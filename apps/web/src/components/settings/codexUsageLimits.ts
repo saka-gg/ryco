@@ -1,4 +1,4 @@
-import type { ServerProviderRateLimitWindow } from "@ryco/contracts";
+import type { ServerProviderRateLimits, ServerProviderRateLimitWindow } from "@ryco/contracts";
 
 import { formatRelativeTimeUntilLabel } from "../../timestampFormat";
 
@@ -52,6 +52,29 @@ export function describeRateLimitWindow(window: ServerProviderRateLimitWindow): 
   }
   const hours = Math.max(1, Math.round(minutes / 60));
   return { label: `${hours}h`, bucket: "other" };
+}
+
+/**
+ * Heading for a rate-limit row. A driver-supplied `label` wins — it exists
+ * precisely for windows the duration can't tell apart (Claude's
+ * account-wide vs Fable-scoped weekly caps). Otherwise fall back to the
+ * duration bucket, or the caller's slot label when the duration is absent.
+ */
+export function resolveRateLimitWindowLabel(
+  window: ServerProviderRateLimitWindow,
+  fallbackLabel: string,
+): string {
+  if (window.label !== undefined) return window.label;
+  if (window.windowDurationMins === undefined) return fallbackLabel;
+  return describeRateLimitWindow(window).label;
+}
+
+/**
+ * Whether a snapshot has any window worth rendering.
+ */
+export function hasRateLimitWindows(rateLimits: ServerProviderRateLimits | undefined): boolean {
+  if (!rateLimits) return false;
+  return Boolean(rateLimits.primary ?? rateLimits.secondary ?? rateLimits.tertiary);
 }
 
 /**

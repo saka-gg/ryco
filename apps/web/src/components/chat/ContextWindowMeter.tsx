@@ -4,8 +4,9 @@ import { cn } from "~/lib/utils";
 import { type ContextWindowUsage, formatContextWindowTokens } from "~/lib/contextWindow";
 import {
   clampUsedPercent,
-  describeRateLimitWindow,
   formatRateLimitResetText,
+  hasRateLimitWindows,
+  resolveRateLimitWindowLabel,
 } from "../settings/codexUsageLimits";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
@@ -42,9 +43,7 @@ function UsageLimitRow(props: {
   readonly window: ServerProviderRateLimitWindow;
   readonly fallbackLabel: string;
 }) {
-  const descriptor = describeRateLimitWindow(props.window);
-  const label =
-    props.window.windowDurationMins === undefined ? props.fallbackLabel : descriptor.label;
+  const label = resolveRateLimitWindowLabel(props.window, props.fallbackLabel);
   const used = clampUsedPercent(props.window.usedPercent);
   const resetText = formatRateLimitResetText(props.window.resetsAt);
 
@@ -67,7 +66,7 @@ export function ContextWindowMeter(props: {
   rateLimits?: ServerProviderRateLimits | undefined;
 }) {
   const { usage, rateLimits } = props;
-  const showUsageLimits = Boolean(rateLimits && (rateLimits.primary || rateLimits.secondary));
+  const showUsageLimits = hasRateLimitWindows(rateLimits);
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -186,6 +185,9 @@ export function ContextWindowMeter(props: {
               ) : null}
               {rateLimits.secondary ? (
                 <UsageLimitRow window={rateLimits.secondary} fallbackLabel="Weekly" />
+              ) : null}
+              {rateLimits.tertiary ? (
+                <UsageLimitRow window={rateLimits.tertiary} fallbackLabel="Model weekly" />
               ) : null}
             </div>
           </div>

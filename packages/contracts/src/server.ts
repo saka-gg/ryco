@@ -123,6 +123,14 @@ export const ServerProviderRateLimitWindow = Schema.Struct({
   usedPercent: Schema.Number,
   resetsAt: Schema.optional(Schema.Number),
   windowDurationMins: Schema.optional(Schema.Number),
+  /**
+   * Driver-supplied heading for the window. Only needed when the duration
+   * alone can't distinguish it from a sibling window — Claude reports both
+   * an account-wide and a Fable-scoped seven-day cap, which would otherwise
+   * both render as "Weekly". Absent means the consumer derives the label
+   * from `windowDurationMins`.
+   */
+  label: Schema.optional(TrimmedNonEmptyString),
 });
 export type ServerProviderRateLimitWindow = typeof ServerProviderRateLimitWindow.Type;
 
@@ -134,10 +142,11 @@ export const ServerProviderRateLimitCredits = Schema.Struct({
 export type ServerProviderRateLimitCredits = typeof ServerProviderRateLimitCredits.Type;
 
 /**
- * Account-scoped rate-limit snapshot attached to a provider. Currently
- * populated only by the Codex driver (one snapshot per Codex provider
- * instance, since each instance can target a different `CODEX_HOME` /
- * ChatGPT account). Other drivers leave it absent.
+ * Account-scoped rate-limit snapshot attached to a provider. Populated by
+ * the Codex driver (one snapshot per Codex provider instance, since each
+ * instance can target a different `CODEX_HOME` / ChatGPT account) and by
+ * the Claude driver from the OAuth usage API. Other drivers leave it
+ * absent.
  */
 export const ServerProviderRateLimits = Schema.Struct({
   limitId: Schema.optional(TrimmedNonEmptyString),
@@ -145,6 +154,12 @@ export const ServerProviderRateLimits = Schema.Struct({
   planType: Schema.optional(TrimmedNonEmptyString),
   primary: Schema.optional(ServerProviderRateLimitWindow),
   secondary: Schema.optional(ServerProviderRateLimitWindow),
+  /**
+   * Third window, used when a provider caps a single premium model on top
+   * of the account-wide windows — Claude's Fable weekly allowance. Carries
+   * its own `label` since it shares a duration with `secondary`.
+   */
+  tertiary: Schema.optional(ServerProviderRateLimitWindow),
   credits: Schema.optional(ServerProviderRateLimitCredits),
   rateLimitReachedType: Schema.optional(TrimmedNonEmptyString),
 });

@@ -49,8 +49,9 @@ import {
 import {
   availablePercent,
   clampUsedPercent,
-  describeRateLimitWindow,
   formatRateLimitResetText,
+  hasRateLimitWindows,
+  resolveRateLimitWindowLabel,
 } from "./codexUsageLimits";
 
 const PROVIDER_ACCENT_SWATCHES = [
@@ -256,9 +257,7 @@ function ProviderUsageLimitWindowRow(props: {
   readonly window: ServerProviderRateLimitWindow;
   readonly fallbackLabel: string;
 }) {
-  const descriptor = describeRateLimitWindow(props.window);
-  const headingLabel =
-    props.window.windowDurationMins === undefined ? props.fallbackLabel : descriptor.label;
+  const headingLabel = resolveRateLimitWindowLabel(props.window, props.fallbackLabel);
   const used = clampUsedPercent(props.window.usedPercent);
   const available = availablePercent(props.window.usedPercent);
   const resetText = formatRateLimitResetText(props.window.resetsAt);
@@ -300,8 +299,8 @@ function ProviderUsageLimitWindowRow(props: {
 }
 
 function ProviderUsageLimitsSection(props: { readonly rateLimits: ServerProviderRateLimits }) {
-  const { primary, secondary } = props.rateLimits;
-  if (!primary && !secondary) return null;
+  const { primary, secondary, tertiary } = props.rateLimits;
+  if (!hasRateLimitWindows(props.rateLimits)) return null;
 
   return (
     <div className="border-t border-border/60 px-4 py-3 sm:px-5">
@@ -313,6 +312,9 @@ function ProviderUsageLimitsSection(props: { readonly rateLimits: ServerProvider
           ) : null}
           {secondary ? (
             <ProviderUsageLimitWindowRow window={secondary} fallbackLabel="Weekly" />
+          ) : null}
+          {tertiary ? (
+            <ProviderUsageLimitWindowRow window={tertiary} fallbackLabel="Model weekly" />
           ) : null}
         </div>
       </div>

@@ -221,14 +221,58 @@ function readUsageTier(
   };
 }
 
+/**
+ * Weekly windows the usage API scopes to a single premium model, most
+ * capable first. These sit alongside the account-wide `seven_day` cap and
+ * are the ones users actually run out of, so the first one present is
+ * surfaced as its own window. Sonnet-scoped windows are deliberately not
+ * listed — the account-wide weekly window already tracks that spend.
+ */
+const MODEL_WEEKLY_TIERS = [
+  { model: "fable", label: "Fable weekly" },
+  { model: "opus", label: "Opus weekly" },
+] as const;
+
+/**
+ * Match `seven_day_fable` and generation-suffixed variants the API may
+ * start emitting (`seven_day_fable_5`), without matching an unrelated
+ * model whose name merely starts with the same letters.
+ */
+function matchesModelWeeklyKey(key: string, model: string): boolean {
+  const prefix = `seven_day_${model}`;
+  if (!key.startsWith(prefix)) {
+    return false;
+  }
+  const suffix = key.slice(prefix.length);
+  return suffix.length === 0 || /^[_-]?\d+$/.test(suffix);
+}
+
+function readModelWeeklyTier(
+  data: Record<string, unknown>,
+):
+  | { readonly utilization: number; readonly resetsAt?: number; readonly label: string }
+  | undefined {
+  for (const tier of MODEL_WEEKLY_TIERS) {
+    for (const key of Object.keys(data)) {
+      if (!matchesModelWeeklyKey(key, tier.model)) continue;
+      const parsed = readUsageTier(data, key);
+      if (parsed) {
+        return { ...parsed, label: tier.label };
+      }
+    }
+  }
+  return undefined;
+}
+
 export function parseClaudeUsageRateLimits(
   data: Record<string, unknown>,
   plan: string | null | undefined,
 ): ServerProviderRateLimits | undefined {
   const fiveHour = readUsageTier(data, "five_hour");
   const sevenDay = readUsageTier(data, "seven_day");
+  const modelWeekly = readModelWeeklyTier(data);
 
-  if (!fiveHour && !sevenDay) {
+  if (!fiveHour && !sevenDay && !modelWeekly) {
     return undefined;
   }
 
@@ -250,6 +294,16 @@ export function parseClaudeUsageRateLimits(
             usedPercent: sevenDay.utilization,
             windowDurationMins: 7 * 24 * 60,
             ...(sevenDay.resetsAt !== undefined ? { resetsAt: sevenDay.resetsAt } : {}),
+          },
+        }
+      : {}),
+    ...(modelWeekly
+      ? {
+          tertiary: {
+            usedPercent: modelWeekly.utilization,
+            windowDurationMins: 7 * 24 * 60,
+            label: modelWeekly.label,
+            ...(modelWeekly.resetsAt !== undefined ? { resetsAt: modelWeekly.resetsAt } : {}),
           },
         }
       : {}),

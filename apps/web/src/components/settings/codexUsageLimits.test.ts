@@ -6,7 +6,43 @@ import {
   describeRateLimitWindow,
   formatRateLimitResetLabel,
   formatRateLimitResetText,
+  hasRateLimitWindows,
+  resolveRateLimitWindowLabel,
 } from "./codexUsageLimits";
+
+describe("resolveRateLimitWindowLabel", () => {
+  it("prefers the driver-supplied label over the duration bucket", () => {
+    expect(
+      resolveRateLimitWindowLabel(
+        { usedPercent: 63, windowDurationMins: 7 * 24 * 60, label: "Fable weekly" },
+        "Weekly",
+      ),
+    ).toBe("Fable weekly");
+  });
+
+  it("derives the label from the duration when none is supplied", () => {
+    expect(resolveRateLimitWindowLabel({ usedPercent: 10, windowDurationMins: 300 }, "Short")).toBe(
+      "5h",
+    );
+  });
+
+  it("falls back to the slot label when the duration is absent", () => {
+    expect(resolveRateLimitWindowLabel({ usedPercent: 10 }, "Short window")).toBe("Short window");
+  });
+});
+
+describe("hasRateLimitWindows", () => {
+  it("is false for an undefined or window-less snapshot", () => {
+    expect(hasRateLimitWindows(undefined)).toBe(false);
+    expect(hasRateLimitWindows({ limitId: "claude-oauth" })).toBe(false);
+  });
+
+  it("is true when only the model-scoped window is present", () => {
+    expect(hasRateLimitWindows({ tertiary: { usedPercent: 63, label: "Fable weekly" } })).toBe(
+      true,
+    );
+  });
+});
 
 describe("clampUsedPercent", () => {
   it("returns the value unchanged when in range", () => {
