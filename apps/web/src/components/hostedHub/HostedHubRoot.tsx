@@ -54,7 +54,12 @@ import {
   consumeHostedIdentityLink,
   type HostedIdentityLink,
 } from "../../hostedHub/hostedIdentityLinks";
-import { hubRouteTitle, navigateHub, useHubRoute } from "../../hostedHub/hubRoutes";
+import {
+  hubRoutePathname,
+  hubRouteTitle,
+  navigateHub,
+  useHubRoute,
+} from "../../hostedHub/hubRoutes";
 import { hubPageTitle } from "../../hubBranding";
 import {
   selectHostedNodeRoute,
@@ -181,6 +186,15 @@ export function HostedHubRoot() {
   useHostedBrowserLifecycle();
   useHubDocumentTitle();
   const hubRoute = useHubRoute();
+
+  useEffect(() => {
+    // GitHub authentication returns to account completion so an unlinked
+    // identity can continue without another click. A linked identity establishes
+    // a session instead, so replace that transient destination with the directory.
+    if (accountStatus === "authenticated" && hubRoute?.kind === "sign-up") {
+      navigateHub({ kind: "nodes" }, { replace: true });
+    }
+  }, [accountStatus, hubRoute]);
 
   if (
     emailVerificationLink?.kind === "email-verification" ||
@@ -595,7 +609,10 @@ export function HostedAuthenticationSurface({
     try {
       await beginGitHubAuthorization({
         intent: "authenticate",
-        returnTo: context === "native-authorization" ? window.location.pathname : "/nodes",
+        returnTo:
+          context === "native-authorization"
+            ? window.location.pathname
+            : hubRoutePathname({ kind: "sign-up" }),
         start: (request) => hostedHubApi.startExternalIdentityAuthorization(request),
         navigate: (authorizationUrl) => window.location.assign(authorizationUrl),
       });

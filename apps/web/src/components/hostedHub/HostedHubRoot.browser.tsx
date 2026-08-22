@@ -152,6 +152,48 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect.element(page.getByRole("button", { name: "Continue with GitHub" })).toBeVisible();
   });
 
+  it("returns GitHub authentication to account completion", async () => {
+    window.history.replaceState(null, "", "/sign-in");
+    useHostedAccountStore.setState({
+      externalIdentityConfiguration: {
+        version: 1,
+        providers: [{ provider: "github", login: true, signup: true, link: true }],
+      },
+      externalIdentityConfigurationStatus: "ready",
+    });
+    const start = vi
+      .spyOn(hostedHubApi, "startExternalIdentityAuthorization")
+      .mockRejectedValue(new HostedHubApiError("external_identity_unavailable", 503));
+
+    mounted = await render(<HostedHubRoot />);
+    await page.getByRole("button", { name: "Continue with GitHub" }).click();
+
+    await vi.waitFor(() => {
+      expect(start).toHaveBeenCalledWith({
+        provider: "github",
+        intent: "authenticate",
+        returnTo: "/sign-up",
+      });
+    });
+  });
+
+  it("replaces GitHub account completion with the directory after linked login", async () => {
+    window.history.replaceState(null, "", "/sign-up");
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      nodes: [],
+    });
+
+    mounted = await render(<HostedHubRoot />);
+
+    await vi.waitFor(() => {
+      expect(window.location.pathname).toBe("/nodes");
+    });
+  });
+
   it("confirms a GitHub-backed signup before creating the Ryco account", async () => {
     window.history.replaceState(null, "", "/sign-up");
     vi.mocked(hostedHubApi.getPublicSignupConfiguration).mockResolvedValue({
