@@ -57,8 +57,12 @@ const gitClient = {
     ...BASE_STATUS,
     refName: `${input.cwd}-refreshed`,
   })),
-  onStatus: vi.fn((input: { cwd: string }, listener: (event: VcsStatusResult) => void) =>
-    registerListener(gitStatusListeners, listener),
+  onStatus: vi.fn(
+    (
+      input: { cwd: string },
+      listener: (event: VcsStatusResult) => void,
+      _options?: { readonly onResubscribe?: () => void },
+    ) => registerListener(gitStatusListeners, listener),
   ),
 };
 
@@ -66,13 +70,6 @@ function emitGitStatus(event: VcsStatusResult) {
   for (const listener of gitStatusListeners) {
     listener(event);
   }
-}
-
-async function flushRefreshPromises(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
 }
 
 function createRegisteredGitStatusClient(environmentId: EnvironmentId) {
@@ -213,7 +210,7 @@ describe("gitStatusState", () => {
     const releaseB = watchGitStatus(TARGET, gitClient);
 
     expect(gitClient.onStatus).toHaveBeenCalledOnce();
-    expect(gitClient.refreshStatus).toHaveBeenCalledOnce();
+    expect(gitClient.refreshStatus).not.toHaveBeenCalled();
     expect(getGitStatusSnapshot(TARGET)).toEqual({
       data: null,
       error: null,
@@ -237,15 +234,52 @@ describe("gitStatusState", () => {
     expect(gitStatusListeners.size).toBe(0);
   });
 
-  it("requests a full local and remote status refresh when a cwd is first watched", async () => {
+  it("relies on the status stream instead of requesting a full refresh when first watched", () => {
     const release = watchGitStatus(TARGET, gitClient);
 
-    expect(gitClient.refreshStatus).toHaveBeenCalledWith({ cwd: "/repo" });
+    expect(gitClient.onStatus).toHaveBeenCalledWith(
+      { cwd: "/repo" },
+      expect.any(Function),
+      expect.objectContaining({ onResubscribe: expect.any(Function) }),
+    );
+    expect(gitClient.refreshStatus).not.toHaveBeenCalled();
 
-    await flushRefreshPromises();
+    release();
+  });
 
+  it("passes an enabled remote polling interval to the status stream without forcing a refresh", () => {
+    const release = watchGitStatus(TARGET, gitClient, {
+      automaticRemoteRefreshIntervalMs: 30_000,
+    });
+
+    expect(gitClient.onStatus).toHaveBeenCalledWith(
+      { cwd: "/repo", automaticRemoteRefreshIntervalMs: 30_000 },
+      expect.any(Function),
+      expect.objectContaining({ onResubscribe: expect.any(Function) }),
+    );
+    expect(gitClient.refreshStatus).not.toHaveBeenCalled();
+
+    release();
+  });
+
+  it("marks cached status pending on reconnect and waits for the resubscribed stream", () => {
+    const release = watchGitStatus(TARGET, gitClient);
+    emitGitStatus(BASE_STATUS);
+
+    const options = gitClient.onStatus.mock.calls[0]?.[2];
+    options?.onResubscribe?.();
+
+    expect(gitClient.refreshStatus).not.toHaveBeenCalled();
     expect(getGitStatusSnapshot(TARGET)).toEqual({
-      data: { ...BASE_STATUS, refName: "/repo-refreshed" },
+      data: BASE_STATUS,
+      error: null,
+      cause: null,
+      isPending: true,
+    });
+
+    emitGitStatus({ ...BASE_STATUS, refName: "reconnected-refName" });
+    expect(getGitStatusSnapshot(TARGET)).toEqual({
+      data: { ...BASE_STATUS, refName: "reconnected-refName" },
       error: null,
       cause: null,
       isPending: false,
@@ -265,6 +299,28 @@ describe("gitStatusState", () => {
     expect(refreshed).toEqual({ ...BASE_STATUS, refName: "/repo-refreshed" });
     expect(getGitStatusSnapshot(TARGET)).toEqual({
       data: { ...BASE_STATUS, refName: "/repo-refreshed" },
+      error: null,
+      cause: null,
+      isPending: false,
+    });
+
+    release();
+  });
+
+  it("propagates explicit refresh failures without discarding streamed status", async () => {
+    const refreshError = new Error("refresh failed");
+    const failingClient = {
+      onStatus: gitClient.onStatus,
+      refreshStatus: vi.fn(async () => {
+        throw refreshError;
+      }),
+    };
+    const release = watchGitStatus(TARGET, failingClient);
+    emitGitStatus(BASE_STATUS);
+
+    await expect(refreshGitStatus(TARGET, failingClient)).rejects.toBe(refreshError);
+    expect(getGitStatusSnapshot(TARGET)).toEqual({
+      data: BASE_STATUS,
       error: null,
       cause: null,
       isPending: false,
@@ -318,6 +374,7 @@ describe("gitStatusState", () => {
     });
 
     const registered = createRegisteredGitStatusClient(ENVIRONMENT_ID);
+    expect(registered.client.vcs.refreshStatus).not.toHaveBeenCalled();
     registered.emit(BASE_STATUS);
 
     expect(getGitStatusSnapshot(TARGET)).toEqual({
@@ -350,6 +407,8 @@ describe("gitStatusState", () => {
     });
 
     const secondClient = createRegisteredGitStatusClient(ENVIRONMENT_ID);
+    expect(firstClient.client.vcs.refreshStatus).not.toHaveBeenCalled();
+    expect(secondClient.client.vcs.refreshStatus).not.toHaveBeenCalled();
     secondClient.emit({ ...BASE_STATUS, refName: "reconnected-refName" });
 
     expect(getGitStatusSnapshot(TARGET)).toEqual({

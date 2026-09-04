@@ -96,7 +96,8 @@ const COMMIT_TIMEOUT_MS = 10 * 60_000;
 const MAX_PROGRESS_TEXT_LENGTH = 500;
 const SHORT_SHA_LENGTH = 7;
 const TOAST_DESCRIPTION_MAX = 72;
-const STATUS_RESULT_CACHE_TTL = Duration.seconds(1);
+const LOCAL_STATUS_RESULT_CACHE_TTL = Duration.seconds(5);
+const REMOTE_STATUS_RESULT_CACHE_TTL = Duration.seconds(30);
 const STATUS_RESULT_CACHE_CAPACITY = 2_048;
 type StripProgressContext<T> = T extends any ? Omit<T, "actionId" | "cwd" | "action"> : never;
 type GitActionProgressPayload = StripProgressContext<GitActionProgressEvent>;
@@ -776,7 +777,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   });
   const localStatusResultCache = yield* Cache.makeWith(readLocalStatus, {
     capacity: STATUS_RESULT_CACHE_CAPACITY,
-    timeToLive: (exit) => (Exit.isSuccess(exit) ? STATUS_RESULT_CACHE_TTL : Duration.zero),
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? LOCAL_STATUS_RESULT_CACHE_TTL : Duration.zero),
   });
   const invalidateLocalStatusResultCache = (cwd: string) =>
     normalizeStatusCacheKey(cwd).pipe(
@@ -858,7 +859,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   });
   const remoteStatusResultCache = yield* Cache.makeWith(readRemoteStatus, {
     capacity: STATUS_RESULT_CACHE_CAPACITY,
-    timeToLive: (exit) => (Exit.isSuccess(exit) ? STATUS_RESULT_CACHE_TTL : Duration.zero),
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? REMOTE_STATUS_RESULT_CACHE_TTL : Duration.zero),
   });
   const invalidateRemoteStatusResultCache = (cwd: string) =>
     normalizeStatusCacheKey(cwd).pipe(
@@ -1441,7 +1442,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     },
   );
   const status: GitManagerShape["status"] = Effect.fn("status")(function* (input) {
-    const [local, remote] = yield* Effect.all([localStatus(input), remoteStatus(input)]);
+    const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
+    const [local, remote] = yield* Effect.all([
+      Cache.get(localStatusResultCache, cacheKey),
+      Cache.get(remoteStatusResultCache, cacheKey),
+    ]);
     return mergeGitStatusParts(local, remote);
   });
   const invalidateLocalStatus: GitManagerShape["invalidateLocalStatus"] = Effect.fn(
@@ -1456,8 +1461,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   });
   const invalidateStatus: GitManagerShape["invalidateStatus"] = Effect.fn("invalidateStatus")(
     function* (cwd) {
-      yield* invalidateLocalStatusResultCache(cwd);
-      yield* invalidateRemoteStatusResultCache(cwd);
+      const cacheKey = yield* normalizeStatusCacheKey(cwd);
+      yield* Effect.all([
+        Cache.invalidate(localStatusResultCache, cacheKey),
+        Cache.invalidate(remoteStatusResultCache, cacheKey),
+      ]);
     },
   );
 

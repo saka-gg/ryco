@@ -269,12 +269,7 @@ function subscribeToGitStatusTarget(
 
     currentUnsubscribe();
     currentClientIdentity = resolved.clientIdentity;
-    currentUnsubscribe = subscribeToGitStatus(
-      targetKey,
-      { ...target, cwd },
-      resolved.client,
-      options,
-    );
+    currentUnsubscribe = subscribeToGitStatus(targetKey, cwd, resolved.client, options);
   };
 
   const unsubscribeRegistry = providedClient
@@ -290,14 +285,13 @@ function subscribeToGitStatusTarget(
 
 function subscribeToGitStatus(
   targetKey: string,
-  target: GitStatusTarget & { readonly cwd: string },
+  cwd: string,
   client: GitStatusClient,
   options?: GitStatusWatchOptions,
 ): () => void {
   markGitStatusPending(targetKey);
-  const cwd = target.cwd;
   const automaticRemoteRefreshIntervalMs = options?.automaticRemoteRefreshIntervalMs ?? 0;
-  const unsubscribe = client.onStatus(
+  return client.onStatus(
     {
       cwd,
       ...(automaticRemoteRefreshIntervalMs > 0 ? { automaticRemoteRefreshIntervalMs } : {}),
@@ -316,18 +310,6 @@ function subscribeToGitStatus(
       },
     },
   );
-  let disposed = false;
-  void requestGitStatusRefresh(target, client)
-    .then((status) => {
-      if (!disposed && status !== null) {
-        commitGitStatusRefresh(targetKey, status);
-      }
-    })
-    .catch(() => undefined);
-  return () => {
-    disposed = true;
-    unsubscribe();
-  };
 }
 
 function markGitStatusPending(targetKey: string): void {

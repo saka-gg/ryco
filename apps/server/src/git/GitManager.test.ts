@@ -1022,7 +1022,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
-  it.effect("status briefly caches repeated lookups for the same cwd", () =>
+  it.effect("status caches repeated lookups until explicit invalidation", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("ryco-git-manager-");
       yield* initRepo(repoDir);
@@ -1050,6 +1050,12 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(first.pr?.number).toBe(113);
       expect(second.pr?.number).toBe(113);
       expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
+
+      yield* manager.invalidateRemoteStatus(repoDir);
+      const refreshed = yield* manager.remoteStatus({ cwd: repoDir });
+
+      expect(refreshed?.pr?.number).toBe(113);
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(2);
     }),
   );
 
