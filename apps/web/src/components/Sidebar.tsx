@@ -64,7 +64,6 @@ import { useModelPickerOpen } from "../modelPickerOpenState";
 import { useShortcutModifierState } from "../shortcutModifierState";
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
-import { retainThreadDetailSubscription } from "../environments/runtime/service";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 
 import { useThreadActions } from "../hooks/useThreadActions";
@@ -90,6 +89,7 @@ import {
   shouldAutoAnimateSidebarProjectList,
   shouldAutoAnimateSidebarThreadLists,
   shouldClearThreadSelectionOnMouseDown,
+  shouldPrewarmSidebarThreads,
   sortProjectsForSidebar,
   sortThreadsWithPinned,
   useThreadJumpHintVisibility,
@@ -125,6 +125,7 @@ import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import { useHostedWorkspaceState } from "../hostedHub/hostedConnectionCoordinator";
 import { useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { useMessageQueueStore } from "../messageQueueStore";
+import { useSidebarThreadPrewarm } from "./sidebar/hooks/useSidebarThreadPrewarm";
 
 const SIDEBAR_LIST_ANIMATION_OPTIONS = {
   duration: 180,
@@ -242,7 +243,7 @@ export default function Sidebar() {
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread } = useNewThreadHandler();
   const { archiveThread, deleteThread } = useThreadActions();
-  const { isMobile, setOpen, setOpenMobile } = useSidebar();
+  const { isMobile, open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const pinnedThreadKeys = useMemo(
     () =>
       new Set(
@@ -1057,17 +1058,10 @@ export default function Sidebar() {
     [prewarmedSidebarThreadKeys],
   );
 
-  useEffect(() => {
-    const releases = prewarmedSidebarThreadRefs.map((ref) =>
-      retainThreadDetailSubscription(ref.environmentId, ref.threadId),
-    );
-
-    return () => {
-      for (const release of releases) {
-        release();
-      }
-    };
-  }, [prewarmedSidebarThreadRefs]);
+  useSidebarThreadPrewarm(
+    shouldPrewarmSidebarThreads({ isMobile, open, openMobile, sidebarMode }),
+    prewarmedSidebarThreadRefs,
+  );
 
   useEffect(() => {
     updateThreadJumpHintsVisibility(shouldShowThreadJumpHintsNow);

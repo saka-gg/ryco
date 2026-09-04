@@ -23,6 +23,7 @@ import {
 import {
   createEnvironmentConnectionSupervisor,
   createDeviceFrameSource,
+  type ReleaseThreadDetailSubscription,
   SavedEnvironmentConnectionCancelledError,
 } from "@ryco/client-runtime/connection";
 export {
@@ -308,7 +309,7 @@ function disposeThreadDetailSubscriptionsForEnvironment(environmentId: Environme
 export function retainThreadDetailSubscription(
   environmentId: EnvironmentId,
   threadId: ThreadId,
-): () => void {
+): ReleaseThreadDetailSubscription {
   return getEnvironmentSupervisor().retainThreadDetailSubscription(environmentId, threadId);
 }
 

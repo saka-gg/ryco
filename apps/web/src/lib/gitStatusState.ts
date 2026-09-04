@@ -35,13 +35,14 @@ interface WatchedGitStatus {
   unsubscribe: () => void;
 }
 
-interface GitStatusTarget {
+export interface GitStatusTarget {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
 }
 
 interface GitStatusWatchOptions {
   readonly automaticRemoteRefreshIntervalMs?: GitStatusPollIntervalMs | undefined;
+  readonly enabled?: boolean | undefined;
 }
 
 const EMPTY_GIT_STATUS_STATE = Object.freeze<GitStatusState>({
@@ -113,6 +114,9 @@ export function watchGitStatus(
 ): () => void {
   const targetKey = getGitStatusTargetKey(target);
   if (targetKey === null) {
+    return NOOP;
+  }
+  if (options?.enabled === false) {
     return NOOP;
   }
 
@@ -199,15 +203,19 @@ export function resetGitStatusStateForTests(): void {
   knownGitStatusKeys.clear();
 }
 
-export function useGitStatus(target: GitStatusTarget): GitStatusState {
+export function useGitStatus(
+  target: GitStatusTarget,
+  options?: Pick<GitStatusWatchOptions, "enabled">,
+): GitStatusState {
   const targetKey = getGitStatusTargetKey(target);
   const automaticRemoteRefreshIntervalMs = useSettings((s) => s.gitStatusPollIntervalMs);
   useEffect(
     () =>
       watchGitStatus({ environmentId: target.environmentId, cwd: target.cwd }, undefined, {
         automaticRemoteRefreshIntervalMs,
+        enabled: options?.enabled,
       }),
-    [automaticRemoteRefreshIntervalMs, target.environmentId, target.cwd],
+    [automaticRemoteRefreshIntervalMs, options?.enabled, target.environmentId, target.cwd],
   );
 
   const state = useAtomValue(

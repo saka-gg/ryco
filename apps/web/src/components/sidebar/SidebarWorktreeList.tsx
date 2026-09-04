@@ -14,7 +14,7 @@ import {
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { cn } from "../../lib/utils";
-import { useGitStatus, type GitStatusState } from "../../lib/gitStatusState";
+import type { GitStatusTarget } from "../../lib/gitStatusState";
 import {
   ContextMenu,
   ContextMenuPopup,
@@ -26,11 +26,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { SidebarMenuSub, SidebarMenuSubItem } from "../ui/sidebar";
-import {
-  resolveSharedSidebarGitStatusTarget,
-  SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME,
-  type SidebarStatusBucket,
-} from "../Sidebar.logic";
+import { SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME, type SidebarStatusBucket } from "../Sidebar.logic";
 import {
   isSyntheticWorktreeId,
   normalizeWorktreePath,
@@ -67,7 +63,7 @@ export interface SidebarWorktreeListProps {
   renderThread: (
     thread: SidebarTreeThread,
     orderedProjectThreadKeys: readonly string[],
-    gitStatus: GitStatusState | null | undefined,
+    gitStatusTarget: GitStatusTarget | null | undefined,
   ) => React.ReactNode;
   treeProject: SidebarTreeProject;
   visibleThreadKeys: ReadonlySet<string> | null;
@@ -81,10 +77,10 @@ export interface SidebarWorktreeListProps {
   onRestoreWorktree: (worktree: SidebarTreeWorktree) => void;
 }
 
-export interface SidebarThreadGitStatusTarget {
+export type SidebarThreadGitStatusTarget = GitStatusTarget & {
   environmentId: EnvironmentId;
   cwd: string;
-}
+};
 
 interface LinkedWorktreeItemContext {
   cwd: string;
@@ -302,7 +298,7 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
   renderThread: (
     thread: SidebarTreeThread,
     orderedProjectThreadKeys: readonly string[],
-    gitStatus: GitStatusState | null | undefined,
+    gitStatusTarget: GitStatusTarget | null | undefined,
   ) => React.ReactNode;
   resolveThreadGitStatusTarget: (thread: SidebarTreeThread) => SidebarThreadGitStatusTarget | null;
   visibleThreadKeys: ReadonlySet<string> | null;
@@ -611,33 +607,20 @@ const SidebarWorktreeThreadRows = memo(function SidebarWorktreeThreadRows(props:
   renderThread: (
     thread: SidebarTreeThread,
     orderedProjectThreadKeys: readonly string[],
-    gitStatus: GitStatusState | null | undefined,
+    gitStatusTarget: GitStatusTarget | null | undefined,
   ) => React.ReactNode;
   resolveThreadGitStatusTarget: (thread: SidebarTreeThread) => SidebarThreadGitStatusTarget | null;
   visibleThreads: ReadonlyArray<SidebarTreeThread>;
 }) {
-  const sharedGitStatusTarget = useMemo(
-    () =>
-      resolveSharedSidebarGitStatusTarget(props.visibleThreads, props.resolveThreadGitStatusTarget),
-    [props.resolveThreadGitStatusTarget, props.visibleThreads],
-  );
-  const sharedGitStatus = useGitStatus({
-    environmentId:
-      sharedGitStatusTarget.kind === "shared" ? sharedGitStatusTarget.target.environmentId : null,
-    cwd: sharedGitStatusTarget.kind === "shared" ? sharedGitStatusTarget.target.cwd : null,
-  });
-  const rowGitStatus =
-    sharedGitStatusTarget.kind === "shared"
-      ? sharedGitStatus
-      : sharedGitStatusTarget.kind === "none"
-        ? null
-        : undefined;
-
   return (
     <>
       {props.visibleThreads.map((thread) => (
         <Fragment key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}>
-          {props.renderThread(thread, props.orderedProjectThreadKeys, rowGitStatus)}
+          {props.renderThread(
+            thread,
+            props.orderedProjectThreadKeys,
+            props.resolveThreadGitStatusTarget(thread),
+          )}
         </Fragment>
       ))}
     </>

@@ -30,6 +30,8 @@ import {
   shouldConfirmSidebarThreadDelete,
   shouldConfirmSidebarThreadSelectionDelete,
   shouldClearThreadSelectionOnMouseDown,
+  shouldEnableSidebarRowGitStatus,
+  shouldPrewarmSidebarThreads,
   shouldQuerySidebarSourceControlCounts,
   sortProjectsForSidebar,
   sortThreadsWithPinned,
@@ -225,6 +227,10 @@ describe("createThreadJumpHintVisibilityController", () => {
 });
 
 describe("getSidebarThreadIdsToPrewarm", () => {
+  it("prewarms at most three threads by default", () => {
+    expect(getSidebarThreadIdsToPrewarm(["a1", "a2", "a3", "a4"])).toEqual(["a1", "a2", "a3"]);
+  });
+
   it("returns only the first visible thread ids up to the prewarm limit", () => {
     expect(getSidebarThreadIdsToPrewarm(["a1", "a2", "a3"], 2)).toEqual(["a1", "a2"]);
   });
@@ -235,6 +241,59 @@ describe("getSidebarThreadIdsToPrewarm", () => {
 
   it("returns no thread ids when the limit is zero", () => {
     expect(getSidebarThreadIdsToPrewarm(["t1", "t2"], 0)).toEqual([]);
+  });
+});
+
+describe("shouldPrewarmSidebarThreads", () => {
+  it("requires Projects mode and the active desktop or mobile sidebar to be open", () => {
+    expect(
+      shouldPrewarmSidebarThreads({
+        isMobile: false,
+        open: true,
+        openMobile: false,
+        sidebarMode: "projects",
+      }),
+    ).toBe(true);
+    expect(
+      shouldPrewarmSidebarThreads({
+        isMobile: false,
+        open: false,
+        openMobile: true,
+        sidebarMode: "projects",
+      }),
+    ).toBe(false);
+    expect(
+      shouldPrewarmSidebarThreads({
+        isMobile: true,
+        open: true,
+        openMobile: false,
+        sidebarMode: "projects",
+      }),
+    ).toBe(false);
+    expect(
+      shouldPrewarmSidebarThreads({
+        isMobile: true,
+        open: false,
+        openMobile: true,
+        sidebarMode: "projects",
+      }),
+    ).toBe(true);
+    expect(
+      shouldPrewarmSidebarThreads({
+        isMobile: false,
+        open: true,
+        openMobile: true,
+        sidebarMode: "inbox",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("shouldEnableSidebarRowGitStatus", () => {
+  it("enables visible rows and keeps the active row enabled while offscreen", () => {
+    expect(shouldEnableSidebarRowGitStatus({ isActive: false, isIntersecting: true })).toBe(true);
+    expect(shouldEnableSidebarRowGitStatus({ isActive: true, isIntersecting: false })).toBe(true);
+    expect(shouldEnableSidebarRowGitStatus({ isActive: false, isIntersecting: false })).toBe(false);
   });
 });
 

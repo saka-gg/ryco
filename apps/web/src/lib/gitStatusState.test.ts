@@ -247,6 +247,26 @@ describe("gitStatusState", () => {
     release();
   });
 
+  it("does not retain a status stream when watching is disabled", () => {
+    const releaseActiveWatch = watchGitStatus(TARGET, gitClient);
+    emitGitStatus(BASE_STATUS);
+    releaseActiveWatch();
+    gitClient.onStatus.mockClear();
+
+    const release = watchGitStatus(TARGET, gitClient, { enabled: false });
+
+    expect(gitClient.onStatus).not.toHaveBeenCalled();
+    expect(gitClient.refreshStatus).not.toHaveBeenCalled();
+    expect(getGitStatusSnapshot(TARGET)).toEqual({
+      data: BASE_STATUS,
+      error: null,
+      cause: null,
+      isPending: false,
+    });
+
+    release();
+  });
+
   it("passes an enabled remote polling interval to the status stream without forcing a refresh", () => {
     const release = watchGitStatus(TARGET, gitClient, {
       automaticRemoteRefreshIntervalMs: 30_000,
