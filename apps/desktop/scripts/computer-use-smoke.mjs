@@ -4,7 +4,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const kind = process.argv[2];
-if (kind !== "browser" && kind !== "integration") throw new Error("Choose browser or integration.");
+if (kind !== "browser" && kind !== "integration" && kind !== "project")
+  throw new Error("Choose browser, integration or project.");
 const cache = join(desktop, "node_modules/.cache");
 mkdirSync(cache, { recursive: true });
 const directory = mkdtempSync(join(cache, "computer-use-smoke-"));
@@ -20,7 +21,12 @@ function run(command, args, env = process.env) {
 try {
   run("bun", [
     "build",
-    join(desktop, `scripts/computer-use-${kind}-smoke.ts`),
+    join(
+      desktop,
+      kind === "project"
+        ? "scripts/project-browser-smoke.ts"
+        : `scripts/computer-use-${kind}-smoke.ts`,
+    ),
     "--target=node",
     "--format=esm",
     "--external",

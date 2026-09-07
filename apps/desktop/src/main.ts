@@ -1,5 +1,6 @@
 import { Duplex } from "node:stream";
 import { attachDesktopResourceTelemetry } from "./desktopResourceTelemetry.ts";
+import { registerProjectBrowserIpc } from "./browser/ipc.ts";
 import * as ChildProcess from "node:child_process";
 import * as Crypto from "node:crypto";
 import * as FS from "node:fs";
@@ -3685,6 +3686,7 @@ async function bootstrap(): Promise<void> {
     });
     await computerUseRuntime.start();
     registerComputerUseIpc(computerUseRuntime, () => mainWindow);
+    registerProjectBrowserIpc(computerUseRuntime.embedded, () => mainWindow);
   } catch {
     computerUseRuntime?.dispose();
     computerUseRuntime = null;

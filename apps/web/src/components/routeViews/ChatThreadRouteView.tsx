@@ -36,6 +36,7 @@ import {
   buildOpenFilesSearch,
   buildOpenReviewSearch,
   buildOpenSimulatorSearch,
+  buildOpenBrowserSearch,
   buildOpenTerminalSearch,
   buildOpenWorkspaceSearch,
 } from "../../workspaceRouteSearch";
@@ -141,6 +142,7 @@ export function ChatThreadRouteView({
     hasOpenedPreview: previewOpen,
     hasOpenedTerminal: rightPanelMode === "terminal",
     hasOpenedSimulator: rightPanelMode === "simulator",
+    hasOpenedBrowser: rightPanelMode === "browser",
     hasOpenedAgents: rightPanelMode === "agents",
     openedAgentKeys: activeAgentKey ? [activeAgentKey] : [],
   }));
@@ -176,6 +178,10 @@ export function ChatThreadRouteView({
     diffPanelMountState.threadKey === currentThreadKey
       ? diffPanelMountState.hasOpenedSimulator
       : rightPanelMode === "simulator";
+  const hasOpenedBrowser =
+    diffPanelMountState.threadKey === currentThreadKey
+      ? diffPanelMountState.hasOpenedBrowser
+      : rightPanelMode === "browser";
   const hasOpenedAgents =
     diffPanelMountState.threadKey === currentThreadKey
       ? diffPanelMountState.hasOpenedAgents
@@ -206,6 +212,9 @@ export function ChatThreadRouteView({
     if (hasOpenedSimulator || rightPanelMode === "simulator") {
       modes.push("simulator");
     }
+    if (hasOpenedBrowser || rightPanelMode === "browser") {
+      modes.push("browser");
+    }
     if (hasOpenedAgents || rightPanelMode === "agents") {
       modes.push("agents");
     }
@@ -215,6 +224,7 @@ export function ChatThreadRouteView({
     hasOpenedDiff,
     hasOpenedPreview,
     hasOpenedSimulator,
+    hasOpenedBrowser,
     hasOpenedTerminal,
     rightPanelMode,
   ]);
@@ -238,6 +248,10 @@ export function ChatThreadRouteView({
             (previous.threadKey === currentThreadKey
               ? previous.hasOpenedSimulator
               : rightPanelMode === "simulator") || panelMode === "simulator",
+          hasOpenedBrowser:
+            (previous.threadKey === currentThreadKey
+              ? previous.hasOpenedBrowser
+              : rightPanelMode === "browser") || panelMode === "browser",
           hasOpenedAgents:
             (previous.threadKey === currentThreadKey
               ? previous.hasOpenedAgents
@@ -251,6 +265,7 @@ export function ChatThreadRouteView({
           previous.hasOpenedPreview === nextState.hasOpenedPreview &&
           previous.hasOpenedTerminal === nextState.hasOpenedTerminal &&
           previous.hasOpenedSimulator === nextState.hasOpenedSimulator &&
+          previous.hasOpenedBrowser === nextState.hasOpenedBrowser &&
           previous.hasOpenedAgents === nextState.hasOpenedAgents &&
           previous.openedAgentKeys === nextState.openedAgentKeys
         ) {
@@ -292,6 +307,9 @@ export function ChatThreadRouteView({
       if (lastOpenedRightPanelMode === "simulator" && hasOpenedSimulator) {
         return buildOpenSimulatorSearch(previous);
       }
+      if (lastOpenedRightPanelMode === "browser" && hasOpenedBrowser) {
+        return buildOpenBrowserSearch(previous);
+      }
       if (lastOpenedRightPanelMode === "agents" && hasOpenedAgents) {
         return buildOpenAgentsSearch(previous);
       }
@@ -306,6 +324,9 @@ export function ChatThreadRouteView({
       }
       if (hasOpenedSimulator) {
         return buildOpenSimulatorSearch(previous);
+      }
+      if (hasOpenedBrowser) {
+        return buildOpenBrowserSearch(previous);
       }
       if (hasOpenedAgents) {
         return buildOpenAgentsSearch(previous);
@@ -325,6 +346,7 @@ export function ChatThreadRouteView({
     hasOpenedDiff,
     hasOpenedPreview,
     hasOpenedSimulator,
+    hasOpenedBrowser,
     hasOpenedTerminal,
     lastOpenedRightPanelMode,
     navigate,
@@ -359,6 +381,8 @@ export function ChatThreadRouteView({
             previous.threadKey === currentThreadKey
               ? previous.hasOpenedSimulator
               : hasOpenedSimulator,
+          hasOpenedBrowser:
+            previous.threadKey === currentThreadKey ? previous.hasOpenedBrowser : hasOpenedBrowser,
           hasOpenedAgents:
             previous.threadKey === currentThreadKey ? previous.hasOpenedAgents : hasOpenedAgents,
           openedAgentKeys: nextOpenedAgentKeys,
@@ -385,6 +409,9 @@ export function ChatThreadRouteView({
               if (hasOpenedSimulator) {
                 return buildOpenSimulatorSearch(previous);
               }
+              if (hasOpenedBrowser) {
+                return buildOpenBrowserSearch(previous);
+              }
               if (hasOpenedAgents) {
                 return buildOpenAgentsSearch(previous);
               }
@@ -403,6 +430,8 @@ export function ChatThreadRouteView({
         input.mode === "terminal" ? false : hasOpenedTerminal || rightPanelMode === "terminal";
       const nextHasOpenedSimulator =
         input.mode === "simulator" ? false : hasOpenedSimulator || rightPanelMode === "simulator";
+      const nextHasOpenedBrowser =
+        input.mode === "browser" ? false : hasOpenedBrowser || rightPanelMode === "browser";
       const nextHasOpenedAgents =
         input.mode === "agents" ? false : hasOpenedAgents || rightPanelMode === "agents";
       setDiffPanelMountState((previous) => {
@@ -412,6 +441,7 @@ export function ChatThreadRouteView({
           hasOpenedPreview: nextHasOpenedPreview,
           hasOpenedTerminal: nextHasOpenedTerminal,
           hasOpenedSimulator: nextHasOpenedSimulator,
+          hasOpenedBrowser: nextHasOpenedBrowser,
           hasOpenedAgents: nextHasOpenedAgents,
           openedAgentKeys:
             previous.threadKey === currentThreadKey ? previous.openedAgentKeys : openedAgentKeys,
@@ -422,6 +452,7 @@ export function ChatThreadRouteView({
           previous.hasOpenedPreview === nextState.hasOpenedPreview &&
           previous.hasOpenedTerminal === nextState.hasOpenedTerminal &&
           previous.hasOpenedSimulator === nextState.hasOpenedSimulator &&
+          previous.hasOpenedBrowser === nextState.hasOpenedBrowser &&
           previous.hasOpenedAgents === nextState.hasOpenedAgents &&
           previous.openedAgentKeys === nextState.openedAgentKeys
         ) {
@@ -447,6 +478,9 @@ export function ChatThreadRouteView({
         if (input.mode !== "simulator" && nextHasOpenedSimulator) {
           return buildOpenSimulatorSearch(previous);
         }
+        if (input.mode !== "browser" && nextHasOpenedBrowser) {
+          return buildOpenBrowserSearch(previous);
+        }
         if (input.mode !== "agents" && nextHasOpenedAgents) {
           return buildOpenAgentsSearch(previous);
         }
@@ -465,6 +499,7 @@ export function ChatThreadRouteView({
       hasOpenedDiff,
       hasOpenedPreview,
       hasOpenedSimulator,
+      hasOpenedBrowser,
       hasOpenedTerminal,
       navigate,
       openedAgentKeys,
@@ -495,6 +530,7 @@ export function ChatThreadRouteView({
               hasOpenedPreview,
               hasOpenedTerminal,
               hasOpenedSimulator,
+              hasOpenedBrowser,
               hasOpenedAgents,
               openedAgentKeys: baseAgentKeys,
             };
@@ -512,6 +548,10 @@ export function ChatThreadRouteView({
           previous.threadKey === currentThreadKey
             ? previous.hasOpenedSimulator
             : rightPanelMode === "simulator",
+        hasOpenedBrowser:
+          previous.threadKey === currentThreadKey
+            ? previous.hasOpenedBrowser
+            : rightPanelMode === "browser",
         hasOpenedAgents:
           previous.threadKey === currentThreadKey
             ? previous.hasOpenedAgents
@@ -527,6 +567,7 @@ export function ChatThreadRouteView({
     hasOpenedDiff,
     hasOpenedPreview,
     hasOpenedSimulator,
+    hasOpenedBrowser,
     hasOpenedTerminal,
     previewOpen,
     rightPanelMode,
@@ -578,6 +619,8 @@ export function ChatThreadRouteView({
     hasOpenedTerminal ||
     rightPanelMode === "simulator" ||
     hasOpenedSimulator ||
+    rightPanelMode === "browser" ||
+    hasOpenedBrowser ||
     rightPanelMode === "agents" ||
     hasOpenedAgents ||
     rightPanelMode === "agent" ||

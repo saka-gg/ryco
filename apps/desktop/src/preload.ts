@@ -73,6 +73,25 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
 }
 
 contextBridge.exposeInMainWorld("desktopBridge", {
+  browser: {
+    getState: () => ipcRenderer.invoke("desktop:browser:state"),
+    open: (input) => ipcRenderer.invoke("desktop:browser:open", input),
+    command: (input) => ipcRenderer.invoke("desktop:browser:command", input),
+    surface: (input) => ipcRenderer.invoke("desktop:browser:surface", input),
+    capture: (tab) => ipcRenderer.invoke("desktop:browser:capture", tab),
+    discover: (cwd) => ipcRenderer.invoke("desktop:browser:discover", cwd),
+    onFocusAddress: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, tab: string) => listener(tab);
+      ipcRenderer.on("desktop:browser:focus-address", wrapped);
+      return () => ipcRenderer.removeListener("desktop:browser:focus-address", wrapped);
+    },
+    onState: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) =>
+        listener(state);
+      ipcRenderer.on("desktop:browser:changed", wrapped);
+      return () => ipcRenderer.removeListener("desktop:browser:changed", wrapped);
+    },
+  },
   computerUse: {
     getState: () => ipcRenderer.invoke("desktop:computer-use:state"),
     refresh: (query) => ipcRenderer.invoke("desktop:computer-use:refresh", query),

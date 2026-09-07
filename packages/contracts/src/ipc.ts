@@ -4,6 +4,12 @@ import type {
   ResourceTelemetryHistory,
 } from "./resourceTelemetry.ts";
 import type {
+  ProjectBrowserState,
+  ProjectBrowserCommand,
+  ProjectBrowserSurface,
+  DiscoveredProjectSite,
+} from "./projectBrowser.ts";
+import type {
   GitArchiveWorktreeInput,
   GitCreateWorktreeForProjectInput,
   GitCreateWorktreeForProjectOutput,
@@ -552,6 +558,16 @@ export type DesktopHubOriginValidation =
     };
 
 export interface DesktopBridge {
+  browser?: {
+    getState(): Promise<ProjectBrowserState>;
+    open(input: { url: string; project: string }): Promise<string>;
+    command(input: ProjectBrowserCommand): Promise<void>;
+    surface(input: ProjectBrowserSurface): Promise<void>;
+    capture(tab: string): Promise<string>;
+    discover(cwd?: string): Promise<readonly DiscoveredProjectSite[]>;
+    onFocusAddress(listener: (tab: string) => void): () => void;
+    onState(listener: (state: ProjectBrowserState) => void): () => void;
+  };
   computerUse?: {
     getState(): Promise<ComputerUseState>;
     refresh(query?: string): Promise<ComputerUseState>;

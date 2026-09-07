@@ -41,7 +41,7 @@ export class DesktopComputerUseRuntime {
   private readonly server: Server;
   private readonly sockets = new WebSocketServer({ noServer: true, maxPayload: 20 * 1024 * 1024 });
   private readonly transports = new Map<ComputerBrowser, BrowserTransport>();
-  private readonly embedded = new EmbeddedComputerBrowser();
+  readonly embedded = new EmbeddedComputerBrowser();
   private readonly browser = new BrowserComputerDriver(this.transports);
   private readonly native: NativeComputerDriver;
   private readonly overlay: ComputerUseOverlay;

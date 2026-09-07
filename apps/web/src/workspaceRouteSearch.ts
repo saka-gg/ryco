@@ -3,7 +3,14 @@ import { type TurnId } from "@ryco/contracts";
 import { stripDiffSearchParams } from "./diffRouteSearch";
 import { stripPreviewSearchParams } from "./previewRouteSearch";
 
-export type WorkspacePanelTab = "review" | "files" | "terminal" | "simulator" | "agent" | "agents";
+export type WorkspacePanelTab =
+  | "review"
+  | "files"
+  | "terminal"
+  | "simulator"
+  | "browser"
+  | "agent"
+  | "agents";
 
 export interface WorkspaceRouteSearch {
   workspaceOpen?: "1" | undefined;
@@ -25,6 +32,7 @@ function normalizeWorkspaceTab(value: unknown): WorkspacePanelTab | undefined {
     value === "files" ||
     value === "terminal" ||
     value === "simulator" ||
+    value === "browser" ||
     value === "agent" ||
     value === "agents"
   ) {
@@ -381,4 +389,8 @@ export function parseWorkspaceRouteSearch(search: Record<string, unknown>): Work
     workspaceTab,
     ...(workspaceAgentKey ? { workspaceAgentKey } : {}),
   };
+}
+
+export function buildOpenBrowserSearch<T extends Record<string, unknown>>(params: T) {
+  return { ...buildOpenWorkspaceSearch(params), workspaceTab: "browser" as const };
 }
