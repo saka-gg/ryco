@@ -223,3 +223,44 @@ describe("ThreadBackgroundLiveness", () => {
     expect(a.getThreadBackgroundLiveness("t")).toBeNull();
   });
 });
+
+it("retains monitor classification on sparse updates and ignores late terminal-task updates", () => {
+  const liveness = ThreadBackgroundLiveness.make();
+  const base = { threadId: "history", taskId: "monitor", taskType: undefined, status: undefined };
+  liveness.recordTaskLiveness({ ...base, taskType: "local_bash", kind: "started", attempt: 1 });
+  liveness.recordTaskLiveness({ ...base, kind: "updated", status: "running" });
+  expect(liveness.getThreadBackgroundLiveness("history")).toBe("monitoring");
+  liveness.recordTaskLiveness({ ...base, kind: "completed" });
+  liveness.recordTaskLiveness({ ...base, kind: "updated", status: "running" });
+  expect(liveness.getThreadBackgroundLiveness("history")).toBeNull();
+  liveness.recordTaskLiveness({ ...base, kind: "started", attempt: 2 });
+  expect(liveness.getThreadBackgroundLiveness("history")).toBe("monitoring");
+});
+
+it("settles workflow-owned members with the coordinator, including delayed member updates", () => {
+  const liveness = ThreadBackgroundLiveness.make();
+  const base = { threadId: "workflow", taskType: undefined, status: undefined };
+  liveness.recordTaskLiveness({
+    ...base,
+    taskId: "coordinator",
+    taskType: "local_workflow",
+    kind: "started",
+  });
+  liveness.recordTaskLiveness({
+    ...base,
+    taskId: "member",
+    parentAgentId: "coordinator",
+    kind: "progress",
+    status: "running",
+  });
+  liveness.recordTaskLiveness({ ...base, taskId: "coordinator", kind: "completed" });
+  expect(liveness.getThreadBackgroundLiveness("workflow")).toBeNull();
+  liveness.recordTaskLiveness({
+    ...base,
+    taskId: "late-member",
+    parentAgentId: "coordinator",
+    kind: "progress",
+    status: "running",
+  });
+  expect(liveness.getThreadBackgroundLiveness("workflow")).toBeNull();
+});

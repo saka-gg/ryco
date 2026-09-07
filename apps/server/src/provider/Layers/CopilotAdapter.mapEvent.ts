@@ -1,5 +1,7 @@
+import { isCopilotChildEvent } from "./CopilotAdapter.eventScope.ts";
 import {
   EventId,
+  RuntimeTaskId,
   TurnId,
   type ProviderRuntimeEvent,
   type UserInputQuestion,
@@ -13,6 +15,10 @@ import {
   eventBase,
   normalizeUsage,
 } from "./CopilotAdapter.types.ts";
+
+function nonNegativeCount(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
 
 export interface MapEventDeps {
   readonly makeEventStamp: () => Effect.Effect<{ eventId: EventId; createdAt: string }>;
@@ -32,6 +38,78 @@ export const mapEvent = (
       method: event.type,
       payload: event,
     };
+
+    // Lifecycle carries explicit parent tool identity and is useful even when
+    // the SDK marks the envelope as child-owned. Handle it before scope filtering.
+    if (
+      event.type === "subagent.started" ||
+      event.type === "subagent.completed" ||
+      event.type === "subagent.failed"
+    ) {
+      const data = event.data;
+      const linkage = {
+        taskId: RuntimeTaskId.make(`copilot-task:${data.toolCallId}`),
+        taskType: "subagent",
+        title: data.agentDisplayName.trim() || data.agentName.trim() || "Copilot agent",
+        ...(data.agentName.trim() ? { role: data.agentName.trim() } : {}),
+        ...(data.model?.trim() ? { model: data.model.trim() } : {}),
+        toolUseId: data.toolCallId,
+      };
+      const base = eventBase({
+        eventId: stamp.eventId,
+        createdAt: event.timestamp,
+        threadId: session.threadId,
+        providerInstanceId: session.providerInstanceId,
+        ...(turnId ? { turnId } : {}),
+        raw,
+      });
+      if (event.type === "subagent.started") {
+        return [
+          {
+            ...base,
+            type: "task.started",
+            payload: {
+              ...linkage,
+              ...(event.data.agentDescription.trim()
+                ? { description: event.data.agentDescription.trim() }
+                : {}),
+            },
+          },
+        ];
+      }
+      const terminal = event.data;
+      const totalTokens = nonNegativeCount(terminal.totalTokens);
+      const toolUses = nonNegativeCount(terminal.totalToolCalls);
+      const durationMs = nonNegativeCount(terminal.durationMs);
+      const usage = {
+        ...(totalTokens !== undefined ? { totalTokens } : {}),
+        ...(toolUses !== undefined ? { toolUses } : {}),
+        ...(durationMs !== undefined ? { durationMs } : {}),
+      };
+      return [
+        {
+          ...base,
+          type: "task.completed",
+          payload: {
+            ...linkage,
+            status:
+              event.type === "subagent.failed"
+                ? "failed"
+                : event.data.cancelled
+                  ? "stopped"
+                  : "completed",
+            ...(event.type === "subagent.failed" && event.data.error.trim()
+              ? { summary: event.data.error.trim() }
+              : {}),
+            ...(Object.keys(usage).length > 0 ? { usage } : {}),
+            ...(totalTokens !== undefined ? { typedUsage: { ...usage, totalTokens } } : {}),
+          },
+        },
+      ];
+    }
+    // Child narration/lifecycle must never mutate the root turn or leak into
+    // its answer. Native lifecycle above supplies the summary-only roster.
+    if (isCopilotChildEvent(event)) return [];
 
     switch (event.type) {
       case "assistant.turn_start": {

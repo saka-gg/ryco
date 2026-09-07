@@ -1,3 +1,4 @@
+import { isCopilotChildEvent } from "./CopilotAdapter.eventScope.ts";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
@@ -314,7 +315,7 @@ export const makeStartSession =
           delete record.contextUsage;
           record.lastUsage = undefined;
           record.unsubscribe = nextSession.on((event) => {
-            if (event.type === "assistant.turn_start") {
+            if (event.type === "assistant.turn_start" && !isCopilotChildEvent(event)) {
               activeTurn = TurnId.make(event.data.turnId);
               record.activeTurnId = activeTurn;
               for (const pending of Array.from(record.pendingTurnStarts)) {

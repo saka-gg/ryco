@@ -1,3 +1,4 @@
+import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import { isContextCompactionActivity } from "@ryco/shared/threadActivity";
 
 import { isBackgroundTaskActivity } from "./subagentRuntime.ts";
@@ -68,6 +69,7 @@ export const PROVIDER_OPTIONS: Array<{
 
 export interface WorkLogEntry {
   id: string;
+  sequence?: number;
   createdAt: string;
   label: string;
   detail?: string;
@@ -638,17 +640,51 @@ export function hasActionableProposedPlan(
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
+  options?: { readonly agentTimeline?: boolean },
 ): WorkLogEntry[] {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   // `tool.started` never becomes a row of its own, but it carries the only
   // authoritative start time for a tool call. Index it first so the surviving
   // lifecycle entries can report how long their call actually took.
   const startedAtByToolCallId = collectToolStartTimestamps(ordered);
+  const firstSequenceByToolId = new Map<string, number>();
+  if (options?.agentTimeline)
+    for (const activity of ordered) {
+      const id = extractToolCallId(asRecord(activity.payload));
+      if (id && activity.sequence !== undefined && !firstSequenceByToolId.has(id))
+        firstSequenceByToolId.set(id, activity.sequence);
+    }
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
-    if (shouldIncludeActivityInWorkLog(activity, latestTurnId)) {
-      entries.push(toDerivedWorkLogEntry(activity, startedAtByToolCallId));
+    const visibleActivity =
+      options?.agentTimeline && activity.kind === "tool.started"
+        ? { ...activity, kind: "tool.updated" }
+        : activity;
+    if (shouldIncludeActivityInWorkLog(visibleActivity, latestTurnId, options?.agentTimeline)) {
+      const entry = toDerivedWorkLogEntry(visibleActivity, startedAtByToolCallId);
+      const sequence =
+        (entry.toolCallId ? firstSequenceByToolId.get(entry.toolCallId) : undefined) ??
+        activity.sequence;
+      if (options?.agentTimeline && sequence !== undefined) entry.sequence = sequence;
+      entries.push(entry);
     }
+  }
+  if (options?.agentTimeline) {
+    const byCall = new Map<string, number>();
+    const merged: DerivedWorkLogEntry[] = [];
+    for (const entry of entries) {
+      const key = entry.toolCallId ? `${entry.turnId ?? ""}:${entry.toolCallId}` : null;
+      const index = key ? byCall.get(key) : undefined;
+      if (index !== undefined) {
+        const previous = merged[index]!;
+        if (!previous.completed || entry.completed)
+          merged[index] = { ...mergeDerivedWorkLogEntries(previous, entry), id: previous.id };
+      } else {
+        if (key) byCall.set(key, merged.length);
+        merged.push(entry);
+      }
+    }
+    return toWorkLogEntries(merged);
   }
   return toWorkLogEntries(entries);
 }
@@ -757,6 +793,7 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
 function shouldIncludeActivityInWorkLog(
   activity: OrchestrationThreadActivity,
   latestTurnId: TurnId | undefined,
+  agentTimeline = false,
 ): boolean {
   if (
     latestTurnId &&
@@ -778,7 +815,7 @@ function shouldIncludeActivityInWorkLog(
     // Fold input only (status patches and heartbeats are not narrative).
     return false;
   }
-  if (isAgentInternalActivity(activity)) {
+  if (!agentTimeline && isAgentInternalActivity(activity)) {
     return false;
   }
   return (
@@ -1335,6 +1372,9 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
     itemInput?.command,
     itemResult?.command,
     data?.command,
+    asRecord(data?.input)?.command,
+    asRecord(data?.rawInput)?.command,
+    asRecord(asRecord(data?.state)?.input)?.command,
     itemType === "command_execution" && detail ? stripTrailingExitCode(detail).output : null,
   ];
 
@@ -1361,7 +1401,7 @@ function extractToolTitle(payload: Record<string, unknown> | null): string | nul
 
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {
   const data = asRecord(payload?.data);
-  return asTrimmedString(data?.toolCallId);
+  return asTrimmedString(data?.toolCallId) ?? asTrimmedString(payload?.providerItemId);
 }
 
 function normalizeInlinePreview(value: string): string {
@@ -1465,27 +1505,7 @@ function extractToolDetail(
 }
 
 function extractTextFromContentArray(value: unknown): string | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-  const chunks: string[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const record = entry as Record<string, unknown>;
-    const directText = asTrimmedString(record.text);
-    if (directText) {
-      chunks.push(directText);
-      continue;
-    }
-    const nested = asRecord(record.content);
-    const nestedText = asTrimmedString(nested?.text);
-    if (nestedText) {
-      chunks.push(nestedText);
-    }
-  }
-  return chunks.length > 0 ? chunks.join("\n") : null;
+  return extractToolContentText(value) ?? null;
 }
 
 function extractCodexItemOutput(item: Record<string, unknown> | null): string | null {
@@ -1565,24 +1585,17 @@ function extractToolFullOutput(payload: Record<string, unknown> | null): string 
     return changeDiffs;
   }
 
-  const rawOutput = asRecord(data.rawOutput);
-  if (rawOutput) {
-    const stdout = asTrimmedString(rawOutput.stdout);
-    if (stdout) {
-      return stdout;
-    }
-    const content = asTrimmedString(rawOutput.content);
-    if (content) {
-      return content;
-    }
-  }
-
-  const acpContent = extractTextFromContentArray(data.content);
-  if (acpContent) {
-    return acpContent;
-  }
-
-  return null;
+  const state = asRecord(data.state);
+  return (
+    extractToolResultText(data.rawOutput) ??
+    extractToolResultText(data.output) ??
+    extractToolResultText(data.result) ??
+    extractToolResultText(state?.output) ??
+    asTrimmedString(state?.error) ??
+    asTrimmedString(asRecord(data.error)?.message) ??
+    extractToolContentText(data.content) ??
+    null
+  );
 }
 
 function extractDiffTextsFromChanges(value: unknown): string | null {

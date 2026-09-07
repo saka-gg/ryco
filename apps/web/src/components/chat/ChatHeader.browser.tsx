@@ -63,7 +63,7 @@ describe("ChatHeader", () => {
       'button[aria-label="Toggle overview panel"]',
     );
     const workspaceToggle = document.querySelector<HTMLButtonElement>(
-      'button[aria-label="Toggle workspace panel, 3 agents working"]',
+      'button[aria-label="Toggle workspace panel, 3 agents active"]',
     );
 
     expect(overviewToggle).not.toBeNull();
@@ -79,7 +79,7 @@ describe("ChatHeader", () => {
 
     await page.getByRole("button", { name: "Toggle overview panel" }).click();
     expect(workspaceToggle!.textContent).toContain("3");
-    await page.getByRole("button", { name: "Toggle workspace panel, 3 agents working" }).click();
+    await page.getByRole("button", { name: "Toggle workspace panel, 3 agents active" }).click();
 
     expect(onToggleOverviewSidebar.mock.calls[0]?.[0]).toBe(true);
     expect(onToggleWorkspacePanel.mock.calls[0]?.[0]).toBe(true);

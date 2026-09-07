@@ -4498,6 +4498,8 @@ export default function ChatView(props: ChatViewProps) {
                   <BackgroundLivenessChip
                     liveness={activeBackgroundLiveness}
                     liveCount={agentPanelModel.liveCount}
+                    waitingCount={agentPanelModel.waitingCount}
+                    onOpenAgents={onOpenAgentsPanel}
                     stopping={isStoppingBackgroundWork}
                     onStop={handleStopBackgroundWork}
                   />

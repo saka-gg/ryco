@@ -1,12 +1,13 @@
 import type { OrchestrationLatestTurnState, OrchestrationThreadActivity } from "@ryco/contracts";
 
 import { deriveWorkLogEntries, type WorkLogEntry } from "./session-logic.ts";
-import { assignSubagentIdentities } from "./subagentIdentity.ts";
+import { assignSubagentIdentities, canonicalSubagentIdentityKey } from "./subagentIdentity.ts";
 
 export type ThreadSubagentStatus = "running" | "idle" | "finished" | "failed" | "interrupted";
 
 export interface ThreadSubagentMessageView {
   id: string;
+  sequence?: number;
   text: string;
   createdAt: string;
   providerThreadId: string | null;
@@ -635,6 +636,7 @@ function messageFromActivity(
       asTrimmedString(providerRefs?.providerItemId) ??
       activity.id,
     text,
+    ...(activity.sequence !== undefined ? { sequence: activity.sequence } : {}),
     createdAt: activity.createdAt,
     providerThreadId:
       asTrimmedString(payload?.providerThreadId) ??
@@ -873,6 +875,45 @@ export function deriveThreadSubagents(
       entries: [entry],
       messages: [],
     });
+  }
+
+  // Agent-owned tools were deliberately removed from the parent work log.
+  // Re-home them using explicit task / parent-tool / provider-thread linkage.
+  // Build indexes before reading tools so late lifecycle discovery is safe.
+  const byIdentity = new Map<string, MutableThreadSubagentView>();
+  const byLaunchTool = new Map<string, MutableThreadSubagentView>();
+  for (const agent of subagents.values())
+    byIdentity.set(canonicalSubagentIdentityKey(agent.key), agent);
+  for (const activity of orderedActivities) {
+    const key = subagentKeyByActivityId.get(activity.id);
+    const agent = key ? subagents.get(key) : undefined;
+    if (!agent) continue;
+    const payload = payloadFromActivity(activity);
+    const launch =
+      asTrimmedString(payload?.toolUseId) ??
+      asTrimmedString(canonicalSubagentFromPayload(payload)?.parentProviderItemId);
+    if (launch) byLaunchTool.set(launch, agent);
+  }
+  const toolsByAgent = new Map<MutableThreadSubagentView, OrchestrationThreadActivity[]>();
+  for (const activity of orderedActivities) {
+    if (!activity.kind.startsWith("tool.")) continue;
+    const payload = payloadFromActivity(activity);
+    const owner = asTrimmedString(payload?.agentId);
+    const launch = asTrimmedString(payload?.parentToolUseId);
+    const providerThread = asTrimmedString(asRecord(payload?.providerRefs)?.providerThreadId);
+    const agent =
+      (owner ? byIdentity.get(canonicalSubagentIdentityKey(owner)) : undefined) ??
+      (launch ? byLaunchTool.get(launch) : undefined) ??
+      (providerThread ? findSubagentByProviderThreadId(subagents, providerThread) : undefined);
+    if (!agent) continue;
+    const rows = toolsByAgent.get(agent) ?? [];
+    rows.push(activity);
+    toolsByAgent.set(agent, rows);
+  }
+  for (const [agent, rows] of toolsByAgent) {
+    const tools = deriveWorkLogEntries(rows, undefined, { agentTimeline: true });
+    const existingIds = new Set(agent.entries.map((entry) => entry.id));
+    agent.entries.push(...tools.filter((entry) => !existingIds.has(entry.id)));
   }
 
   const ordered = [...subagents.values()].toSorted((left, right) =>

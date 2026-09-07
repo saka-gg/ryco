@@ -115,3 +115,16 @@ describe("isRightPanelOpen", () => {
     expect(isRightPanelOpen({})).toBe(false);
   });
 });
+
+it("preserves an agent selection within Agents and reports the shared panel mode", () => {
+  const search = parseRightPanelRouteSearch({
+    workspaceTab: "agents",
+    workspaceAgentKey: "subagent:child",
+  });
+  expect(search).toEqual({
+    workspaceOpen: "1",
+    workspaceTab: "agents",
+    workspaceAgentKey: "subagent:child",
+  });
+  expect(getRightPanelMode(search)).toBe("agents");
+});

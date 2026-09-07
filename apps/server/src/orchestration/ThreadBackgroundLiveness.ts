@@ -58,6 +58,8 @@ export class ThreadBackgroundLivenessService extends Context.Service<
       readonly status: string | undefined;
       readonly kind: "started" | "progress" | "updated" | "completed";
       readonly agentId?: string | undefined;
+      readonly attempt?: number | undefined;
+      readonly parentAgentId?: string | undefined;
     }) => void;
 
     /** Session death orphans all of a thread's background work. */
@@ -71,8 +73,18 @@ export class ThreadBackgroundLivenessService extends Context.Service<
   }
 >()("ryco/orchestration/ThreadBackgroundLiveness/ThreadBackgroundLivenessService") {}
 
+interface TaskLivenessHistory {
+  taskType: string | undefined;
+  parentAgentId: string | undefined;
+  terminal: boolean;
+  attempt: number | undefined;
+}
+
 export function make(): ThreadBackgroundLivenessService["Service"] {
   const stateByThreadId = new Map<string, ThreadLivenessState>();
+  // Session-scoped history prevents delayed starts/status patches from reviving
+  // completed tasks and retains classification on sparse updates.
+  const history = new Map<string, Map<string, TaskLivenessHistory>>();
 
   const stateFor = (threadId: string): ThreadLivenessState => {
     const existing = stateByThreadId.get(threadId);
@@ -102,7 +114,46 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
 
   return {
     recordTaskLiveness: (input) => {
-      const taskType = input.taskType;
+      const tasks = history.get(input.threadId) ?? new Map<string, TaskLivenessHistory>();
+      const previous = tasks.get(input.taskId);
+      if (
+        input.attempt !== undefined &&
+        previous?.attempt !== undefined &&
+        input.attempt < previous.attempt
+      )
+        return;
+      const newAttempt =
+        input.attempt !== undefined &&
+        previous?.attempt !== undefined &&
+        input.attempt > previous.attempt;
+      if (previous?.terminal && !newAttempt) return;
+      const taskType = input.taskType ?? previous?.taskType;
+      const parentAgentId = input.parentAgentId ?? previous?.parentAgentId;
+      const terminalEvent =
+        input.kind === "completed" ||
+        (input.status !== undefined && TERMINAL_STATUSES.has(input.status));
+      tasks.set(input.taskId, {
+        taskType,
+        parentAgentId,
+        terminal: terminalEvent,
+        attempt: input.attempt ?? previous?.attempt,
+      });
+      history.set(input.threadId, tasks);
+      const parent = parentAgentId ? tasks.get(parentAgentId) : undefined;
+      if (parent?.taskType === "local_workflow" && parent.terminal) {
+        tasks.get(input.taskId)!.terminal = true;
+        drop(input.threadId, input.taskId);
+        return;
+      }
+      if (taskType === "local_workflow" && terminalEvent) {
+        for (const [memberId, member] of tasks) {
+          if (member.parentAgentId === input.taskId) {
+            member.terminal = true;
+            drop(input.threadId, memberId);
+          }
+        }
+      }
+
       if (taskType !== undefined && INERT_TASK_TYPES.has(taskType)) {
         drop(input.threadId, input.taskId);
         return;
@@ -131,7 +182,7 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
 
       // Status-free progress is a description tick, not a restart. A delayed
       // progress event after idle must not put the task back in the live set.
-      if (input.kind === "progress" && input.status === undefined) {
+      if (input.kind !== "started" && input.status === undefined) {
         const existing = stateByThreadId.get(input.threadId);
         const stillLive =
           existing !== undefined &&
@@ -150,6 +201,7 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
 
     clearThreadLiveness: (threadId) => {
       stateByThreadId.delete(threadId);
+      history.delete(threadId);
     },
 
     getThreadBackgroundLiveness: (threadId) => {

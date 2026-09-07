@@ -2725,6 +2725,8 @@ const make = Effect.gen(function* () {
             taskType?: string;
             status?: string;
             agentId?: string;
+            attempt?: number;
+            parentAgentId?: string;
           };
           threadBackgroundLiveness.recordTaskLiveness({
             threadId: thread.id,
@@ -2732,6 +2734,8 @@ const make = Effect.gen(function* () {
             taskType: payload.taskType,
             status: payload.status,
             agentId: payload.agentId,
+            attempt: payload.attempt,
+            parentAgentId: payload.parentAgentId,
             kind:
               event.type === "task.started"
                 ? "started"
@@ -2741,6 +2745,27 @@ const make = Effect.gen(function* () {
                     ? "updated"
                     : "completed",
           });
+          break;
+        }
+        case "subagent.started":
+        case "subagent.updated":
+        case "subagent.completed": {
+          const subagent = event.payload.subagent;
+          // Native task events already own liveness when a task id exists.
+          if (!subagent.providerTaskId) {
+            threadBackgroundLiveness.recordTaskLiveness({
+              threadId: thread.id,
+              taskId: `subagent:${subagent.subagentId}`,
+              taskType: "subagent",
+              status: "status" in event.payload ? event.payload.status : undefined,
+              kind:
+                event.type === "subagent.started"
+                  ? "started"
+                  : event.type === "subagent.completed"
+                    ? "completed"
+                    : "updated",
+            });
+          }
           break;
         }
         case "session.exited":

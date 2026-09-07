@@ -1,3 +1,4 @@
+import { extractToolResultText, extractToolContentText } from "@ryco/shared/toolOutput";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { deriveToolActivityPresentation } from "@ryco/shared/toolActivity";
 import {
@@ -485,22 +486,24 @@ export function isAcpSubagentToolCall(input: {
   readonly detail?: string | undefined;
   readonly data?: Record<string, unknown> | undefined;
 }): boolean {
-  if (
-    containsSubagentKeyword(input.kind) ||
-    containsSubagentKeyword(input.title) ||
-    containsSubagentKeyword(input.command) ||
-    containsSubagentKeyword(input.detail)
-  ) {
-    return true;
-  }
-  if (hasExplicitSubagentType(input.data)) {
-    return true;
-  }
-
+  if (hasExplicitSubagentType(input.data)) return true;
+  // Descriptions, shell commands, search queries and file paths are user data,
+  // not evidence that a tool spawned an agent.
+  if (input.kind && input.kind !== "other" && !containsSubagentKeyword(input.kind)) return false;
   const rawInput = isRecord(input.data?.rawInput) ? input.data.rawInput : undefined;
+  const namedDelegation = (value: unknown) =>
+    typeof value === "string" &&
+    /^(?:sub[-_ ]?agent|subtask|delegate|delegation|spawn_agent|delegate_task)$/i.test(
+      value.trim(),
+    );
   return (
-    containsSubagentKeyword(typeof rawInput?.tool === "string" ? rawInput.tool : undefined) ||
-    containsSubagentKeyword(typeof rawInput?.name === "string" ? rawInput.name : undefined)
+    namedDelegation(input.kind) ||
+    namedDelegation(rawInput?.tool) ||
+    namedDelegation(rawInput?.name) ||
+    (input.title !== undefined &&
+      /^(?:(?:launch|spawn|run|start)\s+)?(?:sub[-\s]?agent|subtask|delegate|delegation)(?:$|[:\s])/i.test(
+        input.title,
+      ))
   );
 }
 
@@ -586,6 +589,10 @@ function makeAcpSubagentSummaryState(input: {
     ].filter(([, value]) => value !== undefined),
   );
   const status = acpSubagentStatusFromToolStatus(input.status);
+  const output =
+    extractToolResultText(input.data?.rawOutput) ?? extractToolContentText(input.data?.content);
+  const model = rawInputStringField(input.data, "model");
+  const role = rawInputStringField(input.data, "subagent_type");
 
   return {
     subagent: {
@@ -595,10 +602,11 @@ function makeAcpSubagentSummaryState(input: {
       label,
       ...(detail ? { description: detail } : {}),
       parentProviderItemId: ProviderItemId.make(input.toolCallId),
-      metadata,
+      ...(model ? { model } : {}),
+      metadata: { ...metadata, ...(role ? { role } : {}) },
     },
     ...(status ? { status } : {}),
-    summary: label,
+    summary: (status === "completed" || status === "failed") && output ? output : label,
     ...(detail ? { detail } : {}),
   };
 }

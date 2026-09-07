@@ -1,3 +1,4 @@
+import { makeAcpSubagentRuntimeEvents } from "../acp/AcpSubagentRuntimeEvents.ts";
 /**
  * CursorAdapterLive — Cursor CLI (`agent acp`) via ACP.
  *
@@ -71,7 +72,6 @@ import {
 import {
   type AcpSessionMode,
   type AcpSessionModeState,
-  type AcpSubagentSummaryState,
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
@@ -147,8 +147,7 @@ interface CursorSessionContext {
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
-  readonly startedSubagentIds: Set<string>;
-  readonly completedSubagentIds: Set<string>;
+  readonly subagentEvents: ReturnType<typeof makeAcpSubagentRuntimeEvents>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   stopped: boolean;
@@ -367,84 +366,6 @@ export function makeCursorAdapter(
         stampRuntimeEvent(event, { providerInstanceId: boundInstanceId, runtimeSessionId }),
       ).pipe(Effect.asVoid);
     };
-
-    const offerAcpSubagentRuntimeEvents = Effect.fn("offerAcpSubagentRuntimeEvents")(function* (
-      ctx: CursorSessionContext,
-      subagentState: AcpSubagentSummaryState | undefined,
-      rawPayload: unknown,
-    ) {
-      if (!subagentState) {
-        return;
-      }
-
-      const subagentId = String(subagentState.subagent.subagentId);
-      if (!ctx.startedSubagentIds.has(subagentId)) {
-        ctx.startedSubagentIds.add(subagentId);
-        yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
-          type: "subagent.started",
-          ...(yield* makeEventStamp()),
-          provider: PROVIDER,
-          threadId: ctx.threadId,
-          ...(ctx.activeTurnId ? { turnId: ctx.activeTurnId } : {}),
-          payload: {
-            subagent: subagentState.subagent,
-          },
-          raw: {
-            source: "acp.jsonrpc",
-            method: "session/update",
-            payload: rawPayload,
-          },
-        });
-      }
-
-      if (
-        subagentState.status === "completed" ||
-        subagentState.status === "failed" ||
-        subagentState.status === "stopped"
-      ) {
-        if (ctx.completedSubagentIds.has(subagentId)) {
-          return;
-        }
-        ctx.completedSubagentIds.add(subagentId);
-        yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
-          type: "subagent.completed",
-          ...(yield* makeEventStamp()),
-          provider: PROVIDER,
-          threadId: ctx.threadId,
-          ...(ctx.activeTurnId ? { turnId: ctx.activeTurnId } : {}),
-          payload: {
-            subagent: subagentState.subagent,
-            status: subagentState.status,
-            ...(subagentState.summary ? { summary: subagentState.summary } : {}),
-          },
-          raw: {
-            source: "acp.jsonrpc",
-            method: "session/update",
-            payload: rawPayload,
-          },
-        });
-        return;
-      }
-
-      yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
-        type: "subagent.updated",
-        ...(yield* makeEventStamp()),
-        provider: PROVIDER,
-        threadId: ctx.threadId,
-        ...(ctx.activeTurnId ? { turnId: ctx.activeTurnId } : {}),
-        payload: {
-          subagent: subagentState.subagent,
-          ...(subagentState.status ? { status: subagentState.status } : {}),
-          ...(subagentState.summary ? { summary: subagentState.summary } : {}),
-          ...(subagentState.detail ? { detail: subagentState.detail } : {}),
-        },
-        raw: {
-          source: "acp.jsonrpc",
-          method: "session/update",
-          payload: rawPayload,
-        },
-      });
-    });
 
     const getThreadSemaphore = (threadId: string) =>
       SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
@@ -920,8 +841,7 @@ export function makeCursorAdapter(
             pendingApprovals,
             pendingUserInputs,
             turns: [],
-            startedSubagentIds: new Set(),
-            completedSubagentIds: new Set(),
+            subagentEvents: makeAcpSubagentRuntimeEvents(),
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             stopped: false,
@@ -992,11 +912,16 @@ export function makeCursorAdapter(
                         rawPayload: event.rawPayload,
                       }),
                     );
-                    yield* offerAcpSubagentRuntimeEvents(
-                      ctx,
-                      event.toolCall.subagent,
-                      event.rawPayload,
-                    );
+                    for (const subagentEvent of yield* ctx.subagentEvents({
+                      provider: PROVIDER,
+                      threadId: ctx.threadId,
+                      turnId: ctx.activeTurnId,
+                      state: event.toolCall.subagent,
+                      rawPayload: event.rawPayload,
+                      makeStamp: makeEventStamp,
+                    })) {
+                      yield* offerRuntimeEventForRuntime(runtimeSessionId, subagentEvent);
+                    }
                     return;
                   case "ContentDelta":
                     yield* logNative(

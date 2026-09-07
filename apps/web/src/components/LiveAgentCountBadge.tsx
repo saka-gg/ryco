@@ -1,7 +1,7 @@
 import { cn } from "~/lib/utils";
 
 export function formatLiveAgentCount(count: number): string {
-  return `${count} ${count === 1 ? "agent" : "agents"} working`;
+  return `${count} ${count === 1 ? "agent" : "agents"} active`;
 }
 
 export function LiveAgentCountBadge({ count, className }: { count: number; className?: string }) {

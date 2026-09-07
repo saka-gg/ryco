@@ -1393,6 +1393,7 @@ export const makeCodexSessionRuntime = (
               payload: {
                 ...childIdentity,
                 item: notification.params.item,
+                lifecycle: notification.method,
               },
             });
             return true;
