@@ -2,6 +2,7 @@ let socket = null;
 let config = null;
 let authenticated = false;
 let generation = 0;
+let detaching = Promise.resolve();
 const attached = new Set();
 const methods = new Set([
   "Runtime.evaluate",
@@ -23,10 +24,9 @@ const safeUrl = (value) => {
   return url.href;
 };
 async function detachAll() {
-  for (const tabId of attached) {
-    attached.delete(tabId);
-    await chrome.debugger.detach({ tabId }).catch(() => {});
-  }
+  const tabs = [...attached];
+  attached.clear();
+  await Promise.all(tabs.map((tabId) => chrome.debugger.detach({ tabId }).catch(() => {})));
 }
 function disconnect() {
   authenticated = false;
@@ -34,7 +34,7 @@ function disconnect() {
   const previous = socket;
   socket = null;
   previous?.close();
-  void detachAll();
+  detaching = Promise.all([detaching, detachAll()]).then(() => {});
 }
 async function run(message, attempt) {
   const check = () => {
@@ -81,8 +81,10 @@ async function run(message, attempt) {
   check();
   return await chrome.debugger.sendCommand({ tabId }, message.method, message.params || {});
 }
-function connect() {
-  if (!config || socket) return;
+async function connect() {
+  const previousGeneration = generation;
+  await detaching;
+  if (previousGeneration !== generation || !config || socket) return;
   const attempt = ++generation;
   const ws = new WebSocket(config.url);
   socket = ws;
@@ -113,7 +115,7 @@ function connect() {
       authenticated = false;
       socket = null;
       generation++;
-      void detachAll();
+      detaching = Promise.all([detaching, detachAll()]).then(() => {});
     }
   });
   ws.addEventListener("error", () => ws.close());
@@ -140,8 +142,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     return true;
   }
 });
-chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId) attached.delete(source.tabId);
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId !== undefined) attached.delete(source.tabId);
+  if (reason === "canceled_by_user") {
+    // Browser cancellation/DevTools takeover must not be undone by auto-reconnect.
+    disconnect();
+    config = null;
+    void chrome.storage.local.remove("config");
+  }
 });
 chrome.alarms.create("ryco-connect", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => {

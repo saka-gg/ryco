@@ -241,6 +241,9 @@ export class DesktopComputerUseRuntime {
         return;
       }
       this.sockets.handleUpgrade(request, socket, head, (connection) => {
+        // Invalid frames can arrive before authentication installs the transport.
+        // An unhandled WebSocket error would otherwise terminate the desktop app.
+        connection.on("error", () => connection.terminate());
         const timer = setTimeout(() => connection.close(), 5_000);
         connection.once("message", (bytes) => {
           clearTimeout(timer);

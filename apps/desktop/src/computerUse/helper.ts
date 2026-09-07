@@ -50,6 +50,9 @@ export class ComputerNativeHelper {
       stdio: "pipe",
     });
     this.child = child;
+    child.stdin.on("error", () => {
+      if (this.child === child) this.stop();
+    });
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (this.child !== child) return;
@@ -106,7 +109,7 @@ export class ComputerNativeHelper {
       this.pending.set(id, { resolve, reject, cleanup });
       signal?.addEventListener("abort", abort, { once: true });
       child.stdin.write(`${JSON.stringify({ id, action, input })}\n`, (error) => {
-        if (error) this.stop();
+        if (error && this.child === child) this.stop();
       });
     });
   }

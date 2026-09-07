@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { WebSocket } from "ws";
 import { DesktopComputerUseRuntime } from "../src/computerUse/runtime.ts";
 import { ComputerUseOverlay } from "../src/computerUse/overlay.ts";
 
@@ -14,6 +15,7 @@ const directory = mkdtempSync(join(tmpdir(), "ryco-computer-integration-"));
 app.setPath("userData", join(directory, "electron"));
 app.on("window-all-closed", () => {});
 async function main() {
+  let exitCode = 0;
   let runtime: DesktopComputerUseRuntime | undefined;
   let overlay: ComputerUseOverlay | undefined;
   let closeBrowser: (() => Promise<void>) | undefined;
@@ -73,6 +75,26 @@ async function main() {
       browsers: ["chrome"],
     });
     request.turnId = "enabled-turn";
+    // A malformed client frame before authentication must not crash Electron.
+    await new Promise<void>((resolve, reject) => {
+      const malformed = new WebSocket(
+        binding.url.replace("http:", "ws:").replace("/control", "/browser"),
+        {
+          origin: `chrome-extension://${"a".repeat(32)}`,
+        },
+      );
+      const timeout = setTimeout(() => {
+        malformed.terminate();
+        reject(new Error("Malformed socket was not closed"));
+      }, 5000);
+      malformed.on("error", () => {});
+      malformed.on("open", () => malformed.send("unmasked", { mask: false }));
+      malformed.on("close", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    assert.equal((await call({ action: "tabs" })).status, 200);
     const pairing = runtime.pair("chrome");
     const { chromium } = await import(
       pathToFileURL(join(process.cwd(), "apps/web/node_modules/playwright/index.mjs")).href
@@ -162,20 +184,19 @@ async function main() {
       "PASS: real MV3 extension pairing, private HTTP authentication, Chromium background form control, revocation/token rotation, and repeated native cursor overlay without focus or pointer takeover.",
     );
   } catch (error) {
-    process.exitCode = 1;
-    throw error;
+    console.error(error);
+    exitCode = 1;
   } finally {
     overlay?.dispose();
     runtime?.dispose();
     await closeBrowser?.();
     fixture.closeAllConnections();
     fixture.close();
-    app.quit();
     rmSync(directory, { recursive: true, force: true });
+    app.exit(exitCode);
   }
 }
 void main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
-  app.quit();
+  app.exit(1);
 });

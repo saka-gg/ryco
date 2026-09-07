@@ -62,7 +62,39 @@ export function browserCursorScript(x: number, y: number): string {
   })()`;
 }
 
+/** Check the actual hit target, including open shadow roots, before delivering input. */
+function elementActionScript(ref: string, action: string, value?: string, scroll = false): string {
+  return `(() => {
+    const el=globalThis.__rycoRefs?.get(${JSON.stringify(ref)});
+    if(!el?.isConnected) throw Error('stale');
+    if(el.closest('[inert]')) throw Error('inert');
+    if(${action !== "hover"} && (el.matches(':disabled') || el.closest('[aria-disabled="true"]'))) throw Error('disabled');
+    if(${action === "fill"}) {
+      if(el.readOnly) throw Error('readonly');
+      if(!(el instanceof HTMLTextAreaElement || el.isContentEditable ||
+        (el instanceof HTMLInputElement && ['text','search','email','url','tel','password','number','date','datetime-local','month','time','week'].includes(el.type)))) throw Error('not fillable');
+    }
+    if(${action === "select"}) {
+      if(!(el instanceof HTMLSelectElement)) throw Error('not a select');
+      const option=Array.from(el.options).find(o=>o.value===${JSON.stringify(value)});
+      if(!option || option.disabled || option.parentElement?.disabled) throw Error('unavailable option');
+    }
+    ${scroll ? "el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});" : ""}
+    const r=el.getBoundingClientRect(), style=getComputedStyle(el);
+    const left=Math.max(0,r.left), right=Math.min(innerWidth,r.right), top=Math.max(0,r.top), bottom=Math.min(innerHeight,r.bottom);
+    if(right<=left || bottom<=top || style.visibility!=='visible' || style.display==='none') throw Error('hidden');
+    const x=(left+right)/2,y=(top+bottom)/2;
+    let hit=document.elementFromPoint(x,y);
+    while(hit?.shadowRoot) { const inner=hit.shadowRoot.elementFromPoint(x,y); if(!inner || inner===hit) break; hit=inner; }
+    let current=hit;
+    while(current && current!==el) current=current.parentElement || current.getRootNode()?.host;
+    if(current!==el) throw Error('covered');
+    return {el,x,y};
+  })()`;
+}
+
 interface Observation {
+  transport: BrowserTransport;
   contextId: number;
   document: string;
   observed: boolean;
@@ -172,7 +204,12 @@ export class BrowserComputerDriver {
     const key = `${browser}:${tab}`;
     const scope = JSON.stringify([context.request.sessionId, context.request.turnId]);
     let observation = this.observations.get(key);
-    if (!observation || observation.document !== document || observation.scope !== scope) {
+    if (
+      !observation ||
+      observation.transport !== transport ||
+      observation.document !== document ||
+      observation.scope !== scope
+    ) {
       const world = record(
         await transport.send(
           tab,
@@ -182,6 +219,7 @@ export class BrowserComputerDriver {
         ),
       );
       observation = {
+        transport,
         contextId: numberArg(world, "executionContextId", 0, Number.MAX_SAFE_INTEGER),
         document,
         observed: false,
@@ -232,11 +270,8 @@ export class BrowserComputerDriver {
           ? textArg(args, action === "fill" ? "text" : "value", 20_000)
           : undefined;
       const ref = textArg(args, "ref", 16);
-      const point = record(
-        await evaluate(
-          `(() => { const el=globalThis.__rycoRefs?.get(${JSON.stringify(ref)}); if(!el?.isConnected) throw Error('stale'); el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); if(r.width<=0||r.height<=0) throw Error('hidden'); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`,
-        ),
-      );
+      const prepare = elementActionScript(ref, action, value, true);
+      const point = record(await evaluate(`(() => { const {x,y}=${prepare}; return {x,y}; })()`));
       const x = numberArg(point, "x");
       const y = numberArg(point, "y");
       await evaluate(browserCursorScript(x, y));
@@ -247,25 +282,34 @@ export class BrowserComputerDriver {
         { type: "mouseMoved", x, y },
         context.signal,
       );
-      if (action === "hover") return result({ delivered: "background" });
-      await transport.send(
-        tab,
-        "Input.dispatchMouseEvent",
-        { type: "mousePressed", x, y, button: "left", clickCount: 1 },
-        context.signal,
-      );
-      await transport.send(
-        tab,
-        "Input.dispatchMouseEvent",
-        { type: "mouseReleased", x, y, button: "left", clickCount: 1 },
-        context.signal,
-      );
+      // Hover handlers, scrolling and the cursor animation can change the layout.
+      // Revalidate in the same document immediately before clicking or editing.
+      const validate = `const {el,x,y}=${elementActionScript(ref, action, value)};
+        if(Math.abs(x-${x})>1 || Math.abs(y-${y})>1) throw Error('target moved');`;
       if (action === "fill" || action === "select") {
-        await evaluate(`(() => { const el=globalThis.__rycoRefs?.get(${JSON.stringify(ref)}); if(!el?.isConnected) throw Error('stale');
-          if(el instanceof HTMLSelectElement) { if(!Array.from(el.options).some(o=>o.value===${JSON.stringify(value)})) throw Error('option'); el.value=${JSON.stringify(value)}; }
+        // Do not click a select first: its native popup can intercept later input.
+        await evaluate(`(() => { ${validate}
+          el.focus({preventScroll:true});
+          if(!el.isConnected || el.matches(':disabled') || el.readOnly) throw Error('state changed');
+          if(el instanceof HTMLSelectElement) el.value=${JSON.stringify(value)};
           else if(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) { const proto=el instanceof HTMLInputElement?HTMLInputElement.prototype:HTMLTextAreaElement.prototype; Object.getOwnPropertyDescriptor(proto,'value').set.call(el,${JSON.stringify(value)}); }
-          else if(el.isContentEditable) el.textContent=${JSON.stringify(value)}; else throw Error('not editable');
+          else el.textContent=${JSON.stringify(value)};
           el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return true; })()`);
+      } else {
+        await evaluate(`(() => { ${validate} return true; })()`);
+        if (action === "hover") return result({ delivered: "background" });
+        await transport.send(
+          tab,
+          "Input.dispatchMouseEvent",
+          { type: "mousePressed", x, y, button: "left", clickCount: 1 },
+          context.signal,
+        );
+        await transport.send(
+          tab,
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x, y, button: "left", clickCount: 1 },
+          context.signal,
+        );
       }
       return result({ delivered: "background", verify: "Observe the page to verify the result." });
     }

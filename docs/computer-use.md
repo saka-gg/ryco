@@ -16,6 +16,8 @@ Private tool injection supports the existing audited Agent Control integrations:
 
 Enable Chrome, Brave or Edge, then click **Pair**. **Open browser Extensions** opens the selected browser's extension manager. Choose **Show extension folder**, then **Copy folder path** to avoid searching through folders. Enable Developer mode and choose Load unpacked; on macOS use ⌘ + Shift + G in the folder chooser to paste the path. **Copy pairing configuration**, open **Ryco Browser Control** in the browser toolbar, and paste it there.
 
+Canceling the browser’s debugging session (including taking over with DevTools) disconnects Ryco and disables automatic reconnection. Use the extension’s pairing flow to reconnect explicitly.
+
 Pairing is scoped to that browser profile and replaces the previous connection for that browser. Pair again after restarting Ryco. The extension uses the browser's debugger API, so the browser may display its own debugger indicator. It works with the profile's existing sign-ins. Firefox and Safari are not supported by this extension.
 
 Chrome's supported app-assisted install flow on macOS/Windows requires a published Web Store extension and user confirmation. Ryco's development extension is currently unpacked; this guide keeps Developer mode and installation under the user's control. See [Chrome distribution requirements](https://developer.chrome.com/docs/extensions/how-to/distribute/install-extensions).
@@ -46,6 +48,10 @@ Background support varies by app and operating system. Refused native operations
 - This policy governs these Ryco tools. It is not an OS sandbox around a provider's separately enabled shell, MCPs or other automation tools, nor does it constrain what an already approved terminal/scripting application could do.
 - The bridge listens only on loopback, rejects web origins and requires an ephemeral backend credential passed privately through desktop bootstrap. Tokens are rotated on backend restart and never included in provider tool arguments. Browser pairing tokens remain local to the explicitly paired extension.
 - Native control has been exercised on macOS. The upstream helper includes Windows and Linux implementations, but Ryco's native behavior on those systems still needs platform qualification. This is not a guarantee of complete Codex/Claude feature parity.
+
+Locked use remains a future feature. Native control requires an unlocked desktop; granting Screen Recording and Accessibility does not enable operation through the macOS lock screen.
+
+Browser element actions check visibility and whether the target is covered or has moved before delivering input. Fill/select also respect disabled and read-only controls. A replaced browser connection requires a fresh observation even if it reuses tab identifiers.
 
 ## Development and validation
 

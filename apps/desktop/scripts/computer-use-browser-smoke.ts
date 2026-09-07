@@ -12,13 +12,14 @@ import type { ComputerBrowser, ComputerUseRequest } from "@ryco/contracts";
 const directory = mkdtempSync(join(tmpdir(), "ryco-computer-browser-smoke-"));
 app.setPath("userData", directory);
 app.commandLine.appendSwitch("remote-debugging-port", "0");
-const fixture = `<!doctype html><title>Ryco automation fixture</title><style>body{font:18px system-ui;padding:60px}input,select,button{font:inherit;padding:12px;margin:12px}#result{margin:12px}footer{margin-top:1400px}</style><h1>Automation fixture</h1><label>Name <input aria-label="Name" id="name"></label><select aria-label="Colour" id="colour"><option value="blue">Blue</option><option value="green">Green</option></select><button id="save">Save sample</button><div id="result" role="status">Waiting</div><footer>End</footer><script>save.onclick=()=>result.textContent='Saved '+nameInput.value+' '+colour.value;const nameInput=document.getElementById('name');</script>`;
+const fixture = `<!doctype html><title>Ryco automation fixture</title><style>body{font:18px system-ui;padding:60px}input,select,button{font:inherit;padding:12px;margin:12px}#result{margin:12px}footer{margin-top:1400px}</style><h1>Automation fixture</h1><label>Name <input aria-label="Name" id="name"></label><select aria-label="Colour" id="colour"><option value="blue">Blue</option><option value="green">Green</option></select><button id="save">Save sample</button><div id="result" role="status">Waiting</div><label>Read only <input aria-label="Read only" readonly value="Original"></label><fieldset disabled><input aria-label="Disabled" value="Original"></fieldset><div style="position:relative;width:300px"><button id="covered" onclick="document.body.dataset.unwanted='yes'">Covered</button><div style="position:absolute;inset:0;background:#ccc">Cover</div></div><button id="moving" onpointerover="this.style.marginLeft='300px'" onclick="document.body.dataset.unwanted='yes'">Moving</button><footer>End</footer><script>save.onclick=()=>result.textContent='Saved '+nameInput.value+' '+colour.value;const nameInput=document.getElementById('name');</script>`;
 const server = createServer((_request, response) => {
   response.setHeader("content-type", "text/html");
   response.end(fixture);
 });
 let transport: EmbeddedComputerBrowser | undefined;
 async function main() {
+  let exitCode = 0;
   try {
     await app.whenReady();
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -60,6 +61,31 @@ async function main() {
     await execute({ action: "click", tab, ref: ref("Save sample") });
     state = decoded(await execute({ action: "observe", tab }));
     assert.match(state.text, /Saved Ada green/);
+    for (const name of ["Read only", "Disabled"]) {
+      await assert.rejects(
+        execute({ action: "fill", tab, ref: ref(name), text: "Must not change" }),
+        /Page state changed/,
+      );
+    }
+    await assert.rejects(
+      execute({ action: "click", tab, ref: ref("Covered") }),
+      /Page state changed/,
+    );
+    await assert.rejects(
+      execute({ action: "click", tab, ref: ref("Moving") }),
+      /Page state changed/,
+    );
+    const unchanged = (await transport.send(
+      tab,
+      "Runtime.evaluate",
+      {
+        expression: `({unwanted:document.body.dataset.unwanted || null, values:Array.from(document.querySelectorAll('input[readonly],fieldset input')).map(el=>el.value)})`,
+        returnByValue: true,
+      },
+      new AbortController().signal,
+    )) as { result: { value: { unwanted: string | null; values: string[] } } };
+    assert.equal(unchanged.result.value.unwanted, null);
+    assert.deepEqual(unchanged.result.value.values, ["Original", "Original"]);
     const cursor = (await transport.send(
       tab,
       "Runtime.evaluate",
@@ -80,17 +106,17 @@ async function main() {
     controller.stop();
     await assert.rejects(execute({ action: "tabs" }), /stopped/);
     console.log(
-      "PASS: live Chromium fill/select/click, visible cursor, screenshot, navigation invalidation and stop.",
+      "PASS: live Chromium rejects covered/moving/readonly/disabled targets; fill/select/click, visible cursor, screenshot, navigation invalidation and stop.",
     );
   } catch (error) {
     console.error(error);
-    process.exitCode = 1;
+    exitCode = 1;
   } finally {
     transport?.dispose();
     server.closeAllConnections();
     server.close();
-    app.quit();
     rmSync(directory, { recursive: true, force: true });
+    app.exit(exitCode);
   }
 }
 void main();
