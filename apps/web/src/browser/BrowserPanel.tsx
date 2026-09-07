@@ -199,15 +199,18 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
         className="flex shrink-0 items-center gap-1 border-b p-2"
         onSubmit={(event) => {
           event.preventDefault();
-          void run(() =>
-            api && active
-              ? api.command({
+          void run(async () => {
+            if (active) {
+              const url = normalizeBrowserUrl(address);
+              if (api)
+                await api.command({
                   action: "navigate",
                   tab: active.id,
-                  url: normalizeBrowserUrl(address),
-                })
-              : open(address),
-          );
+                  url,
+                });
+              else useBrowserUi.getState().navigateFallback(active.id, url);
+            } else await open(address);
+          });
         }}
       >
         <Button

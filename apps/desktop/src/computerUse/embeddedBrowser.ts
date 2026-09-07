@@ -105,6 +105,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       requestedUrl: target,
     };
     this.entries.set(id, entry);
+    host.once("closed", () => this.destroy(id, "host"));
+    wc.once("destroyed", () => this.destroy(id, "guest"));
     host.contentView.addChildView(view);
     this.fitHost(entry);
     host.on("resize", () => {
@@ -199,7 +201,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const entry = this.entries.get(mounted.tab);
     if (!entry) return;
     if (!mounted.window.isDestroyed()) mounted.window.contentView.removeChildView(entry.view);
-    entry.host.contentView.addChildView(entry.view);
+    if (!entry.host.isDestroyed()) entry.host.contentView.addChildView(entry.view);
     const { width, height } = entry.view.getBounds();
     entry.view.setBounds({ x: 0, y: 0, width, height });
     entry.presentation = "background";
@@ -271,13 +273,20 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     entry.host.showInactive();
     this.publish();
   }
-  private destroy(tab: string): void {
+  private destroy(tab: string, destroyed?: "guest" | "host"): void {
     const entry = this.entries.get(tab);
     if (!entry) return;
-    if (this.mounted?.tab === tab) this.unmount();
+    // Remove ownership before Electron emits nested close/destroy events. A closing guest
+    // must never be reparented or asked to close again from its own destroyed callback.
     this.entries.delete(tab);
-    entry.view.webContents.close({ waitForBeforeUnload: false });
-    entry.host.destroy();
+    if (this.mounted?.tab === tab) {
+      const { window } = this.mounted;
+      this.mounted = null;
+      if (!window.isDestroyed()) window.contentView.removeChildView(entry.view);
+    }
+    if (destroyed !== "guest" && !entry.view.webContents.isDestroyed())
+      entry.view.webContents.close({ waitForBeforeUnload: false });
+    if (destroyed !== "host" && !entry.host.isDestroyed()) entry.host.destroy();
     this.publish();
   }
   async close(tab: string, signal: AbortSignal): Promise<void> {

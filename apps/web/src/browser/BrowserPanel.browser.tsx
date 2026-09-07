@@ -172,3 +172,20 @@ it("attaches the live preview inside its own popup and detaches when closed", as
   await view.getByRole("button", { name: "Live preview" }).click();
   await expect.poll(() => api.surface.mock.calls.at(-1)?.[0].tab).toBeNull();
 });
+
+it("navigates the current web preview instead of creating another tab", async () => {
+  await page.viewport(1200, 900);
+  delete window.desktopBridge;
+  const view = await render(<BrowserPanel environmentId={null} cwd="/project" />);
+  const address = view.getByRole("textbox", { name: "Browser address" });
+  await address.fill(`${location.origin}/first-preview`);
+  await view.getByRole("button", { name: "Go", exact: true }).click();
+  const firstId = useBrowserUi.getState().fallback[0]?.id;
+  await address.fill(`${location.origin}/second-preview`);
+  await view.getByRole("button", { name: "Go", exact: true }).click();
+  expect(useBrowserUi.getState().fallback).toHaveLength(1);
+  expect(useBrowserUi.getState().fallback[0]).toMatchObject({
+    id: firstId,
+    url: `${location.origin}/second-preview`,
+  });
+});

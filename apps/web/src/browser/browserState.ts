@@ -9,6 +9,7 @@ interface BrowserUiState {
   setNative(state: ProjectBrowserState): void;
   select(project: string, id: string): void;
   openFallback(url: string, project: string): string;
+  navigateFallback(id: string, url: string): void;
   closeFallback(id: string): void;
 }
 export const useBrowserUi = create<BrowserUiState>((set) => ({
@@ -41,6 +42,12 @@ export const useBrowserUi = create<BrowserUiState>((set) => ({
   },
   closeFallback: (id) =>
     set((state) => ({ fallback: state.fallback.filter((tab) => tab.id !== id) })),
+  navigateFallback: (id, url) =>
+    set((state) => ({
+      fallback: state.fallback.map((tab) =>
+        tab.id === id ? { ...tab, url, title: new URL(url).host } : tab,
+      ),
+    })),
 }));
 let subscribers = 0;
 let unsubscribe: (() => void) | undefined;

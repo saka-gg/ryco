@@ -1,5 +1,5 @@
 import { ComputerNativeHelper } from "../src/computerUse/helper.ts";
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, webContents } from "electron";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -165,6 +165,53 @@ async function main() {
     );
     await browser.close(tab.id, new AbortController().signal);
     assert.equal(browser.state().tabs.length, 0);
+    const interrupted = await browser.open(
+      `http://127.0.0.1:${address.port}`,
+      false,
+      new AbortController().signal,
+      "fixture-project",
+    );
+    browser.surface({ ...surface, tab: interrupted.id }, owner);
+    const guest = webContents.fromId(Number(interrupted.id));
+    assert(guest);
+    const destroyed = new Promise<void>((resolve) => guest.once("destroyed", resolve));
+    guest.close({ waitForBeforeUnload: false });
+    await Promise.race([
+      destroyed,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Guest close timed out")), 3000),
+      ),
+    ]);
+    assert.equal(
+      browser.state().tabs.length,
+      0,
+      "Unexpected guest destruction must remove its tab and host",
+    );
+    const interruptedHost = await browser.open(
+      `http://127.0.0.1:${address.port}`,
+      false,
+      new AbortController().signal,
+      "fixture-project",
+    );
+    browser.surface({ ...surface, tab: interruptedHost.id }, owner);
+    const host = BrowserWindow.getAllWindows().find((window) => window !== owner);
+    assert(host);
+    const hostGuest = webContents.fromId(Number(interruptedHost.id));
+    assert(hostGuest);
+    const hostGuestDestroyed = new Promise<void>((resolve) => hostGuest.once("destroyed", resolve));
+    host.destroy();
+    await Promise.race([
+      hostGuestDestroyed,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Host guest close timed out")), 3000),
+      ),
+    ]);
+    assert.equal(
+      browser.state().tabs.length,
+      0,
+      "Host destruction must also release its docked guest",
+    );
+    assert(!owner.isDestroyed(), "Closing a guest must not close the Ryco shell");
     console.log(
       "PASS: docked native page, shared agent input, surface fencing, bounds validation, popout/redock state, guest isolation, shell reload and tab cleanup.",
     );
