@@ -789,6 +789,7 @@ it.live("tracks approval requests and resolves pending approvals on user respons
       yield* seedProjectAndThread(harness);
 
       yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+        completeTurn: false,
         events: [
           {
             type: "turn.started",
@@ -805,13 +806,8 @@ it.live("tracks approval requests and resolves pending approvals on user respons
             requestKind: "command",
             detail: "Approve command execution",
           },
-          {
-            type: "turn.completed",
-            ...runtimeBase("evt-approval-3", "2026-02-24T10:03:00.200Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-            status: "completed",
-          },
+          // Keep the turn open while awaiting approval. A completed turn clears
+          // its pending requests before the user can respond.
         ],
       });
 
