@@ -387,6 +387,8 @@ export interface ChatComposerProps {
   scheduleComposerFocus: () => void;
   setThreadError: (threadId: ThreadId | null, error: string | null) => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
+  onGoalBudgetChange: (tokenBudget: number | null) => Promise<boolean>;
+  onRetryGoal: () => void;
   onEditGoal: () => void;
   onGoalStatusChange: (status: ThreadGoalStatus) => void;
   onClearGoal: () => void;
@@ -466,6 +468,8 @@ export const ChatComposer = memo(
       scheduleComposerFocus,
       setThreadError,
       onExpandImage,
+      onGoalBudgetChange,
+      onRetryGoal,
       onEditGoal,
       onGoalStatusChange,
       onClearGoal,
@@ -2584,6 +2588,9 @@ export const ChatComposer = memo(
               ) : showGoalHeader && activeThreadGoal ? (
                 <ComposerGoalHeader
                   goal={activeThreadGoal}
+                  isRunning={phase === "running"}
+                  onBudgetChange={onGoalBudgetChange}
+                  onRetry={onRetryGoal}
                   onEdit={onEditGoal}
                   onStatusChange={onGoalStatusChange}
                   onClear={onClearGoal}

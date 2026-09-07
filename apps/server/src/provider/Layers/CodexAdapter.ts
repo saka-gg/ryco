@@ -2450,18 +2450,55 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
   const setThreadGoal: NonNullable<CodexAdapterShape["setThreadGoal"]> = (threadId, goal) =>
     requireSession(threadId).pipe(
-      Effect.flatMap((session) =>
-        session.runtime.setGoal({
-          objective: goal.objective,
-          status: goal.status,
-          tokenBudget: goal.tokenBudget,
-        }),
-      ),
-      Effect.asVoid,
+      Effect.flatMap((session) => {
+        const fields = goal.synchronization?.fields ?? ["objective", "status", "tokenBudget"];
+        return session.runtime.setGoal({
+          ...(fields.includes("objective") ? { objective: goal.objective } : {}),
+          ...(fields.includes("status") ? { status: goal.status } : {}),
+          ...(fields.includes("tokenBudget") ? { tokenBudget: goal.tokenBudget } : {}),
+        });
+      }),
+      Effect.flatMap((response) => {
+        const goal = normalizeCodexThreadGoal(response.goal);
+        return goal
+          ? Effect.succeed(goal)
+          : Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "thread/goal/set",
+                detail: "Codex returned an invalid goal.",
+              }),
+            );
+      }),
       Effect.mapError((cause) =>
-        cause._tag === "ProviderAdapterSessionNotFoundError"
+        cause._tag === "ProviderAdapterSessionNotFoundError" ||
+        cause._tag === "ProviderAdapterRequestError"
           ? cause
           : mapCodexRuntimeError(threadId, "thread/goal/set", cause),
+      ),
+    );
+
+  const getThreadGoal: NonNullable<CodexAdapterShape["getThreadGoal"]> = (threadId) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) => session.runtime.getGoal),
+      Effect.flatMap((response) => {
+        if (!response.goal) return Effect.succeed(null);
+        const goal = normalizeCodexThreadGoal(response.goal);
+        return goal
+          ? Effect.succeed(goal)
+          : Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "thread/goal/get",
+                detail: "Codex returned an invalid goal.",
+              }),
+            );
+      }),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError" ||
+        cause._tag === "ProviderAdapterRequestError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/goal/get", cause),
       ),
     );
 
@@ -2555,6 +2592,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     readThreadHistory,
     rollbackThread,
     setThreadGoal,
+    getThreadGoal,
     clearThreadGoal,
     respondToRequest,
     respondToUserInput,

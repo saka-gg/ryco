@@ -5,6 +5,8 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  MessageId,
+  type ThreadGoal,
   type OrchestrationEvent,
 } from "@ryco/contracts";
 import { Effect } from "effect";
@@ -79,7 +81,7 @@ async function seedThread(at: string) {
 }
 
 describe("thread goal decider", () => {
-  it("sets, pauses with elapsed accounting, and clears a goal", async () => {
+  it("sets, pauses without inventing provider usage, and requests a clear", async () => {
     const createdAt = "2026-08-17T10:00:00.000Z";
     const initial = await seedThread(createdAt);
     const setEvent = expectSingleEvent(
@@ -124,7 +126,8 @@ describe("thread goal decider", () => {
     );
     if (pauseEvent.type !== "thread.goal-updated") return;
     expect(pauseEvent.payload.goal.status).toBe("paused");
-    expect(pauseEvent.payload.goal.timeUsedSeconds).toBe(61);
+    expect(pauseEvent.payload.goal.timeUsedSeconds).toBe(0);
+    expect(pauseEvent.payload.goal.synchronization?.fields).toEqual(["objective", "status"]);
 
     const paused = await Effect.runPromise(
       projectEvent(withGoal, { ...pauseEvent, sequence: 4 } as OrchestrationEvent),
@@ -142,6 +145,179 @@ describe("thread goal decider", () => {
         }),
       ),
     );
-    expect(clearEvent.type).toBe("thread.goal-cleared");
+    expect(clearEvent.type).toBe("thread.goal-updated");
+    if (clearEvent.type === "thread.goal-updated") {
+      expect(clearEvent.payload.goal.synchronization).toMatchObject({
+        state: "pending",
+        action: "clear",
+      });
+    }
+  });
+});
+
+const goalTime = "2026-08-17T10:00:00.000Z";
+const nativeGoal = {
+  objective: "Ship the migration",
+  status: "active" as const,
+  tokenBudget: 1000,
+  tokensUsed: 250,
+  timeUsedSeconds: 30,
+  createdAt: goalTime,
+  updatedAt: goalTime,
+};
+async function modelWithGoal(goal: ThreadGoal = nativeGoal) {
+  const initial = await seedThread(goalTime);
+  const event = expectSingleEvent(
+    await Effect.runPromise(
+      decideOrchestrationCommand({
+        readModel: initial,
+        command: {
+          type: "thread.goal.sync",
+          commandId: CommandId.make("native-goal"),
+          threadId,
+          goal,
+          createdAt: goalTime,
+        },
+      }),
+    ),
+  );
+  return Effect.runPromise(projectEvent(initial, { ...event, sequence: 3 } as OrchestrationEvent));
+}
+
+describe("goal confirmation and lifecycle", () => {
+  it("rejects late notifications and superseded confirmations while a change is pending", async () => {
+    const state = await modelWithGoal({
+      ...nativeGoal,
+      synchronization: { requestId: "new-request", state: "pending", action: "set" },
+    });
+    for (const expectedRequestId of [undefined, "old-request"]) {
+      await expect(
+        Effect.runPromise(
+          decideOrchestrationCommand({
+            readModel: state,
+            command: {
+              type: "thread.goal.sync",
+              commandId: CommandId.make("late"),
+              threadId,
+              goal: nativeGoal,
+              ...(expectedRequestId ? { expectedRequestId } : {}),
+              createdAt: goalTime,
+            },
+          }),
+        ),
+      ).rejects.toThrow("Superseded goal update");
+    }
+    const confirmed = expectSingleEvent(
+      await Effect.runPromise(
+        decideOrchestrationCommand({
+          readModel: state,
+          command: {
+            type: "thread.goal.sync",
+            commandId: CommandId.make("confirmed"),
+            threadId,
+            goal: nativeGoal,
+            expectedRequestId: "new-request",
+            createdAt: goalTime,
+          },
+        }),
+      ),
+    );
+    expect(confirmed).toMatchObject({
+      type: "thread.goal-updated",
+      payload: { goal: nativeGoal, origin: "provider" },
+    });
+  });
+
+  it("only clears a pending goal after the matching confirmation", async () => {
+    const state = await modelWithGoal({
+      ...nativeGoal,
+      synchronization: { requestId: "clear-request", state: "pending", action: "clear" },
+    });
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          readModel: state,
+          command: {
+            type: "thread.goal.provider-clear",
+            commandId: CommandId.make("late-clear"),
+            threadId,
+            createdAt: goalTime,
+          },
+        }),
+      ),
+    ).rejects.toThrow("Superseded goal clear");
+    const confirmed = expectSingleEvent(
+      await Effect.runPromise(
+        decideOrchestrationCommand({
+          readModel: state,
+          command: {
+            type: "thread.goal.provider-clear",
+            commandId: CommandId.make("confirmed-clear"),
+            threadId,
+            expectedRequestId: "clear-request",
+            createdAt: goalTime,
+          },
+        }),
+      ),
+    );
+    expect(confirmed.type).toBe("thread.goal-cleared");
+  });
+
+  it("preserves usage for status edits and resets completed objectives when explicitly set again", async () => {
+    const state = await modelWithGoal({ ...nativeGoal, status: "complete" });
+    const decide = (update: {
+      objective?: string;
+      status?: "paused";
+      tokenBudget?: number | null;
+    }) =>
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          readModel: state,
+          command: {
+            type: "thread.goal.set",
+            commandId: CommandId.make("edit-goal"),
+            threadId,
+            ...update,
+            createdAt: "2026-08-17T11:00:00.000Z",
+          },
+        }),
+      );
+    expect(expectSingleEvent(await decide({ tokenBudget: 2000 }))).toMatchObject({
+      payload: { goal: { synchronization: { fields: ["tokenBudget"] } } },
+    });
+    expect(expectSingleEvent(await decide({ status: "paused" }))).toMatchObject({
+      payload: { goal: { tokensUsed: 250, timeUsedSeconds: 30, tokenBudget: 1000 } },
+    });
+    expect(expectSingleEvent(await decide({ objective: nativeGoal.objective }))).toMatchObject({
+      payload: { goal: { status: "active", tokensUsed: 0, timeUsedSeconds: 0, tokenBudget: null } },
+    });
+  });
+
+  it("commits the goal before requesting the first turn", async () => {
+    const events = await Effect.runPromise(
+      decideOrchestrationCommand({
+        readModel: await seedThread(goalTime),
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("start-goal"),
+          threadId,
+          goal: { objective: nativeGoal.objective },
+          message: {
+            messageId: MessageId.make("goal-message"),
+            role: "user",
+            text: nativeGoal.objective,
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: goalTime,
+        },
+      }),
+    );
+    expect(Array.isArray(events) && events.map((event) => event.type)).toEqual([
+      "thread.goal-updated",
+      "thread.message-sent",
+      "thread.turn-start-requested",
+    ]);
   });
 });

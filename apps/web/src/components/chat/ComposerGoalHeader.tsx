@@ -21,10 +21,15 @@ const STATUS_LABEL: Record<ThreadGoalStatus, string> = {
   complete: "Goal achieved",
 };
 
-function elapsedSeconds(goal: ThreadGoal, now: number): number {
+function elapsedSeconds(
+  goal: ThreadGoal,
+  now: number,
+  runningSince: number,
+  isRunning: boolean,
+): number {
   const liveSeconds =
-    goal.status === "active"
-      ? Math.max(0, Math.floor((now - Date.parse(goal.updatedAt)) / 1_000))
+    goal.status === "active" && isRunning && goal.synchronization === undefined
+      ? Math.max(0, Math.floor((now - runningSince) / 1_000))
       : 0;
   return goal.timeUsedSeconds + liveSeconds;
 }
@@ -64,24 +69,36 @@ function GoalAction(props: {
 
 export const ComposerGoalHeader = memo(function ComposerGoalHeader(props: {
   readonly goal: ThreadGoal;
+  readonly isRunning: boolean;
+  readonly onBudgetChange: (tokenBudget: number | null) => Promise<boolean>;
   readonly onEdit: () => void;
   readonly onStatusChange: (status: ThreadGoalStatus) => void;
   readonly onClear: () => void;
+  readonly onRetry: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [budget, setBudget] = useState(() => props.goal.tokenBudget?.toString() ?? "");
+  const [budgetError, setBudgetError] = useState<string | null>(null);
+  useEffect(() => setBudget(props.goal.tokenBudget?.toString() ?? ""), [props.goal.tokenBudget]);
+  const synchronization = props.goal.synchronization;
+  const pending = synchronization?.state === "pending";
+  const reminder = synchronization?.state === "unsupported";
   const [now, setNow] = useState(() => Date.now());
+  const [runningSince, setRunningSince] = useState(() => Date.now());
 
   useEffect(() => {
-    if (props.goal.status !== "active") return;
+    setRunningSince(Date.now());
+    if (props.goal.status !== "active" || !props.isRunning) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [props.goal.status, props.goal.updatedAt]);
+  }, [props.goal.status, props.goal.updatedAt, props.isRunning]);
 
   const canResume =
     props.goal.status === "paused" ||
     props.goal.status === "blocked" ||
-    props.goal.status === "usageLimited";
+    props.goal.status === "usageLimited" ||
+    props.goal.status === "budgetLimited";
   const complete = props.goal.status === "complete";
 
   return (
@@ -108,14 +125,23 @@ export const ComposerGoalHeader = memo(function ComposerGoalHeader(props: {
           aria-expanded={expanded}
         >
           <span className="flex items-center gap-2 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-            {STATUS_LABEL[props.goal.status]}
+            {pending
+              ? "Updating goal…"
+              : synchronization?.state === "failed"
+                ? "Goal change failed"
+                : reminder && props.goal.status === "active"
+                  ? "Goal reminder"
+                  : STATUS_LABEL[props.goal.status]}
             <span className="font-mono font-normal tracking-normal normal-case">
-              {formatElapsed(elapsedSeconds(props.goal, now))}
+              {formatElapsed(elapsedSeconds(props.goal, now, runningSince, props.isRunning))}
             </span>
-            {props.goal.tokenBudget !== null ? (
+            {!reminder ? (
               <span className="font-normal tracking-normal normal-case">
-                {numberFormatter.format(props.goal.tokensUsed)} /{" "}
-                {numberFormatter.format(props.goal.tokenBudget)} tokens
+                {numberFormatter.format(props.goal.tokensUsed)}
+                {props.goal.tokenBudget !== null
+                  ? ` / ${numberFormatter.format(props.goal.tokenBudget)}`
+                  : ""}{" "}
+                tokens
               </span>
             ) : null}
           </span>
@@ -129,7 +155,10 @@ export const ComposerGoalHeader = memo(function ComposerGoalHeader(props: {
           </span>
         </button>
 
-        <div className="flex shrink-0 items-center gap-0.5">
+        <fieldset
+          disabled={pending}
+          className="flex shrink-0 items-center gap-0.5 disabled:opacity-50"
+        >
           <GoalAction label="Edit goal" onClick={props.onEdit}>
             <PencilIcon className="size-3.5" />
           </GoalAction>
@@ -152,8 +181,75 @@ export const ComposerGoalHeader = memo(function ComposerGoalHeader(props: {
               expanded && "rotate-180",
             )}
           />
-        </div>
+        </fieldset>
       </div>
+      {pending ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Waiting for provider confirmation.{" "}
+          <button type="button" onClick={props.onRetry} className="underline">
+            Retry
+          </button>
+        </p>
+      ) : null}
+      {synchronization?.state === "failed" ? (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          {synchronization.error}{" "}
+          <button type="button" onClick={props.onRetry} className="ml-2 underline">
+            Retry
+          </button>
+        </p>
+      ) : null}
+      {reminder ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          While active, this provider receives the goal with each message. Automatic continuation
+          and goal usage tracking are unavailable.
+        </p>
+      ) : null}
+      {expanded && !reminder ? (
+        <form
+          className="mt-3 flex flex-wrap items-center gap-2"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const next = budget.trim() === "" ? null : Number(budget);
+            if (next !== null && (!Number.isSafeInteger(next) || next <= 0)) {
+              setBudgetError("Enter a positive whole number, or leave blank for no limit.");
+              return;
+            }
+            setBudgetError(null);
+            await props.onBudgetChange(next);
+          }}
+        >
+          <label className="text-xs text-muted-foreground">
+            Token budget
+            <input
+              aria-label="Goal token budget"
+              inputMode="numeric"
+              value={budget}
+              placeholder="No limit"
+              disabled={pending}
+              onChange={(event) => setBudget(event.target.value)}
+              className="ml-2 w-32 rounded border border-border bg-background px-2 py-1 text-foreground"
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={pending}
+            className="rounded border border-border px-2 py-1 text-xs"
+          >
+            Save budget
+          </button>
+          {budgetError ? (
+            <p role="alert" className="w-full text-xs text-destructive">
+              {budgetError}
+            </p>
+          ) : null}
+          {props.goal.status === "budgetLimited" ? (
+            <p className="w-full text-xs text-muted-foreground">
+              Increase or remove the budget, then resume the goal.
+            </p>
+          ) : null}
+        </form>
+      ) : null}
     </div>
   );
 });

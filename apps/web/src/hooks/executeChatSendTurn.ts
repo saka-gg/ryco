@@ -11,6 +11,7 @@ import {
   type RuntimeMode,
   type ServerProvider,
   type ThreadId,
+  type ThreadGoalUpdate,
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
@@ -50,6 +51,9 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface SendTurnComposerSnapshot {
+  /** Preserve slash-command text when a synthesized turn fails to dispatch. */
+  promptForRestore?: string;
+  goal?: ThreadGoalUpdate;
   prompt: string;
   trimmedPrompt: string;
   images: ComposerImageAttachment[];
@@ -485,6 +489,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       tokenMode: settings.tokenMode,
       // A prepared thread already exists server-side, so there is nothing left
       // for the bootstrap to create.
+      ...(composer.goal ? { goal: composer.goal } : {}),
       bootstrap: prepared ? undefined : bootstrap,
       sourceControlContexts: freshSourceControlContexts,
       createdAt: messageCreatedAt,
@@ -500,7 +505,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       dispatch: { setOptimisticUserMessages },
       draft,
       messageId: messageIdForSend,
-      promptSnapshot: composer.prompt,
+      promptSnapshot: composer.promptForRestore ?? composer.prompt,
       imagesSnapshot,
       terminalContextsSnapshot,
     });

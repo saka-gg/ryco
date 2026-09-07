@@ -19,6 +19,30 @@ export const ThreadGoalStatus = Schema.Literals([
 ]);
 export type ThreadGoalStatus = typeof ThreadGoalStatus.Type;
 
+export const ThreadGoalUpdate = Schema.Struct({
+  objective: Schema.optional(ThreadGoalObjective),
+  status: Schema.optional(ThreadGoalStatus),
+  tokenBudget: Schema.optional(Schema.NullOr(PositiveInt)),
+});
+export type ThreadGoalUpdate = typeof ThreadGoalUpdate.Type;
+
+const ThreadGoalSynchronizationSchema = Schema.Struct({
+  requestId: Schema.String,
+  state: Schema.Literals(["pending", "failed", "unsupported"]),
+  action: Schema.Literals(["set", "clear"]),
+  startTurn: Schema.optional(Schema.Boolean),
+  deferUntilTurn: Schema.optional(Schema.Boolean),
+  fields: Schema.optional(Schema.Array(Schema.Literals(["objective", "status", "tokenBudget"]))),
+  error: Schema.optional(Schema.String),
+});
+
+export interface ThreadGoalSynchronization extends Schema.Schema.Type<
+  typeof ThreadGoalSynchronizationSchema
+> {}
+
+export const ThreadGoalSynchronization: Schema.Codec<ThreadGoalSynchronization> =
+  ThreadGoalSynchronizationSchema;
+
 export const ThreadGoal = Schema.Struct({
   objective: ThreadGoalObjective,
   status: ThreadGoalStatus,
@@ -27,6 +51,8 @@ export const ThreadGoal = Schema.Struct({
   timeUsedSeconds: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  /** Local delivery state. Absent when the native provider has confirmed the goal. */
+  synchronization: Schema.optional(ThreadGoalSynchronization),
 });
 export type ThreadGoal = typeof ThreadGoal.Type;
 

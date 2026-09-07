@@ -444,7 +444,10 @@ describe("executeChatSendTurn", () => {
     );
   });
 
-  it("keeps the staged target retryable after immediate rejection", async () => {
+  it.each([
+    { name: "staged target", restorePrompt: undefined },
+    { name: "goal command", restorePrompt: "/goal Continue with Claude" },
+  ])("keeps the $name retryable after immediate rejection", async ({ restorePrompt }) => {
     const targetSelection = {
       instanceId: ProviderInstanceId.make("claudeAgent"),
       model: "claude-sonnet-4-6",
@@ -464,6 +467,9 @@ describe("executeChatSendTurn", () => {
     const input: Parameters<typeof executeChatSendTurn>[0] = {
       composer: {
         prompt: "Continue with Claude",
+        ...(restorePrompt
+          ? { promptForRestore: restorePrompt, goal: { objective: "Continue with Claude" } }
+          : {}),
         trimmedPrompt: "Continue with Claude",
         images: [],
         sendableTerminalContexts: [],
@@ -530,10 +536,10 @@ describe("executeChatSendTurn", () => {
 
     await executeChatSendTurn(input);
 
-    expect(refs.promptRef.current).toBe("Continue with Claude");
+    expect(refs.promptRef.current).toBe(restorePrompt ?? "Continue with Claude");
     expect(setComposerDraftPrompt).toHaveBeenCalledWith(
       DraftId.make("draft-handoff"),
-      "Continue with Claude",
+      restorePrompt ?? "Continue with Claude",
     );
     expect(input.composer.selectedModelSelection).toEqual(targetSelection);
     expect(persistThreadSettingsForNextTurn.mock.calls[0]?.[0]).not.toHaveProperty(

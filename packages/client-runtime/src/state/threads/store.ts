@@ -488,6 +488,17 @@ function threadGoalsEqual(
   if (left === right) return true;
   if (left == null || right == null) return false;
   return (
+    left.synchronization?.requestId === right.synchronization?.requestId &&
+    left.synchronization?.state === right.synchronization?.state &&
+    left.synchronization?.action === right.synchronization?.action &&
+    left.synchronization?.startTurn === right.synchronization?.startTurn &&
+    left.synchronization?.deferUntilTurn === right.synchronization?.deferUntilTurn &&
+    left.synchronization?.fields?.length === right.synchronization?.fields?.length &&
+    (left.synchronization?.fields?.every(
+      (field, index) => field === right.synchronization?.fields?.[index],
+    ) ??
+      true) &&
+    left.synchronization?.error === right.synchronization?.error &&
     left.objective === right.objective &&
     left.status === right.status &&
     left.tokenBudget === right.tokenBudget &&

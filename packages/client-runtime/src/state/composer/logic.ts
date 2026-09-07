@@ -339,9 +339,25 @@ export function parseStandaloneComposerSlashCommand(
   return "default";
 }
 
-export function parseThreadGoalSlashCommand(text: string): string | null {
+export type ThreadGoalSlashCommand =
+  | { readonly action: "show" | "pause" | "resume" | "clear" }
+  | { readonly action: "set"; readonly objective: string };
+
+export function parseThreadGoalSlashCommand(text: string): ThreadGoalSlashCommand | null {
   const match = /^\/goal(?:\s+([\s\S]*))?$/i.exec(text.trim());
-  return match ? (match[1]?.trim() ?? "") : null;
+  if (!match) return null;
+  const objective = match[1]?.trim() ?? "";
+  if (!objective) return { action: "show" };
+  switch (objective.toLowerCase()) {
+    case "pause":
+      return { action: "pause" };
+    case "resume":
+      return { action: "resume" };
+    case "clear":
+      return { action: "clear" };
+    default:
+      return { action: "set", objective };
+  }
 }
 
 export function replaceTextRange(

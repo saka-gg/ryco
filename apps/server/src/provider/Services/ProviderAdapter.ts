@@ -154,7 +154,11 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
 
   /** Native thread-goal integration. Providers without it use prompt injection. */
-  readonly setThreadGoal?: (threadId: ThreadId, goal: ThreadGoal) => Effect.Effect<void, TError>;
+  readonly setThreadGoal?: (
+    threadId: ThreadId,
+    goal: ThreadGoal,
+  ) => Effect.Effect<ThreadGoal, TError>;
+  readonly getThreadGoal?: (threadId: ThreadId) => Effect.Effect<ThreadGoal | null, TError>;
   readonly clearThreadGoal?: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
   /**

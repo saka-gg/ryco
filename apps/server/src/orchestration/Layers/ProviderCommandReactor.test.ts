@@ -139,6 +139,10 @@ describe("ProviderCommandReactor", () => {
   });
 
   async function createHarness(input?: {
+    readonly setThreadGoal?: NonNullable<ProviderServiceShape["setThreadGoal"]>;
+    readonly getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
+    readonly clearThreadGoal?: NonNullable<ProviderServiceShape["clearThreadGoal"]>;
+    readonly pendingGoal?: boolean;
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
@@ -308,6 +312,9 @@ describe("ProviderCommandReactor", () => {
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
+      ...(input?.setThreadGoal ? { setThreadGoal: input.setThreadGoal } : {}),
+      ...(input?.getThreadGoal ? { getThreadGoal: input.getThreadGoal } : {}),
+      ...(input?.clearThreadGoal ? { clearThreadGoal: input.clearThreadGoal } : {}),
       startSession: startSession as ProviderServiceShape["startSession"],
       startFreshSession: () => unsupported(),
       getSession: () => Effect.succeed(Option.none()),
@@ -418,7 +425,6 @@ describe("ProviderCommandReactor", () => {
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
     scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
 
     await Effect.runPromise(
@@ -448,6 +454,19 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    if (input?.pendingGoal) {
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.goal.set",
+          commandId: CommandId.make("pending-before-restart"),
+          threadId: ThreadId.make("thread-1"),
+          objective: "Recover delivery",
+          createdAt: now,
+        }),
+      );
+    }
+    await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
+
     return {
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
@@ -472,6 +491,179 @@ describe("ProviderCommandReactor", () => {
       drain,
     };
   }
+
+  it("recovers pending goal delivery when the reactor starts", async () => {
+    const now = new Date().toISOString();
+    const native = {
+      objective: "Recover delivery",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const setThreadGoal = vi.fn(() => Effect.succeed(native));
+    const harness = await createHarness({ pendingGoal: true, setThreadGoal });
+    await waitFor(
+      async () => (await harness.readModel()).threads[0]?.goal?.synchronization === undefined,
+    );
+    expect(setThreadGoal).toHaveBeenCalledOnce();
+    expect((await harness.readModel()).threads[0]?.goal).toEqual(native);
+  });
+
+  it("binds an atomic goal to the provider selected by its first turn", async () => {
+    const now = new Date().toISOString();
+    const native = {
+      objective: "Finish the migration",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const setThreadGoal = vi.fn(() => Effect.succeed(native));
+    const harness = await createHarness({ setThreadGoal });
+    const selection = { instanceId: ProviderInstanceId.make("codex_work"), model: "gpt-5-codex" };
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("atomic-goal-start"),
+        threadId: ThreadId.make("thread-1"),
+        goal: { objective: native.objective },
+        modelSelection: selection,
+        message: {
+          messageId: asMessageId("atomic-goal-message"),
+          role: "user",
+          text: native.objective,
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ modelSelection: selection });
+    expect(setThreadGoal).toHaveBeenCalledTimes(1);
+    expect((await harness.readModel()).threads[0]?.goal).toEqual(native);
+  });
+
+  it("confirms goals from the native response and resumes with a provider turn", async () => {
+    const now = new Date().toISOString();
+    const canonical = {
+      objective: "Finish the migration",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 123,
+      timeUsedSeconds: 45,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const setThreadGoal = vi.fn(() => Effect.succeed(canonical));
+    const harness = await createHarness({
+      setThreadGoal,
+      getThreadGoal: () => Effect.succeed(canonical),
+    });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.goal.set",
+        commandId: CommandId.make("set-native-goal"),
+        threadId: ThreadId.make("thread-1"),
+        objective: canonical.objective,
+        startTurn: true,
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]?.goal).toEqual(canonical);
+    expect(setThreadGoal).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      input: `Continue pursuing this goal: ${canonical.objective}`,
+    });
+  });
+
+  it("marks provider failures visibly and does not claim a clear succeeded", async () => {
+    const fail = () =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: "codex",
+          method: "thread/goal/clear",
+          detail: "Provider disconnected",
+        }),
+      );
+    const harness = await createHarness({ clearThreadGoal: fail });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.goal.set",
+        commandId: CommandId.make("set-reminder"),
+        threadId: ThreadId.make("thread-1"),
+        objective: "Keep working",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await waitFor(
+      async () =>
+        (await harness.readModel()).threads[0]?.goal?.synchronization?.state === "unsupported",
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.goal.clear",
+        commandId: CommandId.make("clear-fails"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await waitFor(
+      async () => (await harness.readModel()).threads[0]?.goal?.synchronization?.state === "failed",
+    );
+    const goal = (await harness.readModel()).threads[0]?.goal;
+    expect(goal).toMatchObject({
+      objective: "Keep working",
+      synchronization: { action: "clear", state: "failed", error: "Provider disconnected" },
+    });
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a native goal before sending without overwriting its status", async () => {
+    const now = new Date().toISOString();
+    const native = {
+      objective: "Already achieved",
+      status: "complete" as const,
+      tokenBudget: 1000,
+      tokensUsed: 700,
+      timeUsedSeconds: 50,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const setThreadGoal = vi.fn(() => Effect.succeed(native));
+    const harness = await createHarness({
+      getThreadGoal: () => Effect.succeed(native),
+      setThreadGoal,
+    });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("reconcile-goal"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("reconcile-message"),
+          role: "user",
+          text: "What changed?",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect((await harness.readModel()).threads[0]?.goal).toEqual(native);
+    expect(setThreadGoal).not.toHaveBeenCalled();
+  });
 
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();

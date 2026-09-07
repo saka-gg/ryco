@@ -762,29 +762,50 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       }
 
       const objective = command.objective ?? previousGoal!.objective;
-      const objectiveChanged = previousGoal === null || objective !== previousGoal.objective;
-      const elapsedSeconds =
-        previousGoal !== null && previousGoal.status === "active" && !objectiveChanged
-          ? Math.max(
-              0,
-              Math.floor(
-                (Date.parse(command.createdAt) - Date.parse(previousGoal.updatedAt)) / 1_000,
-              ),
-            )
-          : 0;
+      const objectiveChanged =
+        previousGoal === null ||
+        objective !== previousGoal.objective ||
+        (command.objective !== undefined && previousGoal.status === "complete");
+      const tokenBudget =
+        command.tokenBudget !== undefined
+          ? command.tokenBudget
+          : objectiveChanged
+            ? null
+            : (previousGoal?.tokenBudget ?? null);
+      if (
+        command.status === "active" &&
+        !objectiveChanged &&
+        tokenBudget !== null &&
+        previousGoal!.tokensUsed >= tokenBudget
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Increase or remove the token budget before resuming this goal.",
+        });
+      }
       const goal = {
         objective,
         status: command.status ?? (objectiveChanged ? ("active" as const) : previousGoal!.status),
-        tokenBudget:
-          command.tokenBudget !== undefined
-            ? command.tokenBudget
-            : (previousGoal?.tokenBudget ?? null),
+        tokenBudget,
         tokensUsed: objectiveChanged ? NonNegativeInt.make(0) : previousGoal!.tokensUsed,
         timeUsedSeconds: objectiveChanged
           ? NonNegativeInt.make(0)
-          : NonNegativeInt.make(previousGoal!.timeUsedSeconds + elapsedSeconds),
+          : NonNegativeInt.make(previousGoal!.timeUsedSeconds),
         createdAt: objectiveChanged ? command.createdAt : previousGoal!.createdAt,
         updatedAt: command.createdAt,
+        synchronization: {
+          requestId: command.commandId,
+          state: "pending" as const,
+          action: "set" as const,
+          fields: (["objective", "status", "tokenBudget"] as const).filter(
+            (field) =>
+              command[field] !== undefined ||
+              (!objectiveChanged &&
+                previousGoal?.synchronization?.action === "set" &&
+                (previousGoal.synchronization.fields?.includes(field) ?? true)),
+          ),
+          ...(command.startTurn ? { startTurn: true } : {}),
+        },
       };
 
       return {
@@ -804,11 +825,20 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.goal.sync": {
-      yield* requireThread({
-        readModel,
-        command,
-        threadId: command.threadId,
-      });
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const synchronization = thread.goal?.synchronization;
+      if (
+        command.expectedRequestId !== undefined
+          ? synchronization?.requestId !== command.expectedRequestId
+          : (synchronization !== undefined && synchronization.state !== "unsupported") ||
+            (thread.goal != null &&
+              Date.parse(command.goal.updatedAt) < Date.parse(thread.goal.updatedAt))
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Superseded goal update.",
+        });
+      }
       return {
         ...withEventBase({
           aggregateKind: "thread",
@@ -838,6 +868,36 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Thread '${command.threadId}' does not have a goal to clear.`,
         });
       }
+      if (command.type === "thread.goal.clear") {
+        return {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.goal-updated",
+          payload: {
+            threadId: command.threadId,
+            origin: "client",
+            goal: {
+              ...thread.goal,
+              synchronization: { requestId: command.commandId, state: "pending", action: "clear" },
+            },
+          },
+        };
+      }
+      if (
+        command.expectedRequestId !== undefined
+          ? thread.goal.synchronization?.requestId !== command.expectedRequestId
+          : thread.goal.synchronization !== undefined &&
+            thread.goal.synchronization.state !== "unsupported"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Superseded goal clear.",
+        });
+      }
       return {
         ...withEventBase({
           aggregateKind: "thread",
@@ -848,7 +908,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.goal-cleared",
         payload: {
           threadId: command.threadId,
-          origin: command.type === "thread.goal.clear" ? "client" : "provider",
+          origin: "provider",
           updatedAt: command.createdAt,
         },
       };
@@ -1034,7 +1094,39 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         thread: targetThread,
         occurredAt: command.createdAt,
       });
-      return unsettledEvent === null ? turnEvents : [unsettledEvent, ...turnEvents];
+      const goalEvents =
+        command.goal === undefined
+          ? []
+          : yield* decideOrchestrationCommand({
+              readModel,
+              command: {
+                type: "thread.goal.set",
+                commandId: command.commandId,
+                threadId: command.threadId,
+                ...command.goal,
+                createdAt: command.createdAt,
+              },
+            });
+      return [
+        ...(Array.isArray(goalEvents) ? goalEvents : [goalEvents]).map((event) =>
+          event.type === "thread.goal-updated"
+            ? {
+                ...event,
+                payload: {
+                  ...event.payload,
+                  goal: {
+                    ...event.payload.goal,
+                    synchronization: {
+                      ...event.payload.goal.synchronization!,
+                      deferUntilTurn: true,
+                    },
+                  },
+                },
+              }
+            : event,
+        ),
+        ...(unsettledEvent === null ? turnEvents : [unsettledEvent, ...turnEvents]),
+      ];
     }
 
     case "thread.turn.steer": {

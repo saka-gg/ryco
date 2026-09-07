@@ -2279,3 +2279,23 @@ validation.layer("ProviderServiceLive validation", (it) => {
     }),
   );
 });
+
+it.effect("goal operations distinguish unsupported providers from inactive sessions", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("goal-inactive-session");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      assert.equal(yield* provider.clearThreadGoal!(threadId), false);
+      codex.removeSession(threadId);
+      const failure = yield* Effect.flip(provider.clearThreadGoal!(threadId));
+      assert.equal(failure._tag, "ProviderSessionNotFoundError");
+    }).pipe(Effect.provide(makeStandaloneProviderServiceLayer([codex])));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
