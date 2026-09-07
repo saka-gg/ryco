@@ -9,6 +9,7 @@ import {
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
+  MonitorIcon,
   PaletteIcon,
   PlugZapIcon,
   RotateCcwIcon,
@@ -64,6 +65,7 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   { id: "providers", label: "Providers", icon: BlocksIcon },
   { id: "opinionated-plugins", label: "Plugins", icon: PlugZapIcon },
   { id: "mcp-servers", label: "Integrations", icon: ServerIcon },
+  { id: "computer-use", label: "Computer use", icon: MonitorIcon },
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
   { id: "keybindings", label: "Keybindings", icon: KeyboardIcon },
   { id: "source-control", label: "Source Control", icon: GitBranchIcon },
@@ -144,6 +146,9 @@ const LazyIntegrationsSettings = lazy(() =>
     default: module.IntegrationsSettingsPanel,
   })),
 );
+const LazyComputerUseSettings = lazy(() =>
+  import("./ComputerUseSettings").then((module) => ({ default: module.ComputerUseSettings })),
+);
 const LazyAppearanceSettingsPanel = lazy(() =>
   import("./AppearanceSettings").then((module) => ({
     default: module.AppearanceSettingsPanel,
@@ -216,6 +221,7 @@ function SectionPanel({
       {section === "providers" ? <LazyProvidersSettingsPanel /> : null}
       {section === "opinionated-plugins" ? <LazyOpinionatedPluginsSettingsPanel /> : null}
       {section === "mcp-servers" ? <LazyIntegrationsSettings /> : null}
+      {section === "computer-use" ? <LazyComputerUseSettings /> : null}
       {section === "appearance" ? <LazyAppearanceSettingsPanel /> : null}
       {section === "keybindings" ? <LazyKeybindingsSettingsPanel /> : null}
       {section === "source-control" ? <LazySourceControlSettingsPanel /> : null}
@@ -290,7 +296,11 @@ export function SettingsDialog() {
   const roleFresh = hostedSettingsRoleFresh(hostedDirectoryStatus, hostedTransportStatus);
   const role = hostedSettingsRoleSnapshot(hostedRole, hostedDirectoryStatus, hostedTransportStatus);
   const visibleNavItems = NAV_ITEMS.filter((item) =>
-    settingsSectionReachable(item.id, { hosted, role }),
+    settingsSectionReachable(item.id, {
+      hosted,
+      role,
+      desktop: isElectron && Boolean(window.desktopBridge?.computerUse),
+    }),
   );
   const effectiveSection = visibleNavItems.some((item) => item.id === section)
     ? section

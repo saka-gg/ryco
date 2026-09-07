@@ -1,3 +1,4 @@
+import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
@@ -37,6 +38,7 @@ import {
   buildOpenFilesSearch,
   buildOpenReviewSearch,
   buildOpenSimulatorSearch,
+  buildOpenBrowserSearch,
   buildOpenTerminalSearch,
   buildOpenWorkspaceSearch,
   stripWorkspacePanelSearchParams,
@@ -125,6 +127,7 @@ function TabIcon(props: { tab: WorkspaceTab; active: boolean }) {
   if (props.tab.key === "terminal") {
     return <TerminalIcon className={className} />;
   }
+  if (props.tab.key === "browser") return <GlobeIcon className={className} />;
   if (props.tab.key === "simulator") {
     return <SmartphoneIcon className={className} />;
   }
@@ -301,15 +304,7 @@ function TerminalUnavailableState(props: { title: string; description: string })
   );
 }
 
-/**
- * The workspace terminal tab. On the phone tier this renders inside the
- * full-screen work surface: xterm fills the surface, the drawer toolbar grows
- * to the 44px touch floor via the `phone:` variant, and the surface sheet pads
- * by the published keyboard inset so the toolbar never sits under the software
- * keyboard. Deep touch/IME terminal ergonomics are explicitly deferred
- * follow-up work (see the focused mobile workspace design, non-goals).
- */
-function WorkspaceTerminalPanel() {
+function useWorkspaceProjectContext() {
   const params = useParams({ strict: false }) as Record<string, string | undefined>;
   const routeThreadRef = resolveThreadRouteRef(params);
   const draftId = params.draftId ? DraftId.make(params.draftId) : null;
@@ -335,6 +330,29 @@ function WorkspaceTerminalPanel() {
       ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
       : null;
   const project = useStore(useMemo(() => createProjectSelectorByRef(projectRef), [projectRef]));
+  return { threadRef, serverThread, draftThread, project };
+}
+
+function WorkspaceBrowserPanel() {
+  const { threadRef, serverThread, draftThread, project } = useWorkspaceProjectContext();
+  return (
+    <LazyBrowserPanel
+      environmentId={threadRef?.environmentId ?? null}
+      cwd={serverThread?.worktreePath ?? draftThread?.worktreePath ?? project?.cwd ?? null}
+    />
+  );
+}
+
+/**
+ * The workspace terminal tab. On the phone tier this renders inside the
+ * full-screen work surface: xterm fills the surface, the drawer toolbar grows
+ * to the 44px touch floor via the `phone:` variant, and the surface sheet pads
+ * by the published keyboard inset so the toolbar never sits under the software
+ * keyboard. Deep touch/IME terminal ergonomics are explicitly deferred
+ * follow-up work (see the focused mobile workspace design, non-goals).
+ */
+function WorkspaceTerminalPanel() {
+  const { threadRef, serverThread, draftThread, project } = useWorkspaceProjectContext();
   const terminalState = useTerminalStateStore((state) =>
     selectThreadTerminalState(state.terminalStateByThreadKey, threadRef),
   );
@@ -666,10 +684,11 @@ function WorkspaceLauncher(props: {
       />
       <LauncherCard
         label="Browser"
-        description="Open a website"
+        description="Preview sites and local servers"
         icon={GlobeIcon}
         compact={compact}
-        disabled
+        disabled={props.isPhoneSurface}
+        onClick={() => props.onSelectTab({ key: "browser", label: "Browser", mode: "browser" })}
       />
       <LauncherCard
         label="Review"
@@ -857,6 +876,7 @@ export default function ThreadWorkspacePanel(props: {
       activeMode === "review" ||
       activeMode === "terminal" ||
       activeMode === "simulator" ||
+      activeMode === "browser" ||
       activeMode === "agents"
     ) {
       return props.openedPanelModes.includes(activeMode)
@@ -874,7 +894,9 @@ export default function ThreadWorkspacePanel(props: {
     });
     // The web phone tier is frozen; native mobile owns future phone surfaces.
     return isPhoneSurface
-      ? built.filter((tab) => tab.mode !== "agents" && tab.mode !== "simulator")
+      ? built.filter(
+          (tab) => tab.mode !== "agents" && tab.mode !== "simulator" && tab.mode !== "browser",
+        )
       : built;
   }, [agentKey, isPhoneSurface, openedPanelModes, props.openedAgentKeys, subagents]);
   // A phone agents deep link falls back to the launcher with the agents tab
@@ -883,7 +905,7 @@ export default function ThreadWorkspacePanel(props: {
   const activeTabKey =
     activeMode === "agent"
       ? agentKey
-      : isPhoneSurface && activeMode === "agents"
+      : isPhoneSurface && (activeMode === "agents" || activeMode === "browser")
         ? null
         : activeMode;
 
@@ -923,6 +945,10 @@ export default function ThreadWorkspacePanel(props: {
       }
       if (tab.mode === "terminal") {
         navigateSearch((previous) => buildOpenTerminalSearch(previous));
+        return;
+      }
+      if (tab.mode === "browser") {
+        navigateSearch((previous) => buildOpenBrowserSearch(previous));
         return;
       }
       if (tab.mode === "simulator") {
@@ -1184,6 +1210,8 @@ export default function ThreadWorkspacePanel(props: {
           <PreviewPanel mode={props.mode} />
         ) : activeMode === "terminal" ? (
           <WorkspaceTerminalPanel />
+        ) : activeMode === "browser" && !isPhoneSurface ? (
+          <WorkspaceBrowserPanel />
         ) : activeMode === "simulator" && !isPhoneSurface ? (
           <SimulatorPanel
             environmentId={workspaceThreadRef?.environmentId ?? null}

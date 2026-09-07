@@ -17,6 +17,8 @@
  * @module AgentControlMcpServer
  */
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
+import { ServerConfig } from "../../config.ts";
+import { withComputerUseTools } from "../Mcp/computerTools.ts";
 import * as Semaphore from "effect/Semaphore";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -52,8 +54,9 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const serverSettings = yield* ServerSettingsService;
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
+  const config = yield* Effect.serviceOption(ServerConfig);
 
-  const tools = makeAgentControlMcpTools({
+  const baseTools = makeAgentControlMcpTools({
     policy,
     proposals,
     proposalEvents,
@@ -67,6 +70,13 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     ...(Option.isSome(validator) ? { validator: validator.value } : {}),
     ...(Option.isSome(projectPlans) ? { projectPlans: projectPlans.value } : {}),
     getTurnAuthority: registry.getTurnAuthority,
+  });
+  const tools = withComputerUseTools(baseTools, {
+    ...(Option.isSome(config) && config.value.computerUseBridge
+      ? { config: config.value.computerUseBridge }
+      : {}),
+    policy,
+    registry,
   });
 
   // Start/stop transitions are serialized so a rapid settings flip cannot

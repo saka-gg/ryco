@@ -1,2 +1,6 @@
 dist-electron/
 .electron-runtime/
+native/computer-use-helper/target/
+resources/ryco-computer-use-helper*
+resources/browser-extension/
+resources/computer-use-licenses/

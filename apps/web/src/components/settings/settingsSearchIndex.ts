@@ -19,6 +19,13 @@ export interface SettingsSearchEntry {
  */
 export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
+    section: "computer-use",
+    title: "Computer use",
+    description: "Control local apps and browsers, manage permissions, and pair a browser.",
+    keywords:
+      "accessibility screen recording capture cursor chrome brave edge app access foreground automation",
+  },
+  {
     section: "inbox",
     title: "AI Focus",
     description: "Prioritize the Inbox with bounded, environment-local model ranking.",

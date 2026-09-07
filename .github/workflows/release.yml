@@ -172,6 +172,11 @@ jobs:
         with:
           cache-scope: release-build-${{ matrix.arch }}-${{ matrix.platform }}
 
+      - name: Install computer-use Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
 

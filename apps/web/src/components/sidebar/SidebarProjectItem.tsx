@@ -1,3 +1,4 @@
+import { ProjectBrowserPreview } from "../../browser/ProjectBrowserPreview";
 import React, { useCallback, memo, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { type ThreadEnvMode } from "@ryco/contracts";
@@ -494,6 +495,12 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
         onRename={projectDialogs.openRename}
         onSettings={projectDialogs.openSettings}
       />
+
+      {projectExpanded ? (
+        <div className="pl-5 pr-2">
+          <ProjectBrowserPreview environmentId={project.environmentId} cwd={project.cwd} />
+        </div>
+      ) : null}
 
       {treeProject?.isGitRepo ? (
         <SidebarWorktreeList

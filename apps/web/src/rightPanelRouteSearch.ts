@@ -3,7 +3,14 @@ import { type DiffRouteSearch, parseDiffRouteSearch } from "./diffRouteSearch";
 import { type PreviewRouteSearch, parsePreviewRouteSearch } from "./previewRouteSearch";
 import { type WorkspaceRouteSearch, parseWorkspaceRouteSearch } from "./workspaceRouteSearch";
 
-export type RightPanelMode = "review" | "files" | "terminal" | "simulator" | "agent" | "agents";
+export type RightPanelMode =
+  | "review"
+  | "files"
+  | "terminal"
+  | "simulator"
+  | "browser"
+  | "agent"
+  | "agents";
 
 export interface MessageRouteSearch {
   messageId?: MessageId;
@@ -56,6 +63,8 @@ export function parseRightPanelRouteSearch(search: Record<string, unknown>): Rig
       workspaceTab: "terminal",
     };
   }
+  if (workspaceSearch.workspaceTab === "browser")
+    return { ...messageSearch, workspaceOpen: "1", workspaceTab: "browser" };
   if (workspaceSearch.workspaceTab === "simulator") {
     return {
       ...messageSearch,
@@ -103,6 +112,7 @@ export function getRightPanelMode(search: RightPanelRouteSearch): RightPanelMode
   if (search.workspaceTab === "files" || search.preview === "1") return "files";
   if (search.workspaceTab === "terminal") return "terminal";
   if (search.workspaceTab === "simulator") return "simulator";
+  if (search.workspaceTab === "browser") return "browser";
   return null;
 }
 

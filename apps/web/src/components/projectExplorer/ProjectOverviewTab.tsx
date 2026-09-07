@@ -1,3 +1,4 @@
+import { ProjectBrowserPreview } from "../../browser/ProjectBrowserPreview";
 import type {
   ChangeRequest,
   EnvironmentId,
@@ -107,6 +108,9 @@ export function ProjectOverviewTab(props: ProjectOverviewTabProps) {
 
   return (
     <div className="h-full min-h-0 overflow-y-auto">
+      <div className="px-4 pt-3">
+        <ProjectBrowserPreview environmentId={props.environmentId} cwd={props.cwd} />
+      </div>
       <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
         <OverviewMetric
           label="Open issues"

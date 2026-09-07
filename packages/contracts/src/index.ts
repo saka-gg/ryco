@@ -40,3 +40,6 @@ export * from "./rpc.ts";
 export * from "./worktree.ts";
 
 export * from "./resourceTelemetry.ts";
+export * from "./computerUse.ts";
+
+export * from "./projectBrowser.ts";

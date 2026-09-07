@@ -932,6 +932,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     },
     files: DESKTOP_BUILD_FILES,
     asarUnpack: ["apps/server/dist/resource-monitor/**"],
+    extraResources: [
+      {
+        from: `apps/desktop/resources/ryco-computer-use-helper${platform === "win" ? ".exe" : ""}`,
+        to: `ryco-computer-use-helper${platform === "win" ? ".exe" : ""}`,
+      },
+      { from: "apps/desktop/resources/browser-extension", to: "browser-extension" },
+      { from: "apps/desktop/resources/computer-use-licenses", to: "computer-use-licenses" },
+    ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
   const publishConfig = resolveGitHubPublishConfig(updateChannel);
@@ -954,6 +962,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       },
     ];
     buildConfig.extraResources = [
+      ...(buildConfig.extraResources as ReadonlyArray<unknown>),
       {
         from: "apps/desktop/resources/ryco-desktop-security-helper",
         to: "ryco-desktop-security-helper",
@@ -1202,6 +1211,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     yield* runCommand(
       ChildProcess.make({
         cwd: repoRoot,
+        env: { ...process.env, RYCO_DESKTOP_ARCH: options.arch },
         // Windows needs shell mode to resolve .cmd shims (e.g. bun.cmd).
         shell: process.platform === "win32",
       })`bun run build:desktop`,

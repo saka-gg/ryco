@@ -202,6 +202,8 @@ export const AGENT_CONTROL_CAPABILITIES = {
   readDevices: AgentControlCapability.make("devices.read"),
   readDeviceContent: AgentControlCapability.make("devices.content.read"),
   controlDevices: AgentControlCapability.make("devices.control"),
+  controlComputer: AgentControlCapability.make("computer.control"),
+  controlBrowser: AgentControlCapability.make("browser.control"),
   externalListProjects: AgentControlCapability.make("external.projects.list"),
   externalCreateTask: AgentControlCapability.make("external.tasks.create"),
   externalReadTask: AgentControlCapability.make("external.tasks.read"),

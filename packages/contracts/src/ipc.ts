@@ -4,6 +4,12 @@ import type {
   ResourceTelemetryHistory,
 } from "./resourceTelemetry.ts";
 import type {
+  ProjectBrowserState,
+  ProjectBrowserCommand,
+  ProjectBrowserSurface,
+  DiscoveredProjectSite,
+} from "./projectBrowser.ts";
+import type {
   GitArchiveWorktreeInput,
   GitCreateWorktreeForProjectInput,
   GitCreateWorktreeForProjectOutput,
@@ -18,6 +24,12 @@ import type {
   EmptyRpcResult,
 } from "./rpc.ts";
 import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
+import type {
+  ComputerUseState,
+  ComputerUsePolicy,
+  ComputerUsePairing,
+  ComputerBrowser,
+} from "./computerUse.ts";
 import type {
   VcsSwitchRefInput,
   VcsSwitchRefResult,
@@ -546,6 +558,27 @@ export type DesktopHubOriginValidation =
     };
 
 export interface DesktopBridge {
+  browser?: {
+    getState(): Promise<ProjectBrowserState>;
+    open(input: { url: string; project: string }): Promise<string>;
+    command(input: ProjectBrowserCommand): Promise<void>;
+    surface(input: ProjectBrowserSurface): Promise<void>;
+    capture(tab: string): Promise<string>;
+    discover(cwd?: string): Promise<readonly DiscoveredProjectSite[]>;
+    onFocusAddress(listener: (tab: string) => void): () => void;
+    onState(listener: (state: ProjectBrowserState) => void): () => void;
+  };
+  computerUse?: {
+    getState(): Promise<ComputerUseState>;
+    refresh(query?: string): Promise<ComputerUseState>;
+    setPolicy(policy: ComputerUsePolicy): Promise<ComputerUseState>;
+    requestPermission(kind: "accessibility" | "screenRecording"): Promise<void>;
+    pairBrowser(browser: ComputerBrowser): Promise<ComputerUsePairing>;
+    showExtension(): Promise<string>;
+    openBrowserSetup(browser: ComputerBrowser): Promise<void>;
+    stop(): Promise<void>;
+    onState(listener: (state: ComputerUseState) => void): () => void;
+  };
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
   getClientSettings: () => Promise<ClientSettings | null>;

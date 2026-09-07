@@ -26,6 +26,7 @@ import {
   buildOpenFilesSearch,
   buildOpenReviewSearch,
   buildOpenSimulatorSearch,
+  buildOpenBrowserSearch,
   buildOpenTerminalSearch,
   buildOpenWorkspaceSearch,
 } from "../../workspaceRouteSearch";
@@ -118,6 +119,7 @@ export function DraftChatThreadRouteView({
     hasOpenedPreview: previewOpen,
     hasOpenedTerminal: rightPanelMode === "terminal",
     hasOpenedSimulator: rightPanelMode === "simulator",
+    hasOpenedBrowser: rightPanelMode === "browser",
     hasOpenedAgents: rightPanelMode === "agents",
     openedAgentKeys: activeAgentKey ? [activeAgentKey] : [],
   }));
@@ -149,6 +151,10 @@ export function DraftChatThreadRouteView({
     rightPanelMountState.draftId === draftId
       ? rightPanelMountState.hasOpenedSimulator
       : rightPanelMode === "simulator";
+  const hasOpenedBrowser =
+    rightPanelMountState.draftId === draftId
+      ? rightPanelMountState.hasOpenedBrowser
+      : rightPanelMode === "browser";
   const hasOpenedAgents =
     rightPanelMountState.draftId === draftId
       ? rightPanelMountState.hasOpenedAgents
@@ -179,6 +185,9 @@ export function DraftChatThreadRouteView({
     if (hasOpenedSimulator || rightPanelMode === "simulator") {
       modes.push("simulator");
     }
+    if (hasOpenedBrowser || rightPanelMode === "browser") {
+      modes.push("browser");
+    }
     if (hasOpenedAgents || rightPanelMode === "agents") {
       modes.push("agents");
     }
@@ -188,6 +197,7 @@ export function DraftChatThreadRouteView({
     hasOpenedDiff,
     hasOpenedPreview,
     hasOpenedSimulator,
+    hasOpenedBrowser,
     hasOpenedTerminal,
     rightPanelMode,
   ]);
@@ -211,6 +221,10 @@ export function DraftChatThreadRouteView({
             (previous.draftId === draftId
               ? previous.hasOpenedSimulator
               : rightPanelMode === "simulator") || panelMode === "simulator",
+          hasOpenedBrowser:
+            (previous.draftId === draftId
+              ? previous.hasOpenedBrowser
+              : rightPanelMode === "browser") || panelMode === "browser",
           hasOpenedAgents:
             (previous.draftId === draftId
               ? previous.hasOpenedAgents
@@ -224,6 +238,7 @@ export function DraftChatThreadRouteView({
           previous.hasOpenedPreview === nextState.hasOpenedPreview &&
           previous.hasOpenedTerminal === nextState.hasOpenedTerminal &&
           previous.hasOpenedSimulator === nextState.hasOpenedSimulator &&
+          previous.hasOpenedBrowser === nextState.hasOpenedBrowser &&
           previous.hasOpenedAgents === nextState.hasOpenedAgents &&
           previous.openedAgentKeys === nextState.openedAgentKeys
         ) {
@@ -259,6 +274,9 @@ export function DraftChatThreadRouteView({
       if (lastOpenedRightPanelMode === "simulator" && hasOpenedSimulator) {
         return buildOpenSimulatorSearch(previous);
       }
+      if (lastOpenedRightPanelMode === "browser" && hasOpenedBrowser) {
+        return buildOpenBrowserSearch(previous);
+      }
       if (lastOpenedRightPanelMode === "agents" && hasOpenedAgents) {
         return buildOpenAgentsSearch(previous);
       }
@@ -273,6 +291,9 @@ export function DraftChatThreadRouteView({
       }
       if (hasOpenedSimulator) {
         return buildOpenSimulatorSearch(previous);
+      }
+      if (hasOpenedBrowser) {
+        return buildOpenBrowserSearch(previous);
       }
       if (hasOpenedAgents) {
         return buildOpenAgentsSearch(previous);
@@ -293,6 +314,7 @@ export function DraftChatThreadRouteView({
     hasOpenedDiff,
     hasOpenedPreview,
     hasOpenedSimulator,
+    hasOpenedBrowser,
     hasOpenedTerminal,
     lastOpenedRightPanelMode,
     navigate,
@@ -318,6 +340,8 @@ export function DraftChatThreadRouteView({
             previous.draftId === draftId ? previous.hasOpenedTerminal : hasOpenedTerminal,
           hasOpenedSimulator:
             previous.draftId === draftId ? previous.hasOpenedSimulator : hasOpenedSimulator,
+          hasOpenedBrowser:
+            previous.draftId === draftId ? previous.hasOpenedBrowser : hasOpenedBrowser,
           hasOpenedAgents:
             previous.draftId === draftId ? previous.hasOpenedAgents : hasOpenedAgents,
           openedAgentKeys: nextOpenedAgentKeys,
@@ -344,6 +368,9 @@ export function DraftChatThreadRouteView({
               if (hasOpenedSimulator) {
                 return buildOpenSimulatorSearch(previous);
               }
+              if (hasOpenedBrowser) {
+                return buildOpenBrowserSearch(previous);
+              }
               if (hasOpenedAgents) {
                 return buildOpenAgentsSearch(previous);
               }
@@ -362,6 +389,8 @@ export function DraftChatThreadRouteView({
         input.mode === "terminal" ? false : hasOpenedTerminal || rightPanelMode === "terminal";
       const nextHasOpenedSimulator =
         input.mode === "simulator" ? false : hasOpenedSimulator || rightPanelMode === "simulator";
+      const nextHasOpenedBrowser =
+        input.mode === "browser" ? false : hasOpenedBrowser || rightPanelMode === "browser";
       const nextHasOpenedAgents =
         input.mode === "agents" ? false : hasOpenedAgents || rightPanelMode === "agents";
       setRightPanelMountState((previous) => {
@@ -371,6 +400,7 @@ export function DraftChatThreadRouteView({
           hasOpenedPreview: nextHasOpenedPreview,
           hasOpenedTerminal: nextHasOpenedTerminal,
           hasOpenedSimulator: nextHasOpenedSimulator,
+          hasOpenedBrowser: nextHasOpenedBrowser,
           hasOpenedAgents: nextHasOpenedAgents,
           openedAgentKeys:
             previous.draftId === draftId ? previous.openedAgentKeys : openedAgentKeys,
@@ -381,6 +411,7 @@ export function DraftChatThreadRouteView({
           previous.hasOpenedPreview === nextState.hasOpenedPreview &&
           previous.hasOpenedTerminal === nextState.hasOpenedTerminal &&
           previous.hasOpenedSimulator === nextState.hasOpenedSimulator &&
+          previous.hasOpenedBrowser === nextState.hasOpenedBrowser &&
           previous.hasOpenedAgents === nextState.hasOpenedAgents &&
           previous.openedAgentKeys === nextState.openedAgentKeys
         ) {
@@ -406,6 +437,9 @@ export function DraftChatThreadRouteView({
         if (input.mode !== "simulator" && nextHasOpenedSimulator) {
           return buildOpenSimulatorSearch(previous);
         }
+        if (input.mode !== "browser" && nextHasOpenedBrowser) {
+          return buildOpenBrowserSearch(previous);
+        }
         if (input.mode !== "agents" && nextHasOpenedAgents) {
           return buildOpenAgentsSearch(previous);
         }
@@ -424,6 +458,7 @@ export function DraftChatThreadRouteView({
       hasOpenedDiff,
       hasOpenedPreview,
       hasOpenedSimulator,
+      hasOpenedBrowser,
       hasOpenedTerminal,
       navigate,
       openedAgentKeys,
@@ -453,6 +488,7 @@ export function DraftChatThreadRouteView({
               hasOpenedPreview,
               hasOpenedTerminal,
               hasOpenedSimulator,
+              hasOpenedBrowser,
               hasOpenedAgents,
               openedAgentKeys: baseAgentKeys,
             };
@@ -467,6 +503,8 @@ export function DraftChatThreadRouteView({
           previous.draftId === draftId
             ? previous.hasOpenedSimulator
             : rightPanelMode === "simulator",
+        hasOpenedBrowser:
+          previous.draftId === draftId ? previous.hasOpenedBrowser : rightPanelMode === "browser",
         hasOpenedAgents:
           previous.draftId === draftId ? previous.hasOpenedAgents : rightPanelMode === "agents",
         openedAgentKeys: [...baseAgentKeys, activeAgentKey],
@@ -480,6 +518,7 @@ export function DraftChatThreadRouteView({
     hasOpenedDiff,
     hasOpenedPreview,
     hasOpenedSimulator,
+    hasOpenedBrowser,
     hasOpenedTerminal,
     previewOpen,
     rightPanelMode,
@@ -533,6 +572,8 @@ export function DraftChatThreadRouteView({
     hasOpenedTerminal ||
     rightPanelMode === "simulator" ||
     hasOpenedSimulator ||
+    rightPanelMode === "browser" ||
+    hasOpenedBrowser ||
     rightPanelMode === "agents" ||
     hasOpenedAgents ||
     rightPanelMode === "agent" ||

@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Ryco Browser Control",
+  "version": "0.1.0",
+  "description": "Connect Chrome, Brave or Edge to the Ryco desktop app. Control runs only while enabled in Ryco.",
+  "permissions": ["debugger", "tabs", "storage", "alarms"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "Ryco Browser Control" }
+}

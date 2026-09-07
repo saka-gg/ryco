@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Ryco Browser Control</title>
+    <style>
+      body {
+        width: 310px;
+        padding: 18px;
+        font: 13px system-ui;
+        background: #171719;
+        color: #eee;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 10px;
+      }
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+        height: 96px;
+        background: #252528;
+        color: #fff;
+        border: 1px solid #555;
+        border-radius: 7px;
+        padding: 8px;
+      }
+      button {
+        margin: 12px 6px 0 0;
+        padding: 8px 12px;
+        border: 0;
+        border-radius: 6px;
+      }
+      p {
+        line-height: 1.5;
+        color: #bbb;
+      }
+      #status {
+        min-height: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Connect to Ryco</h1>
+    <p>
+      Copy the pairing configuration from Ryco → Settings → Computer use. Only pair with your own
+      Ryco app.
+    </p>
+    <label for="pairing">Pairing configuration</label
+    ><textarea id="pairing" spellcheck="false" placeholder="Paste pairing configuration"></textarea
+    ><button id="connect">Connect</button><button id="disconnect">Disconnect</button>
+    <p id="status" role="status"></p>
+    <script src="popup.js"></script>
+  </body>
+</html>
