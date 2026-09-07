@@ -55,6 +55,10 @@ Browser element actions check visibility and whether the target is covered or ha
 
 ## Development and validation
 
+On macOS, a permission toggle applies to a code identity, not just an app name. If permissions remain denied after granting them and restarting, check the app's signature with `codesign --verify --deep --strict /Applications/Ryco.app`. Invalid or unsealed Electron bundles can be attributed to an executable path instead of Ryco's bundle identity. Packaged Ryco diagnoses invalid app/helper signatures without changing the permission result or requesting access.
+
+Non-notarized macOS artifacts are locally (ad hoc) signed after packaging, including their native helpers. They still require the unsigned-install procedure and are not Developer ID signed. Ad hoc signatures do not provide a durable identity across code updates; use Developer ID signing for distribution that preserves identity across versions. After replacing an invalid build with a correctly signed one, macOS may require the user to remove the old permission entry and add the current app again. Ryco does not automate these permission changes.
+
 The helper's source commit and Apache-2.0 license are in `apps/desktop/native/computer-use-helper/UPSTREAM.md` and `LICENSE`. Install Rust 1.98.1 with `rustup toolchain install 1.98.1 --profile minimal`. `bun run build:desktop` builds and stages the helper and extension; macOS produces a universal helper. Source and lockfile are pinned, and startup verifies protocol version 3.
 
 Use Bun 1.4.0 and `bun install --frozen-lockfile`. Focused automated checks:
