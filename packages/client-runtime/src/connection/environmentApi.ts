@@ -4,6 +4,9 @@ import type { WsRpcClient } from "../rpc/index.ts";
 
 export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
   return {
+    ...(rpcClient.chatAttachments?.readChunk
+      ? { attachments: { readChunk: rpcClient.chatAttachments.readChunk } }
+      : {}),
     server: {
       refreshProviders: rpcClient.server.refreshProviders,
       updateProvider: rpcClient.server.updateProvider,

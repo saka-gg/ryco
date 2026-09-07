@@ -44,6 +44,8 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
+import { WorkspaceAccessPolicyLayer } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
@@ -263,7 +265,8 @@ describe("ProviderRuntimeIngestion", () => {
         }),
       ),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(WorkspaceAccessPolicyLayer(workspaceRoot)),
+      Layer.provideMerge(ServerConfig.layerTest(workspaceRoot, workspaceRoot)),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);
@@ -334,6 +337,8 @@ describe("ProviderRuntimeIngestion", () => {
     });
 
     return {
+      workspaceRoot,
+      attachmentsDir: path.join(workspaceRoot, "userdata", "attachments"),
       reconcileThread: (threadId: ThreadId) =>
         Effect.runPromise(ingestion.reconcileThread!(threadId)),
       engine,
@@ -1456,6 +1461,77 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.text).toBe("hello world");
     expect(message?.streaming).toBe(false);
   });
+
+  it.each(["buffered", "streaming"] as const)(
+    "delivers generated files from %s replies into persistent history",
+    async (deliveryMode) => {
+      const harness = await createHarness({
+        serverSettings: { enableLegacyTokenStreaming: deliveryMode === "streaming" },
+      });
+      fs.writeFileSync(path.join(harness.workspaceRoot, "voice.mp3"), "ID3voice");
+      const now = new Date().toISOString();
+      const turnId = asTurnId("turn-delivery");
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("start-delivery"),
+          threadId: asThreadId("thread-1"),
+          message: {
+            messageId: MessageId.make("user-delivery"),
+            role: "user",
+            text: "Make a voice file",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      const reply =
+        'Your narration.\n\n```ryco-attachments\n{"files":[{"path":"voice.mp3"},{"path":"missing.pdf"}]}\n```';
+      for (const [index, delta] of [reply.slice(0, 30), reply.slice(30)].entries()) {
+        harness.emit({
+          type: "content.delta",
+          eventId: asEventId(`delivery-delta-${index}`),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId,
+          itemId: asItemId("delivery"),
+          payload: { streamKind: "assistant_text", delta },
+        });
+      }
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId("delivery-complete"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId,
+        itemId: asItemId("delivery"),
+        payload: { itemType: "assistant_message", status: "completed" },
+      });
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.messages.some((message) => message.id === "assistant:delivery" && !message.streaming),
+      );
+      const message = thread.messages.find((message) => message.id === "assistant:delivery")!;
+      expect(message.text).toContain("Your narration.");
+      expect(message.text).toContain("Attachment 2 could not be delivered");
+      expect(message.text).not.toContain("ryco-attachments");
+      expect(message.attachments).toHaveLength(1);
+      expect(message.attachments?.[0]).toMatchObject({ name: "voice.mp3", mimeType: "audio/mpeg" });
+      fs.rmSync(path.join(harness.workspaceRoot, "voice.mp3"));
+      expect(
+        fs.readFileSync(
+          resolveAttachmentPath({
+            attachmentsDir: harness.attachmentsDir,
+            attachment: message.attachments![0]!,
+          })!,
+          "utf8",
+        ),
+      ).toBe("ID3voice");
+    },
+  );
 
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
     const harness = await createHarness();

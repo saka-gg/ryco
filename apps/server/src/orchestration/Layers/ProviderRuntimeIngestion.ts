@@ -1,7 +1,16 @@
 import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
+import { ServerConfig } from "../../config.ts";
+import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
+import {
+  AssistantAttachmentError,
+  parseAssistantAttachments,
+  persistAssistantAttachment,
+} from "../../assistantAttachments.ts";
 import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
+  type ChatAttachment,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
   CommandId,
   DEFAULT_AGENT_TOKEN_MODE,
   EventId,
@@ -1071,6 +1080,8 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const attachmentConfig = yield* Effect.serviceOption(ServerConfig);
+  const attachmentAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
   const liveAssistantDeltaBuffers = new Map<string, LiveAssistantDeltaBuffer>();
   const subagentProviderThreadIdsByThread = new Map<string, Set<string>>();
   const subagentMessageTextByKey = new Map<string, string>();
@@ -1702,11 +1713,67 @@ const make = Effect.gen(function* () {
       }
 
       if (input.hasProjectedMessage || hasRenderableText) {
+        // Read the complete projection after flushing, so split/streamed manifests work too.
+        // Replayed terminal events must not replace an already delivered attachment snapshot.
+        let delivery: { text: string; attachments: ReadonlyArray<ChatAttachment> } | undefined;
+        if (Option.isSome(attachmentConfig) && Option.isSome(attachmentAccess)) {
+          delivery = yield* Effect.gen(function* () {
+            const message = projectionSnapshotQuery.getThreadMessageById
+              ? Option.getOrUndefined(yield* projectionSnapshotQuery.getThreadMessageById(input))
+              : (yield* resolveThreadDetail(input.threadId))?.messages.find(
+                  (message) => message.id === input.messageId,
+                );
+            if (!message?.streaming || !message.text.includes("ryco-attachments")) return undefined;
+            const parsed = parseAssistantAttachments(message.text);
+            if (parsed.files.length === 0 && parsed.errors.length === 0) return undefined;
+            const context = Option.getOrUndefined(
+              yield* projectionSnapshotQuery.getThreadCheckpointContext(input.threadId),
+            );
+            const cwd = context?.worktreePath ?? context?.workspaceRoot;
+            const attachments: ChatAttachment[] = [];
+            let remainingBytes = PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES;
+            for (const [index, file] of parsed.files.entries()) {
+              const result = yield* Effect.gen(function* () {
+                if (!cwd) return yield* new AssistantAttachmentError();
+                const authorizedCwd = yield* attachmentAccess.value.assertExistingPath({
+                  path: cwd,
+                  operation: "assistant file delivery",
+                });
+                return yield* Effect.tryPromise({
+                  try: (signal) =>
+                    persistAssistantAttachment({
+                      attachmentsDir: attachmentConfig.value.attachmentsDir,
+                      cwd: authorizedCwd,
+                      threadId: input.threadId,
+                      deliveryId: `${input.messageId}:${index}`,
+                      file,
+                      remainingBytes,
+                      signal,
+                    }),
+                  catch: () => new AssistantAttachmentError(),
+                });
+              }).pipe(Effect.option);
+              if (Option.isSome(result)) {
+                attachments.push(result.value);
+                remainingBytes -= result.value.sizeBytes ?? 0;
+              } else {
+                parsed.errors.push(
+                  `Attachment ${index + 1} could not be delivered. Check that the file exists inside this thread's workspace, is not a link, and fits the attachment limits.`,
+                );
+              }
+            }
+            return {
+              text: [parsed.text, ...parsed.errors].filter(Boolean).join("\n\n") || " ",
+              attachments,
+            };
+          }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+        }
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.complete",
           commandId: providerCommandId(input.event, input.commandTag, String(input.messageId)),
           threadId: input.threadId,
           messageId: input.messageId,
+          ...delivery,
           ...(input.turnId ? { turnId: input.turnId } : {}),
           createdAt: input.createdAt,
         });

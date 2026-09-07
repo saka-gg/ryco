@@ -267,6 +267,7 @@ it.effect("injects the MCP connection into runtime options, never the environmen
         runtimeSessionId,
         capabilities: [
           AGENT_CONTROL_CAPABILITIES.read,
+          AGENT_CONTROL_CAPABILITIES.attachFile,
           AGENT_CONTROL_CAPABILITIES.createThreads,
           AGENT_CONTROL_CAPABILITIES.sendMessage,
           AGENT_CONTROL_CAPABILITIES.interruptThread,

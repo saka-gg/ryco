@@ -2,6 +2,15 @@ import { memo, useState } from "react";
 import { FileIcon } from "lucide-react";
 import type { ChatFileAttachment, ChatUnknownAttachment } from "../../types";
 
+export function attachmentDownloadUrl(url: string, name: string | undefined): string {
+  if (!name || url.startsWith("blob:") || url.startsWith("data:")) return url;
+  const resolved = new URL(url, "http://ryco.invalid");
+  resolved.searchParams.set("download", name);
+  return /^https?:/.test(url)
+    ? resolved.href
+    : `${resolved.pathname}${resolved.search}${resolved.hash}`;
+}
+
 export function isVideoAttachmentMimeType(mimeType: string): boolean {
   return mimeType.toLowerCase().startsWith("video/");
 }
@@ -29,7 +38,7 @@ export const AttachmentFileRow = memo(function AttachmentFileRow(props: {
     "flex min-h-[72px] items-center gap-2 px-3 py-3 text-left text-xs text-foreground/80";
   return attachment.previewUrl ? (
     <a
-      href={attachment.previewUrl}
+      href={attachmentDownloadUrl(attachment.previewUrl, attachment.name)}
       download={attachment.name}
       className={className}
       aria-label={`Download ${attachment.name}`}
@@ -65,7 +74,7 @@ export const AttachmentVideo = memo(function AttachmentVideo(props: {
         className="block h-auto w-full bg-black"
       />
       <a
-        href={previewUrl}
+        href={attachmentDownloadUrl(previewUrl, attachment.name)}
         download={attachment.name}
         aria-label={`Download ${attachment.name}`}
         className="flex items-center justify-center gap-1.5 border-t border-border/60 px-3 py-2 text-[11px] text-muted-foreground transition-colors hover:text-foreground"

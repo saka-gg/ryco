@@ -1,4 +1,8 @@
 import type {
+  ChatAttachmentReadChunkInput,
+  ChatAttachmentReadChunkResult,
+} from "./orchestration.ts";
+import type {
   ResourceTelemetrySnapshot,
   ResourceTelemetryHistoryInput,
   ResourceTelemetryHistory,
@@ -816,6 +820,9 @@ export interface LocalApi {
  * `environmentId` rather than reaching through the local desktop bridge.
  */
 export interface EnvironmentApi {
+  attachments?: {
+    readChunk: (input: ChatAttachmentReadChunkInput) => Promise<ChatAttachmentReadChunkResult>;
+  };
   /** Node-scoped provider/settings operations, resolved by environment. */
   server?: {
     refreshProviders: (input?: {

@@ -186,6 +186,7 @@ export type AgentControlCapability = typeof AgentControlCapability.Type;
 
 export const AGENT_CONTROL_CAPABILITIES = {
   read: AgentControlCapability.make("read"),
+  attachFile: AgentControlCapability.make("files.attach"),
   createThreads: AgentControlCapability.make("threads.create"),
   sendMessage: AgentControlCapability.make("threads.send-message"),
   interruptThread: AgentControlCapability.make("threads.interrupt"),

@@ -387,6 +387,70 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("View diff");
   });
 
+  it("renders assistant image, video, audio and document deliveries without an empty-response placeholder", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "delivered",
+            kind: "message",
+            createdAt: "2026-09-07T12:00:00Z",
+            message: {
+              id: MessageId.make("delivered"),
+              role: "assistant",
+              text: "",
+              streaming: false,
+              createdAt: "2026-09-07T12:00:00Z",
+              attachments: [
+                {
+                  type: "image",
+                  id: "image",
+                  name: "result.png",
+                  mimeType: "image/png",
+                  sizeBytes: 30,
+                  previewUrl: "/attachments/image",
+                },
+                {
+                  type: "file",
+                  id: "video",
+                  name: "clip.mp4",
+                  mimeType: "video/mp4",
+                  sizeBytes: 30,
+                  previewUrl: "/attachments/video",
+                },
+                {
+                  type: "file",
+                  id: "audio",
+                  name: "voice.mp3",
+                  mimeType: "audio/mpeg",
+                  sizeBytes: 30,
+                  previewUrl: "/attachments/audio",
+                },
+                {
+                  type: "file",
+                  id: "pdf",
+                  name: "report.pdf",
+                  mimeType: "application/pdf",
+                  sizeBytes: 30,
+                  previewUrl: "/attachments/pdf",
+                },
+              ],
+            },
+          },
+        ]}
+      />,
+    );
+    expect(markup).toContain("<img");
+    expect(markup).toContain("<video");
+    expect(markup).toContain("<audio");
+    expect(markup).toContain('aria-label="Play voice.mp3"');
+    expect(markup).toContain('download="report.pdf"');
+    expect(markup).not.toContain("(empty response)");
+    expect(markup).not.toContain("autoPlay");
+  });
+
   it("renders file attachments as download rows and unknown attachments inert", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
@@ -431,7 +495,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain('href="http://localhost:0/attachments/file-1"');
+    expect(markup).toContain('href="http://localhost:0/attachments/file-1?download=report.pdf"');
     expect(markup).toContain('download="report.pdf"');
     expect(markup).toContain("report.pdf");
     expect(markup).toContain("2 KB");
@@ -562,7 +626,7 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('preload="metadata"');
     expect(markup).toContain('download="clip.mp4"');
     expect(markup).toContain('download="stream.mov"');
-    expect(markup).toContain('href="http://localhost:0/attachments/doc-1"');
+    expect(markup).toContain('href="http://localhost:0/attachments/doc-1?download=notes.pdf"');
     expect(markup).toContain('download="notes.pdf"');
     expect(markup).toContain("opaque-blob");
     expect(markup).not.toContain('download="opaque-blob"');

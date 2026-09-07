@@ -9,6 +9,7 @@
  *
  * @module ProviderServiceLive
  */
+import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
 import {
   ModelSelection,
   NonNegativeInt,
@@ -1117,7 +1118,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
-      const turn = yield* routed.adapter.sendTurn(input);
+      const turn = yield* routed.adapter.sendTurn({
+        ...input,
+        input: `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\n${input.input ?? ""}`,
+      });
       yield* directory.upsert({
         threadId: input.threadId,
         provider: routed.adapter.provider,

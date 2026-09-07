@@ -51,6 +51,7 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.atlassianSaveProjectLink]: "owner",
   [WS_METHODS.atlassianStartOAuth]: "owner",
   [WS_METHODS.chatAttachmentsCreateFileUpload]: "operator",
+  [WS_METHODS.chatAttachmentsReadChunk]: "operator",
   [WS_METHODS.filesystemBrowse]: "operator",
   [WS_METHODS.gitArchiveWorktree]: "operator",
   [WS_METHODS.gitCreateWorktreeForProject]: "operator",

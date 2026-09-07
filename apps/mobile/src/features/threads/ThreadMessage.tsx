@@ -6,6 +6,7 @@ import {
   type ChatUnknownAttachment,
 } from "@ryco/client-runtime/state/threads";
 import { useVideoPlayer, VideoView } from "expo-video";
+import { useEvent } from "expo";
 import * as Linking from "expo-linking";
 import { Image, Pressable, ScrollView, Share, View } from "react-native";
 
@@ -96,6 +97,68 @@ function VideoAttachmentRow(props: { readonly attachment: ChatFileAttachment }) 
   );
 }
 
+function AudioAttachmentRow({ attachment }: { readonly attachment: ChatFileAttachment }) {
+  const player = useVideoPlayer({ uri: attachment.previewUrl }, (player) => {
+    player.timeUpdateEventInterval = 0.5;
+  });
+  const playing = useEvent(player, "playingChange");
+  const progress = useEvent(player, "timeUpdate");
+  const status = useEvent(player, "statusChange");
+  const isPlaying = playing?.isPlaying ?? player.playing;
+  const seconds = Math.floor(progress?.currentTime ?? 0);
+  return (
+    <View className="w-full gap-2 rounded-2xl bg-subtle px-3 py-3">
+      <Text className="font-ryco-bold text-sm text-foreground">{attachment.name}</Text>
+      {status?.status === "error" ? (
+        <Text className="text-xs text-foreground-muted">
+          Audio could not be played. Use Share to open it in another app.
+        </Text>
+      ) : (
+        <View className="flex-row items-center gap-4">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={isPlaying ? "Pause audio" : "Play audio"}
+            onPress={() => {
+              if (isPlaying) player.pause();
+              else {
+                if (player.duration > 0 && player.currentTime >= player.duration)
+                  player.currentTime = 0;
+                player.play();
+              }
+            }}
+            className="min-h-11 justify-center px-2"
+          >
+            <Text className="font-ryco-bold text-sm text-foreground">
+              {isPlaying ? "Pause" : "Play"}
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Rewind 15 seconds"
+            onPress={() => {
+              player.currentTime = Math.max(0, player.currentTime - 15);
+            }}
+            className="min-h-11 justify-center px-2"
+          >
+            <Text className="text-sm text-foreground">−15s</Text>
+          </Pressable>
+          <Text className="text-xs text-foreground-muted">
+            {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
+          </Text>
+        </View>
+      )}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Share ${attachment.name}`}
+        onPress={() => void shareAttachmentFile(attachment.previewUrl!)}
+        className="min-h-11 justify-center"
+      >
+        <Text className="text-xs text-foreground-muted">Share audio</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 export function ThreadMessage(props: { readonly message: ChatMessage }) {
   const isUser = props.message.role === "user";
   const presentation = threadMessagePresentation(isUser ? "user" : "assistant");
@@ -141,7 +204,16 @@ export function ThreadMessage(props: { readonly message: ChatMessage }) {
   ): attachment is ChatFileAttachment =>
     isVideoFileAttachment(attachment) && attachment.previewUrl !== undefined;
   const videoAttachments = attachments.filter(hasVideoPlaybackSource);
-  const stripAttachments = attachments.filter((attachment) => !hasVideoPlaybackSource(attachment));
+  const hasAudioPlaybackSource = (
+    attachment: ChatFileAttachment | ChatImageAttachment | ChatUnknownAttachment,
+  ): attachment is ChatFileAttachment =>
+    isChatFileAttachment(attachment) &&
+    attachment.mimeType.toLowerCase().startsWith("audio/") &&
+    attachment.previewUrl !== undefined;
+  const audioAttachments = attachments.filter(hasAudioPlaybackSource);
+  const stripAttachments = attachments.filter(
+    (attachment) => !hasVideoPlaybackSource(attachment) && !hasAudioPlaybackSource(attachment),
+  );
 
   return (
     <View className={`px-4 py-2 ${isUser ? "items-end" : "items-start"}`}>
@@ -176,6 +248,13 @@ export function ThreadMessage(props: { readonly message: ChatMessage }) {
             }}
           />
         )}
+        {audioAttachments.length > 0 ? (
+          <View className="mt-2 w-full gap-2">
+            {audioAttachments.map((attachment) => (
+              <AudioAttachmentRow key={attachment.id} attachment={attachment} />
+            ))}
+          </View>
+        ) : null}
         {videoAttachments.length > 0 ? (
           <View className="mt-2 w-full gap-2">
             {videoAttachments.map((attachment) => (

@@ -1,4 +1,5 @@
 import { Effect, Option, Schema, Stream } from "effect";
+import { readAttachmentChunk } from "../attachmentRead.ts";
 import { clamp } from "effect/Number";
 import {
   AuthRpcError,
@@ -692,6 +693,18 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           }),
         ),
         { "rpc.aggregate": "threadPriority" },
+      ),
+    [WS_METHODS.chatAttachmentsReadChunk]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.chatAttachmentsReadChunk,
+        ownerEffect(
+          WS_METHODS.chatAttachmentsReadChunk,
+          readAttachmentChunk(input, {
+            attachmentsDir: ctx.config.attachmentsDir,
+            projections: projectionSnapshotQuery,
+          }),
+        ),
+        { "rpc.aggregate": "orchestration" },
       ),
     [WS_METHODS.chatAttachmentsCreateFileUpload]: (input) =>
       observeRpcEffect(

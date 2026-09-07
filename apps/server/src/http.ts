@@ -316,11 +316,18 @@ export const otlpTracesProxyRouteLayer = HttpRouter.add(
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
 
-const INLINE_VIDEO_CONTENT_TYPES: Readonly<Record<string, string>> = {
+const INLINE_MEDIA_CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".mp4": "video/mp4",
   ".mov": "video/quicktime",
   ".webm": "video/webm",
   ".ogv": "video/ogg",
+  ".mp3": "audio/mpeg",
+  ".m4a": "audio/mp4",
+  ".aac": "audio/aac",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".flac": "audio/flac",
 };
 
 /** A single byte range; malformed or multipart ranges are served in full. */
@@ -357,6 +364,13 @@ export const attachmentsRouteLayer = HttpRouter.add(
 
     const config = yield* ServerConfig;
     const rawRelativePath = url.value.pathname.slice(ATTACHMENTS_ROUTE_PREFIX.length);
+    const downloadName = url.value.searchParams.get("download");
+    if (
+      downloadName !== null &&
+      (downloadName.length === 0 || downloadName.length > 255 || /[/\\\p{Cc}]/u.test(downloadName))
+    ) {
+      return HttpServerResponse.text("Invalid download name", { status: 400 });
+    }
     const normalizedRelativePath = normalizeAttachmentRelativePath(rawRelativePath);
     if (!normalizedRelativePath) {
       return HttpServerResponse.text("Invalid attachment path", { status: 400 });
@@ -392,12 +406,12 @@ export const attachmentsRouteLayer = HttpRouter.add(
       path.extname(filePath) ||
       (isIdLookup ? attachmentIdExtensionSegment(normalizedRelativePath) : null) ||
       "";
-    const videoContentType = INLINE_VIDEO_CONTENT_TYPES[extension.toLowerCase()];
+    const mediaContentType = INLINE_MEDIA_CONTENT_TYPES[extension.toLowerCase()];
     const size = Number(fileInfo.size);
     // If-Range validators are not compared here: sending the complete response
     // is the safe fallback instead of returning a potentially mismatched slice.
     const range =
-      videoContentType && !request.headers["if-range"]
+      mediaContentType && !request.headers["if-range"]
         ? parseAttachmentByteRange(request.headers.range, size)
         : null;
     if (range === "unsatisfiable") {
@@ -421,9 +435,9 @@ export const attachmentsRouteLayer = HttpRouter.add(
       status: range ? 206 : 200,
       ...(range ? { offset: range.start, bytesToRead: range.end - range.start + 1 } : {}),
       headers: {
-        ...(videoContentType
+        ...(mediaContentType
           ? {
-              "Content-Type": videoContentType,
+              "Content-Type": mediaContentType,
               "Cache-Control": "private, max-age=3600",
               "X-Content-Type-Options": "nosniff",
               "Accept-Ranges": "bytes",
@@ -431,6 +445,9 @@ export const attachmentsRouteLayer = HttpRouter.add(
           : userAssetResponseHeaders(filePath, path)),
         ...(range ? { "Content-Range": `bytes ${range.start}-${range.end}/${size}` } : {}),
         ...mediaHeaders,
+        ...(downloadName !== null
+          ? { "Content-Disposition": downloadContentDisposition(downloadName) }
+          : {}),
       },
     }).pipe(
       Effect.catch(() =>

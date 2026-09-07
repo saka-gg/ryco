@@ -28,6 +28,7 @@ import type {
 
 export interface TestTurnResponse {
   readonly events: ReadonlyArray<FixtureProviderRuntimeEvent>;
+  readonly completeTurn?: boolean;
   readonly mutateWorkspace?: (input: {
     readonly cwd: string;
     readonly turnCount: number;
@@ -377,7 +378,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
           turns: [...state.snapshot.turns, nextTurn],
         };
 
-        if (deferredTurnCompletedEvents.length === 0) {
+        if (deferredTurnCompletedEvents.length === 0 && response.completeTurn !== false) {
           yield* emit({
             type: "turn.completed",
             eventId: EventId.make(randomUUID()),

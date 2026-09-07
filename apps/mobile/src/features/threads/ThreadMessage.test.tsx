@@ -11,7 +11,14 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const hoisted = vi.hoisted(() => ({
   share: vi.fn(async (_input: unknown) => undefined),
-  player: { replace: vi.fn() },
+  player: {
+    replace: vi.fn(),
+    play: vi.fn(),
+    pause: vi.fn(),
+    playing: false,
+    duration: 20,
+    currentTime: 0,
+  },
 }));
 
 vi.mock("react-native", () => ({
@@ -21,6 +28,7 @@ vi.mock("react-native", () => ({
   Share: { share: hoisted.share },
   View: "View",
 }));
+vi.mock("expo", () => ({ useEvent: () => null }));
 vi.mock("expo-linking", () => ({ openURL: async () => undefined }));
 vi.mock("expo-video", () => ({
   useVideoPlayer: () => hoisted.player,
@@ -109,6 +117,25 @@ function renderMessage(attachments: ChatAttachment[]): ReactElement {
 describe("ThreadMessage attachment rows", () => {
   beforeEach(() => {
     hoisted.share.mockClear();
+  });
+
+  it("renders audio playback controls and a share fallback", () => {
+    const tree = renderMessage([
+      {
+        type: "file",
+        id: "audio",
+        name: "voice.mp3",
+        mimeType: "audio/mpeg",
+        sizeBytes: 30,
+        previewUrl: "http://node.local/attachments/audio",
+      },
+    ]);
+    const buttons = findPressables(tree);
+    const play = buttons.find((button) => pressableLabel(button) === "Play audio");
+    expect(play).toBeDefined();
+    (play!.props as { onPress: () => void }).onPress();
+    expect(hoisted.player.play).toHaveBeenCalledTimes(1);
+    expect(buttons.some((button) => pressableLabel(button) === "Share voice.mp3")).toBe(true);
   });
 
   it("renders a tappable row for a file attachment that shares its preview URL", async () => {
