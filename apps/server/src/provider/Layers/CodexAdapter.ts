@@ -8,6 +8,7 @@
  * @module CodexAdapterLive
  */
 import {
+  isToolLifecycleItemType,
   type AgentTokenMode,
   type CanonicalItemType,
   type CanonicalRequestType,
@@ -22,6 +23,7 @@ import {
   type ProviderUserInputAnswers,
   type RuntimeSessionId,
   RuntimeItemId,
+  RuntimeSubagentId,
   RuntimeRequestId,
   RuntimeTaskId,
   type RuntimeTaskUsage,
@@ -827,9 +829,7 @@ function mapCollabAgentEvent(
           ? (payload.item as Record<string, unknown>)
           : undefined;
       const itemTypeRaw = typeof item?.type === "string" ? item.type : undefined;
-      if (!itemTypeRaw) {
-        return [];
-      }
+      if (!itemTypeRaw) return [];
       // A loose summary from the raw item: the child stream is untyped at
       // this boundary (synthetic event payload), so read best-effort fields
       // rather than force a schema decode.
@@ -839,7 +839,51 @@ function mapCollabAgentEvent(
         (typeof item?.query === "string" ? item.query : undefined);
       const canonical = toCanonicalItemType(itemTypeRaw);
       const summary = looseSummary ?? canonical.replaceAll("_", " ");
+      // Child message snapshots are authoritative at completion. Preserve their
+      // full text in the child transcript rather than a generic progress label.
+      if (
+        canonical === "assistant_message" &&
+        payload.lifecycle === "item/completed" &&
+        typeof item?.text === "string" &&
+        typeof item.id === "string"
+      ) {
+        return [
+          {
+            ...base,
+            type: "subagent.message.delta",
+            payload: {
+              subagentId: RuntimeSubagentId.make(agentThreadId),
+              providerThreadId: agentThreadId,
+              providerMessageId: item.id,
+              delta: item.text,
+              role: "assistant",
+            },
+          },
+        ];
+      }
+
+      const toolEvents: ProviderRuntimeEvent[] = [];
+      if (isToolLifecycleItemType(canonical) && typeof item?.id === "string") {
+        const completed =
+          payload.lifecycle === "item/completed" ||
+          item.status === "completed" ||
+          item.status === "failed";
+        toolEvents.push({
+          ...base,
+          eventId: EventId.make(`${base.eventId}:tool`),
+          itemId: RuntimeItemId.make(`${agentThreadId}:${item.id}`),
+          type: completed ? "item.completed" : "item.updated",
+          payload: {
+            itemType: canonical,
+            status: item.status === "failed" ? "failed" : completed ? "completed" : "inProgress",
+            title: summary,
+            agentId: agentThreadId,
+            data: { item },
+          },
+        });
+      }
       return [
+        ...toolEvents,
         {
           ...base,
           type: "task.progress",

@@ -1,3 +1,4 @@
+import { makeAcpSubagentRuntimeEvents } from "../acp/AcpSubagentRuntimeEvents.ts";
 import {
   ApprovalRequestId,
   DEFAULT_AGENT_TOKEN_MODE,
@@ -107,6 +108,7 @@ interface PendingUserInput {
 }
 
 interface GrokSessionContext {
+  readonly subagentEvents: ReturnType<typeof makeAcpSubagentRuntimeEvents>;
   readonly threadId: ThreadId;
   readonly acpSessionId: string;
   session: ProviderSession;
@@ -611,6 +613,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           };
 
           ctx = {
+            subagentEvents: makeAcpSubagentRuntimeEvents(),
             threadId: input.threadId,
             acpSessionId: started.sessionId,
             session,
@@ -673,6 +676,16 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                         rawPayload: event.rawPayload,
                       }),
                     );
+                    for (const subagentEvent of yield* ctx.subagentEvents({
+                      provider: PROVIDER,
+                      threadId: ctx.threadId,
+                      turnId: ctx.activeTurnId,
+                      state: event.toolCall.subagent,
+                      rawPayload: event.rawPayload,
+                      makeStamp: makeEventStamp,
+                    })) {
+                      yield* offerRuntimeEventForRuntime(runtimeSessionId, subagentEvent);
+                    }
                     return;
                   case "ContentDelta":
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);

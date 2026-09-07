@@ -54,3 +54,15 @@ describe("buildTabs", () => {
     ]);
   });
 });
+
+it("groups legacy agent links into one Agents tab on the shared desktop surface", () => {
+  expect(
+    buildTabs({
+      subagents: [],
+      activeAgentKey: "subagent:a",
+      openedAgentKeys: ["subagent:a", "subagent:b"],
+      openedPanelModes: ["files"],
+      groupAgents: true,
+    }).map((tab) => tab.key),
+  ).toEqual(["files", "agents"]);
+});

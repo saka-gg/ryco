@@ -120,6 +120,10 @@
       "types": "./src/schemaJson.ts",
       "import": "./src/schemaJson.ts"
     },
+    "./toolOutput": {
+      "types": "./src/toolOutput.ts",
+      "import": "./src/toolOutput.ts"
+    },
     "./toolActivity": {
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"

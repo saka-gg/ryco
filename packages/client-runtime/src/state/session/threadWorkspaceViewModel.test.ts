@@ -1,6 +1,8 @@
 import { EventId, TurnId, type OrchestrationThreadActivity } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import { deriveAgentTimeline } from "./agentActivity";
+import { deriveWorkLogEntries } from "./session-logic";
 import { deriveThreadSubagents, findThreadSubagent } from "./threadWorkspaceViewModel";
 
 function makeActivity(overrides: {
@@ -749,4 +751,109 @@ describe("findThreadSubagent", () => {
     expect(findThreadSubagent(subagents, subagents[0]?.key)).toBe(subagents[0]);
     expect(findThreadSubagent(subagents, "missing")).toBeNull();
   });
+});
+
+it("keeps child tool details out of the parent and folds tool lifecycle at its original position", () => {
+  const activities = [
+    makeActivity({
+      id: "spawn",
+      kind: "task.started",
+      sequence: 1,
+      payload: { taskId: "child", agentKind: "agent", status: "running" },
+    }),
+    makeActivity({
+      id: "start",
+      kind: "tool.started",
+      sequence: 2,
+      payload: {
+        agentId: "child",
+        data: { toolCallId: "cmd", command: "cat README.md", output: "Readme contents" },
+        itemType: "command_execution",
+        title: "Bash",
+        command: "cat README.md",
+        status: "inProgress",
+      },
+    }),
+    makeActivity({
+      id: "end",
+      kind: "tool.completed",
+      sequence: 4,
+      payload: {
+        agentId: "child",
+        data: { toolCallId: "cmd", command: "cat README.md", output: "Readme contents" },
+        itemType: "command_execution",
+        title: "Bash",
+        command: "cat README.md",
+        output: "Readme contents",
+        status: "completed",
+      },
+    }),
+    makeActivity({
+      id: "other",
+      kind: "tool.completed",
+      sequence: 5,
+      payload: {
+        agentId: "another-child",
+        toolCallId: "other",
+        itemType: "command_execution",
+        command: "pwd",
+        status: "completed",
+      },
+    }),
+  ];
+  const child = deriveThreadSubagents(activities)[0]!;
+  expect(child.entries).toHaveLength(1);
+  expect(child.entries[0]).toMatchObject({
+    id: "start",
+    command: "cat README.md",
+    output: "Readme contents",
+    sequence: 2,
+  });
+  expect(deriveWorkLogEntries(activities).some((entry) => entry.command === "cat README.md")).toBe(
+    false,
+  );
+  const timeline = deriveAgentTimeline({
+    ...child,
+    messages: [
+      {
+        id: "message",
+        text: "Reading documentation",
+        createdAt: activities[0]!.createdAt,
+        sequence: 3,
+      },
+    ],
+  });
+  expect(timeline.map((row) => row.kind)).toEqual(["tool", "message"]);
+  expect(deriveThreadSubagents(activities.slice(0, 2))[0]?.entries).toHaveLength(1);
+});
+
+it("collapses interleaved provider item lifecycles without merging distinct child commands", () => {
+  const activities = [
+    makeActivity({
+      kind: "task.started",
+      payload: { taskId: "child", agentKind: "agent", status: "running" },
+    }),
+    ...[
+      ["tool.started", "a", 1],
+      ["tool.started", "b", 2],
+      ["tool.completed", "a", 3],
+      ["tool.completed", "b", 4],
+    ].map(([kind, id, sequence]) =>
+      makeActivity({
+        kind: String(kind),
+        sequence: Number(sequence),
+        payload: {
+          agentId: "child",
+          providerItemId: String(id),
+          itemType: "command_execution",
+          data: { state: { input: { command: `echo ${id}` }, output: `result ${id}` } },
+        },
+      }),
+    ),
+  ];
+  const entries = deriveThreadSubagents(activities)[0]!.entries;
+  expect(entries.map((entry) => [entry.command, entry.sequence, entry.completed])).toEqual([
+    ["echo a", 1, true],
+    ["echo b", 2, true],
+  ]);
 });

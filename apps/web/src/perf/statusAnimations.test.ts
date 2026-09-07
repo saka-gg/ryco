@@ -105,7 +105,10 @@ describe("status animation CSS", () => {
       "@media (prefers-reduced-motion: reduce) {\n  .animate-status-pulse",
       "/* Safe-area inset utilities",
     );
-    const shimmerReducedMotion = css.slice(css.lastIndexOf("@media (prefers-reduced-motion"));
+    const shimmerReducedMotion =
+      css.match(
+        /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.shimmer,\s*\.thinking-status-shimmer[^]*?\n\}/,
+      )?.[0] ?? "";
     const sidebarReducedMotion = cssSection(
       "@media (prefers-reduced-motion: reduce) {\n    .sidebar-status-text--flow",
       "@media (forced-colors: active)",

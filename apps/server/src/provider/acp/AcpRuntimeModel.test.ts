@@ -234,6 +234,7 @@ describe("AcpRuntimeModel", () => {
         mergeToolCallState(createdEvent.toolCall, updatedEvent.toolCall).subagent,
       ).toMatchObject({
         status: "completed",
+        summary: "Retry flow reviewed",
         subagent: {
           subagentId: "tool-agent-1",
           origin: "inferred",
@@ -241,6 +242,26 @@ describe("AcpRuntimeModel", () => {
         },
       });
     }
+  });
+
+  it.each([
+    { kind: "execute" as const, title: "Run command", rawInput: { command: "rg subagent src" } },
+    { kind: "read" as const, title: "Read subagent documentation" },
+    { kind: "search" as const, title: "Search delegation code" },
+    { kind: "other" as const, title: "Read subagent status" },
+  ])("does not turn ordinary tool data into agents: $title", (fields) => {
+    const { events } = parseSessionUpdateEvent({
+      sessionId: "session",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "ordinary-tool",
+        status: "completed",
+        ...fields,
+      },
+    });
+    const event = events[0];
+    expect(event?._tag).toBe("ToolCallUpdated");
+    if (event?._tag === "ToolCallUpdated") expect(event.toolCall.subagent).toBeUndefined();
   });
 
   it("does not infer subagents from generic task wording", () => {

@@ -1,14 +1,17 @@
 import "../index.css";
 
+import { EventId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 import {
   deriveAgentPanelModel,
+  deriveThreadSubagents,
   type RuntimeSubagent,
   type RuntimeSubagentStatus,
 } from "../threadWorkspaceViewModel";
+import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { AgentsPanel } from "./AgentsPanel";
 
 function agent(
@@ -63,6 +66,89 @@ describe("AgentsPanel", () => {
     await mounted?.unmount().catch(() => {});
     mounted = null;
     document.body.innerHTML = "";
+  });
+
+  it("separates background navigation from stopping and identifies waiting agents", async () => {
+    const onOpenAgents = vi.fn();
+    const onStop = vi.fn();
+    mounted = await render(
+      <BackgroundLivenessChip
+        liveness="working"
+        liveCount={2}
+        waitingCount={1}
+        onOpenAgents={onOpenAgents}
+        onStop={onStop}
+        stopping={false}
+      />,
+    );
+    await page
+      .getByRole("button", { name: "2 agents active in the background · 1 waiting" })
+      .click();
+    expect(onOpenAgents).toHaveBeenCalledOnce();
+    expect(onStop).not.toHaveBeenCalled();
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    expect(onStop).toHaveBeenCalledOnce();
+    await mounted.rerender(
+      <BackgroundLivenessChip
+        liveness="monitoring"
+        liveCount={0}
+        onStop={onStop}
+        stopping={true}
+      />,
+    );
+    await expect
+      .element(page.getByRole("status", { name: "Monitoring in the background" }))
+      .toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Stopping…" })).toBeDisabled();
+  });
+
+  it("opens ordered commands and output within Agents, then returns to the roster", async () => {
+    const activities = [
+      {
+        id: EventId.make("spawn"),
+        kind: "task.started",
+        payload: { taskId: "child", agentKind: "agent", status: "running" },
+        sequence: 1,
+      },
+      {
+        id: EventId.make("tool"),
+        kind: "tool.completed",
+        payload: {
+          agentId: "child",
+          itemType: "command_execution",
+          title: "Bash",
+          status: "completed",
+          data: {
+            toolCallId: "cmd",
+            command: "cat README.md",
+            rawOutput: "Documentation contents",
+          },
+        },
+        sequence: 2,
+      },
+    ].map((activity) =>
+      Object.assign(activity, {
+        createdAt: "2026-08-10T10:00:00.000Z",
+        summary: "Agent activity",
+        tone: "tool" as const,
+        turnId: null,
+      }),
+    );
+    mounted = await render(
+      <div className="h-[420px] w-[440px]">
+        <AgentsPanel
+          model={deriveAgentPanelModel({ agents: [agent("child", { status: "waiting" })] })}
+          subagents={deriveThreadSubagents(activities)}
+        />
+      </div>,
+    );
+    await page.getByRole("button", { name: /Open .*Waiting/ }).click();
+    await expect.element(page.getByRole("button", { name: "All agents" })).toBeVisible();
+    expect(document.querySelectorAll("[data-agent-tool]")).toHaveLength(1);
+    await page.getByText("Read", { exact: false }).first().click();
+    await expect.element(page.getByText("Documentation contents", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "All agents" }).click();
+    expect(rowIds()).toEqual(["child"]);
   });
 
   it("keeps fixed role-aware rows in spawn order while live state changes", async () => {

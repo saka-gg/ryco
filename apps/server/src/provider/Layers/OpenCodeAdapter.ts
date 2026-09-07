@@ -1485,10 +1485,10 @@ export function makeOpenCodeAdapter(
                 detail,
                 raw: event,
               });
-              break;
             }
             const payload = {
               itemType,
+              ...(childSubagent ? { agentId: String(childSubagent.subagentId) } : {}),
               ...(part.state.status === "error"
                 ? { status: "failed" as const }
                 : part.state.status === "completed"
@@ -1517,7 +1517,7 @@ export function makeOpenCodeAdapter(
                     : "item.updated",
               payload,
             };
-            appendTurnItem(context, turnId, part);
+            if (!childSubagent) appendTurnItem(context, turnId, part);
             yield* emitForContext(context, runtimeEvent);
           }
           break;

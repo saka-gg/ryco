@@ -1,3 +1,4 @@
+import { isCopilotChildEvent } from "./CopilotAdapter.eventScope.ts";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -175,6 +176,17 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
     session: ActiveCopilotSession,
     event: SessionEvent,
   ) {
+    if (isCopilotChildEvent(event)) {
+      yield* logNativeEvent(session.threadId, event);
+      const mapped = (yield* mapEvent(mapEventDeps, session, event)).map((runtimeEvent) =>
+        stampRuntimeEvent(runtimeEvent, {
+          providerInstanceId: instanceId,
+          runtimeSessionId: session.runtimeSessionId,
+        }),
+      );
+      if (mapped.length > 0) yield* emit(mapped);
+      return;
+    }
     session.updatedAt = event.timestamp;
     const clearsActiveTurn = event.type === "session.idle" || event.type === "abort";
 

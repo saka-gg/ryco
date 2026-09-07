@@ -25,6 +25,7 @@ export function buildTabs(input: {
   activeAgentKey: string | null;
   openedAgentKeys: ReadonlyArray<string>;
   openedPanelModes: ReadonlyArray<RightPanelMode>;
+  groupAgents?: boolean;
 }): WorkspaceTab[] {
   const tabs: WorkspaceTab[] = [];
   const openedModes = new Set(input.openedPanelModes);
@@ -41,9 +42,11 @@ export function buildTabs(input: {
   if (openedModes.has("simulator")) {
     tabs.push({ key: "simulator", label: "Simulator", mode: "simulator" });
   }
-  if (openedModes.has("agents")) {
+  if (openedModes.has("agents") || (input.groupAgents && input.activeAgentKey)) {
     tabs.push({ key: "agents", label: "Agents", mode: "agents" });
   }
+
+  if (input.groupAgents) return tabs;
 
   const visibleAgentKeys = [
     ...new Set([...input.openedAgentKeys, ...(input.activeAgentKey ? [input.activeAgentKey] : [])]),

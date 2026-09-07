@@ -1,3 +1,4 @@
+import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import type { OrchestrationThreadActivity } from "@ryco/contracts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -170,34 +171,11 @@ const MCP_ITEM_KEPT_FIELDS = [
   "durationMs",
 ] as const;
 
-function extractMcpResultText(result: unknown): string | null {
-  const record = asRecord(result);
-  if (!record) {
-    return typeof result === "string" ? result : null;
-  }
-  if (typeof record.content === "string") {
-    return record.content;
-  }
-  if (Array.isArray(record.content)) {
-    const texts: string[] = [];
-    for (const entry of record.content) {
-      const text = asRecord(entry)?.text;
-      if (typeof text === "string" && text.trim().length > 0) {
-        texts.push(text);
-      }
-    }
-    if (texts.length > 0) {
-      return texts.join("\n");
-    }
-  }
-  return null;
-}
-
 function summarizeMcpResult(result: unknown): Record<string, unknown> | undefined {
   if (result === undefined || result === null) {
     return undefined;
   }
-  const text = extractMcpResultText(result);
+  const text = extractToolResultText(result);
   const summary = text ? summarizeToolTextOutput(text) : null;
   return summary ? { content: summary } : undefined;
 }
@@ -249,52 +227,21 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
 }
 
 function projectRawOutput(value: unknown): Record<string, unknown> | undefined {
-  const direct = asTrimmedString(value);
-  if (direct) {
-    const summary = summarizeToolTextOutput(direct);
-    return summary ? { content: summary } : undefined;
-  }
-
   const rawOutput = asRecord(value);
-  if (!rawOutput) {
-    return undefined;
-  }
-
-  if (typeof rawOutput.totalFiles === "number" && Number.isFinite(rawOutput.totalFiles)) {
+  if (typeof rawOutput?.totalFiles === "number" && Number.isFinite(rawOutput.totalFiles)) {
     return {
       totalFiles: rawOutput.totalFiles,
       ...(rawOutput.truncated === true ? { truncated: true } : {}),
     };
   }
-
-  for (const key of ["content", "stdout", "stderr"]) {
-    const output = asTrimmedString(rawOutput[key]);
-    if (!output) {
-      continue;
-    }
-    const summary = summarizeToolTextOutput(output);
-    return summary ? { content: summary } : undefined;
-  }
-
-  return undefined;
+  const text = extractToolResultText(value);
+  const summary = text ? summarizeToolTextOutput(text) : null;
+  return summary ? { content: summary } : undefined;
 }
 
 function projectAcpContent(value: unknown): Record<string, unknown> | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-
-  const text = value
-    .map((entryValue) => {
-      const entry = asRecord(entryValue);
-      const content = asRecord(entry?.content);
-      return entry?.type === "content" && content?.type === "text"
-        ? asTrimmedString(content.text)
-        : null;
-    })
-    .filter((entry): entry is string => entry !== null)
-    .join("\n");
-  const summary = summarizeToolTextOutput(text);
+  const text = extractToolContentText(value);
+  const summary = text ? summarizeToolTextOutput(text) : null;
   return summary ? { content: summary } : undefined;
 }
 
@@ -352,7 +299,13 @@ export function projectActivityPayload(
     projectedData.kind = data.kind;
   }
 
-  const rawOutput = projectRawOutput(data.rawOutput) ?? projectAcpContent(data.content);
+  const rawOutput =
+    projectRawOutput(data.rawOutput) ??
+    projectRawOutput(data.result) ??
+    projectRawOutput(asRecord(data.state)?.output) ??
+    projectRawOutput(asRecord(data.state)?.error) ??
+    projectRawOutput(asRecord(data.error)?.message) ??
+    projectAcpContent(data.content);
   if (rawOutput) {
     projectedData.rawOutput = rawOutput;
   }

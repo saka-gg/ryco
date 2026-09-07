@@ -1430,6 +1430,32 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.exitCode).toBe(0);
   });
 
+  it.each([
+    ["ACP string", { rawOutput: "Review complete" }, "Review complete"],
+    [
+      "Claude",
+      { result: { type: "tool_result", content: [{ type: "text", text: "Full report" }] } },
+      "Full report",
+    ],
+    ["Copilot", { result: { detailedContent: "Full report", content: "Summary" } }, "Full report"],
+    ["OpenCode", { state: { status: "completed", output: "Full report" } }, "Full report"],
+    ["OpenCode failure", { state: { status: "error", error: "Command failed" } }, "Command failed"],
+    ["ACP structured", { rawOutput: { structuredContent: { ok: true } } }, '{\n  "ok": true\n}'],
+  ])("retains %s output after persisted activities are reconstructed", (_name, data, output) => {
+    const [entry] = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "provider-result",
+          kind: "tool.completed",
+          summary: "Tool",
+          payload: { itemType: "dynamic_tool_call", data },
+        }),
+      ],
+      undefined,
+    );
+    expect(entry?.output).toBe(output);
+  });
+
   it("populates output from ACP rawOutput.stdout when no Codex item is present", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

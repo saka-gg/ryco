@@ -5,15 +5,14 @@
  *
  * Visualization rules:
  * - Stable spawn order: activity and usage updates never reshuffle the roster.
- * - Rows are flat status lines — no expansion, no per-agent tool feeds. The
- *   row answers "who / what phase / how much"; agents with a transcript
- *   deep-link into their workspace transcript tab instead of unfolding.
+ * - Rows open an ordered agent activity feed inside the same Agents surface.
  * - Workflow expansion is presentation state keyed by workflow id; lifecycle
  *   changes cannot move or implicitly collapse the group.
  * - Static status dots, DOM-write elapsed timers, plain token counters.
  */
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import {
+  ArrowLeftIcon,
   BotIcon,
   BracesIcon,
   CheckIcon,
@@ -27,6 +26,8 @@ import { createContext, use, useEffect, useMemo, useRef, useState, type ReactNod
 import { readEnvironmentApi } from "../environmentApi";
 import {
   assignSubagentIdentities,
+  canonicalSubagentIdentityKey,
+  type ThreadSubagentView,
   formatSubagentModelLabel,
   formatSubagentTokenCount,
   subagentRoleDuplicatesLabel,
@@ -36,26 +37,23 @@ import {
   type SubagentIdentity,
 } from "../threadWorkspaceViewModel";
 import { cn } from "~/lib/utils";
+import { AgentActivityTimeline } from "./AgentActivityTimeline";
+import ChatMarkdown from "./ChatMarkdown";
 import { SubagentAvatar } from "./sidebar/SubagentAvatar";
 import { ScrollArea } from "./ui/scroll-area";
 
-/**
- * In-flight states all present as Working (one steady state: detail belongs
- * in the activity sub-line, and a stalled/waiting/queued subagent is still
- * the fleet doing its job, not a user problem). Only settled states
- * differentiate.
- */
+/** Provider phases remain distinct, including resumable idle agents. */
 const STATUS_VISUALS: Record<RuntimeSubagent["status"], { dotClass: string; label: string }> = {
-  pending: { dotClass: "bg-info", label: "Working" },
-  running: { dotClass: "bg-info", label: "Working" },
-  waiting: { dotClass: "bg-info", label: "Working" },
+  pending: { dotClass: "bg-info", label: "Queued" },
+  running: { dotClass: "bg-info", label: "Running" },
+  waiting: { dotClass: "bg-info", label: "Waiting" },
   // Idle reads as settled (muted, not sky): a resting Codex child looks done
   // unless resumed.
   idle: { dotClass: "bg-muted-foreground/50", label: "Idle · resumable" },
   completed: { dotClass: "bg-success", label: "Completed" },
   failed: { dotClass: "bg-destructive", label: "Failed" },
   cancelled: { dotClass: "bg-muted-foreground/60", label: "Stopped" },
-  interrupted: { dotClass: "bg-muted-foreground/60", label: "Stopped" },
+  interrupted: { dotClass: "bg-muted-foreground/60", label: "Interrupted" },
 };
 
 interface AgentsPanelIdentityContextValue {
@@ -273,6 +271,7 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
       </span>
       <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
         <span className="inline-flex items-center gap-1">
+          <span>{visuals.label}</span>
           <AgentElapsed agent={agent} />
           {agent.status === "completed" ? (
             <CheckIcon aria-hidden className="size-3 text-success" />
@@ -724,12 +723,20 @@ export function AgentsPanel({
   environmentId = null,
   threadId = null,
   onOpenAgent = null,
+  subagents = [],
+  selectedAgentId = null,
+  onBack,
 }: {
+  subagents?: ReadonlyArray<ThreadSubagentView>;
+  selectedAgentId?: string | null;
+  onBack?: () => void;
   model: AgentPanelModel;
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
   onOpenAgent?: ((agentId: string) => void) | null;
 }) {
+  const [localSelection, setLocalSelection] = useState<string | null>(null);
+  useEffect(() => setLocalSelection(null), [threadId]);
   const identityContext = useMemo<AgentsPanelIdentityContextValue>(() => {
     const agentsById = new Map<string, RuntimeSubagent>();
     for (const group of model.workflows) {
@@ -745,9 +752,97 @@ export function AgentsPanel({
           taskLabel: agent.title,
         })),
       ),
-      onOpenAgent,
+      onOpenAgent: onOpenAgent ?? setLocalSelection,
     };
   }, [model, onOpenAgent]);
+
+  const selection = selectedAgentId ?? localSelection;
+  const selected = selection
+    ? [
+        ...model.directAgents,
+        ...model.workflows.flatMap((group) => [group.workflow, ...workflowMembers(group)]),
+      ].find(
+        (agent) =>
+          canonicalSubagentIdentityKey(agent.id) === canonicalSubagentIdentityKey(selection),
+      )
+    : undefined;
+  if (selected) {
+    const transcript = subagents.find(
+      (agent) =>
+        canonicalSubagentIdentityKey(agent.key) === canonicalSubagentIdentityKey(selected.id),
+    );
+    const identity = identityContext.identities.get(selected.id);
+    return (
+      <div className="flex h-full min-h-0 flex-col" data-agent-detail>
+        <header className="space-y-2 border-b border-border/60 px-3 py-3">
+          <button
+            type="button"
+            onClick={() => {
+              setLocalSelection(null);
+              onBack?.();
+            }}
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeftIcon aria-hidden className="size-3.5" />
+            All agents
+          </button>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="truncate text-sm font-semibold">
+              {identity?.codename ?? selected.role ?? selected.title}
+            </h3>
+            <span className="flex shrink-0 items-center gap-1.5 text-xs">
+              <StatusDot status={selected.status} />
+              {STATUS_VISUALS[selected.status].label}
+            </span>
+          </div>
+          <p className="break-words text-xs leading-relaxed text-muted-foreground">
+            {selected.title}
+          </p>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              {selected.model
+                ? formatSubagentModelLabel(selected.model, selected.effort)
+                : "Model not reported"}
+            </span>
+            <AgentElapsed agent={selected} />
+            {selected.usage?.totalTokens !== undefined ? (
+              <span>{formatSubagentTokenCount(selected.usage.totalTokens)} tokens</span>
+            ) : null}
+          </div>
+          <p className="text-[10px] text-muted-foreground/70">
+            Last reported activity{" "}
+            <time dateTime={selected.updatedAt}>
+              {new Date(selected.updatedAt).toLocaleTimeString()}
+            </time>
+          </p>
+        </header>
+        <ScrollArea className="min-h-0 flex-1">
+          {selected.error ? (
+            <p
+              role="status"
+              className="m-3 whitespace-pre-wrap break-words text-xs text-destructive"
+            >
+              {selected.error}
+            </p>
+          ) : null}
+          <AgentActivityTimeline
+            subagent={transcript ?? { messages: [], entries: [] }}
+            running={selected.status === "running" || selected.status === "waiting"}
+          />
+          {!transcript && selected.progress ? (
+            <p className="px-3 pb-3 text-xs text-muted-foreground">{selected.progress}</p>
+          ) : null}
+          {selected.result &&
+          !transcript?.messages.some((message) => message.text === selected.result) ? (
+            <div className="border-t border-border/40 p-3 text-sm">
+              <p className="mb-2 text-xs font-medium text-muted-foreground">Result summary</p>
+              <ChatMarkdown text={selected.result} cwd={undefined} isStreaming={false} />
+            </div>
+          ) : null}
+        </ScrollArea>
+      </div>
+    );
+  }
 
   if (!model.hasAgents) {
     return (
@@ -793,7 +888,8 @@ export function AgentsPanel({
           <span className="flex items-center gap-2">
             {model.runningCount + model.waitingCount > 0 ? (
               <span className="text-info-foreground">
-                ● {model.runningCount + model.waitingCount} working
+                ● {model.runningCount} active
+                {model.waitingCount > 0 ? ` · ${model.waitingCount} waiting` : ""}
               </span>
             ) : null}
             {model.idleCount > 0 ? <span>{model.idleCount} idle</span> : null}

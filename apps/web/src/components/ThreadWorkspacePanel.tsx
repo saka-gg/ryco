@@ -856,9 +856,13 @@ export default function ThreadWorkspacePanel(props: {
     [activeThread?.activities, activeThread?.latestTurn?.state, agentSessionLive],
   );
   const agentKey =
-    search.workspaceTab === "agent" && search.workspaceAgentKey ? search.workspaceAgentKey : null;
+    (search.workspaceTab === "agent" || search.workspaceTab === "agents") &&
+    search.workspaceAgentKey
+      ? search.workspaceAgentKey
+      : null;
   const activeAgent = useMemo(() => findThreadSubagent(subagents, agentKey), [agentKey, subagents]);
-  const activeMode = getRightPanelMode(search) ?? props.panelMode;
+  const requestedMode = getRightPanelMode(search) ?? props.panelMode;
+  const activeMode = !isPhoneSurface && requestedMode === "agent" ? "agents" : requestedMode;
   // Shared by the Agents workspace tab and the launcher badge; pure fold,
   // memoized by activity-list identity.
   const agentPanelModel = useMemo(
@@ -891,6 +895,7 @@ export default function ThreadWorkspacePanel(props: {
       activeAgentKey: agentKey,
       openedAgentKeys: props.openedAgentKeys,
       openedPanelModes,
+      groupAgents: !isPhoneSurface,
     });
     // The web phone tier is frozen; native mobile owns future phone surfaces.
     return isPhoneSurface
@@ -933,6 +938,12 @@ export default function ThreadWorkspacePanel(props: {
     [navigate, params.draftId, routeThreadRef],
   );
 
+  useEffect(() => {
+    if (!isPhoneSurface && requestedMode === "agent" && agentKey) {
+      navigateSearch((previous) => buildOpenAgentsSearch(previous, agentKey));
+    }
+  }, [isPhoneSurface, requestedMode, agentKey, navigateSearch]);
+
   const selectTab = useCallback(
     (tab: WorkspaceTab) => {
       if (tab.mode === "review") {
@@ -973,9 +984,13 @@ export default function ThreadWorkspacePanel(props: {
       const agentKey = runtimeAgentId.startsWith("subagent:")
         ? runtimeAgentId
         : `subagent:${runtimeAgentId}`;
-      navigateSearch((previous) => buildOpenAgentSearch(previous, agentKey));
+      navigateSearch((previous) =>
+        isPhoneSurface
+          ? buildOpenAgentSearch(previous, agentKey)
+          : buildOpenAgentsSearch(previous, agentKey),
+      );
     },
-    [navigateSearch],
+    [isPhoneSurface, navigateSearch],
   );
   const closeTab = useCallback(
     (tab: WorkspaceTab) => {
@@ -1225,6 +1240,9 @@ export default function ThreadWorkspacePanel(props: {
             environmentId={workspaceThreadRef?.environmentId ?? null}
             threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
             onOpenAgent={openRuntimeAgent}
+            subagents={subagents}
+            selectedAgentId={agentKey}
+            onBack={() => navigateSearch((previous) => buildOpenAgentsSearch(previous))}
           />
         ) : activeMode === "agent" ? (
           <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />

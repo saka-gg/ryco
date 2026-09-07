@@ -918,6 +918,74 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("preserves child command payloads and ownership", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime, session } = yield* startLifecycleRuntime();
+      const first = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId("child-command"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: new Date().toISOString(),
+        method: "collabAgent/item",
+        threadId: session.threadId,
+        payload: {
+          agentThreadId: "child",
+          lifecycle: "item/completed",
+          item: {
+            id: "cmd",
+            type: "commandExecution",
+            command: "cat README.md",
+            aggregatedOutput: "Documentation",
+            status: "completed",
+          },
+        },
+      });
+      const result = yield* Fiber.join(first);
+      assert.equal(result._tag, "Some");
+      if (result._tag !== "Some" || result.value.type !== "item.completed")
+        return assert.fail("Expected child tool completion");
+      assert.equal(result.value.payload.agentId, "child");
+      assert.equal(result.value.itemId, "child:cmd");
+      assert.deepEqual(result.value.payload.data, {
+        item: {
+          id: "cmd",
+          type: "commandExecution",
+          command: "cat README.md",
+          aggregatedOutput: "Documentation",
+          status: "completed",
+        },
+      });
+    }),
+  );
+
+  it.effect("routes a completed child message to its own transcript", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime, session } = yield* startLifecycleRuntime();
+      const first = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId("child-message"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: new Date().toISOString(),
+        method: "collabAgent/item",
+        threadId: session.threadId,
+        payload: {
+          agentThreadId: "child",
+          lifecycle: "item/completed",
+          item: { id: "message", type: "agentMessage", text: "Detailed child findings" },
+        },
+      });
+      const result = yield* Fiber.join(first);
+      assert.equal(result._tag, "Some");
+      if (result._tag !== "Some" || result.value.type !== "subagent.message.delta")
+        return assert.fail("Expected a child message");
+      assert.equal(result.value.payload.subagentId, "child");
+      assert.equal(result.value.payload.delta, "Detailed child findings");
+      assert.equal(result.value.payload.providerMessageId, "message");
+    }),
+  );
+
   it.effect("maps completed agent message items to canonical item.completed events", () =>
     Effect.gen(function* () {
       const { adapter, runtime, session } = yield* startLifecycleRuntime();

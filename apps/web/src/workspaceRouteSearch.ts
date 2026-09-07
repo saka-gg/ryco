@@ -290,6 +290,7 @@ export function buildOpenSimulatorSearch<T extends Record<string, unknown>>(
 
 export function buildOpenAgentsSearch<T extends Record<string, unknown>>(
   params: T,
+  agentKey?: string,
 ): Omit<
   T,
   | "diff"
@@ -308,7 +309,7 @@ export function buildOpenAgentsSearch<T extends Record<string, unknown>>(
     ...stripWorkspacePanelSearchParams(params),
     workspaceOpen: "1",
     workspaceTab: "agents",
-    workspaceAgentKey: undefined,
+    workspaceAgentKey: agentKey,
     diff: undefined,
     diffTurnId: undefined,
     diffFilePath: undefined,
@@ -379,7 +380,9 @@ export function parseWorkspaceRouteSearch(search: Record<string, unknown>): Work
   }
 
   const workspaceAgentKey =
-    workspaceTab === "agent" ? normalizeSearchString(search.workspaceAgentKey) : undefined;
+    workspaceTab === "agent" || workspaceTab === "agents"
+      ? normalizeSearchString(search.workspaceAgentKey)
+      : undefined;
   if (workspaceTab === "agent" && !workspaceAgentKey) {
     return {};
   }

@@ -77,6 +77,9 @@ export function parseRightPanelRouteSearch(search: Record<string, unknown>): Rig
       ...messageSearch,
       workspaceOpen: "1",
       workspaceTab: "agents",
+      ...(workspaceSearch.workspaceAgentKey
+        ? { workspaceAgentKey: workspaceSearch.workspaceAgentKey }
+        : {}),
     };
   }
 
