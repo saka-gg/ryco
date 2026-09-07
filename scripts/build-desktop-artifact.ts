@@ -976,6 +976,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      // A renamed Electron bundle's linker signature does not bind Ryco's Info.plist.
+      // Even non-notarized builds need a complete signature for macOS TCC attribution.
+      ...(!signed ? { identity: "-", hardenedRuntime: false } : {}),
+      strictVerify: true,
+      binaries: [
+        "Contents/Resources/ryco-computer-use-helper",
+        "Contents/Resources/ryco-desktop-security-helper",
+      ],
     };
     if (macUnsignedInstallAssets) {
       buildConfig.dmg = {

@@ -18,8 +18,10 @@ export class ComputerPermissionMonitor {
   };
   private inFlight: Promise<NativePermissionSnapshot> | null = null;
   private readonly probe: () => Promise<unknown>;
-  constructor(probe: () => Promise<unknown>) {
+  private readonly diagnoseDenial: (() => Promise<string | null>) | undefined;
+  constructor(probe: () => Promise<unknown>, diagnoseDenial?: () => Promise<string | null>) {
     this.probe = probe;
+    this.diagnoseDenial = diagnoseDenial;
   }
   state(): NativePermissionSnapshot {
     return this.current;
@@ -47,15 +49,20 @@ export class ComputerPermissionMonitor {
         !statuses.has(screenRecording)
       )
         throw new Error("Unsupported permission response");
+      const diagnostic =
+        accessibility === "denied" || screenRecording === "denied"
+          ? await this.diagnoseDenial?.().catch(() => null)
+          : null;
       this.current = {
         accessibility,
         screenRecording,
         helperAvailable: true,
         checkedAt: new Date().toISOString(),
         error:
-          accessibility === "unknown" || screenRecording === "unknown"
+          diagnostic ??
+          (accessibility === "unknown" || screenRecording === "unknown"
             ? "The native helper could not determine a permission. Check this build in system settings and retry."
-            : null,
+            : null),
       };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | null)?.code;

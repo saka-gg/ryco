@@ -447,6 +447,44 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(config.npmRebuild, false);
     }),
   );
+  it.effect(
+    "signs non-notarized macOS bundles locally and explicitly includes native helpers",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* createBuildConfig(
+          "mac",
+          "dmg",
+          "0.1.1",
+          false,
+          false,
+          undefined,
+          undefined,
+        );
+        assert.deepStrictEqual(config.mac, {
+          target: ["dmg", "zip"],
+          icon: "icon.icns",
+          category: "public.app-category.developer-tools",
+          identity: "-",
+          hardenedRuntime: false,
+          strictVerify: true,
+          binaries: [
+            "Contents/Resources/ryco-computer-use-helper",
+            "Contents/Resources/ryco-desktop-security-helper",
+          ],
+        });
+        const signed = yield* createBuildConfig(
+          "mac",
+          "zip",
+          "0.1.1",
+          true,
+          false,
+          undefined,
+          undefined,
+        );
+        assert.equal((signed.mac as Record<string, unknown>).identity, undefined);
+        assert.equal((signed.mac as Record<string, unknown>).hardenedRuntime, undefined);
+      }),
+  );
 
   it.effect("uses electron-builder 26 signtoolOptions for certificate-based Windows signing", () =>
     Effect.gen(function* () {

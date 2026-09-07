@@ -42,3 +42,30 @@ it("rejects malformed and incompatible permission replies", async () => {
     expect((await monitor.refresh()).helperAvailable).toBe(false);
   }
 });
+it("explains a denied helper without replacing its real permission result", async () => {
+  const probe = vi.fn(async () => hello("denied"));
+  const diagnose = vi.fn(async () => "Invalid signature");
+  const monitor = new ComputerPermissionMonitor(probe, diagnose);
+  expect(await monitor.refresh()).toMatchObject({
+    accessibility: "denied",
+    screenRecording: "denied",
+    helperAvailable: true,
+    error: "Invalid signature",
+  });
+  probe.mockResolvedValue(hello("granted"));
+  expect(await monitor.refresh()).toMatchObject({ accessibility: "granted", error: null });
+  expect(diagnose).toHaveBeenCalledOnce();
+});
+it("keeps valid permission results when optional diagnostics fail", async () => {
+  const monitor = new ComputerPermissionMonitor(
+    async () => hello("denied"),
+    async () => {
+      throw new Error("diagnostic unavailable");
+    },
+  );
+  expect(await monitor.refresh()).toMatchObject({
+    accessibility: "denied",
+    helperAvailable: true,
+    error: null,
+  });
+});

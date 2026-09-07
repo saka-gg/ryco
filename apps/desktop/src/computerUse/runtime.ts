@@ -18,6 +18,7 @@ import { Schema } from "effect";
 import { ComputerPolicyController, DEFAULT_COMPUTER_POLICY } from "./policy.ts";
 import { ComputerNativeHelper } from "./helper.ts";
 import { ComputerPermissionMonitor } from "./permissions.ts";
+import { createMacPermissionDiagnostic } from "./macPermissionDiagnostic.ts";
 import { NativeComputerDriver, record } from "./native.ts";
 import { BrowserComputerDriver, type BrowserTransport } from "./browser.ts";
 import { EmbeddedComputerBrowser } from "./embeddedBrowser.ts";
@@ -87,7 +88,12 @@ export class DesktopComputerUseRuntime {
       new ComputerNativeHelper(options.helperPath, join(options.stateDir, "computer-use-native")),
       marker >= 0 ? exe.slice(0, marker + 4) : exe,
     );
-    this.permissions = new ComputerPermissionMonitor(() => this.native.helper.probePermissions());
+    this.permissions = new ComputerPermissionMonitor(
+      () => this.native.helper.probePermissions(),
+      process.platform === "darwin" && app.isPackaged && marker >= 0
+        ? createMacPermissionDiagnostic(exe.slice(0, marker + 4), options.helperPath)
+        : undefined,
+    );
     this.permissionAppName =
       marker >= 0 ? basename(exe.slice(0, marker + 4), ".app") : app.getName();
     this.transports.set("ryco", this.embedded);
