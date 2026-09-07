@@ -25,6 +25,7 @@ const SETTINGS_SCOPE_BY_SECTION = {
   providers: "node",
   "opinionated-plugins": "node",
   "mcp-servers": "node",
+  "computer-use": "device",
   appearance: "browser",
   keybindings: "node",
   "source-control": "node",
@@ -66,6 +67,10 @@ export function settingsScopeLabel(
  * questions: this one is "does the section exist in this build", which has not
  * changed, and that one is "does the hosted client route here", which has.
  */
+export const DESKTOP_ONLY_SETTINGS_SECTIONS: ReadonlySet<SettingsSectionId> = new Set([
+  "computer-use",
+]);
+
 const HOSTED_ONLY_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["account"]);
 
 const HOSTED_OWNER_SECTIONS = new Set<SettingsSectionId>([
@@ -74,6 +79,7 @@ const HOSTED_OWNER_SECTIONS = new Set<SettingsSectionId>([
   "providers",
   "opinionated-plugins",
   "mcp-servers",
+  "computer-use",
   "keybindings",
   "source-control",
   // Node-scoped and owner-only, like the rest of this set. In hosted mode the
@@ -86,7 +92,12 @@ const HOSTED_OWNER_SECTIONS = new Set<SettingsSectionId>([
   "statistics",
 ]);
 
-export function settingsSectionAvailable(section: SettingsSectionId, hosted: boolean): boolean {
+export function settingsSectionAvailable(
+  section: SettingsSectionId,
+  hosted: boolean,
+  desktop = false,
+): boolean {
+  if (DESKTOP_ONLY_SETTINGS_SECTIONS.has(section) && !desktop) return false;
   return hosted || !HOSTED_ONLY_SECTIONS.has(section);
 }
 
@@ -144,10 +155,14 @@ export function hostedSettingsRoleSnapshot(
  */
 export function settingsSectionReachable(
   section: SettingsSectionId,
-  { hosted, role }: { readonly hosted: boolean; readonly role: HostedSettingsRole },
+  {
+    hosted,
+    role,
+    desktop = false,
+  }: { readonly hosted: boolean; readonly role: HostedSettingsRole; readonly desktop?: boolean },
 ): boolean {
   return (
-    settingsSectionAvailable(section, hosted) &&
+    settingsSectionAvailable(section, hosted, desktop) &&
     (!hosted || hostedSettingsSectionAllowed(section, role))
   );
 }

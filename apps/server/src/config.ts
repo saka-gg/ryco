@@ -7,6 +7,7 @@
  * @module ServerConfig
  */
 import path from "node:path";
+import type { ComputerUseBridgeConfig } from "@ryco/contracts";
 
 import { Effect, FileSystem, Layer, LogLevel, Path, Schema, Context } from "effect";
 import { canonicalizeHubOrigin, normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
@@ -252,6 +253,7 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly desktopBootstrapToken: string | undefined;
   /** Process-private credential for Desktop main's loopback control channel. */
   readonly desktopControlToken?: string | undefined;
+  readonly computerUseBridge?: ComputerUseBridgeConfig | undefined;
   readonly autoBootstrapProjectFromCwd: boolean;
   readonly logWebSocketEvents: boolean;
   readonly tailscaleServeEnabled: boolean;

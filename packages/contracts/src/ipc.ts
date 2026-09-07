@@ -19,6 +19,12 @@ import type {
 } from "./rpc.ts";
 import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
 import type {
+  ComputerUseState,
+  ComputerUsePolicy,
+  ComputerUsePairing,
+  ComputerBrowser,
+} from "./computerUse.ts";
+import type {
   VcsSwitchRefInput,
   VcsSwitchRefResult,
   VcsCreateRefInput,
@@ -546,6 +552,17 @@ export type DesktopHubOriginValidation =
     };
 
 export interface DesktopBridge {
+  computerUse?: {
+    getState(): Promise<ComputerUseState>;
+    refresh(query?: string): Promise<ComputerUseState>;
+    setPolicy(policy: ComputerUsePolicy): Promise<ComputerUseState>;
+    requestPermission(kind: "accessibility" | "screenRecording"): Promise<void>;
+    pairBrowser(browser: ComputerBrowser): Promise<ComputerUsePairing>;
+    showExtension(): Promise<string>;
+    openBrowserSetup(browser: ComputerBrowser): Promise<void>;
+    stop(): Promise<void>;
+    onState(listener: (state: ComputerUseState) => void): () => void;
+  };
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
   getClientSettings: () => Promise<ClientSettings | null>;

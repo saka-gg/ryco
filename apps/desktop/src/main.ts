@@ -6,6 +6,8 @@ import * as FS from "node:fs";
 import * as OS from "node:os";
 import * as Path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DesktopComputerUseRuntime } from "./computerUse/runtime.ts";
+import { registerComputerUseIpc } from "./computerUse/ipc.ts";
 
 import {
   app,
@@ -350,6 +352,7 @@ type LinuxDesktopNamedApp = Electron.App & {
 };
 
 let mainWindow: BrowserWindow | null = null;
+let computerUseRuntime: DesktopComputerUseRuntime | null = null;
 const desktopAuthorizationBroker = new DesktopAuthorizationCallbackBroker();
 let desktopHostedIdentityCoordinator: DesktopHostedIdentityCoordinator | null = null;
 let desktopHostedIdentityStatus: DesktopHostedIdentityStatus = {
@@ -2478,6 +2481,7 @@ function startBackend(): void {
         desktopBootstrapToken: backendBootstrapToken,
         desktopTelemetryFd: 4,
         desktopControlToken: childControlToken,
+        ...(computerUseRuntime ? { computerUseBridge: computerUseRuntime.backendBinding() } : {}),
         tailscaleServeEnabled: desktopSettings.tailscaleServeEnabled,
         tailscaleServePort: desktopSettings.tailscaleServePort,
         hubConnectorEnabled: desktopSettings.hubConnectorEnabled,
@@ -3663,6 +3667,29 @@ async function bootstrap(): Promise<void> {
   }
 
   registerIpcHandlers();
+  try {
+    computerUseRuntime = new DesktopComputerUseRuntime({
+      stateDir: STATE_DIR,
+      helperPath: Path.join(
+        app.isPackaged ? process.resourcesPath : Path.join(__dirname, "../resources"),
+        `ryco-computer-use-helper${process.platform === "win32" ? ".exe" : ""}`,
+      ),
+      extensionPath: app.isPackaged
+        ? Path.join(process.resourcesPath, "browser-extension")
+        : Path.join(__dirname, "../browser-extension"),
+      getWindow: () => mainWindow,
+      changed: (state) => {
+        if (mainWindow && !mainWindow.isDestroyed())
+          mainWindow.webContents.send("desktop:computer-use:changed", state);
+      },
+    });
+    await computerUseRuntime.start();
+    registerComputerUseIpc(computerUseRuntime, () => mainWindow);
+  } catch {
+    computerUseRuntime?.dispose();
+    computerUseRuntime = null;
+    writeDesktopLogHeader("Computer-use bridge unavailable; continuing without desktop control.");
+  }
   writeDesktopLogHeader("bootstrap ipc handlers registered");
   if (!isDevelopment) {
     ensurePackagedBootstrapWindowOpen("pre-backend-bootstrap");
@@ -3684,6 +3711,7 @@ async function bootstrap(): Promise<void> {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  computerUseRuntime?.dispose();
   updateInstallInFlight = false;
   writeDesktopLogHeader("before-quit received");
   clearUpdatePollTimer();

@@ -138,7 +138,7 @@ export interface AgentControlMcpToolResult {
     | {
         readonly type: "image";
         readonly data: string;
-        readonly mimeType: "image/png";
+        readonly mimeType: "image/png" | "image/jpeg";
         /** Type-only compatibility with existing text-result consumers; absent on the wire. */
         readonly text: string;
       }

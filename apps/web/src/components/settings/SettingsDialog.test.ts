@@ -12,9 +12,10 @@ import {
   SETTINGS_DIALOG_SECTION_LABELS,
 } from "./SettingsDialog";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
+import { DESKTOP_ONLY_SETTINGS_SECTIONS } from "./settingsSections.logic";
 
 describe("the phone surface mirrors the desktop dialog's section inventory", () => {
-  it("navigates to exactly the same sections", () => {
+  it("navigates to the same shared sections, excluding desktop-only controls", () => {
     // `PhoneSettingsSurface` keeps its own registry so it can group and order
     // independently, and the desktop dialog is what decides which sections
     // exist. Missing one there makes it unreachable on every phone-tier
@@ -27,7 +28,9 @@ describe("the phone surface mirrors the desktop dialog's section inventory", () 
     // Set equality rather than "every label in this hardcoded array is present":
     // the latter is what let it through.
     expect([...PHONE_SETTINGS_SECTION_IDS].toSorted()).toEqual(
-      [...SETTINGS_DIALOG_SECTION_IDS].toSorted(),
+      SETTINGS_DIALOG_SECTION_IDS.filter(
+        (id) => !DESKTOP_ONLY_SETTINGS_SECTIONS.has(id),
+      ).toSorted(),
     );
   });
 
@@ -50,6 +53,7 @@ describe("hosted settings capabilities", () => {
         ["general", "mixed"],
         ["appearance", "browser"],
         ["connections", "device"],
+        ["computer-use", "device"],
         ["account", "account"],
         ["providers", "node"],
         ["source-control", "node"],

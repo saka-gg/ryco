@@ -571,6 +571,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
 
       assert.deepStrictEqual(config.extraResources, [
+        { from: "apps/desktop/resources/ryco-computer-use-helper", to: "ryco-computer-use-helper" },
+        { from: "apps/desktop/resources/browser-extension", to: "browser-extension" },
+        { from: "apps/desktop/resources/computer-use-licenses", to: "computer-use-licenses" },
         {
           from: "apps/desktop/resources/ryco-desktop-security-helper",
           to: "ryco-desktop-security-helper",

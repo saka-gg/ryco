@@ -73,6 +73,23 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
 }
 
 contextBridge.exposeInMainWorld("desktopBridge", {
+  computerUse: {
+    getState: () => ipcRenderer.invoke("desktop:computer-use:state"),
+    refresh: (query) => ipcRenderer.invoke("desktop:computer-use:refresh", query),
+    setPolicy: (policy) => ipcRenderer.invoke("desktop:computer-use:policy", policy),
+    requestPermission: (kind) => ipcRenderer.invoke("desktop:computer-use:permission", kind),
+    pairBrowser: (browser) => ipcRenderer.invoke("desktop:computer-use:pair", browser),
+    showExtension: () => ipcRenderer.invoke("desktop:computer-use:extension"),
+    openBrowserSetup: (browser) =>
+      ipcRenderer.invoke("desktop:computer-use:browser-setup", browser),
+    stop: () => ipcRenderer.invoke("desktop:computer-use:stop"),
+    onState: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) =>
+        listener(state);
+      ipcRenderer.on("desktop:computer-use:changed", wrapped);
+      return () => ipcRenderer.removeListener("desktop:computer-use:changed", wrapped);
+    },
+  },
   getAppBranding: () => {
     const result = ipcRenderer.sendSync(GET_APP_BRANDING_CHANNEL);
     if (typeof result !== "object" || result === null) {

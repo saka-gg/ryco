@@ -9,7 +9,7 @@
     "dev:bundle": "tsdown --watch",
     "dev:electron": "node scripts/dev-electron.mjs",
     "build": "bun run build:native && tsdown",
-    "build:native": "node scripts/build-native-security-helper.mjs",
+    "build:native": "node scripts/build-native-security-helper.mjs && node scripts/build-computer-use-helper.mjs",
     "start": "node scripts/start-electron.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vp test run --passWithNoTests",

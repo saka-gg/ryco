@@ -68,6 +68,17 @@
       // without risking a stale hit on a real source change.
       "inputs": ["$TURBO_DEFAULT$", "!**/*.md", "!**/*.test.ts", "!**/*.test.tsx", "!**/*.spec.ts"]
     },
+    "@ryco/desktop#build": {
+      "dependsOn": ["^build"],
+      "env": ["RYCO_DESKTOP_ARCH"],
+      "outputs": [
+        "dist-electron/**",
+        "resources/ryco-desktop-security-helper",
+        "resources/ryco-computer-use-helper*",
+        "resources/browser-extension/**",
+        "resources/computer-use-licenses/**"
+      ]
+    },
     "dev": {
       "dependsOn": ["@ryco/contracts#build"],
       "cache": false,

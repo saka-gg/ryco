@@ -54,13 +54,15 @@ export const AGENT_CONTROL_MCP_SERVER_INFO = {
 
 /**
  * The adapter must not inject this server at all when setup fails. Mutation
- * tools are advertised only during an exact active turn and create approval
- * proposals rather than mutating inline.
+ * tools are advertised only during an exact active turn. Ryco state mutations create
+ * approval proposals; desktop control uses its separate local consent policy.
  */
 export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "Ryco Agent Control tools over a private local connection. Read tools inspect Ryco state. " +
   "During this exact active turn, mutation tools may request immutable action plans; every " +
-  "request requires user approval in Ryco and never mutates inline.";
+  "such request requires user approval in Ryco and never mutates inline. " +
+  "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
+  "these tools act directly and require an exact active turn. Respect local denials and verify results.";
 
 export class AgentControlMcpListenerError extends Schema.TaggedError<AgentControlMcpListenerError>()(
   "AgentControlMcpListenerError",
@@ -274,6 +276,10 @@ const makeRequestHandler = (deps: AgentControlMcpListenerDeps) => {
         // revoking the session (or retiring a bound turn) aborts the
         // controller, which interrupts the running tool effect.
         const controller = new AbortController();
+        const onDisconnect = () => {
+          if (!response.writableEnded) controller.abort();
+        };
+        response.once("close", onDisconnect);
         const timeout = setTimeout(() => controller.abort(), AGENT_CONTROL_MCP_REQUEST_TIMEOUT_MS);
         const authority = deps.tools.isWriteTool(toolName)
           ? await Effect.runPromise(deps.registry.getTurnAuthority(session.value.sessionId))
@@ -288,6 +294,7 @@ const makeRequestHandler = (deps: AgentControlMcpListenerDeps) => {
         );
         if (registration._tag === "None") {
           clearTimeout(timeout);
+          response.off("close", onDisconnect);
           endJson(
             response,
             200,
@@ -315,6 +322,7 @@ const makeRequestHandler = (deps: AgentControlMcpListenerDeps) => {
           );
         } finally {
           clearTimeout(timeout);
+          response.off("close", onDisconnect);
           unregister();
         }
         return;
