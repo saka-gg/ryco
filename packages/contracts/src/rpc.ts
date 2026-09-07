@@ -137,6 +137,9 @@ import {
   ContextHandoffRawPayloadChunk,
   ContextHandoffRawPayloadChunkInput,
   FileAttachmentCreateUploadUrlError,
+  ChatAttachmentReadChunkInput,
+  ChatAttachmentReadChunkResult,
+  ChatAttachmentReadError,
   FileAttachmentCreateUploadUrlInput,
   FileAttachmentCreateUploadUrlResult,
   ORCHESTRATION_WS_METHODS,
@@ -284,6 +287,7 @@ export const WS_METHODS = {
 
   // Chat attachment methods
   chatAttachmentsCreateFileUpload: "chatAttachments.createFileUpload",
+  chatAttachmentsReadChunk: "chatAttachments.readChunk",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -1115,6 +1119,12 @@ export const WsChatAttachmentsCreateFileUploadRpc = Rpc.make(
   },
 );
 
+export const WsChatAttachmentsReadChunkRpc = Rpc.make(WS_METHODS.chatAttachmentsReadChunk, {
+  payload: ChatAttachmentReadChunkInput,
+  success: ChatAttachmentReadChunkResult,
+  error: Schema.Union([ChatAttachmentReadError, AuthRpcError]),
+});
+
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   payload: OpenInEditorInput,
   error: Schema.Union([OpenError, AuthRpcError]),
@@ -1728,6 +1738,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsWriteFileRpc,
   WsProjectsStageFileReferenceRpc,
   WsChatAttachmentsCreateFileUploadRpc,
+  WsChatAttachmentsReadChunkRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsSubscribeVcsStatusRpc,

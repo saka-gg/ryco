@@ -1,3 +1,4 @@
+import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../src/assistantAttachments.ts";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -484,10 +485,22 @@ it.live("hands one canonical thread from Codex to Claude to Grok and back to fre
       assertHandoffInput(claudeTurns[0]!.input ?? "", bMessage);
       assertHandoffInput(grokTurns[0]!.input ?? "", cMessage);
       assertHandoffInput(codexTurns[2]!.input ?? "", a2Message);
-      assert.equal(claudeTurns[1]!.input, "B1 ordinary second turn");
-      assert.equal(grokTurns[1]!.input, "C1 ordinary second turn");
-      assert.equal(codexTurns[1]!.input, "A1 ordinary second turn");
-      assert.equal(codexTurns[3]!.input, "A2 ordinary second turn");
+      assert.equal(
+        claudeTurns[1]!.input,
+        `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nB1 ordinary second turn`,
+      );
+      assert.equal(
+        grokTurns[1]!.input,
+        `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nC1 ordinary second turn`,
+      );
+      assert.equal(
+        codexTurns[1]!.input,
+        `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nA1 ordinary second turn`,
+      );
+      assert.equal(
+        codexTurns[3]!.input,
+        `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nA2 ordinary second turn`,
+      );
     }),
   ),
 );

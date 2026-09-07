@@ -19,6 +19,8 @@
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
 import { withComputerUseTools } from "../Mcp/computerTools.ts";
+import { withAssistantAttachmentTools } from "../Mcp/attachmentTools.ts";
+import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import * as Semaphore from "effect/Semaphore";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -55,6 +57,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
   const config = yield* Effect.serviceOption(ServerConfig);
+  const engine = yield* Effect.serviceOption(OrchestrationEngineService);
 
   const baseTools = makeAgentControlMcpTools({
     policy,
@@ -71,7 +74,18 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     ...(Option.isSome(projectPlans) ? { projectPlans: projectPlans.value } : {}),
     getTurnAuthority: registry.getTurnAuthority,
   });
-  const tools = withComputerUseTools(baseTools, {
+  const fileTools =
+    Option.isSome(config) && Option.isSome(workspaceAccess) && Option.isSome(engine)
+      ? yield* withAssistantAttachmentTools(baseTools, {
+          attachmentsDir: config.value.attachmentsDir,
+          registry,
+          policy,
+          projections,
+          workspaceAccess: workspaceAccess.value,
+          engine: engine.value,
+        })
+      : baseTools;
+  const tools = withComputerUseTools(fileTools, {
     ...(Option.isSome(config) && config.value.computerUseBridge
       ? { config: config.value.computerUseBridge }
       : {}),

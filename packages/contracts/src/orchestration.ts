@@ -545,6 +545,29 @@ export const ChatFileAttachment = Schema.Struct({
 });
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 
+export const CHAT_ATTACHMENT_READ_CHUNK_BYTES = 256 * 1024;
+export const ChatAttachmentReadChunkInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  attachmentId: ChatAttachmentId,
+  offset: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+});
+export type ChatAttachmentReadChunkInput = typeof ChatAttachmentReadChunkInput.Type;
+export const ChatAttachmentReadChunkResult = Schema.Struct({
+  dataBase64: Schema.String.check(
+    Schema.isMaxLength(4 * Math.ceil(CHAT_ATTACHMENT_READ_CHUNK_BYTES / 3)),
+  ),
+  offset: NonNegativeInt,
+  totalBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+});
+export type ChatAttachmentReadChunkResult = typeof ChatAttachmentReadChunkResult.Type;
+export class ChatAttachmentReadError extends Schema.TaggedError<ChatAttachmentReadError>()(
+  "ChatAttachmentReadError",
+  {
+    message: Schema.String,
+  },
+) {}
+
 export const FileAttachmentUploadToken = TrimmedNonEmptyString.check(
   Schema.isMaxLength(FILE_ATTACHMENT_UPLOAD_TOKEN_MAX_CHARS),
 );
@@ -1619,6 +1642,8 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   messageId: MessageId,
+  text: Schema.optional(Schema.String),
+  attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });

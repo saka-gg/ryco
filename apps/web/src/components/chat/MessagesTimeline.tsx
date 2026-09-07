@@ -1,3 +1,4 @@
+import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
   type EnvironmentId,
   type MessageId,
@@ -28,7 +29,7 @@ import {
   type AgentPanelModel,
 } from "../../threadWorkspaceViewModel";
 import { glassSurfaceClassName } from "../mobile/GlassSurface";
-import { type TurnDiffSummary, isChatFileAttachment, isChatImageAttachment } from "../../types";
+import { type TurnDiffSummary } from "../../types";
 import { summarizeTurnDiffStats } from "../../lib/turnDiffTree";
 import ChatMarkdown from "../ChatMarkdown";
 import {
@@ -51,8 +52,8 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
-import { AttachmentFileRow, AttachmentVideo, isVideoAttachmentMimeType } from "./AttachmentVideo";
-import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
+import { MessageAttachments } from "./MessageAttachments";
+import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { VscodeEntryIcon } from "./VscodeEntryIcon";
@@ -1009,8 +1010,6 @@ function TimelineMinimap({
 // TimelineRowContent — the actual row component
 // ---------------------------------------------------------------------------
 
-type TimelineEntry = ReturnType<typeof deriveTimelineEntries>[number];
-type TimelineMessage = Extract<TimelineEntry, { kind: "message" }>["message"];
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
 type TimelineRow = MessagesTimelineRow;
 
@@ -1125,53 +1124,14 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   className="relative rounded-2xl rounded-br-sm bg-foreground/8 px-3 py-2 shadow-md/5 transition-[background-color,box-shadow] duration-200 group-hover:bg-foreground/10 group-hover:shadow-lg/8"
                   {...messageLongPress}
                 >
-                  {userImages.length > 0 && (
-                    <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
-                      {userImages.map(
-                        (image: NonNullable<TimelineMessage["attachments"]>[number]) => (
-                          <div
-                            key={image.id}
-                            className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
-                          >
-                            {isChatImageAttachment(image) && image.previewUrl ? (
-                              <button
-                                type="button"
-                                className="h-full w-full cursor-zoom-in"
-                                aria-label={`Preview ${image.name}`}
-                                onClick={() => {
-                                  const preview = buildExpandedImagePreview(
-                                    userImages.filter(isChatImageAttachment),
-                                    image.id,
-                                  );
-                                  if (!preview) return;
-                                  ctx.onImageExpand(preview);
-                                }}
-                              >
-                                <img
-                                  src={image.previewUrl}
-                                  alt={image.name}
-                                  {...(image.width !== undefined && image.height !== undefined
-                                    ? { width: image.width, height: image.height }
-                                    : {})}
-                                  className="block h-auto max-h-[220px] w-full object-cover"
-                                />
-                              </button>
-                            ) : isChatFileAttachment(image) ? (
-                              image.previewUrl && isVideoAttachmentMimeType(image.mimeType) ? (
-                                <AttachmentVideo attachment={image} />
-                              ) : (
-                                <AttachmentFileRow attachment={image} />
-                              )
-                            ) : (
-                              <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-[11px] text-muted-foreground/70">
-                                <span>{image.name ?? "Attachment"}</span>
-                              </div>
-                            )}
-                          </div>
-                        ),
-                      )}
-                    </div>
-                  )}
+                  <MessageAttachments
+                    attachments={userImages}
+                    variant="user"
+                    onImageExpand={ctx.onImageExpand}
+                    environmentId={ctx.activeThreadEnvironmentId}
+                    threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
+                    messageId={row.message.id}
+                  />
                   {(displayedUserMessage.visibleText.trim().length > 0 ||
                     terminalContexts.length > 0) && (
                     <UserMessageBody
@@ -1220,7 +1180,9 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
       {row.kind === "message" &&
         row.message.role === "assistant" &&
         (() => {
-          const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+          const messageText =
+            row.message.text ||
+            (row.message.streaming || row.message.attachments?.length ? "" : "(empty response)");
           const assistantResponseStillInProgress = resolveAssistantRowInProgress(row, ctx);
           const assistantCopyState = resolveAssistantRowCopyState(row, ctx);
           return (
@@ -1233,6 +1195,13 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   isStreaming={assistantResponseStillInProgress}
                   skills={ctx.skills}
                   searchHighlight={messageSearchHighlight}
+                />
+                <MessageAttachments
+                  attachments={row.message.attachments ?? []}
+                  onImageExpand={ctx.onImageExpand}
+                  environmentId={ctx.activeThreadEnvironmentId}
+                  threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
+                  messageId={row.message.id}
                 />
                 {!assistantResponseStillInProgress && (
                   <AssistantChangedFilesSection

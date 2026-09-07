@@ -62,7 +62,9 @@ export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "During this exact active turn, mutation tools may request immutable action plans; every " +
   "such request requires user approval in Ryco and never mutates inline. " +
   "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
-  "these tools act directly and require an exact active turn. Respect local denials and verify results.";
+  "these tools act directly and require an exact active turn. " +
+  "When available, ryco_attach_file directly delivers a workspace file to this thread's timeline under exact active-turn authority. " +
+  "Respect local denials and verify results.";
 
 export class AgentControlMcpListenerError extends Schema.TaggedError<AgentControlMcpListenerError>()(
   "AgentControlMcpListenerError",

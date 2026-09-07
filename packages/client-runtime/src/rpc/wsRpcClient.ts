@@ -152,6 +152,7 @@ export interface WsRpcClient {
     readonly transition: RpcUnaryMethod<typeof WS_METHODS.workItemsTransition>;
   };
   readonly chatAttachments: {
+    readonly readChunk: RpcUnaryMethod<typeof WS_METHODS.chatAttachmentsReadChunk>;
     readonly createFileUpload: RpcUnaryMethod<typeof WS_METHODS.chatAttachmentsCreateFileUpload>;
   };
   readonly shell: {
@@ -475,6 +476,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.workItemsTransition](input)),
     },
     chatAttachments: {
+      readChunk: (input) =>
+        transport.request((client) => client[WS_METHODS.chatAttachmentsReadChunk](input)),
       createFileUpload: (input) =>
         transport.request((client) => client[WS_METHODS.chatAttachmentsCreateFileUpload](input)),
     },

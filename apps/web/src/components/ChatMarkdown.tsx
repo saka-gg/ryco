@@ -825,6 +825,13 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
         }
 
         if (isStreaming) {
+          if (codeBlock.className?.split(/\s+/).includes("language-ryco-attachments")) {
+            return (
+              <p className="text-xs text-muted-foreground" role="status">
+                Preparing files…
+              </p>
+            );
+          }
           return (
             <MarkdownCodeBlock code={codeBlock.code}>
               <PlainCodeBlock
