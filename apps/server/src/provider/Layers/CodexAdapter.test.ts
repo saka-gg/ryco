@@ -167,7 +167,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     });
   }
 
-  getGoal = Effect.succeed({ goal: null });
+  getGoal: CodexSessionRuntimeShape["getGoal"] = Effect.succeed({ goal: null });
 
   clearGoal = Effect.succeed({ cleared: true });
 
@@ -1464,6 +1464,65 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         lastReasoningOutputTokens: 0,
         compactsAutomatically: true,
       });
+    }),
+  );
+
+  it.effect("uses native mutation responses and omits the objective on status-only edits", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const native = {
+        threadId: "provider-thread-1",
+        objective: "Ship the migration",
+        status: "complete" as const,
+        tokenBudget: 1000,
+        tokensUsed: 750,
+        timeUsedSeconds: 60,
+        createdAt: 1_787_011_200,
+        updatedAt: 1_787_011_275,
+      };
+      runtime.getGoal = Effect.succeed({ goal: native });
+      const setGoal = vi
+        .spyOn(runtime, "setGoal")
+        .mockImplementation(() => Effect.succeed({ goal: native }));
+      const canonical = yield* adapter.getThreadGoal!(asThreadId("thread-1"));
+      assert.equal(canonical?.tokensUsed, 750);
+      assert.ok(canonical);
+      const result = yield* adapter.setThreadGoal!(asThreadId("thread-1"), {
+        ...canonical,
+        status: "paused",
+        synchronization: {
+          requestId: "pause",
+          state: "pending",
+          action: "set",
+          fields: ["status"],
+        },
+      });
+      assert.equal(result.tokensUsed, 750);
+      assert.equal(result.status, "complete");
+      assert.deepEqual(setGoal.mock.calls[0]?.[0], { status: "paused" });
+      yield* adapter.setThreadGoal!(asThreadId("thread-1"), {
+        ...canonical,
+        status: "active",
+        createdAt: "2026-08-19T00:00:00.000Z",
+        synchronization: {
+          requestId: "replace",
+          state: "pending",
+          action: "set",
+          fields: ["objective", "status"],
+        },
+      });
+      assert.equal(setGoal.mock.calls[1]?.[0].objective, native.objective);
+      yield* adapter.setThreadGoal!(asThreadId("thread-1"), {
+        ...canonical,
+        tokenBudget: 2000,
+        synchronization: {
+          requestId: "budget",
+          state: "pending",
+          action: "set",
+          fields: ["tokenBudget"],
+        },
+      });
+      assert.deepEqual(setGoal.mock.calls[2]?.[0], { tokenBudget: 2000 });
     }),
   );
 

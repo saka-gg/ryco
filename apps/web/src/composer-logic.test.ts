@@ -493,14 +493,23 @@ describe("parseStandaloneComposerSlashCommand", () => {
 });
 
 describe("parseThreadGoalSlashCommand", () => {
+  it.each(["pause", "resume", "clear"])("parses %s as a control", (action) => {
+    expect(parseThreadGoalSlashCommand(`/goal ${action}`)).toEqual({ action });
+    expect(parseThreadGoalSlashCommand(` /GOAL ${action.toUpperCase()} `)).toEqual({ action });
+    expect(parseThreadGoalSlashCommand(`/goal ${action} the migration`)).toEqual({
+      action: "set",
+      objective: `${action} the migration`,
+    });
+  });
   it("returns the trimmed objective", () => {
-    expect(parseThreadGoalSlashCommand(" /goal  Ship a reliable reconnect flow  ")).toBe(
-      "Ship a reliable reconnect flow",
-    );
+    expect(parseThreadGoalSlashCommand(" /goal  Ship a reliable reconnect flow  ")).toEqual({
+      action: "set",
+      objective: "Ship a reliable reconnect flow",
+    });
   });
 
-  it("returns an empty objective for a bare command", () => {
-    expect(parseThreadGoalSlashCommand("/goal")).toBe("");
+  it("shows the current goal for a bare command", () => {
+    expect(parseThreadGoalSlashCommand("/goal")).toEqual({ action: "show" });
   });
 
   it("does not capture ordinary messages", () => {

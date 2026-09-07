@@ -14,6 +14,30 @@ Common reasons:
 - switch to another account when one account hits limits
 - keep one shared Codex history instead of maintaining two separate Codex setups
 
+## Persistent goals
+
+In the web or desktop composer, use `/goal <objective>` to start a durable goal, including
+in a new thread. Use `/goal` to inspect it, `/goal pause` to pause pursuit, `/goal resume` to
+continue, and `/goal clear` to remove it. These controls also appear above the composer.
+Pausing or clearing a goal changes goal pursuit; the normal Stop control interrupts the current turn.
+
+Expand the goal header to set, increase, or remove its token budget. Budgets are optional.
+After reaching a budget, increase or remove it and then resume. Usage is reported by Codex;
+changing a status or budget preserves its accounting, while replacing the objective starts a new goal.
+
+Ryco enables Codex's goals feature for its managed sessions and uses the native app-server
+set/get/clear APIs. Codex owns continuation, completion, blocking, and usage limits. Pending
+changes remain marked as updating until confirmed; failures show an error and a Retry control.
+Ryco reads native state before subsequent turns and checks structural notifications against
+current native state so delayed notifications cannot undo newer changes.
+
+A Codex version supporting the goal APIs is required for native pursuit. Providers without
+native goal integration show a **Goal reminder**: the objective accompanies subsequent
+messages, with no automatic continuation or goal usage tracking.
+
+See the [Codex goal workflow](https://learn.chatgpt.com/use-cases/follow-goals) and
+[app-server goal API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal).
+
 ## I Only Use One Codex Account
 
 Use the default provider.

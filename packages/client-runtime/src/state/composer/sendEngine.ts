@@ -4,6 +4,7 @@ import {
   type CommandId,
   type ComposerSourceControlContext,
   type EnvironmentApi,
+  type ThreadGoalUpdate,
   type MessageId,
   type ModelSelection,
   type ProjectId,
@@ -214,6 +215,7 @@ export interface CommitSendTurnDispatchInput {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly tokenMode: AgentTokenMode;
+  readonly goal?: ThreadGoalUpdate;
   readonly bootstrap: SendTurnBootstrap;
   readonly sourceControlContexts: readonly ComposerSourceControlContext[];
   readonly createdAt: string;
@@ -273,6 +275,7 @@ export async function commitSendTurnDispatch(input: CommitSendTurnDispatchInput)
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
     tokenMode: input.tokenMode,
+    ...(input.goal ? { goal: input.goal } : {}),
     ...(input.bootstrap ? { bootstrap: input.bootstrap } : {}),
     ...(input.sourceControlContexts.length > 0
       ? { sourceControlContexts: input.sourceControlContexts }

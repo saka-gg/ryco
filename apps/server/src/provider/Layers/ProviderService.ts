@@ -1166,11 +1166,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       operation: "ProviderService.setThreadGoal",
       allowRecovery: false,
     });
-    if (!routed.isActive || routed.adapter.setThreadGoal === undefined) {
+    if (!routed.isActive) return yield* new ProviderSessionNotFoundError({ threadId });
+    if (routed.adapter.setThreadGoal === undefined) {
       return false;
     }
-    yield* routed.adapter.setThreadGoal(threadId, goal);
-    return true;
+    return yield* routed.adapter.setThreadGoal(threadId, goal);
+  });
+
+  const getThreadGoal: NonNullable<ProviderServiceShape["getThreadGoal"]> = Effect.fn(
+    "getThreadGoal",
+  )(function* (threadId) {
+    const routed = yield* resolveRoutableSession({
+      threadId,
+      operation: "ProviderService.getThreadGoal",
+      allowRecovery: false,
+    });
+    if (!routed.isActive) return yield* new ProviderSessionNotFoundError({ threadId });
+    if (routed.adapter.getThreadGoal === undefined) return false;
+    return yield* routed.adapter.getThreadGoal(threadId);
   });
 
   const clearThreadGoal: NonNullable<ProviderServiceShape["clearThreadGoal"]> = Effect.fn(
@@ -1181,7 +1194,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       operation: "ProviderService.clearThreadGoal",
       allowRecovery: false,
     });
-    if (!routed.isActive || routed.adapter.clearThreadGoal === undefined) {
+    if (!routed.isActive) return yield* new ProviderSessionNotFoundError({ threadId });
+    if (routed.adapter.clearThreadGoal === undefined) {
       return false;
     }
     yield* routed.adapter.clearThreadGoal(threadId);
@@ -1644,6 +1658,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listStaleSessionBindings,
     sendTurn,
     setThreadGoal,
+    getThreadGoal,
     clearThreadGoal,
     steerTurn,
     interruptTurn,

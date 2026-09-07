@@ -19,6 +19,7 @@ import {
   RuntimeMode,
   AgentTokenMode,
   type ThreadGoalStatus,
+  type ThreadGoalUpdate,
   THREAD_GOAL_OBJECTIVE_MAX_CHARS,
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -2404,8 +2405,12 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, serverThread],
   );
 
+  const startGoalTurnRef = useRef<
+    (goal: NonNullable<SendTurnComposerSnapshot["goal"]>) => Promise<boolean>
+  >(async () => false);
+
   const dispatchThreadGoalUpdate = useCallback(
-    async (update: { readonly objective?: string; readonly status?: ThreadGoalStatus }) => {
+    async (update: ThreadGoalUpdate & { readonly startTurn?: boolean }) => {
       if (!serverThread || !dispatchCapability.allowed) return false;
       const api = readEnvironmentApi(environmentId);
       if (!api) return false;
@@ -2454,22 +2459,26 @@ export default function ChatView(props: ChatViewProps) {
 
   const handleGoalStatusChange = useCallback(
     (status: ThreadGoalStatus) => {
-      void dispatchThreadGoalUpdate({ status });
+      void dispatchThreadGoalUpdate({
+        status,
+        startTurn: status === "active" && phase !== "running",
+      });
     },
-    [dispatchThreadGoalUpdate],
+    [dispatchThreadGoalUpdate, phase],
   );
 
-  const handleClearGoal = useCallback(() => {
+  const handleClearGoal = useCallback(async () => {
     if (!serverThread || !dispatchCapability.allowed) return;
     const api = readEnvironmentApi(environmentId);
     if (!api) return;
-    void api.orchestration
+    return api.orchestration
       .dispatchCommand({
         type: "thread.goal.clear",
         commandId: newCommandId(),
         threadId: serverThread.id,
         createdAt: new Date().toISOString(),
       })
+      .then(() => true)
       .catch((error: unknown) => {
         toastManager.add(
           stackedThreadToast({
@@ -2478,6 +2487,7 @@ export default function ChatView(props: ChatViewProps) {
             description: error instanceof Error ? error.message : "The goal could not be cleared.",
           }),
         );
+        return false;
       });
   }, [dispatchCapability.allowed, environmentId, serverThread]);
 
@@ -3313,6 +3323,36 @@ export default function ChatView(props: ChatViewProps) {
   };
   const dispatchComposerSnapshotRef = useRef(dispatchComposerSnapshot);
   dispatchComposerSnapshotRef.current = dispatchComposerSnapshot;
+  startGoalTurnRef.current = async (goal) => {
+    const context = readComposer()?.getSendContext();
+    if (!context || sendInFlightRef.current || isConnecting || activeEnvironmentUnavailable)
+      return false;
+    const objective = goal.objective ?? serverThread?.goal?.objective;
+    if (!objective) return false;
+    const sendState = deriveComposerSendState({
+      prompt: objective,
+      imageCount: context.images.length,
+      terminalContexts: context.terminalContexts,
+    });
+    return dispatchComposerSnapshotRef.current(
+      {
+        goal,
+        prompt: `Continue pursuing this goal: ${objective}`,
+        promptForRestore: promptRef.current,
+        trimmedPrompt: `Continue pursuing this goal: ${objective}`,
+        images: context.images,
+        sendableTerminalContexts: sendState.sendableTerminalContexts,
+        sourceControlContexts: context.sourceControlContexts,
+        selectedProvider: context.selectedProvider,
+        selectedModel: context.selectedModel,
+        selectedProviderModels: context.selectedProviderModels,
+        selectedPromptEffort: context.selectedPromptEffort,
+        selectedModelSelection: context.selectedModelSelection,
+        expiredTerminalContextCount: 0,
+      },
+      { runtimeMode, interactionMode, tokenMode },
+    );
+  };
 
   const runSend = async (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
@@ -3357,28 +3397,46 @@ export default function ChatView(props: ChatViewProps) {
       imageCount: composerImages.length,
       terminalContexts: composerTerminalContexts,
     });
-    const goalObjective =
-      composerImages.length === 0 && sendableComposerTerminalContexts.length === 0
-        ? parseThreadGoalSlashCommand(trimmed)
-        : null;
-    if (goalObjective !== null) {
-      if (!serverThread) {
+    const goalCommand = parseThreadGoalSlashCommand(trimmed);
+    if (goalCommand !== null) {
+      const clearGoalDraft = () => {
+        promptRef.current = "";
+        setComposerDraftPrompt(composerDraftTarget, "");
+        setComposerDraftTokenMode(composerDraftTarget, tokenMode);
+        readComposer()?.resetCursorState();
+      };
+      if (goalCommand.action === "show") {
+        const goal = serverThread?.goal;
         toastManager.add({
-          type: "warning",
-          title: "Start the thread first",
-          description: "A goal can be attached after the thread has been created.",
+          type: "info",
+          title: goal ? `Goal: ${goal.status}` : "No goal set",
+          description: goal
+            ? `${goal.objective} — ${goal.tokensUsed.toLocaleString()} tokens used${goal.tokenBudget === null ? "" : ` of ${goal.tokenBudget.toLocaleString()}`}.${goal.synchronization ? ` Goal synchronization: ${goal.synchronization.state}. ${goal.synchronization.error ?? ""}` : ""}`
+            : "Use /goal followed by the outcome you want to achieve.",
+        });
+        clearGoalDraft();
+        return;
+      }
+      if (goalCommand.action !== "set" && !serverThread?.goal) {
+        toastManager.add({
+          type: "info",
+          title: "No goal set",
+          description: "Use /goal followed by an objective first.",
         });
         return;
       }
-      if (goalObjective.length === 0) {
-        toastManager.add({
-          type: "warning",
-          title: "Describe the goal",
-          description: "Use /goal followed by the outcome you want this thread to pursue.",
-        });
+      if (goalCommand.action === "clear") {
+        if (await handleClearGoal()) clearGoalDraft();
         return;
       }
-      if (goalObjective.length > THREAD_GOAL_OBJECTIVE_MAX_CHARS) {
+      if (goalCommand.action === "pause") {
+        if (await dispatchThreadGoalUpdate({ status: "paused" })) clearGoalDraft();
+        return;
+      }
+      if (
+        goalCommand.action === "set" &&
+        goalCommand.objective.length > THREAD_GOAL_OBJECTIVE_MAX_CHARS
+      ) {
         toastManager.add({
           type: "warning",
           title: "Goal is too long",
@@ -3386,12 +3444,15 @@ export default function ChatView(props: ChatViewProps) {
         });
         return;
       }
-      const updated = await dispatchThreadGoalUpdate({ objective: goalObjective });
-      if (updated) {
-        promptRef.current = "";
-        clearComposerDraftContent(composerDraftTarget);
-        setComposerDraftTokenMode(composerDraftTarget, tokenMode);
-        readComposer()?.resetCursorState();
+      const goal =
+        goalCommand.action === "set"
+          ? { objective: goalCommand.objective, status: "active" as const }
+          : { status: "active" as const };
+      if (phase === "running") {
+        if (await dispatchThreadGoalUpdate(goal)) clearGoalDraft();
+      } else {
+        // Uses the same worktree/thread bootstrap as a normal first message.
+        await startGoalTurnRef.current(goal);
       }
       return;
     }
@@ -4542,6 +4603,15 @@ export default function ChatView(props: ChatViewProps) {
                   scheduleComposerFocus={scheduleComposerFocus}
                   setThreadError={setThreadError}
                   onExpandImage={onExpandTimelineImage}
+                  onGoalBudgetChange={(tokenBudget) => dispatchThreadGoalUpdate({ tokenBudget })}
+                  onRetryGoal={() => {
+                    if (serverThread?.goal?.synchronization?.action === "clear")
+                      void handleClearGoal();
+                    else
+                      void dispatchThreadGoalUpdate({
+                        startTurn: serverThread?.goal?.status === "active" && phase !== "running",
+                      });
+                  }}
                   onEditGoal={handleEditGoal}
                   onGoalStatusChange={handleGoalStatusChange}
                   onClearGoal={handleClearGoal}

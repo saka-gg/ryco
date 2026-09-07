@@ -2026,21 +2026,44 @@ const make = Effect.gen(function* () {
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
 
-      if (event.type === "thread.goal.updated") {
-        yield* orchestrationEngine.dispatch({
-          type: "thread.goal.sync",
-          commandId: providerCommandId(event, "thread-goal-sync"),
-          threadId: thread.id,
-          goal: event.payload.goal,
-          createdAt: now,
-        });
-      } else if (event.type === "thread.goal.cleared" && thread.goal != null) {
-        yield* orchestrationEngine.dispatch({
-          type: "thread.goal.provider-clear",
-          commandId: providerCommandId(event, "thread-goal-provider-clear"),
-          threadId: thread.id,
-          createdAt: now,
-        });
+      if (event.type === "thread.goal.updated" || event.type === "thread.goal.cleared") {
+        // The mutation response confirms pending requests. Uncorrelated notifications
+        // must not acknowledge or undo them, even when ingestion trails the RPC reply.
+        if (thread.goal?.synchronization && thread.goal.synchronization.state !== "unsupported")
+          return;
+        let goal = event.type === "thread.goal.updated" ? event.payload.goal : null;
+        const structuralChange =
+          goal === null ||
+          thread.goal == null ||
+          goal.objective !== thread.goal.objective ||
+          goal.status !== thread.goal.status ||
+          goal.tokenBudget !== thread.goal.tokenBudget;
+        if (structuralChange && providerService.getThreadGoal) {
+          const current = yield* providerService.getThreadGoal(thread.id);
+          if (current !== false) goal = current;
+          const latest = yield* resolveThreadShell(thread.id);
+          if (
+            latest?.session?.runtimeSessionId !== activeSession.runtimeSessionId ||
+            latest?.session?.providerInstanceId !== activeSession.providerInstanceId
+          )
+            return;
+        }
+        if (goal !== null) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.goal.sync",
+            commandId: providerCommandId(event, "thread-goal-sync"),
+            threadId: thread.id,
+            goal,
+            createdAt: now,
+          });
+        } else if (thread.goal != null) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.goal.provider-clear",
+            commandId: providerCommandId(event, "thread-goal-provider-clear"),
+            threadId: thread.id,
+            createdAt: now,
+          });
+        }
       }
 
       // A recovered provider can become ready after the process that owned the

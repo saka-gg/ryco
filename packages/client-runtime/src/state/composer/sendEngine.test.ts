@@ -211,6 +211,7 @@ describe("send engine — dispatch assembly", () => {
 
   it("attaches the bootstrap and source-control contexts to the turn.start command", async () => {
     const harness = makeDispatchHarness({
+      goal: { objective: "Finish the migration", status: "active", tokenBudget: 1000 },
       bootstrap: { runSetupScript: true },
       sourceControlContexts: [{ id: "sc-1" } as unknown as ComposerSourceControlContext],
     });
@@ -218,6 +219,11 @@ describe("send engine — dispatch assembly", () => {
 
     const turnStart = harness.commands.find((command) => command.type === "thread.turn.start");
     expect(turnStart).toBeDefined();
+    expect(turnStart?.goal).toEqual({
+      objective: "Finish the migration",
+      status: "active",
+      tokenBudget: 1000,
+    });
     expect(turnStart).toHaveProperty("bootstrap");
     expect(turnStart).toHaveProperty("sourceControlContexts");
   });

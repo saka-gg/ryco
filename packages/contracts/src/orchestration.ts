@@ -28,12 +28,7 @@ import {
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ComposerSourceControlContext } from "./sourceControl.ts";
 import { WorkItemProviderKind, WorkItemState } from "./workItems.ts";
-import {
-  ThreadGoal,
-  ThreadGoalEventOrigin,
-  ThreadGoalObjective,
-  ThreadGoalStatus,
-} from "./threadGoal.ts";
+import { ThreadGoal, ThreadGoalEventOrigin, ThreadGoalUpdate } from "./threadGoal.ts";
 import {
   IssueState,
   PullRequestState,
@@ -1265,11 +1260,10 @@ const ThreadTokenModeSetCommand = Schema.Struct({
 
 const ThreadGoalSetCommand = Schema.Struct({
   type: Schema.Literal("thread.goal.set"),
+  startTurn: Schema.optional(Schema.Boolean),
   commandId: CommandId,
   threadId: ThreadId,
-  objective: Schema.optional(ThreadGoalObjective),
-  status: Schema.optional(ThreadGoalStatus),
-  tokenBudget: Schema.optional(Schema.NullOr(PositiveInt)),
+  ...ThreadGoalUpdate.fields,
   createdAt: IsoDateTime,
 });
 
@@ -1324,6 +1318,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   tokenMode: Schema.optionalKey(AgentTokenMode),
+  goal: Schema.optional(ThreadGoalUpdate),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
@@ -1345,6 +1340,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   tokenMode: Schema.optionalKey(AgentTokenMode),
+  goal: Schema.optional(ThreadGoalUpdate),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
@@ -1713,6 +1709,7 @@ const ThreadGoalSyncCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   goal: ThreadGoal,
+  expectedRequestId: Schema.optional(Schema.String),
   createdAt: IsoDateTime,
 });
 
@@ -1720,6 +1717,7 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
   type: Schema.Literal("thread.goal.provider-clear"),
   commandId: CommandId,
   threadId: ThreadId,
+  expectedRequestId: Schema.optional(Schema.String),
   createdAt: IsoDateTime,
 });
 

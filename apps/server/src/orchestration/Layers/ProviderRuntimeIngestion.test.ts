@@ -222,6 +222,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   async function createHarness(options?: {
+    getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
     serverSettings?: Partial<ServerSettings>;
     readThreadHistory?: NonNullable<ProviderServiceShape["readThreadHistory"]>;
   }) {
@@ -257,6 +258,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(
         Layer.succeed(ProviderService, {
           ...provider.service,
+          ...(options?.getThreadGoal ? { getThreadGoal: options.getThreadGoal } : {}),
           ...(options?.readThreadHistory ? { readThreadHistory: options.readThreadHistory } : {}),
         }),
       ),
@@ -342,6 +344,38 @@ describe("ProviderRuntimeIngestion", () => {
       drain,
     };
   }
+
+  it("does not resurrect a cleared native goal from a delayed update", async () => {
+    let reads = 0;
+    const harness = await createHarness({
+      getThreadGoal: () => {
+        reads += 1;
+        return Effect.succeed(null);
+      },
+    });
+    const now = new Date().toISOString();
+    await harness.emit({
+      type: "thread.goal.updated",
+      eventId: asEventId("delayed-goal"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      payload: {
+        goal: {
+          objective: "Old goal",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+    await waitForThread(harness.readModel, () => reads > 0);
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]?.goal).toBeNull();
+  });
 
   it("restores missed completed history through persistence and rejects stale recovery commands", async () => {
     const threadId = asThreadId("thread-1");

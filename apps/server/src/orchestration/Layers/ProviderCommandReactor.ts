@@ -3,10 +3,11 @@ import nodePath from "node:path";
 
 import {
   type ChatAttachment,
+  type ThreadGoal,
   CommandId,
   DEFAULT_AGENT_TOKEN_MODE,
   EventId,
-  type MessageId,
+  MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   type OrchestrationProjectShell,
@@ -240,6 +241,7 @@ const make = Effect.gen(function* () {
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
     readonly kind:
+      | "provider.goal.update.failed"
       | "provider.turn.start.failed"
       | "provider.turn.interrupt.failed"
       | "provider.approval.respond.failed"
@@ -708,6 +710,115 @@ const make = Effect.gen(function* () {
     return startedSession.threadId;
   });
 
+  const reconcileThreadGoal = Effect.fn("reconcileThreadGoal")(function* (threadId: ThreadId) {
+    const thread = yield* resolveThread(threadId);
+    const goal = thread?.goal ?? null;
+    const request = goal?.synchronization;
+    const now = new Date().toISOString();
+    if (goal && request && request.state !== "unsupported") {
+      const synchronize = Effect.gen(function* () {
+        if (request.action === "clear") {
+          yield* providerService.clearThreadGoal?.(threadId) ?? Effect.succeed(false as const);
+          yield* orchestrationEngine.dispatch({
+            type: "thread.goal.provider-clear",
+            commandId: serverCommandId("goal-clear-confirmed"),
+            threadId,
+            expectedRequestId: request.requestId,
+            createdAt: now,
+          });
+          return { goal: null, native: true };
+        }
+        const result = yield* (
+          providerService.setThreadGoal?.(threadId, goal) ?? Effect.succeed(false as const)
+        );
+        const confirmed: ThreadGoal =
+          result === false
+            ? { ...goal, synchronization: { ...request, state: "unsupported" } }
+            : result;
+        yield* orchestrationEngine.dispatch({
+          type: "thread.goal.sync",
+          commandId: serverCommandId("goal-confirmed"),
+          threadId,
+          goal: confirmed,
+          expectedRequestId: request.requestId,
+          createdAt: now,
+        });
+        return { goal: confirmed, native: result !== false };
+      });
+      return yield* synchronize.pipe(
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            if (Cause.hasInterruptsOnly(cause)) return yield* Effect.failCause(cause);
+            const latest = yield* resolveThread(threadId);
+            if (latest?.goal?.synchronization?.requestId !== request.requestId)
+              return yield* Effect.failCause(cause);
+            const detail = formatFailureDetail(cause);
+            yield* orchestrationEngine
+              .dispatch({
+                type: "thread.goal.sync",
+                commandId: serverCommandId("goal-failed"),
+                threadId,
+                expectedRequestId: request.requestId,
+                goal: { ...goal, synchronization: { ...request, state: "failed", error: detail } },
+                createdAt: now,
+              })
+              .pipe(Effect.catchCause(() => Effect.void));
+            yield* appendProviderFailureActivity({
+              threadId,
+              kind: "provider.goal.update.failed",
+              summary: "Goal change could not be confirmed",
+              detail,
+              turnId: null,
+              createdAt: now,
+            });
+            return yield* Effect.failCause(cause);
+          }),
+        ),
+      );
+    }
+    const nativeGoal = yield* (
+      providerService.getThreadGoal?.(threadId) ?? Effect.succeed(false as const)
+    );
+    if (nativeGoal === false) {
+      if (goal && !goal.synchronization) {
+        const reminder: ThreadGoal = {
+          ...goal,
+          synchronization: {
+            requestId: serverCommandId("goal-reminder"),
+            state: "unsupported",
+            action: "set",
+          },
+        };
+        yield* orchestrationEngine.dispatch({
+          type: "thread.goal.sync",
+          commandId: serverCommandId("goal-reminder-confirmed"),
+          threadId,
+          goal: reminder,
+          createdAt: now,
+        });
+        return { goal: reminder, native: false };
+      }
+      return { goal, native: false };
+    }
+    if (nativeGoal !== null) {
+      yield* orchestrationEngine.dispatch({
+        type: "thread.goal.sync",
+        commandId: serverCommandId("goal-reconciled"),
+        threadId,
+        goal: nativeGoal,
+        createdAt: now,
+      });
+    } else if (goal !== null) {
+      yield* orchestrationEngine.dispatch({
+        type: "thread.goal.provider-clear",
+        commandId: serverCommandId("goal-reconciled-clear"),
+        threadId,
+        createdAt: now,
+      });
+    }
+    return { goal: nativeGoal, native: true };
+  });
+
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
@@ -728,35 +839,13 @@ const make = Effect.gen(function* () {
       input.createdAt,
       input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {},
     );
-    const goal = thread.goal ?? null;
-    const goalHandledNatively =
-      goal === null
-        ? providerService.clearThreadGoal === undefined
-          ? false
-          : yield* providerService.clearThreadGoal(input.threadId).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("provider goal clear failed before turn", {
-                  threadId: input.threadId,
-                  cause: Cause.pretty(cause),
-                }).pipe(Effect.as(false)),
-              ),
-            )
-        : providerService.setThreadGoal === undefined
-          ? false
-          : yield* providerService.setThreadGoal(input.threadId, goal).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("provider goal synchronization failed; using prompt fallback", {
-                  threadId: input.threadId,
-                  cause: Cause.pretty(cause),
-                }).pipe(Effect.as(false)),
-              ),
-            );
+    const { goal, native } = yield* reconcileThreadGoal(input.threadId);
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = withProviderGoalPrompt({
       message: toNonEmptyProviderInput(input.messageText),
-      goal: goalHandledNatively ? null : goal,
+      goal: native ? null : goal,
     });
     const normalizedAttachments = input.attachments ?? [];
     const project = yield* resolveProject(thread.projectId);
@@ -1177,36 +1266,68 @@ const make = Effect.gen(function* () {
   const processGoalUpdated = Effect.fn("processGoalUpdated")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.goal-updated" }>,
   ) {
-    if (event.payload.origin !== "client") return;
+    if (event.payload.origin !== "client" || event.payload.goal.synchronization?.deferUntilTurn)
+      return;
     const thread = yield* resolveThread(event.payload.threadId);
-    if (!thread?.session || thread.session.status === "stopped") return;
-    if (providerService.setThreadGoal === undefined) return;
-    yield* providerService.setThreadGoal(thread.id, event.payload.goal).pipe(
+    if (thread?.goal?.synchronization?.requestId !== event.payload.goal.synchronization?.requestId)
+      return;
+    const threadId = event.payload.threadId;
+    yield* ensureSessionForThread(threadId, event.occurredAt).pipe(
       Effect.catchCause((cause) =>
-        Effect.logWarning("provider goal synchronization failed", {
-          threadId: thread.id,
-          cause: Cause.pretty(cause),
+        Effect.gen(function* () {
+          const goal = thread?.goal;
+          if (goal?.synchronization) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.goal.sync",
+              commandId: serverCommandId("goal-session-failed"),
+              threadId,
+              expectedRequestId: goal.synchronization.requestId,
+              goal: {
+                ...goal,
+                synchronization: {
+                  ...goal.synchronization,
+                  state: "failed",
+                  error: formatFailureDetail(cause),
+                },
+              },
+              createdAt: new Date().toISOString(),
+            });
+          }
+          return yield* Effect.failCause(cause);
         }),
       ),
-      Effect.asVoid,
     );
+    const result = yield* reconcileThreadGoal(threadId);
+    if (event.payload.goal.synchronization?.startTurn && result.goal?.status === "active") {
+      const sessions = yield* providerService.listSessions();
+      if (sessions.some((session) => session.threadId === threadId && session.status === "running"))
+        return;
+      const current = yield* resolveThread(threadId);
+      if (!current || current.goal?.synchronization?.state === "pending") return;
+      yield* orchestrationEngine.dispatch({
+        type: "thread.turn.start",
+        commandId: serverCommandId("goal-resume-turn"),
+        threadId,
+        message: {
+          messageId: MessageId.make(crypto.randomUUID()),
+          role: "user",
+          text: `Continue pursuing this goal: ${result.goal.objective}`,
+          attachments: [],
+        },
+        runtimeMode: current.runtimeMode,
+        interactionMode: current.interactionMode,
+        createdAt: new Date().toISOString(),
+      });
+    }
   });
 
+  // Older persisted client clear events are still accepted during replay.
   const processGoalCleared = Effect.fn("processGoalCleared")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.goal-cleared" }>,
   ) {
     if (event.payload.origin !== "client") return;
-    const thread = yield* resolveThread(event.payload.threadId);
-    if (!thread?.session || thread.session.status === "stopped") return;
-    if (providerService.clearThreadGoal === undefined) return;
-    yield* providerService.clearThreadGoal(thread.id).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("provider goal clear failed", {
-          threadId: thread.id,
-          cause: Cause.pretty(cause),
-        }),
-      ),
-      Effect.asVoid,
+    yield* (
+      providerService.clearThreadGoal?.(event.payload.threadId) ?? Effect.succeed(false as const)
     );
   });
 
@@ -1508,6 +1629,26 @@ const make = Effect.gen(function* () {
     yield* Effect.forkScoped(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent),
     );
+    const snapshot = yield* projectionSnapshotQuery.getShellSnapshot().pipe(Effect.orDie);
+    for (const thread of snapshot.threads) {
+      if (thread.goal?.synchronization?.state !== "pending") continue;
+      // Deferred first-turn work is recovered by the normal turn lifecycle. It
+      // must not bind to the previous provider ahead of a context handoff.
+      if (thread.goal.synchronization.deferUntilTurn) continue;
+      yield* worker.enqueue({
+        sequence: snapshot.snapshotSequence,
+        eventId: EventId.make(crypto.randomUUID()),
+        type: "thread.goal-updated",
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        occurredAt: thread.goal.updatedAt,
+        commandId: CommandId.make(thread.goal.synchronization.requestId),
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: { threadId: thread.id, goal: thread.goal, origin: "client" },
+      });
+    }
   });
 
   return {

@@ -351,6 +351,7 @@ describe("openCodexThread", () => {
       sandbox: "danger-full-access",
       approvalsReviewer: "user",
       config: {
+        "features.goals": true,
         mcp_servers: {
           ryco_device: {
             url: "http://127.0.0.1:3100/device",
@@ -402,6 +403,7 @@ describe("openCodexThread", () => {
           approvalsReviewer: "user",
           model: "gpt-5.5",
           serviceTier: "fast",
+          config: { "features.goals": true },
         },
       },
     ]);
