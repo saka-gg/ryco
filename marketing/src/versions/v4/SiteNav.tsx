@@ -1,3 +1,4 @@
+import { GitHubIcon } from "@/assets/brands";
 /**
  * SiteNav — a cleaner, floating navigation.
  *
@@ -10,7 +11,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Github, Download, Menu, X } from "lucide-react";
+import { Download, Menu, X } from "lucide-react";
 import { RycoWordmark, RycoMark } from "@/assets/RycoLogo";
 import { SITE } from "@/data/content";
 import { gsap, prefersReducedMotion } from "@/lib/motion";
@@ -206,7 +207,7 @@ export function SiteNav() {
               focusRing,
             )}
           >
-            <Github className="size-[18px]" />
+            <GitHubIcon className="size-[18px]" />
           </a>
           <MagneticButton
             href={dl.href}

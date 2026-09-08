@@ -1,3 +1,4 @@
+import { GitHubIcon } from "@/assets/brands";
 /**
  * Version 4 — "Kinetic" (motion-led art direction).
  *
@@ -19,7 +20,6 @@ import {
   ShieldCheck,
   Eye,
   Download,
-  Github,
   ArrowRight,
   ArrowUpRight,
   Copy,
@@ -756,7 +756,7 @@ export default function Version4() {
                 {dl.osLabel ? `for ${dl.osLabel}` : "for desktop"}
               </MagneticButton>
               <MagneticButton href={SITE.repo} external variant="ghost">
-                <Github className="size-[18px]" /> View source
+                <GitHubIcon className="size-[18px]" /> View source
                 <ArrowRight className="size-4 transition-transform duration-300 group-hover/btn:translate-x-0.5" />
               </MagneticButton>
             </div>
@@ -1390,7 +1390,7 @@ export default function Version4() {
                     focusRing,
                   )}
                 >
-                  <Github className="size-4" /> GitHub
+                  <GitHubIcon className="size-4" /> GitHub
                 </a>
                 <a
                   href={SITE.releases}

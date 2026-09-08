@@ -352,7 +352,7 @@ const SPEC_CONSTANTS: ReadonlyArray<SpecConstantRow> = [
     E2EE_CROCKFORD_ALPHABET,
     "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
   ],
-  ["Encoding", "E2EE_CBOR_CODEC", E2EE_CBOR_CODEC, "cborg@6.1.1"],
+  ["Encoding", "E2EE_CBOR_CODEC", E2EE_CBOR_CODEC, "cborg@6.1.2"],
   [
     "Dependencies",
     "E2EE_NOBLE_CURVES_AUDIT_BASELINE",

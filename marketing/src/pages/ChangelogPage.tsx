@@ -1,6 +1,7 @@
+import { GitHubIcon } from "@/assets/brands";
 import { useEffect } from "react";
 import { Link } from "react-router-dom";
-import { ArrowDown, ArrowLeft, ArrowUpRight, Download, Github } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUpRight, Download } from "lucide-react";
 import { RycoMark, RycoWordmark } from "@/assets/RycoLogo";
 import { CHANGELOG_RELEASES, type ChangelogRelease } from "@/data/changelog";
 import { SITE } from "@/data/content";
@@ -78,7 +79,7 @@ function ChangelogNav({ dl }: { dl: DownloadInfo }) {
               focusRing,
             )}
           >
-            <Github className="size-[18px]" />
+            <GitHubIcon className="size-[18px]" />
           </a>
           <MagneticButton
             href={dl.href}

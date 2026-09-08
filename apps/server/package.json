@@ -26,20 +26,20 @@
     "test:process-reaper": "vp test run src/server.test.ts src/provider/Layers/ClaudeAdapter.test.ts src/provider/Layers/ProviderSessionDirectory.test.ts src/provider/Layers/ProviderSessionReaper.test.ts src/provider/Layers/CodexAdapter.test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.233",
-    "@anthropic-ai/sdk": "^0.117.1",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.263",
+    "@anthropic-ai/sdk": "^0.124.0",
     "@effect/platform-bun": "catalog:",
     "@effect/platform-node": "catalog:",
     "@effect/platform-node-shared": "catalog:",
     "@effect/sql-sqlite-bun": "catalog:",
-    "@github/copilot-sdk": "1.0.11",
+    "@github/copilot-sdk": "1.0.13",
     "@github/keytar": "7.10.6",
-    "@opencode-ai/sdk": "^1.18.18",
+    "@opencode-ai/sdk": "^1.18.29",
     "@pierre/diffs": "catalog:",
     "effect": "catalog:",
     "node-pty": "^1.1.0",
-    "open": "^11.0.1",
-    "sharp": "^0.35.3"
+    "open": "^11.0.2",
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",

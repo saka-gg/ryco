@@ -1,8 +1,8 @@
 diff --git a/apple/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift b/apple/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift
 --- a/apple/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift
 +++ b/apple/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift
-@@ -254,8 +254,15 @@ open class JavaScriptRuntime: Equatable, Identifiable, @unchecked Sendable {
-       (@convention(c) (UnsafeMutableRawPointer, UnsafePointer<CChar>, UnsafeMutableRawPointer) -> Void)? = setter
+@@ -257,8 +257,15 @@
+       (@convention(c) (UnsafeMutableRawPointer, UnsafePointer<CChar>, UnsafeMutableRawPointer) -> Bool)? = setter
      // Pass a null setter to C++ when the Swift setter is nil so that JS assignment
      // raises a `jsi::JSError` directly, without crossing the Swift boundary.
 +    if set == nil {
@@ -21,7 +21,7 @@ diff --git a/apple/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift b/appl
 diff --git a/apple/scripts/build-xcframework.sh b/apple/scripts/build-xcframework.sh
 --- a/apple/scripts/build-xcframework.sh
 +++ b/apple/scripts/build-xcframework.sh
-@@ -209,6 +209,9 @@ build_slice() {
+@@ -217,6 +217,9 @@
      env_args+=(DEVELOPER_DIR="$DEVELOPER_DIR")
    fi
  
@@ -31,7 +31,7 @@ diff --git a/apple/scripts/build-xcframework.sh b/apple/scripts/build-xcframewor
    (cd "$PACKAGE_DIR" && env -i "${env_args[@]}" \
      xcodebuild \
      build \
-@@ -228,6 +231,7 @@ build_slice() {
+@@ -234,6 +237,7 @@
      OBJROOT="${DERIVED_DATA_PATH}/Build/Intermediates.noindex" \
      BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
      SKIP_INSTALL=NO \
