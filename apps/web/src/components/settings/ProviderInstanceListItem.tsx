@@ -31,6 +31,8 @@ export function ProviderInstanceListItem(props: {
   return (
     <button
       type="button"
+      data-settings-section={presentation.displayName}
+      data-settings-action
       data-provider-instance-row
       aria-current={props.selected ? "true" : undefined}
       aria-controls={props.editorId}

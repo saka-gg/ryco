@@ -1,3 +1,4 @@
+import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import { Duplex } from "node:stream";
 import { attachDesktopResourceTelemetry } from "./desktopResourceTelemetry.ts";
 import { registerProjectBrowserIpc } from "./browser/ipc.ts";
@@ -1738,7 +1739,7 @@ function configureApplicationMenu(): void {
         { role: "hideOthers" },
         { role: "unhide" },
         { type: "separator" },
-        { role: "quit" },
+        { label: `Quit ${APP_DISPLAY_NAME}`, click: () => app.quit() },
       ],
     });
   }
@@ -1757,7 +1758,9 @@ function configureApplicationMenu(): void {
               },
               { type: "separator" as const },
             ]),
-        { role: process.platform === "darwin" ? "close" : "quit" },
+        ...(process.platform === "darwin"
+          ? [{ role: "close" as const }]
+          : [{ label: `Quit ${APP_DISPLAY_NAME}`, click: () => app.quit() }]),
       ],
     },
     { role: "editMenu" },
@@ -2661,6 +2664,21 @@ function registerIpcHandlers(): void {
     } as const;
   });
 
+  ipcMain.removeHandler("desktop:quit-shortcut-get");
+  ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
+  ipcMain.removeHandler("desktop:quit-shortcut-set");
+  ipcMain.handle("desktop:quit-shortcut-set", (event, mode: unknown) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || event.senderFrame !== event.sender.mainFrame)
+      throw new Error("Invalid quit shortcut sender.");
+    if (mode !== "press-twice" && mode !== "hold" && mode !== "immediately")
+      throw new Error("Invalid quit shortcut mode.");
+    const next: DesktopSettings = { ...desktopSettings, quitShortcutMode: mode };
+    writeDesktopSettings(DESKTOP_SETTINGS_PATH, next);
+    desktopSettings = next;
+    for (const guard of quitShortcutGuards) guard.reset();
+  });
+
   ipcMain.removeHandler(GET_CLIENT_SETTINGS_CHANNEL);
   ipcMain.handle(GET_CLIENT_SETTINGS_CHANNEL, async () => readClientSettings(CLIENT_SETTINGS_PATH));
 
@@ -3387,6 +3405,8 @@ function syncAllWindowAppearance(): void {
 
 nativeTheme.on("updated", syncAllWindowAppearance);
 
+const quitShortcutGuards = new Set<ReturnType<typeof createQuitShortcutGuard>>();
+
 function createWindow(): BrowserWindow {
   markDesktopStartupPhase("desktop.window.create");
   const window = new BrowserWindow({
@@ -3407,6 +3427,28 @@ function createWindow(): BrowserWindow {
       sandbox: true,
       backgroundThrottling: true,
     },
+  });
+
+  const quitGuard = createQuitShortcutGuard({
+    mode: () => desktopSettings.quitShortcutMode,
+    mac: process.platform === "darwin",
+    quit: () => app.quit(),
+    feedback: (state) => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed())
+        window.webContents.send("desktop:quit-shortcut-feedback", state);
+    },
+  });
+  quitShortcutGuards.add(quitGuard);
+  // Cancelling here suppresses subsequent keyUp events on macOS. Preload blocks
+  // the DOM shortcut instead; this process remains the only owner of quitting.
+  window.webContents.on("before-input-event", (_event, input) => {
+    quitGuard.input(input);
+  });
+  window.on("blur", quitGuard.reset);
+  window.webContents.on("did-start-navigation", quitGuard.reset);
+  window.on("closed", () => {
+    quitGuard.reset();
+    quitShortcutGuards.delete(quitGuard);
   });
 
   window.webContents.on("context-menu", (event, params) => {

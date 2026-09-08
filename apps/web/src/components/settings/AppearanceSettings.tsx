@@ -1,4 +1,6 @@
+import { Menu, MenuTrigger, MenuPopup, MenuItem } from "../ui/menu";
 import {
+  EllipsisIcon,
   BaselineIcon,
   ClipboardCopyIcon,
   Code2Icon,
@@ -42,7 +44,6 @@ import {
   type AppearancePreferenceKey,
   type AppearancePreferenceOption,
 } from "../../themes/appearancePreferences";
-import { useUiStateStore } from "../../uiStateStore";
 import {
   addCustomTheme,
   applyThemeToDocument,
@@ -68,7 +69,6 @@ import {
 } from "../ui/alert-dialog";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { ColorPicker } from "../ui/color-picker";
@@ -78,6 +78,8 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
+import { ThemePreview } from "./ThemePreview";
 import { ThemeEditor } from "./ThemeEditor";
 
 const VARIANT_OPTIONS = [
@@ -111,14 +113,6 @@ export function AppearanceSettingsPanel({
 } = {}) {
   const isHub = surface === "hub";
   const { theme, setTheme, resolvedTheme, activeThemeId, setActiveTheme } = useTheme();
-  const wideComposerControlsAutoCollapse = useUiStateStore(
-    (state) => state.wideComposerControlsAutoCollapse,
-  );
-  const setWideComposerControlsAutoCollapse = useUiStateStore(
-    (state) => state.setWideComposerControlsAutoCollapse,
-  );
-  const alwaysUseBuildMode = useUiStateStore((state) => state.alwaysUseBuildMode);
-  const setAlwaysUseBuildMode = useUiStateStore((state) => state.setAlwaysUseBuildMode);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ThemeDefinition | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -319,7 +313,210 @@ export function AppearanceSettingsPanel({
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="Interface controls">
+      <SettingsSection title="Color mode">
+        <div className="grid grid-cols-3 gap-3 p-4" role="group" aria-label="Color mode">
+          {VARIANT_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={theme === option.value}
+              onClick={() => setTheme(option.value)}
+              className={cn(
+                "min-w-0 rounded-xl border p-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+                theme === option.value
+                  ? "border-primary bg-muted/40"
+                  : "border-border hover:bg-muted/30",
+              )}
+            >
+              <div className="relative overflow-hidden rounded-lg">
+                <ThemePreview
+                  compact
+                  theme={findTheme(activeThemeId)}
+                  variant={option.value === "dark" ? "dark" : "light"}
+                />
+                {option.value === "system" && (
+                  <div className="absolute inset-0 [clip-path:inset(0_0_0_50%)]">
+                    <ThemePreview compact theme={findTheme(activeThemeId)} variant="dark" />
+                  </div>
+                )}
+              </div>
+              <span className="mt-2 block font-medium">{option.label}</span>
+            </button>
+          ))}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Theme palette"
+        headerAction={
+          <div className="flex items-center gap-1">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="sr-only"
+              onChange={handleImportChange}
+              aria-hidden
+              tabIndex={-1}
+            />
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={handleAddNew}
+              aria-label="Create a new theme"
+              title="Create a new theme"
+              className="text-muted-foreground"
+            >
+              <PlusIcon className="size-3.5" />
+              New
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={handleImportClick}
+              aria-label="Import a theme from file"
+              title="Import a theme from disk"
+              className="text-muted-foreground"
+            >
+              <UploadIcon className="size-3.5" />
+              Import
+            </Button>
+          </div>
+        }
+      >
+        <div role="radiogroup" aria-label="Theme palette" className="grid grid-cols-2 gap-4 p-4">
+          {themes.map((entry) => {
+            const isActive = entry.id === activeThemeId;
+            const isEditing = editingId === entry.id;
+            return (
+              <Fragment key={entry.id}>
+                <div
+                  role="radio"
+                  aria-checked={isActive}
+                  tabIndex={isActive ? 0 : -1}
+                  onClick={() => setActiveTheme(entry.id)}
+                  onKeyDown={(event) => {
+                    const direction =
+                      event.key === "ArrowRight" || event.key === "ArrowDown"
+                        ? 1
+                        : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                          ? -1
+                          : 0;
+                    if (direction) {
+                      event.preventDefault();
+                      const index = themes.findIndex((theme) => theme.id === entry.id);
+                      const next = (index + direction + themes.length) % themes.length;
+                      setActiveTheme(themes[next]!.id);
+                      const radios =
+                        event.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
+                          '[role="radio"]',
+                        );
+                      radios?.item(next).focus();
+                    }
+                    if (event.key === " " || event.key === "Enter") {
+                      event.preventDefault();
+                      setActiveTheme(entry.id);
+                    }
+                  }}
+                  className={cn(
+                    "flex cursor-pointer flex-wrap items-center gap-3 rounded-xl border p-3 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+                    isActive ? "border-primary" : "border-border",
+                    isActive ? "bg-muted/40" : "hover:bg-muted/24",
+                  )}
+                >
+                  <ThemePreview theme={entry} variant={resolvedTheme} />
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "relative flex size-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
+                      isActive ? "border-primary" : "border-muted-foreground/40",
+                    )}
+                  >
+                    {isActive ? (
+                      <span className="size-2 rounded-full bg-primary" aria-hidden />
+                    ) : null}
+                  </span>
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="truncate text-sm font-medium text-foreground"
+                        title={entry.name}
+                      >
+                        {entry.name}
+                      </span>
+                      <Badge variant="outline" size="sm">
+                        {entry.builtIn ? "Built-in" : "Custom"}
+                      </Badge>
+                    </span>
+                    {entry.description ? (
+                      <span
+                        className="truncate text-xs text-muted-foreground/80"
+                        title={entry.description}
+                      >
+                        {entry.description}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                  >
+                    <Menu>
+                      <MenuTrigger
+                        render={
+                          <Button
+                            size="icon-xs"
+                            variant="ghost"
+                            aria-label={`Theme actions for ${entry.name}`}
+                          >
+                            <EllipsisIcon className="size-4" />
+                          </Button>
+                        }
+                      />
+                      <MenuPopup align="end">
+                        {!entry.builtIn && (
+                          <MenuItem onClick={() => startEditing(entry)}>
+                            <PencilIcon /> Edit
+                          </MenuItem>
+                        )}
+                        <MenuItem onClick={() => handleDuplicate(entry)}>
+                          <CopyIcon /> Duplicate
+                        </MenuItem>
+                        <MenuItem onClick={() => handleExport(entry)}>
+                          <DownloadIcon /> Export
+                        </MenuItem>
+                        <MenuItem onClick={() => void handleCopyJson(entry)}>
+                          <ClipboardCopyIcon /> Copy JSON
+                        </MenuItem>
+                        {!entry.builtIn && (
+                          <MenuItem onClick={() => setPendingDeleteId(entry.id)}>
+                            <Trash2Icon /> Delete
+                          </MenuItem>
+                        )}
+                      </MenuPopup>
+                    </Menu>
+                  </div>
+                </div>
+                {isEditing && editing ? (
+                  <div className="col-span-full">
+                    <ThemeEditor
+                      source={editing.source}
+                      draft={editing.draft}
+                      onDraftChange={(next) => setDraft(next)}
+                      onSave={handleSave}
+                      onCancel={handleCancel}
+                      resolvedVariant={resolvedTheme}
+                    />
+                  </div>
+                ) : null}
+              </Fragment>
+            );
+          })}
+        </div>
+      </SettingsSection>
+
+      {!isHub && <DiffAppearanceSettings />}
+      <SettingsSection title="Typography">
         <SettingsRow
           title="Interface font"
           description="Normal app text, navigation, dialogs, and controls."
@@ -392,6 +589,8 @@ export function AppearanceSettingsPanel({
             />
           }
         />
+      </SettingsSection>
+      <SettingsSection title="Interface">
         {isHub ? null : (
           <SettingsRow
             title="Corner radius"
@@ -476,254 +675,6 @@ export function AppearanceSettingsPanel({
                 </span>
               }
             />
-          }
-        />
-      </SettingsSection>
-
-      <SettingsSection
-        title="Theme palette"
-        headerAction={
-          <div className="flex items-center gap-1">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json,application/json"
-              className="sr-only"
-              onChange={handleImportChange}
-              aria-hidden
-              tabIndex={-1}
-            />
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={handleAddNew}
-              aria-label="Create a new theme"
-              title="Create a new theme"
-              className="text-muted-foreground"
-            >
-              <PlusIcon className="size-3.5" />
-              New
-            </Button>
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={handleImportClick}
-              aria-label="Import a theme from file"
-              title="Import a theme from disk"
-              className="text-muted-foreground"
-            >
-              <UploadIcon className="size-3.5" />
-              Import
-            </Button>
-          </div>
-        }
-      >
-        <div role="radiogroup" aria-label="Theme palette">
-          {themes.map((entry, index) => {
-            const isActive = entry.id === activeThemeId;
-            const isEditing = editingId === entry.id;
-            return (
-              <Fragment key={entry.id}>
-                <div
-                  role="radio"
-                  aria-checked={isActive}
-                  tabIndex={isActive ? 0 : -1}
-                  onClick={() => setActiveTheme(entry.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === " " || event.key === "Enter") {
-                      event.preventDefault();
-                      setActiveTheme(entry.id);
-                    }
-                  }}
-                  className={cn(
-                    "flex cursor-pointer flex-wrap items-center gap-3 px-4 py-3 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset sm:px-5",
-                    index > 0 ? "border-t border-border/60" : "",
-                    isActive ? "bg-muted/40" : "hover:bg-muted/24",
-                  )}
-                >
-                  <span
-                    aria-hidden
-                    className={cn(
-                      "relative flex size-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
-                      isActive ? "border-primary" : "border-muted-foreground/40",
-                    )}
-                  >
-                    {isActive ? (
-                      <span className="size-2 rounded-full bg-primary" aria-hidden />
-                    ) : null}
-                  </span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="flex items-center gap-2">
-                      <span
-                        className="truncate text-sm font-medium text-foreground"
-                        title={entry.name}
-                      >
-                        {entry.name}
-                      </span>
-                      <Badge variant="outline" size="sm">
-                        {entry.builtIn ? "Built-in" : "Custom"}
-                      </Badge>
-                    </span>
-                    {entry.description ? (
-                      <span
-                        className="truncate text-xs text-muted-foreground/80"
-                        title={entry.description}
-                      >
-                        {entry.description}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div
-                    className="flex shrink-0 items-center gap-0.5"
-                    onClick={(event) => event.stopPropagation()}
-                    onKeyDown={(event) => event.stopPropagation()}
-                  >
-                    {!entry.builtIn ? (
-                      <Button
-                        size="icon-xs"
-                        variant="ghost"
-                        aria-label={`Edit ${entry.name}`}
-                        title="Edit"
-                        onClick={() => startEditing(entry)}
-                        className="text-muted-foreground"
-                      >
-                        <PencilIcon className="size-3.5" />
-                      </Button>
-                    ) : null}
-                    <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      aria-label={`Duplicate ${entry.name}`}
-                      title="Duplicate"
-                      onClick={() => handleDuplicate(entry)}
-                      className="text-muted-foreground"
-                    >
-                      <CopyIcon className="size-3.5" />
-                    </Button>
-                    <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      aria-label={`Export ${entry.name}`}
-                      title="Export"
-                      onClick={() => handleExport(entry)}
-                      className="text-muted-foreground"
-                    >
-                      <DownloadIcon className="size-3.5" />
-                    </Button>
-                    <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      aria-label={`Copy ${entry.name} JSON`}
-                      title="Copy JSON"
-                      onClick={() => void handleCopyJson(entry)}
-                      className="text-muted-foreground"
-                    >
-                      <ClipboardCopyIcon className="size-3.5" />
-                    </Button>
-                    {!entry.builtIn ? (
-                      <Button
-                        size="icon-xs"
-                        variant="ghost"
-                        aria-label={`Delete ${entry.name}`}
-                        title="Delete"
-                        onClick={() => setPendingDeleteId(entry.id)}
-                        className="text-destructive-foreground"
-                      >
-                        <Trash2Icon className="size-3.5" />
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-                {isEditing && editing ? (
-                  <ThemeEditor
-                    source={editing.source}
-                    draft={editing.draft}
-                    onDraftChange={(next) => setDraft(next)}
-                    onSave={handleSave}
-                    onCancel={handleCancel}
-                    resolvedVariant={resolvedTheme}
-                  />
-                ) : null}
-              </Fragment>
-            );
-          })}
-        </div>
-      </SettingsSection>
-
-      {isHub ? null : (
-        <SettingsSection title="Composer controls">
-          <SettingsRow
-            title="Auto-collapse wide composer labels"
-            description="Show long composer mode labels only on hover or focus."
-            resetAction={
-              !wideComposerControlsAutoCollapse ? (
-                <SettingResetButton
-                  label="wide composer labels"
-                  onClick={() => setWideComposerControlsAutoCollapse(true)}
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                checked={wideComposerControlsAutoCollapse}
-                onCheckedChange={(checked) => setWideComposerControlsAutoCollapse(Boolean(checked))}
-                aria-label="Auto-collapse wide composer labels"
-              />
-            }
-          />
-          <SettingsRow
-            title="Always use Build mode"
-            description="Hide the mode selector in the composer and send every turn in Build mode."
-            resetAction={
-              !alwaysUseBuildMode ? (
-                <SettingResetButton
-                  label="always use Build mode"
-                  onClick={() => setAlwaysUseBuildMode(true)}
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                checked={alwaysUseBuildMode}
-                onCheckedChange={(checked) => setAlwaysUseBuildMode(Boolean(checked))}
-                aria-label="Always use Build mode"
-              />
-            }
-          />
-        </SettingsSection>
-      )}
-
-      <SettingsSection title="Color mode">
-        <SettingsRow
-          title="Theme variant"
-          description="Choose between light, dark, or following the system preference."
-          resetAction={
-            theme !== "system" ? (
-              <SettingResetButton label="color mode" onClick={() => setTheme("system")} />
-            ) : null
-          }
-          control={
-            <Select
-              value={theme}
-              onValueChange={(value) => {
-                if (value === "system" || value === "light" || value === "dark") {
-                  setTheme(value);
-                }
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Color mode">
-                <SelectValue>
-                  {VARIANT_OPTIONS.find((option) => option.value === theme)?.label ?? "System"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {VARIANT_OPTIONS.map((option) => (
-                  <SelectItem hideIndicator key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
           }
         />
       </SettingsSection>

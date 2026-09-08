@@ -128,7 +128,11 @@ export function ComputerUseSettings() {
   for (const browser of BROWSERS)
     appEntries.set(`browser:${browser.id}`, { id: `browser:${browser.id}`, name: browser.label });
   return (
-    <section className="border-b p-6 sm:p-8" aria-labelledby="computer-use-heading">
+    <section
+      data-settings-section="Computer Use"
+      className="scroll-mt-6 border-b p-6 sm:p-8"
+      aria-labelledby="computer-use-heading"
+    >
       <div className="mx-auto flex max-w-4xl flex-col gap-5">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -251,8 +255,11 @@ export function ComputerUseSettings() {
                 />
               </div>
             </div>
-            <div className="space-y-3 border-t pt-4">
-              <h3 className="text-sm font-semibold">Browsers</h3>
+            <section
+              data-settings-section="Browser Use"
+              className="scroll-mt-6 space-y-3 border-t pt-4"
+            >
+              <h3 className="text-sm font-semibold">Browser Use</h3>
               <p className="text-xs text-muted-foreground">
                 Ryco Browser has a separate profile. Pair Chrome, Brave or Edge to use your existing
                 tabs and sign-ins.
@@ -394,7 +401,7 @@ export function ComputerUseSettings() {
                   </Button>
                 </div>
               ) : null}
-            </div>
+            </section>
             <div className="space-y-3 border-t pt-4">
               <h3 className="text-sm font-semibold">App access</h3>
               <p className="text-xs text-muted-foreground">
@@ -461,9 +468,20 @@ export function ComputerUseSettings() {
             </div>
           </>
         ) : (
-          <p className="text-sm text-muted-foreground">
-            Off. Agents cannot inspect or operate apps or browsers through Ryco computer use.
-          </p>
+          <>
+            <p className="text-sm text-muted-foreground">
+              Off. Agents cannot inspect or operate apps or browsers through Ryco computer use.
+            </p>
+            <section
+              data-settings-section="Browser Use"
+              className="scroll-mt-6 space-y-2 border-t pt-4"
+            >
+              <h3 className="text-sm font-semibold">Browser Use</h3>
+              <p className="text-xs text-muted-foreground">
+                Enable Computer Use above to configure Ryco Browser or pair Chrome, Brave, and Edge.
+              </p>
+            </section>
+          </>
         )}
       </div>
     </section>

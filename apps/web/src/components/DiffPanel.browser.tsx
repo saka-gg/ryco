@@ -9,7 +9,15 @@ import { render } from "vitest-browser-react";
 import { resetPointerEmulation, setCoarsePointerEmulation } from "../../test/browserPointer";
 import { measureEffectiveHitTarget } from "../../test/touchTargets";
 import { syncDocumentPresentationTier } from "../lib/presentationTier";
+import {
+  setAppearancePreference,
+  applyAppearancePreferencesToDocument,
+  APPEARANCE_PREFERENCES_STORAGE_KEY,
+} from "../themes/appearancePreferences";
 import DiffPanel from "./DiffPanel";
+
+// Keep the real draft schema used by cn without initializing browser draft persistence.
+vi.mock("../composerDraftStore", () => import("@ryco/client-runtime/state/composer"));
 
 const openInPreferredEditor = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
@@ -47,10 +55,11 @@ vi.mock("@pierre/diffs/react", () => ({
     renderHeaderPrefix?: () => ReactNode;
     options: {
       overflow?: string;
+      diffStyle?: string;
       onLineNumberClick?: (input: { lineNumber: number; lineType: string }) => void;
     };
   }) => (
-    <div>
+    <div data-test-diff-style={props.options.diffStyle}>
       <div data-title="">
         {props.renderHeaderPrefix?.()}
         {props.fileDiff.name}
@@ -266,6 +275,7 @@ describe("DiffPanel", () => {
   });
 
   beforeEach(() => {
+    localStorage.removeItem(APPEARANCE_PREFERENCES_STORAGE_KEY);
     openInPreferredEditor.mockClear();
   });
 
@@ -275,11 +285,46 @@ describe("DiffPanel", () => {
       await teardown?.call(mounted).catch(() => {});
     }
     mounted = null;
+    localStorage.removeItem(APPEARANCE_PREFERENCES_STORAGE_KEY);
     document.body.innerHTML = "";
     document.documentElement.style.fontSize = "";
     openInPreferredEditor.mockClear();
     await resetPointerEmulation();
     await page.viewport(1_280, 720);
+  });
+
+  it("shares the persistent layout between Appearance and the live diff toolbar", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    setAppearancePreference("diffLayout", "split");
+    applyAppearancePreferencesToDocument();
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector("[data-test-diff-style]")?.getAttribute("data-test-diff-style"),
+      ).toBe("split"),
+    );
+    expect(
+      JSON.parse(localStorage.getItem(APPEARANCE_PREFERENCES_STORAGE_KEY) ?? "{}").diffLayout,
+    ).toBe("split");
+    await page.getByRole("button", { name: "Stacked diff view" }).click();
+    expect(
+      JSON.parse(localStorage.getItem(APPEARANCE_PREFERENCES_STORAGE_KEY) ?? "{}").diffLayout,
+    ).toBeUndefined();
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector("[data-test-diff-style]")?.getAttribute("data-test-diff-style"),
+      ).toBe("unified"),
+    );
+  });
+
+  it("keeps the phone presentation unified when split is preferred", async () => {
+    setAppearancePreference("diffLayout", "split");
+    applyAppearancePreferencesToDocument();
+    mounted = await render(<DiffPanel mode="phone" />);
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector("[data-test-diff-style]")?.getAttribute("data-test-diff-style"),
+      ).toBe("unified"),
+    );
   });
 
   it("filters to search matches and cycles next results", async () => {

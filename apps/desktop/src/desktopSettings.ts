@@ -1,11 +1,16 @@
 import * as FS from "node:fs";
 import * as Path from "node:path";
-import type { DesktopServerExposureMode, DesktopUpdateChannel } from "@ryco/contracts";
+import type {
+  DesktopQuitShortcutMode,
+  DesktopServerExposureMode,
+  DesktopUpdateChannel,
+} from "@ryco/contracts";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 
 export interface DesktopSettings {
+  readonly quitShortcutMode: DesktopQuitShortcutMode;
   readonly serverExposureMode: DesktopServerExposureMode;
   /**
    * Hub launch configuration, owned by the desktop.
@@ -33,6 +38,7 @@ export interface DesktopSettings {
 export const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
+  quitShortcutMode: "press-twice",
   serverExposureMode: "local-only",
   hubConnectorEnabled: false,
   hubOrigin: null,
@@ -156,6 +162,7 @@ export function readDesktopSettings(settingsPath: string, appVersion: string): D
 
     const raw = FS.readFileSync(settingsPath, "utf8");
     const parsed = JSON.parse(raw) as {
+      readonly quitShortcutMode?: unknown;
       readonly serverExposureMode?: unknown;
       readonly tailscaleServeEnabled?: unknown;
       readonly tailscaleServePort?: unknown;
@@ -187,6 +194,10 @@ export function readDesktopSettings(settingsPath: string, appVersion: string): D
     }
 
     return {
+      quitShortcutMode:
+        parsed.quitShortcutMode === "hold" || parsed.quitShortcutMode === "immediately"
+          ? parsed.quitShortcutMode
+          : "press-twice",
       serverExposureMode:
         parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
       tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,

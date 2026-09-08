@@ -561,7 +561,14 @@ export type DesktopHubOriginValidation =
       readonly suggestion?: string;
     };
 
+export type DesktopQuitShortcutMode = "press-twice" | "hold" | "immediately";
+
 export interface DesktopBridge {
+  quitShortcut?: {
+    getMode(): Promise<DesktopQuitShortcutMode>;
+    setMode(mode: DesktopQuitShortcutMode): Promise<void>;
+    onFeedback(listener: (state: "press-twice" | "hold" | null) => void): () => void;
+  };
   browser?: {
     getState(): Promise<ProjectBrowserState>;
     open(input: { url: string; project: string }): Promise<string>;

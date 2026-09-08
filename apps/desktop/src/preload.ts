@@ -1,6 +1,28 @@
+import { isQuitShortcutChord } from "./quitShortcut.ts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { DesktopBridge } from "@ryco/contracts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
+
+// Capture before app/terminal listeners, without suppressing Electron key releases.
+function suppressQuitShortcut(event: KeyboardEvent): void {
+  if (
+    !isQuitShortcutChord(
+      {
+        key: event.key,
+        control: event.ctrlKey,
+        meta: event.metaKey,
+        alt: event.altKey,
+        shift: event.shiftKey,
+      },
+      process.platform === "darwin",
+    )
+  )
+    return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+window.addEventListener("keydown", suppressQuitShortcut, true);
+window.addEventListener("keyup", suppressQuitShortcut, true);
 
 const startupTimingEnabled = process.env.RYCO_DESKTOP_STARTUP_TIMING_STDOUT === "1";
 const preloadStartMs = performance.now();
@@ -122,6 +144,16 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       return null;
     }
     return result as ReturnType<DesktopBridge["getLocalEnvironmentBootstrap"]>;
+  },
+  quitShortcut: {
+    getMode: () => ipcRenderer.invoke("desktop:quit-shortcut-get"),
+    setMode: (mode) => ipcRenderer.invoke("desktop:quit-shortcut-set", mode),
+    onFeedback: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: "press-twice" | "hold" | null) =>
+        listener(state);
+      ipcRenderer.on("desktop:quit-shortcut-feedback", handler);
+      return () => ipcRenderer.removeListener("desktop:quit-shortcut-feedback", handler);
+    },
   },
   getClientSettings: () => ipcRenderer.invoke(GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) => ipcRenderer.invoke(SET_CLIENT_SETTINGS_CHANNEL, settings),

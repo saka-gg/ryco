@@ -1,3 +1,4 @@
+import { ComposerSettings } from "./ComposerSettings";
 import "../../index.css";
 
 import { page } from "vite-plus/test/browser";
@@ -63,6 +64,43 @@ describe("AppearanceSettingsPanel", () => {
     useUiStateStore.getState().setAlwaysUseBuildMode(true);
   });
 
+  it("previews color modes and theme palettes at desktop size", async () => {
+    await page.viewport(1100, 780);
+    mounted = await render(
+      <div style={{ width: 850, height: 720, overflow: "auto", margin: "20px auto" }}>
+        <AppearanceSettingsPanel />
+      </div>,
+    );
+    const dark = page.getByRole("button", { name: "Dark", exact: true });
+    await dark.click();
+    await expect.element(dark).toHaveAttribute("aria-pressed", "true");
+    const gallery = page.getByRole("radiogroup", { name: "Theme palette" }).element();
+    const previews = gallery.querySelectorAll<HTMLElement>('[aria-hidden="true"][style]');
+    expect(previews.length).toBeGreaterThan(3);
+    expect(
+      new Set(Array.from(previews, (preview) => getComputedStyle(preview).backgroundColor)).size,
+    ).toBeGreaterThan(3);
+  });
+
+  it("previews and remembers the selected diff style", async () => {
+    await page.viewport(1100, 780);
+    mounted = await render(
+      <div style={{ width: 800 }}>
+        <AppearanceSettingsPanel />
+      </div>,
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Unified diff style" }))
+      .toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "Split diff style" }).click();
+    await expect
+      .element(page.getByRole("button", { name: "Split diff style" }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(
+      JSON.parse(localStorage.getItem(APPEARANCE_PREFERENCES_STORAGE_KEY) ?? "{}").diffLayout,
+    ).toBe("split");
+  });
+
   it("lists built-in themes and applies a selected built-in theme", async () => {
     mounted = await render(<AppearanceSettingsPanel />);
 
@@ -100,10 +138,12 @@ describe("AppearanceSettingsPanel", () => {
     await expect.element(page.getByRole("radio", { name: /New theme/ })).toBeInTheDocument();
     expect(localStorage.getItem(ACTIVE_THEME_STORAGE_KEY)).toBe("custom-new");
 
-    await page.getByRole("button", { name: /Duplicate Default/ }).click();
+    await page.getByRole("button", { name: "Theme actions for Default", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Duplicate", exact: true }).click();
     await expect.element(page.getByRole("radio", { name: /Default \(Copy\)/ })).toBeInTheDocument();
 
-    await page.getByRole("button", { name: "Delete New theme" }).click();
+    await page.getByRole("button", { name: "Theme actions for New theme", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
     await expect.element(page.getByText("Delete custom theme?")).toBeInTheDocument();
     await page.getByRole("button", { name: "Delete theme" }).click();
 
@@ -129,7 +169,7 @@ describe("AppearanceSettingsPanel", () => {
       (option) => option.label === "Teal",
     )?.value;
 
-    await expect.element(page.getByText("Interface controls")).toBeInTheDocument();
+    await expect.element(page.getByText("Typography", { exact: true })).toBeInTheDocument();
     await page.getByRole("radio", { name: `Use ${interfaceFontLabel} for interface font` }).click();
     await page.getByRole("radio", { name: `Use ${codeFontLabel} for code font` }).click();
     await page.getByRole("button", { name: "Set text size to Large" }).click();
@@ -188,7 +228,7 @@ describe("AppearanceSettingsPanel", () => {
   });
 
   it("toggles and resets wide composer auto-collapse", async () => {
-    mounted = await render(<AppearanceSettingsPanel />);
+    mounted = await render(<ComposerSettings />);
 
     const autoCollapseSwitch = page.getByLabelText("Auto-collapse wide composer labels");
     await expect.element(autoCollapseSwitch).toBeChecked();
@@ -221,7 +261,7 @@ describe("AppearanceSettingsPanel", () => {
   });
 
   it("toggles and resets always use Build mode", async () => {
-    mounted = await render(<AppearanceSettingsPanel />);
+    mounted = await render(<ComposerSettings />);
 
     const buildModeSwitch = page.getByLabelText("Always use Build mode", { exact: true });
     await expect.element(buildModeSwitch).toBeChecked();

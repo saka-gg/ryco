@@ -121,6 +121,21 @@ describe("appearance preferences", () => {
     Reflect.deleteProperty(globalThis, "HTMLStyleElement");
   });
 
+  it("persists and validates the diff layout independently of theme colors", () => {
+    expect(getAppearancePreferences().diffLayout).toBe("stacked");
+    setAppearancePreference("diffLayout", "split");
+    expect(getAppearancePreferences().diffLayout).toBe("split");
+    expect(hasAppearancePreferenceOverride("diffLayout")).toBe(true);
+    localStorage.setItem(
+      APPEARANCE_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ diffLayout: "invalid" }),
+    );
+    expect(getAppearancePreferences().diffLayout).toBe("stacked");
+    setAppearancePreference("diffLayout", "split");
+    resetAppearancePreference("diffLayout");
+    expect(getAppearancePreferences().diffLayout).toBe("stacked");
+  });
+
   it("returns defaults when no overrides are stored", () => {
     expect(getAppearancePreferences()).toEqual(DEFAULT_APPEARANCE_PREFERENCES);
     expect(hasAppearancePreferenceOverride("fontFamilySans")).toBe(false);

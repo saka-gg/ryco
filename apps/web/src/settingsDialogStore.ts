@@ -8,6 +8,7 @@ export type SettingsSectionId =
   | "providers"
   | "opinionated-plugins"
   | "mcp-servers"
+  | "integrations"
   | "computer-use"
   | "appearance"
   | "keybindings"

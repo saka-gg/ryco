@@ -132,14 +132,14 @@ export const MessageAttachments = memo(function MessageAttachments(
     <div
       className={
         props.variant === "user"
-          ? "mb-2 grid max-w-[420px] grid-cols-2 gap-2"
+          ? "mb-2 flex max-w-[520px] flex-wrap items-start gap-2"
           : "my-2 flex w-full max-w-[520px] flex-col gap-2"
       }
     >
       {props.attachments.map((attachment, index) => (
         <div
           key={`${props.environmentId}:${props.messageId}:${attachment.id ?? index}`}
-          className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
+          className="max-w-full overflow-hidden rounded-lg border border-border/80 bg-background/70"
         >
           <LoadableAttachment {...props} attachment={attachment}>
             {(attachment) =>
@@ -165,11 +165,14 @@ export const MessageAttachments = memo(function MessageAttachments(
                       {...(attachment.width !== undefined && attachment.height !== undefined
                         ? { width: attachment.width, height: attachment.height }
                         : {})}
+                      style={
+                        props.variant === "user" ? { maxWidth: "min(100%, 360px)" } : undefined
+                      }
                       loading="lazy"
                       decoding="async"
                       className={
                         props.variant === "user"
-                          ? "block h-auto max-h-[220px] w-full object-cover"
+                          ? "block h-auto max-h-[260px] w-auto max-w-full object-contain"
                           : "block h-auto max-h-[360px] w-full object-contain"
                       }
                     />

@@ -2038,3 +2038,12 @@ label:has(> select#reasoning-effort) select {
     transition: none;
   }
 }
+
+@keyframes quit-shortcut-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}

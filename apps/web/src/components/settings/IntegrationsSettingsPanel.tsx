@@ -6,7 +6,11 @@ import { ChevronRightIcon, KeyRoundIcon } from "lucide-react";
 import { Switch } from "../ui/switch";
 import { AgentControlMcpInstallations } from "./AgentControlMcpInstallations";
 import { ExternalIntegrationsSettings } from "./IntegrationsSettings";
-import { McpServersSettings } from "./McpServersSettings";
+import { lazy, Suspense } from "react";
+
+const ComputerUseSettings = lazy(() =>
+  import("./ComputerUseSettings").then((module) => ({ default: module.ComputerUseSettings })),
+);
 
 export function IntegrationsSettingsPanel() {
   const enabled = useSettings((settings) => settings.agentControl.enabled);
@@ -15,11 +19,14 @@ export function IntegrationsSettingsPanel() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <section className="border-b bg-muted/10 p-6 sm:p-8">
+      <section
+        data-settings-section="Private Agent Control"
+        className="scroll-mt-6 border-b bg-muted/10 p-6 sm:p-8"
+      >
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-              Agent Control
+              Private Agent Control
             </div>
             <h2 className="mt-1 text-lg font-semibold tracking-[-0.01em]">
               Private tools for every agent
@@ -69,7 +76,15 @@ export function IntegrationsSettingsPanel() {
           </details>
         </>
       ) : null}
-      <McpServersSettings />
+      {window.desktopBridge?.computerUse && (
+        <Suspense
+          fallback={
+            <p className="p-6 text-sm text-muted-foreground">Loading device integrations…</p>
+          }
+        >
+          <ComputerUseSettings />
+        </Suspense>
+      )}
     </div>
   );
 }

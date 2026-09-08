@@ -1,3 +1,4 @@
+import { SourceControlPreferences } from "./SourceControlPreferences";
 import { KeyRoundIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { Option } from "effect";
 import { type FormEvent, type ReactNode, useState } from "react";
@@ -740,6 +741,7 @@ export function SourceControlSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SourceControlPreferences />
       {hasDiscoveryItems ? null : (
         <SettingsSection title="Source Control Providers">
           <Empty className="min-h-56 border-t border-border/60 first:border-t-0">

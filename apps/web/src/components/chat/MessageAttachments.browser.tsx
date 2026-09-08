@@ -104,3 +104,40 @@ it("offers retry when an attachment read fails", async () => {
     .toHaveAttribute("download", "report.pdf");
   await screen.unmount();
 });
+
+it("keeps portrait and landscape user thumbnails proportional without stretching their frames", async () => {
+  const dimensions = [
+    [1600, 900],
+    [900, 1600],
+  ] as const;
+  const attachments = dimensions.map(([width, height], index) => ({
+    type: "image" as const,
+    id: `shape-${index}`,
+    name: `shape-${index}.svg`,
+    mimeType: "image/svg+xml",
+    sizeBytes: 100,
+    width,
+    height,
+    previewUrl: `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="teal"/></svg>`)}`,
+  }));
+  const expand = vi.fn();
+  const screen = await render(
+    <div style={{ width: 440 }}>
+      <MessageAttachments variant="user" attachments={attachments} onImageExpand={expand} />
+    </div>,
+  );
+  for (const [index, [width, height]] of dimensions.entries()) {
+    const image = page
+      .getByRole("img", { name: `shape-${index}.svg` })
+      .element() as HTMLImageElement;
+    await vi.waitFor(() => expect(image.naturalWidth).toBe(width));
+    const rect = image.getBoundingClientRect();
+    expect(rect.width / rect.height).toBeCloseTo(width / height, 2);
+    expect(rect.height).toBeLessThanOrEqual(260);
+    expect(rect.width).toBeLessThanOrEqual(360);
+    expect(image.closest("button")!.getBoundingClientRect().height).toBeCloseTo(rect.height, 0);
+  }
+  await page.getByRole("button", { name: "Preview shape-1.svg" }).click();
+  expect(expand).toHaveBeenCalledOnce();
+  await screen.unmount();
+});
