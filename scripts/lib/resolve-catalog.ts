@@ -29,3 +29,33 @@ export function resolveCatalogDependencies(
     }),
   );
 }
+
+export type DependencyOverrides = Record<string, string | Record<string, string>>;
+
+/** Resolve catalog specs without flattening parent-scoped npm overrides. */
+export function resolveCatalogOverrides(
+  overrides: DependencyOverrides,
+  catalog: Record<string, string>,
+  label: string,
+): DependencyOverrides {
+  return Object.fromEntries(
+    Object.entries(overrides).map(([parent, spec]) => {
+      if (typeof spec === "string") {
+        return [parent, resolveCatalogDependencies({ [parent]: spec }, catalog, label)[parent]!];
+      }
+
+      // npm's "." entry overrides the parent itself. A version selector is
+      // not part of the package's catalog key (including for scoped names).
+      const parentName = parent.replace(/@[^/@]+$/, "");
+      return [
+        parent,
+        Object.fromEntries(
+          Object.entries(spec).map(([child, value]) => {
+            const name = child === "." ? parentName : child;
+            return [child, resolveCatalogDependencies({ [name]: value }, catalog, label)[name]!];
+          }),
+        ),
+      ];
+    }),
+  );
+}

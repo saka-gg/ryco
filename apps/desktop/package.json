@@ -19,7 +19,7 @@
   "dependencies": {
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
-    "electron": "43.4.0",
+    "electron": "44.2.0",
     "electron-updater": "^6.8.9",
     "ws": "catalog:"
   },

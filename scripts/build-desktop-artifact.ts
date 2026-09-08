@@ -10,7 +10,7 @@ import {
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
-import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { resolveCatalogDependencies, resolveCatalogOverrides } from "./lib/resolve-catalog.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -974,6 +974,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ];
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
+      minimumSystemVersion: "13.0",
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
       // A renamed Electron bundle's linker signature does not bind Ryco's Info.plist.
@@ -1149,7 +1150,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   const resolvedOverrides = yield* Effect.try({
     try: () =>
-      resolveCatalogDependencies(
+      resolveCatalogOverrides(
         rootPackageJson.overrides,
         rootPackageJson.workspaces.catalog,
         "apps/desktop",

@@ -481,7 +481,7 @@ export const E2EE_CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
  * protocol-relevant change, because canonical bytes participate in signatures
  * and hashes.
  */
-export const E2EE_CBOR_CODEC = "cborg@6.1.1";
+export const E2EE_CBOR_CODEC = "cborg@6.1.2";
 /** Maintainer security-audit baseline for X25519/Ed25519/P-256 (April 2026; §14). */
 export const E2EE_NOBLE_CURVES_AUDIT_BASELINE = "@noble/curves@2.2.0";
 /** Maintainer security-audit baseline for ChaCha20-Poly1305 (April 2026; §14). */

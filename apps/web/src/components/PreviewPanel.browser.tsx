@@ -78,16 +78,16 @@ vi.mock("@pierre/diffs/react", () => ({
   File: (props: {
     edit?: boolean;
     file: { contents: string; name: string };
-    editorOptions?: {
-      onChange?: (file: { contents: string; name: string }) => void;
-    };
+    onEditChange?: (event: { file: { contents: string; name: string } }) => void;
   }) =>
     props.edit ? (
       <textarea
         aria-label={`Edit ${props.file.name}`}
         value={props.file.contents}
         onChange={(event) =>
-          props.editorOptions?.onChange?.({ ...props.file, contents: event.currentTarget.value })
+          props.onEditChange?.({
+            file: { ...props.file, contents: event.currentTarget.value },
+          })
         }
       />
     ) : (

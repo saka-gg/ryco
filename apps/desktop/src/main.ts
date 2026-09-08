@@ -3474,7 +3474,11 @@ function createWindow(): BrowserWindow {
       menuTemplate.push(
         {
           label: "Copy Link",
-          click: () => clipboard.writeText(params.linkURL),
+          click: () => {
+            void clipboard.writeText(params.linkURL).catch((error: unknown) => {
+              console.error("[desktop] failed to copy link", error);
+            });
+          },
         },
         { type: "separator" },
       );

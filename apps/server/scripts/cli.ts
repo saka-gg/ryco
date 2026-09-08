@@ -10,7 +10,11 @@ import {
   DEVELOPMENT_ICON_OVERRIDES,
   PUBLISH_ICON_OVERRIDES,
 } from "../../../scripts/lib/brand-assets.ts";
-import { resolveCatalogDependencies } from "../../../scripts/lib/resolve-catalog.ts";
+import {
+  resolveCatalogDependencies,
+  resolveCatalogOverrides,
+  type DependencyOverrides,
+} from "../../../scripts/lib/resolve-catalog.ts";
 import rootPackageJson from "../../../package.json" with { type: "json" };
 import serverPackageJson from "../package.json" with { type: "json" };
 
@@ -27,7 +31,7 @@ interface PackageJson {
   engines: Record<string, string>;
   files: string[];
   dependencies: Record<string, string>;
-  overrides: Record<string, string>;
+  overrides: DependencyOverrides;
 }
 
 class CliError extends Data.TaggedError("CliError")<{
@@ -251,7 +255,7 @@ const publishCmd = Command.make(
               rootPackageJson.workspaces.catalog,
               "apps/server",
             ),
-            overrides: resolveCatalogDependencies(
+            overrides: resolveCatalogOverrides(
               rootPackageJson.overrides,
               rootPackageJson.workspaces.catalog,
               "apps/server",

@@ -462,6 +462,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         );
         assert.deepStrictEqual(config.mac, {
           target: ["dmg", "zip"],
+          minimumSystemVersion: "13.0",
           icon: "icon.icns",
           category: "public.app-category.developer-tools",
           identity: "-",
