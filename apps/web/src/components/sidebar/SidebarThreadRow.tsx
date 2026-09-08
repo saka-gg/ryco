@@ -7,7 +7,7 @@ import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../../environments/runtime";
-import { useGitStatus, type GitStatusState } from "../../lib/gitStatusState";
+import { type GitStatusTarget, useGitStatus, type GitStatusState } from "../../lib/gitStatusState";
 import { cn, isMacPlatform } from "../../lib/utils";
 import { type AppState, selectProjectByRef, useStore } from "../../store";
 import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
@@ -28,6 +28,7 @@ import {
   resolveThreadRowClassName,
   resolveThreadStatusPill,
   SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME,
+  shouldEnableSidebarRowGitStatus,
 } from "../Sidebar.logic";
 import { SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -35,11 +36,12 @@ import {
   resolveSidebarStatusTextStyle,
   resolveThreadStatusTextClassName,
 } from "./sidebarStatusText";
+import { useIsIntersectingViewport } from "./hooks/useHasIntersectedViewport";
 
 export interface SidebarThreadRowProps {
   thread: SidebarThreadSummary & { draftId?: DraftId | undefined };
   projectCwd: string | null;
-  gitStatus?: GitStatusState | null | undefined;
+  gitStatusTarget?: GitStatusTarget | null | undefined;
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
   isTreeChild?: boolean | undefined;
@@ -82,8 +84,8 @@ export interface SidebarThreadRowProps {
 }
 
 export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
-  if (props.gitStatus !== undefined) {
-    return <SidebarThreadRowContent {...props} gitStatus={props.gitStatus} />;
+  if (props.gitStatusTarget !== undefined) {
+    return <SidebarThreadRowWithGitStatusTarget {...props} target={props.gitStatusTarget} />;
   }
 
   return <SidebarThreadRowWithGitStatusFallback {...props} />;
@@ -103,16 +105,42 @@ export function SidebarThreadRowWithGitStatusFallback(props: SidebarThreadRowPro
     ),
   );
   const gitCwd = thread.worktreePath ?? threadProjectCwd ?? props.projectCwd;
-  const gitStatus = useGitStatus({
-    environmentId: thread.environmentId,
-    cwd: thread.branch != null ? gitCwd : null,
+  const target = useMemo(
+    () => ({
+      environmentId: thread.environmentId,
+      cwd: thread.branch != null ? gitCwd : null,
+    }),
+    [gitCwd, thread.branch, thread.environmentId],
+  );
+
+  return <SidebarThreadRowWithGitStatusTarget {...props} target={target} />;
+}
+
+function SidebarThreadRowWithGitStatusTarget(
+  props: SidebarThreadRowProps & { readonly target: GitStatusTarget | null },
+) {
+  const [setVisibilityNode, isIntersecting] = useIsIntersectingViewport();
+  const gitStatus = useGitStatus(props.target ?? { environmentId: null, cwd: null }, {
+    enabled: shouldEnableSidebarRowGitStatus({
+      isActive: props.isActive,
+      isIntersecting,
+    }),
   });
 
-  return <SidebarThreadRowContent {...props} gitStatus={gitStatus} />;
+  return (
+    <SidebarThreadRowContent
+      {...props}
+      gitStatus={props.target === null ? null : gitStatus}
+      setVisibilityNode={setVisibilityNode}
+    />
+  );
 }
 
 export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
-  props: SidebarThreadRowProps & { gitStatus: GitStatusState | null },
+  props: SidebarThreadRowProps & {
+    gitStatus: GitStatusState | null;
+    setVisibilityNode?: ((node: HTMLElement | null) => void) | undefined;
+  },
 ) {
   const {
     orderedProjectThreadKeys,
@@ -402,6 +430,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
 
   return (
     <SidebarMenuSubItem
+      ref={props.setVisibilityNode}
       className={cn(
         "w-full",
         props.isTreeChild &&

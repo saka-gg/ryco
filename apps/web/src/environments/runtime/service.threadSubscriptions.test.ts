@@ -260,6 +260,79 @@ describe("retainThreadDetailSubscription", () => {
     await resetEnvironmentServiceForTests();
   });
 
+  it("releases an idle speculative thread detail subscription immediately when requested", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const stop = startEnvironmentConnectionService();
+    const release = retainThreadDetailSubscription(
+      EnvironmentId.make("env-1"),
+      ThreadId.make("thread-speculative"),
+    );
+
+    release({ immediately: true });
+
+    expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
+
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("ignores an immediate release from a disposed subscription generation", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      removeSavedEnvironment,
+      getPrimaryEnvironmentConnection,
+    } = await import("./service");
+    const stop = startEnvironmentConnectionService();
+    const environmentId = EnvironmentId.make("env-1");
+    const threadId = ThreadId.make("thread-recreated");
+    const releaseOld = retainThreadDetailSubscription(environmentId, threadId);
+
+    await removeSavedEnvironment(environmentId);
+    getPrimaryEnvironmentConnection();
+    const releaseCurrent = retainThreadDetailSubscription(environmentId, threadId);
+    expect(mockSubscribeThread).toHaveBeenCalledTimes(2);
+    mockThreadUnsubscribe.mockClear();
+
+    releaseOld({ immediately: true });
+    expect(mockThreadUnsubscribe).not.toHaveBeenCalled();
+    releaseCurrent({ immediately: true });
+    expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("does not dispose an active thread detail retain when speculative demand is released", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const stop = startEnvironmentConnectionService();
+    const environmentId = EnvironmentId.make("env-1");
+    const threadId = ThreadId.make("thread-active-and-speculative");
+    const releaseActive = retainThreadDetailSubscription(environmentId, threadId);
+    const releaseSpeculative = retainThreadDetailSubscription(environmentId, threadId);
+
+    releaseSpeculative({ immediately: true });
+
+    expect(mockThreadUnsubscribe).not.toHaveBeenCalled();
+
+    releaseActive();
+    expect(mockThreadUnsubscribe).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
+
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
   it("does not start the primary connection until the known environment has an id", async () => {
     mockGetPrimaryKnownEnvironment.mockReturnValue({
       id: "env-1",

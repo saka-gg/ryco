@@ -214,25 +214,36 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
       ),
     [project.memberProjects],
   );
-  const resolveThreadGitStatusTarget = useCallback(
-    (
+  const resolveThreadGitStatusTarget = useMemo(() => {
+    // Cache only targets used by the current project thread set. Rebuilding
+    // the resolver when that set changes also drops removed worktree paths.
+    const targets = new Map<string, SidebarThreadGitStatusTarget>();
+    const resolve = (
       thread: Pick<
         SidebarTreeThread,
         "branch" | "environmentId" | "projectId" | "sourceProjectId" | "worktreePath"
       >,
     ): SidebarThreadGitStatusTarget | null => {
-      if (thread.branch === null) {
-        return null;
-      }
+      if (thread.branch === null) return null;
       const sourceProjectId = thread.sourceProjectId ?? thread.projectId;
       const memberProject = memberProjectByScopedKey.get(
         scopedProjectKey(scopeProjectRef(thread.environmentId, sourceProjectId)),
       );
       const cwd = thread.worktreePath ?? memberProject?.cwd ?? project.cwd;
-      return cwd ? { environmentId: thread.environmentId, cwd } : null;
-    },
-    [memberProjectByScopedKey, project.cwd],
-  );
+      if (!cwd) return null;
+      return { environmentId: thread.environmentId, cwd };
+    };
+    const targetKey = (target: SidebarThreadGitStatusTarget) =>
+      JSON.stringify([target.environmentId, target.cwd]);
+    for (const thread of projectThreads) {
+      const target = resolve(thread);
+      if (target) targets.set(targetKey(target), target);
+    }
+    return (thread: Parameters<typeof resolve>[0]) => {
+      const target = resolve(thread);
+      return target ? (targets.get(targetKey(target)) ?? target) : null;
+    };
+  }, [memberProjectByScopedKey, project.cwd, projectThreads]);
   const memberThreadCountByPhysicalKey = useMemo(() => {
     const counts = new Map<string, number>(
       project.memberProjects.map((member) => [member.physicalProjectKey, 0] as const),
@@ -517,14 +528,14 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
           onOpenWorktree={openWorktree}
           onRenameWorktree={renameWorktree}
           onRestoreWorktree={restoreWorktree}
-          renderThread={(thread: SidebarTreeThread, treeThreadKeys, gitStatus) => {
+          renderThread={(thread: SidebarTreeThread, treeThreadKeys, gitStatusTarget) => {
             const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
             return (
               <SidebarThreadRow
                 key={threadKey}
                 thread={thread}
                 projectCwd={project.cwd}
-                gitStatus={gitStatus}
+                gitStatusTarget={gitStatusTarget}
                 orderedProjectThreadKeys={treeThreadKeys}
                 isActive={activeRouteThreadKey === threadKey}
                 jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}

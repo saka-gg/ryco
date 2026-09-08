@@ -107,6 +107,14 @@ type ThreadDetailSubscriptionEntry = {
   estimatedRetainedBytes: number;
 };
 
+export interface ThreadDetailSubscriptionReleaseOptions {
+  readonly immediately?: boolean | undefined;
+}
+
+export type ReleaseThreadDetailSubscription = (
+  options?: ThreadDetailSubscriptionReleaseOptions,
+) => void;
+
 export interface EnvironmentConnectionSupervisor {
   readonly subscribe: (listener: () => void) => () => void;
   readonly list: () => ReadonlyArray<EnvironmentConnection>;
@@ -137,7 +145,7 @@ export interface EnvironmentConnectionSupervisor {
   readonly retainThreadDetailSubscription: (
     environmentId: EnvironmentId,
     threadId: ThreadId,
-  ) => () => void;
+  ) => ReleaseThreadDetailSubscription;
   readonly disposeThreadDetailSubscriptionsForEnvironment: (environmentId: EnvironmentId) => void;
   readonly disposeThreadDetailSubscription: (
     environmentId: EnvironmentId,
@@ -476,12 +484,17 @@ export function createEnvironmentConnectionSupervisor<
     if (!attach(entry)) watch(entry);
     if (!existing) evictToCapacity();
     let released = false;
-    return () => {
+    return (options?: ThreadDetailSubscriptionReleaseOptions) => {
       if (released) return;
       released = true;
+      if (threadDetailSubscriptions.get(key) !== entry) return;
       entry.refCount = Math.max(0, entry.refCount - 1);
       entry.lastAccessedAt = input.now();
       if (entry.refCount === 0) {
+        if (options?.immediately === true && shouldEvict(entry)) {
+          disposeByKey(key);
+          return;
+        }
         reconcileEntry(entry);
         evictToCapacity();
       }

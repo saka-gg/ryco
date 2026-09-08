@@ -90,6 +90,42 @@ describe("SidebarWorktreeList", () => {
     expect(document.body.textContent).not.toContain("release/next");
   });
 
+  it("passes each expanded worktree row its resolved git status target", async () => {
+    const gitStatusTargets: unknown[] = [];
+    await render(
+      <SidebarWorktreeList
+        attachThreadListAutoAnimateRef={() => undefined}
+        projectExpanded
+        resolveThreadGitStatusTarget={(thread) => ({
+          environmentId: thread.environmentId,
+          cwd: `/status/${thread.id}`,
+        })}
+        renderThread={(_thread, _keys, gitStatusTarget) => {
+          gitStatusTargets.push(gitStatusTarget);
+          return <div>Rendered session</div>;
+        }}
+        treeProject={makeTreeProject()}
+        visibleThreadKeys={null}
+        onArchiveWorktree={vi.fn()}
+        onCopyWorktreePath={vi.fn()}
+        onDeleteWorktree={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenInEditor={vi.fn()}
+        onOpenWorktree={vi.fn()}
+        onRenameWorktree={vi.fn()}
+        onRestoreWorktree={vi.fn()}
+      />,
+    );
+
+    expect(gitStatusTargets).toEqual([]);
+    await page.getByRole("button", { name: "Expand main", exact: true }).click();
+    await expect.element(page.getByText("Rendered session")).toBeInTheDocument();
+    expect(gitStatusTargets.at(-1)).toEqual({
+      environmentId,
+      cwd: "/status/thread-1",
+    });
+  });
+
   it("expands a worktree when clicking its title without opening it", async () => {
     const onOpenWorktree = vi.fn();
     await render(

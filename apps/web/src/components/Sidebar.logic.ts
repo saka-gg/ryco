@@ -15,7 +15,7 @@ export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
 // Visible sidebar rows are prewarmed into the thread-detail cache so opening a
 // nearby thread usually reuses an already-hot subscription.
-export const SIDEBAR_THREAD_PREWARM_LIMIT = 10;
+export const SIDEBAR_THREAD_PREWARM_LIMIT = 3;
 export const SIDEBAR_AUTO_ANIMATE_PROJECT_LIMIT = 80;
 export const SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT = 120;
 // 44px effective touch target for compact sidebar row actions on coarse
@@ -407,6 +407,22 @@ export function getSidebarThreadIdsToPrewarm<TThreadId>(
   limit = SIDEBAR_THREAD_PREWARM_LIMIT,
 ): TThreadId[] {
   return visibleThreadIds.slice(0, Math.max(0, limit));
+}
+
+export function shouldPrewarmSidebarThreads(input: {
+  readonly isMobile: boolean;
+  readonly open: boolean;
+  readonly openMobile: boolean;
+  readonly sidebarMode: "inbox" | "projects";
+}): boolean {
+  return input.sidebarMode === "projects" && (input.isMobile ? input.openMobile : input.open);
+}
+
+export function shouldEnableSidebarRowGitStatus(input: {
+  readonly isActive: boolean;
+  readonly isIntersecting: boolean;
+}): boolean {
+  return input.isActive || input.isIntersecting;
 }
 
 export function sortThreadsWithPinned<T extends Pick<Thread, "id"> & ThreadSortInput>(input: {
