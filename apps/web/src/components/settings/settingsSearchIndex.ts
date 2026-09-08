@@ -2,6 +2,7 @@ import type { SettingsSectionId } from "../../settingsDialogStore";
 
 export interface SettingsSearchEntry {
   readonly section: SettingsSectionId;
+  readonly desktopCapability?: "computerUse" | "quitShortcut";
   readonly title: string;
   readonly description: string;
   /** Extra match terms not present in title/description. */
@@ -19,7 +20,28 @@ export interface SettingsSearchEntry {
  */
 export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
-    section: "computer-use",
+    section: "appearance",
+    title: "Diff style",
+    description: "Preview unified and split layouts for code changes.",
+    keywords: "diff design side by side stacked layout",
+  },
+  {
+    section: "integrations",
+    title: "Browser Use",
+    description: "Pair browsers and manage agent access to local tabs.",
+    keywords: "chrome brave edge browser extension",
+    desktopCapability: "computerUse",
+  },
+  {
+    section: "general",
+    title: "Quit shortcut",
+    description: "Prevent accidental quits: press twice, hold, or quit immediately.",
+    keywords: "ctrl cmd q exit desktop",
+    desktopCapability: "quitShortcut",
+  },
+  {
+    section: "integrations",
+    desktopCapability: "computerUse",
     title: "Computer use",
     description: "Control local apps and browsers, manage permissions, and pair a browser.",
     keywords:
@@ -50,25 +72,25 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "vscode cursor open in",
   },
   {
-    section: "general",
+    section: "source-control",
     title: "Diff line wrapping",
     description: "Default wrap state when the diff panel opens.",
     keywords: "word wrap",
   },
   {
-    section: "general",
+    section: "source-control",
     title: "Hide whitespace changes",
     description: "Whether the diff panel ignores whitespace-only edits.",
     keywords: "diff",
   },
   {
-    section: "general",
+    section: "source-control",
     title: "Remote Git status",
     description: "Refresh remote branch and pull request metadata.",
     keywords: "git polling refresh remote",
   },
   {
-    section: "general",
+    section: "source-control",
     title: "PR & workflow updates",
     description: "Choose automatic, reduced, or manual pull request and workflow refreshes.",
     keywords: "github actions checks ci polling refresh",
@@ -171,20 +193,20 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "dark midnight graphite nord dracula catppuccin",
   },
   {
-    section: "appearance",
+    section: "general",
     title: "Auto-collapse wide composer labels",
     description: "Show long composer mode labels only on hover or focus.",
     keywords: "chips",
   },
   {
-    section: "appearance",
+    section: "general",
     title: "Always use Build mode",
     description: "Hide the mode selector and send every turn in Build mode.",
     keywords: "composer",
   },
   {
     section: "appearance",
-    title: "Theme variant",
+    title: "Color mode",
     description: "Light, dark, or follow the system preference.",
     keywords: "color mode dark light",
   },
@@ -195,8 +217,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "api model driver accent",
   },
   {
-    section: "mcp-servers",
-    title: "External integrations",
+    section: "integrations",
+    title: "Private Agent Control",
     description: "Pair local Codex or Claude MCP clients with scoped, revocable access.",
     keywords: "model context protocol tools pairing codex claude approval agent control",
   },

@@ -14,6 +14,7 @@ export const APPEARANCE_PREFERENCE_KEYS = [
   "surfaceTransparency",
   "motion",
   "dockDensity",
+  "diffLayout",
 ] as const;
 
 export type AppearancePreferenceKey = (typeof APPEARANCE_PREFERENCE_KEYS)[number];
@@ -190,6 +191,7 @@ export const DEFAULT_APPEARANCE_PREFERENCES: AppearancePreferences = {
   surfaceTransparency: "default",
   motion: MOTION_OPTIONS[0].value,
   dockDensity: DOCK_DENSITY_OPTIONS[0].value,
+  diffLayout: "stacked",
 };
 
 const RADIUS_TOKEN_OFFSETS_PX = {
@@ -212,6 +214,7 @@ const OPTION_VALUES: Record<AppearancePreferenceKey, ReadonlySet<string>> = {
   surfaceTransparency: new Set(SURFACE_TRANSPARENCY_OPTIONS.map((option) => option.value)),
   motion: new Set(MOTION_OPTIONS.map((option) => option.value)),
   dockDensity: new Set(DOCK_DENSITY_OPTIONS.map((option) => option.value)),
+  diffLayout: new Set(["stacked", "split"]),
 };
 
 /**

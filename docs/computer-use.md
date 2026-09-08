@@ -4,7 +4,7 @@ Ryco desktop can give an agent permission to inspect and operate apps on the loc
 
 ## Enable it
 
-1. Enable **Agent Control** for the local environment in **Settings → Integrations**, then open the separate **Settings → Computer use** tab and enable computer use.
+1. Open **Settings → Integrations**, enable **Private Agent Control** for the local environment, then enable **Computer Use** on the same page. Configure browsers in its **Browser Use** subsection.
 2. Permission badges refresh automatically on opening settings, returning to the app, and while the panel is visible. **Granted** is green, **Not granted** is red, and unverified states are neutral. You can also click **Check permissions**. On macOS, grant Accessibility and Screen Recording using the buttons and the system settings panes. Restart Ryco if macOS requests it. Development executables and installed/signed builds can have different permission identities.
 3. Find an app and choose **Ask**, **Always allow**, or **Block**. Ask opens a native Ryco consent dialog on first use in each turn. Remembered rules remain editable even when an app is not running.
 4. Enable the desired browsers. **Ryco Browser** uses a separate persistent profile. Chrome, Brave and Edge use the extension setup below.

@@ -1,3 +1,6 @@
+import { SourceControlPreferences } from "./SourceControlPreferences";
+import { ComposerSettings } from "./ComposerSettings";
+import { QuitShortcutSetting } from "./QuitShortcutSetting";
 import { ArchiveIcon, ArchiveX, ChevronRightIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -8,11 +11,7 @@ import {
   type ScopedThreadRef,
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import {
-  DEFAULT_UNIFIED_SETTINGS,
-  type GitStatusPollIntervalMs,
-  type SourceControlRefreshMode,
-} from "@ryco/contracts/settings";
+import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
 import { Equal } from "effect";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
@@ -68,42 +67,6 @@ const TIMESTAMP_FORMAT_LABELS = {
   "12-hour": "12-hour",
   "24-hour": "24-hour",
 } as const;
-
-const GIT_STATUS_POLL_INTERVAL_LABELS = {
-  0: "Off",
-  10000: "10 seconds",
-  30000: "30 seconds",
-  60000: "1 minute",
-  300000: "5 minutes",
-} satisfies Record<GitStatusPollIntervalMs, string>;
-
-const GIT_STATUS_POLL_INTERVAL_OPTIONS = [
-  0, 10_000, 30_000, 60_000, 300_000,
-] as const satisfies readonly GitStatusPollIntervalMs[];
-
-const SOURCE_CONTROL_REFRESH_MODE_LABELS = {
-  automatic: "Automatic",
-  reduced: "Reduced",
-  manual: "Manual",
-} satisfies Record<SourceControlRefreshMode, string>;
-
-const SOURCE_CONTROL_REFRESH_MODE_OPTIONS = [
-  "automatic",
-  "reduced",
-  "manual",
-] as const satisfies readonly SourceControlRefreshMode[];
-
-function parseGitStatusPollInterval(value: string | null): GitStatusPollIntervalMs | null {
-  if (value === null) return null;
-  const parsed = Number.parseInt(value, 10);
-  return GIT_STATUS_POLL_INTERVAL_OPTIONS.includes(parsed as GitStatusPollIntervalMs)
-    ? (parsed as GitStatusPollIntervalMs)
-    : null;
-}
-
-function parseSourceControlRefreshMode(value: string | null): SourceControlRefreshMode | null {
-  return SOURCE_CONTROL_REFRESH_MODE_OPTIONS.find((mode) => mode === value) ?? null;
-}
 
 function EditorOptionIcon({ editor }: { editor: EditorId }) {
   const IconComponent = EDITOR_ICONS[editor];
@@ -648,7 +611,7 @@ export function GeneralSettingsPanel({
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="General">
+      <SettingsSection title="Behavior">
         <SettingsRow
           title="Time format"
           description="System default follows your browser or OS clock preference."
@@ -757,143 +720,9 @@ export function GeneralSettingsPanel({
             </Select>
           }
         />
-
-        <SettingsRow
-          title="Diff line wrapping"
-          description="Set the default wrap state when the diff panel opens."
-          scope={localScopeLabel}
-          resetAction={
-            settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap ? (
-              <SettingResetButton
-                label="diff line wrapping"
-                onClick={() =>
-                  updateSettings({
-                    diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffWordWrap}
-              onCheckedChange={(checked) => updateSettings({ diffWordWrap: Boolean(checked) })}
-              aria-label="Wrap diff lines by default"
-            />
-          }
-        />
-
-        <SettingsRow
-          title="Hide whitespace changes"
-          description="Set whether the diff panel ignores whitespace-only edits by default."
-          scope={localScopeLabel}
-          resetAction={
-            settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
-              <SettingResetButton
-                label="diff whitespace changes"
-                onClick={() =>
-                  updateSettings({
-                    diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffIgnoreWhitespace}
-              onCheckedChange={(checked) =>
-                updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
-              }
-              aria-label="Hide whitespace changes by default"
-            />
-          }
-        />
-
-        <SettingsRow
-          title="Remote Git status"
-          description="Refresh remote branch and pull request metadata while a repository is open."
-          scope={localScopeLabel}
-          resetAction={
-            settings.gitStatusPollIntervalMs !==
-            DEFAULT_UNIFIED_SETTINGS.gitStatusPollIntervalMs ? (
-              <SettingResetButton
-                label="git status polling"
-                onClick={() =>
-                  updateSettings({
-                    gitStatusPollIntervalMs: DEFAULT_UNIFIED_SETTINGS.gitStatusPollIntervalMs,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={String(settings.gitStatusPollIntervalMs)}
-              onValueChange={(value) => {
-                const interval = parseGitStatusPollInterval(value);
-                if (interval !== null) {
-                  updateSettings({ gitStatusPollIntervalMs: interval });
-                }
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Git status polling interval">
-                <SelectValue>
-                  {GIT_STATUS_POLL_INTERVAL_LABELS[settings.gitStatusPollIntervalMs]}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {GIT_STATUS_POLL_INTERVAL_OPTIONS.map((interval) => (
-                  <SelectItem key={interval} hideIndicator value={String(interval)}>
-                    {GIT_STATUS_POLL_INTERVAL_LABELS[interval]}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
-
-        <SettingsRow
-          title="PR & workflow updates"
-          description="Control automatic pull request and workflow refreshes. Automatic is fast after pushes and stops when checks settle."
-          scope={localScopeLabel}
-          resetAction={
-            settings.sourceControlRefreshMode !==
-            DEFAULT_UNIFIED_SETTINGS.sourceControlRefreshMode ? (
-              <SettingResetButton
-                label="PR and workflow updates"
-                onClick={() =>
-                  updateSettings({
-                    sourceControlRefreshMode: DEFAULT_UNIFIED_SETTINGS.sourceControlRefreshMode,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.sourceControlRefreshMode}
-              onValueChange={(value) => {
-                const mode = parseSourceControlRefreshMode(value);
-                if (mode !== null) updateSettings({ sourceControlRefreshMode: mode });
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-40" aria-label="PR and workflow update mode">
-                <SelectValue>
-                  {SOURCE_CONTROL_REFRESH_MODE_LABELS[settings.sourceControlRefreshMode]}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {SOURCE_CONTROL_REFRESH_MODE_OPTIONS.map((mode) => (
-                  <SelectItem key={mode} hideIndicator value={mode}>
-                    {SOURCE_CONTROL_REFRESH_MODE_LABELS[mode]}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
-
+      </SettingsSection>
+      {isPhoneTier && <SourceControlPreferences />}
+      <SettingsSection title="Provider updates">
         <SettingsRow
           title="Provider update checks"
           description="Check installed provider CLIs for newer versions. Disable if you install providers with Nix or another package manager."
@@ -921,7 +750,9 @@ export function GeneralSettingsPanel({
             />
           }
         />
-
+      </SettingsSection>
+      {!isPhoneTier && <ComposerSettings />}
+      <SettingsSection title="Projects & threads">
         <SettingsRow
           title="Auto-open overview"
           description="Open the overview automatically when plans, progress, or implementation steps appear."
@@ -1019,7 +850,9 @@ export function GeneralSettingsPanel({
             />
           }
         />
-
+      </SettingsSection>
+      <SettingsSection title="Confirmations">
+        {!isPhoneTier && <QuitShortcutSetting />}
         <SettingsRow
           title="Archive confirmation"
           description="Require a second click on the inline archive action before a thread is archived."
@@ -1100,8 +933,9 @@ export function GeneralSettingsPanel({
             />
           }
         />
-
-        {isElectron ? (
+      </SettingsSection>
+      {isElectron && (
+        <SettingsSection title="Notifications">
           <SettingsRow
             title="Turn-complete notifications"
             description="Show a desktop notification when an agent finishes a turn while the Ryco window is unfocused."
@@ -1132,8 +966,8 @@ export function GeneralSettingsPanel({
               />
             }
           />
-        ) : null}
-      </SettingsSection>
+        </SettingsSection>
+      )}
 
       {!isPhoneTier ? (
         <LegacyFeaturesSection searchTargetId={searchTargetId} nodeScopeLabel={nodeScopeLabel} />

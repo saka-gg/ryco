@@ -14,7 +14,7 @@ import {
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
 import { DESKTOP_ONLY_SETTINGS_SECTIONS } from "./settingsSections.logic";
 
-describe("the phone surface mirrors the desktop dialog's section inventory", () => {
+describe("the frozen phone surface keeps its existing section inventory", () => {
   it("navigates to the same shared sections, excluding desktop-only controls", () => {
     // `PhoneSettingsSurface` keeps its own registry so it can group and order
     // independently, and the desktop dialog is what decides which sections
@@ -29,7 +29,8 @@ describe("the phone surface mirrors the desktop dialog's section inventory", () 
     // the latter is what let it through.
     expect([...PHONE_SETTINGS_SECTION_IDS].toSorted()).toEqual(
       SETTINGS_DIALOG_SECTION_IDS.filter(
-        (id) => !DESKTOP_ONLY_SETTINGS_SECTIONS.has(id),
+        // Integrations is a new desktop/web page; the phone tier remains frozen.
+        (id) => id !== "integrations" && !DESKTOP_ONLY_SETTINGS_SECTIONS.has(id),
       ).toSorted(),
     );
   });
@@ -53,10 +54,10 @@ describe("hosted settings capabilities", () => {
         ["general", "mixed"],
         ["appearance", "browser"],
         ["connections", "device"],
-        ["computer-use", "device"],
+        ["integrations", "mixed"],
         ["account", "account"],
         ["providers", "node"],
-        ["source-control", "node"],
+        ["source-control", "mixed"],
         ["security", "node"],
       ]),
     );
@@ -200,5 +201,25 @@ describe("legacy token streaming search", () => {
     expect(`${entry?.title} ${entry?.description} ${entry?.keywords}`.toLowerCase()).toContain(
       "token streaming",
     );
+  });
+});
+
+describe("MCP and integrations navigation", () => {
+  it("keeps separate destinations and removes the standalone Computer Use tab", () => {
+    expect(SETTINGS_DIALOG_SECTION_LABELS.get("mcp-servers")).toBe("MCP");
+    expect(SETTINGS_DIALOG_SECTION_LABELS.get("integrations")).toBe("Integrations");
+    expect(SETTINGS_DIALOG_SECTION_IDS).not.toContain("computer-use");
+    expect(
+      SETTINGS_SEARCH_INDEX.find((entry) => entry.title === "Private Agent Control")?.section,
+    ).toBe("integrations");
+    expect(SETTINGS_SEARCH_INDEX.find((entry) => entry.title === "MCP Servers")?.section).toBe(
+      "mcp-servers",
+    );
+  });
+  it("retains hosted ownership and availability gates", () => {
+    expect(settingsSectionAvailable("integrations", false, false)).toBe(true);
+    expect(hostedSettingsSectionAllowed("integrations", "owner")).toBe(true);
+    for (const role of [null, "viewer", "operator"] as const)
+      expect(hostedSettingsSectionAllowed("integrations", role)).toBe(false);
   });
 });

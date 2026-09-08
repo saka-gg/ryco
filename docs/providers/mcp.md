@@ -1,6 +1,6 @@
 # Provider MCP management
 
-Open **Settings → MCP Servers** to inspect the MCP profiles detected from enabled Ryco provider
+Open **Settings → MCP** to inspect the MCP profiles detected from enabled Ryco provider
 instances. Profiles are grouped by their effective native configuration authority, so two provider
 instances that share a home or config file do not present duplicate sources of truth.
 

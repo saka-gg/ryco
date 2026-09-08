@@ -38,6 +38,7 @@ describe("desktopSettings", () => {
 
   it("defaults packaged nightly builds to the nightly update channel", () => {
     expect(resolveDefaultDesktopSettings("0.0.17-nightly.20260415.1")).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
@@ -54,6 +55,7 @@ describe("desktopSettings", () => {
     const settingsPath = makeSettingsPath();
 
     writeDesktopSettings(settingsPath, {
+      quitShortcutMode: "press-twice",
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
@@ -66,6 +68,7 @@ describe("desktopSettings", () => {
     });
 
     expect(readDesktopSettings(settingsPath, "0.0.17")).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
@@ -82,6 +85,7 @@ describe("desktopSettings", () => {
     expect(
       setDesktopServerExposurePreference(
         {
+          quitShortcutMode: "press-twice",
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
@@ -95,6 +99,7 @@ describe("desktopSettings", () => {
         "network-accessible",
       ),
     ).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
@@ -111,6 +116,7 @@ describe("desktopSettings", () => {
     expect(
       setDesktopTailscaleServePreference(
         {
+          quitShortcutMode: "press-twice",
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
@@ -124,6 +130,7 @@ describe("desktopSettings", () => {
         { enabled: true, port: 8443 },
       ),
     ).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
@@ -140,6 +147,7 @@ describe("desktopSettings", () => {
     expect(
       setDesktopTailscaleServePreference(
         {
+          quitShortcutMode: "press-twice",
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 8443,
@@ -153,6 +161,7 @@ describe("desktopSettings", () => {
         { enabled: true },
       ),
     ).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
@@ -169,6 +178,7 @@ describe("desktopSettings", () => {
     expect(
       setDesktopUpdateChannelPreference(
         {
+          quitShortcutMode: "press-twice",
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
@@ -182,6 +192,7 @@ describe("desktopSettings", () => {
         "nightly",
       ),
     ).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
@@ -316,6 +327,7 @@ describe("desktopSettings", () => {
     fs.writeFileSync(settingsPath, JSON.stringify({ serverExposureMode: "local-only" }), "utf8");
 
     expect(readDesktopSettings(settingsPath, "0.0.17-nightly.20260415.1")).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
@@ -333,6 +345,7 @@ describe("desktopSettings", () => {
     fs.writeFileSync(
       settingsPath,
       JSON.stringify({
+        quitShortcutMode: "press-twice",
         serverExposureMode: "local-only",
         updateChannel: "latest",
       }),
@@ -340,6 +353,7 @@ describe("desktopSettings", () => {
     );
 
     expect(readDesktopSettings(settingsPath, "0.0.17-nightly.20260415.1")).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
@@ -357,6 +371,7 @@ describe("desktopSettings", () => {
     fs.writeFileSync(
       settingsPath,
       JSON.stringify({
+        quitShortcutMode: "press-twice",
         serverExposureMode: "local-only",
         updateChannel: "latest",
         updateChannelConfiguredByUser: true,
@@ -369,6 +384,7 @@ describe("desktopSettings", () => {
     );
 
     expect(readDesktopSettings(settingsPath, "0.0.17-nightly.20260415.1")).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
@@ -393,6 +409,7 @@ describe("desktopSettings", () => {
     );
 
     expect(readDesktopSettings(settingsPath, "0.0.17")).toEqual({
+      quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 443,
@@ -404,4 +421,21 @@ describe("desktopSettings", () => {
       hubAllowFileSecretStore: false,
     });
   });
+});
+
+it.each(["press-twice", "hold", "immediately"] as const)(
+  "persists quit shortcut mode %s",
+  (quitShortcutMode) => {
+    const settingsPath = makeSettingsPath();
+    writeDesktopSettings(settingsPath, { ...DEFAULT_DESKTOP_SETTINGS, quitShortcutMode });
+    expect(readDesktopSettings(settingsPath, "0.1.21").quitShortcutMode).toBe(quitShortcutMode);
+  },
+);
+
+it("defaults missing or invalid quit shortcut preferences to press twice", () => {
+  const settingsPath = makeSettingsPath();
+  for (const value of [{}, { quitShortcutMode: "bad" }]) {
+    fs.writeFileSync(settingsPath, JSON.stringify(value));
+    expect(readDesktopSettings(settingsPath, "0.1.21").quitShortcutMode).toBe("press-twice");
+  }
 });

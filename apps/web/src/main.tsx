@@ -29,6 +29,11 @@ const history = isElectron
     : createBrowserHistory();
 
 const router = getRouter(history);
+const DesktopQuitFeedback = React.lazy(() =>
+  import("./components/QuitShortcutFeedback").then((module) => ({
+    default: module.QuitShortcutFeedback,
+  })),
+);
 
 initializeWsConnectionState();
 syncDocumentMotionVisibility();
@@ -79,5 +84,10 @@ if (hostedPwaLifecycle) {
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <RouterProvider router={router} />
+    {isElectron && (
+      <React.Suspense fallback={null}>
+        <DesktopQuitFeedback />
+      </React.Suspense>
+    )}
   </React.StrictMode>,
 );

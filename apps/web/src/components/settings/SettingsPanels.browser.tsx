@@ -34,6 +34,7 @@ import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import { ProvidersSettingsPanel } from "./ProvidersSettingsPanel";
+import { SourceControlPreferences } from "./SourceControlPreferences";
 import { GeneralSettingsPanel } from "./SettingsPanels";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 
@@ -1139,7 +1140,7 @@ describe("GeneralSettingsPanel observability", () => {
 
     mounted = await render(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel />
+        <SourceControlPreferences />
       </AppAtomRegistryProvider>,
     );
 
@@ -1177,7 +1178,7 @@ describe("GeneralSettingsPanel observability", () => {
 
     mounted = await render(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel />
+        <SourceControlPreferences />
       </AppAtomRegistryProvider>,
     );
 
@@ -1818,7 +1819,9 @@ describe("SourceControlSettingsPanel discovery states", () => {
 
     mounted = await renderSourceControlSettingsPanel();
 
-    await expect.element(page.getByRole("heading", { name: "Git" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Git", exact: true }))
+      .toBeInTheDocument();
     await expect.element(page.getByText("Nothing detected yet")).not.toBeInTheDocument();
   });
 
@@ -1846,7 +1849,9 @@ describe("SourceControlSettingsPanel discovery states", () => {
     const queryClient = new QueryClient();
     mounted = await renderSourceControlSettingsPanel(queryClient);
 
-    await expect.element(page.getByRole("heading", { name: "Git" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Git", exact: true }))
+      .toBeInTheDocument();
     expect(calls).toBe(1);
 
     const teardown = mounted.cleanup ?? mounted.unmount;
@@ -1856,7 +1861,9 @@ describe("SourceControlSettingsPanel discovery states", () => {
 
     mounted = await renderSourceControlSettingsPanel(queryClient);
 
-    await expect.element(page.getByRole("heading", { name: "Git" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Git", exact: true }))
+      .toBeInTheDocument();
     expect(calls).toBe(1);
   });
 });

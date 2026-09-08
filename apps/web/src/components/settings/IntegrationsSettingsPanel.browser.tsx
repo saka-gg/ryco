@@ -1,7 +1,7 @@
 import "../../index.css";
 
 import { page } from "vite-plus/test/browser";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 const harness = vi.hoisted(() => ({
@@ -12,6 +12,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("../../hooks/useSettings", () => ({
+  getClientSettings: () => ({}),
   useSettings: <T,>(selector: (settings: { agentControl: { enabled: boolean } }) => T): T =>
     selector({ agentControl: { enabled: harness.enabled } }),
   useUpdateSettings: () => ({ updateSettings: harness.updateSettings }),
@@ -34,6 +35,10 @@ vi.mock("./AgentControlMcpInstallations", () => ({
   ),
 }));
 
+vi.mock("./ComputerUseSettings", () => ({
+  ComputerUseSettings: () => <div data-testid="computer-use">Computer Use and Browser Use</div>,
+}));
+
 vi.mock("./McpServersSettings", () => ({
   McpServersSettings: () => <div data-testid="mcp-servers">MCP servers</div>,
 }));
@@ -42,10 +47,29 @@ import { IntegrationsSettingsPanel } from "./IntegrationsSettingsPanel";
 
 describe("IntegrationsSettingsPanel", () => {
   beforeEach(() => {
+    delete window.desktopBridge;
     harness.enabled = false;
     harness.settingsAllowed = true;
     harness.settingsReason = null;
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    delete window.desktopBridge;
+  });
+
+  it("separates MCP servers and only mounts local integrations when available", async () => {
+    const mounted = await render(<IntegrationsSettingsPanel />);
+    await expect.element(page.getByTestId("mcp-servers")).not.toBeInTheDocument();
+    await expect.element(page.getByTestId("computer-use")).not.toBeInTheDocument();
+    await mounted.unmount();
+    Object.defineProperty(window, "desktopBridge", {
+      configurable: true,
+      value: { computerUse: {} },
+    });
+    await render(<IntegrationsSettingsPanel />);
+    await expect.element(page.getByTestId("computer-use")).toBeInTheDocument();
+    await expect.element(page.getByTestId("mcp-servers")).not.toBeInTheDocument();
   });
 
   it("persists the Agent Control feature gate from Settings", async () => {

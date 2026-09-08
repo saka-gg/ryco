@@ -30,6 +30,7 @@ import { useCheckpointDiff } from "~/rpc/useProvider";
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "../localApi";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
+import { useDiffLayout, type DiffRenderMode } from "../hooks/useDiffLayout";
 import { useTheme } from "../hooks/useTheme";
 import { DiffParseCache } from "../lib/diffParseCache";
 import { buildPatchCacheKey } from "../lib/diffRendering";
@@ -58,7 +59,6 @@ import {
 } from "./DiffPanel.search.logic";
 import { resolveDiffOpenInEditorTarget } from "./DiffPanel.openInEditor.logic";
 
-type DiffRenderMode = "stacked" | "split";
 type DiffThemeType = "light" | "dark";
 
 const DIFF_PANEL_BASE_UNSAFE_CSS = `
@@ -445,7 +445,8 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   // suppressed, and the split-view toggle is hidden. The settings-driven
   // desktop defaults are untouched.
   const isPhonePresentation = mode === "phone";
-  const [diffRenderMode, setDiffRenderMode] = useState<DiffRenderMode>("stacked");
+  const [preferredDiffLayout, setDiffRenderMode] = useDiffLayout();
+  const diffRenderMode = isPhonePresentation ? "stacked" : preferredDiffLayout;
   const [diffWordWrap, setDiffWordWrap] = useState(
     isPhonePresentation ? true : settings.diffWordWrap,
   );

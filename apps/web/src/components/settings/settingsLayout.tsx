@@ -39,7 +39,11 @@ export function SettingsSection({
   children: ReactNode;
 }) {
   return (
-    <section {...sectionProps} className={cn("space-y-2.5", className)}>
+    <section
+      data-settings-section={title}
+      {...sectionProps}
+      className={cn("scroll-mt-6 space-y-2.5", className)}
+    >
       <div className="flex items-center justify-between px-1">
         <h2 className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-foreground/50">
           <span className="inline-block h-px w-3 bg-border" aria-hidden />

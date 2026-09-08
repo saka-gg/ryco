@@ -1,5 +1,14 @@
+import { useSettingsSubsections } from "./useSettingsSubsections";
 // apps/web/src/components/settings/SettingsDialog.tsx
-import { lazy, Suspense, useCallback, useEffect, useState, type ComponentType } from "react";
+import {
+  Fragment,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useState,
+  type ComponentType,
+} from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   ActivityIcon,
@@ -9,7 +18,6 @@ import {
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
-  MonitorIcon,
   PaletteIcon,
   PlugZapIcon,
   RotateCcwIcon,
@@ -64,8 +72,8 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   { id: "inbox", label: "Inbox", icon: SparklesIcon },
   { id: "providers", label: "Providers", icon: BlocksIcon },
   { id: "opinionated-plugins", label: "Plugins", icon: PlugZapIcon },
-  { id: "mcp-servers", label: "Integrations", icon: ServerIcon },
-  { id: "computer-use", label: "Computer use", icon: MonitorIcon },
+  { id: "mcp-servers", label: "MCP", icon: ServerIcon },
+  { id: "integrations", label: "Integrations", icon: PlugZapIcon },
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
   { id: "keybindings", label: "Keybindings", icon: KeyboardIcon },
   { id: "source-control", label: "Source Control", icon: GitBranchIcon },
@@ -146,8 +154,8 @@ const LazyIntegrationsSettings = lazy(() =>
     default: module.IntegrationsSettingsPanel,
   })),
 );
-const LazyComputerUseSettings = lazy(() =>
-  import("./ComputerUseSettings").then((module) => ({ default: module.ComputerUseSettings })),
+const LazyMcpServersSettings = lazy(() =>
+  import("./McpServersSettings").then((module) => ({ default: module.McpServersSettings })),
 );
 const LazyAppearanceSettingsPanel = lazy(() =>
   import("./AppearanceSettings").then((module) => ({
@@ -220,8 +228,8 @@ function SectionPanel({
       {section === "inbox" ? <LazyAiFocusSettings /> : null}
       {section === "providers" ? <LazyProvidersSettingsPanel /> : null}
       {section === "opinionated-plugins" ? <LazyOpinionatedPluginsSettingsPanel /> : null}
-      {section === "mcp-servers" ? <LazyIntegrationsSettings /> : null}
-      {section === "computer-use" ? <LazyComputerUseSettings /> : null}
+      {section === "mcp-servers" ? <LazyMcpServersSettings /> : null}
+      {section === "integrations" ? <LazyIntegrationsSettings /> : null}
       {section === "appearance" ? <LazyAppearanceSettingsPanel /> : null}
       {section === "keybindings" ? <LazyKeybindingsSettingsPanel /> : null}
       {section === "source-control" ? <LazySourceControlSettingsPanel /> : null}
@@ -302,8 +310,10 @@ export function SettingsDialog() {
       desktop: isElectron && Boolean(window.desktopBridge?.computerUse),
     }),
   );
-  const effectiveSection = visibleNavItems.some((item) => item.id === section)
-    ? section
+  const requestedSection =
+    section === "computer-use" && window.desktopBridge?.computerUse ? "integrations" : section;
+  const effectiveSection = visibleNavItems.some((item) => item.id === requestedSection)
+    ? requestedSection
     : (visibleNavItems[0]?.id ?? "appearance");
   const activeScope = settingsSectionScope(effectiveSection);
   const scopeLabel = settingsScopeLabel(activeScope, {
@@ -332,6 +342,8 @@ export function SettingsDialog() {
       : SETTINGS_SEARCH_INDEX.filter(
           (entry) =>
             visibleSectionIds.has(entry.section) &&
+            (!entry.desktopCapability ||
+              Boolean(window.desktopBridge?.[entry.desktopCapability])) &&
             `${entry.title} ${entry.description} ${entry.keywords ?? ""}`
               .toLowerCase()
               .includes(normalizedQuery),
@@ -342,9 +354,10 @@ export function SettingsDialog() {
   }, []);
 
   const showRestore = SECTIONS_WITH_RESTORE.has(effectiveSection);
-  const activeSectionIndex = Math.max(
-    0,
-    visibleNavItems.findIndex((item) => item.id === effectiveSection),
+  const subsections = useSettingsSubsections(
+    `${open}:${effectiveSection}`,
+    normalizedQuery.length > 0,
+    searchTargetId,
   );
 
   return (
@@ -396,47 +409,70 @@ export function SettingsDialog() {
           </header>
 
           <div className="flex min-h-0 flex-1 flex-row">
-            <nav className="relative isolate flex w-12 shrink-0 flex-col gap-1 border-r border-border p-2 sm:w-48">
-              <span
-                className="pointer-events-none absolute top-2 right-2 left-2 z-0 h-9 rounded-md bg-accent transition-transform duration-[240ms] ease-out"
-                style={{
-                  transform: `translateY(${activeSectionIndex * 2.5}rem)`,
-                }}
-                aria-hidden
-              />
+            <nav className="relative isolate flex w-12 shrink-0 flex-col gap-1 overflow-y-auto border-r border-border p-2 sm:w-52">
               {visibleNavItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = effectiveSection === item.id;
                 return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => {
-                      setSearchTargetId(null);
-                      setSection(item.id);
-                    }}
-                    className={cn(
-                      "relative z-10 flex h-9 items-center gap-2.5 rounded-md px-2 text-left text-[13px] outline-hidden ring-ring transition-colors duration-150 focus-visible:ring-2",
-                      isActive
-                        ? "font-medium text-foreground"
-                        : "text-muted-foreground/70 hover:text-foreground/80",
-                    )}
-                    aria-label={item.label}
-                    aria-current={isActive ? "page" : undefined}
-                  >
-                    <Icon
+                  <Fragment key={item.id}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchTargetId(null);
+                        setSection(item.id);
+                      }}
                       className={cn(
-                        "size-4 shrink-0",
-                        isActive ? "text-foreground" : "text-muted-foreground/60",
+                        "relative z-10 flex h-9 w-full shrink-0 items-center gap-2.5 rounded-md px-2 text-left text-[13px] outline-hidden ring-ring transition-colors duration-150 focus-visible:ring-2",
+                        isActive
+                          ? "bg-accent font-medium text-foreground"
+                          : "text-muted-foreground/70 hover:text-foreground/80",
                       )}
-                    />
-                    <span className="hidden truncate sm:inline">{item.label}</span>
-                  </button>
+                      aria-label={item.label}
+                      aria-current={isActive ? "page" : undefined}
+                    >
+                      <Icon
+                        className={cn(
+                          "size-4 shrink-0",
+                          isActive ? "text-foreground" : "text-muted-foreground/60",
+                        )}
+                      />
+                      <span className="hidden truncate sm:inline">{item.label}</span>
+                    </button>
+                    {isActive && subsections.sections.length > 1 && (
+                      <div className="mb-2 ml-7 hidden flex-col border-l border-border sm:flex">
+                        {subsections.sections.map(({ id, title, element }) => (
+                          <button
+                            key={id}
+                            type="button"
+                            aria-current={subsections.active === element ? "location" : undefined}
+                            className={cn(
+                              "rounded-r px-3 py-1.5 text-left text-xs focus-visible:outline-2 focus-visible:outline-ring",
+                              subsections.active === element
+                                ? "font-medium text-foreground"
+                                : "text-muted-foreground hover:text-foreground",
+                            )}
+                            onClick={() => {
+                              if (element.hasAttribute("data-settings-action")) element.click();
+                              element.scrollIntoView({
+                                block: "start",
+                                behavior: window.matchMedia("(prefers-reduced-motion: reduce)")
+                                  .matches
+                                  ? "instant"
+                                  : "smooth",
+                              });
+                            }}
+                          >
+                            {title}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </Fragment>
                 );
               })}
             </nav>
 
-            <ScrollArea className="min-h-0 min-w-0 flex-1">
+            <ScrollArea ref={subsections.contentRef} className="min-h-0 min-w-0 flex-1">
               {normalizedQuery.length > 0 ? (
                 <div className="p-4">
                   <div className="flex flex-col gap-0.5 rounded-xl border border-border bg-card p-1.5 shadow-sm/4">
@@ -459,7 +495,7 @@ export function SettingsDialog() {
                                 void navigate({ to: "/statistics" });
                                 return;
                               }
-                              setSearchTargetId(entry.targetId ?? null);
+                              setSearchTargetId(entry.targetId ?? entry.title);
                               setSection(entry.section);
                               setSearchQuery("");
                             }}
