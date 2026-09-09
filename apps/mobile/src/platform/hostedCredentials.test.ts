@@ -254,17 +254,51 @@ describe("bearer session credentials", () => {
     expect(credentials.readBearerToken?.()).toBe("fresh");
   });
 
-  it("treats an unreadable secret store as no session", async () => {
+  it("retries a locked secret store without replacing its session", async () => {
+    const get = vi.fn().mockRejectedValueOnce(new Error("locked")).mockResolvedValue("stored");
     const credentials = createMobileSessionCredentials({
-      get: async () => {
-        throw new Error("keychain unavailable");
-      },
-      set: async () => true,
-      remove: async () => {},
+      ...fakeSecretKV().service,
+      get,
     });
+    await expect(credentials.hydrate()).rejects.toThrow("credential store is unavailable");
+    await credentials.hydrate();
+    expect(credentials.readBearerToken?.()).toBe("stored");
+  });
 
-    await expect(credentials.hydrate()).resolves.toBeUndefined();
+  it("does not restore a credential after sign-out while hydration is pending", async () => {
+    let finishRead!: (value: string) => void;
+    const credentials = createMobileSessionCredentials({
+      ...fakeSecretKV().service,
+      get: () =>
+        new Promise((resolve) => {
+          finishRead = resolve;
+        }),
+    });
+    const hydration = credentials.hydrate();
+    await credentials.clearBearerToken();
+    finishRead("stale");
+    await hydration;
     expect(credentials.readBearerToken?.()).toBeNull();
+  });
+
+  it("does not publish a pending durable commit after sign-out", async () => {
+    let finishRead!: (value: string) => void;
+    const readStarted = Promise.withResolvers<void>();
+    const credentials = createMobileSessionCredentials({
+      ...fakeSecretKV().service,
+      get: () =>
+        new Promise((resolve) => {
+          finishRead = resolve;
+          readStarted.resolve();
+        }),
+    });
+    const commit = credentials.commitBearerToken("new-token");
+    await readStarted.promise;
+    const clear = credentials.clearBearerToken();
+    finishRead("new-token");
+    await expect(commit).resolves.toBe(false);
+    expect(credentials.readBearerToken?.()).toBeNull();
+    await clear;
   });
 
   it("keeps the token out of any serialized form of the adapter", () => {

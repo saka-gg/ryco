@@ -123,7 +123,11 @@ import {
   shouldUseUnsignedMacUpdateInstaller,
   type MacCodeSignatureKind,
 } from "./unsignedMacUpdateInstaller.ts";
-import { createDesktopProtectedRecordStore } from "./protectedRecordStore.ts";
+import { lazyAsyncResource } from "./lazyAsyncResource.ts";
+import {
+  createDesktopProtectedRecordStore,
+  desktopProtectedRecordExists,
+} from "./protectedRecordStore.ts";
 import { createDesktopNativeSecretStore } from "./nativeSecretStore.ts";
 import { resolveDesktopDataHomes } from "./desktopDataHomes.ts";
 import {
@@ -680,165 +684,169 @@ function desktopHostedDeviceLabel(): string {
   return hostname.length > 0 ? hostname : APP_DISPLAY_NAME;
 }
 
-async function ensureDesktopNativeIdentityContext(): Promise<
-  NonNullable<typeof desktopNativeIdentityContext>
-> {
-  if (desktopNativeIdentityContext !== null) return desktopNativeIdentityContext;
-  if (process.platform !== "darwin" || desktopSettings.hubOrigin === null) {
-    throw new Error("Desktop native Hub identity is unavailable.");
-  }
-  const protection = getDesktopSecretStorage();
-  const installationRecords = createDesktopProtectedRecordStore({
-    directory: NATIVE_SECURITY_DIR,
-    namespace: desktopNativeInstallationNamespace(desktopAuthorizationVariant()),
-    protection,
-  });
-  const installationId = await getOrCreateDesktopInstallationId(installationRecords);
-  const namespace = desktopNativeSecurityNamespace(
-    `${desktopSettings.hubOrigin}\0${installationId}`,
-  );
-  const records = createDesktopProtectedRecordStore({
-    directory: NATIVE_SECURITY_DIR,
-    namespace,
-    protection,
-  });
-  const security = new DesktopNativeSecurityHelper({
-    run: createNativeSecurityHelperRunner(
-      resolveDesktopNativeSecurityHelperPath({
-        isPackaged: app.isPackaged,
-        resourcesPath: process.resourcesPath,
-        moduleDirectory: __dirname,
-      }),
-    ),
-    store: createDesktopNativeSecretStore({
+const ensureDesktopNativeIdentityContext = lazyAsyncResource(
+  async (): Promise<NonNullable<typeof desktopNativeIdentityContext>> => {
+    if (desktopNativeIdentityContext !== null) return desktopNativeIdentityContext;
+    if (process.platform !== "darwin" || desktopSettings.hubOrigin === null) {
+      throw new Error("Desktop native Hub identity is unavailable.");
+    }
+    const protection = getDesktopSecretStorage();
+    const installationRecords = createDesktopProtectedRecordStore({
+      directory: NATIVE_SECURITY_DIR,
+      namespace: desktopNativeInstallationNamespace(desktopAuthorizationVariant()),
+      protection,
+    });
+    const installationId = await getOrCreateDesktopInstallationId(installationRecords);
+    const namespace = desktopNativeSecurityNamespace(
+      `${desktopSettings.hubOrigin}\0${installationId}`,
+    );
+    const records = createDesktopProtectedRecordStore({
       directory: NATIVE_SECURITY_DIR,
       namespace,
       protection,
-    }),
-  });
-  const prekey = new DesktopE2eePrekeyIssuer({
-    origin: desktopSettings.hubOrigin,
-    security,
-    records,
-  });
-  const context = {
-    origin: desktopSettings.hubOrigin,
-    installationId,
-    records,
-    security,
-    trust: new DesktopE2eeTrustStore(records),
-    prekey,
-    nativeE2eePlatform: createDesktopNativeE2eePlatform({
+    });
+    const security = new DesktopNativeSecurityHelper({
+      run: createNativeSecurityHelperRunner(
+        resolveDesktopNativeSecurityHelperPath({
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+          moduleDirectory: __dirname,
+        }),
+      ),
+      store: createDesktopNativeSecretStore({
+        directory: NATIVE_SECURITY_DIR,
+        namespace,
+        protection,
+      }),
+    });
+    const prekey = new DesktopE2eePrekeyIssuer({
       origin: desktopSettings.hubOrigin,
-      installationId,
-      appVersion: app.getVersion(),
-      deviceLabel: desktopHostedDeviceLabel,
       security,
       records,
+    });
+    const context = {
+      origin: desktopSettings.hubOrigin,
+      installationId,
+      records,
+      security,
+      trust: new DesktopE2eeTrustStore(records),
       prekey,
-      platform: "darwin",
-    }),
-  };
-  desktopNativeIdentityContext = context;
-  return context;
-}
+      nativeE2eePlatform: createDesktopNativeE2eePlatform({
+        origin: desktopSettings.hubOrigin,
+        installationId,
+        appVersion: app.getVersion(),
+        deviceLabel: desktopHostedDeviceLabel,
+        security,
+        records,
+        prekey,
+        platform: "darwin",
+      }),
+    };
+    desktopNativeIdentityContext = context;
+    return context;
+  },
+);
 
-async function ensureDesktopHostedIdentityCoordinator(): Promise<DesktopHostedIdentityCoordinator> {
-  if (desktopHostedIdentityCoordinator !== null) return desktopHostedIdentityCoordinator;
-  const context = await ensureDesktopNativeIdentityContext();
-  const credentials = createDesktopHostedSessionCredentials(context.records);
-  const nativeAuthorization = createDesktopNativeAuthorization({
-    variant: desktopAuthorizationVariant(),
-    deviceLabel: desktopHostedDeviceLabel,
-    broker: desktopAuthorizationBroker,
-    openExternal: async (url) => await shell.openExternal(url, { activate: true }),
-  });
-  const api = await createDesktopHostedHubApi({
-    origin: context.origin,
-    credentials,
-    security: context.security,
-    nativeAuthorization,
-  });
-  const coordinator = new DesktopHostedIdentityCoordinator({
-    origin: context.origin,
-    installationId: context.installationId,
-    api,
-    credentials,
-    security: context.security,
-    records: context.records,
-    trust: context.trust,
-    nativeE2eePlatform: context.nativeE2eePlatform,
-    relayDpopSigner: await createDesktopDpopSigner(context.security),
-    control: createDesktopHubControlClient({
-      baseUrl: () => backendHttpUrl,
-      controlToken: () => backendControlToken,
-    }),
-  });
-  desktopHostedIdentityCoordinator = coordinator;
-  return coordinator;
-}
+const ensureDesktopHostedIdentityCoordinator = lazyAsyncResource(
+  async (): Promise<DesktopHostedIdentityCoordinator> => {
+    if (desktopHostedIdentityCoordinator !== null) return desktopHostedIdentityCoordinator;
+    const context = await ensureDesktopNativeIdentityContext();
+    const credentials = createDesktopHostedSessionCredentials(context.records);
+    const nativeAuthorization = createDesktopNativeAuthorization({
+      variant: desktopAuthorizationVariant(),
+      deviceLabel: desktopHostedDeviceLabel,
+      broker: desktopAuthorizationBroker,
+      openExternal: async (url) => await shell.openExternal(url, { activate: true }),
+    });
+    const api = await createDesktopHostedHubApi({
+      origin: context.origin,
+      credentials,
+      security: context.security,
+      nativeAuthorization,
+    });
+    const coordinator = new DesktopHostedIdentityCoordinator({
+      origin: context.origin,
+      installationId: context.installationId,
+      api,
+      credentials,
+      security: context.security,
+      records: context.records,
+      trust: context.trust,
+      nativeE2eePlatform: context.nativeE2eePlatform,
+      relayDpopSigner: await createDesktopDpopSigner(context.security),
+      control: createDesktopHubControlClient({
+        baseUrl: () => backendHttpUrl,
+        controlToken: () => backendControlToken,
+      }),
+    });
+    desktopHostedIdentityCoordinator = coordinator;
+    return coordinator;
+  },
+);
 
-async function ensureDesktopWorkspaceRelayManager(): Promise<DesktopWorkspaceRelayManager> {
-  if (desktopWorkspaceRelayManager !== null) return desktopWorkspaceRelayManager;
-  const context = await ensureDesktopNativeIdentityContext();
-  const coordinator = await ensureDesktopHostedIdentityCoordinator();
-  const manager = new DesktopWorkspaceRelayManager({
-    authority: {
-      resolveTarget: async (environmentId, pairingOnly) => {
-        const client = await ensureDesktopWorkspaceClient();
-        const snapshot = client.snapshot();
-        if (snapshot.status !== "ready" || snapshot.accountId === null) return null;
-        const machine = snapshot.catalog.find(
-          (candidate) => candidate.environmentId === environmentId,
-        );
-        const eligible = pairingOnly
-          ? machine?.presence.online === true &&
-            (machine.nativeTrust === "unverified" ||
-              machine.nativeTrust === "unknown" ||
-              machine.nativeTrust === "account-trusted") &&
-            machine.revokedAt === null &&
-            !machine.removed
-          : machine?.canConnect === true &&
-            (machine.nativeTrust === "verified" || machine.nativeTrust === "account-trusted");
-        if (!machine?.nodeId || !eligible) {
-          return null;
-        }
-        const relayUrl = new URL("/v1/relay/client", context.origin);
-        relayUrl.protocol = relayUrl.protocol === "https:" ? "wss:" : "ws:";
-        return {
-          accountId: snapshot.accountId,
-          nodeId: machine.nodeId,
-          environmentId,
-          relayUrl: relayUrl.toString(),
-          nativeTrust: machine.nativeTrust,
-        };
+const ensureDesktopWorkspaceRelayManager = lazyAsyncResource(
+  async (): Promise<DesktopWorkspaceRelayManager> => {
+    if (desktopWorkspaceRelayManager !== null) return desktopWorkspaceRelayManager;
+    const context = await ensureDesktopNativeIdentityContext();
+    const coordinator = await ensureDesktopHostedIdentityCoordinator();
+    const manager = new DesktopWorkspaceRelayManager({
+      authority: {
+        resolveTarget: async (environmentId, pairingOnly) => {
+          const client = await ensureDesktopWorkspaceClient();
+          const snapshot = client.snapshot();
+          if (snapshot.status !== "ready" || snapshot.accountId === null) return null;
+          const machine = snapshot.catalog.find(
+            (candidate) => candidate.environmentId === environmentId,
+          );
+          const eligible = pairingOnly
+            ? machine?.presence.online === true &&
+              (machine.nativeTrust === "unverified" ||
+                machine.nativeTrust === "unknown" ||
+                machine.nativeTrust === "account-trusted") &&
+              machine.revokedAt === null &&
+              !machine.removed
+            : machine?.canConnect === true &&
+              (machine.nativeTrust === "verified" || machine.nativeTrust === "account-trusted");
+          if (!machine?.nodeId || !eligible) {
+            return null;
+          }
+          const relayUrl = new URL("/v1/relay/client", context.origin);
+          relayUrl.protocol = relayUrl.protocol === "https:" ? "wss:" : "ws:";
+          return {
+            accountId: snapshot.accountId,
+            nodeId: machine.nodeId,
+            environmentId,
+            relayUrl: relayUrl.toString(),
+            nativeTrust: machine.nativeTrust,
+          };
+        },
+        prepareE2ee: async (target, pairingOnly) =>
+          (await ensureDesktopNativeE2eeHandshakeService()).prepare({
+            accountId: target.accountId,
+            nodeId: target.nodeId,
+            allowPairing: pairingOnly,
+            expectedTrust: pairingOnly
+              ? target.nativeTrust === "account-trusted"
+                ? "account-trusted"
+                : "unverified"
+              : target.nativeTrust === "account-trusted"
+                ? "account-trusted"
+                : "verified",
+          }),
+        handshake: ensureDesktopNativeE2eeHandshakeService,
+        issueTicket: (target) => coordinator.issueRelayTicket(target.nodeId),
+        authorizeUpgrade: (target) => coordinator.authorizeRelayUpgrade(target.relayUrl),
+        onAccountAuthorizationRevoked: invalidateDesktopNativeE2eeAccess,
       },
-      prepareE2ee: async (target, pairingOnly) =>
-        (await ensureDesktopNativeE2eeHandshakeService()).prepare({
-          accountId: target.accountId,
-          nodeId: target.nodeId,
-          allowPairing: pairingOnly,
-          expectedTrust: pairingOnly
-            ? target.nativeTrust === "account-trusted"
-              ? "account-trusted"
-              : "unverified"
-            : target.nativeTrust === "account-trusted"
-              ? "account-trusted"
-              : "verified",
-        }),
-      handshake: ensureDesktopNativeE2eeHandshakeService,
-      issueTicket: (target) => coordinator.issueRelayTicket(target.nodeId),
-      authorizeUpgrade: (target) => coordinator.authorizeRelayUpgrade(target.relayUrl),
-      onAccountAuthorizationRevoked: invalidateDesktopNativeE2eeAccess,
-    },
-    emit: (event) => {
-      if (!mainWindow || mainWindow.isDestroyed()) return;
-      mainWindow.webContents.send(DESKTOP_WORKSPACE_IPC.transportEvent, event);
-    },
-  });
-  desktopWorkspaceRelayManager = manager;
-  return manager;
-}
+      emit: (event) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.webContents.send(DESKTOP_WORKSPACE_IPC.transportEvent, event);
+      },
+    });
+    desktopWorkspaceRelayManager = manager;
+    return manager;
+  },
+);
 
 function emitDesktopWorkspaceState(snapshot: DesktopWorkspaceClientSnapshot): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -850,28 +858,26 @@ function emitDesktopWorkspaceState(snapshot: DesktopWorkspaceClientSnapshot): vo
 
 async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
   if (desktopWorkspaceClient !== null) return desktopWorkspaceClient;
-  const context = await ensureDesktopNativeIdentityContext();
-  const coordinator = await ensureDesktopHostedIdentityCoordinator();
+  const origin = desktopSettings.hubOrigin;
+  if (origin === null) throw new Error("Desktop Hub is unavailable.");
+  // Constructing the workspace (including getState IPC) must not create keys.
+  // Native credentials are needed only for an existing session or user sign-in.
   const client = new DesktopWorkspaceClient({
-    hubOrigin: context.origin,
+    hubOrigin: origin,
     identity: {
-      resume: async () => {
-        desktopHostedIdentityStatus = await coordinator.resume();
-        return desktopHostedIdentityStatus;
-      },
-      connect: async () => {
-        desktopHostedIdentityStatus = await coordinator.connect();
-        return desktopHostedIdentityStatus;
-      },
+      resume: () => runDesktopHostedIdentity(false),
+      connect: () => runDesktopHostedIdentity(true),
       disconnect: async () => {
         desktopWorkspaceRelayManager?.dispose();
         desktopNativeE2eeHandshakeService?.dispose();
-        await coordinator.disconnect();
+        await desktopHostedIdentityCoordinator?.disconnect();
         desktopHostedIdentityStatus = { status: "signed-out" };
       },
-      listNodes: () => coordinator.listNodes(),
+      listNodes: async () => desktopHostedIdentityCoordinator?.listNodes() ?? [],
     },
-    trust: context.trust,
+    trust: {
+      read: async (...args) => (await ensureDesktopNativeIdentityContext()).trust.read(...args),
+    },
     cache: createDesktopWorkspaceMetadataCache(DESKTOP_WORKSPACE_CACHE_PATH),
     connection: {
       connect: async ({ environmentId, delayMs }) => {
@@ -900,6 +906,7 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
         desktopWorkspaceRelayManager?.close(handle);
       },
       verifyApproval: async ({ accountId, nodeId, environmentId, payload }) => {
+        const context = await ensureDesktopNativeIdentityContext();
         await context.trust.promoteCrossDeviceApproval({
           payload,
           hubOrigin: context.origin,
@@ -918,28 +925,30 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
   return client;
 }
 
-async function ensureDesktopNativeE2eeHandshakeService(): Promise<DesktopNativeE2eeHandshakeService> {
-  if (desktopNativeE2eeHandshakeService !== null) return desktopNativeE2eeHandshakeService;
-  const context = await ensureDesktopNativeIdentityContext();
-  const service = new DesktopNativeE2eeHandshakeService({
-    origin: context.origin,
-    security: context.security,
-    records: context.records,
-    trust: context.trust,
-    prekey: context.prekey,
-    identityStatus: () => desktopHostedIdentityStatus,
-    accountAuthority: {
-      enrollmentState: () => desktopHostedIdentityCoordinator?.nativeE2eeEnrollmentState ?? null,
-      resolve: (input) =>
-        ensureDesktopHostedIdentityCoordinator().then((coordinator) =>
-          coordinator.resolveNativeE2eeTrust(input),
-        ),
-      revoked: invalidateDesktopNativeE2eeAccess,
-    },
-  });
-  desktopNativeE2eeHandshakeService = service;
-  return service;
-}
+const ensureDesktopNativeE2eeHandshakeService = lazyAsyncResource(
+  async (): Promise<DesktopNativeE2eeHandshakeService> => {
+    if (desktopNativeE2eeHandshakeService !== null) return desktopNativeE2eeHandshakeService;
+    const context = await ensureDesktopNativeIdentityContext();
+    const service = new DesktopNativeE2eeHandshakeService({
+      origin: context.origin,
+      security: context.security,
+      records: context.records,
+      trust: context.trust,
+      prekey: context.prekey,
+      identityStatus: () => desktopHostedIdentityStatus,
+      accountAuthority: {
+        enrollmentState: () => desktopHostedIdentityCoordinator?.nativeE2eeEnrollmentState ?? null,
+        resolve: (input) =>
+          ensureDesktopHostedIdentityCoordinator().then((coordinator) =>
+            coordinator.resolveNativeE2eeTrust(input),
+          ),
+        revoked: invalidateDesktopNativeE2eeAccess,
+      },
+    });
+    desktopNativeE2eeHandshakeService = service;
+    return service;
+  },
+);
 
 function invalidateDesktopNativeE2eeAccess(): void {
   desktopHostedIdentityStatus = { status: "unavailable" };
@@ -953,6 +962,17 @@ async function runDesktopHostedIdentity(
   interactive: boolean,
 ): Promise<DesktopHostedIdentityStatus> {
   try {
+    if (
+      !interactive &&
+      desktopHostedIdentityCoordinator === null &&
+      !desktopProtectedRecordExists({
+        directory: NATIVE_SECURITY_DIR,
+        name: "hub-session-token",
+      })
+    ) {
+      desktopHostedIdentityStatus = { status: "signed-out" };
+      return desktopHostedIdentityStatus;
+    }
     const coordinator = await ensureDesktopHostedIdentityCoordinator();
     desktopHostedIdentityStatus = interactive
       ? await coordinator.connect()
@@ -2836,15 +2856,17 @@ function registerIpcHandlers(): void {
     // Interactive account connection is the Desktop onboarding action: once
     // browser sign-in produced a retained session, make the colocated node
     // connector part of the same transaction. Older settings could retain
-    // trust and report the client as `ready` while this launch preference was
-    // still false, so readiness cannot gate this repair. Startup resumes the
-    // node claim after relaunch. A cancelled sign-in has no session material
-    // and therefore never enables or restarts anything.
+    // trust while this launch preference was still false. Account readiness
+    // requires a durable session but no longer depends on the local connector.
+    // Startup resumes the node claim after relaunch. A cancelled sign-in or
+    // failed credential write never enables or restarts anything.
     if (
       shouldEnableDesktopHubConnectorForAccountSetup({
         hubOrigin: desktopSettings.hubOrigin,
         connectorEnabled: desktopSettings.hubConnectorEnabled,
-        hasSessionMaterial: desktopHostedIdentityCoordinator?.hasSessionMaterial === true,
+        hasSessionMaterial:
+          desktopHostedIdentityCoordinator?.hasSessionMaterial === true &&
+          desktopHostedIdentityStatus.status === "ready",
       })
     ) {
       const nextSettings = setDesktopHubPreference(desktopSettings, {

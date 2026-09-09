@@ -187,7 +187,8 @@ export const E2EE_WEB_SAS_ADVISORY =
  * `settingsSearchIndex.ts` carries the section's rows, so a reader who searches
  * for what this sentence names is not told it does not exist.
  */
-export const E2EE_WEB_SAS_MORE = "Settings → Security explains what else this tab cannot check.";
+export const E2EE_WEB_SAS_MORE =
+  "Settings → Connections → Node security explains what else this tab cannot check.";
 
 /**
  * The long form, for the one surface an owner opens to read about this.

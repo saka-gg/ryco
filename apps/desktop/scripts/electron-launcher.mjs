@@ -1,5 +1,7 @@
 // This file mostly exists because we want dev mode to say "Ryco (Dev)" instead of "electron"
 
+import { writeMacAppBootstrap, writeMacLaunchConfiguration } from "./mac-launcher-bootstrap.mjs";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
@@ -22,7 +24,7 @@ const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const APP_DISPLAY_NAME = isDevelopment ? "Ryco (Dev)" : "Ryco";
 const APP_BUNDLE_ID = isDevelopment ? "com.sak0a.ryco.dev" : "com.sak0a.ryco";
 const APP_PROTOCOL = isDevelopment ? "ryco-dev" : "ryco";
-const LAUNCHER_VERSION = 4;
+const LAUNCHER_VERSION = 5;
 const MAC_LAUNCH_SERVICES_REGISTER =
   "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
@@ -197,29 +199,28 @@ function macBootstrapEnvironment() {
   );
 }
 
-function writeMacAppBootstrap(appBundlePath, bootstrapEnvironment, desktopMainPath) {
-  const appResourcesDir = join(appBundlePath, "Contents", "Resources", "app");
-  mkdirSync(appResourcesDir, { recursive: true });
-  writeFileSync(
-    join(appResourcesDir, "package.json"),
-    `${JSON.stringify({ name: "ryco-desktop-launcher", main: "main.cjs" }, null, 2)}\n`,
-  );
-  writeFileSync(
-    join(appResourcesDir, "main.cjs"),
-    `Object.assign(process.env, ${JSON.stringify(bootstrapEnvironment)});\nif (${JSON.stringify(
-      isDevelopment,
-    )} && !process.argv.some((value) => value.startsWith("--ryco-dev-root="))) {\n  process.env.RYCO_DESKTOP_CALLBACK_RELAY = "1";\n}\nrequire(${JSON.stringify(
-      desktopMainPath,
-    )});\n`,
-  );
-}
-
 function readJson(path) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return null;
   }
+}
+
+function developmentSigningIdentity() {
+  if (!isDevelopment) return "-";
+  const result = spawnSync("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  if (result.status !== 0) return "-";
+  const identities = Array.from(
+    result.stdout.matchAll(/\b([A-Fa-f0-9]{40})\s+"Apple Development:[^"]+"/g),
+    (match) => match[1],
+  );
+  // Never guess between teams or create a certificate. When the developer has
+  // one usable identity, it survives runtime updates as well as checkout changes.
+  return identities.length === 1 ? identities[0] : "-";
 }
 
 function buildMacLauncher(electronBinaryPath) {
@@ -240,18 +241,19 @@ function buildMacLauncher(electronBinaryPath) {
   const metadataPath = join(runtimeDir, "metadata.json");
   const bootstrapEnvironment = macBootstrapEnvironment();
   const desktopMainPath = join(desktopDir, "dist-electron", "main.cjs");
+  const signingIdentity = developmentSigningIdentity();
 
   mkdirSync(runtimeDir, { recursive: true });
 
   const expectedMetadata = {
     launcherVersion: LAUNCHER_VERSION,
-    sourceAppBundlePath,
-    sourceAppMtimeMs: statSync(sourceAppBundlePath).mtimeMs,
-    iconMtimeMs: statSync(iconPath).mtimeMs,
-    bootstrapEnvironment,
-    desktopMainPath,
+    electronVersion: createRequire(import.meta.url)("electron/package.json").version,
+    arch: process.arch,
+    signingIdentity,
+    iconDigest: createHash("sha256").update(readFileSync(iconPath)).digest("hex"),
   };
 
+  writeMacLaunchConfiguration(runtimeDir, bootstrapEnvironment, desktopMainPath);
   const currentMetadata = readJson(metadataPath);
   if (
     existsSync(targetBinaryPath) &&
@@ -270,11 +272,18 @@ function buildMacLauncher(electronBinaryPath) {
     verbatimSymlinks: true,
   });
   patchMainBundleInfoPlist(targetAppBundlePath, iconPath);
-  writeMacAppBootstrap(targetAppBundlePath, bootstrapEnvironment, desktopMainPath);
+  writeMacAppBootstrap(targetAppBundlePath, isDevelopment);
   // Editing Info.plist invalidates Electron's upstream signature. Launch
   // Services refuses a protocol claim from that modified bundle until the
   // complete local wrapper is signed again.
-  runChecked("codesign", ["--force", "--deep", "--sign", "-", targetAppBundlePath]);
+  runChecked("codesign", [
+    "--force",
+    "--deep",
+    "--timestamp=none",
+    "--sign",
+    signingIdentity,
+    targetAppBundlePath,
+  ]);
   runChecked(MAC_LAUNCH_SERVICES_REGISTER, ["-f", targetAppBundlePath]);
   writeFileSync(metadataPath, `${JSON.stringify(expectedMetadata, null, 2)}\n`);
 

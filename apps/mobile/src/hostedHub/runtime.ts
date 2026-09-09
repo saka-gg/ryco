@@ -155,6 +155,7 @@ export async function configureMobileHostedRuntime(): Promise<boolean> {
     // software fallback: it would reduce DPoP to bare bearer assurance.
     dpopSigner = await createMobileDpopSigner();
   } catch {
+    setMobileHostedModeAvailable(false, "device-security");
     return false;
   }
   if (configured) return isMobileHostedModeAvailable();
@@ -344,21 +345,34 @@ function watchSelectionForE2ee(): void {
  * a keychain hiccup between the owner and their nodes.
  */
 export function ensureMobileHostedSession(): Promise<void> {
-  session ??= (async () => {
+  if (session) return session;
+  const attempt = (async () => {
     await hydrateMobileHubProfile(mobileKV);
     // A settings render may have memoized the build default before async
     // profile hydration completed. Re-resolve now so a compatible saved domain
     // becomes authoritative before any secret is read or request is sent.
     invalidateMobileHostedRuntimeConfig();
-    if (!isMobileHostedModeConfigured()) return;
-    await hydrateMobileHostedSessionToken();
+    if (!isMobileHostedModeConfigured()) return false;
+    try {
+      await hydrateMobileHostedSessionToken();
+    } catch {
+      setMobileHostedModeAvailable(false, "credential-storage");
+      return false;
+    }
     await mobileE2eeTrustStore.hydrate();
-    if (!(await configureMobileHostedRuntime())) return;
+    if (!(await configureMobileHostedRuntime())) return false;
     await hostedHubController.bootstrap();
-  })().catch(() => {
-    session = undefined;
-  });
-  return session;
+    return true;
+  })().then(
+    (ready) => {
+      if (!ready && session === attempt) session = undefined;
+    },
+    () => {
+      if (session === attempt) session = undefined;
+    },
+  );
+  session = attempt;
+  return attempt;
 }
 
 /** Invalidate hosted availability after a deliberate Hub profile change. */

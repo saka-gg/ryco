@@ -1,3 +1,4 @@
+import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import * as FS from "node:fs";
 import * as Path from "node:path";
 import type {
@@ -41,7 +42,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   quitShortcutMode: "press-twice",
   serverExposureMode: "local-only",
   hubConnectorEnabled: false,
-  hubOrigin: null,
+  hubOrigin: DEFAULT_HOSTED_APP_ORIGIN,
   hubNodeName: null,
   hubAllowFileSecretStore: false,
   tailscaleServeEnabled: false,
@@ -211,7 +212,7 @@ export function readDesktopSettings(settingsPath: string, appVersion: string): D
       hubOrigin:
         typeof parsed.hubOrigin === "string" && parsed.hubOrigin.length > 0
           ? parsed.hubOrigin
-          : null,
+          : defaultSettings.hubOrigin,
       hubNodeName,
       hubAllowFileSecretStore: parsed.hubAllowFileSecretStore === true,
     };

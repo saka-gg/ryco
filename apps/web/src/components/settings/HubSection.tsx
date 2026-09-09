@@ -684,7 +684,7 @@ export function HubSection({
               : automaticNativeSetupWaiting && hostedIdentity.status === "ready"
                 ? "You are signed in. Finish setup to register this Mac with the Hub and verify local trust automatically."
                 : hostedIdentity.status === "ready"
-                  ? "Your native account session and this Mac's automatic node claim are ready. Local trust introduction is verified."
+                  ? "You are signed in. Ryco chooses this device's secure connection automatically; this Mac's node status is shown above."
                   : hostedIdentity.status === "signed-out"
                     ? "Sign in in your browser. Ryco will claim this Mac's node and verify its local trust automatically."
                     : "Automatic secure setup did not finish. Existing node and trust state are preserved while you retry."

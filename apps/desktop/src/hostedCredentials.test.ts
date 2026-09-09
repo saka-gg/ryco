@@ -35,6 +35,42 @@ function memoryStore(
 }
 
 describe("Desktop hosted credentials", () => {
+  it("reports failed persistence and allows a later durable retry", async () => {
+    const memory = memoryStore();
+    const write = vi.fn(memory.store.write).mockRejectedValueOnce(new Error("locked"));
+    const credentials = createDesktopHostedSessionCredentials({ ...memory.store, write });
+    credentials.writeBearerToken?.("new-token");
+    await expect(credentials.flush()).rejects.toThrow("credential storage is unavailable");
+    await expect(credentials.flush()).resolves.toBeUndefined();
+    expect(memory.records.get("hub-session-token")).toBe("new-token");
+  });
+
+  it("retries a locked store without treating the existing session as signed out", async () => {
+    const memory = memoryStore({ "hub-session-token": "stored-token" });
+    const read = vi.fn(memory.store.read).mockRejectedValueOnce(new Error("locked"));
+    const credentials = createDesktopHostedSessionCredentials({ ...memory.store, read });
+    await expect(credentials.hydrate()).rejects.toThrow("credential storage is unavailable");
+    await credentials.hydrate();
+    expect(credentials.readBearerToken?.()).toBe("stored-token");
+  });
+
+  it("does not resurrect a session when a pending read completes after sign-out", async () => {
+    let finishRead!: (value: string) => void;
+    const memory = memoryStore();
+    const credentials = createDesktopHostedSessionCredentials({
+      ...memory.store,
+      read: () =>
+        new Promise((resolve) => {
+          finishRead = resolve;
+        }),
+    });
+    const hydration = credentials.hydrate();
+    await credentials.clear();
+    finishRead("old-token");
+    await hydration;
+    expect(credentials.readBearerToken?.()).toBeNull();
+  });
+
   it("creates one stable opaque installation id", async () => {
     const memory = memoryStore();
     const first = await getOrCreateDesktopInstallationId(memory.store);

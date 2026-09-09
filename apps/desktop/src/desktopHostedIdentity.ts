@@ -93,8 +93,8 @@ export type DesktopHostedIdentityStatus =
   | {
       readonly status: "ready";
       readonly accountId: string;
-      readonly nodeId: string;
-      readonly localNodeHandle: string;
+      readonly nodeId: string | null;
+      readonly localNodeHandle: string | null;
       readonly accountE2eeReady?: true;
       readonly github?: NonNullable<DesktopHostedIdentityState["github"]>;
     }
@@ -363,7 +363,11 @@ export class DesktopHostedIdentityCoordinator {
   }
 
   async #run(interactive: boolean): Promise<DesktopHostedIdentityStatus> {
-    await this.#credentials.hydrate();
+    try {
+      await this.#credentials.hydrate();
+    } catch {
+      return { status: "unavailable" };
+    }
     let session;
     if (!this.#api.hasSessionMaterial) {
       if (!interactive) return { status: "signed-out" };
@@ -393,6 +397,9 @@ export class DesktopHostedIdentityCoordinator {
     }
 
     try {
+      // Restores may renew the native session too. A ready state must survive
+      // the connector restart that completes desktop onboarding.
+      await this.#credentials.flush();
       // Account sign-in and the colocated trusted introduction remain useful
       // during a staged Hub rollout. Wait for both operations so a rejected
       // enrollment cannot leave the node claim mutating in the background,
@@ -404,16 +411,18 @@ export class DesktopHostedIdentityCoordinator {
         this.#setup({ accountId: session.account.id }),
         this.#nativeE2eeEnrollment?.ensure(session.account.id),
       ]);
-      if (setupResult.status === "rejected") throw setupResult.reason;
-      const setup = setupResult.value;
+      // A local node can be offline or awaiting connector restart while this
+      // device already has a valid account session. Remote trust still requires
+      // successful native enrollment or an independently verified node pin.
+      const setup = setupResult.status === "fulfilled" ? setupResult.value : null;
       const accountE2eeReady =
         this.#nativeE2eeEnrollment !== undefined && enrollmentResult.status === "fulfilled";
       const github = await this.#readGitHubState();
       return {
         status: "ready",
         accountId: session.account.id,
-        nodeId: setup.nodeId,
-        localNodeHandle: setup.localNodeHandle,
+        nodeId: setup?.nodeId ?? null,
+        localNodeHandle: setup?.localNodeHandle ?? null,
         ...(accountE2eeReady ? { accountE2eeReady: true as const } : {}),
         ...(github === undefined ? {} : { github }),
       };

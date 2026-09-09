@@ -1,6 +1,6 @@
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "./pairingUrl";
 
-const DEFAULT_HOSTED_APP_URL = "https://app.ryco.space";
+import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 
 export interface HostedPairingRequest {
   readonly host: string;
@@ -9,7 +9,7 @@ export interface HostedPairingRequest {
 }
 
 function configuredHostedAppUrl(): string {
-  return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_URL;
+  return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_ORIGIN;
 }
 
 function configuredBackendUrl(): string {

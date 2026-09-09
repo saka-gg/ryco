@@ -37,6 +37,7 @@ export function createMobileSessionCredentials(
   let csrfToken: string | null = null;
   let bearerToken: string | null = null;
   let hydration: Promise<void> | undefined;
+  let revision = 0;
   /** Serializes SecretKV writes so they land in call order. */
   let persistence: Promise<void> = Promise.resolve();
   const persistBearerToken = (token: string | null, requireSuccess = false): Promise<void> => {
@@ -67,6 +68,7 @@ export function createMobileSessionCredentials(
     },
     readBearerToken: () => bearerToken,
     writeBearerToken: (token) => {
+      revision += 1;
       bearerToken = token;
       // Mirror durably, strictly in call order. Unsequenced writes let a
       // delayed `set` land after the `remove` issued by sign-out, leaving a
@@ -78,16 +80,18 @@ export function createMobileSessionCredentials(
       void persistBearerToken(token);
     },
     clearBearerToken: async () => {
+      revision += 1;
       bearerToken = null;
       await persistBearerToken(null, true);
     },
     commitBearerToken: async (token) => {
+      const commitRevision = ++revision;
       const operation = persistence.then(async () => {
         try {
           const written = await secretKV.set(HOSTED_SESSION_TOKEN_KEY, token);
           if (!written) return false;
           const verified = await secretKV.get(HOSTED_SESSION_TOKEN_KEY);
-          if (verified !== token) return false;
+          if (verified !== token || revision !== commitRevision) return false;
           bearerToken = token;
           return true;
         } catch {
@@ -99,14 +103,18 @@ export function createMobileSessionCredentials(
     },
     hydrate: () => {
       hydration ??= (async () => {
+        const startedAtRevision = revision;
         try {
           const stored = await secretKV.get(HOSTED_SESSION_TOKEN_KEY);
           // A token written while hydration was in flight wins: it is newer.
-          if (bearerToken === null && stored !== null && stored.length > 0) {
+          if (revision === startedAtRevision && stored !== null && stored.length > 0) {
             bearerToken = stored;
           }
         } catch {
-          // Treat an unreadable store as "no session"; the user re-authenticates.
+          // A locked Keychain is not an absent session. Bootstrap can retry
+          // after foreground/unlock without replacing the retained credential.
+          hydration = undefined;
+          throw new Error("The Hub credential store is unavailable.");
         }
       })();
       return hydration;

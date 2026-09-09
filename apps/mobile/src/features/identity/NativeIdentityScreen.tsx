@@ -1,6 +1,7 @@
 import { getHostedHubApi } from "@ryco/client-runtime/authorization";
 import { encodeBase64Url } from "@ryco/client-runtime/relay";
 import type * as HostedIdentity from "@ryco/contracts/hosted-identity";
+import { getMobileHostedUnavailableReason } from "../../hostedHub/runtimeAvailability";
 import { Image } from "expo-image";
 import * as Linking from "expo-linking";
 import { useNavigation } from "@react-navigation/native";
@@ -352,6 +353,18 @@ export function NativeIdentityScreen() {
       // so never let that independent restore keep the blocker inert forever.
       await waitForSessionSetup();
       if (issued !== capabilityGeneration.current) return;
+      if (getMobileHostedUnavailableReason() === "credential-storage") {
+        setCapability(null);
+        setError("Your saved sign-in is temporarily locked. Unlock your device and retry.");
+        return;
+      }
+      if (getMobileHostedUnavailableReason() === "device-security") {
+        setCapability(null);
+        setError(
+          "Native sign-in needs this device's hardware security key. Unlock your device and retry. If this device cannot provide a hardware key, use another supported device.",
+        );
+        return;
+      }
       // Provider policy is additive. A slow/old external-identity endpoint must
       // never hold the established passkey/password/recovery surface hostage.
       void hostedHubController.refreshExternalIdentityConfiguration({ force: true });
