@@ -7,6 +7,7 @@ describe("settingsDialogStore", () => {
   beforeEach(() => {
     useSettingsDialogStore.setState({
       open: false,
+      editingScope: "client",
       section: "general",
       targetEnvironmentId: null,
     });
@@ -29,5 +30,17 @@ describe("settingsDialogStore", () => {
       open: false,
       targetEnvironmentId: null,
     });
+  });
+  it("keeps local appearance separate when switching from a node destination", () => {
+    const store = useSettingsDialogStore.getState();
+    store.openSettings("providers", EnvironmentId.make("remote"));
+    expect(useSettingsDialogStore.getState().editingScope).toBe("node");
+    store.setEditingScope("client");
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      editingScope: "client",
+      section: "general",
+    });
+    store.openSettings("appearance");
+    expect(useSettingsDialogStore.getState().editingScope).toBe("client");
   });
 });

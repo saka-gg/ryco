@@ -2,12 +2,15 @@ import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon, BarChart3Icon } from "lucide-react";
 
 import { useSettingsDialogStore } from "~/settingsDialogStore";
+import { useSettingsTarget } from "~/settingsTarget";
+import { parseStatisticsSearch } from "../statistics/statisticsSearch";
 
 import { Button } from "../ui/button";
 import { SettingsPageContainer } from "./settingsLayout";
 
 export function StatisticsSettingsLink() {
   const navigate = useNavigate();
+  const target = useSettingsTarget();
   const closeSettings = useSettingsDialogStore((state) => state.closeSettings);
   return (
     <SettingsPageContainer>
@@ -26,7 +29,12 @@ export function StatisticsSettingsLink() {
             className="mt-5"
             onClick={() => {
               closeSettings();
-              void navigate({ to: "/statistics" });
+              void navigate({
+                to: "/statistics",
+                search: parseStatisticsSearch(
+                  target ? { environmentIds: [target.environmentId] } : {},
+                ),
+              });
             }}
           >
             Open Statistics <ArrowUpRightIcon />

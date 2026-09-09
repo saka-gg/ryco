@@ -1,3 +1,4 @@
+import { findLocalMacSigningIdentity } from "../../../packages/shared/src/macLocalSigning.ts";
 // This file mostly exists because we want dev mode to say "Ryco (Dev)" instead of "electron"
 
 import { writeMacAppBootstrap, writeMacLaunchConfiguration } from "./mac-launcher-bootstrap.mjs";
@@ -207,22 +208,6 @@ function readJson(path) {
   }
 }
 
-function developmentSigningIdentity() {
-  if (!isDevelopment) return "-";
-  const result = spawnSync("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"], {
-    encoding: "utf8",
-    timeout: 5_000,
-  });
-  if (result.status !== 0) return "-";
-  const identities = Array.from(
-    result.stdout.matchAll(/\b([A-Fa-f0-9]{40})\s+"Apple Development:[^"]+"/g),
-    (match) => match[1],
-  );
-  // Never guess between teams or create a certificate. When the developer has
-  // one usable identity, it survives runtime updates as well as checkout changes.
-  return identities.length === 1 ? identities[0] : "-";
-}
-
 function buildMacLauncher(electronBinaryPath) {
   const sourceAppBundlePath = resolve(electronBinaryPath, "../../..");
   // Launch Services does not resolve protocol handlers from temporary
@@ -241,7 +226,7 @@ function buildMacLauncher(electronBinaryPath) {
   const metadataPath = join(runtimeDir, "metadata.json");
   const bootstrapEnvironment = macBootstrapEnvironment();
   const desktopMainPath = join(desktopDir, "dist-electron", "main.cjs");
-  const signingIdentity = developmentSigningIdentity();
+  const signingIdentity = findLocalMacSigningIdentity() ?? "-";
 
   mkdirSync(runtimeDir, { recursive: true });
 

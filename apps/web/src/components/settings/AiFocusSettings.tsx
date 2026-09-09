@@ -1,3 +1,4 @@
+import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 import { EnvironmentId, type ModelSelection, type ServerConfig } from "@ryco/contracts";
 import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
 import { createModelSelection } from "@ryco/shared/model";
@@ -52,7 +53,11 @@ export function AutoSettleSettingsSection(props: {
   readonly onChange: (value: SidebarAutoSettleAfterDays) => void;
 }) {
   return (
-    <SettingsSection title="Housekeeping" icon={<ArchiveIcon className="size-3.5" />}>
+    <SettingsSection
+      owner="client"
+      title="Housekeeping"
+      icon={<ArchiveIcon className="size-3.5" />}
+    >
       <SettingsRow
         title="Auto-settle inactive tasks"
         description="Move inactive tasks to Settled after their last message or turn. Running work, queued messages, pending input, open pull requests, and tasks kept active are protected."
@@ -201,6 +206,8 @@ function EnvironmentRow({ row }: { row: AiFocusEnvironmentRow }) {
 }
 
 export function AiFocusSettings() {
+  const editingScope = useSettingsEditingScope();
+  const target = useSettingsTarget();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const primaryConfig = useServerConfig();
@@ -210,6 +217,15 @@ export function AiFocusSettings() {
   const [refreshing, setRefreshing] = useState(false);
 
   const rows = useMemo(() => {
+    if (editingScope === "node" && target)
+      return resolveAiFocusEnvironmentRows([
+        {
+          environmentId: target.environmentId,
+          label: target.nodeLabel,
+          connected: target.connected && target.canManage !== false,
+          serverConfig: target.serverConfig,
+        },
+      ]);
     const byId = new Map<EnvironmentId, { label: string; config: ServerConfig | null }>();
     if (primary?.environmentId) {
       byId.set(primary.environmentId, { label: primary.label, config: primaryConfig });
@@ -240,7 +256,15 @@ export function AiFocusSettings() {
         serverConfig: value.config,
       })),
     );
-  }, [connections, primary?.environmentId, primary?.label, primaryConfig, savedRuntimeById]);
+  }, [
+    editingScope,
+    target,
+    connections,
+    primary?.environmentId,
+    primary?.label,
+    primaryConfig,
+    savedRuntimeById,
+  ]);
 
   const refreshNow = useCallback(async () => {
     setRefreshing(true);
@@ -282,7 +306,7 @@ export function AiFocusSettings() {
         onChange={(sidebarAutoSettleAfterDays) => updateSettings({ sidebarAutoSettleAfterDays })}
       />
 
-      <SettingsSection title="AI Focus" icon={<SparklesIcon className="size-3.5" />}>
+      <SettingsSection owner="client" title="AI Focus" icon={<SparklesIcon className="size-3.5" />}>
         <SettingsRow
           title="Prioritize the Inbox"
           description="Create a Focus section from pinned, actionable, and model-ranked threads. Focused threads are removed from Active, never duplicated."
@@ -337,7 +361,7 @@ export function AiFocusSettings() {
         />
       </SettingsSection>
 
-      <SettingsSection title="Models">
+      <SettingsSection owner="node" title="Models">
         {rows.length > 0 ? (
           rows.map((row) => <EnvironmentRow key={row.environmentId} row={row} />)
         ) : (
@@ -349,6 +373,7 @@ export function AiFocusSettings() {
       </SettingsSection>
 
       <SettingsSection
+        owner="node"
         title="Data sent to the selected model"
         icon={<InfoIcon className="size-3.5" />}
       >

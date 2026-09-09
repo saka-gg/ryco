@@ -72,7 +72,6 @@ export interface MobileHostedConnectionCoordinatorDeps {
   readonly selectedEnvironmentId: () => EnvironmentId | null;
   readonly selectNode: (nodeId: string) => Promise<void>;
   readonly connectSelectedEnvironment: () => void;
-  readonly clearSelectedEnvironment: () => Promise<void>;
   readonly markSelectedDeliveryUnknown: () => void;
   readonly listConnections: () => ReadonlyArray<EnvironmentConnection>;
   readonly readConnection: (environmentId: EnvironmentId) => EnvironmentConnection | null;
@@ -347,7 +346,9 @@ export function createMobileHostedConnectionCoordinator(
     releaseEnvironment: release,
     shouldActivate: (environmentId) =>
       acquiringEnvironmentId === environmentId ||
-      (records.has(environmentId) && deps.scopes.isEnvironmentRetained(environmentId)),
+      (records.has(environmentId) &&
+        (deps.selectedEnvironmentId() === environmentId ||
+          deps.scopes.isEnvironmentRetained(environmentId))),
     ensureRecord(node) {
       const existing = records.get(node.environmentId);
       if (existing) {
@@ -429,7 +430,9 @@ export function createMobileHostedConnectionCoordinator(
     connectionClosed: (environmentId, generation) =>
       patch(environmentId, generation, (current) => ({
         ...current,
-        effectiveRole: null,
+        // Keep the validated role for read-only session-sync subscriptions.
+        // Stale transport/session state still blocks mutations; terminal
+        // failures and directory authorization independently revoke access.
         transportStatus:
           current.transportStatus === "terminal-failure" ? current.transportStatus : "reconnecting",
         sessionStatus: current.sessionStatus === "delivery-unknown" ? "delivery-unknown" : "stale",
@@ -470,6 +473,7 @@ export function createMobileHostedConnectionCoordinator(
     },
     async releaseNonRetainedForBackground() {
       const selectedEnvironmentId = deps.selectedEnvironmentId();
+      const selectedRecord = selectedEnvironmentId ? records.get(selectedEnvironmentId) : null;
       const releasedEnvironmentIds = Array.from(records.values())
         .filter((record) => !deps.scopes.isEnvironmentRetained(record.environmentId))
         .map((record) => record.environmentId);
@@ -480,10 +484,18 @@ export function createMobileHostedConnectionCoordinator(
         })),
       );
       if (
-        selectedEnvironmentId !== null &&
+        selectedRecord &&
+        deps.selectedEnvironmentId() === selectedEnvironmentId &&
         released.some((result) => result.removed && result.environmentId === selectedEnvironmentId)
       ) {
-        await deps.clearSelectedEnvironment();
+        // Suspending a socket does not deselect the user's node. Keep only a
+        // fresh metadata generation so the shared foreground lifecycle can
+        // revalidate access and recreate the selected connection. No socket or
+        // mutation authority is retained by this record.
+        const node = deps.nodeForId(selectedRecord.nodeId);
+        if (node && node.environmentId === selectedEnvironmentId && node.revokedAt === null) {
+          coordinatorRecord(node);
+        }
       }
     },
     reconnectRetainedAfterForeground() {

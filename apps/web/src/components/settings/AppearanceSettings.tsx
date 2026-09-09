@@ -102,12 +102,10 @@ export function AppearanceSettingsPanel({
   /**
    * Which product is showing this panel.
    *
-   * `hub` is the Hub website's `/account/appearance` page, which offers only
-   * the controls that mean something there — colour mode, theme palette, fonts,
-   * text size, primary colour, transparency. The code font, the corner radius,
-   * and the composer controls describe a node workspace,
-   * and a hosted user may have no node at all; they stay in the node app's own
-   * settings, reachable from inside a node session.
+   * `hub` is the account site's subset of browser-local appearance controls.
+   * Both surfaces persist on this client only; no appearance preference is a
+   * remote node setting. Workspace-specific controls are available from this
+   * browser/app's settings while viewing a workspace.
    */
   readonly surface?: "node" | "hub";
 } = {}) {

@@ -10,20 +10,20 @@
  * store.
  */
 import { useCallback, useMemo, useSyncExternalStore } from "react";
-import { ServerSettings, type ServerSettingsPatch } from "@ryco/contracts";
+
 import {
-  type ClientSettingsPatch,
   type ClientSettings,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_UNIFIED_SETTINGS,
   UnifiedSettings,
 } from "@ryco/contracts/settings";
 import { ensureLocalApi } from "~/localApi";
-import { Struct } from "effect";
+import { splitUnifiedSettingsPatch } from "@ryco/shared/settingsOwnership";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { applySettingsUpdated, getServerConfig, useServerSettings } from "~/rpc/serverState";
 import { updateEnvironmentServerSettings } from "~/environments/runtime";
-import { useSettingsTarget } from "~/settingsTarget";
+import { useSettingsEditingScope, useSettingsTarget } from "~/settingsTarget";
+import { toastManager } from "~/components/ui/toast";
 import {
   __resetClientSettingsPersistenceForTests,
   addClientSettingsHydrationListener,
@@ -93,29 +93,6 @@ function persistClientSettings(settings: ClientSettings): void {
     });
 }
 
-// ── Key sets for routing patches ─────────────────────────────────────
-
-const SERVER_SETTINGS_KEYS = new Set<string>(Struct.keys(ServerSettings.fields));
-
-function splitPatch(patch: Partial<UnifiedSettings>): {
-  serverPatch: ServerSettingsPatch;
-  clientPatch: ClientSettingsPatch;
-} {
-  const serverPatch: Record<string, unknown> = {};
-  const clientPatch: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(patch)) {
-    if (SERVER_SETTINGS_KEYS.has(key)) {
-      serverPatch[key] = value;
-    } else {
-      clientPatch[key] = value;
-    }
-  }
-  return {
-    serverPatch: serverPatch as ServerSettingsPatch,
-    clientPatch: clientPatch as ClientSettingsPatch,
-  };
-}
-
 // ── Hooks ────────────────────────────────────────────────────────────
 
 /**
@@ -167,14 +144,18 @@ export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings)
  */
 export function useUpdateSettings() {
   const target = useSettingsTarget();
+  const editingScope = useSettingsEditingScope();
   const targetEnvironmentId = target?.environmentId ?? null;
   const targetIsPrimary = target?.primary ?? true;
   const targetConnected = target?.connected ?? true;
   const updateSettings = useCallback(
     (patch: Partial<UnifiedSettings>) => {
-      const { serverPatch, clientPatch } = splitPatch(patch);
+      const { serverPatch, clientPatch } = splitUnifiedSettingsPatch(patch);
 
-      if (Object.keys(serverPatch).length > 0) {
+      const serverWriteAllowed =
+        !(editingScope === "node" && !target) &&
+        !(target && (!target.connected || target.canManage === false));
+      if (editingScope !== "client" && serverWriteAllowed && Object.keys(serverPatch).length > 0) {
         if (targetEnvironmentId && !targetIsPrimary) {
           if (!targetConnected) {
             console.error(
@@ -184,6 +165,11 @@ export function useUpdateSettings() {
             void updateEnvironmentServerSettings(targetEnvironmentId, serverPatch).catch(
               (error) => {
                 console.error(`[SETTINGS] update failed for ${targetEnvironmentId}`, error);
+                toastManager.add({
+                  type: "error",
+                  title: "Could not save node settings",
+                  description: `Reconnect to ${target?.nodeLabel ?? "this node"} and try again.`,
+                });
               },
             );
           }
@@ -199,14 +185,14 @@ export function useUpdateSettings() {
         }
       }
 
-      if (Object.keys(clientPatch).length > 0) {
+      if (editingScope !== "node" && Object.keys(clientPatch).length > 0) {
         persistClientSettings({
           ...getClientSettingsSnapshot(),
           ...clientPatch,
         });
       }
     },
-    [targetConnected, targetEnvironmentId, targetIsPrimary],
+    [editingScope, target, targetConnected, targetEnvironmentId, targetIsPrimary],
   );
 
   const resetSettings = useCallback(() => {

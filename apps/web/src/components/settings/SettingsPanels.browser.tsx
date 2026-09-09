@@ -29,7 +29,7 @@ import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/ser
 import { useUiStateStore } from "../../uiStateStore";
 import { syncDocumentPresentationTier } from "../../lib/presentationTier";
 import { useTierOverrideStore } from "../../tierOverrideStore";
-import { SettingsTargetProvider } from "../../settingsTarget";
+import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
@@ -925,6 +925,24 @@ describe("GeneralSettingsPanel observability", () => {
     ).toBe("Node: Connecting…");
   });
 
+  it("shows only local controls in this browser's General settings", async () => {
+    installSettingsNativeApi();
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SettingsEditingScopeProvider value="client">
+          <GeneralSettingsPanel />
+        </SettingsEditingScopeProvider>
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByText("Time format", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Provider update checks", { exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByText("Add project starts in", { exact: true }))
+      .not.toBeInTheDocument();
+  });
+
   it("labels and writes node settings against the explicitly selected remote node", async () => {
     const environmentId = EnvironmentId.make("environment-qa");
     const remoteConfig = {
@@ -942,17 +960,19 @@ describe("GeneralSettingsPanel observability", () => {
 
     mounted = await render(
       <AppAtomRegistryProvider>
-        <SettingsTargetProvider
-          value={{
-            environmentId,
-            nodeLabel: "Ryco Multi-node QA",
-            serverConfig: remoteConfig,
-            primary: false,
-            connected: true,
-          }}
-        >
-          <GeneralSettingsPanel />
-        </SettingsTargetProvider>
+        <SettingsEditingScopeProvider value="node">
+          <SettingsTargetProvider
+            value={{
+              environmentId,
+              nodeLabel: "Ryco Multi-node QA",
+              serverConfig: remoteConfig,
+              primary: false,
+              connected: true,
+            }}
+          >
+            <GeneralSettingsPanel />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
       </AppAtomRegistryProvider>,
     );
 
@@ -964,6 +984,13 @@ describe("GeneralSettingsPanel observability", () => {
         ?.getAttribute("data-setting-scope"),
     ).toBe("Node: Ryco Multi-node QA");
 
+    await expect.element(page.getByText("Time format", { exact: true })).not.toBeInTheDocument();
+    await expect
+      .element(page.getByText("Archive confirmation", { exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByLabelText("Auto-collapse wide composer labels"))
+      .not.toBeInTheDocument();
     const providerUpdateSwitch = page.getByLabelText("Check providers for updates");
     await expect.element(providerUpdateSwitch).not.toBeChecked();
     await providerUpdateSwitch.click();
@@ -972,6 +999,31 @@ describe("GeneralSettingsPanel observability", () => {
         enableProviderUpdateChecks: true,
       });
     });
+  });
+
+  it.each([
+    { connected: false, canManage: true },
+    { connected: true, canManage: false },
+  ])("refuses node writes without current access: %o", async (access) => {
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SettingsEditingScopeProvider value="node">
+          <SettingsTargetProvider
+            value={{
+              environmentId: EnvironmentId.make("environment-denied"),
+              nodeLabel: "Unavailable node",
+              serverConfig: createBaseServerConfig(),
+              primary: false,
+              ...access,
+            }}
+          >
+            <GeneralSettingsPanel />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByLabelText("Check providers for updates").click();
+    expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
   });
 
   it("reveals and focuses legacy token streaming when settings search targets it", async () => {

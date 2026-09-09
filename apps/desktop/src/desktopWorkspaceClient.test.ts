@@ -7,6 +7,7 @@ import {
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { projectDesktopWorkspaceState } from "./desktopWorkspaceIpc.ts";
 
 import {
   DesktopWorkspaceClient,
@@ -175,6 +176,22 @@ function fixture(
 }
 
 describe("DesktopWorkspaceClient", () => {
+  it("projects exact node roles without promoting operators and removes offline authority", async () => {
+    const nodes = [node(1), node(2, { role: "operator" }), node(3, { role: "viewer" })];
+    const { client, setDirectory } = fixture({ nodes });
+    const state = projectDesktopWorkspaceState(await client.resume());
+    expect(state.machines.map((machine) => [machine.effectiveRole, machine.canMutate])).toEqual([
+      ["owner", true],
+      ["operator", true],
+      ["viewer", false],
+    ]);
+    setDirectory([node(1, { online: false })]);
+    expect(projectDesktopWorkspaceState(await client.refreshCatalog()).machines[0]).toMatchObject({
+      effectiveRole: null,
+      canMutate: false,
+      canConnect: false,
+    });
+  });
   it("trusts only the colocated introduction and keeps remote nodes unverified", async () => {
     const nodes = [node(1), node(2)];
     const { client } = fixture({

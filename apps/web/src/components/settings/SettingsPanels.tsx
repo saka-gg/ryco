@@ -1,3 +1,5 @@
+import { settingsRestorePlan } from "./settingsRestore";
+import { selectArchivedSettingsGroups } from "./archivedSettings";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
@@ -12,7 +14,6 @@ import {
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
-import { Equal } from "effect";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
   canCheckForUpdate,
@@ -60,7 +61,7 @@ import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
 import { EDITOR_ICONS, getEditorLabel } from "./SettingsPanels.editor";
 import { settingsScopeLabel } from "./settingsSections.logic";
-import { useSettingsTarget } from "../../settingsTarget";
+import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 
 const TIMESTAMP_FORMAT_LABELS = {
   locale: "System default",
@@ -321,105 +322,19 @@ export function useSettingsRestore(onRestored?: () => void) {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
 
-  const isGitWritingModelDirty = !Equal.equals(
-    settings.textGenerationModelSelection ?? null,
-    DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
-  );
-
-  const changedSettingLabels = useMemo(
-    () => [
-      ...(theme !== "system" ? ["Theme"] : []),
-      ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
-        ? ["Time format"]
-        : []),
-      ...(settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap
-        ? ["Diff line wrapping"]
-        : []),
-      ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
-        ? ["Diff whitespace changes"]
-        : []),
-      ...(settings.gitStatusPollIntervalMs !== DEFAULT_UNIFIED_SETTINGS.gitStatusPollIntervalMs
-        ? ["Remote Git status"]
-        : []),
-      ...(settings.sourceControlRefreshMode !== DEFAULT_UNIFIED_SETTINGS.sourceControlRefreshMode
-        ? ["PR & workflow updates"]
-        : []),
-      ...(settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar
-        ? ["Auto-open overview"]
-        : []),
-      ...(settings.enableLegacyTokenStreaming !==
-      DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming
-        ? ["Stream token by token"]
-        : []),
-      ...(settings.enableProviderUpdateChecks !==
-      DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
-        ? ["Provider update checks"]
-        : []),
-      ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
-        ? ["New thread mode"]
-        : []),
-      ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
-        ? ["Add project base directory"]
-        : []),
-      ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
-        ? ["Archive confirmation"]
-        : []),
-      ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
-        ? ["Delete confirmation"]
-        : []),
-      ...(settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin
-        ? ["Unpin confirmation"]
-        : []),
-      ...(isGitWritingModelDirty ? ["Git writing model"] : []),
-    ],
-    [
-      isGitWritingModelDirty,
-      settings.autoOpenPlanSidebar,
-      settings.confirmThreadArchive,
-      settings.confirmThreadDelete,
-      settings.confirmThreadUnpin,
-      settings.addProjectBaseDirectory,
-      settings.defaultThreadEnvMode,
-      settings.diffIgnoreWhitespace,
-      settings.diffWordWrap,
-      settings.enableLegacyTokenStreaming,
-      settings.enableProviderUpdateChecks,
-      settings.gitStatusPollIntervalMs,
-      settings.sourceControlRefreshMode,
-      settings.timestampFormat,
-      theme,
-    ],
-  );
-
+  const editingScope = useSettingsEditingScope();
+  const plan = settingsRestorePlan(settings, theme, editingScope);
+  const changedSettingLabels = plan.labels;
   const restoreDefaults = useCallback(async () => {
-    if (changedSettingLabels.length === 0) return;
-    const api = readLocalApi();
-    const confirmed = await (api ?? ensureLocalApi()).dialogs.confirm(
-      ["Restore default settings?", `This will reset: ${changedSettingLabels.join(", ")}.`].join(
-        "\n",
-      ),
+    if (plan.labels.length === 0) return;
+    const confirmed = await (readLocalApi() ?? ensureLocalApi()).dialogs.confirm(
+      ["Restore default settings?", `This will reset: ${plan.labels.join(", ")}.`].join("\n"),
     );
     if (!confirmed) return;
-
-    setTheme("system");
-    updateSettings({
-      timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
-      diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
-      diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
-      gitStatusPollIntervalMs: DEFAULT_UNIFIED_SETTINGS.gitStatusPollIntervalMs,
-      sourceControlRefreshMode: DEFAULT_UNIFIED_SETTINGS.sourceControlRefreshMode,
-      autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
-      enableLegacyTokenStreaming: DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming,
-      enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
-      defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
-      addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-      confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
-      confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
-      confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
-      textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-    });
+    if (plan.resetTheme) setTheme("system");
+    updateSettings(plan.patch);
     onRestored?.();
-  }, [changedSettingLabels, onRestored, setTheme, updateSettings]);
+  }, [plan, onRestored, setTheme, updateSettings]);
 
   return {
     changedSettingLabels,
@@ -475,6 +390,7 @@ function LegacyFeaturesSection({
                 <SettingsRow
                   title="Stream token by token (legacy)"
                   description="Paint assistant output token by token instead of in complete chunks. This legacy mode is significantly slower and makes long responses harder to follow."
+                  owner="node"
                   scope={nodeScopeLabel}
                   resetAction={
                     settings.enableLegacyTokenStreaming !==
@@ -535,6 +451,7 @@ export function GeneralSettingsPanel({
   const { updateSettings } = useUpdateSettings();
   const isPhoneTier = usePresentationTier() === "phone";
   const settingsTarget = useSettingsTarget();
+  const editingScope = useSettingsEditingScope();
   const scopeOptions = {
     nativeClient: isElectron,
     nodeLabel: settingsTarget?.nodeLabel ?? null,
@@ -611,10 +528,11 @@ export function GeneralSettingsPanel({
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="Behavior">
+      <SettingsSection title="Behavior" owner="client">
         <SettingsRow
           title="Time format"
           description="System default follows your browser or OS clock preference."
+          owner="client"
           scope={localScopeLabel}
           resetAction={
             settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
@@ -662,6 +580,7 @@ export function GeneralSettingsPanel({
               ? "Pin which editor opens directories and files. Auto uses your last selection from the Open menu."
               : "No installed editors detected. Install a supported IDE to pick a default."
           }
+          owner="client"
           scope={localScopeLabel}
           resetAction={
             settings.preferredEditor !== DEFAULT_UNIFIED_SETTINGS.preferredEditor ? (
@@ -722,10 +641,11 @@ export function GeneralSettingsPanel({
         />
       </SettingsSection>
       {isPhoneTier && <SourceControlPreferences />}
-      <SettingsSection title="Provider updates">
+      <SettingsSection title="Provider updates" owner="node">
         <SettingsRow
           title="Provider update checks"
           description="Check installed provider CLIs for newer versions. Disable if you install providers with Nix or another package manager."
+          owner="node"
           scope={nodeScopeLabel}
           resetAction={
             settings.enableProviderUpdateChecks !==
@@ -751,11 +671,12 @@ export function GeneralSettingsPanel({
           }
         />
       </SettingsSection>
-      {!isPhoneTier && <ComposerSettings />}
+      {!isPhoneTier && editingScope !== "node" && <ComposerSettings />}
       <SettingsSection title="Projects & threads">
         <SettingsRow
           title="Auto-open overview"
           description="Open the overview automatically when plans, progress, or implementation steps appear."
+          owner="client"
           scope={localScopeLabel}
           resetAction={
             settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
@@ -783,6 +704,7 @@ export function GeneralSettingsPanel({
         <SettingsRow
           title="New threads"
           description="Pick the default workspace mode for newly created draft threads."
+          owner="node"
           scope={nodeScopeLabel}
           resetAction={
             settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
@@ -825,6 +747,7 @@ export function GeneralSettingsPanel({
         <SettingsRow
           title="Add project starts in"
           description='Leave empty to use "~/" when the Add Project browser opens.'
+          owner="node"
           scope={nodeScopeLabel}
           resetAction={
             settings.addProjectBaseDirectory !==
@@ -851,11 +774,12 @@ export function GeneralSettingsPanel({
           }
         />
       </SettingsSection>
-      <SettingsSection title="Confirmations">
+      <SettingsSection title="Confirmations" owner="client">
         {!isPhoneTier && <QuitShortcutSetting />}
         <SettingsRow
           title="Archive confirmation"
           description="Require a second click on the inline archive action before a thread is archived."
+          owner="client"
           scope={localScopeLabel}
           resetAction={
             settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
@@ -883,6 +807,7 @@ export function GeneralSettingsPanel({
         <SettingsRow
           title="Delete confirmation"
           description="Ask before deleting a thread and its chat history."
+          owner="client"
           scope={localScopeLabel}
           resetAction={
             settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
@@ -910,6 +835,7 @@ export function GeneralSettingsPanel({
         <SettingsRow
           title="Unpin confirmation"
           description="Ask before removing a thread from the pinned section."
+          owner="client"
           scope={localScopeLabel}
           resetAction={
             settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin ? (
@@ -935,10 +861,11 @@ export function GeneralSettingsPanel({
         />
       </SettingsSection>
       {isElectron && (
-        <SettingsSection title="Notifications">
+        <SettingsSection title="Notifications" owner="client">
           <SettingsRow
             title="Turn-complete notifications"
             description="Show a desktop notification when an agent finishes a turn while the Ryco window is unfocused."
+            owner="client"
             scope={deviceScopeLabel}
             resetAction={
               settings.notifyOnTurnCompleteWhenUnfocused !==
@@ -969,24 +896,31 @@ export function GeneralSettingsPanel({
         </SettingsSection>
       )}
 
-      {!isPhoneTier ? (
-        <LegacyFeaturesSection searchTargetId={searchTargetId} nodeScopeLabel={nodeScopeLabel} />
-      ) : null}
+      {!isPhoneTier
+        ? editingScope !== "client" && (
+            <LegacyFeaturesSection
+              searchTargetId={searchTargetId}
+              nodeScopeLabel={nodeScopeLabel}
+            />
+          )
+        : null}
 
       <SettingsSection title="About">
-        <AboutBrandingHeader />
-        {isElectron ? (
+        {editingScope !== "node" && <AboutBrandingHeader />}
+        {isElectron && editingScope !== "node" ? (
           <AboutVersionSection scopeLabel={deviceScopeLabel} />
         ) : (
           <SettingsRow
             title={<AboutVersionTitle />}
             description="Current version of the application."
+            owner="client"
             scope={localScopeLabel}
           />
         )}
         <SettingsRow
           title="Diagnostics"
           description={diagnosticsDescription}
+          owner="node"
           scope={nodeScopeLabel}
           status={
             <>
@@ -1019,28 +953,21 @@ export function GeneralSettingsPanel({
 }
 
 export function ArchivedThreadsPanel() {
+  const target = useSettingsTarget();
   const mutationCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
+  const mutationAllowed =
+    mutationCapability.allowed && (!target || (target.connected && target.canMutate !== false));
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const threads = useStore(useShallow(selectThreadShellsAcrossEnvironments));
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
-  const archivedGroups = useMemo(() => {
-    return projects
-      .map((project) => ({
-        project,
-        threads: threads
-          .filter((thread) => thread.projectId === project.id && thread.archivedAt !== null)
-          .toSorted((left, right) => {
-            const leftKey = left.archivedAt ?? left.createdAt;
-            const rightKey = right.archivedAt ?? right.createdAt;
-            return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
-          }),
-      }))
-      .filter((group) => group.threads.length > 0);
-  }, [projects, threads]);
+  const archivedGroups = useMemo(
+    () => selectArchivedSettingsGroups(projects, threads, target?.environmentId),
+    [projects, threads, target?.environmentId],
+  );
 
   const handleArchivedThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
-      if (!mutationCapability.allowed) {
+      if (!mutationAllowed) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
@@ -1079,12 +1006,7 @@ export function ArchivedThreadsPanel() {
         await confirmAndDeleteThread(threadRef);
       }
     },
-    [
-      confirmAndDeleteThread,
-      mutationCapability.allowed,
-      mutationCapability.reason,
-      unarchiveThread,
-    ],
+    [confirmAndDeleteThread, mutationAllowed, mutationCapability.reason, unarchiveThread],
   );
 
   return (
@@ -1104,7 +1026,7 @@ export function ArchivedThreadsPanel() {
       ) : (
         archivedGroups.map(({ project, threads: projectThreads }) => (
           <SettingsSection
-            key={project.id}
+            key={`${project.environmentId}:${project.id}`}
             title={project.name}
             icon={
               <ProjectFavicon
@@ -1119,7 +1041,7 @@ export function ArchivedThreadsPanel() {
               <ArchivedThreadRow
                 key={thread.id}
                 thread={thread}
-                mutationAllowed={mutationCapability.allowed}
+                mutationAllowed={mutationAllowed}
                 mutationReason={mutationCapability.reason ?? null}
                 onOpenMenu={handleArchivedThreadContextMenu}
                 onUnarchive={unarchiveThread}

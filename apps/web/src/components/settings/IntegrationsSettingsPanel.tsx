@@ -1,3 +1,4 @@
+import { useSettingsEditingScope } from "../../settingsTarget";
 import { WS_METHODS } from "@ryco/contracts";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
@@ -13,6 +14,20 @@ const ComputerUseSettings = lazy(() =>
 );
 
 export function IntegrationsSettingsPanel() {
+  const scope = useSettingsEditingScope();
+  return (
+    <div className="flex-1 overflow-y-auto">
+      {scope !== "client" && <NodeIntegrationsSettingsPanel />}
+      {scope !== "node" && window.desktopBridge?.computerUse && (
+        <Suspense fallback={<p className="p-6">Loading device integrations…</p>}>
+          <ComputerUseSettings />
+        </Suspense>
+      )}
+    </div>
+  );
+}
+
+function NodeIntegrationsSettingsPanel() {
   const enabled = useSettings((settings) => settings.agentControl.enabled);
   const { updateSettings } = useUpdateSettings();
   const settingsCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
@@ -76,15 +91,6 @@ export function IntegrationsSettingsPanel() {
           </details>
         </>
       ) : null}
-      {window.desktopBridge?.computerUse && (
-        <Suspense
-          fallback={
-            <p className="p-6 text-sm text-muted-foreground">Loading device integrations…</p>
-          }
-        >
-          <ComputerUseSettings />
-        </Suspense>
-      )}
     </div>
   );
 }

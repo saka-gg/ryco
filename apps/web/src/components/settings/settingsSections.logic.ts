@@ -168,3 +168,21 @@ export function settingsSectionReachable(
     (!hosted || hostedSettingsSectionAllowed(section, role))
   );
 }
+
+/** Destination filtering is separate from authorization and the frozen phone inventory. */
+export function settingsSectionInDestination(
+  section: SettingsSectionId,
+  scope: "client" | "node",
+  desktop: boolean,
+): boolean {
+  if (scope === "node") return !["account", "appearance", "computer-use"].includes(section);
+  if (section === "integrations") return desktop;
+  return [
+    "general",
+    "inbox",
+    "appearance",
+    "source-control",
+    "connections",
+    "diagnostics",
+  ].includes(section);
+}

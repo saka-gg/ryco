@@ -9,6 +9,18 @@ describe("resolveSettingsTargetEnvironmentId", () => {
   const activeEnvironmentId = EnvironmentId.make("environment-qa");
   const requestedEnvironmentId = EnvironmentId.make("environment-notification");
 
+  it("uses the direct connection when selecting this desktop's Hub alias", () => {
+    expect(
+      resolveSettingsTargetEnvironmentId({
+        requestedEnvironmentId,
+        routedEnvironmentId,
+        activeEnvironmentId,
+        primaryEnvironmentId,
+        desktopLocalEnvironmentId: requestedEnvironmentId,
+      }),
+    ).toBe(primaryEnvironmentId);
+  });
+
   it("targets the active remote task instead of the local primary node", () => {
     expect(
       resolveSettingsTargetEnvironmentId({

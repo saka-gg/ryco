@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fileURLToPath } from "node:url";
+import { findLocalMacSigningIdentity } from "@ryco/shared/macLocalSigning";
 
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
@@ -922,6 +924,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   mockUpdates: boolean,
   mockUpdateServerPort: number | undefined,
   macUnsignedInstallAssets: MacUnsignedInstallAssetPaths | undefined,
+  localSigningIdentity?: string,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: "com.laurinfrank.ryco",
@@ -941,6 +944,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       { from: "apps/desktop/resources/computer-use-licenses", to: "computer-use-licenses" },
     ],
   };
+  if (!signed && localSigningIdentity) buildConfig.forceCodeSigning = true;
   const updateChannel = resolveDesktopUpdateChannel(version);
   const publishConfig = resolveGitHubPublishConfig(updateChannel);
   if (publishConfig) {
@@ -979,7 +983,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "public.app-category.developer-tools",
       // A renamed Electron bundle's linker signature does not bind Ryco's Info.plist.
       // Even non-notarized builds need a complete signature for macOS TCC attribution.
-      ...(!signed ? { identity: "-", hardenedRuntime: false } : {}),
+      ...(!signed
+        ? {
+            identity: localSigningIdentity ?? "-",
+            hardenedRuntime: false,
+            ...(localSigningIdentity
+              ? {
+                  type: "development",
+                  notarize: false,
+                  timestamp: "none",
+                  sign: fileURLToPath(
+                    new URL("../apps/desktop/scripts/mac-local-sign.cjs", import.meta.url),
+                  ),
+                }
+              : {}),
+          }
+        : {}),
       strictVerify: true,
       binaries: [
         "Contents/Resources/ryco-computer-use-helper",
@@ -1295,6 +1314,12 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   yield* fs.copy(stageResourcesDir, path.join(stageAppDir, "apps/desktop/prod-resources"));
 
+  const localSigningIdentity =
+    options.platform === "mac" && !options.signed ? findLocalMacSigningIdentity() : undefined;
+  if (localSigningIdentity)
+    yield* Effect.log(
+      "[desktop-artifact] Using the existing local development identity; notarization is not requested.",
+    );
   const stagePackageJson: StagePackageJson = {
     name: "ryco",
     version: appVersion,
@@ -1312,6 +1337,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.mockUpdates,
       options.mockUpdateServerPort,
       macUnsignedInstallAssets,
+      localSigningIdentity,
     ),
     dependencies: stageDependencies,
     devDependencies: {
