@@ -237,6 +237,109 @@ describe("HostedHubApi", () => {
     expect(String(requests[1]?.input)).not.toContain("node_aaaaaaaaaaaaaaaaaaaaaa");
   });
 
+  it.each([2, 3] as const)(
+    "offers the current relay version and accepts selected minor %i",
+    async (protocolMinor) => {
+      const api = createApi();
+      globalThis.fetch = vi.fn(async () => response(session));
+      await api.restoreSession();
+      const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        response(
+          { ticket: "ticket", expiresAt: Date.now() + 60_000, protocolMajor: 1, protocolMinor },
+          201,
+        ),
+      );
+      globalThis.fetch = fetch;
+      await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).resolves.toMatchObject({
+        protocolMinor,
+      });
+      expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toMatchObject({
+        protocolMinor: 3,
+      });
+    },
+  );
+
+  it("retries an old Hub's explicit schema rejection once with minor 2", async () => {
+    const api = createApi();
+    globalThis.fetch = vi.fn(async () => response(session));
+    await api.restoreSession();
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "invalid_request" }, 400))
+      .mockResolvedValueOnce(
+        response(
+          { ticket: "ticket", expiresAt: Date.now() + 60_000, protocolMajor: 1, protocolMinor: 2 },
+          201,
+        ),
+      );
+    globalThis.fetch = fetch;
+    await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).resolves.toMatchObject({
+      protocolMinor: 2,
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls.map((call) => JSON.parse(String(call[1]?.body)).protocolMinor)).toEqual(
+      [3, 2],
+    );
+    expect(
+      fetch.mock.calls.every((call) => headersOf(call[1]).get("X-Ryco-CSRF") === "csrf-canary"),
+    ).toBe(true);
+  });
+
+  it.each([0, 1, 4, "3"])(
+    "rejects an unsupported selected relay minor %s",
+    async (protocolMinor) => {
+      const api = createApi();
+      globalThis.fetch = vi.fn(async () => response(session));
+      await api.restoreSession();
+      globalThis.fetch = vi.fn(async () =>
+        response(
+          { ticket: "ticket", expiresAt: Date.now() + 60_000, protocolMajor: 1, protocolMinor },
+          201,
+        ),
+      );
+      await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).rejects.toMatchObject({
+        code: "invalid_response",
+      });
+      expect(globalThis.fetch).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("rejects a widened response after retrying a legacy Hub", async () => {
+    const api = createApi();
+    globalThis.fetch = vi.fn(async () => response(session));
+    await api.restoreSession();
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "invalid_request" }, 400))
+      .mockResolvedValueOnce(
+        response(
+          { ticket: "ticket", expiresAt: Date.now() + 60_000, protocolMajor: 1, protocolMinor: 3 },
+          201,
+        ),
+      );
+    await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [401, "unauthorized"],
+    [403, "forbidden"],
+    [409, "unsupported_version"],
+    [500, "internal_error"],
+  ] as const)("never repeats ticket issuance after %i %s", async (status, code) => {
+    const api = createApi();
+    globalThis.fetch = vi.fn(async () => response(session));
+    await api.restoreSession();
+    const fetch = vi.fn(async () => response({ error: code }, status));
+    globalThis.fetch = fetch;
+    await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).rejects.toMatchObject({
+      status,
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it("keeps the legacy ticket response grant-free", async () => {
     const api = createApi();
     globalThis.fetch = vi
@@ -408,7 +511,7 @@ describe("HostedHubApi", () => {
       nodeId: maxNodeId,
       capability: "ryco.rpc",
       protocolMajor: 1,
-      protocolMinor: 2,
+      protocolMinor: 3,
     });
   });
 

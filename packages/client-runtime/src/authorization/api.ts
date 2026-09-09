@@ -2587,18 +2587,37 @@ export class HostedHubApi {
 
   async issueRelayTicket(nodeId: string, signal?: AbortSignal): Promise<HostedRelayTicket> {
     const validatedNodeId = decodeContract(RelayNodeId, nodeId, "invalid_request");
-    const result = await this.#request("/api/relay/tickets", {
-      method: "POST",
-      body: { nodeId: validatedNodeId, capability: "ryco.rpc", protocolMajor: 1, protocolMinor: 2 },
-      csrf: true,
-      ...(signal ? { signal } : {}),
-    });
+    const request = (protocolMinor: 2 | 3) =>
+      this.#request("/api/relay/tickets", {
+        method: "POST",
+        body: { nodeId: validatedNodeId, capability: "ryco.rpc", protocolMajor: 1, protocolMinor },
+        csrf: true,
+        ...(signal ? { signal } : {}),
+      });
+    let offeredMinor: 2 | 3 = 3;
+    let result: Record<string, unknown>;
+    try {
+      result = await request(offeredMinor);
+    } catch (error) {
+      // Older Hubs reject the newer request schema before issuing any ticket.
+      // Retry only that explicit rejection, never a failed/uncertain issuance.
+      if (
+        !(error instanceof HostedHubApiError) ||
+        error.status !== 400 ||
+        error.code !== "invalid_request"
+      ) {
+        throw error;
+      }
+      offeredMinor = 2;
+      result = await request(offeredMinor);
+    }
     if (
       Object.keys(result).length !== 4 ||
       typeof result.ticket !== "string" ||
       !Number.isSafeInteger(result.expiresAt) ||
       result.protocolMajor !== 1 ||
-      result.protocolMinor !== 2
+      (result.protocolMinor !== 2 && result.protocolMinor !== 3) ||
+      result.protocolMinor > offeredMinor
     ) {
       throw new HostedHubApiError("invalid_response", 502);
     }
@@ -2606,7 +2625,7 @@ export class HostedHubApi {
       ticket: result.ticket,
       expiresAt: result.expiresAt,
       protocolMajor: 1,
-      protocolMinor: 2,
+      protocolMinor: result.protocolMinor,
     } as HostedRelayTicket;
   }
 
