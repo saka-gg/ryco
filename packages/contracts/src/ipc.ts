@@ -28,6 +28,7 @@ import type {
   EmptyRpcResult,
 } from "./rpc.ts";
 import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
+import type { RelayEffectiveRole } from "./relay.ts";
 import type {
   ComputerUseState,
   ComputerUsePolicy,
@@ -410,6 +411,7 @@ export interface DesktopWorkspaceMachineProjection {
   readonly canReadMetadata: boolean;
   readonly canConnect: boolean;
   readonly canMutate: boolean;
+  readonly effectiveRole: RelayEffectiveRole | null;
   readonly threadSettlementSupported: boolean;
   readonly accessReasons: ReadonlyArray<string>;
 }

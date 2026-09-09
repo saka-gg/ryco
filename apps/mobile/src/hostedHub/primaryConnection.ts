@@ -18,6 +18,7 @@ import {
 import {
   authorizeHostedRequestForState,
   HostedRelayAttemptFactory,
+  recoverHostedRelayConnection,
 } from "@ryco/client-runtime/relay";
 import { createWsRpcClient } from "@ryco/client-runtime/rpc";
 
@@ -72,6 +73,7 @@ export function createHostedPrimaryConnection(
   const acceptsEvent = () =>
     coordinator.isCurrentGeneration(descriptor.environmentId, connectionGeneration);
   const sharedSelectionGeneration = (): number | null => {
+    if (!acceptsEvent()) return null;
     const state = hostedHubStore.getState();
     return state.selectedNode?.environmentId === descriptor.environmentId ? state.generation : null;
   };
@@ -162,6 +164,11 @@ export function createHostedPrimaryConnection(
       coordinator.markDeliveryUnknown(descriptor.environmentId, generation);
       const sharedGeneration = sharedSelectionGeneration();
       if (sharedGeneration !== null) hostedHubController.markDeliveryUnknown(sharedGeneration);
+    },
+    connectionRecovered: (generation) => {
+      if (!coordinator.isCurrentGeneration(descriptor.environmentId, generation)) return;
+      const sharedGeneration = sharedSelectionGeneration();
+      if (sharedGeneration !== null) recoverHostedRelayConnection(sharedGeneration);
     },
     connectionClosed: (generation) => {
       coordinator.connectionClosed(descriptor.environmentId, generation);

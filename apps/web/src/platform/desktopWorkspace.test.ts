@@ -30,6 +30,7 @@ const workspaceState = (
             canReadMetadata: canConnect,
             canConnect,
             canMutate: canConnect,
+            effectiveRole: "owner",
             threadSettlementSupported: false,
             accessReasons: [],
           },

@@ -29,6 +29,7 @@ function state(): DesktopWorkspaceStateProjection {
       {
         environmentId: EnvironmentId.make("remote"),
         nodeId: "node_remote",
+        effectiveRole: "operator",
         label: "Remote",
         online: true,
         nativeTrust: "verified",
@@ -42,6 +43,7 @@ function state(): DesktopWorkspaceStateProjection {
       {
         environmentId: EnvironmentId.make("local"),
         nodeId: "node_local",
+        effectiveRole: "owner",
         label: "Local",
         online: true,
         nativeTrust: "verified",

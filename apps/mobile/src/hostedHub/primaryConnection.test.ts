@@ -10,6 +10,24 @@ const hostedLifecycle = vi.hoisted(() => ({
 const connectionFactory = vi.hoisted(() => ({
   input: null as Record<string, unknown> | null,
 }));
+const relay = vi.hoisted(() => ({
+  binding: null as import("@ryco/client-runtime/relay").HostedRelayAttemptBinding | null,
+  recover: vi.fn(),
+}));
+vi.mock("@ryco/client-runtime/relay", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ryco/client-runtime/relay")>();
+  return {
+    ...actual,
+    recoverHostedRelayConnection: relay.recover,
+    HostedRelayAttemptFactory: class extends actual.HostedRelayAttemptFactory {
+      constructor(binding: import("@ryco/client-runtime/relay").HostedRelayAttemptBinding) {
+        super(binding);
+        relay.binding = binding;
+      }
+    },
+  };
+});
+
 const coordinator = vi.hoisted(() => ({
   current: true,
   generation: 3,
@@ -147,11 +165,24 @@ beforeEach(() => {
   coordinator.markReplaying.mockReset();
   coordinator.reportFailure.mockReset();
   connectionFactory.input = null;
+  relay.binding = null;
+  relay.recover.mockClear();
   resetPrimaryEnvironmentForTests();
   resetMobileHostedRuntimeConfigForTests();
 });
 
 describe("hosted primary connection", () => {
+  it("returns recovered channels to the shared lifecycle only for the active record", () => {
+    writePrimaryEnvironmentDescriptor(descriptor);
+    createHostedPrimaryConnection(deps());
+    relay.binding?.connectionRecovered?.(coordinator.generation);
+    expect(relay.recover).toHaveBeenCalledExactlyOnceWith(hostedLifecycle.generation);
+
+    coordinator.current = false;
+    relay.binding?.connectionRecovered?.(coordinator.generation);
+    expect(relay.recover).toHaveBeenCalledTimes(1);
+  });
+
   it("returns null when no hosted node is selected", () => {
     // The normal state, including at supervisor start() on a direct-only build.
     expect(createHostedPrimaryConnection(deps())).toBeNull();

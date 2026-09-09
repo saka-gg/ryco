@@ -98,6 +98,23 @@ Use this first to validate the release pipeline.
 
 ## 2) Apple signing + notarization setup (macOS)
 
+### Local development without distribution credentials
+
+On macOS, the launcher and local artifact builder reuse an existing valid
+`Apple Development` identity when all matching certificates belong to one
+developer. Xcode certificate renewals with the same name are resolved by exact
+certificate hash, so duplicate display names do not break signing. No private
+key is exported and no certificate is created by the build.
+
+This keeps a stable code identity across local rebuilds and lets Keychain retain
+its access decision. A first launch or a transition from an ad-hoc build can
+still require macOS consent. Local signing does not notarize the app or provide
+public distribution trust. If no unambiguous development identity exists, the
+ordinary unsigned build remains ad-hoc; CI does not automatically select a
+developer's local identity.
+
+### Signed and notarized distribution
+
 Required secrets used by the workflow:
 
 - `CSC_LINK`

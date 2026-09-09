@@ -2022,6 +2022,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           "remote.fork-seed.url",
           "git@github.com:octocat/codething-mvp.git",
         ]);
+        // Keep pushes inside the fixture while retaining fork metadata for gh.
+        yield* runGit(repoDir, ["config", "remote.fork-seed.pushurl", forkDir]);
 
         const { manager, ghCalls } = yield* makeManager({
           ghScenario: {

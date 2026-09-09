@@ -203,35 +203,35 @@ function defaultBinding(): HostedRelayAttemptBinding {
     failure: (generation, failure) => hostedHubController.failure(generation, failure),
     markDeliveryUnknown: (generation) => hostedHubController.markDeliveryUnknown(generation),
     connectionClosed: (generation) => hostedHubController.connectionClosed(generation),
-    connectionRecovered: (generation) => {
-      const state = hostedHubStore.getState();
-      if (
-        state.generation !== generation ||
-        state.accountStatus !== "authenticated" ||
-        state.directoryStatus !== "ready" ||
-        state.browserStatus !== "current" ||
-        state.selectedNode === null ||
-        state.transportStatus === "terminal-failure"
-      ) {
-        return;
-      }
-      // A replacement relay socket is not enough: the RPC subscriptions that
-      // ended with the old channel belong to that client session. Wait until
-      // the transport has authenticated a replacement channel before
-      // rebuilding that client. Rebuilding immediately on close races the
-      // node's own relay-ticket renewal and can turn that brief handoff into a
-      // terminal channel rejection.
-      getHostedRuntimeConfiguration().timers.queueMicrotask(() => {
-        const current = hostedHubStore.getState();
-        if (
-          current.generation === generation &&
-          current.selectedNode?.id === state.selectedNode?.id
-        ) {
-          void hostedHubController.retrySelectedNode();
-        }
-      });
-    },
+    connectionRecovered: recoverHostedRelayConnection,
   };
+}
+
+/** Re-enter the authoritative lifecycle after a replacement channel authenticates. */
+export function recoverHostedRelayConnection(generation: number): void {
+  const state = hostedHubStore.getState();
+  if (
+    state.generation !== generation ||
+    state.accountStatus !== "authenticated" ||
+    state.directoryStatus !== "ready" ||
+    state.browserStatus !== "current" ||
+    state.selectedNode === null ||
+    state.transportStatus === "terminal-failure"
+  ) {
+    return;
+  }
+  // A replacement relay socket is not enough: the RPC subscriptions that
+  // ended with the old channel belong to that client session. Wait until
+  // the transport has authenticated a replacement channel before
+  // rebuilding that client. Rebuilding immediately on close races the
+  // node's own relay-ticket renewal and can turn that brief handoff into a
+  // terminal channel rejection.
+  getHostedRuntimeConfiguration().timers.queueMicrotask(() => {
+    const current = hostedHubStore.getState();
+    if (current.generation === generation && current.selectedNode?.id === state.selectedNode?.id) {
+      void hostedHubController.retrySelectedNode();
+    }
+  });
 }
 
 export class HostedRelayAttemptFactory {

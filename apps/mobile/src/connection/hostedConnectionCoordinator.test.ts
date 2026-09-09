@@ -1,6 +1,8 @@
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import type { EnvironmentConnection } from "@ryco/client-runtime/connection";
 import type { EnvironmentId } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts";
+import { authorizeHostedRequestForState } from "@ryco/client-runtime/relay";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -76,9 +78,6 @@ function fixture() {
       observedCounts.push(active.size);
       coordinator.markAttemptPrepared(target.environmentId, record.generation);
     },
-    clearSelectedEnvironment: async () => {
-      selectedEnvironmentId = null;
-    },
     markSelectedDeliveryUnknown: () => undefined,
     listConnections: () => Array.from(active.values()),
     readConnection: (environmentId) => active.get(environmentId) ?? null,
@@ -94,6 +93,69 @@ afterEach(() => {
 });
 
 describe("mobile hosted connection coordinator", () => {
+  it("allows the explicitly selected connection to recover without a thread scope", async () => {
+    const { active, coordinator, nodes } = fixture();
+    await coordinator.acquireNode(nodes[0]!.id);
+    expect(coordinator.shouldActivate(nodes[0]!.environmentId)).toBe(true);
+    await coordinator.acquireNode(nodes[1]!.id);
+    expect(coordinator.shouldActivate(nodes[0]!.environmentId)).toBe(false);
+    expect(coordinator.shouldActivate(nodes[1]!.environmentId)).toBe(true);
+    await coordinator.releaseNonRetainedForBackground();
+    expect(active.size).toBe(0);
+    expect(coordinator.read(nodes[1]!.environmentId)).toMatchObject({
+      transportStatus: "idle",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+    });
+    // Selection is remembered, but reopening requires the shared lifecycle to
+    // validate the account/directory and establish a new channel and snapshot.
+    expect(coordinator.shouldActivate(nodes[1]!.environmentId)).toBe(true);
+  });
+
+  it("retains only session-sync access during a retryable channel gap", () => {
+    const { coordinator, nodes } = fixture();
+    const record = coordinator.ensureRecord(nodes[0]!);
+    coordinator.transportStatus(record.environmentId, record.generation, "online");
+    coordinator.markSessionReady(record.environmentId, record.generation);
+    coordinator.connectionClosed(record.environmentId, record.generation);
+
+    const current = coordinator.read(record.environmentId)!;
+    const state = { ...current, directoryStatus: "ready", browserStatus: "current" } as const;
+    expect(current).toMatchObject({ transportStatus: "reconnecting", sessionStatus: "stale" });
+    expect(
+      authorizeHostedRequestForState(state, {
+        tag: ORCHESTRATION_WS_METHODS.subscribeShell,
+        stream: true,
+      }),
+    ).toBe(true);
+    expect(
+      authorizeHostedRequestForState(state, {
+        tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+        stream: false,
+      }),
+    ).toBe(false);
+    expect(
+      authorizeHostedRequestForState(
+        { ...state, directoryStatus: "stale" },
+        {
+          tag: ORCHESTRATION_WS_METHODS.subscribeShell,
+          stream: true,
+        },
+      ),
+    ).toBe(false);
+
+    coordinator.failure(record.environmentId, record.generation, {
+      kind: "authorization-removed",
+      retryable: false,
+    });
+    coordinator.connectionClosed(record.environmentId, record.generation);
+    expect(coordinator.read(record.environmentId)).toMatchObject({
+      effectiveRole: null,
+      transportStatus: "terminal-failure",
+      sessionStatus: "stale",
+    });
+  });
+
   it("holds the named concurrency bound under a five-node fixture", async () => {
     const { active, coordinator, nodes, observedCounts } = fixture();
     for (const target of nodes) await coordinator.acquireNode(target.id);
@@ -165,6 +227,31 @@ describe("mobile hosted connection coordinator", () => {
     coordinator.markDeliveryUnknown(first.environmentId, first.generation);
     expect(coordinator.read(first.environmentId)?.sessionStatus).toBe("delivery-unknown");
     expect(coordinator.read(second.environmentId)?.sessionStatus).toBe("synchronizing");
+  });
+
+  it("preserves delivery uncertainty and rejects old callbacks across selected-node suspension", async () => {
+    const { active, coordinator, nodes } = fixture();
+    const target = nodes[0]!;
+    await coordinator.acquireNode(target.id);
+    const previous = coordinator.read(target.environmentId)!;
+    coordinator.markSessionReady(target.environmentId, previous.generation);
+    coordinator.registerPendingRequestReader(target.environmentId, previous.generation, () => true);
+
+    await coordinator.releaseNonRetainedForBackground();
+    const suspended = coordinator.read(target.environmentId)!;
+    expect(active.size).toBe(0);
+    expect(suspended.generation).not.toBe(previous.generation);
+    expect(suspended.sessionStatus).toBe("delivery-unknown");
+    coordinator.markSessionReady(target.environmentId, previous.generation);
+    expect(coordinator.read(target.environmentId)?.sessionRecoveredAfterUnknown).toBe(false);
+
+    await coordinator.acquireNode(target.id);
+    expect(active.has(target.environmentId)).toBe(true);
+    coordinator.markSessionReady(target.environmentId, suspended.generation);
+    expect(coordinator.read(target.environmentId)).toMatchObject({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: true,
+    });
   });
 
   it("preserves an in-flight request as delivery unknown across background release", async () => {

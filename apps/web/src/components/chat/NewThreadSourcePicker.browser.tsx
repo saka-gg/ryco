@@ -11,9 +11,10 @@ const { listRefs, selectSource, changeName } = vi.hoisted(() => ({
   selectSource: vi.fn(),
   changeName: vi.fn(),
 }));
-vi.mock("../../environmentApi", () => ({
-  readEnvironmentApi: () => ({ vcs: { listRefs } }),
-}));
+vi.mock("../../environmentApi", () => {
+  const readEnvironmentApi = () => ({ vcs: { listRefs } });
+  return { readEnvironmentApi, ensureEnvironmentApi: readEnvironmentApi };
+});
 
 vi.mock("../projectExplorer/IssuesTab", () => ({ IssuesTab: () => null }));
 vi.mock("../projectExplorer/PullRequestsTab", () => ({ PullRequestsTab: () => null }));

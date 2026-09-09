@@ -9,7 +9,7 @@ import { cn } from "../../lib/utils";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useSlowRpcAckRequests } from "../../rpc/requestLatencyState";
 import { useTierOverrideStore, type PresentationTierOverride } from "../../tierOverrideStore";
-import { useSettingsTarget } from "../../settingsTarget";
+import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -568,6 +568,14 @@ export function DiagnosticsSettings({
   readonly presentation?: DiagnosticsPresentation;
 }) {
   const settingsTarget = useSettingsTarget();
+  const scope = useSettingsEditingScope();
+  if (scope === "client")
+    return (
+      <SettingsPageContainer>
+        <NotificationsTestSection />
+        {import.meta.env.DEV ? <TierPreviewSection /> : null}
+      </SettingsPageContainer>
+    );
   return (
     <DiagnosticsSettingsContent
       key={settingsTarget?.environmentId ?? "local"}
@@ -582,6 +590,7 @@ function DiagnosticsSettingsContent({
   readonly presentation: DiagnosticsPresentation;
 }) {
   const settingsTarget = useSettingsTarget();
+  const scope = useSettingsEditingScope();
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -886,8 +895,8 @@ function DiagnosticsSettingsContent({
 
           <ResourceHistorySection memorySeries={memorySeries} cpuSeries={cpuSeries} />
           <DiagnosticsSupportSections snapshot={snapshot} />
-          <NotificationsTestSection />
-          {import.meta.env.DEV ? <TierPreviewSection /> : null}
+          {scope === "all" && <NotificationsTestSection />}
+          {import.meta.env.DEV && scope !== "node" ? <TierPreviewSection /> : null}
         </>
       )}
     </SettingsPageContainer>

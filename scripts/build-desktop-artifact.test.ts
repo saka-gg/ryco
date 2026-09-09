@@ -487,6 +487,43 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       }),
   );
 
+  it.effect(
+    "uses free local signing without enabling notarization or changing distribution signing",
+    () =>
+      Effect.gen(function* () {
+        const identity = "A".repeat(40);
+        const local = yield* createBuildConfig(
+          "mac",
+          "zip",
+          "0.1.1",
+          false,
+          false,
+          undefined,
+          undefined,
+          identity,
+        );
+        assert.equal(local.forceCodeSigning, true);
+        assert.deepStrictEqual(
+          {
+            identity: (local.mac as Record<string, unknown>).identity,
+            type: (local.mac as Record<string, unknown>).type,
+            notarize: (local.mac as Record<string, unknown>).notarize,
+          },
+          { identity, type: "development", notarize: false },
+        );
+        const distribution = yield* createBuildConfig(
+          "mac",
+          "zip",
+          "0.1.1",
+          true,
+          false,
+          undefined,
+          undefined,
+          identity,
+        );
+        assert.equal((distribution.mac as Record<string, unknown>).identity, undefined);
+      }),
+  );
   it.effect("uses electron-builder 26 signtoolOptions for certificate-based Windows signing", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig(

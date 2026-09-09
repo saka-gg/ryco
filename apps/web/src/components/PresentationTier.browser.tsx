@@ -225,8 +225,6 @@ describe("presentation tier", () => {
     const screen = await render(<DiagnosticsSettings />);
     await expect.element(page.getByText("Performance now", { exact: true })).toBeInTheDocument();
     await expect.element(page.getByText("Why was this slow?", { exact: true })).toBeInTheDocument();
-    const advanced = page.getByText("Advanced diagnostics", { exact: true }).element();
-    expect(advanced.closest("details")?.open).toBe(false);
     // The preview override renders only in development builds; production
     // builds tree-shake this section (verified against the build output).
     await expect

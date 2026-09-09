@@ -403,9 +403,9 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     settledStatus,
     actions: {
       selectNode: acquireMobileHostedNode,
-      returnToDirectory: hostedHubController.returnToDirectory,
-      refreshDirectory: hostedHubController.refreshDirectory,
-      retrySelectedNode: hostedHubController.retrySelectedNode,
+      returnToDirectory: () => hostedHubController.returnToDirectory(),
+      refreshDirectory: () => hostedHubController.refreshDirectory(),
+      retrySelectedNode: () => hostedHubController.retrySelectedNode(),
       openNodeSecurity: (node) =>
         acquireBeforeNodeSecurity({
           nodeId: node.id,

@@ -1,42 +1,10 @@
-import { Struct } from "effect";
-
-import {
-  ServerSettings,
-  type ClientSettingsPatch,
-  type ServerSettingsPatch,
-  type UnifiedSettings,
+import type {
+  ClientSettingsPatch,
+  ServerSettingsPatch,
+  UnifiedSettings,
 } from "@ryco/contracts/settings";
-
-// §3-20 settings patch routing (pure). Splits a unified settings patch into the
-// server-owned keys (dispatched over RPC + optimistically applied to the server
-// config atom) and the client-owned keys (persisted device-locally to mobileKV).
-// The split is the single source of truth used by the mobile settings hook — the
-// server key set is derived from the contract, mirroring apps/web useSettings.ts.
-
-const SERVER_SETTINGS_KEYS = new Set<string>(Struct.keys(ServerSettings.fields));
-
-export function isServerSettingKey(key: string): boolean {
-  return SERVER_SETTINGS_KEYS.has(key);
-}
-
-export function splitUnifiedSettingsPatch(patch: Partial<UnifiedSettings>): {
-  readonly serverPatch: ServerSettingsPatch;
-  readonly clientPatch: ClientSettingsPatch;
-} {
-  const serverPatch: Record<string, unknown> = {};
-  const clientPatch: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(patch)) {
-    if (SERVER_SETTINGS_KEYS.has(key)) {
-      serverPatch[key] = value;
-    } else {
-      clientPatch[key] = value;
-    }
-  }
-  return {
-    serverPatch: serverPatch as ServerSettingsPatch,
-    clientPatch: clientPatch as ClientSettingsPatch,
-  };
-}
+import { splitUnifiedSettingsPatch } from "@ryco/shared/settingsOwnership";
+export { isServerSettingKey, splitUnifiedSettingsPatch } from "@ryco/shared/settingsOwnership";
 
 export interface UpdateMobileSettingsDeps {
   /** Optimistically apply the server patch to the server-config atom. */

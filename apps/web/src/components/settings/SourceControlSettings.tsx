@@ -52,7 +52,7 @@ import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { readEnvironmentConnection } from "~/environments/runtime";
 import { usePrimaryEnvironmentId } from "~/environments/primary";
-import { useSettingsTarget } from "../../settingsTarget";
+import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 
 const EMPTY_DISCOVERY_RESULT: SourceControlDiscoveryResult = {
   versionControlSystems: [],
@@ -696,6 +696,18 @@ function AtlassianConfiguration({
 }
 
 export function SourceControlSettingsPanel() {
+  const scope = useSettingsEditingScope();
+  return scope === "client" ? (
+    <SettingsPageContainer>
+      <SourceControlPreferences />
+    </SettingsPageContainer>
+  ) : (
+    <NodeSourceControlSettingsPanel />
+  );
+}
+
+function NodeSourceControlSettingsPanel() {
+  const scope = useSettingsEditingScope();
   const settingsTarget = useSettingsTarget();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environmentId = settingsTarget?.environmentId ?? primaryEnvironmentId;
@@ -741,7 +753,7 @@ export function SourceControlSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      <SourceControlPreferences />
+      {scope === "all" && <SourceControlPreferences />}
       {hasDiscoveryItems ? null : (
         <SettingsSection title="Source Control Providers">
           <Empty className="min-h-56 border-t border-border/60 first:border-t-0">

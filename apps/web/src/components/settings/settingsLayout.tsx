@@ -1,3 +1,4 @@
+import { useSettingsEditingScope } from "../../settingsTarget";
 import { Undo2Icon } from "lucide-react";
 import { type ComponentPropsWithoutRef, type ReactNode, useEffect, useState } from "react";
 
@@ -27,6 +28,7 @@ export function useRelativeTimeTick(intervalMs = 1_000) {
 
 export function SettingsSection({
   title,
+  owner,
   icon,
   headerAction,
   children,
@@ -34,10 +36,13 @@ export function SettingsSection({
   ...sectionProps
 }: ComponentPropsWithoutRef<"section"> & {
   title: string;
+  owner?: "client" | "node";
   icon?: ReactNode;
   headerAction?: ReactNode;
   children: ReactNode;
 }) {
+  const editingScope = useSettingsEditingScope();
+  if (owner && editingScope !== "all" && editingScope !== owner) return null;
   return (
     <section
       data-settings-section={title}
@@ -61,6 +66,7 @@ export function SettingsSection({
 
 export function SettingsRow({
   title,
+  owner,
   description,
   scope,
   status,
@@ -69,6 +75,7 @@ export function SettingsRow({
   children,
 }: {
   title: ReactNode;
+  owner?: "client" | "node";
   description: ReactNode;
   scope?: string;
   status?: ReactNode;
@@ -76,6 +83,8 @@ export function SettingsRow({
   control?: ReactNode;
   children?: ReactNode;
 }) {
+  const editingScope = useSettingsEditingScope();
+  if (owner && editingScope !== "all" && editingScope !== owner) return null;
   return (
     <div
       data-setting-scope={scope}

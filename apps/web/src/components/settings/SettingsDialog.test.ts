@@ -12,7 +12,28 @@ import {
   SETTINGS_DIALOG_SECTION_LABELS,
 } from "./SettingsDialog";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
-import { DESKTOP_ONLY_SETTINGS_SECTIONS } from "./settingsSections.logic";
+import {
+  DESKTOP_ONLY_SETTINGS_SECTIONS,
+  settingsSectionInDestination,
+} from "./settingsSections.logic";
+
+describe("settings destinations", () => {
+  it("keeps local appearance and desktop permissions out of remote node settings", () => {
+    expect(settingsSectionInDestination("appearance", "client", false)).toBe(true);
+    expect(settingsSectionInDestination("appearance", "node", true)).toBe(false);
+    expect(settingsSectionInDestination("computer-use", "node", true)).toBe(false);
+    expect(settingsSectionInDestination("providers", "client", true)).toBe(false);
+    expect(settingsSectionInDestination("providers", "node", false)).toBe(true);
+    expect(settingsSectionInDestination("integrations", "client", false)).toBe(false);
+    expect(settingsSectionInDestination("integrations", "client", true)).toBe(true);
+  });
+  it("assigns every search result to exactly one destination", () => {
+    for (const entry of SETTINGS_SEARCH_INDEX) {
+      expect(["client", "node"]).toContain(entry.owner);
+      expect(settingsSectionInDestination(entry.section, entry.owner, true)).toBe(true);
+    }
+  });
+});
 
 describe("the frozen phone surface keeps its existing section inventory", () => {
   it("navigates to the same shared sections, excluding desktop-only controls", () => {

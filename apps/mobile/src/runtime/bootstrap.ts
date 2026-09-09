@@ -129,7 +129,6 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
       connectSelectedEnvironment: () => {
         registry.driver.supervisor.connectPrimary();
       },
-      clearSelectedEnvironment: () => hostedHubController.returnToDirectory(),
       markSelectedDeliveryUnknown: () =>
         hostedHubController.markDeliveryUnknown(hostedHubStore.getState().generation),
       listConnections: () => registry.driver.supervisor.list(),

@@ -59,10 +59,17 @@ export const mobileHostedNodeLifecycle: HostedNodeLifecycle = {
   writePrimaryEnvironmentDescriptor,
   connectPrimaryEnvironment: () => {
     mobileRuntimeStartupBarrier.runAfterHydration(
-      () => {
+      async () => {
         const state = hostedHubStore.getState();
         const node = state.selectedNode;
-        if (!node) return;
+        if (
+          !node ||
+          node.revokedAt !== null ||
+          state.accountStatus !== "authenticated" ||
+          state.directoryStatus !== "ready" ||
+          (state.browserStatus !== "current" && state.browserStatus !== "synchronizing")
+        )
+          return;
         const coordinator = getMobileHostedConnectionCoordinator();
         if (!coordinator.shouldActivate(node.environmentId)) return;
         const record = coordinator.ensureRecord(node);
@@ -74,8 +81,29 @@ export const mobileHostedNodeLifecycle: HostedNodeLifecycle = {
         // A retained healthy channel is the whole point of multi-connect. A stale
         // retained channel is allowed to reconnect only after selection has moved
         // back to it, so its E2EE preparation and relay ticket remain node-bound.
-        if (record.transportStatus !== "online" || record.sessionStatus !== "ready") {
-          void existing.reconnect().catch(() => undefined);
+        if (
+          state.sessionStatus !== "ready" ||
+          record.transportStatus !== "online" ||
+          record.sessionStatus !== "ready"
+        ) {
+          // Ended RPC subscriptions cannot be restored by replacing only the
+          // socket. The shared lifecycle owns this retry; replace its stale
+          // connection while leaving healthy retained nodes alone.
+          if (!(await coordinator.releaseEnvironment(node.environmentId))) return;
+          const current = hostedHubStore.getState();
+          if (
+            current.generation !== state.generation ||
+            current.accountStatus !== "authenticated" ||
+            current.directoryStatus !== "ready" ||
+            current.selectedNode?.id !== node.id ||
+            current.selectedNode.environmentId !== node.environmentId ||
+            current.selectedNode.revokedAt !== null ||
+            (current.browserStatus !== "current" && current.browserStatus !== "synchronizing")
+          ) {
+            return;
+          }
+          coordinator.ensureRecord(current.selectedNode);
+          if (coordinator.shouldActivate(node.environmentId)) supervisor().connectPrimary();
         }
       },
       (error: unknown) => {

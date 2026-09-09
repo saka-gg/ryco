@@ -239,6 +239,14 @@
     "./providerCapabilities": {
       "types": "./src/providerCapabilities.ts",
       "import": "./src/providerCapabilities.ts"
+    },
+    "./settingsOwnership": {
+      "types": "./src/settingsOwnership.ts",
+      "import": "./src/settingsOwnership.ts"
+    },
+    "./macLocalSigning": {
+      "types": "./src/macLocalSigning.ts",
+      "import": "./src/macLocalSigning.ts"
     }
   },
   "scripts": {

@@ -16,6 +16,15 @@ export interface SettingsTarget {
   readonly serverConfig: ServerConfig | null;
   readonly primary: boolean;
   readonly connected: boolean;
+  readonly canManage?: boolean;
+  readonly canMutate?: boolean;
+}
+
+export type SettingsEditingScope = "client" | "node" | "all";
+const SettingsEditingScopeContext = createContext<SettingsEditingScope>("all");
+export const SettingsEditingScopeProvider = SettingsEditingScopeContext.Provider;
+export function useSettingsEditingScope(): SettingsEditingScope {
+  return useContext(SettingsEditingScopeContext);
 }
 
 export function resolveSettingsTargetEnvironmentId(input: {
@@ -23,14 +32,19 @@ export function resolveSettingsTargetEnvironmentId(input: {
   readonly routedEnvironmentId: EnvironmentId | null;
   readonly activeEnvironmentId: EnvironmentId | null;
   readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly desktopLocalEnvironmentId?: EnvironmentId | null;
 }): EnvironmentId | null {
-  return (
+  const selected =
     input.requestedEnvironmentId ??
     input.routedEnvironmentId ??
     input.activeEnvironmentId ??
     input.primaryEnvironmentId ??
-    null
-  );
+    null;
+  // The colocated node has a Hub alias, but Desktop already owns a direct
+  // primary connection to it. Its native relay intentionally is never opened.
+  return selected && selected === input.desktopLocalEnvironmentId && input.primaryEnvironmentId
+    ? input.primaryEnvironmentId
+    : selected;
 }
 
 const SettingsTargetContext = createContext<SettingsTarget | null>(null);

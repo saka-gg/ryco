@@ -428,6 +428,20 @@ describe("Hub node section when hosted mode is unavailable or signed out", () =>
 });
 
 describe("Hub node section view", () => {
+  it.each([
+    ["Refresh", "refreshDirectory"],
+    ["All nodes", "returnToDirectory"],
+    ["Retry", "retrySelectedNode"],
+  ] as const)("preserves the controller receiver when pressing %s", (label, method) => {
+    hostedMock.state = state({ selectedNode: node(), transportStatus: "terminal-failure" });
+    const action = pressables(HubNodeSection()).find(
+      (element) => element.props.accessibilityLabel === label,
+    );
+    expect(action).toBeDefined();
+    (action!.props.onPress as () => void)();
+    expect(hostedMock.controller[method].mock.contexts).toEqual([hostedMock.controller]);
+  });
+
   it("renders a tappable row that acquires the node through the coordinator", () => {
     hostedMock.state = state();
     const tree = HubNodeSection();

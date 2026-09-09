@@ -57,11 +57,13 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
       }
     >
       <HubPage
-        title="Account"
+        title={section === "appearance" ? "Browser appearance" : "Account"}
         description={
-          account === null
-            ? undefined
-            : `${account.displayName} · ${account.role.charAt(0).toUpperCase()}${account.role.slice(1)}`
+          section === "appearance"
+            ? "Saved in this browser. Your other apps and devices keep their own appearance."
+            : account === null
+              ? undefined
+              : `${account.displayName} · ${account.role.charAt(0).toUpperCase()}${account.role.slice(1)}`
         }
       >
         <div className="flex flex-col gap-6 sm:flex-row sm:gap-8">

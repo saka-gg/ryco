@@ -84,6 +84,7 @@ export function projectDesktopWorkspaceState(
       canReadMetadata: machine.canReadMetadata,
       canConnect: machine.canConnect,
       canMutate: machine.canMutate,
+      effectiveRole: machine.canConnect ? machine.effectiveRole : null,
       threadSettlementSupported: machine.capabilities.threadSettlement,
       accessReasons: machine.accessReasons,
     })),
