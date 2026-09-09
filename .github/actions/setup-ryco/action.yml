@@ -35,6 +35,14 @@ outputs:
 runs:
   using: composite
   steps:
+    # Playwright installs its pinned Chromium and uses Ubuntu for system
+    # dependencies. The runner's unrelated Chrome feed can publish mismatched
+    # indexes and make that dependency installation fail before tests start.
+    - name: Remove unused Chrome package source
+      if: ${{ runner.os == 'Linux' }}
+      shell: bash
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
+
     - name: Setup Vite+
       uses: voidzero-dev/setup-vp@v1
       with:
