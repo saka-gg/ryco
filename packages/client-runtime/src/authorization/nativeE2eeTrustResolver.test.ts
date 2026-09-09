@@ -29,7 +29,6 @@ const TICKET_ID = `rtk_${"t".repeat(22)}`;
 const CONTINUITY_ID = `nct_${"c".repeat(22)}`;
 const KEY_ID = `hgk_${"k".repeat(22)}`;
 const HUB_SECRET = new Uint8Array(32).fill(1);
-const HUB_PUBLIC = ed25519.getPublicKey(HUB_SECRET);
 const DEVICE_PUBLIC = p256.getPublicKey(new Uint8Array(32).fill(2), false);
 const DEVICE_AGREEMENT_PUBLIC = x25519.getPublicKey(new Uint8Array(32).fill(3));
 const NODE_PUBLIC = ed25519.getPublicKey(new Uint8Array(32).fill(4));
@@ -104,10 +103,33 @@ const enrollment = {
   },
 } as unknown as NativeE2eeReadyEnrollment;
 
-function grantEnvelope(expiresAt = NOW + 60_000) {
+const ROTATED_SIGNER = {
+  keyId: `hgk_${"r".repeat(22)}`,
+  secretKey: new Uint8Array(32).fill(8),
+};
+
+function keyset(signer = { keyId: KEY_ID, secretKey: HUB_SECRET }) {
+  return {
+    protocolVersion: 1 as const,
+    generation: 2,
+    keys: [
+      {
+        keyId: signer.keyId,
+        publicKey: encodeBase64Url(ed25519.getPublicKey(signer.secretKey)),
+        notBefore: NOW - 60_000,
+        notAfter: NOW + 180_000,
+      },
+    ],
+  };
+}
+
+function grantEnvelope(
+  expiresAt = NOW + 60_000,
+  signer = { keyId: KEY_ID, secretKey: HUB_SECRET },
+) {
   const claims = encodeHubDeviceGrantClaims({
     issuerHubOrigin: HUB_ORIGIN,
-    keyId: KEY_ID,
+    keyId: signer.keyId,
     grantId: `hgr_${"g".repeat(22)}`,
     accountId: ACCOUNT_ID,
     accountAuthEpoch: 3,
@@ -133,7 +155,7 @@ function grantEnvelope(expiresAt = NOW + 60_000) {
   } as unknown as HubDeviceGrantClaimsInput);
   return encodeHubDeviceGrantEnvelope(
     claims,
-    ed25519.sign(encodeHubDeviceGrantSigningEnvelope(claims), HUB_SECRET),
+    ed25519.sign(encodeHubDeviceGrantSigningEnvelope(claims), signer.secretKey),
   );
 }
 
@@ -156,22 +178,14 @@ function ticket(grant = grantEnvelope()): NativeAccountGrantRelayTicketResponse 
   } as NativeAccountGrantRelayTicketResponse;
 }
 
-function harness(previous: NativeE2eeAccountTrustedNode | null = null, currentTime = NOW + 1) {
+function harness(
+  previous: NativeE2eeAccountTrustedNode | null = null,
+  currentTime: number | (() => number) = NOW + 1,
+) {
   let stored = previous;
   const api = {
     issueAccountGrantRelayTicket: vi.fn(async () => ticket()),
-    getE2eeGrantVerificationKeys: vi.fn(async () => ({
-      protocolVersion: 1 as const,
-      generation: 2,
-      keys: [
-        {
-          keyId: KEY_ID,
-          publicKey: encodeBase64Url(HUB_PUBLIC),
-          notBefore: NOW - 60_000,
-          notAfter: NOW + 180_000,
-        },
-      ],
-    })),
+    getE2eeGrantVerificationKeys: vi.fn(async () => keyset()),
   } as unknown as Pick<
     HostedHubApi,
     "issueAccountGrantRelayTicket" | "getE2eeGrantVerificationKeys"
@@ -185,7 +199,7 @@ function harness(previous: NativeE2eeAccountTrustedNode | null = null, currentTi
   const resolve = createNativeE2eeTrustResolver({
     api,
     platform,
-    now: () => currentTime,
+    now: () => (typeof currentTime === "function" ? currentTime() : currentTime),
     verifyAccountStatement: () => statement,
   });
   const request: ResolveNativeE2eeTrustInput = {
@@ -379,6 +393,148 @@ describe("native E2EE trust resolver", () => {
         result.dispose();
       }
     }
+  });
+
+  it("refreshes cached keys when a restarted Hub signs with a new key at the same generation", async () => {
+    const { api, resolve, request } = harness();
+    const first = await resolve(request);
+    if (first.kind === "authorized" && first.trustSource === "account-enrolled") first.dispose();
+    vi.mocked(api.issueAccountGrantRelayTicket).mockResolvedValue(
+      ticket(grantEnvelope(undefined, ROTATED_SIGNER)),
+    );
+    vi.mocked(api.getE2eeGrantVerificationKeys).mockResolvedValue(keyset(ROTATED_SIGNER));
+
+    const recovered = await resolve(request);
+
+    expect(recovered).toMatchObject({ kind: "authorized", trustSource: "account-enrolled" });
+    expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledTimes(2);
+    expect(api.issueAccountGrantRelayTicket).toHaveBeenCalledTimes(2);
+    if (recovered.kind === "authorized" && recovered.trustSource === "account-enrolled") {
+      recovered.dispose();
+    }
+  });
+
+  it("coalesces a concurrent unknown-key refresh and verifies both grants", async () => {
+    const { api, resolve, request } = harness();
+    const first = await resolve(request);
+    if (first.kind === "authorized" && first.trustSource === "account-enrolled") first.dispose();
+    vi.mocked(api.issueAccountGrantRelayTicket).mockResolvedValue(
+      ticket(grantEnvelope(undefined, ROTATED_SIGNER)),
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    vi.mocked(api.getE2eeGrantVerificationKeys).mockImplementation(async () => {
+      await gate;
+      return keyset(ROTATED_SIGNER);
+    });
+    const attempts = [resolve(request), resolve(request)];
+    await vi.waitFor(() => expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledTimes(2));
+    release();
+    const results = await Promise.all(attempts);
+
+    expect(results.map((result) => result.kind)).toEqual(["authorized", "authorized"]);
+    expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledTimes(2);
+    for (const result of results) {
+      if (result.kind === "authorized" && result.trustSource === "account-enrolled")
+        result.dispose();
+    }
+  });
+
+  it("bounds an unknown-key refresh and persists no trust when the key is still absent", async () => {
+    const { api, platform, resolve, request } = harness();
+    vi.mocked(api.issueAccountGrantRelayTicket).mockResolvedValue(
+      ticket(grantEnvelope(undefined, ROTATED_SIGNER)),
+    );
+
+    await expect(resolve(request)).resolves.toEqual({
+      kind: "blocked",
+      reason: "account-authorization-invalid",
+    });
+    expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledTimes(2);
+    expect(api.issueAccountGrantRelayTicket).toHaveBeenCalledOnce();
+    expect(platform.writeAccountTrustedNode).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed key refresh recoverable with bounded retry guidance", async () => {
+    const { api, platform, resolve, request } = harness();
+    vi.mocked(api.issueAccountGrantRelayTicket).mockResolvedValue(
+      ticket(grantEnvelope(undefined, ROTATED_SIGNER)),
+    );
+    vi.mocked(api.getE2eeGrantVerificationKeys)
+      .mockResolvedValueOnce(keyset())
+      .mockRejectedValueOnce(new HostedHubApiError("rate_limited", 429, 12_000));
+
+    await expect(resolve(request)).resolves.toEqual({
+      kind: "recovery-required",
+      reason: "account-authorization-unavailable",
+      retryAfterMs: 12_000,
+    });
+    expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledTimes(2);
+    expect(platform.writeAccountTrustedNode).not.toHaveBeenCalled();
+  });
+
+  it("does not refresh keys or authorize a grant with an invalid known-key signature", async () => {
+    const { api, platform, resolve, request } = harness();
+    vi.mocked(api.issueAccountGrantRelayTicket).mockResolvedValue(
+      ticket(grantEnvelope(undefined, { ...ROTATED_SIGNER, keyId: KEY_ID })),
+    );
+
+    await expect(resolve(request)).resolves.toEqual({
+      kind: "blocked",
+      reason: "account-authorization-invalid",
+    });
+    expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledOnce();
+    expect(platform.writeAccountTrustedNode).not.toHaveBeenCalled();
+  });
+
+  it.each(["signature", "ticket-binding"] as const)(
+    "still rejects an invalid %s after refreshing an unknown key",
+    async (defect) => {
+      const { api, platform, resolve, request } = harness();
+      const response = ticket(grantEnvelope(undefined, ROTATED_SIGNER));
+      vi.mocked(api.issueAccountGrantRelayTicket).mockResolvedValue({
+        ...response,
+        ...(defect === "ticket-binding" ? { ticketId: `rtk_${"x".repeat(22)}` } : {}),
+      } as NativeAccountGrantRelayTicketResponse);
+      vi.mocked(api.getE2eeGrantVerificationKeys)
+        .mockResolvedValueOnce(keyset())
+        .mockResolvedValueOnce(
+          keyset({
+            ...ROTATED_SIGNER,
+            ...(defect === "signature" ? { secretKey: HUB_SECRET } : {}),
+          }),
+        );
+
+      await expect(resolve(request)).resolves.toEqual({
+        kind: "blocked",
+        reason: "account-authorization-invalid",
+      });
+      expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledTimes(2);
+      expect(platform.writeAccountTrustedNode).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rechecks expiry after refreshing keys and reacquires an expired pair once", async () => {
+    let currentTime = NOW + 1;
+    const { api, resolve, request } = harness(null, () => currentTime);
+    vi.mocked(api.issueAccountGrantRelayTicket)
+      .mockResolvedValueOnce(ticket(grantEnvelope(NOW + 2, ROTATED_SIGNER)))
+      .mockResolvedValueOnce(ticket(grantEnvelope(undefined, ROTATED_SIGNER)));
+    vi.mocked(api.getE2eeGrantVerificationKeys)
+      .mockResolvedValueOnce(keyset())
+      .mockImplementationOnce(async () => {
+        currentTime = NOW + 3;
+        return keyset(ROTATED_SIGNER);
+      });
+
+    const result = await resolve(request);
+
+    expect(result).toMatchObject({ kind: "authorized", trustSource: "account-enrolled" });
+    expect(api.issueAccountGrantRelayTicket).toHaveBeenCalledTimes(2);
+    expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledTimes(2);
+    if (result.kind === "authorized" && result.trustSource === "account-enrolled") result.dispose();
   });
 
   it("discards an expired ticket and grant pair and reacquires exactly once", async () => {

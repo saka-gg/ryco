@@ -108,6 +108,16 @@ function invalid(): NativeE2eeTrustResolution {
   return { kind: "blocked", reason: "account-authorization-invalid" };
 }
 
+function unavailable(cause: unknown): NativeE2eeTrustResolution {
+  return {
+    kind: "recovery-required",
+    reason: "account-authorization-unavailable",
+    ...(cause instanceof HostedHubApiError && cause.retryAfterMs !== undefined
+      ? { retryAfterMs: cause.retryAfterMs }
+      : {}),
+  };
+}
+
 function decodeVerificationKeys(
   keys: readonly {
     readonly keyId: string;
@@ -136,8 +146,8 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
   let cachedKeyset: Keyset | null = null;
   let keysetRequest: Promise<Keyset> | null = null;
   const readKeyset = (force = false): Promise<Keyset> => {
+    if (keysetRequest !== null) return keysetRequest;
     if (!force && cachedKeyset !== null) return Promise.resolve(cachedKeyset);
-    if (!force && keysetRequest !== null) return keysetRequest;
     const request = input.api.getE2eeGrantVerificationKeys().then((value) => {
       cachedKeyset = value;
       return value;
@@ -149,6 +159,10 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
     void request.then(clear, clear);
     return request;
   };
+  const refreshKeyset = (previous: Keyset): Promise<Keyset> =>
+    cachedKeyset !== null && cachedKeyset !== previous
+      ? Promise.resolve(cachedKeyset)
+      : readKeyset(true);
   const resolveAttempt = async (
     request: ResolveNativeE2eeTrustInput,
     expiryRetried: boolean,
@@ -227,12 +241,16 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
 
     let response: NativeAccountGrantRelayTicketResponse;
     let keyset: Keyset;
+    let keysetRefreshed = false;
     try {
       [response, keyset] = await Promise.all([
         input.api.issueAccountGrantRelayTicket(ticketRequest),
         readKeyset(),
       ]);
-      if (response.keysetGeneration !== keyset.generation) keyset = await readKeyset(true);
+      if (response.keysetGeneration !== keyset.generation) {
+        keyset = await refreshKeyset(keyset);
+        keysetRefreshed = true;
+      }
     } catch (cause) {
       if (cause instanceof HostedHubApiError && cause.code === "revoked") {
         return { kind: "blocked", reason: "enrollment-revoked" };
@@ -240,13 +258,7 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
       if (cause instanceof HostedHubApiError && cause.code === "unsupported_version") {
         return { kind: "blocked", reason: "node-update-required" };
       }
-      return {
-        kind: "recovery-required",
-        reason: "account-authorization-unavailable",
-        ...(cause instanceof HostedHubApiError && cause.retryAfterMs !== undefined
-          ? { retryAfterMs: cause.retryAfterMs }
-          : {}),
-      };
+      return unavailable(cause);
     }
 
     let grantEnvelope: Uint8Array;
@@ -306,7 +318,7 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
       zero(statementBytes);
       return { kind: "blocked", reason: "policy-rollback" };
     }
-    const verificationKeys = decodeVerificationKeys(keyset.keys);
+    let verificationKeys = decodeVerificationKeys(keyset.keys);
     if (
       verificationKeys === null ||
       response.keysetGeneration !== keyset.generation ||
@@ -322,37 +334,58 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
       return invalid();
     }
 
-    const verified = verifyHubDeviceGrant({
-      envelope: grantEnvelope,
-      verificationKeys,
-      bindings: {
-        issuerHubOrigin: request.hubOrigin,
-        accountId: request.accountId,
-        accountAuthEpoch: ready.enrollment.accountAuthEpoch,
-        enrollmentId: ready.enrollment.enrollmentId,
-        enrollmentRevision: ready.enrollment.enrollmentRevision,
-        deviceAuthEpoch: ready.enrollment.deviceAuthEpoch,
-        enrollmentStatus: ready.enrollment.status,
-        deviceIdentityPublicKey: ready.identity.publicKey,
-        deviceAgreementPublicKey: ready.prekey.agreementPublicKey,
-        clientPrekeyCertificateDigest: ready.prekey.certificateDigest,
-        clientPrekeyCertificateExpiresAt: ready.prekey.expiresAt,
-        nodeId: request.node.nodeId,
-        nodeIdentityPublicKey: accountStatement.identityPublicKey,
-        nodeAgreementPublicKey: accountStatement.prekeyCertificate.agreementPublicKey,
-        nodeAgreementPrekeyExpiresAt: accountStatement.prekeyCertificate.expiresAt,
-        nodeContinuityId: accountStatement.continuityId,
-        nodePolicyGeneration: accountStatement.policyGeneration,
-        nodeCapabilityStatementDigest: statementDigest,
-        nodeCapabilityStatementExpiresAt: accountStatement.expiresAt,
-        relayTicketId: response.ticketId,
-        relayTicketExpiresAt: response.expiresAt,
-        effectiveRole: response.effectiveRole,
-        effectiveCapabilities: [response.capability],
-        accountGrantAllowed: request.node.accountGrantAllowed,
-        now,
-      },
-    });
+    const verifyGrant = (keys: readonly HubDeviceGrantVerificationKey[]) =>
+      verifyHubDeviceGrant({
+        envelope: grantEnvelope,
+        verificationKeys: keys,
+        bindings: {
+          issuerHubOrigin: request.hubOrigin,
+          accountId: request.accountId,
+          accountAuthEpoch: ready.enrollment.accountAuthEpoch,
+          enrollmentId: ready.enrollment.enrollmentId,
+          enrollmentRevision: ready.enrollment.enrollmentRevision,
+          deviceAuthEpoch: ready.enrollment.deviceAuthEpoch,
+          enrollmentStatus: ready.enrollment.status,
+          deviceIdentityPublicKey: ready.identity.publicKey,
+          deviceAgreementPublicKey: ready.prekey.agreementPublicKey,
+          clientPrekeyCertificateDigest: ready.prekey.certificateDigest,
+          clientPrekeyCertificateExpiresAt: ready.prekey.expiresAt,
+          nodeId: request.node.nodeId,
+          nodeIdentityPublicKey: accountStatement.identityPublicKey,
+          nodeAgreementPublicKey: accountStatement.prekeyCertificate.agreementPublicKey,
+          nodeAgreementPrekeyExpiresAt: accountStatement.prekeyCertificate.expiresAt,
+          nodeContinuityId: accountStatement.continuityId,
+          nodePolicyGeneration: accountStatement.policyGeneration,
+          nodeCapabilityStatementDigest: statementDigest,
+          nodeCapabilityStatementExpiresAt: accountStatement.expiresAt,
+          relayTicketId: response.ticketId,
+          relayTicketExpiresAt: response.expiresAt,
+          effectiveRole: response.effectiveRole,
+          effectiveCapabilities: [response.capability],
+          accountGrantAllowed: request.node.accountGrantAllowed,
+          now: input.now?.() ?? Date.now(),
+        },
+      });
+    let verified = verifyGrant(verificationKeys);
+    if (verified.kind === "error" && verified.reason === "grant_unknown_key" && !keysetRefreshed) {
+      // A signing-key rotation can retain the advertised generation. Refresh
+      // through the authenticated Hub API once, then verify the same grant and
+      // every binding again. A known-key signature failure remains terminal.
+      try {
+        keyset = await refreshKeyset(keyset);
+      } catch (cause) {
+        zero(grantEnvelope);
+        zero(statementBytes);
+        return unavailable(cause);
+      }
+      verificationKeys = decodeVerificationKeys(keyset.keys);
+      if (verificationKeys === null || response.keysetGeneration !== keyset.generation) {
+        zero(grantEnvelope);
+        zero(statementBytes);
+        return invalid();
+      }
+      verified = verifyGrant(verificationKeys);
+    }
     if (verified.kind !== "ok") {
       zero(grantEnvelope);
       zero(statementBytes);
