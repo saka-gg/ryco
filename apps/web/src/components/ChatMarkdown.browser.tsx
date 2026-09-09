@@ -32,11 +32,12 @@ const {
   };
 });
 
-vi.mock("../environmentApi", () => ({
-  readEnvironmentApi: vi.fn(() => ({
+vi.mock("../environmentApi", () => {
+  const readEnvironmentApi = vi.fn(() => ({
     projects: { readFileBinary: readFileBinaryMock },
-  })),
-}));
+  }));
+  return { readEnvironmentApi, ensureEnvironmentApi: readEnvironmentApi };
+});
 
 vi.mock("../editorPreferences", () => ({
   openInPreferredEditor: openInPreferredEditorMock,

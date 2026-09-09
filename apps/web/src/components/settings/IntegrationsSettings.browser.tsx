@@ -2,7 +2,7 @@ import "../../index.css";
 
 import { AgentControlIntegrationId, EnvironmentId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 const harness = vi.hoisted(() => ({
@@ -14,13 +14,17 @@ const harness = vi.hoisted(() => ({
   deleteIntegration: vi.fn(),
 }));
 
-vi.mock("../../environments/primary", () => ({
-  usePrimaryEnvironmentId: () => EnvironmentId.make("environment-local"),
-}));
+import {
+  resetPrimaryEnvironmentDescriptorForTests,
+  writePrimaryEnvironmentDescriptor,
+} from "../../environments/primary";
 
-vi.mock("../../environmentApi", () => ({
-  readEnvironmentApi: () => ({ agentControl: harness }),
-}));
+afterEach(() => resetPrimaryEnvironmentDescriptorForTests());
+
+vi.mock("../../environmentApi", () => {
+  const readEnvironmentApi = () => ({ agentControl: harness });
+  return { readEnvironmentApi, ensureEnvironmentApi: readEnvironmentApi };
+});
 
 import { ExternalIntegrationsSettings } from "./IntegrationsSettings";
 
@@ -64,6 +68,17 @@ const detail = {
 
 describe("ExternalIntegrationsSettings", () => {
   beforeEach(() => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: EnvironmentId.make("environment-local"),
+      label: "Browser test node",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "0.0.0-test",
+      capabilities: {
+        repositoryIdentity: false,
+        threadSettlement: false,
+        threadPriorityRanking: false,
+      },
+    });
     vi.clearAllMocks();
     harness.listIntegrations.mockResolvedValue({
       integrations: [],

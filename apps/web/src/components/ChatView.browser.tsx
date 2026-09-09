@@ -2595,6 +2595,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       // Existing browser fixtures predate sidebar modes; preserve their
       // Projects-tree baseline and opt into Inbox in the mode-specific cases.
       sidebarMode: "projects",
+      alwaysUseBuildMode: true,
       projectExpandedById: {},
       projectOrder: [],
       pinnedThreadKeys: {},
@@ -4408,7 +4409,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               prepareWorktree: {
                 projectCwd: "/repo/project",
-                baseBranch: "main",
+                baseBranch: "origin/main",
                 branch: expect.stringMatching(/^ryco\/[0-9a-f]{8}$/),
               },
               runSetupScript: true,
@@ -4981,6 +4982,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("toggles plan mode with Shift+Tab only while the composer is focused", async () => {
+    useUiStateStore.getState().setAlwaysUseBuildMode(false);
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -7996,6 +7998,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("keeps plan follow-up footer actions fused and aligned after a real resize", async () => {
+    useUiStateStore.getState().setAlwaysUseBuildMode(false);
     const mounted = await mountChatView({
       viewport: WIDE_FOOTER_VIEWPORT,
       snapshot: createSnapshotWithPlanFollowUpPrompt(),
@@ -8059,6 +8062,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("keeps the wide desktop follow-up layout expanded when the footer still fits", async () => {
+    useUiStateStore.getState().setAlwaysUseBuildMode(false);
     const mounted = await mountChatView({
       viewport: WIDE_FOOTER_VIEWPORT,
       snapshot: createSnapshotWithPlanFollowUpPrompt({
@@ -8092,6 +8096,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("compacts the footer when a wide desktop follow-up layout starts overflowing", async () => {
+    useUiStateStore.getState().setAlwaysUseBuildMode(false);
     const mounted = await mountChatView({
       viewport: WIDE_FOOTER_VIEWPORT,
       snapshot: createSnapshotWithPlanFollowUpPrompt({
@@ -8172,6 +8177,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("stages an idle provider target locally and sends it without an unsafe model meta update", async () => {
+    useUiStateStore.getState().setAlwaysUseBuildMode(false);
     const snapshot = createSnapshotForTargetUser({
       targetMessageId: "msg-user-context-handoff-stage" as MessageId,
       targetText: "context handoff staging thread",

@@ -10,7 +10,7 @@ import {
   ProviderInstanceId,
 } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 const harness = vi.hoisted(() => ({
@@ -22,12 +22,15 @@ const harness = vi.hoisted(() => ({
   disconnectMcpInstallation: vi.fn(),
 }));
 
-vi.mock("../../environments/primary", () => ({
-  usePrimaryEnvironmentId: () => EnvironmentId.make("environment-local"),
-}));
+import {
+  resetPrimaryEnvironmentDescriptorForTests,
+  writePrimaryEnvironmentDescriptor,
+} from "../../environments/primary";
 
-vi.mock("../../environmentApi", () => ({
-  readEnvironmentApi: () => ({
+afterEach(() => resetPrimaryEnvironmentDescriptorForTests());
+
+vi.mock("../../environmentApi", () => {
+  const readEnvironmentApi = () => ({
     mcp: { listWorkspaces: harness.listWorkspaces },
     agentControl: {
       listIntegrations: harness.listIntegrations,
@@ -36,8 +39,9 @@ vi.mock("../../environmentApi", () => ({
       repairMcpInstallation: harness.repairMcpInstallation,
       disconnectMcpInstallation: harness.disconnectMcpInstallation,
     },
-  }),
-}));
+  });
+  return { readEnvironmentApi, ensureEnvironmentApi: readEnvironmentApi };
+});
 
 import { AgentControlMcpInstallations } from "./AgentControlMcpInstallations";
 
@@ -75,6 +79,17 @@ const installation = {
 
 describe("AgentControlMcpInstallations", () => {
   beforeEach(() => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: EnvironmentId.make("environment-local"),
+      label: "Browser test node",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "0.0.0-test",
+      capabilities: {
+        repositoryIdentity: false,
+        threadSettlement: false,
+        threadPriorityRanking: false,
+      },
+    });
     vi.clearAllMocks();
     harness.listWorkspaces.mockResolvedValue({
       providers: [
