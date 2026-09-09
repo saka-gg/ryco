@@ -21,6 +21,71 @@ const RELEASE_BASE = "https://github.com/saka-gg/ryco/releases/tag";
  */
 export const CHANGELOG_RELEASES: ChangelogRelease[] = [
   {
+    version: "0.1.23",
+    date: "September 9, 2026",
+    dateTime: "2026-09-09",
+    summary:
+      "Settings become easier to navigate, desktop quitting becomes configurable, and busy workspaces do less background work.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.23`,
+    highlights: [
+      {
+        title: "Find and preview your preferences",
+        summary:
+          "Settings gain focused subsections, theme previews, dedicated composer controls, and shared diff layout preferences that carry through to source control.",
+      },
+      {
+        title: "Choose how the desktop app quits",
+        summary:
+          "Configurable quit gestures include visible feedback and saved preferences, helping prevent accidental exits while keeping your preferred shortcut close at hand.",
+      },
+      {
+        title: "Less background work in large projects",
+        summary:
+          "Sidebar activity follows visible rows, thread prewarming waits for idle time, and source control avoids redundant status refreshes while preserving current results.",
+      },
+      {
+        title: "Attachments keep their proportions",
+        summary:
+          "Images attached to your messages preserve their original proportions instead of filling a fixed grid, making wide and tall images easier to inspect.",
+      },
+    ],
+  },
+  {
+    version: "0.1.22",
+    date: "September 7, 2026",
+    dateTime: "2026-09-07",
+    summary:
+      "Agents can deliver generated files directly in chat, use computer controls, and share live project previews while long-running work stays easier to follow.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.22`,
+    highlights: [
+      {
+        title: "Generated files stay with the conversation",
+        summary:
+          "Assistant messages can deliver persistent file attachments with image previews, audio and video playback, and downloads. General files can also be attached to your own turns.",
+      },
+      {
+        title: "Computer use and live project previews",
+        summary:
+          "Cross-platform computer-use support, a project browser, and shared live previews bring more of the working environment into Ryco, with improved macOS permission attribution.",
+      },
+      {
+        title: "Keep long-running work organized",
+        summary:
+          "Snooze threads, preview destination-aware context handoffs in the Inbox, and keep thread goals synchronized with provider runtimes. Subagent activity and liveness are clearer too.",
+      },
+      {
+        title: "More reliable provider history and context",
+        summary:
+          "Missed history is recovered, failed runtimes are retired, stale requests expire, and authoritative context resets remain intact. OpenCode Go gains usage limits and context fallbacks.",
+      },
+      {
+        title: "A smoother everyday workspace",
+        summary:
+          "The composer shrinks while you read, new worktrees fetch current origin refs, and resource diagnostics help explain runtime load alongside faster event processing and asset delivery.",
+      },
+    ],
+  },
+  {
     version: "0.1.21",
     date: "September 5, 2026",
     dateTime: "2026-09-05",
