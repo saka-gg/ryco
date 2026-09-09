@@ -175,7 +175,7 @@ export class MobileHostedRelaySocket {
   // registrations are held and replayed against the real socket.
   readonly #pendingOpen: Array<() => void> = [];
   readonly #pendingMessage: Array<(bytes: Uint8Array) => void> = [];
-  readonly #pendingClose: Array<() => void> = [];
+  readonly #pendingClose: Array<(reason?: string) => void> = [];
   readonly #pendingError: Array<() => void> = [];
 
   constructor(options: MobileHostedRelaySocketOptions) {
@@ -317,8 +317,8 @@ export class MobileHostedRelaySocket {
           this.#engine.reportUndecodableMessage(message.fail);
         }
       });
-      socket.addEventListener("close", () => {
-        for (const listener of this.#pendingClose) listener();
+      socket.addEventListener("close", (event: { readonly reason?: string }) => {
+        for (const listener of this.#pendingClose) listener(event.reason);
       });
       socket.addEventListener("error", () => {
         for (const listener of this.#pendingError) listener();

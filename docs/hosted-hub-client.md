@@ -53,6 +53,25 @@ proxy arrangement to bypass production origin policy.
 
 ## Authentication and registration
 
+Desktop and mobile builds default to `https://app.ryco.space`; compatible custom Hub profiles
+remain supported. On macOS Desktop, **Connect Ryco account** starts browser authentication and
+automatically enables the local node connector after the session has been durably stored. The
+connector restart resumes the local claim and trusted introduction. Temporary local-node setup
+failure does not sign the account out or grant unverified remote access.
+
+A fresh Desktop workspace does not initialize Keychain credentials just to display the UI. Native
+sign-in and restoration of a retained session still use protected storage. A locked store produces
+a retryable failure rather than silently discarding the session. Development launchers keep mutable
+checkout paths and environment outside their signed bundle and use a single available Apple
+Development identity, falling back to ad-hoc signing when none can be selected unambiguously.
+Production releases need stable Developer ID signing to preserve macOS trust across updates;
+Ryco never changes Keychain access rules to suppress an operating-system prompt.
+
+Native mobile authentication requires a hardware-backed device key. If the device cannot provide
+one, setup explains the limitation and offers retry without falling back to a software key.
+Node-level security details live under **Settings → Connections → Node security · Advanced**;
+the existing owner and connection-readiness checks still apply.
+
 Sign-in uses the existing Hub passkey options and verification endpoints. The client converts the
 Hub's JSON WebAuthn options into the browser API and returns the standard WebAuthn response shape.
 It does not create a bearer token or alternate transcript. Invitation redemption uses the existing
@@ -396,11 +415,11 @@ line and the pointer at the rest of it:
 
 <!-- shipped-text:web-sas-more -->
 
-> Settings → Security explains what else this tab cannot check.
+> Settings → Connections → Node security explains what else this tab cannot check.
 
 <!-- /shipped-text:web-sas-more -->
 
-In Settings → Security, the same code is drawn with the longer account. It names both of the reasons
+In Settings → Connections → Node security, the same code is drawn with the longer account. It names both of the reasons
 the browser tier is denied the active-Hub column, and keeps them apart: one needs a substituted
 bundle and one needs nothing at all.
 
@@ -433,7 +452,7 @@ analytics, and it must not be captured into qualification evidence, screenshots,
 a channel locked encrypted but produced no code, the surface says so rather than rendering nothing —
 an absent comparison value is reported, not silently dropped.
 
-The code renders in the desktop-width node menu and again in Settings → Security, which is where the
+The code renders in the desktop-width node menu and again in Settings → Connections → Node security, which is where the
 menu's pointer leads. That section is owner-only in hosted mode, so the menu asks whether this
 reader can open it before it points there: a viewer, an operator, or an owner whose role snapshot
 has gone stale is shown the longer account in the menu itself, with the `ryco e2ee sessions`

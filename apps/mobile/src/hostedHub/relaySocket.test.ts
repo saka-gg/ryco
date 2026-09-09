@@ -214,6 +214,18 @@ describe("relay attempt validation", () => {
 });
 
 describe("DPoP upgrade", () => {
+  it("passes a socket-only protocol rejection to the shared failure policy", async () => {
+    const handlers = callbacks();
+    const harness = build({ callbacks: handlers });
+    await settle();
+    harness.sockets[0]!.emit("close", { code: 4406, reason: "protocol_unsupported" });
+    expect(handlers.onFailure).toHaveBeenCalledExactlyOnceWith({
+      kind: "incompatible",
+      retryable: false,
+      closeReason: "protocol_unsupported",
+    });
+  });
+
   it("sends exactly the Authorization and DPoP headers, and no Cookie", async () => {
     const harness = build();
     await settle();

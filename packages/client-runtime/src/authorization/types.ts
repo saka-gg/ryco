@@ -365,7 +365,7 @@ export interface HostedRelayTicket {
   readonly ticket: string;
   readonly expiresAt: number;
   readonly protocolMajor: 1;
-  readonly protocolMinor: 2;
+  readonly protocolMinor: 2 | 3;
 }
 
 export type HostedAccountE2eeDevice = NativeE2ee.AccountE2eeDeviceSummary;

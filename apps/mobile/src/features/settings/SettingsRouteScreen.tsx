@@ -35,18 +35,15 @@ export function SettingsRouteScreen() {
       className="flex-1 bg-screen"
       contentContainerStyle={{ paddingTop: 4, paddingBottom: 40 }}
     >
-      <SettingsSection title="Hub">
+      <SettingsSection title="Connections">
         <SettingsRow
           first
           label="Hub and account"
           onPress={() => navigation.navigate("SettingsHub" as never)}
         />
-      </SettingsSection>
-
-      <SettingsSection title="Security">
         <SettingsRow
-          first
           label="Node security"
+          value="Advanced"
           onPress={() => {
             if (selectedNode) {
               navigation.dispatch(

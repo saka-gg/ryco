@@ -120,6 +120,20 @@ function validateName(name: string): string {
   return RECORD_NAME.test(name) ? name : failed();
 }
 
+/** A startup hint only; never grants authority or decrypts a record. */
+export function desktopProtectedRecordExists(input: {
+  readonly directory: string;
+  readonly name: string;
+}): boolean {
+  const pattern = new RegExp(`^[0-9a-f]{64}\\.${validateName(input.name)}\\.record$`);
+  try {
+    return FS.readdirSync(input.directory).some((name) => pattern.test(name));
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+    return failed();
+  }
+}
+
 export function createDesktopProtectedRecordStore(input: {
   readonly directory: string;
   readonly namespace: string;

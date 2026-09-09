@@ -58,7 +58,7 @@ class MockRelaySocket implements RelaySocket {
   onSend: (() => void) | undefined;
   #open: Array<() => void> = [];
   #message: Array<(bytes: Uint8Array) => void> = [];
-  #close: Array<() => void> = [];
+  #close: Array<(reason?: string) => void> = [];
   #error: Array<() => void> = [];
 
   send(bytes: Uint8Array): void {
@@ -76,7 +76,7 @@ class MockRelaySocket implements RelaySocket {
   onBinaryMessage(listener: (bytes: Uint8Array) => void): void {
     this.#message.push(listener);
   }
-  onClose(listener: () => void): void {
+  onClose(listener: (reason?: string) => void): void {
     this.#close.push(listener);
   }
   onError(listener: () => void): void {
@@ -87,8 +87,8 @@ class MockRelaySocket implements RelaySocket {
     this.readyState = OPEN;
     for (const listener of this.#open) listener();
   }
-  emitClose(): void {
-    for (const listener of this.#close) listener();
+  emitClose(reason?: string): void {
+    for (const listener of this.#close) listener(reason);
   }
   emitError(): void {
     for (const listener of this.#error) listener();
@@ -281,6 +281,44 @@ describe("HostedRelayEngine", () => {
     // assembler and onData.
     expect(events.onData).toHaveBeenCalledWith(new TextEncoder().encode('{"inbound":1}'));
   });
+
+  it.each([
+    ["authentication_failed", "authentication", true],
+    ["authentication_required", "authentication", false],
+    ["authorization_failed", "authorization-removed", false],
+    ["protocol_unsupported", "incompatible", false],
+    ["revoked", "revoked", false],
+    ["node_offline", "offline", true],
+    ["server_draining", "draining", true],
+  ] as const)(
+    "preserves the %s socket close before the first relay frame",
+    (reason, kind, retryable) => {
+      const { socket, callbacks: handlers, events } = create();
+      socket.open();
+      socket.emitClose(reason);
+      socket.emitClose(reason);
+      expect(handlers.onFailure).toHaveBeenCalledExactlyOnceWith({
+        kind,
+        retryable,
+        closeReason: reason,
+      });
+      expect(events.onOpen).not.toHaveBeenCalled();
+      expect(events.onClose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([undefined, "", "private server diagnostic"])(
+    "does not surface an unknown socket reason (%s)",
+    (reason) => {
+      const { socket, callbacks: handlers, events } = create();
+      socket.emitClose(reason);
+      expect(handlers.onFailure).toHaveBeenCalledExactlyOnceWith({
+        kind: "network",
+        retryable: true,
+      });
+      expect(JSON.stringify(events.onClose.mock.calls)).not.toContain("private server diagnostic");
+    },
+  );
 
   it("authenticates with a memory-only first frame and forwards RPC bytes exactly", async () => {
     const { engine, socket, callbacks: handlers, events } = create();

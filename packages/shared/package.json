@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./hostedApp": {
+      "types": "./src/hostedApp.ts",
+      "import": "./src/hostedApp.ts"
+    },
     "./diagnosticRedaction": {
       "types": "./src/diagnosticRedaction.ts",
       "import": "./src/diagnosticRedaction.ts"

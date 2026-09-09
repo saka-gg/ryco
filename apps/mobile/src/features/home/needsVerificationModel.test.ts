@@ -24,7 +24,7 @@ function node(id: string, online: boolean): HostedHubNode {
 }
 
 describe("Needs verification group", () => {
-  it("keeps unverified, unknown and conflicted nodes exact while excluding verified work", () => {
+  it("keeps blocked trust actionable without warning about usable account-trusted nodes", () => {
     const nodes = [
       node("verified", true),
       node("pending", true),
@@ -42,13 +42,8 @@ describe("Needs verification group", () => {
         ["env-viewer", "identity-conflict"],
       ]),
     });
-    expect(rows.map((row) => row.nodeId).toSorted()).toEqual([
-      "account",
-      "pending",
-      "unknown",
-      "viewer",
-    ]);
-    expect(rows.find((row) => row.nodeId === "account")?.detail).toContain("Account trusted");
+    expect(rows.map((row) => row.nodeId).toSorted()).toEqual(["pending", "unknown", "viewer"]);
+    expect(rows.find((row) => row.nodeId === "account")).toBeUndefined();
     expect(rows.find((row) => row.nodeId === "unknown")?.detail).toContain("Offline");
     expect(rows.find((row) => row.nodeId === "viewer")?.detail).toContain("Viewer");
     expect(rows.find((row) => row.nodeId === "viewer")?.lockedHistory).toBe(true);

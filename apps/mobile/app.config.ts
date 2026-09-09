@@ -1,3 +1,4 @@
+import { DEFAULT_HOSTED_APP_ORIGIN } from "../../packages/shared/src/hostedApp.ts";
 import type { ExpoConfig } from "expo/config";
 
 import { loadMobileEnv, resolveAppVariant, type AppVariant } from "./config/env.ts";
@@ -7,8 +8,7 @@ import { loadMobileEnv, resolveAppVariant, type AppVariant } from "./config/env.
 // assets, the default telemetry endpoint, widgets, share extension, quick
 // actions, and the camera-showcase rig are all stripped per the design spec's
 // strip list. Direct-node bearer pairing is one auth plane; the hosted plane
-// uses a system-browser public-client handoff and activates only when a Hub
-// origin is configured.
+// uses a system-browser public-client handoff and defaults to Ryco Cloud.
 const repoEnv = loadMobileEnv();
 Object.assign(process.env, repoEnv);
 
@@ -115,8 +115,8 @@ const appleTeamId = repoEnv.RYCO_IOS_APPLE_TEAM_ID?.trim();
 // (the host that serves the API and the relay upgrade), because every DPoP proof
 // signs `htu` against that origin. `EXPO_PUBLIC_RYCO_HUB_APP_URL` is optional
 // hosted-web metadata; native authorization starts from the Hub API itself.
-const hostedHubBaseUrl = repoEnv.EXPO_PUBLIC_RYCO_HUB_URL?.trim() || null;
-const hostedHubAppUrl = repoEnv.EXPO_PUBLIC_RYCO_HUB_APP_URL?.trim() || null;
+const hostedHubBaseUrl = repoEnv.EXPO_PUBLIC_RYCO_HUB_URL?.trim() || DEFAULT_HOSTED_APP_ORIGIN;
+const hostedHubAppUrl = repoEnv.EXPO_PUBLIC_RYCO_HUB_APP_URL?.trim() || hostedHubBaseUrl;
 
 // Fail closed at config time on malformed deployment metadata. A Personal Team
 // build intentionally omits associated-domain entitlements and still supports
@@ -313,7 +313,7 @@ const config: ExpoConfig = {
       httpBaseUrl: repoEnv.EXPO_PUBLIC_RYCO_HTTP_URL ?? null,
       wsBaseUrl: repoEnv.EXPO_PUBLIC_RYCO_WS_URL ?? null,
     },
-    // Hosted plane. Absent/blank `hubBaseUrl` keeps the app in direct-node mode
+    // Hosted plane. Ryco Cloud is ready by default; custom domains override it.
     // (src/platform/config.ts fails closed on anything it cannot validate).
     hosted: {
       hubBaseUrl: hostedHubBaseUrl,

@@ -36,6 +36,15 @@ describe("desktopSettings", () => {
     expect(readDesktopSettings(makeSettingsPath(), "0.0.17")).toEqual(DEFAULT_DESKTOP_SETTINGS);
   });
 
+  it("uses Ryco Cloud for an unset legacy Hub without enabling its connector", () => {
+    const settingsPath = makeSettingsPath();
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubOrigin: null, hubConnectorEnabled: false }));
+    expect(readDesktopSettings(settingsPath, "0.1.23")).toMatchObject({
+      hubOrigin: "https://app.ryco.space",
+      hubConnectorEnabled: false,
+    });
+  });
+
   it("defaults packaged nightly builds to the nightly update channel", () => {
     expect(resolveDefaultDesktopSettings("0.0.17-nightly.20260415.1")).toEqual({
       quitShortcutMode: "press-twice",
@@ -45,7 +54,7 @@ describe("desktopSettings", () => {
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -62,7 +71,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -75,7 +84,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -92,7 +101,7 @@ describe("desktopSettings", () => {
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
-          hubOrigin: null,
+          hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
         },
@@ -106,7 +115,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -123,7 +132,7 @@ describe("desktopSettings", () => {
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
-          hubOrigin: null,
+          hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
         },
@@ -137,7 +146,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -154,7 +163,7 @@ describe("desktopSettings", () => {
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
-          hubOrigin: null,
+          hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
         },
@@ -168,7 +177,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -185,7 +194,7 @@ describe("desktopSettings", () => {
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
-          hubOrigin: null,
+          hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
         },
@@ -199,7 +208,7 @@ describe("desktopSettings", () => {
       updateChannel: "nightly",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -334,7 +343,7 @@ describe("desktopSettings", () => {
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -360,7 +369,7 @@ describe("desktopSettings", () => {
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -376,7 +385,7 @@ describe("desktopSettings", () => {
         updateChannel: "latest",
         updateChannelConfiguredByUser: true,
         hubConnectorEnabled: false,
-        hubOrigin: null,
+        hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
         hubNodeName: null,
         hubAllowFileSecretStore: false,
       }),
@@ -391,7 +400,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
@@ -416,7 +425,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
-      hubOrigin: null,
+      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });

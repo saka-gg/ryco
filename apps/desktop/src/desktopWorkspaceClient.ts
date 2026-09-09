@@ -28,8 +28,8 @@ export type DesktopWorkspaceIdentityStatus =
   | {
       readonly status: "ready";
       readonly accountId: string;
-      readonly nodeId: string;
-      readonly localNodeHandle: string;
+      readonly nodeId: string | null;
+      readonly localNodeHandle: string | null;
       readonly accountE2eeReady?: true;
     };
 

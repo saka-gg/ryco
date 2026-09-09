@@ -14,6 +14,7 @@ import {
 } from "../appChrome";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { cn } from "~/lib/utils";
+import { DesktopAccountConnect } from "./DesktopAccountConnect";
 
 export function NoActiveThreadState() {
   const navigate = useNavigate();
@@ -69,6 +70,7 @@ export function NoActiveThreadState() {
               <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
                 Select an existing thread or create a new one to get started.
               </EmptyDescription>
+              {isElectron ? <DesktopAccountConnect /> : null}
               {isHostedHubMode() ? (
                 <div className="mt-5 space-y-3 text-left">
                   <Button variant="outline" onClick={() => navigateHub({ kind: "nodes" })}>

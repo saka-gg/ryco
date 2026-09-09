@@ -45,17 +45,26 @@ export function createDesktopHostedSessionCredentials(
   let bearerToken: string | null = null;
   let hydrated: Promise<void> | undefined;
   let persistence: Promise<void> = Promise.resolve();
+  let revision = 0;
+  let persistenceFailed = false;
 
-  const enqueue = (token: string | null, requireSuccess: boolean): Promise<void> => {
-    const operation = persistence.then(async () => {
-      try {
-        if (token === null) await store.delete(SESSION_RECORD);
-        else await store.write(SESSION_RECORD, token);
-      } catch {
-        if (requireSuccess) throw new Error("Desktop Hub credential storage is unavailable.");
-      }
-    });
-    persistence = operation.catch(() => undefined);
+  const enqueue = (token: string | null): Promise<void> => {
+    const operation = persistence
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          if (token === null) await store.delete(SESSION_RECORD);
+          else await store.write(SESSION_RECORD, token);
+          persistenceFailed = false;
+        } catch {
+          persistenceFailed = true;
+          throw new Error("Desktop Hub credential storage is unavailable.");
+        }
+      });
+    persistence = operation;
+    // The synchronous credential port cannot await disk I/O. Keep its rejection
+    // handled while preserving it for flush(), which gates successful sign-in.
+    void operation.catch(() => undefined);
     return operation;
   };
 
@@ -65,18 +74,29 @@ export function createDesktopHostedSessionCredentials(
     writeCsrfToken: () => undefined,
     readBearerToken: () => bearerToken,
     writeBearerToken: (token) => {
+      revision += 1;
       bearerToken = validToken(token) ? token : null;
-      void enqueue(bearerToken, false);
+      void enqueue(bearerToken);
     },
     hydrate: () =>
       (hydrated ??= (async () => {
-        const stored = await store.read(SESSION_RECORD).catch(() => null);
-        if (bearerToken === null && validToken(stored)) bearerToken = stored;
-      })()),
-    flush: async () => await persistence,
+        const startedAtRevision = revision;
+        const stored = await store.read(SESSION_RECORD);
+        if (revision === startedAtRevision && validToken(stored)) bearerToken = stored;
+      })().catch(() => {
+        hydrated = undefined;
+        throw new Error("Desktop Hub credential storage is unavailable.");
+      })),
+    flush: async () => {
+      // A later explicit retry can persist the retained session after unlock.
+      // The first failed flush still rejects, so sign-in never claims durability.
+      if (persistenceFailed) enqueue(bearerToken);
+      await persistence;
+    },
     clear: async () => {
+      revision += 1;
       bearerToken = null;
-      await enqueue(null, true);
+      await enqueue(null);
     },
   };
 }

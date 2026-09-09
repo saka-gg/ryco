@@ -78,7 +78,7 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   { id: "keybindings", label: "Keybindings", icon: KeyboardIcon },
   { id: "source-control", label: "Source Control", icon: GitBranchIcon },
   { id: "connections", label: "Connections", icon: Link2Icon },
-  { id: "security", label: "Security", icon: ShieldIcon },
+  { id: "security", label: "Node security", icon: ShieldIcon },
   { id: "diagnostics", label: "Diagnostics", icon: ActivityIcon },
   { id: "statistics", label: "Statistics", icon: BarChart3Icon },
   { id: "archived", label: "Archive", icon: ArchiveIcon },
@@ -233,7 +233,28 @@ function SectionPanel({
       {section === "appearance" ? <LazyAppearanceSettingsPanel /> : null}
       {section === "keybindings" ? <LazyKeybindingsSettingsPanel /> : null}
       {section === "source-control" ? <LazySourceControlSettingsPanel /> : null}
-      {section === "connections" ? <LazyConnectionsSettings /> : null}
+      {section === "connections" ? (
+        isHostedHubMode() ? (
+          <div className="space-y-5 p-6">
+            <div className="space-y-1">
+              <h1 className="text-base font-semibold">Connections</h1>
+              <p className="text-sm text-muted-foreground">
+                Ryco manages your connection automatically. Advanced details for this node are
+                available below.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => useSettingsDialogStore.getState().setSection("security")}
+            >
+              <ShieldIcon className="size-4" />
+              Node security · Advanced
+            </Button>
+          </div>
+        ) : (
+          <LazyConnectionsSettings />
+        )
+      ) : null}
       {section === "security" ? <LazyNodeSecuritySettings /> : null}
       {section === "diagnostics" ? <LazyDiagnosticsSettings /> : null}
       {section === "statistics" ? <LazyStatisticsPanel /> : null}
@@ -304,7 +325,9 @@ export function SettingsDialog() {
   const roleFresh = hostedSettingsRoleFresh(hostedDirectoryStatus, hostedTransportStatus);
   const role = hostedSettingsRoleSnapshot(hostedRole, hostedDirectoryStatus, hostedTransportStatus);
   const visibleNavItems = NAV_ITEMS.filter((item) =>
-    settingsSectionReachable(item.id, {
+    // Hosted Connections is only the parent of the existing owner-gated node
+    // security panel. It never mounts direct/local connection administration.
+    settingsSectionReachable(item.id === "connections" && hosted ? "security" : item.id, {
       hosted,
       role,
       desktop: isElectron && Boolean(window.desktopBridge?.computerUse),
@@ -315,7 +338,8 @@ export function SettingsDialog() {
   const effectiveSection = visibleNavItems.some((item) => item.id === requestedSection)
     ? requestedSection
     : (visibleNavItems[0]?.id ?? "appearance");
-  const activeScope = settingsSectionScope(effectiveSection);
+  const activeScope =
+    hosted && effectiveSection === "connections" ? "node" : settingsSectionScope(effectiveSection);
   const scopeLabel = settingsScopeLabel(activeScope, {
     nativeClient: isElectron,
     nodeLabel: settingsTarget?.nodeLabel ?? null,
@@ -411,8 +435,11 @@ export function SettingsDialog() {
           <div className="flex min-h-0 flex-1 flex-row">
             <nav className="relative isolate flex w-12 shrink-0 flex-col gap-1 overflow-y-auto border-r border-border p-2 sm:w-52">
               {visibleNavItems.map((item) => {
+                if (item.id === "security") return null;
                 const Icon = item.icon;
-                const isActive = effectiveSection === item.id;
+                const isActive =
+                  effectiveSection === item.id ||
+                  (item.id === "connections" && effectiveSection === "security");
                 return (
                   <Fragment key={item.id}>
                     <button
@@ -438,6 +465,26 @@ export function SettingsDialog() {
                       />
                       <span className="hidden truncate sm:inline">{item.label}</span>
                     </button>
+                    {item.id === "connections" && isActive && visibleSectionIds.has("security") && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchTargetId(null);
+                          setSection("security");
+                        }}
+                        aria-current={effectiveSection === "security" ? "page" : undefined}
+                        aria-label="Advanced node security"
+                        className={cn(
+                          "flex items-center gap-2 rounded-md px-2 py-2 text-left text-xs outline-hidden focus-visible:ring-2 focus-visible:ring-ring sm:ml-7",
+                          effectiveSection === "security"
+                            ? "bg-accent text-foreground"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        <ShieldIcon className="size-3.5 shrink-0" />
+                        <span className="hidden sm:inline">Node security · Advanced</span>
+                      </button>
+                    )}
                     {isActive && subsections.sections.length > 1 && (
                       <div className="mb-2 ml-7 hidden flex-col border-l border-border sm:flex">
                         {subsections.sections.map(({ id, title, element }) => (

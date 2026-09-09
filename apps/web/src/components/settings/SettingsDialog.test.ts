@@ -166,7 +166,7 @@ describe("§13.5's pointer names a section this dialog actually has", () => {
     // surface where an owner is performing a security check.
     const label = SETTINGS_DIALOG_SECTION_LABELS.get("security");
     expect(label, "the security section left the dialog").toBeDefined();
-    expect(E2EE_WEB_SAS_MORE).toContain(`Settings → ${label!}`);
+    expect(E2EE_WEB_SAS_MORE).toContain(`Settings → Connections → ${label!}`);
   });
 
   it("is findable by the search box that replaces the section list", () => {

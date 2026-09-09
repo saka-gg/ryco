@@ -96,6 +96,18 @@ afterEach(() => {
 });
 
 describe("BrowserHostedRelaySocket destination validation", () => {
+  it("reports a canonical upgrade rejection received only in the socket close", () => {
+    const handlers = callbacks();
+    const { socket } = create(handlers);
+    socket.open();
+    socket.dispatchEvent(Object.assign(new Event("close"), { reason: "authorization_failed" }));
+    expect(handlers.onFailure).toHaveBeenCalledExactlyOnceWith({
+      kind: "authorization-removed",
+      retryable: false,
+      closeReason: "authorization_failed",
+    });
+  });
+
   it("rejects a non-relay destination before opening a socket or sending the ticket", () => {
     const sockets: MockWebSocket[] = [];
     expect(

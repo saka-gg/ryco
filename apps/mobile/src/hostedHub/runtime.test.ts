@@ -129,6 +129,7 @@ import {
   serializeHubProfile,
 } from "./hubProfile";
 import { resetMobileHostedRuntimeConfigForTests } from "./runtimeConfig";
+import { getMobileHostedUnavailableReason } from "./runtimeAvailability";
 
 const HOSTED_CONFIG = {
   hubOrigin: "https://hub.example.test",
@@ -303,6 +304,29 @@ describe("fail-closed configuration", () => {
 
     await expect(ensureMobileHostedSession()).resolves.toBeUndefined();
     expect(hoisted.calls).not.toContain("bootstrap");
+  });
+
+  it("retries hardware key access after an unavailable session setup", async () => {
+    hoisted.createMobileDpopSigner.mockRejectedValueOnce(new Error("locked"));
+    await ensureMobileHostedSession();
+    expect(isMobileHostedModeAvailable()).toBe(false);
+    expect(hoisted.calls).not.toContain("bootstrap");
+
+    await ensureMobileHostedSession();
+    expect(isMobileHostedModeAvailable()).toBe(true);
+    expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(2);
+    expect(hoisted.calls.filter((entry) => entry === "bootstrap")).toHaveLength(1);
+  });
+
+  it("keeps a locked saved session retryable without bootstrapping as signed out", async () => {
+    hoisted.hydrate.mockRejectedValueOnce(new Error("locked"));
+    await ensureMobileHostedSession();
+    expect(getMobileHostedUnavailableReason()).toBe("credential-storage");
+    expect(hoisted.calls).not.toContain("bootstrap");
+
+    await ensureMobileHostedSession();
+    expect(getMobileHostedUnavailableReason()).toBeNull();
+    expect(isMobileHostedModeAvailable()).toBe(true);
   });
 
   it("makes a compatible saved Hub profile authoritative", async () => {

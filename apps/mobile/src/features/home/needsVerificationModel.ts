@@ -37,7 +37,14 @@ export function buildNeedsVerificationRows(input: {
   return input.nodes
     .filter((node) => {
       const trust = input.trustByEnvironmentId.get(node.environmentId) ?? "unknown";
-      return node.revokedAt === null && trust !== "verified" && trust !== "not-required";
+      // Account-trusted nodes are already usable. Independent verification stays
+      // available in node security; the home warning is for trust that blocks work.
+      return (
+        node.revokedAt === null &&
+        trust !== "verified" &&
+        trust !== "not-required" &&
+        trust !== "account-trusted"
+      );
     })
     .map((node) => {
       const trust = input.trustByEnvironmentId.get(node.environmentId) ?? "unknown";

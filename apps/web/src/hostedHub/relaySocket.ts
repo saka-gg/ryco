@@ -148,7 +148,7 @@ export class BrowserHostedRelaySocket extends EventTarget {
           if ("bytes" in message) f(message.bytes);
           else this.#engine.reportUndecodableMessage(message.fail);
         }),
-      onClose: (f) => ws.addEventListener("close", f),
+      onClose: (f) => ws.addEventListener("close", (event) => f(event.reason)),
       onError: (f) => ws.addEventListener("error", f),
     };
     try {

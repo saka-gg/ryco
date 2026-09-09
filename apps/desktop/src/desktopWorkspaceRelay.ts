@@ -150,7 +150,7 @@ class DesktopWorkspaceRelaySocket {
     this.#socket = socket;
     const openListeners: Array<() => void> = [];
     const messageListeners: Array<(bytes: Uint8Array) => void> = [];
-    const closeListeners: Array<() => void> = [];
+    const closeListeners: Array<(reason?: string) => void> = [];
     const errorListeners: Array<() => void> = [];
     const relaySocket: RelaySocket = {
       get bufferedAmount() {
@@ -196,8 +196,8 @@ class DesktopWorkspaceRelaySocket {
       }
       for (const listener of messageListeners) listener(bytes);
     });
-    socket.on("close", () => {
-      for (const listener of closeListeners) listener();
+    socket.on("close", (_code, reason) => {
+      for (const listener of closeListeners) listener(reason.toString());
     });
     socket.on("error", () => {
       for (const listener of errorListeners) listener();

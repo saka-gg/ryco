@@ -167,9 +167,32 @@ describe("Desktop hosted identity coordinator", () => {
     });
 
     await expect(identity.connect()).resolves.toEqual({
-      status: "unavailable",
+      status: "ready",
+      accountId: "account-1",
+      nodeId: null,
+      localNodeHandle: null,
     });
     expect(identity.hasSessionMaterial).toBe(true);
+  });
+
+  it("requires durable credentials before restoring node setup and allows a retry", async () => {
+    const setup = vi.fn().mockResolvedValue({ nodeId: "node-local", localNodeHandle: "local" });
+    const flush = vi.fn().mockRejectedValueOnce(new Error("locked")).mockResolvedValue(undefined);
+    const identity = coordinator({
+      api: {
+        hasSessionMaterial: true,
+        restoreSession: vi.fn().mockResolvedValue({ account: { id: "account-1" } }),
+      },
+      credentials: { flush },
+      setup,
+    });
+    await expect(identity.resume()).resolves.toEqual({ status: "unavailable" });
+    expect(setup).not.toHaveBeenCalled();
+    await expect(identity.resume()).resolves.toMatchObject({
+      status: "ready",
+      nodeId: "node-local",
+    });
+    expect(setup).toHaveBeenCalledTimes(1);
   });
 
   it("resumes the client from retained local trust while the node plane is unavailable", async () => {

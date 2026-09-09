@@ -8,6 +8,7 @@ import {
   RELAY_MAX_DATA_FRAME_OVERHEAD_BYTES,
   RELAY_PROTOCOL_MAJOR,
   RELAY_PROTOCOL_MINOR,
+  RELAY_CLOSE_REASONS,
   type RelayChannelId,
   type RelayAccountGrantContext,
   type RelayCloseReason,
@@ -79,7 +80,7 @@ export interface RelaySocket {
   close(code?: number, reason?: string): void;
   onOpen(listener: () => void): void;
   onBinaryMessage(listener: (bytes: Uint8Array) => void): void;
-  onClose(listener: () => void): void;
+  onClose(listener: (reason?: string) => void): void;
   onError(listener: () => void): void;
 }
 export interface RelayTimers {
@@ -499,8 +500,12 @@ export class HostedRelayEngine {
     options.socket.onError(() => {
       if (!this.#closed) options.events.onError();
     });
-    options.socket.onClose(() => {
-      if (!this.#closed) this.#fail(failure("network"));
+    options.socket.onClose((reason) => {
+      if (this.#closed) return;
+      // Upgrade authentication can fail before the relay sends a control frame.
+      // Preserve only canonical reasons; arbitrary server text is never surfaced.
+      const knownReason = RELAY_CLOSE_REASONS.find((candidate) => candidate === reason);
+      this.#fail(failure(knownReason ?? "network"));
     });
   }
 
