@@ -424,11 +424,74 @@ describe("RelayConnectionSession", () => {
     const authenticating = session.authenticate();
     await Promise.resolve();
     socket.emit("open", {} as Event);
-    callbacks.get(1)?.();
+    [...callbacks.values()][0]?.();
     await expect(authenticating).rejects.toMatchObject({ kind: "authentication_timeout" });
     expect(socket.closeCalls).toBe(1);
     expect([...socket.listeners.values()].every((listeners) => listeners.size === 0)).toBe(true);
   });
+
+  it("times out a socket that never opens so the connector can retry", async () => {
+    const socket = new FakeSocket();
+    const callbacks = new Set<() => void>();
+    const session = new RelayConnectionSession({
+      identity: identity(),
+      transport: { open: () => socket },
+      hubOrigin: "https://relay.example",
+      scheduler: {
+        setTimeout: (callback, milliseconds) => {
+          expect(milliseconds).toBe(5_000);
+          callbacks.add(callback);
+          return callback;
+        },
+        clearTimeout: (handle) => callbacks.delete(handle as () => void),
+      },
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    const authenticating = session.authenticate();
+    await Promise.resolve();
+    expect(callbacks.size).toBe(1);
+    [...callbacks][0]?.();
+    await expect(authenticating).rejects.toMatchObject({ kind: "network" });
+    expect(socket.closeCalls).toBe(1);
+    expect(socket.sent).toHaveLength(0);
+    expect(callbacks.size).toBe(0);
+    expect([...socket.listeners.values()].every((listeners) => listeners.size === 0)).toBe(true);
+  });
+
+  it.each(["opening", "authenticating"] as const)(
+    "settles cancelled authentication while the socket is %s",
+    async (phase) => {
+      const socket = new FakeSocket();
+      const session = new RelayConnectionSession({
+        identity: identity(),
+        transport: { open: () => socket },
+        hubOrigin: "https://relay.example",
+        onFrame: () => undefined,
+        onTerminal: () => {
+          throw new Error("Cancellation must not report a second terminal failure.");
+        },
+      });
+      let outcome = "pending";
+      const authenticating = session.authenticate().then(
+        () => {
+          outcome = "ready";
+        },
+        (error: unknown) => {
+          outcome = error instanceof RelayConnectionError ? error.kind : "unknown";
+        },
+      );
+      await Promise.resolve();
+      if (phase === "authenticating") socket.emit("open", {} as Event);
+      session.close();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(outcome).toBe("network");
+      await authenticating;
+      expect(socket.closeCalls).toBe(1);
+      expect([...socket.listeners.values()].every((listeners) => listeners.size === 0)).toBe(true);
+    },
+  );
 
   it("maps bounded fatal errors without retaining remote material", async () => {
     const socket = new FakeSocket();
@@ -490,7 +553,14 @@ describe("RelayConnectionSession", () => {
       onTerminal: () => undefined,
     });
     const authenticating = session.authenticate();
+    let cancelled = false;
+    void authenticating.catch(() => {
+      cancelled = true;
+    });
     session.close();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cancelled).toBe(true);
     releaseProof?.(frame);
     await expect(authenticating).rejects.toMatchObject({ kind: "network" });
     expect(opens).toBe(0);

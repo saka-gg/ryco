@@ -183,6 +183,8 @@ export class RelayConnectionSession {
   #frameDeliveryActive = false;
   #settled = false;
   #closed = false;
+  #authenticationStarted = false;
+  #rejectAuthentication: ((error: RelayConnectionError) => void) | undefined;
   #listeners:
     | {
         readonly open: (event: Event) => void;
@@ -216,8 +218,29 @@ export class RelayConnectionSession {
     return this.#ready;
   }
 
-  async authenticate(): Promise<RelayReadyFrame> {
-    if (this.#socket !== undefined) throw new RelayConnectionError("internal_error");
+  authenticate(): Promise<RelayReadyFrame> {
+    if (this.#authenticationStarted || this.#closed) {
+      return Promise.reject(new RelayConnectionError("internal_error"));
+    }
+    this.#authenticationStarted = true;
+    return new Promise((resolve, reject) => {
+      // Closing a session must release the connector even while native key
+      // access is pending. A late proof is still cleared by the closed check.
+      this.#rejectAuthentication = reject;
+      void this.#authenticate().then(
+        (ready) => {
+          this.#rejectAuthentication = undefined;
+          resolve(ready);
+        },
+        (error: unknown) => {
+          this.#rejectAuthentication = undefined;
+          reject(error);
+        },
+      );
+    });
+  }
+
+  async #authenticate(): Promise<RelayReadyFrame> {
     let auth: RelayNodeAuthHandshake;
     try {
       auth = await this.#identity.createRelayAuthenticationFrame(this.#hubOrigin, {
@@ -276,6 +299,7 @@ export class RelayConnectionSession {
       };
       const onOpen = () => {
         if (this.#closed) return;
+        if (this.#timer !== undefined) this.#scheduler.clearTimeout(this.#timer);
         try {
           socket.send(authBytes);
         } catch {
@@ -364,6 +388,12 @@ export class RelayConnectionSession {
       socket.addEventListener("message", onMessage);
       socket.addEventListener("error", onError);
       socket.addEventListener("close", onClose);
+      // Opening can stall without an error/close event after network changes.
+      // Give the handshake its own full deadline once the socket opens.
+      this.#timer = this.#scheduler.setTimeout(
+        () => fail(new RelayConnectionError("network")),
+        RELAY_AUTHENTICATION_DEADLINE_MS,
+      );
     });
   }
 
@@ -402,6 +432,11 @@ export class RelayConnectionSession {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    if (!this.#settled) {
+      this.#settled = true;
+      this.#rejectAuthentication?.(new RelayConnectionError("network"));
+    }
+    this.#rejectAuthentication = undefined;
     for (const frame of this.#pendingPostReadyFrames) clearRelayFrameBytes(frame);
     this.#pendingPostReadyFrames = [];
     this.#clearPendingAuthentication();
