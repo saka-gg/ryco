@@ -9,7 +9,7 @@ describe("Desktop-main local control credential boundary", () => {
   it("passes a fresh per-child credential only through the inherited bootstrap pipe", () => {
     const main = source("main.ts");
     const start = main.indexOf("function startBackend(): void");
-    const stop = main.indexOf("function stopBackend(): void", start);
+    const stop = main.indexOf("async function stopBackendAndWaitForExit(", start);
     const startBackend = main.slice(start, stop);
 
     expect(startBackend).toContain('Crypto.randomBytes(32).toString("base64url")');

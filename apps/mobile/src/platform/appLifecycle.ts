@@ -11,6 +11,12 @@ import { AppState, type AppStateStatus } from "react-native";
 // Cached connectivity so the synchronous `isOnline()` contract can be answered
 // without awaiting a network probe. Optimistically online until proven offline.
 let cachedOnline = true;
+const listeners = new Set<(event: AppLifecycleEvent) => void>();
+let stopNativeSubscriptions: (() => void) | undefined;
+
+function emit(event: AppLifecycleEvent): void {
+  for (const listener of listeners) listener(event);
+}
 
 function isConnected(state: Network.NetworkState): boolean {
   // `undefined` (unknown) is treated as online: the runtime prefers attempting
@@ -18,43 +24,73 @@ function isConnected(state: Network.NetworkState): boolean {
   return state.isConnected !== false;
 }
 
+function subscribeNative(): () => void {
+  let lastForeground = AppState.currentState === "active";
+  let disposed = false;
+  let networkRevision = 0;
+
+  const publishNetworkState = (state: Network.NetworkState) => {
+    const online = isConnected(state);
+    if (online === cachedOnline) return;
+    cachedOnline = online;
+    emit(online ? "online" : "offline");
+  };
+
+  const refreshNetworkState = () => {
+    const revision = ++networkRevision;
+    void Network.getNetworkStateAsync()
+      .then((state) => {
+        // OS notifications and later probes supersede this asynchronous result.
+        if (!disposed && revision === networkRevision) publishNetworkState(state);
+      })
+      .catch(() => undefined);
+  };
+
+  const appStateSubscription = AppState.addEventListener("change", (next: AppStateStatus) => {
+    if (disposed) return;
+    const nowForeground = next === "active";
+    const wasForeground = lastForeground;
+    lastForeground = nowForeground;
+    if (nowForeground && !wasForeground) {
+      // Connectivity changes can be missed while iOS suspends the app.
+      refreshNetworkState();
+      emit("foreground");
+      emit("resume");
+    } else if (!nowForeground && wasForeground) {
+      emit("background");
+    }
+  });
+
+  const networkSubscription = Network.addNetworkStateListener((state) => {
+    if (disposed) return;
+    ++networkRevision;
+    publishNetworkState(state);
+  });
+  refreshNetworkState();
+
+  return () => {
+    disposed = true;
+    appStateSubscription.remove();
+    networkSubscription.remove();
+  };
+}
+
 export const mobileAppLifecycle: AppLifecycleService = {
   isForeground: () => AppState.currentState === "active",
   isOnline: () => cachedOnline,
   subscribe: (listener) => {
-    let lastForeground = AppState.currentState === "active";
-
-    const emit = (event: AppLifecycleEvent) => listener(event);
-
-    const appStateSubscription = AppState.addEventListener("change", (next: AppStateStatus) => {
-      const nowForeground = next === "active";
-      if (nowForeground && !lastForeground) {
-        emit("foreground");
-        emit("resume");
-      } else if (!nowForeground && lastForeground) {
-        emit("background");
-      }
-      lastForeground = nowForeground;
-    });
-
-    const networkSubscription = Network.addNetworkStateListener((state) => {
-      const online = isConnected(state);
-      if (online !== cachedOnline) {
-        cachedOnline = online;
-        emit(online ? "online" : "offline");
-      }
-    });
-
-    // Refresh the cached connectivity once on subscribe without blocking.
-    void Network.getNetworkStateAsync()
-      .then((state) => {
-        cachedOnline = isConnected(state);
-      })
-      .catch(() => undefined);
+    // One native source updates the cache and broadcasts to every consumer.
+    // Per-consumer native listeners would let the first consume the transition.
+    const subscriber = (event: AppLifecycleEvent) => listener(event);
+    listeners.add(subscriber);
+    stopNativeSubscriptions ??= subscribeNative();
 
     return () => {
-      appStateSubscription.remove();
-      networkSubscription.remove();
+      listeners.delete(subscriber);
+      if (listeners.size === 0) {
+        stopNativeSubscriptions?.();
+        stopNativeSubscriptions = undefined;
+      }
     };
   },
 };

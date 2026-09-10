@@ -1,4 +1,5 @@
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
+import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import { Duplex } from "node:stream";
 import { attachDesktopResourceTelemetry } from "./desktopResourceTelemetry.ts";
 import { registerProjectBrowserIpc } from "./browser/ipc.ts";
@@ -1617,7 +1618,6 @@ function handleFatalStartupError(stage: string, error: unknown): void {
     isQuitting = true;
     dialog.showErrorBox("Ryco failed to start", `Stage: ${stage}\n${message}${detail}`);
   }
-  stopBackend();
   restoreStdIoCapture?.();
   app.quit();
 }
@@ -2590,32 +2590,9 @@ function startBackend(): void {
   ensureInitialBackendWindowOpen();
 }
 
-function stopBackend(): void {
-  cancelBackendReadinessWait();
-  backendListeningDetector = null;
-  if (restartTimer) {
-    clearTimeout(restartTimer);
-    restartTimer = null;
-  }
-
-  const child = backendProcess;
-  backendProcess = null;
-  backendControlToken = "";
-  if (!child) return;
-
-  if (child.exitCode === null && child.signalCode === null) {
-    expectedBackendExitChildren.add(child);
-    child.kill("SIGTERM");
-    setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-      }
-    }, 2_000).unref();
-  }
-}
-
 async function stopBackendAndWaitForExit(timeoutMs = 5_000): Promise<void> {
   cancelBackendReadinessWait();
+  backendListeningDetector = null;
   if (restartTimer) {
     clearTimeout(restartTimer);
     restartTimer = null;
@@ -3779,21 +3756,30 @@ async function bootstrap(): Promise<void> {
   ensureInitialBackendWindowOpen();
 }
 
-app.on("before-quit", () => {
-  isQuitting = true;
-  computerUseRuntime?.dispose();
-  updateInstallInFlight = false;
-  writeDesktopLogHeader("before-quit received");
-  clearUpdatePollTimer();
-  cancelBackendReadinessWait();
-  stopBackend();
-  desktopAuthorizationBroker.cancel();
-  desktopNativeE2eeHandshakeService?.dispose();
-  disposeDesktopWorkspaceSubscription?.();
-  disposeDesktopWorkspaceSubscription = null;
-  void desktopSshEnvironmentBridge.dispose().catch(() => undefined);
-  restoreStdIoCapture?.();
-});
+app.on(
+  "before-quit",
+  createQuitCleanupHandler({
+    cleanup: () => {
+      isQuitting = true;
+      computerUseRuntime?.dispose();
+      updateInstallInFlight = false;
+      writeDesktopLogHeader("before-quit received");
+      clearUpdatePollTimer();
+      cancelBackendReadinessWait();
+      // A relaunch/update already awaits shutdown. Ordinary quit must also
+      // keep Electron alive long enough for the bounded force-stop fallback.
+      const pending = backendProcess === null ? undefined : stopBackendAndWaitForExit();
+      desktopAuthorizationBroker.cancel();
+      desktopNativeE2eeHandshakeService?.dispose();
+      disposeDesktopWorkspaceSubscription?.();
+      disposeDesktopWorkspaceSubscription = null;
+      void desktopSshEnvironmentBridge.dispose().catch(() => undefined);
+      restoreStdIoCapture?.();
+      return pending;
+    },
+    quit: () => app.quit(),
+  }),
+);
 
 app
   .whenReady()
@@ -3845,7 +3831,6 @@ if (process.platform !== "win32") {
     writeDesktopLogHeader("SIGINT received");
     clearUpdatePollTimer();
     cancelBackendReadinessWait();
-    stopBackend();
     void desktopSshEnvironmentBridge.dispose().catch(() => undefined);
     restoreStdIoCapture?.();
     app.quit();
@@ -3856,7 +3841,6 @@ if (process.platform !== "win32") {
     isQuitting = true;
     writeDesktopLogHeader("SIGTERM received");
     clearUpdatePollTimer();
-    stopBackend();
     void desktopSshEnvironmentBridge.dispose().catch(() => undefined);
     restoreStdIoCapture?.();
     app.quit();
