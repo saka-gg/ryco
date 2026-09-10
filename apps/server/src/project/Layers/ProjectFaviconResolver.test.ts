@@ -32,17 +32,18 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
 });
 
 it.layer(TestLayer)("ProjectFaviconResolverLive", (it) => {
-  describe("resolvePath", () => {
+  describe("readIcon", () => {
     it.effect("prefers well-known favicon files", () =>
       Effect.gen(function* () {
         const resolver = yield* ProjectFaviconResolver;
         const cwd = yield* makeTempDir;
         yield* writeTextFile(cwd, "favicon.svg", "<svg>favicon</svg>");
 
-        const resolved = yield* resolver.resolvePath(cwd);
+        const resolved = yield* resolver.readIcon(cwd);
 
         expect(resolved).not.toBeNull();
-        expect(resolved).toContain("favicon.svg");
+        expect(resolved?.path).toContain("favicon.svg");
+        expect(Buffer.from(resolved!.bytes).toString()).toBe("<svg>favicon</svg>");
       }),
     );
 
@@ -53,10 +54,11 @@ it.layer(TestLayer)("ProjectFaviconResolverLive", (it) => {
         yield* writeTextFile(cwd, "index.html", '<link rel="icon" href="/brand/logo.svg">');
         yield* writeTextFile(cwd, "public/brand/logo.svg", "<svg>brand</svg>");
 
-        const resolved = yield* resolver.resolvePath(cwd);
+        const resolved = yield* resolver.readIcon(cwd);
 
         expect(resolved).not.toBeNull();
-        expect(resolved).toContain("public/brand/logo.svg");
+        expect(resolved?.path).toContain("public/brand/logo.svg");
+        expect(Buffer.from(resolved!.bytes).toString()).toBe("<svg>brand</svg>");
       }),
     );
 
@@ -65,7 +67,7 @@ it.layer(TestLayer)("ProjectFaviconResolverLive", (it) => {
         const resolver = yield* ProjectFaviconResolver;
         const cwd = yield* makeTempDir;
 
-        const resolved = yield* resolver.resolvePath(cwd);
+        const resolved = yield* resolver.readIcon(cwd);
 
         expect(resolved).toBeNull();
       }),

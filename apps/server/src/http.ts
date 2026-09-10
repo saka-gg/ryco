@@ -62,9 +62,14 @@ const INLINE_ATTACHMENT_EXTENSIONS = new Set([
   ".webp",
 ]);
 const STATIC_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
+  ".gif": "image/gif",
   ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
@@ -73,6 +78,7 @@ const STATIC_CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".txt": "text/plain; charset=utf-8",
   ".wasm": "application/wasm",
   ".webmanifest": "application/manifest+json; charset=utf-8",
+  ".webp": "image/webp",
 };
 
 export const browserApiCorsLayer = HttpRouter.cors({
@@ -637,8 +643,8 @@ export const projectFaviconRouteLayer = HttpRouter.add(
     }
 
     const faviconResolver = yield* ProjectFaviconResolver;
-    const faviconFilePath = yield* faviconResolver.resolvePath(projectCwd);
-    if (!faviconFilePath) {
+    const favicon = yield* faviconResolver.readIcon(projectCwd);
+    if (!favicon) {
       return HttpServerResponse.text(FALLBACK_PROJECT_FAVICON_SVG, {
         status: 200,
         contentType: "image/svg+xml",
@@ -646,14 +652,11 @@ export const projectFaviconRouteLayer = HttpRouter.add(
       });
     }
 
-    return yield* HttpServerResponse.file(faviconFilePath, {
+    return HttpServerResponse.uint8Array(favicon.bytes, {
       status: 200,
-      headers: inlineImageResponseHeaders(faviconFilePath),
-    }).pipe(
-      Effect.catch(() =>
-        Effect.succeed(HttpServerResponse.text("Internal Server Error", { status: 500 })),
-      ),
-    );
+      contentType: resolveStaticContentType(favicon.path, yield* Path.Path),
+      headers: inlineImageResponseHeaders(favicon.path),
+    });
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
 

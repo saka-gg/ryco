@@ -9,16 +9,21 @@
 import { Context } from "effect";
 import type { Effect } from "effect";
 
+export interface ProjectFavicon {
+  readonly path: string;
+  readonly bytes: Uint8Array;
+}
+
 /**
  * ProjectFaviconResolverShape - Service API for project favicon lookup.
  */
 export interface ProjectFaviconResolverShape {
   /**
-   * Resolve a favicon or icon file path for the provided workspace root.
+   * Read a bounded favicon for the workspace without blocking the node's I/O.
    *
    * Returns `null` when no candidate icon file can be found.
    */
-  readonly resolvePath: (cwd: string) => Effect.Effect<string | null>;
+  readonly readIcon: (cwd: string) => Effect.Effect<ProjectFavicon | null>;
 }
 
 /**
