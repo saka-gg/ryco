@@ -1,9 +1,11 @@
 import type * as Exit from "effect/Exit";
 import { Effect, Option, Tracer } from "effect";
+import { Headers } from "effect/unstable/http";
 
 import { spanToTraceRecord } from "./TraceRecord.ts";
 import type { EffectTraceRecord } from "./TraceRecord.ts";
 import { makeTraceSink, type TraceSink } from "./TraceSink.ts";
+import { makeHttpHeaderRedactor } from "./HttpHeaderRedaction.ts";
 
 export interface LocalFileTracerOptions {
   readonly filePath: string;
@@ -30,14 +32,17 @@ class LocalFileSpan implements Tracer.Span {
   events: Array<[name: string, startTime: bigint, attributes: Record<string, unknown>]>;
   private readonly delegate: Tracer.Span;
   private readonly push: (record: EffectTraceRecord) => void;
+  private readonly redactAttribute: (key: string, value: unknown) => unknown;
 
   constructor(
     options: Parameters<Tracer.Tracer["span"]>[0],
     delegate: Tracer.Span,
     push: (record: EffectTraceRecord) => void,
+    redactAttribute: (key: string, value: unknown) => unknown,
   ) {
     this.delegate = delegate;
     this.push = push;
+    this.redactAttribute = redactAttribute;
     this.name = delegate.name;
     this.spanId = delegate.spanId;
     this.traceId = delegate.traceId;
@@ -69,8 +74,9 @@ class LocalFileSpan implements Tracer.Span {
   }
 
   attribute(key: string, value: unknown): void {
-    this.attributes.set(key, value);
-    this.delegate.attribute(key, value);
+    const redacted = this.redactAttribute(key, value);
+    this.attributes.set(key, redacted);
+    this.delegate.attribute(key, redacted);
   }
 
   event(name: string, startTime: bigint, attributes?: Record<string, unknown>): void {
@@ -88,6 +94,9 @@ class LocalFileSpan implements Tracer.Span {
 export const makeLocalFileTracer = Effect.fn("makeLocalFileTracer")(function* (
   options: LocalFileTracerOptions,
 ) {
+  const redactAttribute = makeHttpHeaderRedactor(
+    yield* Effect.service(Headers.CurrentRedactedNames),
+  );
   const sink =
     options.sink ??
     (yield* makeTraceSink({
@@ -105,7 +114,7 @@ export const makeLocalFileTracer = Effect.fn("makeLocalFileTracer")(function* (
 
   return Tracer.make({
     span(spanOptions) {
-      return new LocalFileSpan(spanOptions, delegate.span(spanOptions), sink.push);
+      return new LocalFileSpan(spanOptions, delegate.span(spanOptions), sink.push, redactAttribute);
     },
     ...(delegate.context ? { context: delegate.context } : {}),
   });
