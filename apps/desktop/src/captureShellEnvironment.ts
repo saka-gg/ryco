@@ -15,7 +15,13 @@ export function captureShellEnvironment(options: {
 }): Promise<CapturedShellEnvironment | null> {
   if (options.signal?.aborted) return Promise.resolve(null);
   return new Promise((resolve) => {
-    const worker = new Worker(options.workerPath, { workerData: { env: { ...options.env } } });
+    let worker: Worker;
+    try {
+      worker = new Worker(options.workerPath, { workerData: { env: { ...options.env } } });
+    } catch {
+      resolve(null);
+      return;
+    }
     let settled = false;
     const finish = (value: CapturedShellEnvironment | null) => {
       if (settled) return;

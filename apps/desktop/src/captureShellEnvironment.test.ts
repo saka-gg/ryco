@@ -4,6 +4,12 @@ import { captureShellEnvironment } from "./captureShellEnvironment.ts";
 const worker = (source: string) => new URL(`data:text/javascript,${encodeURIComponent(source)}`);
 
 describe("captureShellEnvironment", () => {
+  it("continues startup if the worker cannot be constructed", async () => {
+    await expect(
+      captureShellEnvironment({ env: {}, workerPath: "invalid-relative-path" }),
+    ).resolves.toBeNull();
+  });
+
   it("returns a captured environment without changing the caller's environment", async () => {
     const env = { PATH: "/original" };
     const result = await captureShellEnvironment({
