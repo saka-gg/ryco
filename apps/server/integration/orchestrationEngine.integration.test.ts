@@ -1280,7 +1280,10 @@ it.live("recovers claudeAgent sessions after provider stopAll using persisted re
         yield* harness.waitForThread(
           THREAD_ID,
           (entry) =>
-            entry.latestTurn?.turnId === "turn-1" && entry.session?.threadId === "thread-1",
+            entry.latestTurn?.turnId === "turn-1" &&
+            entry.latestTurn.state === "completed" &&
+            entry.session?.threadId === "thread-1" &&
+            entry.session.activeTurnId === null,
         );
 
         yield* harness.adapterHarness!.adapter.stopAll();

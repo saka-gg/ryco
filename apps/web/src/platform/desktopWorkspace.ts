@@ -281,6 +281,24 @@ export function startDesktopWorkspaceBridge(): () => void {
   if (!bridge?.getDesktopWorkspaceState) return () => undefined;
   let disposed = false;
   let publishTimer: ReturnType<typeof setTimeout> | null = null;
+  let publicationAccountId = current.accountId;
+  const publications = new Map<EnvironmentId, { fingerprint: string; pending: boolean }>();
+  const adoptPublicationScope = (state: DesktopWorkspaceStateProjection) => {
+    if (publicationAccountId !== state.accountId) {
+      publications.clear();
+      publicationAccountId = state.accountId;
+    }
+    for (const environmentId of publications.keys()) {
+      if (
+        !state.machines.some(
+          (machine) => machine.environmentId === environmentId && machine.canReadMetadata,
+        )
+      ) {
+        publications.delete(environmentId);
+      }
+    }
+    adopt(state);
+  };
   const publishLiveMetadata = () => {
     if (publishTimer) globalThis.clearTimeout(publishTimer);
     publishTimer = globalThis.setTimeout(() => {
@@ -294,17 +312,41 @@ export function startDesktopWorkspaceBridge(): () => void {
           primaryEnvironmentId !== null && machine.environmentId === current.localEnvironmentId
             ? primaryEnvironmentId
             : machine.environmentId;
-        const snapshot = readWorkspaceMetadataSnapshot(sourceEnvironmentId);
-        if (snapshot) {
-          void publish(
-            remapWorkspaceMetadataSnapshotEnvironment(snapshot, machine.environmentId),
-          ).catch(() => undefined);
-        }
+        // Cached metadata is already owned by main. Echoing it back would make
+        // offline data look newly captured and continuously rewrite the cache.
+        if (
+          useStore.getState().environmentStateById[sourceEnvironmentId]?.hydratedFromCacheAt !==
+          undefined
+        )
+          continue;
+        const snapshot = readWorkspaceMetadataSnapshot(sourceEnvironmentId, 0);
+        if (!snapshot) continue;
+        const projected = remapWorkspaceMetadataSnapshotEnvironment(
+          snapshot,
+          machine.environmentId,
+        );
+        const fingerprint = JSON.stringify(projected);
+        const previous = publications.get(machine.environmentId);
+        if (previous?.pending || previous?.fingerprint === fingerprint) continue;
+        const publication = { fingerprint, pending: true };
+        publications.set(machine.environmentId, publication);
+        void publish({ ...projected, capturedAt: Date.now() })
+          .then(() => {
+            if (disposed || publications.get(machine.environmentId) !== publication) return;
+            publication.pending = false;
+            // Flush changes received during the write, at most one write per node.
+            publishLiveMetadata();
+          })
+          .catch(() => {
+            if (publications.get(machine.environmentId) === publication)
+              publications.delete(machine.environmentId);
+          });
       }
     }, 100);
   };
   const unsubscribeState = bridge.onDesktopWorkspaceState?.((state) => {
-    adopt(state);
+    if (disposed) return;
+    adoptPublicationScope(state);
     publishLiveMetadata();
   });
   const unsubscribeCommands = bridge.onDesktopWorkspaceConnectionCommand?.((command) => {
@@ -315,7 +357,7 @@ export function startDesktopWorkspaceBridge(): () => void {
     .getDesktopWorkspaceState()
     .then((state) => {
       if (disposed) return;
-      adopt(state);
+      adoptPublicationScope(state);
       publishLiveMetadata();
     })
     .catch(() => undefined);

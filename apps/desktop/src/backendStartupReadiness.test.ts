@@ -1,9 +1,37 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { BackendReadinessAbortedError } from "./backendReadiness.ts";
+import { BackendReadinessAbortedError, BackendReadinessTimeoutError } from "./backendReadiness.ts";
 import { waitForBackendStartupReady } from "./backendStartupReadiness.ts";
 
 describe("waitForBackendStartupReady", () => {
+  it("accepts a living backend that becomes ready after the HTTP timeout", async () => {
+    const listening = Promise.withResolvers<void>();
+    const ready = waitForBackendStartupReady({
+      listeningPromise: listening.promise,
+      waitForHttpReady: async () => {
+        throw new BackendReadinessTimeoutError("http://localhost");
+      },
+      cancelHttpWait: vi.fn(),
+    });
+    await Promise.resolve();
+    listening.resolve();
+    await expect(ready).resolves.toBe("listening");
+  });
+
+  it("still reports a child exit after the HTTP probe times out", async () => {
+    const listening = Promise.withResolvers<void>();
+    const ready = waitForBackendStartupReady({
+      listeningPromise: listening.promise,
+      waitForHttpReady: async () => {
+        throw new BackendReadinessTimeoutError("http://localhost");
+      },
+      cancelHttpWait: vi.fn(),
+    });
+    await Promise.resolve();
+    listening.reject(new Error("backend exited"));
+    await expect(ready).rejects.toThrow("backend exited");
+  });
+
   it("falls back to the HTTP probe when no listening signal exists", async () => {
     const waitForHttpReady = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
     const cancelHttpWait = vi.fn();

@@ -308,15 +308,46 @@ export const repairContextHandoffRuntimeSessions = Effect.fn("repairContextHando
   },
 );
 
-// Development worktrees can likewise share a database that already recorded
-// different migrations 044 through 047. Re-run these idempotent projection
-// migrations after the ledger pass so startup cannot query a partially migrated
-// read model.
+// Unlike schema checks, the summary backfill scans the entire activity history.
+// Track its successful compatibility repair separately from the divergent
+// numerical migration ledger, and commit the marker with the repaired data.
+export const repairProjectionThreadSummaryState = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS ryco_compatibility_repairs (
+      repair_key TEXT PRIMARY KEY
+    )
+  `;
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      const completed = yield* sql`
+      SELECT repair_key FROM ryco_compatibility_repairs
+      WHERE repair_key = 'projection-thread-summary-v1'
+    `;
+      const objects = yield* sql`
+      SELECT name FROM sqlite_master WHERE name IN (
+        'projection_thread_user_input_requests',
+        'idx_projection_thread_user_input_requests_thread_pending',
+        'idx_projection_thread_proposed_plans_thread_turn_updated'
+      )
+    `;
+      if (completed.length > 0 && objects.length === 3) return;
+      yield* Migration0044;
+      yield* sql`
+      INSERT OR IGNORE INTO ryco_compatibility_repairs (repair_key)
+      VALUES ('projection-thread-summary-v1')
+    `;
+    }),
+  );
+});
+
+// Worktrees can record different migrations 044 through 047. Preserve schema
+// recovery without replaying the expensive data backfill on every startup.
 export const repairProjectionThreadReadModelMigrations = Effect.fn(
   "repairProjectionThreadReadModelMigrations",
 )(function* (toMigrationInclusive: number) {
   if (toMigrationInclusive >= 44) {
-    yield* Migration0044;
+    yield* repairProjectionThreadSummaryState;
   }
   if (toMigrationInclusive >= 45) {
     yield* Migration0045;

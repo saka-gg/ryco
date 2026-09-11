@@ -522,7 +522,7 @@ export const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig;
 
-    fixPath();
+    fixPath({ inheritedFromDesktop: config.mode === "desktop" });
 
     const httpListeningLayer = Layer.effectDiscard(
       Effect.gen(function* () {

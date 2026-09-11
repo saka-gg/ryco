@@ -3,6 +3,17 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { fixPath } from "./os-jank.ts";
 
 describe("fixPath", () => {
+  it("preserves the desktop environment without running another shell", () => {
+    const env = { PATH: "/desktop/tools:/usr/bin" };
+    const readPath = vi.fn();
+    const readWindowsEnvironment = vi.fn();
+    for (const platform of ["darwin", "linux", "win32"] as const) {
+      fixPath({ env, platform, inheritedFromDesktop: true, readPath, readWindowsEnvironment });
+    }
+    expect(readPath).not.toHaveBeenCalled();
+    expect(readWindowsEnvironment).not.toHaveBeenCalled();
+    expect(env.PATH).toBe("/desktop/tools:/usr/bin");
+  });
   it("hydrates PATH on linux using the resolved login shell", () => {
     const env: NodeJS.ProcessEnv = {
       SHELL: "/bin/zsh",

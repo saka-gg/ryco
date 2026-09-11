@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ComputerBrowser, ComputerUsePolicy, ComputerUseState } from "@ryco/contracts";
 import {
   MonitorIcon,
@@ -55,6 +55,7 @@ export function ComputerUseSettings() {
   const [pairing, setPairing] = useState<string | null>(null);
   const [pairingBrowser, setPairingBrowser] = useState<ComputerBrowser | null>(null);
   const [extensionDirectory, setExtensionDirectory] = useState<string | null>(null);
+  const permissionCheckRequested = useRef(false);
   const { copyToClipboard, isCopied } = useCopyToClipboard({
     onError: () => setError("Could not copy. Select the text and copy it manually."),
   });
@@ -62,11 +63,11 @@ export function ComputerUseSettings() {
     if (!api) return;
     let mounted = true;
     let pending = false;
-    const recheck = async () => {
+    const recheck = async (permissions = false) => {
       if (pending || !mounted) return;
       pending = true;
       try {
-        const value = await api.getState();
+        const value = await (permissions ? api.checkPermissions() : api.getState());
         if (mounted) setState(value);
       } catch {
         if (mounted) setError("Computer-use settings could not be loaded.");
@@ -76,29 +77,23 @@ export function ComputerUseSettings() {
     };
     void recheck();
     const focus = () => {
-      void recheck();
+      if (permissionCheckRequested.current) void recheck(true);
     };
     const visible = () => {
-      if (document.visibilityState === "visible") void recheck();
+      if (document.visibilityState === "visible") focus();
     };
     window.addEventListener("focus", focus);
     document.addEventListener("visibilitychange", visible);
-    const timer = state?.policy.enabled
-      ? setInterval(() => {
-          if (document.visibilityState === "visible" && document.hasFocus()) void recheck();
-        }, 3_000)
-      : undefined;
     const unsubscribe = api.onState((value) => {
       if (mounted) setState(value);
     });
     return () => {
       mounted = false;
       unsubscribe();
-      clearInterval(timer);
       window.removeEventListener("focus", focus);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, [api, state?.policy.enabled]);
+  }, [api]);
   if (!api) return null;
   const run = async (operation: () => Promise<unknown>) => {
     setBusy(true);
@@ -115,8 +110,16 @@ export function ComputerUseSettings() {
     if (state)
       void run(async () => {
         setState(await api.setPolicy({ ...state.policy, ...patch }));
+        if (patch.enabled !== undefined) {
+          permissionCheckRequested.current = patch.enabled;
+          if (patch.enabled) setState(await api.checkPermissions());
+        }
         setPairing(null);
       });
+  };
+  const requestPermission = (kind: "accessibility" | "screenRecording") => {
+    permissionCheckRequested.current = true;
+    void run(() => api.requestPermission(kind));
   };
   const appEntries = new Map(
     Object.keys(state?.policy.apps ?? {}).map((id) => [
@@ -190,7 +193,8 @@ export function ComputerUseSettings() {
                   disabled={busy}
                   onClick={() =>
                     void run(async () => {
-                      setState(await api.getState());
+                      permissionCheckRequested.current = true;
+                      setState(await api.checkPermissions());
                     })
                   }
                 >
@@ -202,7 +206,7 @@ export function ComputerUseSettings() {
                   size="sm"
                   variant="outline"
                   disabled={busy}
-                  onClick={() => void run(() => api.requestPermission("accessibility"))}
+                  onClick={() => requestPermission("accessibility")}
                 >
                   Accessibility{" "}
                   <PermissionBadge
@@ -214,7 +218,7 @@ export function ComputerUseSettings() {
                   size="sm"
                   variant="outline"
                   disabled={busy}
-                  onClick={() => void run(() => api.requestPermission("screenRecording"))}
+                  onClick={() => requestPermission("screenRecording")}
                 >
                   Screen recording{" "}
                   <PermissionBadge

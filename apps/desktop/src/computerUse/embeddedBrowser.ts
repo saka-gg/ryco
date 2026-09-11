@@ -19,7 +19,7 @@ interface TabEntry {
 export class EmbeddedComputerBrowser implements BrowserTransport {
   private readonly entries = new Map<string, TabEntry>();
   private readonly listeners = new Set<(state: ProjectBrowserState) => void>();
-  private readonly profile = session.fromPartition("persist:ryco-computer-browser");
+  private profile: Electron.Session | null = null;
   private readonly owners = new WeakSet<BrowserWindow>();
   private readonly focusListeners = new Set<(tab: string) => void>();
   onFocusAddress(listener: (tab: string) => void): () => void {
@@ -31,10 +31,14 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const [width = 1280, height = 850] = entry.host.getContentSize();
     entry.view.setBounds({ x: 0, y: 0, width, height });
   }
-  constructor() {
-    this.profile.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-    this.profile.setPermissionCheckHandler(() => false);
-    this.profile.on("will-download", (event) => event.preventDefault());
+  private getProfile(): Electron.Session {
+    if (this.profile) return this.profile;
+    const profile = session.fromPartition("persist:ryco-computer-browser");
+    profile.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    profile.setPermissionCheckHandler(() => false);
+    profile.on("will-download", (event) => event.preventDefault());
+    this.profile = profile;
+    return profile;
   }
   onState(listener: (state: ProjectBrowserState) => void): () => void {
     this.listeners.add(listener);
@@ -86,7 +90,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     });
     const view = new WebContentsView({
       webPreferences: {
-        session: this.profile,
+        session: this.getProfile(),
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,

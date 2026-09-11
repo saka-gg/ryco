@@ -1,4 +1,4 @@
-import { isBackendReadinessAborted } from "./backendReadiness.ts";
+import { BackendReadinessTimeoutError, isBackendReadinessAborted } from "./backendReadiness.ts";
 
 export interface WaitForBackendStartupReadyOptions {
   readonly listeningPromise?: Promise<void> | null;
@@ -52,6 +52,9 @@ export async function waitForBackendStartupReady(
     httpReadyPromise.then(
       () => settleResolve("http"),
       (error) => {
+        // A slow but living child can still announce readiness after the HTTP
+        // probe budget expires. Its exit/error signal remains authoritative.
+        if (error instanceof BackendReadinessTimeoutError) return;
         if (settled && isBackendReadinessAborted(error)) {
           return;
         }
