@@ -9,6 +9,8 @@ import {
   AttachmentVideo,
   isVideoAttachmentMimeType,
 } from "./AttachmentVideo";
+import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
+import { formatAttachmentBytes } from "./attachmentPreview";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 
 const AttachmentAudio = memo(function AttachmentAudio({
@@ -43,7 +45,7 @@ interface AttachmentContext {
 const LoadableAttachment = memo(function LoadableAttachment(
   props: AttachmentContext & {
     attachment: ChatAttachment;
-    children: (attachment: ChatAttachment) => ReactNode;
+    children: (attachment: ChatAttachment, loaded: boolean) => ReactNode;
   },
 ) {
   const [source, setSource] = useState<string>();
@@ -67,7 +69,10 @@ const LoadableAttachment = memo(function LoadableAttachment(
     !props.messageId ||
     (!isChatImageAttachment(attachment) && !isChatFileAttachment(attachment))
   ) {
-    return props.children(source ? { ...attachment, previewUrl: source } : attachment);
+    return props.children(
+      source ? { ...attachment, previewUrl: source } : attachment,
+      Boolean(source),
+    );
   }
   const load = async () => {
     if (resources.current.controller && !resources.current.controller.signal.aborted) return;
@@ -114,7 +119,7 @@ const LoadableAttachment = memo(function LoadableAttachment(
           ? "Loading…"
           : failed
             ? "Could not load file. Click to retry."
-            : `Load file · ${Math.ceil(attachment.sizeBytes / 1024)} KB`}
+            : `Open file · ${formatAttachmentBytes(attachment.sizeBytes)}`}
       </span>
     </button>
   );
@@ -138,11 +143,11 @@ export const MessageAttachments = memo(function MessageAttachments(
     >
       {props.attachments.map((attachment, index) => (
         <div
-          key={`${props.environmentId}:${props.messageId}:${attachment.id ?? index}`}
+          key={`${props.environmentId}:${props.threadId}:${props.messageId}:${attachment.id ?? index}`}
           className="max-w-full overflow-hidden rounded-lg border border-border/80 bg-background/70"
         >
           <LoadableAttachment {...props} attachment={attachment}>
-            {(attachment) =>
+            {(attachment, loaded) =>
               isChatImageAttachment(attachment) && attachment.previewUrl ? (
                 <div>
                   <button
@@ -194,7 +199,10 @@ export const MessageAttachments = memo(function MessageAttachments(
                 ) : attachment.mimeType.toLowerCase().startsWith("audio/") ? (
                   <AttachmentAudio attachment={attachment} />
                 ) : (
-                  <AttachmentFileRow attachment={attachment} />
+                  <div>
+                    <AttachmentPreviewButton attachment={attachment} initiallyOpen={loaded} />
+                    <AttachmentFileRow attachment={attachment} />
+                  </div>
                 )
               ) : (
                 <div className="px-3 py-3 text-xs text-muted-foreground">

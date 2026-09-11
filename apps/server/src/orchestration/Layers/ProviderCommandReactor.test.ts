@@ -2101,6 +2101,10 @@ describe("ProviderCommandReactor", () => {
       return thread?.session?.status === "stopped";
     });
 
+    // Session settlement is persisted before the failure activity. Wait for
+    // the entire command handler before asserting its durable side effects.
+    await harness.drain();
+
     const thread = (await harness.readModel()).threads.find(
       (entry) => entry.id === ThreadId.make("thread-1"),
     );

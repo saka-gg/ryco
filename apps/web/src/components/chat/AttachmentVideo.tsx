@@ -1,3 +1,4 @@
+import { formatAttachmentBytes } from "./attachmentPreview";
 import { memo, useState } from "react";
 import { FileIcon } from "lucide-react";
 import type { ChatFileAttachment, ChatUnknownAttachment } from "../../types";
@@ -20,7 +21,7 @@ export const AttachmentFileRow = memo(function AttachmentFileRow(props: {
 }) {
   const { attachment } = props;
   const sizeLabel =
-    attachment.sizeBytes !== undefined ? `${Math.ceil(attachment.sizeBytes / 1024)} KB` : null;
+    attachment.sizeBytes !== undefined ? formatAttachmentBytes(attachment.sizeBytes) : null;
   const body = (
     <>
       <FileIcon className="size-4 shrink-0 text-muted-foreground" />
