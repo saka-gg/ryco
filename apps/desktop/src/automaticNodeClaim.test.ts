@@ -84,6 +84,34 @@ describe("automatic Desktop node claim", () => {
     expect(test.control.commitNodeClaim).toHaveBeenCalledWith({ claim, result });
   });
 
+  it("reconnects the same active node after its account-managed label changes", async () => {
+    const test = harness();
+    const renamed = {
+      ...result,
+      disposition: "reconnected" as const,
+      node: { ...result.node, label: "Renamed Mac" },
+    };
+    vi.mocked(test.control.nodeClaimDescriptor).mockResolvedValue({
+      ...descriptor,
+      state: "active",
+    } as never);
+    vi.mocked(test.api.finishNativeNodeClaim).mockResolvedValue(renamed as never);
+    vi.mocked(test.control.commitNodeClaim).mockResolvedValue({
+      protocolVersion: 1,
+      status: "active",
+      result: renamed,
+    } as never);
+    await expect(
+      runDesktopAutomaticNodeClaim({
+        ...test,
+        installationId,
+        expectedHubOrigin: descriptor.hubOrigin,
+        expectedAccountId: claim.accountId,
+      }),
+    ).resolves.toEqual({ claim, result: renamed });
+    expect(test.control.commitNodeClaim).toHaveBeenCalledWith({ claim, result: renamed });
+  });
+
   it("refuses a substituted Hub origin or node result before child promotion", async () => {
     const origin = harness();
     await expect(

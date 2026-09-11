@@ -102,6 +102,7 @@ import * as JiraWorkItemService from "./atlassian/JiraWorkItemService.ts";
 import { AtlassianConnectionRepositoryLive } from "./persistence/Layers/AtlassianConnections.ts";
 import { AtlassianResourceRepositoryLive } from "./persistence/Layers/AtlassianResources.ts";
 import { ProjectAtlassianLinkRepositoryLive } from "./persistence/Layers/ProjectAtlassianLinks.ts";
+import { ProjectionProjectRepositoryLive } from "./persistence/Layers/ProjectionProjects.ts";
 import { ProjectionWorktreeRepositoryLive } from "./persistence/Layers/ProjectionWorktrees.ts";
 import { AgentControlAuditRepositoryLive } from "./persistence/Layers/AgentControlAudit.ts";
 import { AgentControlOperationRepositoryLive } from "./persistence/Layers/AgentControlOperations.ts";
@@ -391,6 +392,7 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
   Layer.provideMerge(AgentControlLayerLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ProjectionWorktreeRepositoryLive),
+  Layer.provideMerge(ProjectionProjectRepositoryLive),
   Layer.provideMerge(KeybindingsLive),
   Layer.provideMerge(ProviderRegistryLive),
   // The instance registry is the new routing keystone — text generation,

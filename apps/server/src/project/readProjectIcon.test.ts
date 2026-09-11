@@ -59,7 +59,7 @@ describe("project artwork over RPC", () => {
     const lookup = vi.fn(() => Effect.succeed(Option.none()));
     const authorize = vi.fn((_role, _method, effect) => effect);
     const handlers = makeProjectHandlers({
-      projectionSnapshotQuery: { getProjectShellById: lookup },
+      projectionProjects: Option.some({ getById: lookup }),
       withAccess: authorize,
     } as unknown as WsRpcContext);
     expect(
@@ -72,6 +72,6 @@ describe("project artwork over RPC", () => {
       WS_METHODS.projectsReadIcon,
       expect.anything(),
     );
-    expect(lookup).toHaveBeenCalledWith(project.id);
+    expect(lookup).toHaveBeenCalledWith({ projectId: project.id });
   });
 });

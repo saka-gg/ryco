@@ -42,26 +42,32 @@ export function ProjectFavicon(input: {
   const [artwork, setArtwork] = useState<{
     key: string;
     api: typeof api;
+    connection: typeof connection;
     source: string | null;
   } | null>(null);
   useEffect(() => {
     let current = true;
     if (api && projectId) {
-      void readProjectIconSource(api, projectId, revision, connection.connectedAt)
+      void readProjectIconSource(api, projectId, revision, connection)
         .then((source) => {
-          if (current) setArtwork({ key: requestKey, api, source });
+          if (current) setArtwork({ key: requestKey, api, connection, source });
         })
         .catch(() => {
-          if (current) setArtwork({ key: requestKey, api, source: null });
+          if (current) setArtwork({ key: requestKey, api, connection, source: null });
         });
     }
     return () => {
       current = false;
     };
-  }, [api, projectId, revision, requestKey, connection.connectedAt]);
+  }, [api, projectId, revision, requestKey, connection]);
   const src = (() => {
     if (rpcSupported && projectId)
-      return artwork?.key === requestKey && artwork.api === api && api ? artwork.source : null;
+      return artwork?.key === requestKey &&
+        artwork.api === api &&
+        artwork.connection === connection &&
+        api
+        ? artwork.source
+        : null;
     if (isHostedHubMode()) return null;
     try {
       if (input.customAvatarContentHash && input.projectId) {

@@ -61,6 +61,7 @@ import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdenti
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
+import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
 import { refreshWorktreeSourceControlState } from "../sourceControl/refreshWorktreeSourceControlState.ts";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
@@ -171,6 +172,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       openCodeMcp,
     ]);
     const startup = yield* ServerRuntimeStartup;
+    const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
     const projectFaviconResolver = yield* Effect.serviceOption(ProjectFaviconResolver);
     const projectAvatarStore = yield* Effect.serviceOption(ProjectAvatarStore);
     const workspaceEntries = yield* WorkspaceEntries;
@@ -766,6 +768,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       lifecycleEvents,
       serverSettings,
       mcpRegistry,
+      projectionProjects,
       projectFaviconResolver,
       projectAvatarStore,
       workspaceEntries,

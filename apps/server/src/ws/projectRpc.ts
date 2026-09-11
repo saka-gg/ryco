@@ -31,18 +31,22 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         "viewer",
         WS_METHODS.projectsReadIcon,
         Effect.gen(function* () {
-          const project = yield* ctx.projectionSnapshotQuery
-            .getProjectShellById(input.projectId)
+          if (Option.isNone(ctx.projectionProjects)) return null;
+          const project = yield* ctx.projectionProjects.value
+            .getById(input)
             .pipe(
               Effect.mapError(
                 () => new ProjectReadIconError({ message: "Could not load project artwork." }),
               ),
             );
-          if (Option.isNone(project)) return null;
-          return yield* readProjectIcon(project.value, {
-            favicon: Option.getOrNull(ctx.projectFaviconResolver),
-            avatar: Option.getOrNull(ctx.projectAvatarStore),
-          });
+          if (Option.isNone(project) || project.value.deletedAt !== null) return null;
+          return yield* readProjectIcon(
+            { ...project.value, id: project.value.projectId },
+            {
+              favicon: Option.getOrNull(ctx.projectFaviconResolver),
+              avatar: Option.getOrNull(ctx.projectAvatarStore),
+            },
+          );
         }),
       ),
     [WS_METHODS.projectsSearchEntries]: (input) =>

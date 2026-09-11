@@ -269,7 +269,11 @@ export function makeNodeNativeClaimService(options: {
           input.result.status !== "claimed" ||
           input.result.node.environmentId !== input.claim.environmentId ||
           input.result.node.fingerprint !== input.claim.nodeFingerprint ||
-          input.result.node.label !== expectedLabel ||
+          // An existing node keeps its account-managed name across OS-name changes and restarts.
+          (input.result.node.label !== expectedLabel &&
+            !(
+              validated.descriptor.state === "active" && input.result.disposition === "reconnected"
+            )) ||
           input.result.node.effectiveRole !== "owner"
         ) {
           return claimError("native_node_claim_conflict");

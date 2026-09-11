@@ -5,6 +5,7 @@ import { LRUCache } from "../lib/lruCache";
 const caches = new WeakMap<
   EnvironmentApi,
   {
+    generation: object | string | null;
     resolved: LRUCache<{ source: string | null; expiresAt: number }>;
     pending: Map<string, Promise<string | null>>;
   }
@@ -14,14 +15,14 @@ export function readProjectIconSource(
   api: EnvironmentApi,
   projectId: ProjectId,
   revision: string | null,
-  generation: string | null = null,
+  generation: object | string | null = null,
 ): Promise<string | null> {
   let cache = caches.get(api);
-  if (!cache) {
-    cache = { resolved: new LRUCache(64, 8 * 1024 * 1024), pending: new Map() };
+  if (!cache || cache.generation !== generation) {
+    cache = { generation, resolved: new LRUCache(64, 8 * 1024 * 1024), pending: new Map() };
     caches.set(api, cache);
   }
-  const key = JSON.stringify([projectId, revision, generation]);
+  const key = JSON.stringify([projectId, revision]);
   const cached = cache.resolved.get(key);
   if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.source);
   const pending = cache.pending.get(key);
