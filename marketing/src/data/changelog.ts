@@ -21,6 +21,66 @@ const RELEASE_BASE = "https://github.com/saka-gg/ryco/releases/tag";
  */
 export const CHANGELOG_RELEASES: ChangelogRelease[] = [
   {
+    version: "0.1.25",
+    date: "September 11, 2026",
+    dateTime: "2026-09-11",
+    summary:
+      "Desktop startup gets faster, local projects return reliably, and device customization and hosted Inbox preferences stay consistent.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.25`,
+    highlights: [
+      {
+        title: "Get back to your local projects",
+        summary:
+          "Startup restores access to existing local projects and preserves device preferences. The desktop app stays responsive and requests system permissions when you use the related feature.",
+      },
+      {
+        title: "Recognize every device",
+        summary:
+          "Device names stay consistent between settings and execution targets, and customizable icons help you recognize your devices across desktop, web, and mobile.",
+      },
+      {
+        title: "A more dependable hosted Inbox",
+        summary:
+          "Project artwork, snooze, and auto-settle work again on hosted nodes, with Inbox preferences retained after reloads. Centered device icons and larger project names make rows easier to scan.",
+      },
+    ],
+  },
+  {
+    version: "0.1.24",
+    date: "September 11, 2026",
+    dateTime: "2026-09-11",
+    summary:
+      "Cloud sign-in takes fewer steps, settings make their scope clearer, and mobile and desktop connections recover more reliably.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.24`,
+    highlights: [
+      {
+        title: "Simpler Cloud sign-in",
+        summary:
+          "GitHub sign-in restores saved accounts, uses the default Cloud address, and enrolls desktop nodes automatically. Devices select supported encryption and credential storage without manual setup.",
+      },
+      {
+        title: "Know which settings you are changing",
+        summary:
+          "This app and This browser preferences are separate from named-node settings. Appearance stays local, node configuration follows the selected node and its permissions, and advanced security controls live under Connections.",
+      },
+      {
+        title: "Reconnect and resume with confidence",
+        summary:
+          "Mobile and desktop connections recover after network interruptions and node or Hub restarts. Editing becomes available again after fresh authorization and synchronization.",
+      },
+      {
+        title: "More responsive desktop nodes",
+        summary:
+          "Slow project-icon reads no longer block core node services, and quitting the desktop app waits for its backend to stop. Local Mac development launchers also help Keychain retain access decisions across rebuilds.",
+      },
+      {
+        title: "Safer diagnostic exports",
+        summary:
+          "Sensitive authentication headers are redacted before HTTP traces are exported, keeping credentials out of shared diagnostics.",
+      },
+    ],
+  },
+  {
     version: "0.1.23",
     date: "September 9, 2026",
     dateTime: "2026-09-09",
