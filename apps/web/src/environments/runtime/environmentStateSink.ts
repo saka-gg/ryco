@@ -19,7 +19,17 @@ import {
   selectThreadsAcrossEnvironments,
 } from "~/store";
 import { useTerminalStateStore } from "~/terminalStateStore";
-import { useUiStateStore } from "~/uiStateStore";
+import { useUiStateStore, type UiSyncScope } from "~/uiStateStore";
+
+function readUiSyncScope(): UiSyncScope {
+  return {
+    authoritativeEnvironmentIds: new Set(
+      Object.entries(useStore.getState().environmentStateById)
+        .filter(([, state]) => state.bootstrapComplete)
+        .map(([environmentId]) => environmentId),
+    ),
+  };
+}
 
 /** Web presentation adapter. Every operation preserves the former store-write order. */
 export function createWebEnvironmentStateSink(input: {
@@ -105,25 +115,8 @@ export function createWebEnvironmentStateSink(input: {
       });
       useTerminalStateStore.getState().removeOrphanedTerminalStates(activeThreadKeys);
     },
-    syncProjects: () => {
-      const clientSettings = getClientSettings();
-      useUiStateStore.getState().syncProjects(
-        selectProjectsAcrossEnvironments(useStore.getState()).map((project) => ({
-          key: derivePhysicalProjectKey(project),
-          logicalKey: deriveLogicalProjectKeyFromSettings(project, clientSettings),
-          cwd: project.cwd,
-        })),
-      );
-    },
-    syncThreads: () => {
-      const threads = selectThreadsAcrossEnvironments(useStore.getState());
-      useUiStateStore.getState().syncThreads(
-        threads.map((thread) => ({
-          key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-          seedVisitedAt: thread.updatedAt ?? thread.createdAt,
-        })),
-      );
-    },
+    syncProjects: syncProjectUiFromStore,
+    syncThreads: syncThreadUiFromStore,
     clearThreadDraft: (ref) => {
       useComposerDraftStore.getState().clearDraftThread(ref);
       useUiStateStore.getState().clearThreadUi(scopedThreadKey(ref));
@@ -145,6 +138,7 @@ function syncProjectUiFromStore() {
       logicalKey: deriveLogicalProjectKeyFromSettings(project, clientSettings),
       cwd: project.cwd,
     })),
+    readUiSyncScope(),
   );
 }
 
@@ -155,6 +149,7 @@ function syncThreadUiFromStore() {
       key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
       seedVisitedAt: thread.updatedAt ?? thread.createdAt,
     })),
+    readUiSyncScope(),
   );
   markPromotedDraftThreadsByRef(
     threads.map((thread) => scopeThreadRef(thread.environmentId, thread.id)),

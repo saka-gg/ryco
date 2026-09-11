@@ -30,6 +30,7 @@ import {
   type OrchestrationWorktreeShell,
   ModelSelection,
   ProjectId,
+  type RepositoryIdentity,
   ThreadId,
   ThreadGoal,
   TurnDispatchMode,
@@ -505,6 +506,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     projectRows: ReadonlyArray<Schema.Schema.Type<typeof ProjectionProjectDbRowSchema>>,
     options?: {
       readonly includeDeleted?: boolean;
+      readonly timeoutMs?: number;
     },
   ) {
     const filteredProjectRows =
@@ -512,16 +514,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ? projectRows
         : projectRows.filter((row) => row.deletedAt === null);
     const uniqueWorkspaceRoots = [...new Set(filteredProjectRows.map((row) => row.workspaceRoot))];
-    const repositoryIdentityByWorkspaceRoot = new Map(
-      yield* Effect.forEach(
-        uniqueWorkspaceRoots,
-        (workspaceRoot) =>
-          repositoryIdentityResolver
-            .resolve(workspaceRoot)
-            .pipe(Effect.map((identity) => [workspaceRoot, identity] as const)),
-        { concurrency: repositoryIdentityResolutionConcurrency },
-      ),
+    const repositoryIdentityByWorkspaceRoot = new Map<string, RepositoryIdentity | null>();
+    const resolveIdentities = Effect.forEach(
+      uniqueWorkspaceRoots,
+      (workspaceRoot) =>
+        repositoryIdentityResolver.resolve(workspaceRoot).pipe(
+          Effect.tap((identity) =>
+            Effect.sync(() => {
+              repositoryIdentityByWorkspaceRoot.set(workspaceRoot, identity);
+            }),
+          ),
+        ),
+      { concurrency: repositoryIdentityResolutionConcurrency, discard: true },
     );
+    // Git enrichment is optional. A slow/offline filesystem must not hide the
+    // persisted catalog, and the budget covers all roots rather than each batch.
+    yield* options?.timeoutMs === undefined
+      ? resolveIdentities
+      : resolveIdentities.pipe(Effect.timeoutOption(options.timeoutMs));
 
     return new Map(
       filteredProjectRows.map((row) => [
@@ -2381,8 +2391,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
               }
 
-              const repositoryIdentities =
-                yield* resolveRepositoryIdentitiesForProjects(projectRows);
+              const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
+                projectRows,
+                { timeoutMs: 1_000 },
+              );
               const latestTurnByThread = new Map(
                 latestTurnRows.map((row) => [row.threadId, mapLatestTurn(row)] as const),
               );

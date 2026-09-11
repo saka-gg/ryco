@@ -120,6 +120,17 @@ export interface SyncProjectInput {
   cwd: string;
 }
 
+export interface UiSyncScope {
+  /** Only a current live catalog can establish that a saved item was deleted. */
+  readonly authoritativeEnvironmentIds: ReadonlySet<string>;
+}
+
+function retainMissingScopedKey(key: string, scope: UiSyncScope | undefined): boolean {
+  if (!scope) return false;
+  const separator = key.indexOf(":");
+  return separator <= 0 || !scope.authoritativeEnvironmentIds.has(key.slice(0, separator));
+}
+
 export interface SyncThreadInput {
   key: string;
   seedVisitedAt?: string | undefined;
@@ -679,24 +690,32 @@ function nestedBooleanRecordsEqual(
   return true;
 }
 
-export function syncProjects(state: UiState, projects: readonly SyncProjectInput[]): UiState {
+export function syncProjects(
+  state: UiState,
+  projects: readonly SyncProjectInput[],
+  scope?: UiSyncScope,
+): UiState {
   const previousProjectCwdById = new Map(currentProjectCwdById);
   const previousLogicalKeyByPhysicalKey = new Map(currentLogicalKeyByPhysicalKey);
-  currentProjectCwdById.clear();
-  currentLogicalKeyByPhysicalKey.clear();
+  for (const key of currentProjectCwdById.keys()) {
+    if (retainMissingScopedKey(key, scope)) continue;
+    currentProjectCwdById.delete(key);
+    currentLogicalKeyByPhysicalKey.delete(key);
+  }
   for (const project of projects) {
     currentProjectCwdById.set(project.key, project.cwd);
     currentLogicalKeyByPhysicalKey.set(project.key, project.logicalKey);
   }
   currentProjectCwdsByLogicalKey.clear();
-  for (const project of projects) {
-    const cwds = currentProjectCwdsByLogicalKey.get(project.logicalKey);
+  for (const [key, cwd] of currentProjectCwdById) {
+    const logicalKey = currentLogicalKeyByPhysicalKey.get(key)!;
+    const cwds = currentProjectCwdsByLogicalKey.get(logicalKey);
     if (cwds) {
-      if (!cwds.includes(project.cwd)) {
-        cwds.push(project.cwd);
+      if (!cwds.includes(cwd)) {
+        cwds.push(cwd);
       }
     } else {
-      currentProjectCwdsByLogicalKey.set(project.logicalKey, [project.cwd]);
+      currentProjectCwdsByLogicalKey.set(logicalKey, [cwd]);
     }
   }
   // Build reverse map: for each new logical key, which previous logical keys
@@ -720,7 +739,13 @@ export function syncProjects(state: UiState, projects: readonly SyncProjectInput
     previousProjectCwdById.size !== currentProjectCwdById.size ||
     projects.some((project) => previousProjectCwdById.get(project.key) !== project.cwd);
 
-  const nextExpandedById: Record<string, boolean> = {};
+  const nextExpandedById: Record<string, boolean> = Object.fromEntries(
+    [...previousLogicalKeyByPhysicalKey].flatMap(([key, logicalKey]) =>
+      retainMissingScopedKey(key, scope) && logicalKey in state.projectExpandedById
+        ? [[logicalKey, state.projectExpandedById[logicalKey]!]]
+        : [],
+    ),
+  );
   const previousExpandedById = state.projectExpandedById;
   const persistedOrderByCwd = new Map(
     persistedProjectOrderCwds.map((cwd, index) => [cwd, index] as const),
@@ -778,6 +803,7 @@ export function syncProjects(state: UiState, projects: readonly SyncProjectInput
           for (const projectId of state.projectOrder) {
             const matchedProjectId =
               (currentProjectIds.has(projectId) ? projectId : undefined) ??
+              (retainMissingScopedKey(projectId, scope) ? projectId : undefined) ??
               (() => {
                 const previousCwd = previousProjectCwdById.get(projectId);
                 return previousCwd ? nextProjectIdByCwd.get(previousCwd) : undefined;
@@ -823,8 +849,9 @@ export function syncProjects(state: UiState, projects: readonly SyncProjectInput
         folderId,
         {
           ...folder,
-          projectKeys: folder.projectKeys.filter((projectKey) =>
-            currentProjectKeySet.has(projectKey),
+          projectKeys: folder.projectKeys.filter(
+            (projectKey) =>
+              currentProjectKeySet.has(projectKey) || retainMissingScopedKey(projectKey, scope),
           ),
         },
       ] as const,
@@ -870,15 +897,19 @@ export function syncProjects(state: UiState, projects: readonly SyncProjectInput
   };
 }
 
-export function syncThreads(state: UiState, threads: readonly SyncThreadInput[]): UiState {
+export function syncThreads(
+  state: UiState,
+  threads: readonly SyncThreadInput[],
+  scope?: UiSyncScope,
+): UiState {
   const retainedThreadIds = new Set(threads.map((thread) => thread.key));
+  const retainThread = (key: string) =>
+    retainedThreadIds.has(key) || retainMissingScopedKey(key, scope);
   const nextPinnedThreadKeys = Object.fromEntries(
-    Object.entries(state.pinnedThreadKeys).filter(([threadId]) => retainedThreadIds.has(threadId)),
+    Object.entries(state.pinnedThreadKeys).filter(([threadId]) => retainThread(threadId)),
   );
   const nextThreadLastVisitedAtById = Object.fromEntries(
-    Object.entries(state.threadLastVisitedAtById).filter(([threadId]) =>
-      retainedThreadIds.has(threadId),
-    ),
+    Object.entries(state.threadLastVisitedAtById).filter(([threadId]) => retainThread(threadId)),
   );
   for (const thread of threads) {
     if (
@@ -891,22 +922,20 @@ export function syncThreads(state: UiState, threads: readonly SyncThreadInput[])
   }
   const nextThreadChangedFilesExpandedById = Object.fromEntries(
     Object.entries(state.threadChangedFilesExpandedById).filter(([threadId]) =>
-      retainedThreadIds.has(threadId),
+      retainThread(threadId),
     ),
   );
   const nextThreadWorkEntryExpandedById = Object.fromEntries(
     Object.entries(state.threadWorkEntryExpandedById).filter(([threadId]) =>
-      retainedThreadIds.has(threadId),
+      retainThread(threadId),
     ),
   );
   const nextThreadTurnFoldExpandedById = Object.fromEntries(
-    Object.entries(state.threadTurnFoldExpandedById).filter(([threadId]) =>
-      retainedThreadIds.has(threadId),
-    ),
+    Object.entries(state.threadTurnFoldExpandedById).filter(([threadId]) => retainThread(threadId)),
   );
   const nextThreadWorkGroupExpandedById = Object.fromEntries(
     Object.entries(state.threadWorkGroupExpandedById).filter(([threadId]) =>
-      retainedThreadIds.has(threadId),
+      retainThread(threadId),
     ),
   );
   if (
@@ -1519,8 +1548,8 @@ export function reorderProjectTreeItem(
 
 interface UiStateStore extends UiState {
   setSidebarMode: (mode: SidebarMode) => void;
-  syncProjects: (projects: readonly SyncProjectInput[]) => void;
-  syncThreads: (threads: readonly SyncThreadInput[]) => void;
+  syncProjects: (projects: readonly SyncProjectInput[], scope: UiSyncScope) => void;
+  syncThreads: (threads: readonly SyncThreadInput[], scope: UiSyncScope) => void;
   markThreadVisited: (threadId: string, visitedAt?: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadPinned: (threadId: string, pinned: boolean) => void;
@@ -1564,8 +1593,8 @@ interface UiStateStore extends UiState {
 export const useUiStateStore = create<UiStateStore>((set) => ({
   ...readPersistedState(),
   setSidebarMode: (sidebarMode) => set({ sidebarMode }),
-  syncProjects: (projects) => set((state) => syncProjects(state, projects)),
-  syncThreads: (threads) => set((state) => syncThreads(state, threads)),
+  syncProjects: (projects, scope) => set((state) => syncProjects(state, projects, scope)),
+  syncThreads: (threads, scope) => set((state) => syncThreads(state, threads, scope)),
   markThreadVisited: (threadId, visitedAt) =>
     set((state) => markThreadVisited(state, threadId, visitedAt)),
   markThreadUnread: (threadId, latestTurnCompletedAt) =>

@@ -731,6 +731,75 @@ describe("uiStateStore pure functions", () => {
     expect(next.projectFolderOrder).toEqual(["folder-wordpress"]);
   });
 
+  it("preserves local folders and order while another node loads first", () => {
+    const local = { key: "local:/work", logicalKey: "local:/work", cwd: "/work" };
+    const remote = { key: "remote:/other", logicalKey: "remote:/other", cwd: "/other" };
+    const initial = createProjectFolder(
+      syncProjects(makeUiState(), [local, remote]),
+      "My projects",
+      [local.key, remote.key],
+      { folderId: "saved-folder", now: "2026-09-11T00:00:00.000Z" },
+    );
+    const waiting = syncProjects(initial, [remote], {
+      authoritativeEnvironmentIds: new Set(["remote"]),
+    });
+    expect(waiting.projectFoldersById["saved-folder"]?.projectKeys).toEqual([
+      local.key,
+      remote.key,
+    ]);
+    expect(waiting.projectOrder).toEqual(initial.projectOrder);
+
+    const restored = syncProjects(waiting, [remote, local], {
+      authoritativeEnvironmentIds: new Set(["local", "remote"]),
+    });
+    expect(restored.projectFoldersById["saved-folder"]?.projectKeys).toEqual([
+      local.key,
+      remote.key,
+    ]);
+    const deleted = syncProjects(restored, [remote], {
+      authoritativeEnvironmentIds: new Set(["local", "remote"]),
+    });
+    expect(deleted.projectFoldersById["saved-folder"]?.projectKeys).toEqual([remote.key]);
+  });
+
+  it("preserves unloaded and cached node preferences through persistence until a live catalog arrives", () => {
+    const initial = createProjectFolder(
+      makeUiState({
+        pinnedThreadKeys: { "local:previous": true, "remote:removed": true },
+        threadLastVisitedAtById: { "local:previous": "2026-09-10T00:00:00.000Z" },
+        threadChangedFilesExpandedById: { "local:previous": { turn: false } },
+      }),
+      "My projects",
+      ["local:/work"],
+      { folderId: "saved-folder", now: "2026-09-11T00:00:00.000Z" },
+    );
+    const cachedScope = { authoritativeEnvironmentIds: new Set<string>() };
+    const waiting = syncThreads(syncProjects(initial, [], cachedScope), [], cachedScope);
+    vi.stubGlobal("window", { localStorage: createLocalStorageStub() });
+    try {
+      persistState(waiting);
+      const persisted = readPersistedState();
+      expect(persisted.projectFoldersById["saved-folder"]?.projectKeys).toEqual(["local:/work"]);
+      expect(persisted.pinnedThreadKeys).toEqual(initial.pinnedThreadKeys);
+      expect(persisted.threadChangedFilesExpandedById).toEqual(
+        initial.threadChangedFilesExpandedById,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    const remoteLoaded = syncThreads(waiting, [], {
+      authoritativeEnvironmentIds: new Set(["remote"]),
+    });
+    expect(remoteLoaded.pinnedThreadKeys).toEqual({ "local:previous": true });
+    expect(remoteLoaded.threadLastVisitedAtById).toEqual(initial.threadLastVisitedAtById);
+    const localLoaded = syncThreads(remoteLoaded, [], {
+      authoritativeEnvironmentIds: new Set(["local", "remote"]),
+    });
+    expect(localLoaded.pinnedThreadKeys).toEqual({});
+    expect(localLoaded.threadLastVisitedAtById).toEqual({});
+  });
+
   it("syncProjects preserves folder membership across project id churn at the same physical key", () => {
     const physicalKey = "env-local:/tmp/project";
     const initialState = createProjectFolder(

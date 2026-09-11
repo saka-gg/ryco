@@ -92,6 +92,7 @@ function buildRepositoryIdentity(input: {
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
 const DEFAULT_POSITIVE_CACHE_TTL = Duration.minutes(1);
 const DEFAULT_NEGATIVE_CACHE_TTL = Duration.minutes(1);
+const GIT_IDENTITY_PROBE_TIMEOUT_MS = 1_000;
 
 interface RepositoryIdentityResolverOptions {
   readonly cacheCapacity?: number;
@@ -99,26 +100,25 @@ interface RepositoryIdentityResolverOptions {
   readonly negativeCacheTtl?: Duration.Input;
 }
 
-async function resolveRepositoryIdentityCacheKey(cwd: string): Promise<string> {
-  let cacheKey = cwd;
-
+async function resolveRepositoryIdentityCacheKey(cwd: string): Promise<string | null> {
   try {
     const topLevelResult = await runProcess("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
       allowNonZeroExit: true,
+      timeoutMs: GIT_IDENTITY_PROBE_TIMEOUT_MS,
     });
-    if (topLevelResult.code !== 0) {
-      return cacheKey;
+    if (topLevelResult.timedOut || topLevelResult.code !== 0) {
+      return null;
     }
 
     const candidate = topLevelResult.stdout.trim();
     if (candidate.length > 0) {
-      cacheKey = candidate;
+      return candidate;
     }
   } catch {
-    return cacheKey;
+    return null;
   }
 
-  return cacheKey;
+  return null;
 }
 
 async function resolveRepositoryIdentityFromCacheKey(
@@ -127,8 +127,9 @@ async function resolveRepositoryIdentityFromCacheKey(
   try {
     const remoteResult = await runProcess("git", ["-C", cacheKey, "remote", "-v"], {
       allowNonZeroExit: true,
+      timeoutMs: GIT_IDENTITY_PROBE_TIMEOUT_MS,
     });
-    if (remoteResult.code !== 0) {
+    if (remoteResult.timedOut || remoteResult.code !== 0) {
       return null;
     }
 
@@ -142,6 +143,19 @@ async function resolveRepositoryIdentityFromCacheKey(
 
 export const makeRepositoryIdentityResolver = Effect.fn("makeRepositoryIdentityResolver")(
   function* (options: RepositoryIdentityResolverOptions = {}) {
+    const workspaceRootCache = yield* Cache.makeWith<string, string | null>(
+      (cwd) => Effect.promise(() => resolveRepositoryIdentityCacheKey(cwd)),
+      {
+        capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
+        timeToLive: Exit.match({
+          onSuccess: (value) =>
+            value === null
+              ? (options.negativeCacheTtl ?? DEFAULT_NEGATIVE_CACHE_TTL)
+              : (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL),
+          onFailure: () => Duration.zero,
+        }),
+      },
+    );
     const repositoryIdentityCache = yield* Cache.makeWith<string, RepositoryIdentity | null>(
       (cacheKey) => Effect.promise(() => resolveRepositoryIdentityFromCacheKey(cacheKey)),
       {
@@ -159,7 +173,8 @@ export const makeRepositoryIdentityResolver = Effect.fn("makeRepositoryIdentityR
     const resolve: RepositoryIdentityResolverShape["resolve"] = Effect.fn(
       "RepositoryIdentityResolver.resolve",
     )(function* (cwd) {
-      const cacheKey = yield* Effect.promise(() => resolveRepositoryIdentityCacheKey(cwd));
+      const cacheKey = yield* Cache.get(workspaceRootCache, cwd);
+      if (cacheKey === null) return null;
       return yield* Cache.get(repositoryIdentityCache, cacheKey);
     });
 

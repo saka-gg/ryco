@@ -9,7 +9,8 @@ import {
   ProviderInstanceId,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Effect, Fiber, Layer, Option } from "effect";
+import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -33,6 +34,75 @@ const projectionSnapshotLayer = it.layer(
     Layer.provideMerge(SqlitePersistenceMemory),
   ),
 );
+
+it.effect("loads every project and its history when optional Git identity probes stall", () => {
+  const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provideMerge(
+      Layer.succeed(RepositoryIdentityResolver, {
+        resolve: (cwd) =>
+          cwd === "/tmp/available"
+            ? Effect.succeed({
+                canonicalKey: "github.com/acme/available",
+                locator: {
+                  source: "git-remote" as const,
+                  remoteName: "origin",
+                  remoteUrl: "https://github.com/acme/available.git",
+                },
+                rootPath: cwd,
+              })
+            : Effect.never,
+      }),
+    ),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const query = yield* ProjectionSnapshotQuery;
+    // More roots than the probe concurrency: queued projects must also survive.
+    for (let index = 0; index < 12; index++) {
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, created_at, updated_at
+        ) VALUES (
+          ${`project-${index}`}, ${`Project ${index}`},
+          ${index === 0 ? "/tmp/available" : `/tmp/unavailable-${index}`},
+          '{"provider":"codex","model":"gpt-5-codex"}', '[]',
+          '2026-09-11T00:00:00.000Z', '2026-09-11T00:00:00.000Z'
+        )
+      `;
+    }
+    yield* sql`
+      INSERT INTO projection_threads (
+        thread_id, project_id, title, model_selection_json, runtime_mode,
+        interaction_mode, created_at, updated_at
+      ) VALUES (
+        'previous-thread', 'project-11', 'Previous conversation',
+        '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+        '2026-09-11T00:00:00.000Z', '2026-09-11T00:00:00.000Z'
+      )
+    `;
+
+    const queryFiber = yield* query
+      .getShellSnapshot()
+      .pipe(Effect.timeoutOption("2 seconds"), Effect.forkChild);
+    yield* TestClock.adjust("2 seconds");
+    const result = yield* Fiber.join(queryFiber);
+    assert.isTrue(Option.isSome(result), "Git metadata must not block the local catalog");
+    if (Option.isNone(result)) return;
+    assert.equal(result.value.projects.length, 12);
+    assert.equal(
+      result.value.projects.find((project) => project.id === "project-0")?.repositoryIdentity
+        ?.canonicalKey,
+      "github.com/acme/available",
+    );
+    assert.isNull(
+      result.value.projects.find((project) => project.id === "project-11")?.repositoryIdentity,
+    );
+    assert.equal(result.value.threads[0]?.title, "Previous conversation");
+  }).pipe(Effect.provide(layer));
+});
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
