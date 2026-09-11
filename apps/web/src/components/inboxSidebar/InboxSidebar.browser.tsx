@@ -229,6 +229,18 @@ describe("Inbox sidebar rendering and settlement", () => {
           '[data-testid="inbox-thread-row-shell"]',
         )!;
         const popup = document.querySelector<HTMLElement>('[data-slot="tooltip-popup"]')!;
+        const contextHeader = rowElement.firstElementChild as HTMLElement;
+        const deviceIcon = contextHeader.querySelector("[data-device-icon]")!;
+        for (const width of [240, 280, 320, 480]) {
+          host.style.width = `${width}px`;
+          const headerBounds = contextHeader.getBoundingClientRect();
+          const iconBounds = deviceIcon.getBoundingClientRect();
+          expect(headerBounds.height).toBeLessThanOrEqual(18);
+          expect(iconBounds.top).toBeGreaterThanOrEqual(headerBounds.top);
+          expect(iconBounds.bottom).toBeLessThanOrEqual(headerBounds.bottom);
+          expect(rowElement.scrollWidth).toBeLessThanOrEqual(rowElement.clientWidth);
+        }
+        host.style.width = "320px";
         expect(getComputedStyle(rowElement).willChange).toBe("auto");
         expect(getComputedStyle(rowShell).contentVisibility).toBe("auto");
         expect(getComputedStyle(rowShell).containIntrinsicBlockSize).toContain("76px");
@@ -248,6 +260,9 @@ describe("Inbox sidebar rendering and settlement", () => {
         expect(getThreadWindow).toHaveBeenCalledOnce();
         expect(popup.textContent).toContain("Hover target");
         expect(popup.textContent).toContain("This device");
+        expect(
+          popup.querySelector("[data-device-icon]")?.parentElement?.querySelectorAll("svg").length,
+        ).toBe(1);
         expect(popup.textContent).toContain("feat/settle");
         expect(popup.textContent).not.toContain("Worktree");
         expect(popup.textContent).not.toContain("Original directory");
