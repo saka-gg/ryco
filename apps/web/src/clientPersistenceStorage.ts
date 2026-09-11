@@ -1,5 +1,6 @@
 import {
   ClientSettingsSchema,
+  DEFAULT_CLIENT_SETTINGS,
   EnvironmentId,
   type ClientSettings,
   type EnvironmentId as EnvironmentIdValue,
@@ -13,6 +14,8 @@ import {
 } from "@ryco/client-runtime/state/settings";
 
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
+import { isHostedHubMode } from "./env";
+import { readHostedInboxPreferences, writeHostedInboxPreferences } from "./hostedInboxPreferences";
 
 export const CLIENT_SETTINGS_STORAGE_KEY = "ryco:client-settings:v1";
 export const SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY = "ryco:saved-environment-registry:v1";
@@ -99,7 +102,10 @@ export function readBrowserClientSettings(): ClientSettings | null {
   }
 
   try {
-    return getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, ClientSettingsSchema);
+    const settings = getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, ClientSettingsSchema);
+    return isHostedHubMode()
+      ? { ...DEFAULT_CLIENT_SETTINGS, ...readHostedInboxPreferences(), ...settings }
+      : settings;
   } catch {
     return null;
   }
@@ -111,6 +117,7 @@ export function writeBrowserClientSettings(settings: ClientSettings): void {
   }
 
   setLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, settings, ClientSettingsSchema);
+  if (isHostedHubMode()) writeHostedInboxPreferences(settings);
 }
 
 function readBrowserSavedEnvironmentRegistryDocument(): BrowserSavedEnvironmentRegistryDocument {

@@ -546,7 +546,11 @@ agreement key material, its handshake and session-key state, its in-memory downg
 session verification code: all of them live in process memory, the browser has no storage class any
 of them may enter, and each is erased when the channel — or, for the downgrade check, the
 application session — that produced it ends. Draft, terminal, general UI, script-selection,
-and other generic local-storage hooks use in-memory storage. The hosted root installs a fail-closed
+and other generic local-storage hooks use in-memory storage. A separate, schema-validated inbox
+preference record stores only three finite user choices: the auto-settle interval, whether AI Focus
+is enabled, and its refresh interval. It contains no node identifiers, rankings, model/provider
+preferences, content, or authentication material. These browser-local choices survive reloads.
+The hosted root installs a fail-closed
 console sink before authentication because older local-client feature paths may log caught values.
 Relay payloads are never persisted or sent to client analytics — which is not the same as the Hub
 seeing nothing, because on every channel, encrypted or not, the Hub still sees which account and
