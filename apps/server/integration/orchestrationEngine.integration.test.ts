@@ -1583,7 +1583,10 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
         yield* harness.waitForThread(
           THREAD_ID,
           (entry) =>
-            entry.latestTurn?.turnId === "turn-1" && entry.session?.threadId === "thread-1",
+            entry.latestTurn?.turnId === "turn-1" &&
+            entry.latestTurn.state === "completed" &&
+            entry.session?.threadId === "thread-1" &&
+            entry.session.activeTurnId === null,
         );
 
         yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
@@ -1638,8 +1641,10 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           THREAD_ID,
           (entry) =>
             entry.latestTurn?.turnId === "turn-2" &&
+            entry.latestTurn.state === "completed" &&
             entry.checkpoints.length === 2 &&
-            entry.session?.providerName === "claudeAgent",
+            entry.session?.providerName === "claudeAgent" &&
+            entry.session.activeTurnId === null,
         );
 
         yield* harness.engine.dispatch({
