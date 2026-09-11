@@ -993,6 +993,9 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.lastError).toBeNull();
 
+    // The ready session can be visible before the interrupt event is stored.
+    await harness.drain();
+
     const events = await Effect.runPromise(
       Stream.runCollect(harness.engine.readEvents(0)).pipe(
         Effect.map((chunk) => Array.from(chunk)),
