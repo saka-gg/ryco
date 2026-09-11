@@ -1,6 +1,7 @@
+import { DeviceIcon } from "./DeviceIcon";
 import { scopeProjectRef, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { VcsStatusResult } from "@ryco/contracts";
-import { CloudIcon, TerminalIcon, type LucideIcon } from "lucide-react";
+import { TerminalIcon, type LucideIcon } from "lucide-react";
 import { useMemo } from "react";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import {
@@ -273,7 +274,11 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
               />
             }
           >
-            <CloudIcon className="size-3 text-muted-foreground/60" />
+            <DeviceIcon
+              environmentId={thread.environmentId}
+              label={threadEnvironmentLabel ?? "Remote"}
+              className="size-3 text-muted-foreground/60"
+            />
           </TooltipTrigger>
           <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
         </Tooltip>

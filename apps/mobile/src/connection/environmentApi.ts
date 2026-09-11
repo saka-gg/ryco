@@ -79,9 +79,9 @@ export async function updateEnvironmentServerSettings(
   patch: ServerSettingsPatch,
 ): Promise<void> {
   const client = readRpcClient(environmentId);
-  if (!client) throw new Error("Connect this environment before changing its Inbox model.");
-  await client.server.updateSettings(patch);
-  patchEnvironmentServerSettings(environmentId, patch);
+  if (!client) throw new Error("Connect this device before changing its settings.");
+  const settings = await client.server.updateSettings(patch);
+  patchEnvironmentServerSettings(environmentId, settings);
 }
 
 export function __setEnvironmentApiOverrideForTests(

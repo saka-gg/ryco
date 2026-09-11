@@ -11,7 +11,8 @@ import {
 } from "@ryco/contracts";
 import type { ProviderDriverKind, ProviderInstanceId } from "@ryco/contracts";
 import { memo, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { ListTodoIcon, MonitorIcon } from "lucide-react";
+import { DeviceIcon } from "../DeviceIcon";
+import { ListTodoIcon } from "lucide-react";
 import { ComposerExpandableLabelControl } from "./ComposerExpandableLabelControl";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import {
@@ -597,7 +598,10 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
                     : "Execution machine"
                 }
               >
-                <MonitorIcon className="size-3.5 shrink-0" />
+                <DeviceIcon
+                  environmentId={props.selectedExecutionEnvironmentId}
+                  className="size-3.5 shrink-0"
+                />
                 <SelectValue>
                   {props.executionTargets?.find(
                     (target) => target.environmentId === props.selectedExecutionEnvironmentId,
@@ -612,7 +616,11 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
                     disabled={target.disabled}
                   >
                     <span className="inline-flex min-w-0 items-center gap-2">
-                      <MonitorIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                      <DeviceIcon
+                        environmentId={target.environmentId}
+                        label={target.label}
+                        className="size-3.5 shrink-0 text-muted-foreground"
+                      />
                       <span className="truncate">{target.label}</span>
                     </span>
                   </SelectItem>

@@ -1,5 +1,7 @@
 "use client";
 
+import { DeviceIcon } from "./DeviceIcon";
+
 import { isElectron } from "../env";
 import { useDeviceName } from "../deviceName";
 import { isLocalHubAlias, resolveDeviceName } from "../deviceName.logic";
@@ -1048,7 +1050,13 @@ function OpenCommandPaletteDialog() {
       searchTerms: [option.label, option.environmentId, option.isPrimary ? "this device" : ""],
       title: option.label,
       description: `Projects on ${option.label}`,
-      icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
+      icon: (
+        <DeviceIcon
+          environmentId={option.environmentId}
+          label={option.label}
+          className={ITEM_ICON_CLASS}
+        />
+      ),
       keepOpen: true,
       run: async () => {
         startAddProjectSourceSelection(option.environmentId);

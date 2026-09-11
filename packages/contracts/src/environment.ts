@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 
 import {
   EnvironmentId,
@@ -19,15 +19,36 @@ export type ExecutionEnvironmentPlatformOs = typeof ExecutionEnvironmentPlatform
 export const ExecutionEnvironmentPlatformArch = Schema.Literals(["arm64", "x64", "other"]);
 export type ExecutionEnvironmentPlatformArch = typeof ExecutionEnvironmentPlatformArch.Type;
 
+export const ENVIRONMENT_MACHINE_KINDS = [
+  "laptop",
+  "desktop",
+  "mini-pc",
+  "workstation",
+  "server",
+  "cloud",
+  "linux",
+  "windows",
+] as const;
+export type EnvironmentMachineKind = (typeof ENVIRONMENT_MACHINE_KINDS)[number];
+export const EnvironmentMachineKind: Schema.Codec<EnvironmentMachineKind> =
+  Schema.Literals(ENVIRONMENT_MACHINE_KINDS);
+
+/** Future icon kinds degrade to Automatic without rejecting a node snapshot. */
+export const EnvironmentMachineHint: Schema.Codec<EnvironmentMachineKind | null> = Schema.NullOr(
+  EnvironmentMachineKind,
+).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some(null))));
+
 export const ExecutionEnvironmentPlatform = Schema.Struct({
   os: ExecutionEnvironmentPlatformOs,
   arch: ExecutionEnvironmentPlatformArch,
+  machine: Schema.optionalKey(EnvironmentMachineHint),
 });
 export type ExecutionEnvironmentPlatform = typeof ExecutionEnvironmentPlatform.Type;
 
 export const ExecutionEnvironmentCapabilities = Schema.Struct({
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   projectIcons: Schema.optional(Schema.Boolean),
+  environmentIcon: Schema.optionalKey(Schema.Boolean),
   threadSnooze: Schema.optional(Schema.Boolean),
   threadSettlement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   threadPriorityRanking: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),

@@ -478,6 +478,7 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
         ) : null}
 
         <NewTaskComposer
+          environmentId={environmentId}
           prompt={prompt}
           attachments={attachments}
           contextLabel={contextLabel}

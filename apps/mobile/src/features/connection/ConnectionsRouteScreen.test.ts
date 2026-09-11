@@ -1,3 +1,8 @@
+vi.mock("../nodes/DeviceIconPicker", () => ({ DeviceIconPicker: () => null }));
+vi.mock("../../components/DeviceIcon", () => ({
+  DeviceIcon: () => null,
+  EnvironmentMachineIcon: () => null,
+}));
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -79,6 +84,7 @@ vi.mock("./useConnectionController", () => ({
   useConnectionActions: () => actionsMock,
 }));
 vi.mock("../../hostedHub/state", () => ({
+  useMobileHostedConnectionsStore: () => [],
   ensureMobileHostedSession: hostedMock.ensureMobileHostedSession,
   isMobileHostedModeAvailable: () => hostedMock.available,
   subscribeMobileHostedModeAvailability: () => () => undefined,

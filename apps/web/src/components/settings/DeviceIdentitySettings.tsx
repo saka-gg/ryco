@@ -1,3 +1,4 @@
+import { DeviceIconPicker } from "./DeviceIconPicker";
 import { useState } from "react";
 import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
 import { useDesktopWorkspaceState } from "../../platform/desktopWorkspace";
@@ -63,6 +64,7 @@ export function DeviceIdentitySettings() {
           ) : undefined
         }
       />
+      <DeviceIconPicker key={target.environmentId} />
       {canRename && (
         <HostedNodeRenameDialog
           key={target.environmentId}

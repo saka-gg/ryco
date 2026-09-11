@@ -1063,6 +1063,7 @@ export function ThreadDetailScreen(props: {
     >
       {headerModel ? (
         <ThreadContextBar
+          environmentId={environmentId}
           model={headerModel}
           checks={checks}
           onPress={() => {
@@ -1268,6 +1269,7 @@ export function ThreadDetailScreen(props: {
 
       {headerModel ? (
         <ThreadActionsSheet
+          environmentId={environmentId}
           visible={actionsVisible}
           model={headerModel}
           // Rename / stop / archive all call ensureEnvironmentApi, which throws

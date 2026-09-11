@@ -29,3 +29,23 @@ session/directory/relay readiness checks.
 desktop, and native mobile using the shared settings schema. Mobile retains its
 own native screens and the same persistence ownership. The legacy web phone
 presentation remains frozen.
+
+## Device icons
+
+Open the named device's settings on web or desktop and choose **Device icon**.
+On mobile, open **Nodes → Device icon** beneath the device. Choose Laptop,
+Desktop, Mini PC, Workstation, Server, Cloud, Linux / WSL, or Windows, or reset to
+Automatic. Automatic uses existing device-name and OS metadata; it does not run
+hardware commands or request system permissions.
+
+The override is the node-owned `environmentIcon` server setting. Existing
+configuration and settings events synchronize it to connected clients, including
+other clients' selectors, device lists, and task/project context. Rendering icons
+does not open connections. Before receiving a node's configuration, a client
+uses its available name and platform metadata. Older nodes remain usable with
+an automatic icon; updating the node enables selection. Unknown future icon
+values fall back to Automatic when reading, while write requests remain strict.
+
+Changing an icon requires a current, authorized settings connection to that
+exact device. Names, IDs, projects, authentication, and app appearance are
+independent of the icon choice.

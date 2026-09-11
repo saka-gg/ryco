@@ -3,10 +3,11 @@ import { DeviceRenameSheet } from "../nodes/DeviceRenameSheet";
 import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
-import type { RelayEffectiveRole } from "@ryco/contracts";
+import { WS_METHODS, type RelayEffectiveRole } from "@ryco/contracts";
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
   getHostedHubApi,
+  resolveHostedRpcCapability,
   deriveHostedConnectionStatusIndicator,
   deriveHostedConnectionStatusText,
   type HostedE2eeChannelStatus,
@@ -19,7 +20,12 @@ import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { StatusPill, type StatusTone } from "../../components/StatusPill";
 import { acquireMobileHostedNode } from "../../hostedHub/acquireNode";
-import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
+import type { MobileHostedConnectionState } from "../../connection/hostedConnectionCoordinator";
+import {
+  hostedHubController,
+  useHostedHubStore,
+  useMobileHostedConnectionsStore,
+} from "../../hostedHub/state";
 import { useMobileE2eeChannelStatus } from "../e2ee/useMobileE2eeSession";
 import { useMobileNativeE2eeEnrollmentStatus } from "../e2ee/useMobileNativeE2eeEnrollment";
 import { acquireBeforeNodeSecurity } from "../e2ee/acquireBeforeNodeSecurity";
@@ -79,6 +85,9 @@ export interface HubNodeSectionActions {
 }
 
 export interface HubNodeRowModel {
+  readonly canEditIcon?: boolean;
+  readonly environmentId?: HostedHubNode["environmentId"];
+  readonly platformOs?: string;
   readonly nodeId: string;
   readonly rename?: (() => void) | undefined;
   readonly label: string;
@@ -158,6 +167,7 @@ export function deriveHubNodeSectionModel(input: {
   readonly actions: HubNodeSectionActions;
   readonly onSignIn: () => void;
   readonly query?: string;
+  readonly connections?: ReadonlyArray<MobileHostedConnectionState>;
   readonly trustByEnvironmentId?: ReadonlyMap<string, WorkspaceNativeTrustState>;
 }): HubNodeSectionModel {
   const { state, available, actions, onSignIn } = input;
@@ -245,8 +255,28 @@ export function deriveHubNodeSectionModel(input: {
               : trust === "account-trusted"
                 ? "Encrypted · Account trusted"
                 : null;
+      const connection = input.connections?.find(
+        (current) => current.environmentId === node.environmentId && current.nodeId === node.id,
+      );
       return {
         nodeId: node.id,
+        environmentId: node.environmentId,
+        platformOs: node.platformOs,
+        canEditIcon:
+          trusted &&
+          node.revokedAt === null &&
+          node.effectiveRole === "owner" &&
+          state.accountStatus === "authenticated" &&
+          state.selectedNode?.id === node.id &&
+          resolveHostedRpcCapability({
+            hosted: true,
+            role: connection?.effectiveRole ?? null,
+            fresh: state.directoryStatus === "ready" && connection?.transportStatus === "online",
+            browserCurrent: state.browserStatus === "current",
+            sessionReady: connection?.sessionStatus === "ready",
+            method: WS_METHODS.serverUpdateSettings,
+          }).allowed,
+
         rename:
           state.directoryStatus === "ready" &&
           state.accountStatus === "authenticated" &&
@@ -334,6 +364,9 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
           {model.rows.map((row, index) => (
             <NodeRow
               key={row.nodeId}
+              environmentId={row.environmentId}
+              platformOs={row.platformOs}
+              canEditIcon={row.canEditIcon}
               label={row.label}
               detail={row.detail}
               transportLabel={row.transportLabel}
@@ -376,6 +409,7 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
   const navigation = useNavigation();
   const [renameTarget, setRenameTarget] = useState<HostedHubNode | null>(null);
   const state = useHostedHubStore((current) => current);
+  const connections = useMobileHostedConnectionsStore((current) => current.selectedNodes);
   // Shared with the other hosted surfaces: it drives the single memoized
   // `ensureMobileHostedSession()` and reports the runtime's own availability
   // flag, so a direct-only build (or a device with no usable hardware key)
@@ -412,6 +446,7 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
 
   const model = deriveHubNodeSectionModel({
     state,
+    connections,
     available,
     e2eeStatus,
     nativeDeviceSecurityStatus,

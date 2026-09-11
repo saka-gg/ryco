@@ -1,3 +1,4 @@
+import { ENVIRONMENT_MACHINE_KINDS, ExecutionEnvironmentPlatform } from "./environment.ts";
 import { describe, expect, it } from "vite-plus/test";
 import { Schema } from "effect";
 
@@ -259,5 +260,29 @@ describe("ServerSettingsPatch.providers.grok", () => {
       binaryPath: "/opt/grok",
       customModels: ["grok-build"],
     });
+  });
+});
+
+describe("node-owned device icons", () => {
+  it("defaults historical settings to Automatic", () => {
+    expect(decodeServerSettings({}).environmentIcon).toBeNull();
+  });
+  it("accepts every icon and an explicit reset, while an omitted patch does not reset", () => {
+    for (const environmentIcon of [null, ...ENVIRONMENT_MACHINE_KINDS]) {
+      expect(decodeServerSettingsPatch({ environmentIcon })).toEqual({ environmentIcon });
+      expect(decodeServerSettings({ environmentIcon }).environmentIcon).toBe(environmentIcon);
+    }
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("environmentIcon");
+  });
+  it("rejects arbitrary icon writes but can read a future node's configuration", () => {
+    expect(() => decodeServerSettingsPatch({ environmentIcon: "future-device" })).toThrow();
+    expect(decodeServerSettings({ environmentIcon: "future-device" }).environmentIcon).toBeNull();
+    expect(
+      Schema.decodeUnknownSync(ExecutionEnvironmentPlatform)({
+        os: "linux",
+        arch: "x64",
+        machine: "future-device",
+      }).machine,
+    ).toBeNull();
   });
 });

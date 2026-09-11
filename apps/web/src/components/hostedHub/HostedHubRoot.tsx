@@ -1,3 +1,4 @@
+import { DeviceIcon } from "../DeviceIcon";
 import { useNavigate } from "@tanstack/react-router";
 import { hostedHubFailureExplanation } from "@ryco/client-runtime/authorization";
 import type { ExternalIdentityPendingResponse } from "@ryco/contracts/hosted-identity";
@@ -1237,11 +1238,13 @@ function NodeRow({
         onClick={onConnect}
         className="flex min-h-16 min-w-0 flex-1 flex-wrap items-center gap-3 px-4 py-3 text-left outline-none hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-60 disabled:hover:bg-transparent phone:min-h-18"
       >
-        {/* `ServerIcon` for every platform: lucide has no legitimate macOS or
-            Windows mark, and shipping a vendor glyph would be brand
-            fabrication as well as colour-adjacent information. */}
         <span className="flex size-[36px] shrink-0 items-center justify-center rounded-lg bg-muted">
-          <ServerIcon aria-hidden className="size-4" />
+          <DeviceIcon
+            environmentId={node.environmentId}
+            label={node.label}
+            platformOs={node.platformOs}
+            className="size-4"
+          />
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium">{node.label}</span>

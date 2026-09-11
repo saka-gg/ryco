@@ -9,6 +9,7 @@ import { ServerConfig } from "../../config.ts";
 import { ServerEnvironment, type ServerEnvironmentShape } from "../Services/ServerEnvironment.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
+import { inferEnvironmentMachineKind } from "@ryco/shared/environmentIcon";
 
 function platformOs(): ExecutionEnvironmentDescriptor["platform"]["os"] {
   switch (process.platform) {
@@ -80,6 +81,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
     platform: {
       os: platformOs(),
       arch: platformArch(),
+      machine: inferEnvironmentMachineKind(platformOs(), label),
     },
     serverVersion: packageJson.version,
     capabilities: {
@@ -87,6 +89,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       threadSettlement: true,
       threadSnooze: true,
       projectIcons: true,
+      environmentIcon: true,
       threadPriorityRanking: true,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
     },

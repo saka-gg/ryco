@@ -1,3 +1,5 @@
+import type { EnvironmentId } from "@ryco/contracts";
+import { DeviceIcon } from "../../components/DeviceIcon";
 import { useEffect, useState } from "react";
 import { Modal, Pressable, ScrollView, TextInput, View } from "react-native";
 
@@ -53,6 +55,7 @@ function ActionRow(props: {
 export function ThreadActionsSheet(props: {
   readonly visible: boolean;
   readonly model: ThreadHeaderModel;
+  readonly environmentId: EnvironmentId;
   readonly busy: boolean;
   readonly error: string | null;
   readonly onClose: () => void;
@@ -114,9 +117,12 @@ export function ThreadActionsSheet(props: {
             <Text className="text-xs font-ryco-bold uppercase tracking-wide text-foreground-muted">
               Node
             </Text>
-            <Text className="text-base font-ryco-medium text-foreground">
-              {props.model.nodeLabel}
-            </Text>
+            <View className="flex-row items-center gap-2">
+              <DeviceIcon environmentId={props.environmentId} label={props.model.nodeLabel} />
+              <Text className="text-base font-ryco-medium text-foreground">
+                {props.model.nodeLabel}
+              </Text>
+            </View>
           </View>
           <View className="border-t border-border px-4 py-4">
             <Text className="text-xs font-ryco-bold uppercase tracking-wide text-foreground-muted">

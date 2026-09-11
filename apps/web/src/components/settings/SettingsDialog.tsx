@@ -1,3 +1,4 @@
+import { DeviceIcon } from "../DeviceIcon";
 import { DeviceIdentitySettings } from "./DeviceIdentitySettings";
 import { useDeviceName, useAppPreferencesLabel } from "../../deviceName";
 import { EnvironmentId, WS_METHODS } from "@ryco/contracts";
@@ -519,7 +520,11 @@ export function SettingsDialog() {
                     className="justify-start px-2"
                     aria-label={`Device settings: ${targetNodeLabel}`}
                   >
-                    <ServerIcon className="size-4 shrink-0" />
+                    <DeviceIcon
+                      environmentId={targetEnvironmentId}
+                      label={targetNodeLabel}
+                      className="size-4 shrink-0"
+                    />
                     <span className="hidden truncate sm:inline">{targetNodeLabel}</span>
                   </Button>
                 </div>

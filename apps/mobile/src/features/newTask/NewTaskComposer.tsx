@@ -1,3 +1,5 @@
+import type { EnvironmentId } from "@ryco/contracts";
+import { DeviceIcon } from "../../components/DeviceIcon";
 import { Pressable, TextInput, View } from "react-native";
 
 import type { RuntimeMode } from "@ryco/contracts";
@@ -20,6 +22,7 @@ const RUNTIME_OPTIONS = runtimeModeOptions.map((value) => ({
 }));
 
 export function NewTaskComposer(props: {
+  readonly environmentId: EnvironmentId | null;
   readonly prompt: string;
   readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
   readonly contextLabel: string;
@@ -111,7 +114,20 @@ export function NewTaskComposer(props: {
           className="min-h-16 flex-row items-center gap-3 rounded-2xl bg-card px-4 py-3 active:bg-card-alt disabled:opacity-40"
         >
           <View className="h-10 w-10 items-center justify-center rounded-xl bg-subtle">
-            <SymbolView name="scope" size={18} tintColor={iconColor as string} type="monochrome" />
+            {props.environmentId ? (
+              <DeviceIcon
+                environmentId={props.environmentId}
+                label={props.machineLabel}
+                size={20}
+              />
+            ) : (
+              <SymbolView
+                name="server.rack"
+                size={18}
+                tintColor={iconColor as string}
+                type="monochrome"
+              />
+            )}
           </View>
           <View className="min-w-0 flex-1 gap-0.5">
             <Text className="text-xs font-ryco-bold uppercase tracking-wide text-foreground-tertiary">

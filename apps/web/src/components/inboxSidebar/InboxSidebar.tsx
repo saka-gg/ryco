@@ -1,3 +1,4 @@
+import { DeviceIcon } from "../DeviceIcon";
 import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
 import type { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
 import {
@@ -292,6 +293,11 @@ function InboxThreadRow(props: {
                 <span aria-hidden className="px-1 text-muted-foreground/40">
                   ·
                 </span>
+                <DeviceIcon
+                  environmentId={props.row.environmentId}
+                  label={props.row.machineLabel}
+                  className="size-3 shrink-0"
+                />
                 <span>{props.row.machineLabel}</span>
               </span>
             </span>
@@ -398,6 +404,11 @@ function InboxThreadRow(props: {
                 </div>
                 <div className="flex items-center gap-2">
                   <ServerIcon aria-hidden className="size-3.5 shrink-0" />
+                  <DeviceIcon
+                    environmentId={props.row.environmentId}
+                    label={props.row.machineLabel}
+                    className="size-3 shrink-0"
+                  />
                   <span className="truncate">{props.row.machineLabel}</span>
                 </div>
                 <div className="flex items-center gap-2">

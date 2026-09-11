@@ -1,3 +1,5 @@
+import type { EnvironmentId } from "@ryco/contracts";
+import { DeviceIcon } from "../../components/DeviceIcon";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -10,6 +12,7 @@ import type { ThreadHeaderModel } from "./threadHeaderModel";
 
 export function ThreadContextBar(props: {
   readonly model: ThreadHeaderModel;
+  readonly environmentId: EnvironmentId;
   readonly checks?: CheckSummary | null;
   readonly onPress: () => void;
 }) {
@@ -29,7 +32,7 @@ export function ThreadContextBar(props: {
       className="mx-4 mb-1 min-h-16 flex-row items-center gap-3 rounded-2xl border border-border bg-card-translucent px-4 py-2.5 active:bg-card-alt"
     >
       <View className="h-9 w-9 items-center justify-center rounded-xl bg-subtle">
-        <SymbolView name="scope" size={17} tintColor={iconColor as string} type="monochrome" />
+        <DeviceIcon environmentId={props.environmentId} label={props.model.nodeLabel} size={20} />
       </View>
       <View className="min-w-0 flex-1">
         <View className="flex-row items-center gap-2">
