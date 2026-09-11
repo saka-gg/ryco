@@ -1,3 +1,4 @@
+import { resolveDeviceName } from "../deviceName.logic";
 import type {
   DesktopWorkspaceStateProjection,
   EnvironmentId,
@@ -29,6 +30,7 @@ export function withDirectDesktopExecutionMachine(input: {
   readonly ready: boolean;
   readonly primaryEnvironmentId: EnvironmentId | null;
   readonly localHubEnvironmentId?: EnvironmentId | null;
+  readonly primaryLabel: string;
 }): ReadonlyArray<DesktopExecutionMachine> {
   if (!input.ready || input.primaryEnvironmentId === null) return input.machines;
   const withoutConflictingPrimary = input.machines.filter(
@@ -39,7 +41,13 @@ export function withDirectDesktopExecutionMachine(input: {
   return [
     {
       environmentId: input.primaryEnvironmentId,
-      label: "This device",
+      label: resolveDeviceName({
+        environmentId: input.primaryEnvironmentId,
+        primaryEnvironmentId: input.primaryEnvironmentId,
+        localHubEnvironmentId: input.localHubEnvironmentId ?? null,
+        machines: input.machines,
+        fallback: input.primaryLabel,
+      }),
       online: true,
       canMutate: true,
       nativeTrust: "not-required",

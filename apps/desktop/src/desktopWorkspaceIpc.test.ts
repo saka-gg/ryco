@@ -15,6 +15,7 @@ describe("Desktop workspace IPC boundary", () => {
     expect(Object.keys(DESKTOP_WORKSPACE_IPC)).toEqual([
       "getState",
       "refreshCatalog",
+      "renameDevice",
       "publishSnapshot",
       "retainScope",
       "renewScope",

@@ -1,9 +1,12 @@
+import { useState } from "react";
+import { DeviceRenameSheet } from "../nodes/DeviceRenameSheet";
 import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
 import type { RelayEffectiveRole } from "@ryco/contracts";
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
+  getHostedHubApi,
   deriveHostedConnectionStatusIndicator,
   deriveHostedConnectionStatusText,
   type HostedE2eeChannelStatus,
@@ -71,11 +74,13 @@ export interface HubNodeSectionActions {
   readonly returnToDirectory: () => unknown;
   readonly refreshDirectory: () => unknown;
   readonly retrySelectedNode: () => unknown;
+  readonly renameNode?: (node: HostedHubNode) => void;
   readonly openNodeSecurity?: (node: HostedHubNode) => unknown;
 }
 
 export interface HubNodeRowModel {
   readonly nodeId: string;
+  readonly rename?: (() => void) | undefined;
   readonly label: string;
   /** Bounded presence/role summary. Never an id, token, ticket, or raw error. */
   readonly detail: string;
@@ -242,6 +247,14 @@ export function deriveHubNodeSectionModel(input: {
                 : null;
       return {
         nodeId: node.id,
+        rename:
+          state.directoryStatus === "ready" &&
+          state.accountStatus === "authenticated" &&
+          node.effectiveRole === "owner" &&
+          node.revokedAt === null &&
+          actions.renameNode
+            ? () => actions.renameNode?.(node)
+            : undefined,
         label: node.label,
         detail: trustDetail ? `${trustDetail} · ${rowDetail(node)}` : rowDetail(node),
         transportLabel: "Hub relay",
@@ -330,6 +343,7 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
               disabled={row.disabled}
               showDivider={index > 0}
               onPress={row.onPress}
+              actions={row.rename ? [{ label: "Rename", onPress: row.rename }] : []}
             />
           ))}
         </View>
@@ -360,6 +374,7 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
 
 export function HubNodeSection(props: { readonly query?: string } = {}) {
   const navigation = useNavigation();
+  const [renameTarget, setRenameTarget] = useState<HostedHubNode | null>(null);
   const state = useHostedHubStore((current) => current);
   // Shared with the other hosted surfaces: it drives the single memoized
   // `ensureMobileHostedSession()` and reports the runtime's own availability
@@ -402,6 +417,7 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     nativeDeviceSecurityStatus,
     settledStatus,
     actions: {
+      renameNode: setRenameTarget,
       selectNode: acquireMobileHostedNode,
       returnToDirectory: () => hostedHubController.returnToDirectory(),
       refreshDirectory: () => hostedHubController.refreshDirectory(),
@@ -423,5 +439,27 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     trustByEnvironmentId,
   });
 
-  return <HubNodeSectionView model={model} />;
+  return (
+    <>
+      <HubNodeSectionView model={model} />
+      {renameTarget &&
+        state.accountStatus === "authenticated" &&
+        state.nodes.some(
+          (node) =>
+            node.id === renameTarget.id &&
+            node.effectiveRole === "owner" &&
+            node.revokedAt === null,
+        ) && (
+          <DeviceRenameSheet
+            key={renameTarget.id}
+            label={renameTarget.label}
+            onClose={() => setRenameTarget(null)}
+            onSave={async (label) => {
+              await getHostedHubApi().renameNode(renameTarget.id, label);
+              await hostedHubController.refreshDirectory();
+            }}
+          />
+        )}
+    </>
+  );
 }

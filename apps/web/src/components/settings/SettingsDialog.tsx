@@ -1,3 +1,5 @@
+import { DeviceIdentitySettings } from "./DeviceIdentitySettings";
+import { useDeviceName, useAppPreferencesLabel } from "../../deviceName";
 import { EnvironmentId, WS_METHODS } from "@ryco/contracts";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { navigateHub } from "../../hostedHub/hubRoutes";
@@ -250,7 +252,7 @@ function SectionPanel({
               onClick={() => useSettingsDialogStore.getState().setSection("security")}
             >
               <ShieldIcon className="size-4" />
-              Node security · Advanced
+              Device security · Advanced
             </Button>
           </div>
         ) : (
@@ -308,13 +310,16 @@ export function SettingsDialog() {
   const targetServerConfig = targetIsPrimary
     ? primaryServerConfig
     : (savedEnvironmentRuntime?.serverConfig ?? null);
-  const targetNodeLabel = targetIsPrimary
-    ? (primaryEnvironment?.label ?? targetServerConfig?.environment.label ?? "Current node")
-    : (savedEnvironmentRuntime?.descriptor?.label ??
-      targetServerConfig?.environment.label ??
-      savedEnvironment?.label ??
-      desktopWorkspaceMachine?.label ??
-      "Selected node");
+  const primaryDeviceName = useDeviceName();
+  const appPreferencesLabel = useAppPreferencesLabel();
+  const targetNodeLabel = useDeviceName(
+    targetEnvironmentId,
+    targetIsPrimary
+      ? (primaryEnvironment?.label ?? targetServerConfig?.environment.label)
+      : (savedEnvironmentRuntime?.descriptor?.label ??
+          targetServerConfig?.environment.label ??
+          savedEnvironment?.label),
+  );
   const remoteRole = desktopWorkspaceMachine
     ? desktopWorkspaceMachine.canConnect
       ? desktopWorkspaceMachine.effectiveRole
@@ -367,8 +372,7 @@ export function SettingsDialog() {
       }
     : null;
   const nodeChoices = new Map<EnvironmentId, string>();
-  if (primaryEnvironment)
-    nodeChoices.set(primaryEnvironment.environmentId, primaryEnvironment.label);
+  if (primaryEnvironment) nodeChoices.set(primaryEnvironment.environmentId, primaryDeviceName);
   for (const entry of Object.values(allSavedEnvironments)) {
     if (primaryEnvironment && entry.environmentId === desktopWorkspace.localEnvironmentId) continue;
     nodeChoices.set(entry.environmentId, entry.label);
@@ -400,8 +404,7 @@ export function SettingsDialog() {
   const effectiveSection = visibleNavItems.some((item) => item.id === requestedSection)
     ? requestedSection
     : (visibleNavItems[0]?.id ?? "appearance");
-  const scopeLabel =
-    editingScope === "node" ? `Node: ${targetNodeLabel}` : isElectron ? "This app" : "This browser";
+  const scopeLabel = editingScope === "node" ? targetNodeLabel : appPreferencesLabel;
 
   useEffect(() => {
     if (hosted && !roleFresh) return;
@@ -506,9 +509,7 @@ export function SettingsDialog() {
                     className="justify-start px-2"
                   >
                     <PaletteIcon className="size-4 shrink-0" />
-                    <span className="hidden sm:inline">
-                      {isElectron ? "This app" : "This browser"}
-                    </span>
+                    <span className="hidden sm:inline">App preferences</span>
                   </Button>
                   <Button
                     variant={editingScope === "node" ? "secondary" : "ghost"}
@@ -516,7 +517,7 @@ export function SettingsDialog() {
                     onClick={() => setEditingScope("node")}
                     disabled={!settingsTarget}
                     className="justify-start px-2"
-                    aria-label={`Node settings: ${targetNodeLabel}`}
+                    aria-label={`Device settings: ${targetNodeLabel}`}
                   >
                     <ServerIcon className="size-4 shrink-0" />
                     <span className="hidden truncate sm:inline">{targetNodeLabel}</span>
@@ -525,7 +526,7 @@ export function SettingsDialog() {
 
                 {editingScope === "node" && !hosted && nodeChoices.size > 1 && (
                   <select
-                    aria-label="Settings node"
+                    aria-label="Settings device"
                     value={targetEnvironmentId ?? ""}
                     onChange={(event) =>
                       setTargetEnvironmentId(EnvironmentId.make(event.target.value))
@@ -594,7 +595,7 @@ export function SettingsDialog() {
                               setSection("security");
                             }}
                             aria-current={effectiveSection === "security" ? "page" : undefined}
-                            aria-label="Advanced node security"
+                            aria-label="Advanced device security"
                             className={cn(
                               "flex items-center gap-2 rounded-md px-2 py-2 text-left text-xs outline-hidden focus-visible:ring-2 focus-visible:ring-ring sm:ml-7",
                               effectiveSection === "security"
@@ -603,7 +604,7 @@ export function SettingsDialog() {
                             )}
                           >
                             <ShieldIcon className="size-3.5 shrink-0" />
-                            <span className="hidden sm:inline">Node security · Advanced</span>
+                            <span className="hidden sm:inline">Device security · Advanced</span>
                           </button>
                         )}
                       {isActive && subsections.sections.length > 1 && (
@@ -641,6 +642,14 @@ export function SettingsDialog() {
               </nav>
 
               <ScrollArea ref={subsections.contentRef} className="min-h-0 min-w-0 flex-1">
+                <p
+                  className="border-b px-6 py-3 text-xs text-muted-foreground"
+                  data-testid="settings-destination-description"
+                >
+                  {editingScope === "client"
+                    ? `Preferences for ${appPreferencesLabel}. Appearance and interface changes stay in this app.`
+                    : `Settings for ${targetNodeLabel}. Changes apply to that device for everyone authorized to use it.`}
+                </p>
                 {normalizedQuery.length > 0 ? (
                   <div className="p-4">
                     <div className="flex flex-col gap-0.5 rounded-xl border border-border bg-card p-1.5 shadow-sm/4">
@@ -683,6 +692,9 @@ export function SettingsDialog() {
                   </div>
                 ) : (
                   <div key={restoreSignal} className="flex flex-col">
+                    {editingScope === "node" && (
+                      <DeviceIdentitySettings key={targetEnvironmentId} />
+                    )}
                     {editingScope === "node" && !authorizedTarget?.connected ? (
                       <p className="p-6 text-sm text-muted-foreground">
                         {desktopWorkspaceMachine && !desktopWorkspaceMachine.online

@@ -46,16 +46,16 @@ export function settingsScopeLabel(
   options: {
     readonly nativeClient: boolean;
     readonly nodeLabel: string | null;
+    readonly appLabel?: string;
   },
 ): string {
-  if (scope === "node") return `Node: ${options.nodeLabel ?? "Connecting…"}`;
+  const app =
+    options.appLabel ?? (options.nativeClient ? "Ryco Desktop" : "Ryco Web · current browser");
+  const device = options.nodeLabel ?? "Device connecting…";
+  if (scope === "node") return device;
   if (scope === "account") return "Hub account";
-  if (scope === "mixed") {
-    const local = options.nativeClient ? "This device" : "This browser";
-    return `${local} + Node: ${options.nodeLabel ?? "Connecting…"}`;
-  }
-  if (scope === "device" || options.nativeClient) return "This device";
-  return "This browser";
+  if (scope === "mixed") return `${app} + ${device}`;
+  return app;
 }
 
 /**

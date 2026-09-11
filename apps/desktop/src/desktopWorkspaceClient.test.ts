@@ -7,7 +7,10 @@ import {
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { projectDesktopWorkspaceState } from "./desktopWorkspaceIpc.ts";
+import {
+  createDesktopWorkspaceIpcHandlers,
+  projectDesktopWorkspaceState,
+} from "./desktopWorkspaceIpc.ts";
 
 import {
   DesktopWorkspaceClient,
@@ -136,6 +139,9 @@ function fixture(
       nodeId: nodes[0]!.id,
       localNodeHandle: "local-handle",
     } satisfies DesktopWorkspaceIdentityStatus);
+  const renameNode = vi.fn(async (nodeId: string, label: string) => {
+    directory = directory.map((entry) => (entry.id === nodeId ? { ...entry, label } : entry));
+  });
   const disconnect = vi.fn(async () => undefined);
   const connectCalls: Array<{ environmentId: EnvironmentId; delayMs: number }> = [];
   const releaseCalls: EnvironmentId[] = [];
@@ -146,6 +152,7 @@ function fixture(
       connect: vi.fn(async () => identityStatus),
       disconnect,
       listNodes: vi.fn(async () => directory),
+      renameNode,
     },
     trust: {
       read: vi.fn(async (_origin, _account, nodeId) => {
@@ -169,6 +176,7 @@ function fixture(
     connectCalls,
     releaseCalls,
     disconnect,
+    renameNode,
     setDirectory: (next: HostedHubNode[]) => {
       directory = next;
     },
@@ -176,6 +184,50 @@ function fixture(
 }
 
 describe("DesktopWorkspaceClient", () => {
+  it("renames the exact device through bounded IPC and preserves its cached projects and conversations", async () => {
+    const { client, renameNode } = fixture({ nodes: [node(1, { online: false }), node(2)] });
+    await client.resume();
+    const id = node(1).environmentId;
+    await client.acceptWorkspaceSnapshot(snapshot(id, "Existing conversation"));
+    const before = client.snapshot();
+    const handlers = createDesktopWorkspaceIpcHandlers(client);
+    const renamed = await handlers.renameDevice({ environmentId: id, label: "  Studio Mac  " });
+    expect(renameNode).toHaveBeenCalledExactlyOnceWith(node(1).id, "Studio Mac");
+    expect(renamed.machines.find((entry) => entry.environmentId === id)?.label).toBe("Studio Mac");
+    expect(client.snapshot().workspace.snapshots).toEqual(before.workspace.snapshots);
+    expect(
+      renamed.machines.find((entry) => entry.environmentId === node(2).environmentId)?.label,
+    ).toBe("Node 2");
+    for (const invalid of [
+      null,
+      [],
+      { environmentId: id, label: " " },
+      { environmentId: id, label: "x".repeat(101) },
+      { label: "Mac" },
+    ]) {
+      await expect(handlers.renameDevice(invalid)).rejects.toThrow();
+    }
+    expect(renameNode).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects device renames for operators, viewers, unknown devices, and signed-out clients", async () => {
+    const nodes = [node(1), node(2, { role: "operator" }), node(3, { role: "viewer" })];
+    const { client, renameNode } = fixture({ nodes });
+    await client.resume();
+    for (const id of [
+      nodes[1]!.environmentId,
+      nodes[2]!.environmentId,
+      EnvironmentId.make("unknown"),
+    ]) {
+      await expect(client.renameDevice(id, "New name")).rejects.toThrow("Only the device owner");
+    }
+    client.invalidateAccess();
+    await expect(client.renameDevice(nodes[0]!.environmentId, "New name")).rejects.toThrow(
+      "Sign in",
+    );
+    expect(renameNode).not.toHaveBeenCalled();
+  });
+
   it("projects exact node roles without promoting operators and removes offline authority", async () => {
     const nodes = [node(1), node(2, { role: "operator" }), node(3, { role: "viewer" })];
     const { client, setDirectory } = fixture({ nodes });
@@ -188,6 +240,7 @@ describe("DesktopWorkspaceClient", () => {
     setDirectory([node(1, { online: false })]);
     expect(projectDesktopWorkspaceState(await client.refreshCatalog()).machines[0]).toMatchObject({
       effectiveRole: null,
+      canRename: true,
       canMutate: false,
       canConnect: false,
     });

@@ -948,7 +948,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
             <h3 className="text-sm font-medium text-foreground">{primaryLabel}</h3>
             {clientSession.current ? (
               <span className="text-[10px] text-muted-foreground/80 rounded-md border border-border/50 bg-muted/50 px-1 py-0.5">
-                This device
+                Current session
               </span>
             ) : null}
           </div>

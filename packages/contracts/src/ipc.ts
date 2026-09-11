@@ -408,6 +408,8 @@ export interface DesktopWorkspaceMachineProjection {
   readonly online: boolean;
   readonly nativeTrust: DesktopWorkspaceNativeTrustState;
   readonly connectionState: "disconnected" | "connecting" | "connected" | "error";
+  /** Hub metadata can be renamed while the device is offline; this grants no runtime access. */
+  readonly canRename?: boolean;
   readonly canReadMetadata: boolean;
   readonly canConnect: boolean;
   readonly canMutate: boolean;
@@ -644,6 +646,10 @@ export interface DesktopBridge {
   cancelHostedGitHubConnection?: () => Promise<void>;
   /** Secret-free native workspace client projection and scoped operations. */
   getDesktopWorkspaceState?: () => Promise<DesktopWorkspaceStateProjection>;
+  renameDesktopWorkspaceDevice?: (input: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+  }) => Promise<DesktopWorkspaceStateProjection>;
   refreshDesktopWorkspaceCatalog?: () => Promise<DesktopWorkspaceStateProjection>;
   publishDesktopWorkspaceSnapshot?: (
     snapshot: DesktopWorkspaceMetadataProjection,

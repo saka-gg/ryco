@@ -1,5 +1,11 @@
 "use client";
 
+import { isElectron } from "../env";
+import { useDeviceName } from "../deviceName";
+import { isLocalHubAlias, resolveDeviceName } from "../deviceName.logic";
+import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
+import { useHostedHubStore } from "../hostedHub/state";
+
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   DEFAULT_MODEL,
@@ -423,7 +429,9 @@ function OpenCommandPaletteDialog() {
     CommandPaletteMessageSearchResult[]
   >([]);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const primaryEnvironmentLabel = readPrimaryEnvironmentDescriptor()?.label ?? null;
+  const primaryEnvironmentLabel = useDeviceName();
+  const deviceCatalog = useDesktopWorkspaceState();
+  const hostedNodes = useHostedHubStore((state) => state.nodes);
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((state) => state.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((state) => state.byId);
 
@@ -445,18 +453,29 @@ function OpenCommandPaletteDialog() {
     }
 
     for (const record of Object.values(savedEnvironmentRegistry)) {
-      if (seenEnvironmentIds.has(record.environmentId)) {
+      if (
+        seenEnvironmentIds.has(record.environmentId) ||
+        isLocalHubAlias(
+          record.environmentId,
+          primaryEnvironmentId,
+          deviceCatalog.localEnvironmentId,
+        )
+      ) {
         continue;
       }
 
       const runtimeState = savedEnvironmentRuntimeById[record.environmentId];
       options.push({
         environmentId: record.environmentId,
-        label: resolveEnvironmentOptionLabel({
-          isPrimary: false,
+        label: resolveDeviceName({
           environmentId: record.environmentId,
-          runtimeLabel: runtimeState?.descriptor?.label ?? null,
-          savedLabel: record.label,
+          machines: isElectron ? deviceCatalog.machines : hostedNodes,
+          fallback: resolveEnvironmentOptionLabel({
+            isPrimary: false,
+            environmentId: record.environmentId,
+            runtimeLabel: runtimeState?.descriptor?.label ?? null,
+            savedLabel: record.label,
+          }),
         }),
         isPrimary: false,
       });
@@ -473,6 +492,8 @@ function OpenCommandPaletteDialog() {
   }, [
     primaryEnvironmentId,
     primaryEnvironmentLabel,
+    deviceCatalog,
+    hostedNodes,
     savedEnvironmentRegistry,
     savedEnvironmentRuntimeById,
   ]);
@@ -1026,7 +1047,7 @@ function OpenCommandPaletteDialog() {
       value: `action:add-project:environment:${option.environmentId}`,
       searchTerms: [option.label, option.environmentId, option.isPrimary ? "this device" : ""],
       title: option.label,
-      description: option.isPrimary ? "This device" : option.environmentId,
+      description: `Projects on ${option.label}`,
       icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
       keepOpen: true,
       run: async () => {

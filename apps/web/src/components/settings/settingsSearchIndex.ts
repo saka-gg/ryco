@@ -44,6 +44,21 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     desktopCapability: "quitShortcut",
   },
   {
+    section: "general",
+    title: "Device name",
+    owner: "node",
+    description: "Rename the selected device for everyone who can access it.",
+    keywords: "machine hostname node name rename",
+  },
+  {
+    section: "integrations",
+    title: "Device permissions",
+    owner: "node",
+    description:
+      "Manage permissions on the selected device or learn where local approval is required.",
+    keywords: "computer use accessibility screen recording capture device local remote",
+  },
+  {
     section: "integrations",
     desktopCapability: "computerUse",
     title: "Computer use",

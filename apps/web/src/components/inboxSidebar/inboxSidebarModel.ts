@@ -149,6 +149,7 @@ export function describeInboxFocus(focus: ThreadPriorityFocusMetadata): InboxFoc
 }
 
 export function buildPrimaryInboxSidebarEnvironment(input: {
+  readonly label: string;
   readonly environmentId: EnvironmentId;
   readonly connectionState: WsConnectionUiState;
   readonly hydratedFromCache: boolean;
@@ -160,7 +161,7 @@ export function buildPrimaryInboxSidebarEnvironment(input: {
   const stale = input.hydratedFromCache || connectionState === "offline";
   return {
     environmentId: input.environmentId,
-    label: "This device",
+    label: input.label,
     connectionState,
     stale,
     ...(stale ? { staleDetail: "Offline · last known" } : {}),

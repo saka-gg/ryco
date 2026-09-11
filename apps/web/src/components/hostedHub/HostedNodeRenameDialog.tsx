@@ -21,7 +21,7 @@ export function HostedNodeRenameDialog({
   onOpenChange,
   onRename,
 }: {
-  readonly node: HostedHubNode;
+  readonly node: Pick<HostedHubNode, "label">;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onRename: (label: string) => Promise<void>;
@@ -40,7 +40,7 @@ export function HostedNodeRenameDialog({
   const normalized = draft.trim();
   const validationError =
     normalized.length === 0
-      ? "Enter a node name."
+      ? "Enter a device name."
       : normalized.length > MAX_NODE_NAME_LENGTH
         ? "Use 100 characters or fewer."
         : null;
@@ -54,23 +54,28 @@ export function HostedNodeRenameDialog({
       await onRename(normalized);
       onOpenChange(false);
     } catch (cause) {
-      setMutationError(cause instanceof Error ? cause.message : "Unable to rename this node.");
+      setMutationError(cause instanceof Error ? cause.message : "Unable to rename this device.");
       setPending(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!pending) onOpenChange(next);
+      }}
+    >
       <DialogPopup className="max-w-md" showCloseButton={!pending}>
         <DialogHeader>
-          <DialogTitle>Rename node</DialogTitle>
+          <DialogTitle>Rename device</DialogTitle>
           <DialogDescription>
-            This is the canonical name shown to everyone authorized to use this node.
+            This is the canonical name shown to everyone authorized to use this device.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-2">
           <label htmlFor="hosted-node-name" className="text-sm font-medium">
-            Node name
+            Device name
           </label>
           <Input
             id="hosted-node-name"

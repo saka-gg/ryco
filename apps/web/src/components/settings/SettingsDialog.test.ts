@@ -86,25 +86,25 @@ describe("hosted settings capabilities", () => {
 
   it("uses the native device mental model for renderer-local preferences", () => {
     expect(settingsScopeLabel("browser", { nativeClient: false, nodeLabel: null })).toBe(
-      "This browser",
+      "Ryco Web · current browser",
     );
     expect(settingsScopeLabel("browser", { nativeClient: true, nodeLabel: null })).toBe(
-      "This device",
+      "Ryco Desktop",
     );
     expect(settingsScopeLabel("device", { nativeClient: false, nodeLabel: null })).toBe(
-      "This device",
+      "Ryco Web · current browser",
     );
     expect(settingsScopeLabel("account", { nativeClient: true, nodeLabel: null })).toBe(
       "Hub account",
     );
     expect(settingsScopeLabel("node", { nativeClient: true, nodeLabel: "Studio Mac" })).toBe(
-      "Node: Studio Mac",
+      "Studio Mac",
     );
     expect(settingsScopeLabel("mixed", { nativeClient: false, nodeLabel: "Studio Mac" })).toBe(
-      "This browser + Node: Studio Mac",
+      "Ryco Web · current browser + Studio Mac",
     );
     expect(settingsScopeLabel("mixed", { nativeClient: true, nodeLabel: "Studio Mac" })).toBe(
-      "This device + Node: Studio Mac",
+      "Ryco Desktop + Studio Mac",
     );
   });
 

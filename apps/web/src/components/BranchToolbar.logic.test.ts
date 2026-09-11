@@ -168,7 +168,7 @@ describe("resolveEnvironmentOptionLabel", () => {
         runtimeLabel: "Local environment",
         savedLabel: "Local",
       }),
-    ).toBe("This device");
+    ).toBe("Device connecting…");
   });
 
   it("keeps configured labels for non-primary environments", () => {

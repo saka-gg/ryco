@@ -208,6 +208,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   disconnectHostedGitHub: (input) => ipcRenderer.invoke(DISCONNECT_HOSTED_GITHUB_CHANNEL, input),
   cancelHostedGitHubConnection: () => ipcRenderer.invoke(CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL),
   getDesktopWorkspaceState: () => ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.getState),
+  renameDesktopWorkspaceDevice: (input) =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.renameDevice, input),
   refreshDesktopWorkspaceCatalog: () => ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.refreshCatalog),
   publishDesktopWorkspaceSnapshot: (snapshot) =>
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.publishSnapshot, snapshot),

@@ -915,14 +915,14 @@ describe("GeneralSettingsPanel observability", () => {
         .element()
         .closest("[data-setting-scope]")
         ?.getAttribute("data-setting-scope"),
-    ).toBe("This browser");
+    ).toBe("Ryco Web · current browser");
     expect(
       page
         .getByText("Provider update checks", { exact: true })
         .element()
         .closest("[data-setting-scope]")
         ?.getAttribute("data-setting-scope"),
-    ).toBe("Node: Connecting…");
+    ).toBe("Device connecting…");
   });
 
   it("shows only local controls in this browser's General settings", async () => {
@@ -982,7 +982,7 @@ describe("GeneralSettingsPanel observability", () => {
         .element()
         .closest("[data-setting-scope]")
         ?.getAttribute("data-setting-scope"),
-    ).toBe("Node: Ryco Multi-node QA");
+    ).toBe("Ryco Multi-node QA");
 
     await expect.element(page.getByText("Time format", { exact: true })).not.toBeInTheDocument();
     await expect
@@ -2270,7 +2270,9 @@ describe("ConnectionsSettings Hub section", () => {
         page.getByText("Locked while this machine is enrolled. Leave this Hub to change it."),
       )
       .toBeInTheDocument();
-    await expect.element(page.getByText(/Managed on the Hub after enrollment/)).toBeInTheDocument();
+    await expect
+      .element(page.getByText(/After enrollment, rename the device in Device settings/))
+      .toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Leave this Hub" })).toBeInTheDocument();
   });
 

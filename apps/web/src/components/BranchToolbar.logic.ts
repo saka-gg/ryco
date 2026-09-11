@@ -87,7 +87,7 @@ export function resolveEnvironmentOptionLabel(input: {
       if (!label) return false;
       return !isGenericLocalEnvironmentLabel(label);
     });
-    return preferredLocalLabel ?? "This device";
+    return preferredLocalLabel ?? "Device connecting…";
   }
 
   return runtimeLabel ?? savedLabel ?? input.environmentId;

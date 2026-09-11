@@ -53,10 +53,16 @@ const tripwire = vi.hoisted(() => {
   return { hits, loaded, trap };
 });
 
+vi.mock("../nodes/DeviceRenameSheet", () => ({ DeviceRenameSheet: () => null }));
+
 vi.mock("react-native", () => ({ Pressable: "Pressable", View: "View", Text: "Text" }));
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
-  return { ...actual, useEffect: (effect: () => void) => mountEffects.push(effect) };
+  return {
+    ...actual,
+    useState: (initial: unknown) => [initial, vi.fn()],
+    useEffect: (effect: () => void) => mountEffects.push(effect),
+  };
 });
 const mountEffects = vi.hoisted(() => [] as Array<() => void>);
 vi.mock("@react-navigation/native", () => ({ useNavigation: () => navigationMock }));
@@ -272,6 +278,31 @@ describe("Hub node selection guard", () => {
 });
 
 describe("Hub node actions", () => {
+  it("offers canonical renaming only to an authenticated owner with a current directory", () => {
+    const renameNode = vi.fn();
+    const owner = state({ nodes: [node({ effectiveRole: "owner" })] });
+    const model = deriveHubNodeSectionModel({
+      state: owner,
+      available: true,
+      e2eeStatus: "unavailable",
+      actions: { ...hostedMock.controller, renameNode },
+      onSignIn: vi.fn(),
+    });
+    model.rows[0]?.rename?.();
+    expect(renameNode).toHaveBeenCalledWith(owner.nodes[0]);
+    const readOnly = deriveHubNodeSectionModel({
+      state: {
+        ...owner,
+        nodes: owner.nodes.map((node) => ({ ...node, effectiveRole: "viewer" as const })),
+      },
+      available: true,
+      e2eeStatus: "unavailable",
+      actions: { ...hostedMock.controller, renameNode },
+      onSignIn: vi.fn(),
+    });
+    expect(readOnly.rows.every((row) => row.rename === undefined)).toBe(true);
+  });
+
   it("selects an enabled node through the controller", () => {
     const row = model().rows[0];
     expect(row?.disabled).toBe(false);

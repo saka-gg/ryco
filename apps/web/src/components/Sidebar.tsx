@@ -1,3 +1,5 @@
+import { useDeviceName } from "../deviceName";
+import { isLocalHubAlias } from "../deviceName.logic";
 import { useServerConfig } from "~/rpc/serverState";
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -295,6 +297,7 @@ export default function Sidebar() {
   const primaryConnectionState = getWsConnectionUiState(primaryWsConnectionStatus);
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
+  const primaryDeviceName = useDeviceName();
   const desktopWorkspace = useDesktopWorkspaceState();
   const hostedWorkspace = useHostedWorkspaceState();
   const selectedHostedEnvironmentId = useHostedHubStore(
@@ -363,6 +366,14 @@ export default function Sidebar() {
       }
     } else if (desktopWorkspace.status !== "signed-out") {
       for (const machine of desktopWorkspace.machines) {
+        if (
+          isLocalHubAlias(
+            machine.environmentId,
+            primaryEnvironmentId,
+            desktopWorkspace.localEnvironmentId,
+          )
+        )
+          continue;
         knownEnvironmentIds.add(machine.environmentId);
         const queued = desktopWorkspace.queuedEnvironmentIds.includes(machine.environmentId);
         const stale =
@@ -393,11 +404,14 @@ export default function Sidebar() {
     }
 
     for (const environmentId of knownEnvironmentIds) {
+      if (isLocalHubAlias(environmentId, primaryEnvironmentId, desktopWorkspace.localEnvironmentId))
+        continue;
       if (byEnvironmentId.has(environmentId)) continue;
       if (primaryEnvironmentId !== null && environmentId === primaryEnvironmentId) {
         byEnvironmentId.set(
           environmentId,
           buildPrimaryInboxSidebarEnvironment({
+            label: primaryDeviceName,
             environmentId,
             connectionState: primaryConnectionState,
             hydratedFromCache:
@@ -464,6 +478,7 @@ export default function Sidebar() {
     hostedWorkspace,
     primaryConnectionState,
     primaryEnvironmentDescriptor,
+    primaryDeviceName,
     primaryEnvironmentId,
     projects,
     savedEnvironmentRegistry,

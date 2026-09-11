@@ -1,4 +1,5 @@
-import { useSettingsEditingScope } from "../../settingsTarget";
+import { isElectron, isHostedHubMode } from "../../env";
+import { useSettingsTarget, useSettingsEditingScope } from "../../settingsTarget";
 import { WS_METHODS } from "@ryco/contracts";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
@@ -15,13 +16,29 @@ const ComputerUseSettings = lazy(() =>
 
 export function IntegrationsSettingsPanel() {
   const scope = useSettingsEditingScope();
+  const target = useSettingsTarget();
+  const localDevice = isElectron && !isHostedHubMode() && target?.primary === true;
+  const canUseNativeControls =
+    Boolean(window.desktopBridge?.computerUse) && (scope !== "node" || localDevice);
   return (
     <div className="flex-1 overflow-y-auto">
       {scope !== "client" && <NodeIntegrationsSettingsPanel />}
-      {scope !== "node" && window.desktopBridge?.computerUse && (
-        <Suspense fallback={<p className="p-6">Loading device integrations…</p>}>
-          <ComputerUseSettings />
-        </Suspense>
+      {scope === "node" && target && !localDevice && (
+        <section className="border-b p-6 sm:p-8" data-settings-section="Device permissions">
+          <h2 className="text-sm font-semibold">Device permissions</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            To enable screen recording, accessibility, or computer use on {target.nodeLabel}, open
+            Ryco on {target.nodeLabel} and use Settings → Integrations. Operating system permissions
+            must be approved on that device.
+          </p>
+        </section>
+      )}
+      {canUseNativeControls && (
+        <div data-settings-section={scope === "node" ? "Device permissions" : undefined}>
+          <Suspense fallback={<p className="p-6">Loading device integrations…</p>}>
+            <ComputerUseSettings />
+          </Suspense>
+        </div>
       )}
     </div>
   );

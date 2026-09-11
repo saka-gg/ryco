@@ -454,7 +454,7 @@ describe("hosted node directory", () => {
 
     await page.getByRole("button", { name: "Node details: Studio" }).click();
     await page.getByRole("button", { name: "Rename" }).click();
-    const input = page.getByRole("textbox", { name: "Node name" });
+    const input = page.getByRole("textbox", { name: "Device name" });
     await expect.element(input).toHaveValue("Studio");
     await input.fill("  Workshop  ");
     await page.getByRole("button", { name: "Save", exact: true }).click();
@@ -466,7 +466,7 @@ describe("hosted node directory", () => {
     });
     await expect.element(page.getByRole("heading", { name: "Workshop" })).toBeVisible();
     await expect
-      .element(page.getByRole("heading", { name: "Rename node" }))
+      .element(page.getByRole("heading", { name: "Rename device" }))
       .not.toBeInTheDocument();
   });
 
@@ -477,12 +477,12 @@ describe("hosted node directory", () => {
 
     await page.getByRole("button", { name: "Node details: Studio" }).click();
     await page.getByRole("button", { name: "Rename" }).click();
-    const input = page.getByRole("textbox", { name: "Node name" });
+    const input = page.getByRole("textbox", { name: "Device name" });
     const save = page.getByRole("button", { name: "Save", exact: true });
     await expect.element(save).toBeDisabled();
 
     await input.fill(" ");
-    await expect.element(page.getByText("Enter a node name.")).toBeVisible();
+    await expect.element(page.getByText("Enter a device name.")).toBeVisible();
     await expect.element(save).toBeDisabled();
 
     await input.fill("N".repeat(101));
@@ -500,14 +500,14 @@ describe("hosted node directory", () => {
 
     await page.getByRole("button", { name: "Node details: Studio" }).click();
     await page.getByRole("button", { name: "Rename" }).click();
-    const input = page.getByRole("textbox", { name: "Node name" });
+    const input = page.getByRole("textbox", { name: "Device name" });
     await input.fill("Workshop");
     await page.getByRole("button", { name: "Save", exact: true }).click();
 
     await expect
       .element(page.getByRole("alert"))
       .toHaveTextContent("You are not authorized to perform this action.");
-    await expect.element(page.getByRole("heading", { name: "Rename node" })).toBeVisible();
+    await expect.element(page.getByRole("heading", { name: "Rename device" })).toBeVisible();
     await expect.element(input).toBeEnabled();
   });
 

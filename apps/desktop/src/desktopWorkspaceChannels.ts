@@ -1,6 +1,7 @@
 export const DESKTOP_WORKSPACE_IPC = {
   getState: "desktop:workspace-get-state",
   refreshCatalog: "desktop:workspace-refresh-catalog",
+  renameDevice: "desktop:workspace-rename-device",
   publishSnapshot: "desktop:workspace-publish-snapshot",
   retainScope: "desktop:workspace-retain-scope",
   renewScope: "desktop:workspace-renew-scope",

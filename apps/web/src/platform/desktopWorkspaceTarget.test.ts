@@ -66,6 +66,7 @@ describe("Desktop new-work target", () => {
     const primaryEnvironmentId = EnvironmentId.make("primary-direct");
     const localHubEnvironmentId = EnvironmentId.make("local-hub-alias");
     const machines = withDirectDesktopExecutionMachine({
+      primaryLabel: "System Mac name",
       machines: [
         {
           environmentId: localHubEnvironmentId,
@@ -90,7 +91,7 @@ describe("Desktop new-work target", () => {
     expect(machines).toEqual([
       {
         environmentId: primaryEnvironmentId,
-        label: "This device",
+        label: "Laurin’s MacBook Pro",
         online: true,
         canMutate: true,
         nativeTrust: "not-required",
