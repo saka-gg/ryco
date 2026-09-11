@@ -2270,7 +2270,9 @@ describe("ConnectionsSettings Hub section", () => {
         page.getByText("Locked while this machine is enrolled. Leave this Hub to change it."),
       )
       .toBeInTheDocument();
-    await expect.element(page.getByText(/Managed on the Hub after enrollment/)).toBeInTheDocument();
+    await expect
+      .element(page.getByText(/After enrollment, rename the device in Device settings/))
+      .toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Leave this Hub" })).toBeInTheDocument();
   });
 
