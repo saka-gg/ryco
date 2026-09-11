@@ -75,6 +75,7 @@ const navigationMock = vi.hoisted(() => ({ navigate: vi.fn() }));
 
 vi.mock("../../hostedHub/state", () => ({
   hostedHubController: hostedMock.controller,
+  useMobileHostedConnectionsStore: () => [],
   useHostedHubStore: (selector: (state: HostedHubState) => unknown) =>
     selector(hostedMock.state as HostedHubState),
 }));
@@ -200,6 +201,24 @@ function model(
 ): HubNodeSectionModel {
   return deriveHubNodeSectionModel({
     state: state(overrides),
+    connections: overrides.selectedNode
+      ? [
+          {
+            environmentId: overrides.selectedNode.environmentId,
+            nodeId: overrides.selectedNode.id,
+            effectiveRole: overrides.effectiveRole ?? null,
+            transportStatus: overrides.transportStatus ?? "idle",
+            sessionStatus: overrides.sessionStatus ?? "closed",
+            label: "Node",
+            generation: 1,
+            lastAccessedAt: 0,
+            attemptPrepared: true,
+            sessionEstablished: true,
+            sessionRecoveredAfterUnknown: false,
+            errorMessage: null,
+          },
+        ]
+      : [],
     available: options.available ?? true,
     e2eeStatus: options.e2eeStatus ?? "unavailable",
     actions: hostedMock.controller,
@@ -549,6 +568,43 @@ describe("node icon settings authorization", () => {
     sessionStatus: "ready",
     browserStatus: "current",
   };
+  it("does not borrow the directory owner role for an operator or missing relay", () => {
+    for (const effectiveRole of ["operator", "viewer", null] as const) {
+      const result = deriveHubNodeSectionModel({
+        state: state(ready),
+        available: true,
+        e2eeStatus: "unavailable",
+        actions: hostedMock.controller,
+        onSignIn: navigationMock.navigate,
+        connections: [
+          {
+            environmentId: owner.environmentId,
+            nodeId: owner.id,
+            effectiveRole,
+            transportStatus: "online",
+            sessionStatus: "ready",
+            label: "Node",
+            generation: 1,
+            lastAccessedAt: 0,
+            attemptPrepared: true,
+            sessionEstablished: true,
+            sessionRecoveredAfterUnknown: false,
+            errorMessage: null,
+          },
+        ],
+      });
+      expect(result.rows[0]?.canEditIcon).not.toBe(true);
+    }
+    expect(
+      deriveHubNodeSectionModel({
+        state: state(ready),
+        available: true,
+        e2eeStatus: "unavailable",
+        actions: hostedMock.controller,
+        onSignIn: navigationMock.navigate,
+      }).rows[0]?.canEditIcon,
+    ).not.toBe(true);
+  });
   it("enables the selected owner node only after current authorization and snapshot readiness", () => {
     expect(model(ready).rows[0]?.canEditIcon).toBe(true);
     for (const change of [

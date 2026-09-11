@@ -84,6 +84,7 @@ vi.mock("./useConnectionController", () => ({
   useConnectionActions: () => actionsMock,
 }));
 vi.mock("../../hostedHub/state", () => ({
+  useMobileHostedConnectionsStore: () => [],
   ensureMobileHostedSession: hostedMock.ensureMobileHostedSession,
   isMobileHostedModeAvailable: () => hostedMock.available,
   subscribeMobileHostedModeAvailability: () => () => undefined,

@@ -200,7 +200,9 @@ export async function configureMobileHostedRuntime(): Promise<boolean> {
     platform: mobileNativeE2eePlatform,
     api: getHostedHubApi(),
     hubOrigin: endpoint.origin(),
-    requestedMaximumRole: "operator",
+    // The Hub intersects this ceiling with the account's current node role.
+    // Owners need settings RPCs; operator/viewer accounts retain their granted limits.
+    requestedMaximumRole: "owner",
     requestedCapabilities: ["ryco.rpc"],
     refreshDirectory: () => hostedHubController.refreshDirectory(),
     invalidateHostedGeneration: () => {

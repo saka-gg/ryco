@@ -110,7 +110,16 @@ vi.mock("./nodeLifecycle", () => ({
   },
 }));
 
+vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ryco/client-runtime/authorization")>();
+  return {
+    ...actual,
+    createNativeE2eeEnrollmentCoordinator: vi.fn(actual.createNativeE2eeEnrollmentCoordinator),
+  };
+});
+
 import {
+  createNativeE2eeEnrollmentCoordinator,
   getHostedRuntimeConfiguration,
   hostedHubController,
   hostedHubStore,
@@ -169,6 +178,12 @@ describe("hosted runtime configuration", () => {
   it("supplies every field the runtime contract requires", async () => {
     await expect(configureMobileHostedRuntime()).resolves.toBe(true);
 
+    expect(createNativeE2eeEnrollmentCoordinator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestedMaximumRole: "owner",
+        requestedCapabilities: ["ryco.rpc"],
+      }),
+    );
     const configuration = getHostedRuntimeConfiguration();
     expect(typeof configuration.endpoint.origin).toBe("function");
     expect(typeof configuration.httpClient.fetch).toBe("function");
