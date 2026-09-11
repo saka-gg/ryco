@@ -2,7 +2,7 @@
 
 import { isElectron } from "../env";
 import { useDeviceName } from "../deviceName";
-import { resolveDeviceName } from "../deviceName.logic";
+import { isLocalHubAlias, resolveDeviceName } from "../deviceName.logic";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import { useHostedHubStore } from "../hostedHub/state";
 
@@ -453,7 +453,14 @@ function OpenCommandPaletteDialog() {
     }
 
     for (const record of Object.values(savedEnvironmentRegistry)) {
-      if (seenEnvironmentIds.has(record.environmentId)) {
+      if (
+        seenEnvironmentIds.has(record.environmentId) ||
+        isLocalHubAlias(
+          record.environmentId,
+          primaryEnvironmentId,
+          deviceCatalog.localEnvironmentId,
+        )
+      ) {
         continue;
       }
 

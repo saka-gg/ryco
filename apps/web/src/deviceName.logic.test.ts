@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "@ryco/contracts";
-import { resolveDeviceName } from "./deviceName.logic";
+import { isLocalHubAlias, resolveDeviceName } from "./deviceName.logic";
 const primary = EnvironmentId.make("direct");
 const alias = EnvironmentId.make("hub-alias");
 const remote = EnvironmentId.make("remote");
 describe("device display names", () => {
+  it("hides only the colocated Hub alias when a direct device is present", () => {
+    expect(isLocalHubAlias(alias, primary, alias)).toBe(true);
+    expect(isLocalHubAlias(primary, primary, alias)).toBe(false);
+    expect(isLocalHubAlias(remote, primary, alias)).toBe(false);
+    expect(isLocalHubAlias(alias, null, alias)).toBe(false);
+    expect(isLocalHubAlias(primary, primary, primary)).toBe(false);
+  });
+
   it("uses the custom Hub name for the direct device without borrowing another device's name", () => {
     const input = {
       primaryEnvironmentId: primary,

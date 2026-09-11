@@ -1,4 +1,5 @@
 import { useDeviceName } from "../deviceName";
+import { isLocalHubAlias } from "../deviceName.logic";
 import { useServerConfig } from "~/rpc/serverState";
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -365,6 +366,14 @@ export default function Sidebar() {
       }
     } else if (desktopWorkspace.status !== "signed-out") {
       for (const machine of desktopWorkspace.machines) {
+        if (
+          isLocalHubAlias(
+            machine.environmentId,
+            primaryEnvironmentId,
+            desktopWorkspace.localEnvironmentId,
+          )
+        )
+          continue;
         knownEnvironmentIds.add(machine.environmentId);
         const queued = desktopWorkspace.queuedEnvironmentIds.includes(machine.environmentId);
         const stale =
@@ -395,6 +404,8 @@ export default function Sidebar() {
     }
 
     for (const environmentId of knownEnvironmentIds) {
+      if (isLocalHubAlias(environmentId, primaryEnvironmentId, desktopWorkspace.localEnvironmentId))
+        continue;
       if (byEnvironmentId.has(environmentId)) continue;
       if (primaryEnvironmentId !== null && environmentId === primaryEnvironmentId) {
         byEnvironmentId.set(

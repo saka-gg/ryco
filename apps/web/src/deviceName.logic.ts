@@ -18,3 +18,16 @@ export function resolveDeviceName(input: {
   const label = input.machines.find((machine) => machine.environmentId === catalogId)?.label.trim();
   return label || input.fallback?.trim() || "Device connecting…";
 }
+
+/** The direct Desktop connection already represents this catalog entry. */
+export function isLocalHubAlias(
+  environmentId: EnvironmentId,
+  primaryEnvironmentId: EnvironmentId | null,
+  localHubEnvironmentId: EnvironmentId | null,
+): boolean {
+  return (
+    primaryEnvironmentId !== null &&
+    environmentId !== primaryEnvironmentId &&
+    environmentId === localHubEnvironmentId
+  );
+}
