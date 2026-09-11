@@ -40,7 +40,6 @@ import {
   LoaderCircleIcon,
   InfoIcon,
   SearchIcon,
-  ServerIcon,
   Undo2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -296,7 +295,7 @@ function InboxThreadRow(props: {
                 <DeviceIcon
                   environmentId={props.row.environmentId}
                   label={props.row.machineLabel}
-                  className="size-3 shrink-0"
+                  className="mr-1 inline-block size-3 align-text-bottom"
                 />
                 <span>{props.row.machineLabel}</span>
               </span>
@@ -403,11 +402,10 @@ function InboxThreadRow(props: {
                   <span className="truncate">{props.row.projectLabel}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <ServerIcon aria-hidden className="size-3.5 shrink-0" />
                   <DeviceIcon
                     environmentId={props.row.environmentId}
                     label={props.row.machineLabel}
-                    className="size-3 shrink-0"
+                    className="size-3.5 shrink-0"
                   />
                   <span className="truncate">{props.row.machineLabel}</span>
                 </div>
