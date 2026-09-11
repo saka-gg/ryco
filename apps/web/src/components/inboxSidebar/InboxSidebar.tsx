@@ -285,19 +285,19 @@ function InboxThreadRow(props: {
           <div className="flex w-full min-w-0 items-center gap-2 text-[10px] leading-4 text-muted-foreground/70">
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               {projectIcon}
-              <span className="truncate">
-                <span className="text-xs font-medium text-sidebar-foreground/85">
+              <span className="flex min-w-0 items-center overflow-hidden whitespace-nowrap">
+                <span className="truncate text-xs font-medium text-sidebar-foreground/85">
                   {props.row.projectLabel}
                 </span>
-                <span aria-hidden className="px-1 text-muted-foreground/40">
+                <span aria-hidden className="shrink-0 px-1 text-muted-foreground/40">
                   ·
                 </span>
                 <DeviceIcon
                   environmentId={props.row.environmentId}
                   label={props.row.machineLabel}
-                  className="mr-1 inline-block size-3 align-text-bottom"
+                  className="mr-1 size-3 shrink-0"
                 />
-                <span>{props.row.machineLabel}</span>
+                <span className="truncate">{props.row.machineLabel}</span>
               </span>
             </span>
             <span className="shrink-0 tabular-nums text-muted-foreground/60 transition-opacity group-hover/inbox-row:opacity-0 group-focus-within/inbox-row:opacity-0">
