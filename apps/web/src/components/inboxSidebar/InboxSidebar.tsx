@@ -286,7 +286,7 @@ function InboxThreadRow(props: {
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               {projectIcon}
               <span className="flex min-w-0 items-center overflow-hidden whitespace-nowrap">
-                <span className="truncate text-xs font-medium text-sidebar-foreground/85">
+                <span className="truncate text-[13px] font-medium text-sidebar-foreground/85">
                   {props.row.projectLabel}
                 </span>
                 <span aria-hidden className="shrink-0 px-1 text-muted-foreground/40">
