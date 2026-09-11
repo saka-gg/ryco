@@ -1,7 +1,7 @@
 import { GitHubIcon } from "@/assets/brands";
 import { useEffect } from "react";
 import { Link } from "react-router-dom";
-import { ArrowDown, ArrowLeft, ArrowUpRight, Download } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Download } from "lucide-react";
 import { RycoMark, RycoWordmark } from "@/assets/RycoLogo";
 import { CHANGELOG_RELEASES, type ChangelogRelease } from "@/data/changelog";
 import { SITE } from "@/data/content";
@@ -184,70 +184,18 @@ export default function ChangelogPage() {
     <div className="relative min-h-screen bg-[#0a0b0d] text-white antialiased">
       <ChangelogNav dl={dl} />
 
-      <main>
-        <section className="mx-auto grid min-h-[100dvh] max-w-7xl items-center gap-12 px-5 pb-20 pt-32 sm:px-8 sm:pt-36 lg:grid-cols-[0.82fr_1.18fr] lg:gap-16">
-          <div className="changelog-intro max-w-xl">
-            <p className="font-['JetBrains_Mono'] text-xs font-medium uppercase tracking-[0.2em] text-[#d9ff78]">
-              Changelog
-            </p>
-            <h1 className="mt-5 font-['Space_Grotesk'] text-[clamp(3rem,7vw,5.8rem)] font-bold leading-[0.94] tracking-[-0.045em] text-white">
-              The Ryco changelog.
-            </h1>
-            <p className="mt-6 max-w-md text-lg leading-relaxed text-white/62">
-              Every public release, distilled into the improvements you can feel.
-            </p>
-            <div className="mt-9 flex flex-wrap items-center gap-3">
-              <a
-                href={`#v${CHANGELOG_RELEASES[0]?.version ?? ""}`}
-                className={cn(
-                  "inline-flex items-center gap-2 rounded-full bg-[#c6ff3a] px-5 py-3 text-sm font-semibold text-[#11140b] transition-transform hover:-translate-y-0.5 active:translate-y-px",
-                  focusRing,
-                )}
-              >
-                Latest release <ArrowDown className="size-4" />
-              </a>
-              <a
-                href={SITE.releases}
-                target="_blank"
-                rel="noreferrer"
-                className={cn(
-                  "inline-flex items-center gap-2 rounded-full border border-white/14 bg-white/[0.03] px-5 py-3 text-sm font-semibold text-white/80 transition hover:border-white/28 hover:text-white active:translate-y-px",
-                  focusRing,
-                )}
-              >
-                GitHub releases <ArrowUpRight className="size-4" />
-              </a>
-            </div>
-          </div>
-
-          <figure className="changelog-visual mx-auto w-full max-w-3xl lg:mx-0">
-            <div className="overflow-hidden rounded-3xl border border-white/12 bg-white/[0.025] p-2 shadow-2xl shadow-black/35">
-              <img
-                src="/shots/overview.png"
-                alt="Ryco desktop workspace showing coding agent sessions and project activity"
-                width={1920}
-                height={1080}
-                fetchPriority="high"
-                className="aspect-[16/10] w-full rounded-[1.15rem] object-cover object-left-top"
-              />
-            </div>
-            <figcaption className="mt-3 text-right font-['JetBrains_Mono'] text-[11px] uppercase tracking-[0.14em] text-white/38">
-              The Ryco desktop workspace
-            </figcaption>
-          </figure>
-        </section>
-
+      <main className="pt-28 sm:pt-32">
         <section aria-labelledby="release-history" className="mx-auto max-w-6xl px-5 pb-28 sm:px-8">
           <div className="mb-4 max-w-2xl">
             <p className="font-['JetBrains_Mono'] text-xs font-medium uppercase tracking-[0.2em] text-[#d9ff78]">
               Release history
             </p>
-            <h2
+            <h1
               id="release-history"
               className="mt-5 font-['Space_Grotesk'] text-4xl font-semibold tracking-[-0.03em] text-white sm:text-5xl"
             >
               From the first public build to today.
-            </h2>
+            </h1>
           </div>
 
           <div className="mt-14">
