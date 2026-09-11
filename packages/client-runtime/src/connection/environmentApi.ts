@@ -162,11 +162,18 @@ export function createEnvironmentApiLookup(input: {
   readonly canReadConnections: () => boolean;
   readonly readClient: (environmentId: EnvironmentId) => WsRpcClient | null;
 }) {
+  const apis = new WeakMap<WsRpcClient, EnvironmentApi>();
   return {
     read: (environmentId: EnvironmentId): EnvironmentApi | undefined => {
       if (!input.canReadConnections() || !environmentId) return undefined;
       const client = input.readClient(environmentId);
-      return client ? createEnvironmentApi(client) : undefined;
+      if (!client) return undefined;
+      let api = apis.get(client);
+      if (!api) {
+        api = createEnvironmentApi(client);
+        apis.set(client, api);
+      }
+      return api;
     },
   };
 }

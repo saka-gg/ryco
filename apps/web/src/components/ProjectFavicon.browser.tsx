@@ -1,22 +1,20 @@
 import "../index.css";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import { EnvironmentId, ProjectId, type EnvironmentApi, type ServerConfig } from "@ryco/contracts";
+import { EnvironmentId, ProjectId, type ServerConfig } from "@ryco/contracts";
 import {
   appAtomRegistry,
   serverConfigAtom,
   recordWsConnectionOpened,
   recordWsConnectionClosed,
   resetWsConnectionStateForTests,
+  type WsRpcClient,
 } from "@ryco/client-runtime/rpc";
 import {
   writePrimaryEnvironmentDescriptor,
   resetPrimaryEnvironmentDescriptorForTests,
 } from "../environments/primary";
-import {
-  __setEnvironmentApiOverrideForTests,
-  __resetEnvironmentApiOverridesForTests,
-} from "../environmentApi";
+import { createEnvironmentApiLookup } from "@ryco/client-runtime/connection";
 import type { ComponentProps } from "react";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
 import { ProjectFavicon } from "./ProjectFavicon";
@@ -25,6 +23,19 @@ vi.mock("../env", async (original) => ({
   ...(await original<typeof import("../env")>()),
   isHostedHubMode: () => true,
 }));
+const connectionHarness = vi.hoisted(() => ({
+  lookup: null as ReturnType<typeof createEnvironmentApiLookup> | null,
+}));
+vi.mock("../environmentApi", async () => {
+  const { createEnvironmentApi } = await import("@ryco/client-runtime/connection");
+  return {
+    createEnvironmentApi,
+    readEnvironmentApi: (id: EnvironmentId) => connectionHarness.lookup?.read(id),
+    ensureEnvironmentApi: (id: EnvironmentId) => connectionHarness.lookup?.read(id),
+    readEnvironmentApiForConnection: (_id: EnvironmentId, client: WsRpcClient | null) =>
+      client ? createEnvironmentApi(client) : undefined,
+  };
+});
 const env = EnvironmentId.make("hosted-icon-node");
 const projectId = ProjectId.make("icon-project");
 const descriptor = {
@@ -53,13 +64,28 @@ function connect(readIcon: unknown, supported = true) {
       capabilities: { ...descriptor.capabilities, projectIcons: supported },
     },
   } as ServerConfig);
-  __setEnvironmentApiOverrideForTests(env, { projects: { readIcon } } as EnvironmentApi);
+  const client = {
+    projects: { readIcon },
+    server: {},
+    filesystem: {},
+    sourceControl: {},
+    vcs: {},
+    git: {},
+    orchestration: {},
+    contextHandoff: {},
+    mcp: {},
+    terminal: {},
+  } as unknown as WsRpcClient;
+  connectionHarness.lookup = createEnvironmentApiLookup({
+    canReadConnections: () => true,
+    readClient: () => client,
+  });
   recordWsConnectionOpened({ environmentId: env });
 }
 
 describe("hosted project icons", () => {
   afterEach(() => {
-    __resetEnvironmentApiOverridesForTests();
+    connectionHarness.lookup = null;
     appAtomRegistry.set(serverConfigAtom, null);
     resetWsConnectionStateForTests();
     resetPrimaryEnvironmentDescriptorForTests();
@@ -73,6 +99,7 @@ describe("hosted project icons", () => {
     );
     await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
     expect(read).toHaveBeenCalledWith({ projectId });
+    expect(read).toHaveBeenCalledTimes(1);
     expect(view.container.querySelector("img")?.src).toBe(
       `data:image/svg+xml;base64,${icon.dataBase64}`,
     );
