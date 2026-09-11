@@ -238,6 +238,16 @@ describe("Inbox sidebar rendering and settlement", () => {
           expect(headerBounds.height).toBeLessThanOrEqual(18);
           expect(iconBounds.top).toBeGreaterThanOrEqual(headerBounds.top);
           expect(iconBounds.bottom).toBeLessThanOrEqual(headerBounds.bottom);
+          const iconCenter = (iconBounds.top + iconBounds.bottom) / 2;
+          for (const label of [
+            deviceIcon.parentElement!.firstElementChild!,
+            deviceIcon.nextElementSibling!,
+          ]) {
+            const labelBounds = label.getBoundingClientRect();
+            expect(Math.abs(iconCenter - (labelBounds.top + labelBounds.bottom) / 2)).toBeLessThan(
+              0.5,
+            );
+          }
           expect(rowElement.scrollWidth).toBeLessThanOrEqual(rowElement.clientWidth);
         }
         host.style.width = "320px";
