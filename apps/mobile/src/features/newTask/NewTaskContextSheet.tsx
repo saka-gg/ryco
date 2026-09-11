@@ -1,3 +1,4 @@
+import { DeviceIcon } from "../../components/DeviceIcon";
 import { Modal, Pressable, ScrollView, TextInput, View } from "react-native";
 
 import type { Project, SidebarWorktreeSummary } from "@ryco/client-runtime/state/threads";
@@ -9,6 +10,7 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import type { ProjectEnvironment } from "../projects/projectsModel";
 
 function OptionRow(props: {
+  readonly environmentId?: EnvironmentId;
   readonly label: string;
   readonly detail: string;
   readonly selected: boolean;
@@ -26,6 +28,9 @@ function OptionRow(props: {
         props.selected ? "border-foreground bg-card-alt" : "border-border bg-card"
       } ${props.disabled ? "opacity-40" : ""}`}
     >
+      {props.environmentId && (
+        <DeviceIcon environmentId={props.environmentId} label={props.label} />
+      )}
       <View className="min-w-0 flex-1 gap-0.5">
         <Text className="text-base font-ryco-bold text-foreground" numberOfLines={1}>
           {props.label}
@@ -103,6 +108,7 @@ export function NewTaskContextSheet(props: {
           {props.environments.map((environment) => (
             <OptionRow
               key={environment.environmentId}
+              environmentId={environment.environmentId}
               label={environment.label}
               detail={
                 environment.connectionState === "connected"

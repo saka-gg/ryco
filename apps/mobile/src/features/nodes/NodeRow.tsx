@@ -1,3 +1,6 @@
+import type { EnvironmentId } from "@ryco/contracts";
+import { DeviceIcon } from "../../components/DeviceIcon";
+import { DeviceIconPicker } from "./DeviceIconPicker";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -12,6 +15,9 @@ export interface NodeRowAction {
 }
 
 export interface NodeRowProps {
+  readonly canEditIcon?: boolean | undefined;
+  readonly environmentId?: EnvironmentId | undefined;
+  readonly platformOs?: string | undefined;
   readonly label: string;
   readonly detail: string;
   readonly transportLabel: string;
@@ -27,6 +33,13 @@ export interface NodeRowProps {
 function NodeRowContent(props: NodeRowProps) {
   return (
     <View className="flex-row items-start gap-3 px-4 py-4">
+      {props.environmentId && (
+        <DeviceIcon
+          environmentId={props.environmentId}
+          label={props.label}
+          platformOs={props.platformOs}
+        />
+      )}
       <View className="min-w-0 flex-1 gap-1">
         <View className="flex-row items-center gap-2">
           <Text
@@ -108,6 +121,13 @@ export function NodeRow(props: NodeRowProps) {
         <NodeRowContent {...props} />
       )}
       <NodeRowActions label={props.label} actions={props.actions} />
+      {props.environmentId && (
+        <DeviceIconPicker
+          environmentId={props.environmentId}
+          label={props.label}
+          canEdit={props.canEditIcon === true}
+        />
+      )}
     </View>
   );
 }

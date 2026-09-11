@@ -1,3 +1,8 @@
+vi.mock("../nodes/DeviceIconPicker", () => ({ DeviceIconPicker: () => null }));
+vi.mock("../../components/DeviceIcon", () => ({
+  DeviceIcon: () => null,
+  EnvironmentMachineIcon: () => null,
+}));
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -531,5 +536,31 @@ describe("two-plane isolation (hosted → direct)", () => {
     // supervisor for node turn-up/teardown (plan Task 4). What must stay clean
     // is this section's own graph.
     expect(tripwire.loaded).toEqual([]);
+  });
+});
+
+describe("node icon settings authorization", () => {
+  const owner = node({ effectiveRole: "owner" });
+  const ready: Partial<HostedHubState> = {
+    nodes: [owner],
+    selectedNode: owner,
+    effectiveRole: "owner",
+    transportStatus: "online",
+    sessionStatus: "ready",
+    browserStatus: "current",
+  };
+  it("enables the selected owner node only after current authorization and snapshot readiness", () => {
+    expect(model(ready).rows[0]?.canEditIcon).toBe(true);
+    for (const change of [
+      { effectiveRole: "operator" },
+      { effectiveRole: "viewer" },
+      { effectiveRole: null },
+      { browserStatus: "revalidating" },
+      { sessionStatus: "replaying" },
+      { directoryStatus: "loading" },
+      { selectedNode: null },
+    ] as Partial<HostedHubState>[]) {
+      expect(model({ ...ready, ...change }).rows[0]?.canEditIcon).not.toBe(true);
+    }
   });
 });

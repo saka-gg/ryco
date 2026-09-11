@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./environmentIcon": {
+      "types": "./src/environmentIcon.ts",
+      "import": "./src/environmentIcon.ts"
+    },
     "./hostedApp": {
       "types": "./src/hostedApp.ts",
       "import": "./src/hostedApp.ts"

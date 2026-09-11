@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { EditorId } from "./editor.ts";
+import { EnvironmentMachineKind, EnvironmentMachineHint } from "./environment.ts";
 import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_GIT_TEXT_GENERATION_OPTIONS,
@@ -436,6 +437,7 @@ export const AgentControlSettings = Schema.Struct({
 export type AgentControlSettings = typeof AgentControlSettings.Type;
 
 export const ServerSettings = Schema.Struct({
+  environmentIcon: EnvironmentMachineHint.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   // Legacy token-by-token assistant output. This is deliberately a fresh key
   // (formerly `enableAssistantStreaming`): decoding drops the old key so all
   // installations, including previous opt-ins, return to buffered output.
@@ -568,6 +570,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  environmentIcon: Schema.optionalKey(Schema.NullOr(EnvironmentMachineKind)),
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),

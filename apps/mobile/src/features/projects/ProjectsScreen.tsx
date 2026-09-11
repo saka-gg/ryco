@@ -1,4 +1,5 @@
 import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
+import { DeviceIcon } from "../../components/DeviceIcon";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -25,7 +26,12 @@ function MachineProvenance(props: { readonly machine: ProjectRowMachine }) {
   // where "Not verified" would sit — a long machine label must shorten itself,
   // never the mandatory §13.1 claim beside it.
   return (
-    <View className="flex-row items-center">
+    <View className="flex-row items-center gap-1">
+      <DeviceIcon
+        environmentId={props.machine.environmentId}
+        label={props.machine.label}
+        size={12}
+      />
       <Text
         className="min-w-0 shrink text-2xs font-ryco-medium text-foreground-muted"
         numberOfLines={1}

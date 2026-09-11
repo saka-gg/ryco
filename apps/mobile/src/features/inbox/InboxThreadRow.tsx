@@ -1,3 +1,4 @@
+import { DeviceIcon } from "../../components/DeviceIcon";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -88,9 +89,15 @@ export function InboxThreadRow(props: {
               : relativeTime(props.row.updatedAt)}
           </Text>
         </View>
-        <Text className="font-sans text-xs text-foreground-muted" numberOfLines={1}>
-          {props.row.contextLabel}
-        </Text>
+        <View className="flex-row items-center gap-1">
+          <DeviceIcon environmentId={props.row.environmentId} size={12} />
+          <Text
+            className="min-w-0 flex-1 font-sans text-xs text-foreground-muted"
+            numberOfLines={1}
+          >
+            {props.row.contextLabel}
+          </Text>
+        </View>
         {props.row.focusTitle === null ? null : (
           <View className="flex-row items-center gap-1.5">
             <Text className="font-ryco-medium text-xs text-foreground" numberOfLines={1}>

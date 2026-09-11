@@ -243,6 +243,10 @@ export function NodesScreen(props: {
             {visibleRows.map((row, index) => (
               <NodeRow
                 key={row.record.environmentId}
+                environmentId={row.record.environmentId}
+                canEditIcon={
+                  row.runtime.connectionState === "connected" && row.runtime.role === "owner"
+                }
                 label={row.record.label}
                 detail={`${directRoleLabel(row.runtime.role)} · ${endpointLabel(row.record.httpBaseUrl)}`}
                 transportLabel={directTransportLabel(row.record.httpBaseUrl)}

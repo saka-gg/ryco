@@ -414,6 +414,26 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("persists the node icon and removes the override on Automatic", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      const config = yield* ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const updated = yield* settings.updateSettings({ environmentIcon: "mini-pc" });
+      assert.equal(updated.environmentIcon, "mini-pc");
+      assert.equal(
+        JSON.parse(yield* fs.readFileString(config.settingsPath)).environmentIcon,
+        "mini-pc",
+      );
+      yield* settings.updateSettings({ environmentIcon: null });
+      assert.equal((yield* settings.getSettings).environmentIcon, null);
+      assert.equal(
+        JSON.parse(yield* fs.readFileString(config.settingsPath)).environmentIcon,
+        undefined,
+      );
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("writes only non-default server settings to disk", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsService;

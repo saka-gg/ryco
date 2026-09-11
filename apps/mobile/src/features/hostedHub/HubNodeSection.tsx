@@ -3,10 +3,11 @@ import { DeviceRenameSheet } from "../nodes/DeviceRenameSheet";
 import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
-import type { RelayEffectiveRole } from "@ryco/contracts";
+import { WS_METHODS, type RelayEffectiveRole } from "@ryco/contracts";
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
   getHostedHubApi,
+  resolveHostedRpcCapability,
   deriveHostedConnectionStatusIndicator,
   deriveHostedConnectionStatusText,
   type HostedE2eeChannelStatus,
@@ -79,6 +80,9 @@ export interface HubNodeSectionActions {
 }
 
 export interface HubNodeRowModel {
+  readonly canEditIcon?: boolean;
+  readonly environmentId?: HostedHubNode["environmentId"];
+  readonly platformOs?: string;
   readonly nodeId: string;
   readonly rename?: (() => void) | undefined;
   readonly label: string;
@@ -247,6 +251,23 @@ export function deriveHubNodeSectionModel(input: {
                 : null;
       return {
         nodeId: node.id,
+        environmentId: node.environmentId,
+        platformOs: node.platformOs,
+        canEditIcon:
+          trusted &&
+          node.revokedAt === null &&
+          node.effectiveRole === "owner" &&
+          state.accountStatus === "authenticated" &&
+          state.selectedNode?.id === node.id &&
+          resolveHostedRpcCapability({
+            hosted: true,
+            role: state.effectiveRole,
+            fresh: state.directoryStatus === "ready" && state.transportStatus === "online",
+            browserCurrent: state.browserStatus === "current",
+            sessionReady: state.sessionStatus === "ready",
+            method: WS_METHODS.serverUpdateSettings,
+          }).allowed,
+
         rename:
           state.directoryStatus === "ready" &&
           state.accountStatus === "authenticated" &&
@@ -334,6 +355,9 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
           {model.rows.map((row, index) => (
             <NodeRow
               key={row.nodeId}
+              environmentId={row.environmentId}
+              platformOs={row.platformOs}
+              canEditIcon={row.canEditIcon}
               label={row.label}
               detail={row.detail}
               transportLabel={row.transportLabel}
