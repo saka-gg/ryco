@@ -4,7 +4,7 @@ import {
   type SourceControlRefreshMode,
 } from "@ryco/contracts/settings";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
-import { isElectron } from "../../env";
+import { useAppPreferencesLabel } from "../../deviceName";
 import { Switch } from "../ui/switch";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsSection, SettingsRow, SettingResetButton } from "./settingsLayout";
@@ -47,7 +47,7 @@ function parseSourceControlRefreshMode(value: string | null): SourceControlRefre
 export function SourceControlPreferences() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
-  const localScopeLabel = isElectron ? "This device" : "This browser";
+  const localScopeLabel = useAppPreferencesLabel();
   return (
     <>
       <SettingsSection title="Diff display">

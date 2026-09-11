@@ -1,3 +1,4 @@
+import { useAppPreferencesLabel } from "../../deviceName";
 import { settingsRestorePlan } from "./settingsRestore";
 import { selectArchivedSettingsGroups } from "./archivedSettings";
 import { SourceControlPreferences } from "./SourceControlPreferences";
@@ -452,7 +453,9 @@ export function GeneralSettingsPanel({
   const isPhoneTier = usePresentationTier() === "phone";
   const settingsTarget = useSettingsTarget();
   const editingScope = useSettingsEditingScope();
+  const appLabel = useAppPreferencesLabel();
   const scopeOptions = {
+    appLabel,
     nativeClient: isElectron,
     nodeLabel: settingsTarget?.nodeLabel ?? null,
   };

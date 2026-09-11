@@ -1,3 +1,4 @@
+import { useDeviceName } from "../deviceName";
 import { useServerConfig } from "~/rpc/serverState";
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -295,6 +296,7 @@ export default function Sidebar() {
   const primaryConnectionState = getWsConnectionUiState(primaryWsConnectionStatus);
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
+  const primaryDeviceName = useDeviceName();
   const desktopWorkspace = useDesktopWorkspaceState();
   const hostedWorkspace = useHostedWorkspaceState();
   const selectedHostedEnvironmentId = useHostedHubStore(
@@ -398,6 +400,7 @@ export default function Sidebar() {
         byEnvironmentId.set(
           environmentId,
           buildPrimaryInboxSidebarEnvironment({
+            label: primaryDeviceName,
             environmentId,
             connectionState: primaryConnectionState,
             hydratedFromCache:
@@ -464,6 +467,7 @@ export default function Sidebar() {
     hostedWorkspace,
     primaryConnectionState,
     primaryEnvironmentDescriptor,
+    primaryDeviceName,
     primaryEnvironmentId,
     projects,
     savedEnvironmentRegistry,

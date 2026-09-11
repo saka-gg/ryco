@@ -872,6 +872,10 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
         desktopHostedIdentityStatus = { status: "signed-out" };
       },
       listNodes: async () => desktopHostedIdentityCoordinator?.listNodes() ?? [],
+      renameNode: async (nodeId, label) => {
+        if (!desktopHostedIdentityCoordinator) throw new Error("Sign in to rename a device.");
+        await desktopHostedIdentityCoordinator.renameNode(nodeId, label);
+      },
     },
     trust: {
       read: async (...args) => (await ensureDesktopNativeIdentityContext()).trust.read(...args),
@@ -2887,6 +2891,7 @@ function registerIpcHandlers(): void {
   for (const channel of [
     DESKTOP_WORKSPACE_IPC.getState,
     DESKTOP_WORKSPACE_IPC.refreshCatalog,
+    DESKTOP_WORKSPACE_IPC.renameDevice,
     DESKTOP_WORKSPACE_IPC.publishSnapshot,
     DESKTOP_WORKSPACE_IPC.retainScope,
     DESKTOP_WORKSPACE_IPC.renewScope,
@@ -2904,6 +2909,9 @@ function registerIpcHandlers(): void {
   );
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.refreshCatalog, () =>
     withDesktopWorkspace((handlers) => handlers.refreshCatalog()),
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.renameDevice, (_event, raw: unknown) =>
+    withDesktopWorkspace((handlers) => handlers.renameDevice(raw)),
   );
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.publishSnapshot, (_event, raw: unknown) =>
     withDesktopWorkspace((handlers) => handlers.publishSnapshot(raw)),

@@ -1,3 +1,4 @@
+import { useDeviceName } from "../deviceName";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
@@ -222,6 +223,7 @@ export function useHandleNewThread() {
     });
   }, [projectOrder, projects]);
   const handleNewThread = useNewThreadState();
+  const primaryDeviceName = useDeviceName();
   const desktopWorkspace = useDesktopWorkspaceState();
   const hostedWorkspace = useHostedWorkspaceState();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -237,6 +239,7 @@ export function useHandleNewThread() {
               ready: desktopWorkspace.status === "ready",
               primaryEnvironmentId,
               localHubEnvironmentId: desktopWorkspace.localEnvironmentId,
+              primaryLabel: primaryDeviceName,
             }),
             ready: desktopWorkspace.status === "ready",
             localEnvironmentId: primaryEnvironmentId,
@@ -249,7 +252,7 @@ export function useHandleNewThread() {
             ready: hostedWorkspace.status === "ready",
             localEnvironmentId: null,
           },
-    [desktopWorkspace, hostedWorkspace, primaryEnvironmentId],
+    [desktopWorkspace, hostedWorkspace, primaryEnvironmentId, primaryDeviceName],
   );
   const defaultProjectRef = useMemo(
     () =>

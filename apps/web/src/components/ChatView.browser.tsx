@@ -319,7 +319,7 @@ function createBaseServerConfig(): ServerConfig {
   return {
     environment: {
       environmentId: EnvironmentId.make("environment-local"),
-      label: "Local environment",
+      label: "Studio Mac",
       platform: { os: "darwin" as const, arch: "arm64" as const },
       serverVersion: "0.0.0-test",
       capabilities: {
@@ -624,7 +624,7 @@ function buildFixture(snapshot: OrchestrationReadModel): TestFixture {
     welcome: {
       environment: {
         environmentId: EnvironmentId.make("environment-local"),
-        label: "Local environment",
+        label: "Studio Mac",
         platform: { os: "darwin" as const, arch: "arm64" as const },
         serverVersion: "0.0.0-test",
         capabilities: {
@@ -3531,7 +3531,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       );
       expect(row).toBeDefined();
       expect(siblingRow).toBeDefined();
-      expect(row?.textContent).toContain("This device");
+      expect(row?.textContent).toContain("Studio Mac");
       expect(row?.textContent).toContain("Project");
       expect(row?.textContent).toContain("main");
       expect(row?.textContent).toContain("Idle");
@@ -7280,7 +7280,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await palette.getByText("Add project", { exact: true }).click();
       await expect.element(palette.getByText("Environments", { exact: true })).toBeInTheDocument();
       await expect
-        .element(palette.getByText("This device", { exact: true }).first())
+        .element(palette.getByText("Studio Mac", { exact: true }).first())
         .toBeInTheDocument();
       await palette.getByText("Staging", { exact: true }).click();
       await palette.getByText("Local folder", { exact: true }).click();

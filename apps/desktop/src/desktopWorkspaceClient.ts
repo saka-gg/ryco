@@ -38,6 +38,7 @@ export interface DesktopWorkspaceIdentityPort {
   readonly connect: () => Promise<DesktopWorkspaceIdentityStatus>;
   readonly disconnect: () => Promise<void>;
   readonly listNodes: () => Promise<ReadonlyArray<HostedHubNode>>;
+  readonly renameNode?: (nodeId: string, label: string) => Promise<void>;
 }
 
 export interface DesktopWorkspaceTrustPort {
@@ -258,10 +259,30 @@ export class DesktopWorkspaceClient {
         };
       }),
     );
+    if (this.#identityStatus !== identity) return this.snapshot();
     this.#catalog = reconcileWorkspaceMachineCatalog(inputs);
     await this.#releaseIneligibleConnections();
     await this.#reconcileCacheDisposition();
     return this.#publish();
+  }
+
+  async renameDevice(
+    environmentId: EnvironmentId,
+    label: string,
+  ): Promise<DesktopWorkspaceClientSnapshot> {
+    const normalized = label.trim();
+    if (!normalized || normalized.length > 100)
+      throw new Error("Use a device name of 1–100 characters.");
+    if (this.#identityStatus.status !== "ready" || !this.#identity.renameNode)
+      throw new Error("Sign in to rename a device.");
+    const identity = this.#identityStatus;
+    const machine = this.#catalog.find((entry) => entry.environmentId === environmentId);
+    if (!machine?.nodeId || machine.effectiveRole !== "owner" || !machine.canReadMetadata)
+      throw new Error("Only the device owner can rename it.");
+    await this.#identity.renameNode(machine.nodeId, normalized);
+    // An account switch must not publish the previous account's device labels.
+    if (this.#identityStatus !== identity) return this.snapshot();
+    return this.refreshCatalog();
   }
 
   async acceptWorkspaceSnapshot(

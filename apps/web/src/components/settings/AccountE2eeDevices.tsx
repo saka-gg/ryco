@@ -242,9 +242,9 @@ export function AccountE2eeDevices() {
           <AlertDialogHeader>
             <AlertDialogTitle>Revoke this encrypted device?</AlertDialogTitle>
             <AlertDialogDescription>
-              {revokeDevice?.deviceLabel ?? "This device"} will lose account-authorized native
-              connections. Signing in again can enroll fresh keys, but this enrollment cannot be
-              restored.
+              {revokeDevice?.deviceLabel ?? "The selected device"} will lose account-authorized
+              native connections. Signing in again can enroll fresh keys, but this enrollment cannot
+              be restored.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

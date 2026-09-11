@@ -89,9 +89,10 @@ const ALL_FILTERS: InboxSidebarFilters = {
 };
 
 describe("buildPrimaryInboxSidebarEnvironment", () => {
-  it("identifies a connected primary environment as This device", () => {
+  it("identifies a connected primary environment as Studio Mac", () => {
     expect(
       buildPrimaryInboxSidebarEnvironment({
+        label: "Studio Mac",
         environmentId: ENV_A,
         connectionState: "connected",
         hydratedFromCache: false,
@@ -99,7 +100,7 @@ describe("buildPrimaryInboxSidebarEnvironment", () => {
       }),
     ).toEqual({
       environmentId: ENV_A,
-      label: "This device",
+      label: "Studio Mac",
       connectionState: "connected",
       stale: false,
       role: "owner",
@@ -114,13 +115,14 @@ describe("buildPrimaryInboxSidebarEnvironment", () => {
   it("keeps an actually cached primary environment visibly stale", () => {
     expect(
       buildPrimaryInboxSidebarEnvironment({
+        label: "Studio Mac",
         environmentId: ENV_A,
         connectionState: "offline",
         hydratedFromCache: true,
         threadSettlementSupported: true,
       }),
     ).toMatchObject({
-      label: "This device",
+      label: "Studio Mac",
       connectionState: "offline",
       stale: true,
       staleDetail: "Offline · last known",

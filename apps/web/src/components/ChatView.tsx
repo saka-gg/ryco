@@ -1,3 +1,4 @@
+import { useDeviceName } from "../deviceName";
 import { resolveBuildModeModelSelection } from "../buildMode";
 import { newWorktreeBaseBranch } from "./chat/NewThreadWorkLocation.logic";
 import {
@@ -482,6 +483,7 @@ export default function ChatView(props: ChatViewProps) {
     routeKind === "server" ? store.threadLastVisitedAtById[routeThreadKey] : undefined,
   );
   const settings = useSettings();
+  const primaryDeviceName = useDeviceName();
   const desktopWorkspace = useDesktopWorkspaceState();
   const hostedWorkspace = useHostedWorkspaceState();
   const setStickyComposerModelSelection = useComposerDraftStore(
@@ -1090,8 +1092,9 @@ export default function ChatView(props: ChatViewProps) {
         ready: desktopWorkspace.status === "ready",
         primaryEnvironmentId,
         localHubEnvironmentId: desktopWorkspace.localEnvironmentId,
+        primaryLabel: primaryDeviceName,
       }),
-    [desktopWorkspace, primaryEnvironmentId],
+    [desktopWorkspace, primaryEnvironmentId, primaryDeviceName],
   );
   const logicalProjectEnvironments = useMemo(() => {
     if (!activeProject) return [];
@@ -1127,7 +1130,7 @@ export default function ChatView(props: ChatViewProps) {
         runtimeLabel: runtimeState?.descriptor?.label ?? null,
         savedLabel: savedRecord?.label ?? null,
       });
-      const label = isPrimary ? fallbackLabel : (workspaceMachine?.label ?? fallbackLabel);
+      const label = workspaceMachine?.label ?? (isPrimary ? primaryDeviceName : fallbackLabel);
       envs.push({
         environmentId: p.environmentId,
         projectId: p.id,
@@ -1148,6 +1151,7 @@ export default function ChatView(props: ChatViewProps) {
     activeProject,
     allProjects,
     desktopExecutionMachines,
+    primaryDeviceName,
     desktopWorkspace.status,
     hostedWorkspace,
     projectGroupingSettings,

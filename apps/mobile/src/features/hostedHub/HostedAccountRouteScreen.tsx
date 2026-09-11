@@ -1,3 +1,4 @@
+import { readMobileDeviceLabel } from "../../platform/config";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, View } from "react-native";
@@ -254,7 +255,7 @@ export function HostedAccountRouteScreen() {
               : null}
 
             {view.rows.length > 0 ? (
-              <SettingsSection title="This device">
+              <SettingsSection title={readMobileDeviceLabel()}>
                 {view.rows.map((row, index) => (
                   <SettingsRow
                     key={row.id}

@@ -974,13 +974,13 @@ export function HubSection({
       />
 
       <SettingsRow
-        title="Node name"
+        title="Device name"
         description={
           editable
             ? "Choose the name proposed on the Hub approval screen. Leave it blank for a stable automatic name."
             : snapshot?.identity.enrolled === "pending"
               ? "Locked while enrollment is pending. Cancel enrollment to change the proposed name."
-              : "Managed on the Hub after enrollment. An owner can rename this node from its Hub details."
+              : "After enrollment, rename the device in Device settings or its Hub details. The name is shared across your apps."
         }
         status={
           nodeNameError ? <span className="block text-destructive">{nodeNameError}</span> : null

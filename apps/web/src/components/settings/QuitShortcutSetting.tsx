@@ -1,3 +1,4 @@
+import { useAppPreferencesLabel } from "../../deviceName";
 import { useEffect, useState } from "react";
 import type { DesktopQuitShortcutMode } from "@ryco/contracts";
 import { SettingsRow } from "./settingsLayout";
@@ -10,6 +11,7 @@ const labels = {
 } as const;
 
 export function QuitShortcutSetting() {
+  const appLabel = useAppPreferencesLabel();
   const api = window.desktopBridge?.quitShortcut;
   const [mode, setMode] = useState<DesktopQuitShortcutMode | null>(null);
   const [saving, setSaving] = useState(false);
@@ -32,7 +34,7 @@ export function QuitShortcutSetting() {
   return (
     <SettingsRow
       title="Quit shortcut"
-      scope="This device"
+      scope={appLabel}
       description="Prevent accidental quits with a second press within 1.5 seconds, or hold for 1 second and release."
       status={error ? <span role="alert">{error}</span> : undefined}
       control={

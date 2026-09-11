@@ -82,6 +82,7 @@ export function projectDesktopWorkspaceState(
       nativeTrust: machine.nativeTrust,
       connectionState: machine.connectionState,
       canReadMetadata: machine.canReadMetadata,
+      canRename: machine.effectiveRole === "owner" && machine.canReadMetadata,
       canConnect: machine.canConnect,
       canMutate: machine.canMutate,
       effectiveRole: machine.canConnect ? machine.effectiveRole : null,
@@ -100,6 +101,16 @@ export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient
   return {
     getState: async () => projectDesktopWorkspaceState(client.snapshot()),
     refreshCatalog: async () => projectDesktopWorkspaceState(await client.refreshCatalog()),
+    renameDevice: async (raw: unknown) => {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+        throw new Error("Device name request is invalid.");
+      const input = raw as { readonly environmentId?: unknown; readonly label?: unknown };
+      if (typeof input.label !== "string" || !input.label.trim() || input.label.trim().length > 100)
+        throw new Error("Use a device name of 1–100 characters.");
+      return projectDesktopWorkspaceState(
+        await client.renameDevice(environmentId(input.environmentId), input.label.trim()),
+      );
+    },
     publishSnapshot: async (raw: unknown) => {
       if (!isWorkspaceMetadataSnapshot(raw)) {
         throw new Error("Desktop workspace metadata snapshot is invalid.");

@@ -252,6 +252,12 @@ export class DesktopHostedIdentityCoordinator {
   }
 
   /** Directory projection for the native Desktop client; credentials stay in main. */
+  async renameNode(nodeId: string, label: string): Promise<void> {
+    await this.#operation?.catch(() => undefined);
+    if (!this.#api.hasSessionMaterial) throw new Error("Sign in to rename a device.");
+    await this.#api.renameNode(nodeId, label);
+  }
+
   async listNodes(): Promise<ReadonlyArray<HostedHubNode>> {
     await this.#operation?.catch(() => undefined);
     if (!this.#api.hasSessionMaterial) return [];
