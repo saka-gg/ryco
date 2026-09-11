@@ -23,7 +23,6 @@ function ChangelogNav({ dl }: { dl: DownloadInfo }) {
           )}
         >
           <RycoMark className="size-7 transition-transform duration-300 group-hover:rotate-[8deg]" />
-          <RycoWordmark className="h-[17px] text-white/90" />
         </Link>
 
         <nav
@@ -85,7 +84,7 @@ function ChangelogNav({ dl }: { dl: DownloadInfo }) {
             href={dl.href}
             external={!dl.isDirect}
             size="sm"
-            magnetic
+            magnetic={false}
             className="rounded-full"
             ariaLabel={dl.osLabel ? `Download Ryco for ${dl.osLabel}` : "Download Ryco"}
           >

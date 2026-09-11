@@ -12,7 +12,7 @@ import { GitHubIcon } from "@/assets/brands";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Download, Menu, X } from "lucide-react";
-import { RycoWordmark, RycoMark } from "@/assets/RycoLogo";
+import { RycoMark } from "@/assets/RycoLogo";
 import { SITE } from "@/data/content";
 import { gsap, prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/cn";
@@ -147,7 +147,6 @@ export function SiteNav() {
           )}
         >
           <RycoMark className="size-7 transition-transform duration-500 ease-out group-hover/logo:rotate-[8deg] group-hover/logo:scale-110" />
-          <RycoWordmark className="h-[17px] text-white/90 transition-colors duration-300 group-hover/logo:text-white" />
         </a>
 
         {/* center links */}
@@ -213,7 +212,7 @@ export function SiteNav() {
             href={dl.href}
             external={!dl.isDirect}
             size="sm"
-            magnetic
+            magnetic={false}
             className="rounded-full"
             ariaLabel={
               dl.osLabel
