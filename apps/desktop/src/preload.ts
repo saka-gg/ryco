@@ -116,6 +116,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   },
   computerUse: {
     getState: () => ipcRenderer.invoke("desktop:computer-use:state"),
+    checkPermissions: () => ipcRenderer.invoke("desktop:computer-use:check-permissions"),
     refresh: (query) => ipcRenderer.invoke("desktop:computer-use:refresh", query),
     setPolicy: (policy) => ipcRenderer.invoke("desktop:computer-use:policy", policy),
     requestPermission: (kind) => ipcRenderer.invoke("desktop:computer-use:permission", kind),

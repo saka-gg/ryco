@@ -22,6 +22,7 @@ function logPathHydrationWarning(message: string, error?: unknown): void {
 
 export function fixPath(
   options: {
+    inheritedFromDesktop?: boolean;
     env?: NodeJS.ProcessEnv;
     platform?: NodeJS.Platform;
     readPath?: typeof readPathFromLoginShell;
@@ -32,6 +33,9 @@ export function fixPath(
     logWarning?: (message: string, error?: unknown) => void;
   } = {},
 ): void {
+  // Desktop already resolves and passes its environment. Probing its profile a
+  // second time can block the backend and repeat OS permission requests.
+  if (options.inheritedFromDesktop) return;
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const logWarning = options.logWarning ?? logPathHydrationWarning;

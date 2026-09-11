@@ -81,7 +81,7 @@ import {
   resolveDesktopServerExposure,
 } from "./serverExposure.ts";
 import { DesktopSshEnvironmentBridge, resolveRemoteRycoCliPackageSpec } from "./sshEnvironment.ts";
-import { syncShellEnvironment } from "./syncShellEnvironment.ts";
+import { captureShellEnvironment } from "./captureShellEnvironment.ts";
 import {
   applyShellEnvironmentCache,
   createShellEnvironmentCacheRecord,
@@ -572,16 +572,26 @@ function backendChildEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function synchronizeDesktopShellEnvironment(reason: string): void {
+const shellEnvironmentAbortController = new AbortController();
+
+async function synchronizeDesktopShellEnvironment(reason: string): Promise<void> {
   markDesktopStartupPhase("desktop.shell-env.refresh.start", `reason=${reason}`);
-  syncShellEnvironment(process.env, {
-    logWarning: (message, error) => {
-      writeDesktopLogHeader(
-        `shell environment warning message=${sanitizeLogValue(message)} detail=${sanitizeLogValue(formatErrorMessage(error))}`,
-      );
-      console.warn(`[desktop] ${message}`, error instanceof Error ? error.message : (error ?? ""));
-    },
+  const captured = await captureShellEnvironment({
+    workerPath: Path.join(__dirname, "shellEnvironmentWorker.cjs"),
+    env: process.env,
+    signal: shellEnvironmentAbortController.signal,
   });
+  if (!captured || shellEnvironmentAbortController.signal.aborted) {
+    markDesktopStartupPhase("desktop.shell-env.refresh.skipped", `reason=${reason}`);
+    return;
+  }
+  for (const message of captured.warnings) {
+    writeDesktopLogHeader(`shell environment warning message=${sanitizeLogValue(message)}`);
+  }
+  applyShellEnvironmentCache(
+    process.env,
+    createShellEnvironmentCacheRecord({ env: captured.environment }),
+  );
   try {
     writeShellEnvironmentCache(
       SHELL_ENVIRONMENT_CACHE_PATH,
@@ -595,7 +605,7 @@ function synchronizeDesktopShellEnvironment(reason: string): void {
   markDesktopStartupPhase("desktop.shell-env.refresh.end", `reason=${reason}`);
 }
 
-function prepareDesktopShellEnvironmentForBackend(): "cache-hit" | "cache-miss" {
+async function prepareDesktopShellEnvironmentForBackend(): Promise<void> {
   markDesktopStartupPhase("desktop.shell-env.prepare.start");
   const cached = readShellEnvironmentCache(SHELL_ENVIRONMENT_CACHE_PATH, {
     currentShell: process.env.SHELL ?? null,
@@ -606,24 +616,11 @@ function prepareDesktopShellEnvironmentForBackend(): "cache-hit" | "cache-miss" 
       "desktop.shell-env.cache.hit",
       `capturedAt=${cached.record.capturedAt}`,
     );
-    return "cache-hit";
+    return;
   }
 
   markDesktopStartupPhase("desktop.shell-env.cache.miss", `reason=${cached.reason}`);
-  synchronizeDesktopShellEnvironment("cache-miss");
-  return "cache-miss";
-}
-
-function scheduleDesktopShellEnvironmentRefresh(reason: string): void {
-  setTimeout(() => {
-    try {
-      synchronizeDesktopShellEnvironment(reason);
-    } catch (error) {
-      writeDesktopLogHeader(
-        `shell environment refresh failed reason=${reason} message=${sanitizeLogValue(formatErrorMessage(error))}`,
-      );
-    }
-  }, 5000);
+  await synchronizeDesktopShellEnvironment("cache-miss");
 }
 
 function getDesktopServerExposureState(): DesktopServerExposureState {
@@ -3741,11 +3738,8 @@ async function bootstrap(): Promise<void> {
   if (!isDevelopment) {
     ensurePackagedBootstrapWindowOpen("pre-backend-bootstrap");
   }
-  const shellEnvironmentPrepareResult = prepareDesktopShellEnvironmentForBackend();
+  await prepareDesktopShellEnvironmentForBackend();
   startBackend();
-  if (shellEnvironmentPrepareResult === "cache-hit") {
-    scheduleDesktopShellEnvironmentRefresh("deferred-refresh");
-  }
   writeDesktopLogHeader("bootstrap backend start requested");
 
   if (isDevelopment) {
@@ -3761,6 +3755,7 @@ app.on(
   createQuitCleanupHandler({
     cleanup: () => {
       isQuitting = true;
+      shellEnvironmentAbortController.abort();
       computerUseRuntime?.dispose();
       updateInstallInFlight = false;
       writeDesktopLogHeader("before-quit received");

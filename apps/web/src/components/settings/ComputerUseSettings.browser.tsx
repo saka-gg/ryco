@@ -39,6 +39,7 @@ it("keeps control opt-in, preserves remembered app denial and pairs only enabled
   window.desktopBridge = {
     computerUse: {
       getState: async () => state,
+      checkPermissions: async () => state,
       onState: () => () => {},
       setPolicy,
       pairBrowser,
@@ -104,9 +105,10 @@ it("uses distinct permission badges and rechecks when returning from system sett
     error: null,
   };
   const getState = vi.fn(async () => state);
+  const checkPermissions = vi.fn(async () => state);
   const requestPermission = vi.fn(async () => {});
   window.desktopBridge = {
-    computerUse: { getState, onState: () => () => {}, requestPermission },
+    computerUse: { getState, checkPermissions, onState: () => () => {}, requestPermission },
   } as unknown as DesktopBridge;
   const view = await render(<ComputerUseSettings />);
   await expect
@@ -116,6 +118,10 @@ it("uses distinct permission badges and rechecks when returning from system sett
   await expect
     .element(view.getByRole("button", { name: "Screen recording Not checked" }))
     .toBeVisible();
+  window.dispatchEvent(new Event("focus"));
+  expect(checkPermissions).not.toHaveBeenCalled();
+  await view.getByRole("button", { name: "Check permissions" }).click();
+  expect(checkPermissions).toHaveBeenCalledOnce();
   await view.getByRole("button", { name: "Accessibility Not granted" }).click();
   expect(requestPermission).toHaveBeenCalledWith("accessibility");
   state = { ...state, accessibility: "granted", screenRecording: "granted" };

@@ -20,7 +20,8 @@ export function registerComputerUseIpc(
       return run(input);
     });
   };
-  handle("state", () => runtime.refreshPermissions());
+  handle("state", () => runtime.state());
+  handle("check-permissions", () => runtime.refreshPermissions());
   handle("refresh", (input) => {
     if (input !== undefined && (typeof input !== "string" || input.length > 256))
       throw new Error("Invalid app search.");

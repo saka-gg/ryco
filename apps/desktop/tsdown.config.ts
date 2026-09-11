@@ -13,7 +13,7 @@ const shared = {
 export default defineConfig([
   {
     ...shared,
-    entry: ["src/main.ts"],
+    entry: ["src/main.ts", "src/shellEnvironmentWorker.ts"],
     clean: true,
     deps: {
       alwaysBundle: (id) => id.startsWith("@ryco/") || id.startsWith("effect-acp"),

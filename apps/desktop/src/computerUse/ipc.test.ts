@@ -28,16 +28,24 @@ it("admits only the exact main window and main frame for local policy changes", 
   expect(update).toHaveBeenCalledWith({ enabled: false });
 });
 
-it("reads fresh permissions instead of the initial cached unknown state", async () => {
+it("reads state without probing and checks permissions only on explicit request", async () => {
   const frame = {};
   const contents = { mainFrame: frame };
   const refreshPermissions = vi.fn(async () => ({ accessibility: "granted" }));
+  const state = vi.fn(() => ({ accessibility: "unknown" }));
   registerComputerUseIpc(
-    { refreshPermissions } as unknown as DesktopComputerUseRuntime,
+    { state, refreshPermissions } as unknown as DesktopComputerUseRuntime,
     () => ({ isDestroyed: () => false, webContents: contents }) as unknown as BrowserWindow,
   );
-  await expect(
+  expect(
     handlers.get("desktop:computer-use:state")!({ sender: contents, senderFrame: frame }),
+  ).toEqual({ accessibility: "unknown" });
+  expect(refreshPermissions).not.toHaveBeenCalled();
+  await expect(
+    handlers.get("desktop:computer-use:check-permissions")!({
+      sender: contents,
+      senderFrame: frame,
+    }),
   ).resolves.toEqual({ accessibility: "granted" });
   expect(refreshPermissions).toHaveBeenCalledOnce();
 });

@@ -583,6 +583,7 @@ export interface DesktopBridge {
   };
   computerUse?: {
     getState(): Promise<ComputerUseState>;
+    checkPermissions(): Promise<ComputerUseState>;
     refresh(query?: string): Promise<ComputerUseState>;
     setPolicy(policy: ComputerUsePolicy): Promise<ComputerUseState>;
     requestPermission(kind: "accessibility" | "screenRecording"): Promise<void>;

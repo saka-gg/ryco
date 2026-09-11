@@ -12,6 +12,13 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_INTERVAL_MS = 100;
 const DEFAULT_REQUEST_TIMEOUT_MS = 1_000;
 
+export class BackendReadinessTimeoutError extends Error {
+  constructor(baseUrl: string) {
+    super(`Timed out waiting for backend readiness at ${baseUrl}.`);
+    this.name = "BackendReadinessTimeoutError";
+  }
+}
+
 export class BackendReadinessAbortedError extends Error {
   constructor() {
     super("Backend readiness wait was aborted.");
@@ -99,7 +106,7 @@ export async function waitForHttpReady(
     }
 
     if (Date.now() >= deadline) {
-      throw new Error(`Timed out waiting for backend readiness at ${baseUrl}.`);
+      throw new BackendReadinessTimeoutError(baseUrl);
     }
 
     await delay(intervalMs, signal);

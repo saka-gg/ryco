@@ -144,7 +144,6 @@ export class DesktopComputerUseRuntime {
         return response.response === 2 ? "allow" : response.response === 1 ? "once" : "block";
       },
     });
-    this.overlay.setEnabled(policy.enabled);
     this.server = createServer((request, response) => {
       void (async () => {
         response.setHeader("cache-control", "no-store");
@@ -190,6 +189,10 @@ export class DesktopComputerUseRuntime {
             input,
             controller.signal,
             async (context) => {
+              if (!this.overlay.setEnabled(true))
+                throw new Error(
+                  "The emergency shortcut is in use by another app. Free it before starting computer use.",
+                );
               if (input.tool === "computer") return this.native.execute(context);
               const browser = input.args.browser as ComputerBrowser;
               if (
