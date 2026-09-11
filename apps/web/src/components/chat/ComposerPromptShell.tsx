@@ -1,4 +1,6 @@
 import type { ComposerSourceControlContext, ServerProviderSkill } from "@ryco/contracts";
+import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
+import { formatAttachmentBytes } from "./attachmentPreview";
 import { memo } from "react";
 import { CircleAlertIcon, FileIcon, PaperclipIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import type { ComposerImageAttachment } from "../../composerDraftStore";
@@ -16,16 +18,6 @@ import { SourceControlContextChip } from "./SourceControlContextChip";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
-
-function formatComposerFileBytes(sizeBytes: number): string {
-  if (sizeBytes >= 1024 * 1024) {
-    return `${Math.round((sizeBytes / (1024 * 1024)) * 10) / 10} MB`;
-  }
-  if (sizeBytes >= 1024) {
-    return `${Math.ceil(sizeBytes / 1024)} KB`;
-  }
-  return `${sizeBytes} B`;
-}
 
 interface ComposerPromptShellPendingProgress {
   customAnswer: string;
@@ -474,7 +466,7 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
           </span>
         ) : (
           <span className="block text-[10px] text-muted-foreground">
-            {formatComposerFileBytes(image.sizeBytes)}
+            {formatAttachmentBytes(image.sizeBytes)}
             {isUploaded ? " · Uploaded" : ""}
           </span>
         )}
@@ -487,6 +479,7 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
           />
         </span>
       )}
+      <AttachmentPreviewButton attachment={image} />
       <Button
         variant="ghost"
         size="icon-xs"
