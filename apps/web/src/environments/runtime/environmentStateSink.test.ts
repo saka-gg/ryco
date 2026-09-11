@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
 const applyOrchestrationEvents = vi.fn();
+const syncProjects = vi.fn();
+const syncThreads = vi.fn();
+const environmentStateById = {
+  live: { bootstrapComplete: true },
+  cached: { bootstrapComplete: false, hydratedFromCacheAt: 1 },
+  connecting: { bootstrapComplete: false },
+};
 
 vi.mock("~/store", () => ({
-  useStore: { getState: () => ({ applyOrchestrationEvents }) },
+  useStore: { getState: () => ({ applyOrchestrationEvents, environmentStateById }) },
   selectProjectsAcrossEnvironments: () => [],
   selectThreadsAcrossEnvironments: () => [],
 }));
@@ -23,13 +30,24 @@ vi.mock("~/terminalStateStore", () => ({
 }));
 vi.mock("~/uiStateStore", () => ({
   useUiStateStore: {
-    getState: () => ({ syncProjects: vi.fn(), syncThreads: vi.fn(), clearThreadUi: vi.fn() }),
+    getState: () => ({ syncProjects, syncThreads, clearThreadUi: vi.fn() }),
   },
 }));
 
 import { createWebEnvironmentStateSink } from "./environmentStateSink";
 
 describe("web environment state sink", () => {
+  it("allows preference cleanup only for nodes with a current live shell", () => {
+    const sink = createWebEnvironmentStateSink({
+      markProviderInvalidationNeeded: vi.fn(),
+      flushProviderInvalidation: vi.fn(),
+    });
+    sink.syncProjects("live" as never);
+    sink.syncThreads("live" as never);
+    const scope = { authoritativeEnvironmentIds: new Set(["live"]) };
+    expect(syncProjects).toHaveBeenCalledWith([], scope);
+    expect(syncThreads).toHaveBeenCalledWith([], scope);
+  });
   it("maps orchestration application to the thread store with the environment id", () => {
     const sink = createWebEnvironmentStateSink({
       markProviderInvalidationNeeded: vi.fn(),
