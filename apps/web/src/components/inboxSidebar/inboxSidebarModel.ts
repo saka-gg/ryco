@@ -19,6 +19,7 @@ import {
   type EnvironmentId,
   type ModelSelection,
   type ServerProvider,
+  type ServerConfig,
   type ProviderDriverKind,
   type SidebarAutoSettleAfterDays,
   type ThreadId,
@@ -501,4 +502,18 @@ export function buildInboxSidebarSections(
   input: BuildInboxSidebarInput,
 ): ReadonlyArray<InboxSidebarSection> {
   return buildInboxSidebarModel(input).sections;
+}
+
+/** Live config is node-owned; hosted directory descriptors intentionally start without capabilities. */
+export function applyInboxServerConfig(
+  environment: InboxSidebarEnvironment,
+  config: Pick<ServerConfig, "environment" | "providers"> | null | undefined,
+): InboxSidebarEnvironment {
+  if (!config) return environment;
+  return {
+    ...environment,
+    threadSnoozeSupported: config.environment.capabilities.threadSnooze ?? false,
+    threadSettlementSupported: config.environment.capabilities.threadSettlement,
+    providers: config.providers,
+  };
 }

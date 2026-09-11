@@ -54,6 +54,8 @@ import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPoli
 import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import { VcsProvisioningService } from "../vcs/VcsProvisioningService.ts";
 import { GitWorkflowService } from "../git/GitWorkflowService.ts";
+import { ProjectFaviconResolver } from "../project/Services/ProjectFaviconResolver.ts";
+import { ProjectAvatarStore } from "../project/Services/ProjectAvatarStore.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
@@ -169,6 +171,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       openCodeMcp,
     ]);
     const startup = yield* ServerRuntimeStartup;
+    const projectFaviconResolver = yield* Effect.serviceOption(ProjectFaviconResolver);
+    const projectAvatarStore = yield* Effect.serviceOption(ProjectAvatarStore);
     const workspaceEntries = yield* WorkspaceEntries;
     const workspaceFileSystem = yield* WorkspaceFileSystem;
     const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
@@ -762,6 +766,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       lifecycleEvents,
       serverSettings,
       mcpRegistry,
+      projectFaviconResolver,
+      projectAvatarStore,
       workspaceEntries,
       workspaceFileSystem,
       sourceControlDiscovery,

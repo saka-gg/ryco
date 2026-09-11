@@ -1,7 +1,8 @@
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 import {
   FilesystemBrowseError,
   ProjectListEntriesError,
+  ProjectReadIconError,
   ProjectReadFileBinaryError,
   ProjectReadFileError,
   ProjectSearchEntriesError,
@@ -10,6 +11,7 @@ import {
   WS_METHODS,
 } from "@ryco/contracts";
 
+import { readProjectIcon } from "../project/readProjectIcon.ts";
 import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
 import {
   WorkspaceFileConflictError,
@@ -24,6 +26,25 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
   const { ownerEffect, workspaceEntries, workspaceFileSystem, open } = ctx;
 
   return defineWsHandlers({
+    [WS_METHODS.projectsReadIcon]: (input) =>
+      ctx.withAccess(
+        "viewer",
+        WS_METHODS.projectsReadIcon,
+        Effect.gen(function* () {
+          const project = yield* ctx.projectionSnapshotQuery
+            .getProjectShellById(input.projectId)
+            .pipe(
+              Effect.mapError(
+                () => new ProjectReadIconError({ message: "Could not load project artwork." }),
+              ),
+            );
+          if (Option.isNone(project)) return null;
+          return yield* readProjectIcon(project.value, {
+            favicon: Option.getOrNull(ctx.projectFaviconResolver),
+            avatar: Option.getOrNull(ctx.projectAvatarStore),
+          });
+        }),
+      ),
     [WS_METHODS.projectsSearchEntries]: (input) =>
       observeRpcEffect(
         WS_METHODS.projectsSearchEntries,

@@ -94,6 +94,7 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.projectsList]: "viewer",
   [WS_METHODS.projectsListEntries]: "operator",
   [WS_METHODS.projectsReadFile]: "operator",
+  [WS_METHODS.projectsReadIcon]: "viewer",
   [WS_METHODS.projectsReadFileBinary]: "operator",
   [WS_METHODS.projectsRemove]: "operator",
   [WS_METHODS.projectsSearchEntries]: "operator",
