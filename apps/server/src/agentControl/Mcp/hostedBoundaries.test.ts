@@ -46,6 +46,7 @@ describe("pre-auth server environment descriptor", () => {
     ]);
     expect(Object.keys(ExecutionEnvironmentCapabilities.fields).toSorted()).toEqual([
       "fileAttachments",
+      "projectIcons",
       "repositoryIdentity",
       "threadPriorityRanking",
       "threadSettlement",

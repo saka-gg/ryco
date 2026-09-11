@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, PositiveInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const PROJECT_SEARCH_ENTRIES_MAX_LIMIT = 200;
 const PROJECT_WRITE_FILE_PATH_MAX_LENGTH = 512;
@@ -172,4 +172,26 @@ export class ProjectStageFileReferenceError extends Schema.TaggedError<ProjectSt
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
   },
+) {}
+
+/** Optional, bounded project artwork carried inside the authenticated node RPC channel. */
+export const PROJECT_ICON_MAX_BYTES = 512 * 1024;
+export const ProjectReadIconInput = Schema.Struct({ projectId: ProjectId });
+export type ProjectReadIconInput = typeof ProjectReadIconInput.Type;
+export const ProjectReadIconResult = Schema.NullOr(
+  Schema.Struct({
+    dataBase64: Schema.String.check(Schema.isMaxLength(Math.ceil(PROJECT_ICON_MAX_BYTES / 3) * 4)),
+    mimeType: Schema.Literals([
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "image/svg+xml",
+      "image/x-icon",
+    ]),
+  }),
+);
+export type ProjectReadIconResult = typeof ProjectReadIconResult.Type;
+export class ProjectReadIconError extends Schema.TaggedError<ProjectReadIconError>()(
+  "ProjectReadIconError",
+  { message: TrimmedNonEmptyString },
 ) {}

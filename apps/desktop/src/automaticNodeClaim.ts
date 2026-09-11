@@ -99,7 +99,8 @@ export async function runDesktopAutomaticNodeClaim(input: {
   }
   if (
     result.node.environmentId !== descriptor.environmentId ||
-    result.node.label !== descriptor.label ||
+    (result.node.label !== descriptor.label &&
+      !(descriptor.state === "active" && result.disposition === "reconnected")) ||
     result.node.fingerprint !== descriptor.fingerprint ||
     result.node.effectiveRole !== "owner"
   ) {

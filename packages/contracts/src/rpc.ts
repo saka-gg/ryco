@@ -165,6 +165,9 @@ import {
   ProjectListEntriesInput,
   ProjectListEntriesResult,
   ProjectReadFileBinaryError,
+  ProjectReadIconInput,
+  ProjectReadIconResult,
+  ProjectReadIconError,
   ProjectReadFileBinaryInput,
   ProjectReadFileBinaryResult,
   ProjectReadFileError,
@@ -281,6 +284,7 @@ export const WS_METHODS = {
   projectsListEntries: "projects.listEntries",
   projectsSearchEntries: "projects.searchEntries",
   projectsReadFile: "projects.readFile",
+  projectsReadIcon: "projects.readIcon",
   projectsReadFileBinary: "projects.readFileBinary",
   projectsWriteFile: "projects.writeFile",
   projectsStageFileReference: "projects.stageFileReference",
@@ -1092,6 +1096,12 @@ export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
   error: Schema.Union([ProjectReadFileError, AuthRpcError]),
 });
 
+export const WsProjectsReadIconRpc = Rpc.make(WS_METHODS.projectsReadIcon, {
+  payload: ProjectReadIconInput,
+  success: ProjectReadIconResult,
+  error: Schema.Union([ProjectReadIconError, AuthRpcError]),
+});
+
 export const WsProjectsReadFileBinaryRpc = Rpc.make(WS_METHODS.projectsReadFileBinary, {
   payload: ProjectReadFileBinaryInput,
   success: ProjectReadFileBinaryResult,
@@ -1734,6 +1744,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsListEntriesRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsReadFileRpc,
+  WsProjectsReadIconRpc,
   WsProjectsReadFileBinaryRpc,
   WsProjectsWriteFileRpc,
   WsProjectsStageFileReferenceRpc,

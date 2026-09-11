@@ -1,3 +1,4 @@
+import { applyInboxServerConfig } from "./inboxSidebar/inboxSidebarModel";
 import { useDeviceName } from "../deviceName";
 import { isLocalHubAlias } from "../deviceName.logic";
 import { useServerConfig } from "~/rpc/serverState";
@@ -455,20 +456,12 @@ export default function Sidebar() {
     }
     return [...byEnvironmentId.values()]
       .map((environment) =>
-        Object.assign(environment, {
-          threadSnoozeSupported:
-            (environment.environmentId === primaryEnvironmentId
-              ? primaryEnvironmentDescriptor
-              : savedEnvironmentRuntimeById[environment.environmentId]?.descriptor
-            )?.capabilities.threadSnooze ??
-            environment.threadSnoozeSupported ??
-            false,
-          providers:
-            (environment.environmentId === primaryEnvironmentId
-              ? inboxServerConfig
-              : savedEnvironmentRuntimeById[environment.environmentId]?.serverConfig
-            )?.providers ?? [],
-        }),
+        applyInboxServerConfig(
+          environment,
+          environment.environmentId === primaryEnvironmentId
+            ? inboxServerConfig
+            : savedEnvironmentRuntimeById[environment.environmentId]?.serverConfig,
+        ),
       )
       .toSorted((left, right) => left.label.localeCompare(right.label));
   }, [

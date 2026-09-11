@@ -100,6 +100,8 @@ import type {
 import type {
   ProjectListEntriesInput,
   ProjectListEntriesResult,
+  ProjectReadIconInput,
+  ProjectReadIconResult,
   ProjectReadFileBinaryInput,
   ProjectReadFileBinaryResult,
   ProjectReadFileInput,
@@ -904,6 +906,7 @@ export interface EnvironmentApi {
   projects: {
     listEntries: (input: ProjectListEntriesInput) => Promise<ProjectListEntriesResult>;
     readFile: (input: ProjectReadFileInput) => Promise<ProjectReadFileResult>;
+    readIcon: (input: ProjectReadIconInput) => Promise<ProjectReadIconResult>;
     readFileBinary: (input: ProjectReadFileBinaryInput) => Promise<ProjectReadFileBinaryResult>;
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;

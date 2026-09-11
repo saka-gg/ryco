@@ -167,6 +167,31 @@ describe("NodeNativeClaimService", () => {
       }),
     ).resolves.toMatchObject({ nodeId: result.node.id });
     expect(states.current().revision).toBe(3);
+    const renamed = {
+      ...result,
+      disposition: "reconnected" as const,
+      node: { ...result.node, label: "Renamed Mac" },
+    };
+    await expect(
+      service.commit({
+        hubOrigin: HUB_ORIGIN,
+        expectedLabel: "Studio Mac",
+        claim,
+        result: renamed,
+      }),
+    ).resolves.toMatchObject({ nodeId: result.node.id, activeKeyId: result.node.activeKeyId });
+    expect(states.current().revision).toBe(4);
+    await expect(
+      service.commit({
+        hubOrigin: HUB_ORIGIN,
+        expectedLabel: "Studio Mac",
+        claim,
+        result: {
+          ...renamed,
+          node: { ...renamed.node, id: "node_bbbbbbbbbbbbbbbbbbbbbb" as never },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "native_node_claim_conflict" });
   });
 
   it("fails closed on another origin, stale claims, or a changed Hub result", async () => {

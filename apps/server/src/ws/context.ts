@@ -54,11 +54,14 @@ import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPoli
 import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import { VcsProvisioningService } from "../vcs/VcsProvisioningService.ts";
 import { GitWorkflowService } from "../git/GitWorkflowService.ts";
+import { ProjectFaviconResolver } from "../project/Services/ProjectFaviconResolver.ts";
+import { ProjectAvatarStore } from "../project/Services/ProjectAvatarStore.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
+import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
 import { refreshWorktreeSourceControlState } from "../sourceControl/refreshWorktreeSourceControlState.ts";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
@@ -169,6 +172,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       openCodeMcp,
     ]);
     const startup = yield* ServerRuntimeStartup;
+    const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
+    const projectFaviconResolver = yield* Effect.serviceOption(ProjectFaviconResolver);
+    const projectAvatarStore = yield* Effect.serviceOption(ProjectAvatarStore);
     const workspaceEntries = yield* WorkspaceEntries;
     const workspaceFileSystem = yield* WorkspaceFileSystem;
     const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
@@ -762,6 +768,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       lifecycleEvents,
       serverSettings,
       mcpRegistry,
+      projectionProjects,
+      projectFaviconResolver,
+      projectAvatarStore,
       workspaceEntries,
       workspaceFileSystem,
       sourceControlDiscovery,

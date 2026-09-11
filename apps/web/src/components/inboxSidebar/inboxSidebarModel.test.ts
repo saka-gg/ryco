@@ -19,6 +19,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  applyInboxServerConfig,
   buildInboxSidebarSections,
   buildPrimaryInboxSidebarEnvironment,
   describeInboxFocus,
@@ -554,5 +555,57 @@ describe("inbox PR badges", () => {
       worktrees: [{ ...worktree, prNumber: null, issueNumber: 12 }],
     }).flatMap((section) => section.rows);
     expect(rows.every((row) => row.pullRequest === null)).toBe(true);
+  });
+});
+
+describe("hosted inbox capability resolution", () => {
+  const liveConfig = {
+    environment: {
+      environmentId: ENV_A,
+      label: "Node name",
+      platform: { os: "darwin" as const, arch: "arm64" as const },
+      serverVersion: "1.0.0",
+      capabilities: {
+        repositoryIdentity: true,
+        threadSettlement: true,
+        threadSnooze: true,
+        threadPriorityRanking: false,
+      },
+    },
+    providers: [],
+  };
+  const inactive = thread("old", { latestUserMessageAt: "2026-08-23T10:00:00.000Z" });
+  it("enables snooze and auto-settlement after a live node replaces directory capability defaults", () => {
+    const initial = environment(ENV_A, {
+      threadSettlementSupported: false,
+      threadSnoozeSupported: false,
+    });
+    const live = applyInboxServerConfig(initial, liveConfig);
+    const sections = build({
+      threads: [inactive],
+      environments: [live],
+      autoSettleAfterDays: 3,
+      nowMs: Date.parse("2026-09-11T10:00:00Z"),
+    });
+    expect(sections.find((section) => section.key === "settled")?.rows[0]).toMatchObject({
+      title: "old",
+      canSnooze: true,
+      settlementActionEnabled: true,
+    });
+  });
+  it.each([
+    { mutationReady: false },
+    { shellCurrent: false },
+    { connectionState: "offline" as const, stale: true },
+  ])("keeps mutations blocked with live capabilities and %o", (blocker) => {
+    const live = applyInboxServerConfig(environment(ENV_A, blocker), liveConfig);
+    const rows = build({ threads: [inactive], environments: [live] }).flatMap(
+      (section) => section.rows,
+    );
+    expect(rows[0]).toMatchObject({ canSnooze: false, settlementActionEnabled: false });
+  });
+  it("does not borrow capabilities when no node config has arrived", () => {
+    const initial = environment(ENV_A, { threadSettlementSupported: false });
+    expect(applyInboxServerConfig(initial, null)).toBe(initial);
   });
 });
