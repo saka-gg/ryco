@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   EventId,
@@ -67,6 +69,8 @@ import {
   verifyOpenCodeServerVersion,
 } from "../opencodeRuntime.ts";
 
+import { OpenCodeTaskLifecycle, type OpenCodeTaskTransition } from "../openCodeTaskLifecycle.ts";
+
 const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_RESUME_VERSION = 1;
 
@@ -101,6 +105,7 @@ interface OpenCodeSessionContext {
   readonly unboundSubtaskPartIds: Array<string>;
   readonly startedSubagentIds: Set<string>;
   readonly completedSubagentIds: Set<string>;
+  readonly tasks: OpenCodeTaskLifecycle;
   readonly turns: Array<OpenCodeTurnSnapshot>;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
@@ -833,6 +838,7 @@ export function makeOpenCodeAdapter(
         readonly raw: unknown;
       },
     ) {
+      if (context.completedSubagentIds.has(subagentKey(input.subagent.subagentId))) return;
       yield* emitOpenCodeSubagentStarted(context, input.subagent, input.raw);
       yield* emitForContext(context, {
         ...(yield* buildEventBase({
@@ -880,10 +886,131 @@ export function makeOpenCodeAdapter(
       });
     });
 
+    const emitOpenCodeTaskTransition = Effect.fn("emitOpenCodeTaskTransition")(function* (
+      context: OpenCodeSessionContext,
+      transition: OpenCodeTaskTransition,
+      raw: unknown,
+    ) {
+      const nativeRef = transition.subagent;
+      const existing = nativeRef.providerSessionId
+        ? context.subagentBySessionId.get(nativeRef.providerSessionId)
+        : undefined;
+      const subagent: SubagentRef = {
+        ...existing,
+        ...nativeRef,
+        subagentId: existing?.subagentId ?? nativeRef.subagentId,
+        capability: existing?.capability === "transcript" ? "transcript" : nativeRef.capability,
+        metadata: {
+          ...existing?.metadata,
+          ...nativeRef.metadata,
+          providerInstanceId: boundInstanceId,
+        },
+      };
+      if (subagent.providerSessionId) {
+        context.childSessionIds.add(subagent.providerSessionId);
+        context.subagentBySessionId.set(subagent.providerSessionId, subagent);
+      }
+      const key = subagentKey(subagent.subagentId);
+      const base = {
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: context.activeTurnId,
+          raw,
+        })),
+        eventId: EventId.make(
+          createHash("sha256")
+            .update(
+              JSON.stringify([
+                context.session.threadId,
+                context.openCodeSessionId,
+                transition.eventKey,
+              ]),
+            )
+            .digest("hex"),
+        ),
+      };
+      if (transition.type === "started") {
+        if (context.startedSubagentIds.has(key)) {
+          // A child-session event can arrive before the Task's metadata.
+          yield* emitForContext(context, {
+            ...base,
+            type: "subagent.updated",
+            payload: { subagent, status: transition.status },
+          });
+        } else {
+          context.startedSubagentIds.add(key);
+          yield* emitForContext(context, {
+            ...base,
+            type: "subagent.started",
+            payload: { subagent },
+          });
+        }
+        context.completedSubagentIds.delete(key);
+      } else if (transition.type === "completed") {
+        context.startedSubagentIds.add(key);
+        context.completedSubagentIds.add(key);
+        yield* emitForContext(context, {
+          ...base,
+          type: "subagent.completed",
+          payload: {
+            subagent,
+            status: transition.status as "completed" | "failed" | "stopped",
+            ...(transition.summary ? { summary: transition.summary } : {}),
+          },
+        });
+      } else {
+        if (transition.status === "running" || transition.status === "starting")
+          context.completedSubagentIds.delete(key);
+        yield* emitForContext(context, {
+          ...base,
+          type: "subagent.updated",
+          payload: {
+            subagent,
+            status: transition.status,
+            ...(transition.summary ? { summary: transition.summary } : {}),
+          },
+        });
+      }
+    });
+
+    const projectOpenCodeTask = Effect.fn("projectOpenCodeTask")(function* (
+      context: OpenCodeSessionContext,
+      part: Part,
+    ) {
+      for (const transition of context.tasks.project(part)) {
+        yield* emitOpenCodeTaskTransition(context, transition, part);
+      }
+    });
+
+    const loadOpenCodeTasks = Effect.fn("loadOpenCodeTasks")(function* (
+      context: OpenCodeSessionContext,
+    ) {
+      const messages = yield* runOpenCodeSdk("session.messages", () =>
+        context.client.session.messages({ sessionID: context.openCodeSessionId }),
+      );
+      // Reconstruct in native message order, but only publish the latest state
+      // of each child. The same projector then deduplicates buffered live events.
+      const latest = new Map<string, { transition: OpenCodeTaskTransition; part: Part }>();
+      for (const entry of messages.data ?? []) {
+        for (const part of entry.parts) {
+          if (part.sessionID !== context.openCodeSessionId) continue;
+          if (entry.info.role !== "assistant" && !(part.type === "text" && part.synthetic))
+            continue;
+          for (const transition of context.tasks.project(part)) {
+            latest.set(String(transition.subagent.subagentId), { transition, part });
+          }
+        }
+      }
+      return [...latest.values()];
+    });
+
     const emitStoppedOpenCodeChildren = Effect.fn("emitStoppedOpenCodeChildren")(function* (
       context: OpenCodeSessionContext,
       raw: unknown,
     ) {
+      for (const transition of context.tasks.stop()) {
+        yield* emitOpenCodeTaskTransition(context, transition, raw);
+      }
       for (const subagent of context.subagentBySessionId.values()) {
         yield* emitOpenCodeSubagentCompleted(context, {
           subagent,
@@ -937,8 +1064,11 @@ export function makeOpenCodeAdapter(
         return undefined;
       }
 
+      const taskRef = context.tasks.refForSession(session.id);
       const existing =
-        context.subagentBySessionId.get(session.id) ?? takeUnboundOpenCodeSubtask(context);
+        context.subagentBySessionId.get(session.id) ??
+        taskRef ??
+        takeUnboundOpenCodeSubtask(context);
       const subagent = mergeOpenCodeChildSessionRef(
         existing,
         session,
@@ -947,6 +1077,8 @@ export function makeOpenCodeAdapter(
       const known = context.childSessionIds.has(session.id);
       context.childSessionIds.add(session.id);
       context.subagentBySessionId.set(session.id, subagent);
+
+      if (taskRef) return subagent;
 
       if (known) {
         yield* emitOpenCodeSubagentUpdated(context, {
@@ -1138,6 +1270,7 @@ export function makeOpenCodeAdapter(
       if (yield* Ref.getAndSet(context.stopped, true)) {
         return;
       }
+      yield* emitStoppedOpenCodeChildren(context, { reason: "transport-exit" });
       const turnId = context.activeTurnId;
       // Emit lifecycle events BEFORE tearing down the scope. Both call sites
       // run this inside a fiber forked via `Effect.forkIn(context.sessionScope)`;
@@ -1282,6 +1415,7 @@ export function makeOpenCodeAdapter(
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
     ) {
+      if (yield* Ref.get(context.stopped)) return;
       const payloadSessionId =
         "properties" in event ? (event.properties as { sessionID?: unknown }).sessionID : undefined;
       const eventSessionId = typeof payloadSessionId === "string" ? payloadSessionId : undefined;
@@ -1462,6 +1596,15 @@ export function makeOpenCodeAdapter(
           const part = event.properties.part;
           context.partById.set(scopedOpenCodeId(part.sessionID, part.id), part);
           const messageRole = messageRoleForPart(context, part);
+          if (part.sessionID === context.openCodeSessionId && messageRole !== "user") {
+            yield* projectOpenCodeTask(context, part);
+          } else if (
+            part.sessionID === context.openCodeSessionId &&
+            part.type === "text" &&
+            part.synthetic
+          ) {
+            yield* projectOpenCodeTask(context, part);
+          }
 
           if (messageRole === "assistant") {
             yield* emitAssistantTextDelta(context, part, turnId, event);
@@ -1477,7 +1620,7 @@ export function makeOpenCodeAdapter(
               part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
             const detail = detailFromToolPart(part);
             const childSubagent = context.subagentBySessionId.get(part.sessionID);
-            if (childSubagent) {
+            if (childSubagent && !context.tasks.hasSession(part.sessionID)) {
               yield* emitOpenCodeSubagentUpdated(context, {
                 subagent: childSubagent,
                 status: statusFromOpenCodeSubagentState("running"),
@@ -1636,6 +1779,7 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.status": {
+          if (context.tasks.hasSession(event.properties.sessionID)) break;
           const childSubagent = context.subagentBySessionId.get(event.properties.sessionID);
           if (childSubagent) {
             if (event.properties.status.type === "idle") {
@@ -1713,6 +1857,7 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.idle": {
+          if (context.tasks.hasSession(event.properties.sessionID)) break;
           const childSubagent = context.subagentBySessionId.get(event.properties.sessionID);
           if (childSubagent) {
             yield* emitOpenCodeSubagentCompleted(context, {
@@ -1725,6 +1870,8 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.error": {
+          if (event.properties.sessionID && context.tasks.hasSession(event.properties.sessionID))
+            break;
           const message = sessionErrorMessage(event.properties.error);
           const childSubagent =
             event.properties.sessionID !== undefined
@@ -1790,7 +1937,9 @@ export function makeOpenCodeAdapter(
       }
     });
 
-    const startEventPump = Effect.fn("startEventPump")(function* (context: OpenCodeSessionContext) {
+    const prepareEventSubscription = Effect.fn("prepareEventSubscription")(function* (
+      context: OpenCodeSessionContext,
+    ) {
       // One AbortController per session scope. The finalizer fires when
       // the scope closes (explicit stop, unexpected exit, or layer
       // shutdown) and cancels the in-flight `event.subscribe` fetch so
@@ -1801,43 +1950,75 @@ export function makeOpenCodeAdapter(
         Effect.sync(() => eventsAbortController.abort()),
       );
 
-      // Fibers forked into `context.sessionScope` are interrupted
-      // automatically when the scope closes — no bookkeeping required.
-      yield* Effect.flatMap(
-        runOpenCodeSdk("event.subscribe", () =>
-          context.client.event.subscribe(undefined, {
-            signal: eventsAbortController.signal,
-          }),
-        ),
-        (subscription) =>
-          Stream.fromAsyncIterable(
-            subscription.stream,
-            (cause) =>
+      const subscription = yield* runOpenCodeSdk("event.subscribe", () =>
+        context.client.event.subscribe(undefined, { signal: eventsAbortController.signal }),
+      );
+      // The SDK returns a lazy async generator: subscribe() alone does not
+      // open HTTP. Prime it before reading history so intervening SSE updates
+      // stay buffered on the established connection instead of being lost.
+      const iterator = subscription.stream[Symbol.asyncIterator]();
+      const first = yield* runOpenCodeSdk("event.subscribe", () => iterator.next()).pipe(
+        Effect.timeoutOrElse({
+          duration: "10 seconds",
+          orElse: () =>
+            Effect.fail(
               new OpenCodeRuntimeError({
                 operation: "event.subscribe",
-                detail: openCodeRuntimeErrorDetail(cause),
-                cause,
+                detail: "Timed out opening OpenCode event stream.",
               }),
-          ).pipe(Stream.runForEach((event) => handleSubscribedEvent(context, event))),
-      ).pipe(
-        Effect.exit,
-        Effect.flatMap((exit) =>
-          Effect.gen(function* () {
-            // Expected paths: caller aborted the fetch or the session
-            // has already been marked stopped. Treat as a clean exit.
-            if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
-              return;
-            }
-            if (Exit.isFailure(exit)) {
-              yield* emitUnexpectedExit(
-                context,
-                openCodeRuntimeErrorDetail(Cause.squash(exit.cause)),
-              );
-            }
-          }),
-        ),
-        Effect.forkIn(context.sessionScope),
+            ),
+        }),
       );
+      const stream = (async function* () {
+        try {
+          if (!first.done) yield first.value;
+          if (first.done) return;
+          while (true) {
+            const next = await iterator.next();
+            if (next.done) return;
+            yield next.value;
+          }
+        } finally {
+          await iterator.return?.();
+        }
+      })();
+      return { subscription: { stream }, eventsAbortController };
+    });
+
+    const startEventPump = Effect.fn("startEventPump")(function* (
+      context: OpenCodeSessionContext,
+      prepared: Effect.Success<ReturnType<typeof prepareEventSubscription>>,
+    ) {
+      const { subscription, eventsAbortController } = prepared;
+      yield* Stream.fromAsyncIterable(
+        subscription.stream,
+        (cause) =>
+          new OpenCodeRuntimeError({
+            operation: "event.subscribe",
+            detail: openCodeRuntimeErrorDetail(cause),
+            cause,
+          }),
+      )
+        .pipe(Stream.runForEach((event) => handleSubscribedEvent(context, event)))
+        .pipe(
+          Effect.exit,
+          Effect.flatMap((exit) =>
+            Effect.gen(function* () {
+              // Expected paths: caller aborted the fetch or the session
+              // has already been marked stopped. Treat as a clean exit.
+              if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
+                return;
+              }
+              if (Exit.isFailure(exit)) {
+                yield* emitUnexpectedExit(
+                  context,
+                  openCodeRuntimeErrorDetail(Cause.squash(exit.cause)),
+                );
+              }
+            }),
+          ),
+          Effect.forkIn(context.sessionScope),
+        );
 
       if (!context.server.external && context.server.exitCode !== null) {
         yield* context.server.exitCode.pipe(
@@ -1987,6 +2168,7 @@ export function makeOpenCodeAdapter(
                 server,
                 client,
                 openCodeSession: openCodeSession.data,
+                adopted: adoptedSession !== undefined,
               };
             }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
           );
@@ -1996,21 +2178,6 @@ export function makeOpenCodeAdapter(
           }
           return startedExit.value;
         });
-
-        // Guard against a concurrent startSession call that may have raced
-        // and already inserted a session while we were awaiting async work.
-        const raceWinner = sessions.get(input.threadId);
-        if (raceWinner) {
-          // Another call won the race – clean up the session we just created
-          // (including the remote SDK session) and return the existing one.
-          yield* runOpenCodeSdk("session.abort", () =>
-            started.client.session.abort({
-              sessionID: started.openCodeSession.id,
-            }),
-          ).pipe(Effect.ignore);
-          yield* Scope.close(started.sessionScope, Exit.void).pipe(Effect.ignore);
-          return raceWinner.session;
-        }
 
         const createdAt = nowIso();
         const tokenMode = input.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
@@ -2051,6 +2218,7 @@ export function makeOpenCodeAdapter(
           unboundSubtaskPartIds: [],
           startedSubagentIds: new Set(),
           completedSubagentIds: new Set(),
+          tasks: new OpenCodeTaskLifecycle(),
           turns: [],
           activeTurnId: undefined,
           activeAgent: undefined,
@@ -2064,6 +2232,37 @@ export function makeOpenCodeAdapter(
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
         };
+        const prepared = yield* Effect.exit(prepareEventSubscription(context));
+        if (Exit.isFailure(prepared)) {
+          if (!started.adopted) {
+            yield* runOpenCodeSdk("session.abort", () =>
+              started.client.session.abort({ sessionID: started.openCodeSession.id }),
+            ).pipe(Effect.ignore);
+          }
+          yield* Scope.close(started.sessionScope, Exit.void).pipe(Effect.ignore);
+          return yield* toProcessError(input.threadId, Cause.squash(prepared.cause));
+        }
+        const storedTasks = started.adopted
+          ? yield* loadOpenCodeTasks(context).pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("OpenCode Task history reconstruction failed", error).pipe(
+                  Effect.as([]),
+                ),
+              ),
+            )
+          : [];
+        // Recheck after subscription and history awaits; a reused native session
+        // belongs to the winner and must never be aborted by a losing startup.
+        const raceWinner = sessions.get(input.threadId);
+        if (raceWinner) {
+          if (!started.adopted) {
+            yield* runOpenCodeSdk("session.abort", () =>
+              started.client.session.abort({ sessionID: started.openCodeSession.id }),
+            ).pipe(Effect.ignore);
+          }
+          yield* Scope.close(started.sessionScope, Exit.void).pipe(Effect.ignore);
+          return raceWinner.session;
+        }
         deviceToolContext = context;
         sessions.set(input.threadId, context);
 
@@ -2081,7 +2280,10 @@ export function makeOpenCodeAdapter(
             providerThreadId: started.openCodeSession.id,
           },
         });
-        yield* startEventPump(context);
+        for (const { transition, part } of storedTasks) {
+          yield* emitOpenCodeTaskTransition(context, transition, part);
+        }
+        yield* startEventPump(context, prepared.value);
         yield* Effect.gen(function* () {
           yield* hydrateOpenCodeChildSessions(context);
           yield* recoverPendingOpenCodeRequests(context);
@@ -2340,6 +2542,10 @@ export function makeOpenCodeAdapter(
         ) {
           return;
         }
+        yield* emitStoppedOpenCodeChildren(context, {
+          method: "session.abort",
+          reason: "turn-interrupted",
+        });
         const pendingPrompt = context.pendingPrompt;
         if (pendingPrompt && pendingPrompt.turnId === interruptedTurnId) {
           context.pendingPrompt = undefined;
@@ -2356,10 +2562,6 @@ export function makeOpenCodeAdapter(
             abortOpenCodeSession(context, sessionID).pipe(Effect.ignore({ log: true })),
           { discard: true },
         );
-        yield* emitStoppedOpenCodeChildren(context, {
-          method: "session.abort",
-          reason: "turn-interrupted",
-        });
         if (Exit.isFailure(rootAbortExit)) {
           return yield* Effect.failCause(rootAbortExit.cause);
         }
