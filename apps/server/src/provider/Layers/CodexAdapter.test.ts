@@ -93,7 +93,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   public readonly interruptTurnImpl = vi.fn((_turnId?: TurnId): Promise<void> =>
     Promise.resolve(undefined),
   );
-  public interruptTurnEffect: Effect.Effect<void> | null = null;
+  public interruptTurnEffect: ReturnType<CodexSessionRuntimeShape["interruptTurn"]> | null = null;
 
   public readonly readThreadImpl = vi.fn((): Promise<CodexThreadSnapshot> =>
     Promise.resolve({
@@ -913,6 +913,28 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       yield* TestClock.adjust("15 seconds");
       yield* Fiber.join(interruptFiber);
 
+      assert.equal(runtime.closeImpl.mock.calls.length, 1);
+      assert.equal(yield* adapter.hasSession(session.threadId), false);
+    }),
+  );
+
+  it.effect("stops an idle parent session when child cancellation fails", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime, session } = yield* startLifecycleRuntime();
+      const exitEvent = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "session.exited"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      runtime.interruptTurnEffect = Effect.fail(
+        new CodexErrors.CodexAppServerTransportError({
+          detail: "Child cancellation failed",
+          cause: new Error("child gone"),
+        }),
+      );
+      yield* adapter.interruptTurn(session.threadId);
+      const settled = yield* Fiber.join(exitEvent);
+      assert.equal(settled._tag, "Some");
       assert.equal(runtime.closeImpl.mock.calls.length, 1);
       assert.equal(yield* adapter.hasSession(session.threadId), false);
     }),

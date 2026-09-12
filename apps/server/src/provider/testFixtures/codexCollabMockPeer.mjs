@@ -17,6 +17,8 @@ const script = JSON.parse(NodeFS.readFileSync(process.env.RYCO_CODEX_COLLAB_SCRI
 
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let turnStartCount = 0;
+const interruptedChildren = new Set();
+let racedRead = false;
 
 const rl = NodeReadline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
@@ -51,12 +53,40 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "thread/read") {
-    write({
-      id,
-      result: {
-        thread: { ...fixture.responses.threadStart.thread, turns: script.historyTurns ?? [] },
-      },
-    });
+    const child = script.childSnapshots?.[message.params.threadId];
+    const snapshot = child
+      ? {
+          ...fixture.responses.threadStart.thread,
+          id: message.params.threadId,
+          ...child,
+          ...(interruptedChildren.has(message.params.threadId)
+            ? {
+                status: { type: "idle" },
+                turns: child.turns.map((turn) =>
+                  Object.assign({}, turn, { status: "interrupted" }),
+                ),
+              }
+            : {}),
+        }
+      : { ...fixture.responses.threadStart.thread, turns: script.historyTurns ?? [] };
+    if (script.staleReadFor === message.params.threadId && !racedRead) {
+      racedRead = true;
+      write({
+        jsonrpc: "2.0",
+        method: "turn/started",
+        params: {
+          threadId: message.params.threadId,
+          turn: child.turns[0],
+        },
+      });
+      setTimeout(
+        () =>
+          write({ id, result: { thread: { ...snapshot, status: { type: "idle" }, turns: [] } } }),
+        50,
+      );
+      return;
+    }
+    write({ id, result: { thread: snapshot } });
     return;
   }
   if (method === "turn/start") {
@@ -121,6 +151,7 @@ rl.on("line", (line) => {
       // nor rejects. The runtime's bounded deadline must move on.
       return;
     }
+    interruptedChildren.add(target);
     write({ id, result: {} });
     return;
   }

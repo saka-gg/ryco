@@ -21,7 +21,19 @@ import {
   TurnId,
 } from "@ryco/contracts";
 import { normalizeModelSlug } from "@ryco/shared/model";
-import { Deferred, Effect, Exit, Layer, Queue, Redacted, Ref, Scope, Schema, Stream } from "effect";
+import {
+  Deferred,
+  Effect,
+  Exit,
+  Layer,
+  Queue,
+  Redacted,
+  Ref,
+  Scope,
+  Schema,
+  Schedule,
+  Stream,
+} from "effect";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
@@ -1050,6 +1062,11 @@ export const makeCodexSessionRuntime = (
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
+    // Only potentially active children need polling. Revisions fence reads against
+    // newer notifications, including a follow-up that starts while a read is pending.
+    const childRevisions = new Map<string, number>();
+    const unsettledChildren = new Set<string>();
+    const reconciledChildStatuses = new Map<string, string>();
     const closedRef = yield* Ref.make(false);
 
     // `~` is not shell-expanded when env vars are set via
@@ -1451,9 +1468,74 @@ export const makeCodexSessionRuntime = (
         }
       });
 
+    const reconcileChild = (childThreadId: string, includeTurns = false) =>
+      Effect.gen(function* () {
+        const revision = childRevisions.get(childThreadId);
+        const response = yield* client.request("thread/read", {
+          threadId: childThreadId,
+          includeTurns,
+        });
+        if (childRevisions.get(childThreadId) !== revision) return;
+        const child = (yield* Ref.get(collabChildAgentsRef)).get(childThreadId);
+        if (!child || response.thread.id !== childThreadId) return;
+        const status = response.thread.status;
+        const activeTurn = response.thread.turns.findLast((turn) => turn.status === "inProgress");
+        const live = status.type === "active";
+        yield* Ref.update(collabChildLiveTurnsRef, (current) => {
+          const next = new Map(current);
+          if (live && activeTurn) next.set(childThreadId, activeTurn.id);
+          else if (!live) next.delete(childThreadId);
+          return next;
+        });
+        if (!live) unsettledChildren.delete(childThreadId);
+        const signature = JSON.stringify([revision, status]);
+        if (reconciledChildStatuses.get(childThreadId) === signature) return;
+        reconciledChildStatuses.set(childThreadId, signature);
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          ...(child.spawnTurnId ? { turnId: child.spawnTurnId } : {}),
+          method: "collabAgent/statusChanged",
+          payload: {
+            agentThreadId: childThreadId,
+            ...(child.nickname ? { nickname: child.nickname } : {}),
+            ...(child.role ? { role: child.role } : {}),
+            ...(child.agentPath ? { agentPath: child.agentPath } : {}),
+            status,
+          },
+        });
+      }).pipe(Effect.timeout("3 seconds"));
+
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
         const payload = notification.params;
+        const rootId = currentProviderThreadId(yield* Ref.get(sessionRef));
+        const activity =
+          (notification.method === "item/started" || notification.method === "item/completed") &&
+          notification.params.item.type === "subAgentActivity"
+            ? notification.params.item
+            : undefined;
+        const childId = activity?.agentThreadId ?? readNotificationThreadId(notification);
+        if (childId && rootId && childId !== rootId) {
+          childRevisions.set(childId, (childRevisions.get(childId) ?? 0) + 1);
+          if (
+            activity ||
+            notification.method === "thread/started" ||
+            notification.method === "turn/started" ||
+            (notification.method === "thread/status/changed" &&
+              notification.params.status.type === "active")
+          ) {
+            unsettledChildren.add(childId);
+          }
+          if (
+            notification.method === "thread/closed" ||
+            notification.method === "turn/completed" ||
+            (notification.method === "thread/status/changed" &&
+              notification.params.status.type !== "active")
+          ) {
+            unsettledChildren.delete(childId);
+          }
+        }
         const route = readRouteFields(notification);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
         const childParentTurnId = (() => {
@@ -1825,6 +1907,14 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
+    yield* Effect.suspend(() =>
+      Effect.forEach(
+        Array.from(unsettledChildren),
+        (id) => reconcileChild(id).pipe(Effect.ignore),
+        { concurrency: 4, discard: true },
+      ),
+    ).pipe(Effect.repeat(Schedule.spaced("5 seconds")), Effect.forkIn(runtimeScope));
+
     const stderrRemainderRef = yield* Ref.make("");
     yield* child.stderr.pipe(
       Stream.decodeText(),
@@ -2038,7 +2128,20 @@ export const makeCodexSessionRuntime = (
           // exactly during the runaway fleet where Stop matters most.
           // Per-child and overall deadlines guarantee the parent interrupt
           // below always runs.
+          // Recover missing turn/started notifications and retire stale entries
+          // before deciding which child turns to interrupt.
+          yield* Effect.forEach(
+            Array.from((yield* Ref.get(collabChildAgentsRef)).keys()),
+            (id) => reconcileChild(id, true).pipe(Effect.ignore),
+            { concurrency: 8, discard: true },
+          ).pipe(Effect.timeoutOption("5 seconds"));
           const liveChildTurns = yield* Ref.get(collabChildLiveTurnsRef);
+          const registeredChildren = yield* Ref.get(collabChildAgentsRef);
+          // A failed/raced read must not turn an unknown live child into a
+          // successful no-op. The adapter will stop the owned session instead.
+          let childInterruptFailed = Array.from(unsettledChildren).some(
+            (id) => registeredChildren.has(id) && !liveChildTurns.has(id),
+          );
           yield* Effect.forEach(
             Array.from(liveChildTurns.entries()),
             ([childThreadId, childTurnId]) =>
@@ -2047,17 +2150,43 @@ export const makeCodexSessionRuntime = (
                   threadId: childThreadId,
                   turnId: childTurnId,
                 })
-                .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
+                .pipe(
+                  Effect.timeout("3 seconds"),
+                  Effect.catchCause(() =>
+                    Effect.sync(() => {
+                      childInterruptFailed = true;
+                    }),
+                  ),
+                ),
             { concurrency: 8, discard: true },
-          ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
+          ).pipe(
+            Effect.timeout("10 seconds"),
+            Effect.catchCause(() =>
+              Effect.sync(() => {
+                childInterruptFailed = true;
+              }),
+            ),
+          );
           const effectiveTurnId = turnId ?? session.activeTurnId;
-          if (!effectiveTurnId) {
-            return;
+          if (effectiveTurnId) {
+            yield* client.request("turn/interrupt", {
+              threadId: providerThreadId,
+              turnId: effectiveTurnId,
+            });
           }
-          yield* client.request("turn/interrupt", {
-            threadId: providerThreadId,
-            turnId: effectiveTurnId,
-          });
+          if (childInterruptFailed) {
+            return yield* Effect.fail(
+              new CodexErrors.CodexAppServerTransportError({
+                detail: "Could not interrupt all Codex child turns",
+                cause: new Error("Child interrupt failed or timed out"),
+              }),
+            );
+          }
+          yield* Effect.forEach(
+            Array.from((yield* Ref.get(collabChildAgentsRef)).keys()),
+            (id) => reconcileChild(id, true).pipe(Effect.ignore),
+            { concurrency: 8, discard: true },
+          ).pipe(Effect.timeoutOption("5 seconds"));
         }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
