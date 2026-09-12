@@ -62,7 +62,7 @@ export const assertSafeAgentControlDeviceUrl = (value: string): void => {
 };
 
 /**
- * Turn the proposal's workspace-relative `.app` reference into an existing
+ * Turn the proposal's workspace-relative `.app` or `.apk` reference into an existing
  * canonical path, rejecting traversal and symlink escapes at proposal and
  * execution time.
  */
@@ -79,11 +79,11 @@ export const resolveAgentControlDeviceArtifact = (input: {
       input.artifactPath.includes("\\") ||
       input.artifactPath.includes("\0") ||
       segments.includes("..") ||
-      path.extname(input.artifactPath) !== ".app"
+      ![".app", ".apk"].includes(path.extname(input.artifactPath))
     ) {
       return yield* Effect.fail(
         new AgentControlDeviceInputError(
-          "The application artifact must be a workspace-relative .app bundle.",
+          "The application artifact must be a workspace-relative .app bundle or .apk file.",
         ),
       );
     }
@@ -102,11 +102,11 @@ export const resolveAgentControlDeviceArtifact = (input: {
       relative === ".." ||
       relative.startsWith(`..${path.sep}`) ||
       path.isAbsolute(relative) ||
-      path.extname(canonicalArtifact) !== ".app"
+      ![".app", ".apk"].includes(path.extname(canonicalArtifact))
     ) {
       return yield* Effect.fail(
         new AgentControlDeviceInputError(
-          "The application artifact must resolve to a .app bundle inside the project workspace.",
+          "The application artifact must resolve to a .app bundle or .apk file inside the project workspace.",
         ),
       );
     }

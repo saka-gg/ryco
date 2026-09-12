@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { HostDeviceBackend } from "./HostDeviceBackend.ts";
 import { DeviceManager } from "./DeviceManager.ts";
 import { IosSimulatorBackend } from "./IosSimulatorBackend.ts";
+import { PlatformDeviceBackend } from "./PlatformDeviceBackend.ts";
+import { FakeDeviceBackend } from "./FakeDeviceBackend.ts";
 import { planIosTestingAction } from "./iosTestingActions.ts";
 import type { runProcess } from "../processRunner.ts";
 
@@ -128,6 +130,22 @@ describe("iOS simulator testing", () => {
       test.run.mock.calls.some(([, args]) => args.includes("boot") || args.includes("bootstatus")),
     ).toBe(false);
   });
+  it("preserves nested platform-wide and targeted testing suspension", async () => {
+    const test = backend();
+    const android = new FakeDeviceBackend({ devices: [] });
+    const suspendAndroid = vi.spyOn(android, "suspendTesting");
+    const router = new PlatformDeviceBackend(test.backend, android);
+    const resumeAll = router.suspendTesting();
+    const resumeTarget = router.suspendTesting(udid);
+    expect(suspendAndroid).toHaveBeenCalledExactlyOnceWith();
+    resumeAll();
+    await expect(router.testing(input({ type: "appearance", value: "dark" }))).rejects.toThrow(
+      "superseded",
+    );
+    resumeTarget();
+    await router.testing(input({ type: "appearance", value: "dark" }));
+    expect(test.run.mock.calls.filter(([, args]) => args[1] === "ui")).toHaveLength(1);
+  });
 
   it("does not report a timed-out action as successful even if the process exits zero", async () => {
     const test = backend();
@@ -239,25 +257,32 @@ describe("iOS simulator testing", () => {
   });
 
   it.each([
-    ["shutdown", false],
-    ["dispose", false],
-    ["shutdown", true],
-    ["dispose", true],
+    ["shutdown", "direct"],
+    ["dispose", "direct"],
+    ["shutdown", "platform"],
+    ["dispose", "platform"],
+    ["shutdown", "host"],
+    ["dispose", "host"],
+    ["shutdown", "host-platform"],
+    ["dispose", "host-platform"],
   ] as const)(
-    "fences testing at manager %s entry while stream cleanup is pending (host factory: %s)",
-    async (lifecycle, factory) => {
+    "fences testing at manager %s while cleanup is pending (%s)",
+    async (lifecycle, routing) => {
       const test = backend();
       vi.spyOn(test.backend, "availability").mockResolvedValue({ kind: "available" });
       const attach = vi.spyOn(test.backend, "attachStream").mockResolvedValue(undefined);
-      const target = factory
+      const routed = routing.includes("platform")
+        ? new PlatformDeviceBackend(test.backend, new FakeDeviceBackend())
+        : test.backend;
+      const target = routing.startsWith("host")
         ? new HostDeviceBackend([
             {
               host: { id: "local", name: "Local", transport: "local" },
               backend: backend().backend,
-              createDeviceBackend: () => test.backend,
+              createDeviceBackend: () => routed,
             },
           ])
-        : test.backend;
+        : routed;
       await target.listDevices({ includeShutdown: true });
       const manager = new DeviceManager({ backend: target });
       await manager.attach("testing-thread", udid);

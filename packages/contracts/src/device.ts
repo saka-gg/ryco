@@ -60,7 +60,7 @@ export const DeviceUdid = TrimmedNonEmptyString.check(
 ).check(Schema.isPattern(/^[A-Za-z0-9._:-]+$/));
 export type DeviceUdid = typeof DeviceUdid.Type;
 
-export const DevicePlatform = Schema.Literals(["ios-simulator"]);
+export const DevicePlatform = Schema.Literals(["ios-simulator", "android-emulator"]);
 export type DevicePlatform = typeof DevicePlatform.Type;
 
 export const DeviceRuntimeState = Schema.Literals([
@@ -151,6 +151,9 @@ export type DeviceState = DeviceDescriptor;
 // ── Availability / setup gating ──────────────────────────────────────
 
 export const DeviceSetupStepId = Schema.Literals([
+  "install-android-platform-tools",
+  "install-android-emulator",
+  "create-android-avd",
   "install-xcode",
   "accept-xcode-license",
   "select-xcode-command-line-tools",
@@ -429,6 +432,8 @@ export type DeviceKeyEventInput = typeof DeviceKeyEventInput.Type;
 
 export const DeviceHardwareButton = Schema.Literals([
   "home",
+  "back",
+  "recents",
   "lock",
   "volume-up",
   "volume-down",
@@ -449,7 +454,7 @@ export type DeviceBundleId = typeof DeviceBundleId.Type;
 
 export const DeviceInstallAppInput = Schema.Struct({
   udid: DeviceUdid,
-  /** Absolute path to a built `.app` bundle; Ryco never runs the build itself. */
+  /** Absolute path to a built `.app` bundle or Android `.apk`; Ryco never runs the build itself. */
   appPath: TrimmedNonEmptyString.check(Schema.isMaxLength(DEVICE_PATH_MAX_LENGTH)),
 });
 export type DeviceInstallAppInput = typeof DeviceInstallAppInput.Type;

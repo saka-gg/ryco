@@ -721,6 +721,11 @@ export class IosSimulatorBackend implements DeviceBackend {
   }
 
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
+    if (button === "back" || button === "recents") {
+      throw new DeviceBackendError(
+        "Back and Recents buttons are only available on Android emulators.",
+      );
+    }
     if (button === "rotate") {
       // Rotation is a Simulator.app window command, not a HID button: there is
       // no HID usage for it and no simctl equivalent. Simulator.app posts a

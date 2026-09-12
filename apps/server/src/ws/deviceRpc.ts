@@ -28,7 +28,7 @@ import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrume
 const DEVICE_EVENT_BUFFER_CAPACITY = 128;
 const DEVICE_ERROR_MESSAGE_LIMIT = 2_048;
 const UNSUPPORTED_MESSAGE =
-  "The Simulator workspace requires a macOS Ryco node with Xcode and an iOS runtime.";
+  "The device workspace requires macOS with Xcode, or macOS, Linux or Windows with the Android SDK.";
 
 type DeviceOperation = "attach" | "screenshot" | "recording" | "helper" | "operation";
 

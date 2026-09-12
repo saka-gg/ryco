@@ -11,6 +11,8 @@ import type {
   ThreadId,
 } from "@ryco/contracts";
 import {
+  ArrowLeftIcon,
+  PanelsTopLeftIcon,
   CameraIcon,
   CircleStopIcon,
   Disc3Icon,
@@ -100,10 +102,10 @@ function SetupState(props: {
     return (
       <div className="flex flex-1 flex-col items-center justify-center p-8 text-center">
         <MonitorOffIcon className="size-7 text-muted-foreground" />
-        <p className="mt-4 text-sm font-medium">iOS Simulator needs a Mac</p>
+        <p className="mt-4 text-sm font-medium">Device emulation is unavailable</p>
         <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
           This environment runs on {availability.platform}. Connect Ryco to a macOS environment with
-          Xcode to use the simulator workspace.
+          Xcode, or a macOS, Linux or Windows environment with the Android SDK.
         </p>
       </div>
     );
@@ -125,7 +127,7 @@ function SetupState(props: {
   return (
     <div className="flex flex-1 flex-col items-center justify-center p-8">
       <div className="w-full max-w-md">
-        <p className="text-sm font-medium">Set up the iOS Simulator</p>
+        <p className="text-sm font-medium">Set up simulators and emulators</p>
         <p className="mt-1 text-xs text-muted-foreground">
           Ryco checks these steps automatically every few seconds.
         </p>
@@ -293,20 +295,22 @@ export default function SimulatorPanel(props: {
     [api, applySnapshot, bootLimit, environmentId, generation, run, threadId],
   );
 
+  const useNativeVideo =
+    Boolean(client?.openFrameSource) && attached?.platform !== "android-emulator";
   const nativeVideo = useDeviceVideoStream({
     canvasRef,
-    udid: attached?.state === "booted" ? attached.udid : null,
+    udid: useNativeVideo && attached?.state === "booted" ? attached.udid : null,
     ...(client?.openFrameSource ? { openFrameSource: client.openFrameSource } : {}),
   });
   const hostedVideo = useDeviceScreenshotStream({
     canvasRef,
     udid: attached?.state === "booted" ? attached.udid : null,
-    enabled: !client?.openFrameSource,
+    enabled: !useNativeVideo,
     screenshot: api ? (input) => api.screenshot(input) : null,
   });
-  const videoStatus = client?.openFrameSource ? nativeVideo.status : hostedVideo.status;
-  const videoError = client?.openFrameSource ? nativeVideo.error : hostedVideo.error;
-  const dimensions = client?.openFrameSource ? nativeVideo.dimensions : hostedVideo.dimensions;
+  const videoStatus = useNativeVideo ? nativeVideo.status : hostedVideo.status;
+  const videoError = useNativeVideo ? nativeVideo.error : hostedVideo.error;
+  const dimensions = useNativeVideo ? nativeVideo.dimensions : hostedVideo.dimensions;
 
   const pressRef = useRef<{ readonly point: DevicePoint | null; readonly at: number } | null>(null);
   const pointFromEvent = useCallback(
@@ -321,14 +325,20 @@ export default function SimulatorPanel(props: {
           frameHeight: dimensions.height,
           displayWidth: rect.width,
           displayHeight: rect.height,
-          pointWidth: attached?.geometry?.pointWidth ?? dimensions.width / scale,
-          pointHeight: attached?.geometry?.pointHeight ?? dimensions.height / scale,
+          pointWidth:
+            attached?.platform === "android-emulator"
+              ? dimensions.width
+              : (attached?.geometry?.pointWidth ?? dimensions.width / scale),
+          pointHeight:
+            attached?.platform === "android-emulator"
+              ? dimensions.height
+              : (attached?.geometry?.pointHeight ?? dimensions.height / scale),
         },
         event.clientX - rect.left,
         event.clientY - rect.top,
       );
     },
-    [attached?.geometry, dimensions],
+    [attached?.geometry, attached?.platform, dimensions],
   );
   const pointerDown = useCallback(
     (event: PointerEvent<HTMLCanvasElement>) => {
@@ -368,18 +378,78 @@ export default function SimulatorPanel(props: {
     [api, attached, pointFromEvent],
   );
 
+  const keyboardTail = useRef<Promise<void>>(Promise.resolve());
+  const keyboardScope = useRef<{ active: boolean; pending: number } | null>(null);
+  useEffect(() => {
+    const scope = { active: true, pending: 0 };
+    keyboardTail.current = Promise.resolve();
+    keyboardScope.current = scope;
+    return () => {
+      scope.active = false;
+    };
+  }, [api, generation, threadKey, attached?.udid]);
+
   const keyEvent = useCallback(
     (event: KeyboardEvent<HTMLCanvasElement>, direction: "down" | "up") => {
       if (!attached || !api) return;
       if (event.metaKey || event.ctrlKey) return;
+      const text =
+        attached.platform === "android-emulator" && event.key.length === 1 ? event.key : null;
       const keyCode = deviceHidUsageForKey(event.key);
-      if (keyCode === null) return;
+      if (text === null && keyCode === null) return;
       event.preventDefault();
-      void api
-        .keyEvent({ udid: attached.udid, keyCode, modifiers: modifiers(event), direction })
-        .catch(() => undefined);
+      if (attached.platform !== "android-emulator") {
+        void api
+          .keyEvent({
+            udid: attached.udid,
+            keyCode: keyCode!,
+            modifiers: modifiers(event),
+            direction,
+          })
+          .catch(() => undefined);
+        return;
+      }
+      // Android emits complete key presses, so key-up has no work to queue.
+      if (direction === "up") return;
+      const scope = keyboardScope.current;
+      if (!scope?.active || scope.pending >= 64) return;
+      scope.pending++;
+      const udid = attached.udid;
+      const keyModifiers = modifiers(event);
+      keyboardTail.current = keyboardTail.current
+        .then(async () => {
+          const state = useDeviceStateStore.getState();
+          if (
+            !scope?.active ||
+            !environmentId ||
+            !threadKey ||
+            state.environmentById[environmentId]?.generation !== generation ||
+            state.environmentById[environmentId]?.status !== "connected" ||
+            state.threadByKey[threadKey]?.attachedDeviceUdid !== udid ||
+            readEnvironmentApi(environmentId)?.device !== api
+          )
+            return;
+          await (text !== null
+            ? api.typeText({ udid, text })
+            : api.keyEvent({ udid, keyCode: keyCode!, modifiers: keyModifiers, direction }));
+        })
+        .catch((error) => {
+          if (scope?.active) {
+            // A failed target must not replay the queued suffix onto a new device.
+            // Reattachment or a new connection creates a fresh input scope.
+            scope.active = false;
+            toastManager.add({
+              type: "error",
+              title: "Android keyboard input failed",
+              description: errorMessage(error, "The input could not be delivered."),
+            });
+          }
+        })
+        .finally(() => {
+          scope.pending--;
+        });
     },
-    [api, attached],
+    [api, attached, environmentId, generation, threadKey],
   );
 
   const pressButton = useCallback(
@@ -467,7 +537,7 @@ export default function SimulatorPanel(props: {
       <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border/60 px-3">
         <SmartphoneIcon className="size-4 text-muted-foreground" />
         <select
-          aria-label="Choose an iOS Simulator"
+          aria-label="Choose a simulator or emulator"
           className="min-w-0 max-w-72 flex-1 bg-transparent text-xs font-medium outline-none"
           disabled={busy}
           value={attached?.udid ?? ""}
@@ -528,7 +598,7 @@ export default function SimulatorPanel(props: {
         >
           Simulator testing controls are unavailable on SSH hosts.
         </div>
-      ) : attached ? (
+      ) : attached?.platform === "ios-simulator" ? (
         <SimulatorTestingDrawer
           key={`${environmentId}:${threadId}:${attached.udid}:${generation}`}
           udid={attached.udid}
@@ -562,6 +632,13 @@ export default function SimulatorPanel(props: {
           </div>
         ) : (
           <div
+            style={
+              attached.platform === "android-emulator"
+                ? {
+                    aspectRatio: `${dimensions?.width ?? attached.geometry?.pointWidth ?? 9} / ${dimensions?.height ?? attached.geometry?.pointHeight ?? 19.5}`,
+                  }
+                : undefined
+            }
             className={cn(
               "relative flex max-h-full max-w-full overflow-hidden border-[7px] border-zinc-900 bg-black shadow-xl",
               attached.family === "tablet" || attached.name.toLowerCase().includes("ipad")
@@ -602,6 +679,22 @@ export default function SimulatorPanel(props: {
       </div>
 
       <div className="flex min-h-12 shrink-0 items-center justify-center gap-0.5 border-t border-border/60 bg-card/40 px-2">
+        {attached?.platform === "android-emulator" ? (
+          <>
+            <Control
+              icon={ArrowLeftIcon}
+              label="Back"
+              disabled={busy}
+              onClick={() => pressButton("back")}
+            />
+            <Control
+              icon={PanelsTopLeftIcon}
+              label="Recents"
+              disabled={busy}
+              onClick={() => pressButton("recents")}
+            />
+          </>
+        ) : null}
         <Control
           icon={HomeIcon}
           label="Home"
@@ -641,7 +734,12 @@ export default function SimulatorPanel(props: {
           }
           label={recording.kind === "recording" ? "Stop recording" : "Record screen"}
           active={recording.kind !== "idle"}
-          disabled={!attached || recording.kind === "starting" || recording.kind === "stopping"}
+          disabled={
+            !attached ||
+            attached.platform === "android-emulator" ||
+            recording.kind === "starting" ||
+            recording.kind === "stopping"
+          }
           onClick={toggleRecording}
         />
         <span className="mx-1 h-5 w-px bg-border" />

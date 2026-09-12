@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeDeviceBackend } from "./FakeDeviceBackend.ts";
 import { HostDeviceBackend, hostDeviceId } from "./HostDeviceBackend.ts";
+import { PlatformDeviceBackend } from "./PlatformDeviceBackend.ts";
 import { DeviceManager } from "./DeviceManager.ts";
 
 function fixture() {
@@ -21,6 +22,50 @@ function fixture() {
 }
 
 describe("device host routing", () => {
+  it("retains factory boots and routes when the root platform SDK cache is stale", async () => {
+    const ios = new FakeDeviceBackend();
+    const android = new FakeDeviceBackend();
+    const list = android.listDevices.bind(android);
+    android.listDevices = async (options) =>
+      (await list(options)).map((d) => ({
+        ...d,
+        udid: `android:${d.udid}`,
+        platform: "android-emulator" as const,
+      }));
+    const boot = android.boot.bind(android);
+    android.boot = async (udid) => ({
+      ...(await boot(udid.slice(8))),
+      udid,
+      platform: "android-emulator",
+    });
+    const tap = vi.spyOn(android, "tap").mockResolvedValue(undefined);
+    vi.spyOn(android, "shutdown").mockResolvedValue(undefined);
+    const backend = new HostDeviceBackend([
+      {
+        host: { id: "local", name: "Local", transport: "local" },
+        backend: new PlatformDeviceBackend(ios, android),
+        createDeviceBackend: () => new PlatformDeviceBackend(new FakeDeviceBackend(), android),
+      },
+    ]);
+    const manager = new DeviceManager({ backend, bootLimit: 1 });
+    const udid = "android:FAKE-0001";
+    try {
+      expect((await manager.boot(udid)).kind).toBe("booted");
+      android.listDevices = async () => {
+        throw new Error("SDK temporarily unavailable");
+      };
+      const inventory = await backend.discoverDevices();
+      expect(inventory.completeFor(udid)).toBe(false);
+      expect(inventory.devices.find((d) => d.udid === udid)?.state).toBe("booted");
+      expect((await manager.rycoBootedDevices()).map((d) => d.udid)).toEqual([udid]);
+      await backend.tap(udid, 1, 2);
+      expect(tap).toHaveBeenCalledWith(udid, 1, 2);
+      expect((await manager.boot("FAKE-0002")).kind).toBe("boot-limit-reached");
+    } finally {
+      await manager.dispose();
+    }
+  });
+
   it("routes object-target testing and suspends per-device factory instances independently", async () => {
     const discovery = new FakeDeviceBackend();
     const instances: FakeDeviceBackend[] = [];

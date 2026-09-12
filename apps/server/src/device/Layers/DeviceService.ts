@@ -2,8 +2,8 @@
  * DeviceServiceLive - one DeviceManager for the server process.
  *
  * The manager exists on every platform so no caller has to branch on `null`;
- * local discovery is unsupported off darwin, but configured SSH hosts remain
- * available through the same manager and authorization surface.
+ * local iOS/Android adapters and configured SSH hosts share its lifecycle
+ * and authorization surface.
  *
  * @module device/Layers/DeviceService
  */
@@ -54,7 +54,7 @@ export function makeDeviceServiceLayer(
       const hosts = yield* Effect.promise(() =>
         readDeviceHostConfig(options.hostsFile ?? process.env.RYCO_DEVICE_HOSTS_FILE),
       );
-      const supported = platform === "darwin" || hosts.length > 0;
+      const supported = ["darwin", "linux", "win32"].includes(platform) || hosts.length > 0;
       const backend = new HostDeviceBackend([
         localDeviceHost(platform),
         ...hosts.map((config) => ({
@@ -63,10 +63,9 @@ export function makeDeviceServiceLayer(
         })),
       ]);
       // Local boots are recovered here; SSH workers recover their own boots on the Mac.
-      const bootOwnership =
-        platform === "darwin"
-          ? makeBootOwnershipStore(options.bootOwnershipPath ?? defaultBootOwnershipPath())
-          : NULL_BOOT_OWNERSHIP;
+      const bootOwnership = supported
+        ? makeBootOwnershipStore(options.bootOwnershipPath ?? defaultBootOwnershipPath())
+        : NULL_BOOT_OWNERSHIP;
       const manager = new DeviceManager({ backend, bootOwnership });
       const toolGateway = supported
         ? yield* Effect.promise(() => startDeviceToolGateway(manager))
@@ -76,7 +75,7 @@ export function makeDeviceServiceLayer(
       // A previous run that crashed left its simulators booted and no longer
       // owned by anyone: reclaim them before this run starts counting boots,
       // or they linger forever outside the cap and the idle sweep.
-      if (platform === "darwin") {
+      if (supported) {
         yield* Effect.promise(async () => {
           const reclaimed = await manager.reclaimOrphanedBoots().catch(() => []);
           if (reclaimed.length > 0) {

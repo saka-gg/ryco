@@ -33,6 +33,7 @@ export function hostDeviceId(hostId: string, nativeUdid: string): string {
 interface DiscoveryVersion {
   readonly generation: number;
   readonly epoch: number;
+  readonly completeFor: (nativeUdid: string) => boolean;
 }
 
 /** Bound unrelated host latency without cancelling its shared refresh. */
@@ -60,7 +61,10 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
   private testingSuspensions = 0;
   private readonly deviceTestingSuspensions = new Map<string, number>();
   private readonly summaries = new Map<string, DeviceHostSummary>();
-  private readonly inventories = new Map<DeviceHostBackend, readonly DeviceDescriptor[]>();
+  private readonly inventories = new Map<
+    DeviceHostBackend,
+    readonly (DeviceDescriptor & { nativeUdid: string; host: DeviceHostBackend["host"] })[]
+  >();
   private readonly discoveries = new Map<
     DeviceHostBackend,
     Promise<DiscoveryVersion | undefined>
@@ -166,7 +170,13 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
     const startedDuringMutation = (this.mutations.get(entry) ?? 0) > 0;
     const work = (async () => {
       try {
-        const devices = await entry.backend.listDevices({ includeShutdown: true });
+        const discovery = entry.backend.discoverDevices
+          ? await entry.backend.discoverDevices()
+          : {
+              devices: await entry.backend.listDevices({ includeShutdown: true }),
+              completeFor: () => true,
+            };
+        const devices = discovery.devices;
         if (
           this.disposed ||
           generation !== (this.generations.get(entry) ?? 0) ||
@@ -174,24 +184,31 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
           epoch !== (this.mutationEpochs.get(entry) ?? 0)
         )
           return undefined;
-        const inventory = devices.map((device) =>
-          Object.assign({}, device, {
-            udid: hostDeviceId(entry.host.id, device.udid),
-            nativeUdid: device.udid,
-            host: this.summaries.get(entry.host.id) ?? entry.host,
-            name:
-              entry.host.id === "local"
-                ? device.name
-                : `${device.name} · ${entry.host.name}`.slice(0, 256),
-          }),
+        const retained = (this.inventories.get(entry) ?? []).filter(
+          (device) => !discovery.completeFor(device.nativeUdid ?? device.udid),
         );
+        const retainedIds = new Set(retained.map((device) => device.udid));
+        const inventory = devices
+          .filter((device) => !retainedIds.has(hostDeviceId(entry.host.id, device.udid)))
+          .map((device) =>
+            Object.assign({}, device, {
+              udid: hostDeviceId(entry.host.id, device.udid),
+              nativeUdid: device.udid,
+              host: this.summaries.get(entry.host.id) ?? entry.host,
+              name:
+                entry.host.id === "local"
+                  ? device.name
+                  : `${device.name} · ${entry.host.name}`.slice(0, 256),
+            }),
+          );
+        inventory.push(...retained);
         for (const [id, route] of this.devices) {
           if (route.host === entry) this.devices.delete(id);
         }
         for (const device of inventory)
           this.devices.set(device.udid, { host: entry, nativeUdid: device.nativeUdid });
         this.inventories.set(entry, inventory);
-        return { generation, epoch };
+        return { generation, epoch, completeFor: discovery.completeFor };
       } catch {
         return undefined;
       }
@@ -239,7 +256,12 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
           host !== undefined &&
           completed.has(host) &&
           completed.get(host)?.generation === (this.generations.get(host) ?? 0) &&
-          completed.get(host)?.epoch === (this.mutationEpochs.get(host) ?? 0)
+          completed.get(host)?.epoch === (this.mutationEpochs.get(host) ?? 0) &&
+          completed
+            .get(host)!
+            .completeFor(
+              host.host.id === "local" ? udid : udid.slice(`ssh:${host.host.id}:`.length),
+            )
         );
       },
     };
@@ -349,6 +371,20 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
       !this.devices.has(udid)
     )
       throw new DeviceBackendError("Stale device host operation");
+    if (method === "boot" || method === "shutdown") {
+      // Factory adapters have separate discovery caches. Keep the host's known
+      // state current so a failed SDK refresh cannot replace a successful boot
+      // with the root adapter's pre-boot shutdown observation.
+      const inventory = this.inventories.get(host) ?? [];
+      this.inventories.set(
+        host,
+        inventory.map((device) =>
+          device.udid === udid
+            ? { ...device, state: method === "boot" ? "booted" : "shutdown" }
+            : device,
+        ),
+      );
+    }
     if (result && typeof result === "object" && "udid" in result) {
       return {
         ...result,

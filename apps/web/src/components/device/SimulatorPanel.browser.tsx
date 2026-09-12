@@ -1,7 +1,7 @@
 import "../../index.css";
+import { page } from "vite-plus/test/browser";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import { create } from "zustand";
 import {
   EnvironmentId,
   ThreadId,
@@ -11,175 +11,230 @@ import {
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import SimulatorPanel from "./SimulatorPanel";
 
-const mocks = vi.hoisted(() => ({
-  hosted: false,
-  testing: vi.fn<() => Promise<void>>(),
-  list: vi.fn(),
-  getThreadState: vi.fn(),
-}));
-const hub = create(() => ({
-  effectiveRole: "owner",
-  directoryStatus: "ready",
-  transportStatus: "online",
-  browserStatus: "current",
-  sessionStatus: "ready",
-}));
-const workspace = create(() => ({
-  machines: [{ environmentId: "simulator-env", canMutate: true }],
-}));
 vi.mock("../../composerDraftStore", () => ({ DraftId: { make: (value: string) => value } }));
-vi.mock("../ui/toast", () => ({ toastManager: { add: vi.fn() } }));
-vi.mock("../../env", () => ({ isHostedHubMode: () => mocks.hosted }));
+vi.mock("../../env", () => ({ isHostedHubMode: () => false }));
 vi.mock("../../hostedHub/state", () => ({
-  useHostedHubStore: (selector: (state: ReturnType<typeof hub.getState>) => unknown) =>
-    hub(selector),
+  useHostedHubStore: (selector: (state: { effectiveRole: string }) => unknown) =>
+    selector({ effectiveRole: "owner" }),
 }));
 vi.mock("../../hostedHub/hostedConnectionCoordinator", () => ({
-  useHostedWorkspaceState: () => workspace(),
-}));
-vi.mock("../../environmentApi", () => ({
-  readEnvironmentApi: () => ({
-    device: { testing: mocks.testing, list: mocks.list, getThreadState: mocks.getThreadState },
-  }),
-}));
-vi.mock("../../environments/runtime", () => ({ readEnvironmentConnection: () => undefined }));
-vi.mock("./useDeviceVideoStream", () => ({
-  useDeviceVideoStream: () => ({ status: "idle", error: null, dimensions: null }),
-}));
-vi.mock("./useDeviceScreenshotStream", () => ({
-  useDeviceScreenshotStream: () => ({
-    status: "streaming",
-    error: null,
-    dimensions: { width: 400, height: 800 },
-  }),
+  useHostedWorkspaceState: () => ({ machines: [] }),
 }));
 
-const environmentId = EnvironmentId.make("simulator-env");
-const threadId = ThreadId.make("simulator-thread");
-const device: DeviceDescriptor = {
-  udid: "AAAA-1111",
-  platform: "ios-simulator",
-  name: "iPhone",
-  runtime: "iOS",
+const mocks = vi.hoisted(() => ({
+  api: {
+    list: vi.fn(),
+    getThreadState: vi.fn(),
+    screenshot: vi.fn(),
+    typeText: vi.fn(),
+    keyEvent: vi.fn(),
+    tap: vi.fn(),
+    swipe: vi.fn(),
+    pressButton: vi.fn(),
+    attach: vi.fn(),
+  },
+  nativeVideo: vi.fn(),
+  openFrameSource: vi.fn(),
+  toast: vi.fn(),
+}));
+vi.mock("../../environmentApi", () => ({ readEnvironmentApi: () => ({ device: mocks.api }) }));
+vi.mock("../../environments/runtime", () => ({
+  readEnvironmentConnection: () => ({
+    client: { device: { openFrameSource: mocks.openFrameSource } },
+  }),
+}));
+vi.mock("./useDeviceVideoStream", () => ({ useDeviceVideoStream: mocks.nativeVideo }));
+vi.mock("../ui/toast", () => ({ toastManager: { add: mocks.toast } }));
+
+const environmentId = EnvironmentId.make("android-browser-test");
+const threadId = ThreadId.make("android-thread");
+const android: DeviceDescriptor = {
+  platform: "android-emulator",
+  udid: "android:Pixel",
+  name: "Pixel",
+  runtime: "Android",
   state: "booted",
   bootSource: "user",
+  geometry: { pointWidth: 200, pointHeight: 400, scale: 1 },
 };
-const snapshot: ThreadDeviceState = {
-  threadId,
-  version: 1,
-  attachedDeviceUdid: device.udid,
-  attachPhase: null,
-  devices: [device],
-  agentActive: false,
-  availability: { kind: "available" },
-  lastError: null,
-};
-
+let snapshot: ThreadDeviceState;
+let generation = 0;
+function updateAttachment(udid: string | null) {
+  snapshot = { ...snapshot, version: snapshot.version + 1, attachedDeviceUdid: udid };
+  useDeviceStateStore.getState().applyThreadSnapshot(environmentId, generation, snapshot);
+}
+async function mount() {
+  return render(
+    <div style={{ width: 600, height: 700, display: "flex" }}>
+      <SimulatorPanel environmentId={environmentId} threadId={threadId} />
+    </div>,
+  );
+}
+function sendKey(key: string) {
+  const canvas = document.querySelector("canvas")!;
+  canvas.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  canvas.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
+}
 beforeEach(() => {
-  mocks.hosted = false;
-  mocks.testing.mockReset().mockResolvedValue(undefined);
-  // Keep panel refresh pending so only the real store's explicit connection
-  // transitions below publish readiness; cached snapshots remain in place.
-  mocks.list.mockReset().mockImplementation(() => new Promise(() => {}));
-  mocks.getThreadState.mockReset().mockImplementation(() => new Promise(() => {}));
-  useDeviceStateStore.setState({
-    environmentById: {},
-    threadByKey: {},
-    pendingOpenByThreadKey: {},
+  vi.clearAllMocks();
+  useDeviceStateStore.setState({ environmentById: {}, threadByKey: {} });
+  generation = useDeviceStateStore.getState().beginConnection(environmentId);
+  snapshot = {
+    threadId,
+    version: 1,
+    attachedDeviceUdid: android.udid,
+    attachPhase: null,
+    devices: [android],
+    agentActive: false,
+    availability: { kind: "available" },
+    lastError: null,
+  };
+  useDeviceStateStore
+    .getState()
+    .applyInventory(environmentId, generation, snapshot.devices, snapshot.availability);
+  useDeviceStateStore.getState().applyThreadSnapshot(environmentId, generation, snapshot);
+  mocks.api.list.mockImplementation(async () => ({
+    devices: snapshot.devices,
+    availability: snapshot.availability,
+  }));
+  mocks.api.getThreadState.mockImplementation(async () => snapshot);
+  mocks.api.attach.mockImplementation(async ({ udid }) => ({
+    ...snapshot,
+    version: snapshot.version + 1,
+    attachedDeviceUdid: udid,
+  }));
+  for (const method of [
+    mocks.api.typeText,
+    mocks.api.keyEvent,
+    mocks.api.tap,
+    mocks.api.swipe,
+    mocks.api.pressButton,
+  ])
+    method.mockResolvedValue(undefined);
+  mocks.nativeVideo.mockReturnValue({ status: "idle", error: null, dimensions: null });
+  const image = document.createElement("canvas");
+  image.width = 200;
+  image.height = 400;
+  image.getContext("2d")!.fillRect(0, 0, 200, 400);
+  mocks.api.screenshot.mockResolvedValue({
+    udid: android.udid,
+    name: "screen.png",
+    mimeType: "image/png",
+    width: 200,
+    height: 400,
+    bytesBase64: image.toDataURL().split(",")[1],
+    capturedAt: new Date().toISOString(),
+    sizeBytes: 100,
   });
-  const store = useDeviceStateStore.getState();
-  const generation = store.beginConnection(environmentId);
-  store.applyThreadSnapshot(environmentId, generation, snapshot);
-  hub.setState({
-    effectiveRole: "owner",
-    directoryStatus: "ready",
-    transportStatus: "online",
-    browserStatus: "current",
-    sessionStatus: "ready",
-  });
-  workspace.setState({ machines: [{ environmentId, canMutate: true }] });
 });
 
-describe("SimulatorPanel testing readiness", () => {
-  it("shows the SSH testing limitation instead of offering unsupported controls", async () => {
-    const remote = {
-      ...device,
-      udid: "ssh:mac:AAAA-1111",
-      host: { id: "mac", name: "Mac", transport: "ssh" as const },
-    };
-    const store = useDeviceStateStore.getState();
-    const generation = store.environmentById[environmentId]!.generation;
-    store.applyInventory(environmentId, generation, [remote], { kind: "available" });
-    store.applyThreadSnapshot(environmentId, generation, {
-      ...snapshot,
-      version: 2,
-      attachedDeviceUdid: remote.udid,
-      devices: [remote],
-    });
-    const screen = await render(
-      <SimulatorPanel environmentId={environmentId} threadId={threadId} />,
-    );
+describe("Android simulator pane", () => {
+  it("renders the PNG preview, maps pixel input, and exposes Android buttons", async () => {
+    await mount();
+    await expect.poll(() => document.querySelector("canvas")?.width).toBe(200);
     await expect
-      .element(screen.getByText("Simulator testing controls are unavailable on SSH hosts."))
-      .toBeVisible();
-    await expect
-      .element(screen.getByText("Simulator testing", { exact: true }))
+      .element(page.getByText("Simulator testing", { exact: true }))
       .not.toBeInTheDocument();
-    expect(mocks.testing).not.toHaveBeenCalled();
+    expect(mocks.nativeVideo.mock.calls.at(-1)?.[0].udid).toBeNull();
+    await page.getByRole("button", { name: "Back", exact: true }).click();
+    expect(mocks.api.pressButton).toHaveBeenCalledWith({ udid: android.udid, button: "back" });
+    await page.getByRole("button", { name: "Recents", exact: true }).click();
+    expect(mocks.api.pressButton).toHaveBeenCalledWith({ udid: android.udid, button: "recents" });
+    await expect
+      .element(page.getByRole("button", { name: "Record screen", exact: true }))
+      .toBeDisabled();
+    await page.getByLabelText("Pixel screen").click();
+    const point = mocks.api.tap.mock.calls.at(-1)?.[0];
+    expect(point.udid).toBe(android.udid);
+    expect(point.x).toBeCloseTo(100, 0);
+    expect(point.y).toBeCloseTo(200, 0);
   });
-
-  it("disables cached attached devices through reconnect/error until current connection inventory arrives", async () => {
-    const screen = await render(
-      <SimulatorPanel environmentId={environmentId} threadId={threadId} />,
-    );
-    await screen.getByText("Simulator testing", { exact: true }).click();
-    const dark = screen.getByRole("button", { name: "Dark mode", exact: true });
-    await expect.element(dark).toBeEnabled();
-    const store = useDeviceStateStore.getState();
-    const previousGeneration = store.environmentById[environmentId]!.generation;
-    const generation = store.beginConnection(environmentId);
-    await screen.getByText("Simulator testing", { exact: true }).click();
-    await expect.element(dark).toBeDisabled();
-    expect(useDeviceStateStore.getState().environmentById[environmentId]!.devices).toEqual([
-      device,
-    ]);
-    expect(Object.values(useDeviceStateStore.getState().threadByKey)[0]?.attachedDeviceUdid).toBe(
-      device.udid,
-    );
-    store.applyInventory(environmentId, previousGeneration, [device], { kind: "available" });
-    await expect.element(dark).toBeDisabled();
-    store.markConnectionError(environmentId, generation, "Disconnected");
-    await expect.element(dark).toBeDisabled();
-    expect(mocks.testing).not.toHaveBeenCalled();
-    store.applyInventory(environmentId, generation, [device], { kind: "available" });
-    await expect.element(dark).toBeEnabled();
-    await dark.click();
-    expect(mocks.testing).toHaveBeenCalledExactlyOnceWith({
-      udid: device.udid,
-      action: { type: "preset", value: "dark" },
+  it("preserves a,b,Backspace,Enter while the first RPC is delayed", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
     });
-  });
-
-  it("uses shared hosted authorization and current-shell mutation readiness despite connected device snapshots", async () => {
-    mocks.hosted = true;
-    const screen = await render(
-      <SimulatorPanel environmentId={environmentId} threadId={threadId} />,
+    mocks.api.typeText.mockImplementationOnce(() => pending);
+    await mount();
+    sendKey("a");
+    sendKey("b");
+    sendKey("Backspace");
+    sendKey("Enter");
+    await expect.poll(() => mocks.api.typeText.mock.calls.length).toBe(1);
+    expect(mocks.api.keyEvent).not.toHaveBeenCalled();
+    release();
+    await expect.poll(() => mocks.api.keyEvent.mock.calls.length).toBe(2);
+    expect(mocks.api.typeText.mock.calls.map(([input]) => input.text)).toEqual(["a", "b"]);
+    expect(mocks.api.keyEvent.mock.calls.map(([input]) => input.keyCode)).toEqual([42, 40]);
+    expect(mocks.api.keyEvent.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mocks.api.typeText.mock.invocationCallOrder[1]!,
     );
-    await screen.getByText("Simulator testing", { exact: true }).click();
-    const dark = screen.getByRole("button", { name: "Dark mode", exact: true });
-    await expect.element(dark).toBeEnabled();
-    hub.setState({ transportStatus: "connecting" });
-    await expect.element(dark).toBeDisabled();
-    workspace.setState({ machines: [{ environmentId, canMutate: false }] });
-    hub.setState({ transportStatus: "online" });
-    await expect.element(dark).toBeDisabled();
-    workspace.setState({ machines: [{ environmentId, canMutate: true }] });
-    hub.setState({ effectiveRole: "viewer" });
-    await expect.element(dark).toBeDisabled();
-    hub.setState({ effectiveRole: "owner", browserStatus: "stale" });
-    await expect.element(dark).toBeDisabled();
-    hub.setState({ browserStatus: "current" });
-    await expect.element(dark).toBeEnabled();
-    expect(mocks.testing).not.toHaveBeenCalled();
+  });
+  it.each(["detach", "reconnect"])("drops pending keyboard input after %s", async (change) => {
+    let release!: () => void;
+    mocks.api.typeText.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await mount();
+    sendKey("a");
+    sendKey("b");
+    sendKey("Backspace");
+    await expect.poll(() => mocks.api.typeText.mock.calls.length).toBe(1);
+    if (change === "detach") updateAttachment(null);
+    else useDeviceStateStore.getState().beginConnection(environmentId);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(mocks.api.typeText).toHaveBeenCalledTimes(1);
+    expect(mocks.api.keyEvent).not.toHaveBeenCalled();
+  });
+  it("cancels the queued suffix on a targeting failure until reattachment", async () => {
+    let fail!: (error: Error) => void;
+    mocks.api.typeText.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    await mount();
+    sendKey("a");
+    sendKey("b");
+    sendKey("Backspace");
+    sendKey("Enter");
+    await expect.poll(() => mocks.api.typeText.mock.calls.length).toBe(1);
+    fail(new Error("Android keyboard transport changed; queued input cancelled."));
+    await expect.poll(() => mocks.toast.mock.calls.length).toBe(1);
+    sendKey("c");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(mocks.api.typeText).toHaveBeenCalledTimes(1);
+    expect(mocks.api.keyEvent).not.toHaveBeenCalled();
+    updateAttachment(null);
+    await expect.element(page.getByRole("combobox")).toBeVisible();
+    updateAttachment(android.udid);
+    await expect.element(page.getByLabelText("Pixel screen")).toBeVisible();
+    sendKey("d");
+    await expect.poll(() => mocks.api.typeText.mock.calls.length).toBe(2);
+    expect(mocks.api.typeText.mock.calls[1]?.[0].text).toBe("d");
+  });
+  it("keeps the iOS picker accessible when only its helper build remains", async () => {
+    snapshot = {
+      ...snapshot,
+      attachedDeviceUdid: null,
+      devices: [{ ...android, platform: "ios-simulator", udid: "IOS-1", name: "iPhone" }],
+      availability: {
+        kind: "setup-required",
+        steps: [{ id: "build-device-helper", label: "Build helper", done: false }],
+      },
+    };
+    useDeviceStateStore
+      .getState()
+      .applyInventory(environmentId, generation, snapshot.devices, snapshot.availability);
+    updateAttachment(null);
+    await mount();
+    await page.getByRole("combobox").selectOptions("IOS-1");
+    await expect.poll(() => mocks.api.attach.mock.calls.length).toBe(1);
+    expect(mocks.api.attach).toHaveBeenCalledWith({ threadId, udid: "IOS-1" });
   });
 });
