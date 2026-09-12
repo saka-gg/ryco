@@ -202,6 +202,7 @@ import type {
   DeviceListInput,
   DeviceListResult,
   DeviceOpenUrlInput,
+  DeviceTestingInput,
   DevicePressButtonInput,
   DeviceScreenshotInput,
   DeviceScreenshotResult,
@@ -890,6 +891,7 @@ export interface EnvironmentApi {
     installApp: (input: DeviceInstallAppInput) => Promise<DeviceInstallAppResult>;
     launchApp: (input: DeviceLaunchAppInput) => Promise<DeviceLaunchAppResult>;
     openUrl: (input: DeviceOpenUrlInput) => Promise<void>;
+    testing: (input: DeviceTestingInput) => Promise<void>;
     startRecording: (input: DeviceStartRecordingInput) => Promise<DeviceStartRecordingResult>;
     stopRecording: (input: DeviceStopRecordingInput) => Promise<DeviceStopRecordingResult>;
     onEvent: (callback: (event: DeviceEvent) => void) => () => void;

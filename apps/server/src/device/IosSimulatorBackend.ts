@@ -24,6 +24,7 @@ import * as path from "node:path";
 
 import type {
   DeviceAvailability,
+  DeviceTestingInput,
   DeviceCapabilityId,
   DeviceDescribeUiResult,
   DeviceDescriptor,
@@ -47,6 +48,8 @@ import {
   deviceHelperCacheKey,
   readDeviceHelperSourceRevision,
 } from "@ryco/shared/deviceHelperCache";
+
+import { planIosTestingAction } from "./iosTestingActions.ts";
 
 import { runProcess, type ProcessRunResult } from "../processRunner.ts";
 import {
@@ -281,6 +284,43 @@ export class IosSimulatorBackend implements DeviceBackend {
   private readonly recordingStops = new Map<string, Promise<DeviceStopRecordingResult>>();
   private readonly reservedRecordingPaths = new Set<string>();
   private disposed = false;
+  // Testing commands may outlive awaits in discovery, toolchain resolution or
+  // simctl. Lifecycle entry invalidates them before its first asynchronous step.
+  private readonly testingLifecycles = new Map<string, { generation: number; pending: number }>();
+
+  private readonly allTestingLifecycle = { generation: 0, pending: 0 };
+
+  suspendTesting(udid?: string): () => void {
+    const state =
+      udid === undefined
+        ? this.allTestingLifecycle
+        : (this.testingLifecycles.get(udid) ?? { generation: 0, pending: 0 });
+    state.generation += 1;
+    state.pending += 1;
+    if (udid !== undefined) this.testingLifecycles.set(udid, state);
+    return () => {
+      state.pending -= 1;
+    };
+  }
+
+  private testingGuard(udid: string): () => void {
+    const generation = this.testingLifecycles.get(udid)?.generation ?? 0;
+    const allGeneration = this.allTestingLifecycle.generation;
+    return () => {
+      const current = this.testingLifecycles.get(udid);
+      if (
+        this.disposed ||
+        this.allTestingLifecycle.pending > 0 ||
+        this.allTestingLifecycle.generation !== allGeneration ||
+        (current?.pending ?? 0) > 0 ||
+        (current?.generation ?? 0) !== generation
+      ) {
+        throw new DeviceBackendError(
+          "Simulator testing was superseded by a lifecycle change. Earlier steps may already have applied.",
+        );
+      }
+    };
+  }
 
   constructor(options: IosSimulatorBackendOptions = {}) {
     this.osPlatform = options.platform ?? process.platform;
@@ -432,29 +472,39 @@ export class IosSimulatorBackend implements DeviceBackend {
   }
 
   async boot(udid: string): Promise<DeviceDescriptor> {
-    const result = await this.simctl(["boot", udid], { timeoutMs: BOOT_TIMEOUT_MS });
-    // Booting an already-booted device is success, not failure: the pane and an
-    // agent can race on the same device and neither should see an error.
-    if (result.code !== 0 && !/current state: Booted/iu.test(result.stderr)) {
-      throw this.simctlError("boot", result);
+    const finish = this.suspendTesting(udid);
+    try {
+      const result = await this.simctl(["boot", udid], { timeoutMs: BOOT_TIMEOUT_MS });
+      // Booting an already-booted device is success, not failure: the pane and an
+      // agent can race on the same device and neither should see an error.
+      if (result.code !== 0 && !/current state: Booted/iu.test(result.stderr)) {
+        throw this.simctlError("boot", result);
+      }
+      await this.simctl(["bootstatus", udid], { timeoutMs: BOOT_TIMEOUT_MS });
+      const devices = await this.listDevicesUnchecked();
+      const device = devices.find((candidate) => candidate.udid === udid);
+      if (!device) throw new DeviceBackendError(`Device ${udid} disappeared after boot`);
+      return { ...device, state: "booted" };
+    } finally {
+      finish();
     }
-    await this.simctl(["bootstatus", udid], { timeoutMs: BOOT_TIMEOUT_MS });
-    const devices = await this.listDevicesUnchecked();
-    const device = devices.find((candidate) => candidate.udid === udid);
-    if (!device) throw new DeviceBackendError(`Device ${udid} disappeared after boot`);
-    return { ...device, state: "booted" };
   }
 
   async shutdown(udid: string): Promise<void> {
-    await this.stopRecordingForLifecycle(udid);
-    await this.detachStream(udid);
-    // The helper outlives the simulator, and its attachment holds a display
-    // descriptor bound to this boot. Dropping it here means the next attach
-    // rebinds instead of reusing a descriptor whose framebuffer is gone.
-    this.helper?.invalidateAttachment(udid);
-    const result = await this.simctl(["shutdown", udid]);
-    if (result.code !== 0 && !/current state: Shutdown/iu.test(result.stderr)) {
-      throw this.simctlError("shutdown", result);
+    const finish = this.suspendTesting(udid);
+    try {
+      await this.stopRecordingForLifecycle(udid);
+      await this.detachStream(udid);
+      // The helper outlives the simulator, and its attachment holds a display
+      // descriptor bound to this boot. Dropping it here means the next attach
+      // rebinds instead of reusing a descriptor whose framebuffer is gone.
+      this.helper?.invalidateAttachment(udid);
+      const result = await this.simctl(["shutdown", udid]);
+      if (result.code !== 0 && !/current state: Shutdown/iu.test(result.stderr)) {
+        throw this.simctlError("shutdown", result);
+      }
+    } finally {
+      finish();
     }
   }
 
@@ -475,6 +525,28 @@ export class IosSimulatorBackend implements DeviceBackend {
     // `simctl launch` prints `<bundleId>: <pid>`.
     const match = /:\s*(\d+)\s*$/u.exec(result.stdout.trim());
     return { udid, bundleId, pid: match ? Number.parseInt(match[1]!, 10) : null };
+  }
+
+  async testing(input: DeviceTestingInput): Promise<void> {
+    const commands = planIosTestingAction(input);
+    const assertCurrent = this.testingGuard(input.udid);
+    assertCurrent();
+    // Never boot or attach implicitly: testing must not acquire boot ownership.
+    const devices = await this.listDevices({ includeShutdown: true });
+    if (!devices.some((device) => device.udid === input.udid && device.state === "booted")) {
+      throw new DeviceBackendError("Testing requires the selected simulator to be booted.");
+    }
+    for (const command of commands) {
+      assertCurrent();
+      const result = await this.simctl(command.args, { stdin: command.stdin, assertCurrent });
+      assertCurrent();
+      if (result.timedOut || result.code !== 0) {
+        // Do not echo subprocess output: it can contain the supplied push payload.
+        throw new DeviceBackendError(
+          `Simulator ${command.label} failed. Earlier preset steps may already have applied. Check runtime support and the target app.`,
+        );
+      }
+    }
   }
 
   async openUrl(udid: string, url: string): Promise<void> {
@@ -911,16 +983,23 @@ export class IosSimulatorBackend implements DeviceBackend {
 
   private async simctl(
     args: readonly string[],
-    options: { readonly timeoutMs?: number } = {},
+    options: {
+      readonly timeoutMs?: number;
+      readonly stdin?: string | undefined;
+      readonly assertCurrent?: () => void;
+    } = {},
   ): Promise<ProcessRunResult> {
     if (this.osPlatform !== "darwin") {
       throw new DeviceBackendError("iOS simulators are only available on macOS");
     }
+    const env = await this.toolchainEnv();
+    options.assertCurrent?.();
     return await this.run("xcrun", ["simctl", ...args], {
       timeoutMs: options.timeoutMs ?? SIMCTL_TIMEOUT_MS,
+      stdin: options.stdin,
       allowNonZeroExit: true,
       outputMode: "truncate",
-      env: await this.toolchainEnv(),
+      env,
     });
   }
 

@@ -40,6 +40,7 @@ import {
   type DeviceLaunchAppResult,
   type DeviceListResult,
   type DeviceOpenPaneReason,
+  type DeviceTestingInput,
   type DeviceScreenshotResult,
   type DeviceStartRecordingResult,
   type DeviceStopRecordingResult,
@@ -366,6 +367,15 @@ export class DeviceManager {
   }
 
   async shutdown(udid: string): Promise<void> {
+    const resumeTesting = this.backend.suspendTesting(udid);
+    try {
+      await this.shutdownDeviceResources(udid);
+    } finally {
+      resumeTesting();
+    }
+  }
+
+  private async shutdownDeviceResources(udid: string): Promise<void> {
     await this.stopRecordingIfActive(udid).catch(() => undefined);
     await this.stopStream(udid);
     await this.backend.shutdown(udid);
@@ -688,6 +698,10 @@ export class DeviceManager {
     return await this.backend.launch(udid, bundleId, launchArguments);
   }
 
+  async testing(input: DeviceTestingInput): Promise<void> {
+    await this.backend.testing(input);
+  }
+
   async openUrl(udid: string, url: string): Promise<void> {
     await this.backend.openUrl(udid, url);
   }
@@ -787,6 +801,15 @@ export class DeviceManager {
    * alone, and release the backend.
    */
   async dispose(): Promise<void> {
+    const resumeTesting = this.backend.suspendTesting();
+    try {
+      await this.disposeDeviceResources();
+    } finally {
+      resumeTesting();
+    }
+  }
+
+  private async disposeDeviceResources(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
     for (const [, timer] of this.idleTimers) this.cancel(timer);
