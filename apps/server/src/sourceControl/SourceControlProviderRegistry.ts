@@ -202,6 +202,33 @@ const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(function* (
       provider.pipe(Effect.flatMap((loaded) => loaded.addChangeRequestComment(input))),
     addChangeRequestCommentReaction: (input) =>
       provider.pipe(Effect.flatMap((loaded) => loaded.addChangeRequestCommentReaction(input))),
+    getChangeRequestFilesViewed: (input) =>
+      provider.pipe(
+        Effect.flatMap((loaded) =>
+          loaded.getChangeRequestFilesViewed
+            ? loaded.getChangeRequestFilesViewed(input)
+            : Effect.succeed({
+                provider: kind,
+                capability: { storage: "unsupported" as const },
+                headSha: null,
+                files: [],
+              }),
+        ),
+      ),
+    setChangeRequestFileViewed: (input) =>
+      provider.pipe(
+        Effect.flatMap((loaded) =>
+          loaded.setChangeRequestFileViewed
+            ? loaded.setChangeRequestFileViewed(input)
+            : Effect.fail(
+                new SourceControlProviderError({
+                  provider: kind,
+                  operation: "setChangeRequestFileViewed",
+                  detail: "Viewed files are not supported by this provider.",
+                }),
+              ),
+        ),
+      ),
     getChangeRequestDiff: (input) =>
       provider.pipe(Effect.flatMap((loaded) => loaded.getChangeRequestDiff(input))),
     createIssue: (input) => provider.pipe(Effect.flatMap((loaded) => loaded.createIssue(input))),
@@ -378,6 +405,30 @@ function bindProviderContext(
         ...input,
         context: input.context ?? context,
       }),
+    ...(provider.getChangeRequestFilesViewed
+      ? {
+          getChangeRequestFilesViewed: (
+            input: Parameters<
+              NonNullable<
+                SourceControlProvider.SourceControlProviderShape["getChangeRequestFilesViewed"]
+              >
+            >[0],
+          ) =>
+            provider.getChangeRequestFilesViewed!({ ...input, context: input.context ?? context }),
+        }
+      : {}),
+    ...(provider.setChangeRequestFileViewed
+      ? {
+          setChangeRequestFileViewed: (
+            input: Parameters<
+              NonNullable<
+                SourceControlProvider.SourceControlProviderShape["setChangeRequestFileViewed"]
+              >
+            >[0],
+          ) =>
+            provider.setChangeRequestFileViewed!({ ...input, context: input.context ?? context }),
+        }
+      : {}),
     getChangeRequestDiff: (input) =>
       provider.getChangeRequestDiff({
         ...input,

@@ -2,6 +2,10 @@ import { Context, Effect, Layer, Result, Schema, SchemaIssue } from "effect";
 
 import {
   TrimmedNonEmptyString,
+  type SourceControlGetChangeRequestFilesViewedInput,
+  type SourceControlChangeRequestFilesViewed,
+  type SourceControlSetChangeRequestFileViewedInput,
+  type SourceControlSetChangeRequestFileViewedResult,
   type SourceControlChangeRequestMergeCapabilities,
   type SourceControlChangeRequestMergeMethod,
   type SourceControlChangeRequestMergeability,
@@ -289,9 +293,16 @@ export interface GitHubCliShape {
     readonly reference: string;
   }) => Effect.Effect<GitHubPullRequestDetail, GitHubCliError>;
 
+  readonly getPullRequestFilesViewed: (
+    input: SourceControlGetChangeRequestFilesViewedInput,
+  ) => Effect.Effect<SourceControlChangeRequestFilesViewed, GitHubCliError>;
+  readonly setPullRequestFileViewed: (
+    input: SourceControlSetChangeRequestFileViewedInput,
+  ) => Effect.Effect<SourceControlSetChangeRequestFileViewedResult, GitHubCliError>;
   readonly getPullRequestDiff: (input: {
     readonly cwd: string;
     readonly reference: string;
+    readonly expectedHeadSha?: string | undefined;
   }) => Effect.Effect<string, GitHubCliError>;
 
   readonly createIssue: (input: {
@@ -561,7 +572,7 @@ function deriveRepositoryCloneUrlsFromCreateOutput(
 function decodeGitHubJson<S extends Schema.Top>(
   raw: string,
   schema: S,
-  operation: "listOpenPullRequests" | "getPullRequest" | "getRepositoryCloneUrls",
+  operation: string,
   invalidDetail: string,
 ): Effect.Effect<S["Type"], GitHubCliError, S["DecodingServices"]> {
   return Schema.decodeEffect(Schema.fromJsonString(schema))(raw).pipe(
@@ -717,6 +728,197 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       })
       .pipe(Effect.mapError((error) => normalizeGitHubCliError("execute", error)));
+
+  const viewedIdentitySchema = Schema.Struct({
+    id: TrimmedNonEmptyString,
+    headRefOid: TrimmedNonEmptyString,
+    url: TrimmedNonEmptyString,
+  });
+  const viewedPageSchema = Schema.Struct({
+    data: Schema.Struct({
+      node: Schema.Struct({
+        headRefOid: TrimmedNonEmptyString,
+        files: Schema.Struct({
+          nodes: Schema.Array(
+            Schema.Struct({
+              path: Schema.String.check(Schema.isMinLength(1)),
+              viewerViewedState: Schema.Literals(["VIEWED", "UNVIEWED", "DISMISSED"]),
+            }),
+          ),
+          pageInfo: Schema.Struct({
+            hasNextPage: Schema.Boolean,
+            endCursor: Schema.NullOr(TrimmedNonEmptyString),
+          }),
+        }),
+      }),
+    }),
+  });
+  const resolveViewedIdentity = (input: SourceControlGetChangeRequestFilesViewedInput) =>
+    execute({
+      cwd: input.cwd,
+      args: ["pr", "view", input.reference, "--json", "id,headRefOid,url"],
+    }).pipe(
+      Effect.flatMap((result) =>
+        decodeGitHubJson(
+          result.stdout,
+          viewedIdentitySchema,
+          "viewedFiles",
+          "Invalid pull request identity",
+        ),
+      ),
+    );
+  const graphql = (cwd: string, url: string, query: string, variables: ReadonlyArray<string>) =>
+    Effect.gen(function* () {
+      const hostname = yield* Effect.try({
+        try: () => new URL(url).hostname,
+        catch: (cause) =>
+          new GitHubCliError({
+            operation: "viewedFiles",
+            detail: "Invalid pull request URL",
+            cause,
+          }),
+      });
+      const result = yield* execute({
+        cwd,
+        args: [
+          "api",
+          "graphql",
+          "--hostname",
+          hostname,
+          "-f",
+          `query=${query}`,
+          ...variables.flatMap((value) => ["-f", value]),
+        ],
+      });
+      return result.stdout;
+    });
+  const getPullRequestFilesViewed: GitHubCliShape["getPullRequestFilesViewed"] = (input) =>
+    Effect.gen(function* () {
+      const identity = yield* resolveViewedIdentity(input);
+      const files: Array<SourceControlChangeRequestFilesViewed["files"][number]> = [];
+      const cursors = new Set<string>();
+      const paths = new Set<string>();
+      let cursor: string | null = null;
+      for (let page = 0; page < 100; page += 1) {
+        const raw: string = yield* graphql(
+          input.cwd,
+          identity.url,
+          "query($id:ID!,$cursor:String){node(id:$id){... on PullRequest{headRefOid files(first:100,after:$cursor){nodes{path viewerViewedState} pageInfo{hasNextPage endCursor}}}}}",
+          [`id=${identity.id}`, ...(cursor ? [`cursor=${cursor}`] : [])],
+        );
+        const response: typeof viewedPageSchema.Type = yield* decodeGitHubJson(
+          raw,
+          viewedPageSchema,
+          "getPullRequestFilesViewed",
+          "Invalid viewed file response",
+        );
+        const node = response.data.node;
+        if (node.headRefOid !== identity.headRefOid)
+          return yield* Effect.fail(
+            new GitHubCliError({
+              operation: "getPullRequestFilesViewed",
+              detail: "Pull request changed while loading review progress. Refresh and try again.",
+            }),
+          );
+        for (const file of node.files.nodes) {
+          if (paths.has(file.path))
+            return yield* Effect.fail(
+              new GitHubCliError({
+                operation: "getPullRequestFilesViewed",
+                detail: "Duplicate file in GitHub review progress.",
+              }),
+            );
+          paths.add(file.path);
+          files.push({
+            path: file.path,
+            state:
+              file.viewerViewedState === "VIEWED"
+                ? "viewed"
+                : file.viewerViewedState === "DISMISSED"
+                  ? "stale"
+                  : "unviewed",
+          });
+        }
+        if (!node.files.pageInfo.hasNextPage)
+          return {
+            provider: "github" as const,
+            capability: { storage: "host" as const },
+            headSha: identity.headRefOid,
+            files,
+          };
+        cursor = node.files.pageInfo.endCursor;
+        if (!cursor || cursors.has(cursor))
+          return yield* Effect.fail(
+            new GitHubCliError({
+              operation: "getPullRequestFilesViewed",
+              detail: "Invalid GitHub review progress pagination.",
+            }),
+          );
+        cursors.add(cursor);
+      }
+      return yield* Effect.fail(
+        new GitHubCliError({
+          operation: "getPullRequestFilesViewed",
+          detail: "GitHub review progress exceeds the pagination limit.",
+        }),
+      );
+    });
+  const setPullRequestFileViewed: GitHubCliShape["setPullRequestFileViewed"] = (input) =>
+    Effect.gen(function* () {
+      const identity = yield* resolveViewedIdentity(input);
+      if (identity.headRefOid !== input.expectedHeadSha)
+        return yield* Effect.fail(
+          new GitHubCliError({
+            operation: "setPullRequestFileViewed",
+            detail: "Pull request changed. Refresh the diff before updating review progress.",
+          }),
+        );
+      const mutation = input.viewed ? "markFileAsViewed" : "unmarkFileAsViewed";
+      const raw = yield* graphql(
+        input.cwd,
+        identity.url,
+        `mutation($id:ID!,$path:String!){${mutation}(input:{pullRequestId:$id,path:$path}){pullRequest{id headRefOid}}}`,
+        [`id=${identity.id}`, `path=${input.path}`],
+      );
+      const result = yield* decodeGitHubJson(
+        raw,
+        Schema.Struct({
+          data: Schema.Struct({
+            [mutation]: Schema.Struct({
+              pullRequest: Schema.Struct({
+                id: TrimmedNonEmptyString,
+                headRefOid: TrimmedNonEmptyString,
+              }),
+            }),
+          }),
+        }),
+        "setPullRequestFileViewed",
+        "Invalid viewed file mutation response",
+      );
+      const updated = result.data[mutation]?.pullRequest;
+      if (!updated || updated.id !== identity.id || updated.headRefOid !== input.expectedHeadSha) {
+        // GitHub has no expected-head argument. Undo a mark if a push raced it so
+        // unseen new content cannot silently remain marked reviewed on the host.
+        if (input.viewed)
+          yield* graphql(
+            input.cwd,
+            identity.url,
+            "mutation($id:ID!,$path:String!){unmarkFileAsViewed(input:{pullRequestId:$id,path:$path}){pullRequest{id}}}",
+            [`id=${identity.id}`, `path=${input.path}`],
+          );
+        return yield* Effect.fail(
+          new GitHubCliError({
+            operation: "setPullRequestFileViewed",
+            detail: "Pull request changed while updating review progress. Refresh and try again.",
+          }),
+        );
+      }
+      return {
+        path: input.path,
+        state: input.viewed ? ("viewed" as const) : ("unviewed" as const),
+        headSha: updated.headRefOid,
+      };
+    });
 
   const executePrJson = (input: {
     readonly cwd: string;
@@ -1336,11 +1538,28 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           ),
         ),
       ),
+    getPullRequestFilesViewed,
+    setPullRequestFileViewed,
     getPullRequestDiff: (input) =>
-      execute({
-        cwd: input.cwd,
-        args: ["pr", "diff", input.reference],
-      }).pipe(Effect.map((r) => r.stdout)),
+      Effect.gen(function* () {
+        const verifyHead = () =>
+          resolveViewedIdentity(input).pipe(
+            Effect.flatMap((identity) =>
+              identity.headRefOid === input.expectedHeadSha
+                ? Effect.void
+                : Effect.fail(
+                    new GitHubCliError({
+                      operation: "getPullRequestDiff",
+                      detail: "Pull request changed while loading the diff. Refresh and try again.",
+                    }),
+                  ),
+            ),
+          );
+        if (input.expectedHeadSha) yield* verifyHead();
+        const result = yield* execute({ cwd: input.cwd, args: ["pr", "diff", input.reference] });
+        if (input.expectedHeadSha) yield* verifyHead();
+        return result.stdout;
+      }),
     createIssue: (input) =>
       execute({
         cwd: input.cwd,

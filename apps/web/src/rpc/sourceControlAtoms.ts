@@ -442,6 +442,7 @@ export interface SourceControlChangeRequestDiffInput {
   readonly cwd: string | null;
   readonly reference: string | null;
   readonly enabled?: boolean;
+  readonly headSha?: string | null;
 }
 
 export const changeRequestDiffBinding = defineQuery<SourceControlChangeRequestDiffInput, string>({
@@ -453,13 +454,15 @@ export const changeRequestDiffBinding = defineQuery<SourceControlChangeRequestDi
     input.environmentId !== null &&
     input.cwd !== null &&
     input.reference !== null,
-  buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.reference}`,
+  buildKey: (input) =>
+    `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.reference}${KEY_SEP}${input.headSha ?? ""}`,
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
   resolveCwd: (input) => input.cwd as string,
   run: (input) =>
     sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestDiff({
       cwd: input.cwd as string,
       reference: input.reference as string,
+      ...(input.headSha ? { expectedHeadSha: input.headSha } : {}),
     }),
 });
 

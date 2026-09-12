@@ -312,14 +312,55 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "source-control",
         },
       ),
-    [WS_METHODS.sourceControlGetChangeRequestDiff]: ({ cwd, reference }) =>
+    [WS_METHODS.sourceControlGetChangeRequestFilesViewed]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.sourceControlGetChangeRequestFilesViewed,
+        ownerEffect(
+          WS_METHODS.sourceControlGetChangeRequestFilesViewed,
+          sourceControlRegistry.resolve({ cwd: input.cwd }).pipe(
+            Effect.flatMap((provider) =>
+              provider.getChangeRequestFilesViewed
+                ? provider.getChangeRequestFilesViewed(input)
+                : Effect.succeed({
+                    provider: provider.kind,
+                    capability: { storage: "unsupported" as const },
+                    headSha: null,
+                    files: [],
+                  }),
+            ),
+          ),
+        ),
+        { "rpc.aggregate": "source-control" },
+      ),
+    [WS_METHODS.sourceControlSetChangeRequestFileViewed]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.sourceControlSetChangeRequestFileViewed,
+        ownerEffect(
+          WS_METHODS.sourceControlSetChangeRequestFileViewed,
+          sourceControlRegistry.resolve({ cwd: input.cwd }).pipe(
+            Effect.flatMap((provider) =>
+              provider.setChangeRequestFileViewed
+                ? provider.setChangeRequestFileViewed(input)
+                : Effect.fail(
+                    new SourceControlProviderError({
+                      provider: provider.kind,
+                      operation: "setChangeRequestFileViewed",
+                      detail: "Viewed files are not supported by this provider.",
+                    }),
+                  ),
+            ),
+          ),
+        ),
+        { "rpc.aggregate": "source-control" },
+      ),
+    [WS_METHODS.sourceControlGetChangeRequestDiff]: (input) =>
       observeRpcEffect(
         WS_METHODS.sourceControlGetChangeRequestDiff,
         ownerEffect(
           WS_METHODS.sourceControlGetChangeRequestDiff,
           sourceControlRegistry
-            .resolve({ cwd })
-            .pipe(Effect.flatMap((provider) => provider.getChangeRequestDiff({ cwd, reference }))),
+            .resolve({ cwd: input.cwd })
+            .pipe(Effect.flatMap((provider) => provider.getChangeRequestDiff(input))),
         ),
         {
           "rpc.aggregate": "source-control",
