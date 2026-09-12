@@ -126,6 +126,8 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.sourceControlCloneRepository]: "operator",
   [WS_METHODS.sourceControlCreateIssue]: "operator",
   [WS_METHODS.sourceControlGetChangeRequestDetail]: "operator",
+  [WS_METHODS.sourceControlGetChangeRequestFilesViewed]: "operator",
+  [WS_METHODS.sourceControlSetChangeRequestFileViewed]: "operator",
   [WS_METHODS.sourceControlGetChangeRequestDiff]: "operator",
   [WS_METHODS.sourceControlGetIssue]: "operator",
   [WS_METHODS.sourceControlGetWorkflowJobLog]: "operator",

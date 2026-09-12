@@ -788,9 +788,17 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
           );
         return toChangeRequestDetail(updated, { fullContent: true });
       }),
+    getChangeRequestFilesViewed: (input) =>
+      github
+        .getPullRequestFilesViewed(input)
+        .pipe(Effect.mapError((error) => providerError("getChangeRequestFilesViewed", error))),
+    setChangeRequestFileViewed: (input) =>
+      github
+        .setPullRequestFileViewed(input)
+        .pipe(Effect.mapError((error) => providerError("setChangeRequestFileViewed", error))),
     getChangeRequestDiff: (input) =>
       github
-        .getPullRequestDiff({ cwd: input.cwd, reference: input.reference })
+        .getPullRequestDiff(input)
         .pipe(Effect.mapError((error) => providerError("getChangeRequestDiff", error))),
     createIssue: (input) =>
       withTempBodyFile(

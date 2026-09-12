@@ -95,6 +95,10 @@
     "./state/side-chat": {
       "types": "./src/state/side-chat/index.ts",
       "import": "./src/state/side-chat/index.ts"
+    },
+    "./state/pull-request-review": {
+      "types": "./src/state/pull-request-review/index.ts",
+      "import": "./src/state/pull-request-review/index.ts"
     }
   },
   "scripts": {

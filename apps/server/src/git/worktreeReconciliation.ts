@@ -2,7 +2,12 @@ import { realpathSync } from "node:fs";
 import path from "node:path";
 
 import type { ProjectId, ThreadId, WorktreeId } from "@ryco/contracts";
-import { isTemporaryWorktreeBranch } from "@ryco/shared/git";
+import {
+  isManagedWorktreeBranch,
+  isTemporaryWorktreeBranch,
+  sanitizeBranchFragment,
+  WORKTREE_BRANCH_PREFIX,
+} from "@ryco/shared/git";
 
 /**
  * Reconciles what git reports on disk with what the orchestration projection
@@ -87,6 +92,7 @@ export interface WorktreeReconciliationPlan {
 }
 
 export interface PlanWorktreeReconciliationInput {
+  readonly worktreeBranchPrefix?: string | undefined;
   /**
    * Resolves a path to its canonical on-disk form (symlinks followed). Injected
    * so the planner stays pure and testable.
@@ -103,16 +109,31 @@ export interface PlanWorktreeReconciliationInput {
 
 /** Only replace a generated directory label; user-chosen titles remain authoritative. */
 export function generatedWorktreeTitle(input: {
+  readonly worktreeBranchPrefix?: string | undefined;
   readonly branch: string;
   readonly worktreePath: string | null;
   readonly title?: string | null | undefined;
 }): string | null {
   if (input.worktreePath === null) return null;
   const directoryName = path.basename(input.worktreePath);
+  const prefix = input.worktreeBranchPrefix ?? WORKTREE_BRANCH_PREFIX;
+  const isGeneratedDirectory = [prefix, WORKTREE_BRANCH_PREFIX].some((candidate) => {
+    const exampleDirectory = sanitizeBranchFragment(
+      candidate === "" ? "00000000" : `${candidate}/00000000`,
+    ).replaceAll("/", "-");
+    // A long namespace can consume the checkout path's 64-character budget.
+    // Without the complete random token there is insufficient evidence to retitle it.
+    if (!exampleDirectory.endsWith("00000000")) return false;
+    const directoryPrefix = exampleDirectory.slice(0, -8);
+    return (
+      directoryName.startsWith(directoryPrefix) &&
+      /^[0-9a-f]{8}(?:__[a-z]{5})?$/.test(directoryName.slice(directoryPrefix.length))
+    );
+  });
   if (
-    !/^ryco-[0-9a-f]{8}(?:__[a-z]{5})?$/.test(directoryName) ||
-    !input.branch.startsWith("ryco/") ||
-    isTemporaryWorktreeBranch(input.branch) ||
+    !isGeneratedDirectory ||
+    (prefix !== "" && !isManagedWorktreeBranch(input.branch, prefix)) ||
+    isTemporaryWorktreeBranch(input.branch, prefix) ||
     (input.title != null && input.title !== directoryName)
   )
     return null;
@@ -207,7 +228,12 @@ export function planWorktreeReconciliation(
     const branch = threads.find((thread) => thread.branch !== null)?.branch ?? directoryName;
     // Older New Thread worktrees were not registered until reconciliation. Their
     // generated directory is stable, while the branch receives the useful name.
-    const title = generatedWorktreeTitle({ branch, worktreePath }) ?? directoryName;
+    const title =
+      generatedWorktreeTitle({
+        branch,
+        worktreePath,
+        worktreeBranchPrefix: input.worktreeBranchPrefix,
+      }) ?? directoryName;
     adopt.push({
       // Only threads know which ref the directory was checked out on when they
       // ran; `refreshWorktreeSourceControlState` corrects it afterwards.

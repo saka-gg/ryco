@@ -1,5 +1,9 @@
 import { Context, Effect } from "effect";
 import type {
+  SourceControlGetChangeRequestFilesViewedInput,
+  SourceControlChangeRequestFilesViewed,
+  SourceControlSetChangeRequestFileViewedInput,
+  SourceControlSetChangeRequestFileViewedResult,
   ChangeRequest,
   ChangeRequestState,
   IssueState,
@@ -177,7 +181,18 @@ export interface SourceControlProviderShape {
       readonly context?: SourceControlProviderContext;
     },
   ) => Effect.Effect<SourceControlChangeRequestDetail, SourceControlProviderError>;
+  readonly getChangeRequestFilesViewed?: (
+    input: SourceControlGetChangeRequestFilesViewedInput & {
+      readonly context?: SourceControlProviderContext;
+    },
+  ) => Effect.Effect<SourceControlChangeRequestFilesViewed, SourceControlProviderError>;
+  readonly setChangeRequestFileViewed?: (
+    input: SourceControlSetChangeRequestFileViewedInput & {
+      readonly context?: SourceControlProviderContext;
+    },
+  ) => Effect.Effect<SourceControlSetChangeRequestFileViewedResult, SourceControlProviderError>;
   readonly getChangeRequestDiff: (input: {
+    readonly expectedHeadSha?: string | undefined;
     readonly cwd: string;
     readonly context?: SourceControlProviderContext;
     readonly reference: string;

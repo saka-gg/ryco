@@ -1097,8 +1097,23 @@ describe("resolveThreadBranchUpdate", () => {
 });
 
 describe("resolveLiveThreadBranchUpdate", () => {
+  it.each(["team/tools/deadbeef", "ryco/deadbeef"])(
+    "does not regress to %s after configuring a prefix",
+    (refName) => {
+      assert.equal(
+        resolveLiveThreadBranchUpdate({
+          worktreeBranchPrefix: "team/tools",
+          threadBranch: "team/tools/fix-bug",
+          gitStatus: status({ refName }),
+        }),
+        null,
+      );
+    },
+  );
+
   it("returns a branch update when live git status differs from stored thread metadata", () => {
     const update = resolveLiveThreadBranchUpdate({
+      worktreeBranchPrefix: "ryco",
       threadBranch: "feature/old-ref",
       gitStatus: status({ refName: "effect-atom" }),
     });
@@ -1110,6 +1125,7 @@ describe("resolveLiveThreadBranchUpdate", () => {
 
   it("returns null when live git status is unavailable", () => {
     const update = resolveLiveThreadBranchUpdate({
+      worktreeBranchPrefix: "ryco",
       threadBranch: "feature/old-ref",
       gitStatus: null,
     });
@@ -1119,6 +1135,7 @@ describe("resolveLiveThreadBranchUpdate", () => {
 
   it("returns null when the stored thread ref already matches git status", () => {
     const update = resolveLiveThreadBranchUpdate({
+      worktreeBranchPrefix: "ryco",
       threadBranch: "effect-atom",
       gitStatus: status({ refName: "effect-atom" }),
     });
@@ -1128,6 +1145,7 @@ describe("resolveLiveThreadBranchUpdate", () => {
 
   it("returns null when git status is detached HEAD but the thread already has a ref", () => {
     const update = resolveLiveThreadBranchUpdate({
+      worktreeBranchPrefix: "ryco",
       threadBranch: "effect-atom",
       gitStatus: status({ refName: null }),
     });
@@ -1137,6 +1155,7 @@ describe("resolveLiveThreadBranchUpdate", () => {
 
   it("does not regress a semantic thread ref back to a temporary worktree ref", () => {
     const update = resolveLiveThreadBranchUpdate({
+      worktreeBranchPrefix: "ryco",
       threadBranch: "ryco/github-query-rate-limit",
       gitStatus: status({ refName: "ryco/bda76797" }),
     });

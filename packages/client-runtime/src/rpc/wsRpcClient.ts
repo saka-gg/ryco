@@ -100,6 +100,12 @@ export interface WsRpcClient {
     readonly getChangeRequestDetail: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlGetChangeRequestDetail
     >;
+    readonly getChangeRequestFilesViewed: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlGetChangeRequestFilesViewed
+    >;
+    readonly setChangeRequestFileViewed: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlSetChangeRequestFileViewed
+    >;
     readonly getChangeRequestDiff: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlGetChangeRequestDiff
     >;
@@ -405,6 +411,14 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       getChangeRequestDetail: (input) =>
         transport.request((client) =>
           client[WS_METHODS.sourceControlGetChangeRequestDetail](input),
+        ),
+      getChangeRequestFilesViewed: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlGetChangeRequestFilesViewed](input),
+        ),
+      setChangeRequestFileViewed: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlSetChangeRequestFileViewed](input),
         ),
       getChangeRequestDiff: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlGetChangeRequestDiff](input)),

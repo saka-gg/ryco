@@ -1082,3 +1082,52 @@ it.effect(
       );
     }),
 );
+
+it.effect("uses the server worktree prefix for agent-created worktrees", () =>
+  Effect.gen(function* () {
+    const nextPlan = {
+      kind: "createThreads" as const,
+      entries: [
+        {
+          projectId,
+          title: "Worker",
+          prompt: "Reply ready",
+          envMode: "worktree" as const,
+          runtimeMode: "auto" as const,
+          modelSelection: target.modelSelection,
+        },
+      ],
+    };
+    const proposal = {
+      ...approvedProposal,
+      plan: nextPlan,
+      planDigest: computeAgentControlPlanDigest(nextPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const createdBranches: string[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      },
+      workspaceAccess: {
+        assertPath: ({ path }: { path: string }) => Effect.succeed(path),
+        assertExistingPath: ({ path }: { path: string }) => Effect.succeed(path),
+      },
+      git: {
+        createWorktree: (input: { path: string; newRefName: string }) => {
+          createdBranches.push(input.newRefName);
+          return Effect.succeed({ worktree: { path: input.path, refName: input.newRefName } });
+        },
+      },
+      engine: { dispatch: () => Effect.succeed({ sequence: 1 }) },
+      commandApplication: { apply: () => Effect.succeed({ sequence: 1 }) },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    assert.lengthOf(createdBranches, 1);
+    assert.match(createdBranches[0]!, /^team\/tasks\/agent-control-/);
+  }).pipe(Effect.provide(ServerSettingsService.layerTest({ worktreeBranchPrefix: "team/tasks" }))),
+);

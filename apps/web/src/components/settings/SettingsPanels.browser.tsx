@@ -1001,6 +1001,55 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
+  it("validates, saves, clears and resets the selected node's worktree branch prefix", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    const environmentId = EnvironmentId.make("environment-prefix");
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SettingsEditingScopeProvider value="node">
+          <SettingsTargetProvider
+            value={{
+              environmentId,
+              nodeLabel: "Build node",
+              serverConfig: {
+                ...createBaseServerConfig(),
+                settings: { ...DEFAULT_SERVER_SETTINGS, worktreeBranchPrefix: "team" },
+              },
+              primary: false,
+              connected: true,
+            }}
+          >
+            <GeneralSettingsPanel />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
+      </AppAtomRegistryProvider>,
+    );
+
+    const input = page.getByRole("textbox", { name: "Worktree branch prefix" });
+    await expect.element(input).toHaveValue("team");
+    await input.fill("  team/agent  ");
+    await userEvent.keyboard("{Enter}");
+    expect(mockUpdateEnvironmentServerSettings).toHaveBeenLastCalledWith(environmentId, {
+      worktreeBranchPrefix: "team/agent",
+    });
+
+    mockUpdateEnvironmentServerSettings.mockClear();
+    await input.fill("invalid..prefix");
+    await userEvent.keyboard("{Enter}");
+    expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
+
+    await input.fill("");
+    await userEvent.keyboard("{Enter}");
+    expect(mockUpdateEnvironmentServerSettings).toHaveBeenLastCalledWith(environmentId, {
+      worktreeBranchPrefix: "",
+    });
+
+    await page.getByRole("button", { name: "Reset worktree branch prefix to default" }).click();
+    expect(mockUpdateEnvironmentServerSettings).toHaveBeenLastCalledWith(environmentId, {
+      worktreeBranchPrefix: "ryco",
+    });
+  });
+
   it.each([
     { connected: false, canManage: true },
     { connected: true, canManage: false },

@@ -97,7 +97,12 @@ import { webAppLifecycle } from "~/platform/appLifecycle";
 import { resolvePathLinkTarget } from "~/terminal-links";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { ensureEnvironmentApi, readEnvironmentApi } from "~/environmentApi";
-import { requireEnvironmentConnection } from "~/environments/runtime";
+import {
+  requireEnvironmentConnection,
+  useSavedEnvironmentRuntimeStore,
+} from "~/environments/runtime";
+import { usePrimaryEnvironmentId } from "~/environments/primary";
+import { useServerConfig } from "~/rpc/serverState";
 import { readLocalApi } from "~/localApi";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useStore } from "~/store";
@@ -1037,6 +1042,14 @@ export default function GitActionsControl({
   onPostPush,
 }: GitActionsControlProps) {
   const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const primaryServerConfig = useServerConfig();
+  const environmentServerConfig = useSavedEnvironmentRuntimeStore((state) =>
+    activeEnvironmentId ? state.byId[activeEnvironmentId]?.serverConfig : null,
+  );
+  const serverConfig =
+    activeEnvironmentId === primaryEnvironmentId ? primaryServerConfig : environmentServerConfig;
+  const worktreeBranchPrefix = serverConfig?.settings.worktreeBranchPrefix;
   const threadToastData = useMemo(
     () => (activeThreadRef ? { threadRef: activeThreadRef } : undefined),
     [activeThreadRef],
@@ -1253,11 +1266,12 @@ export default function GitActionsControl({
     activeDraftThread.worktreePath === null;
 
   useEffect(() => {
-    if (isGitActionRunning || isSelectingWorktreeBase) {
+    if (isGitActionRunning || isSelectingWorktreeBase || worktreeBranchPrefix === undefined) {
       return;
     }
 
     const branchUpdate = resolveLiveThreadBranchUpdate({
+      worktreeBranchPrefix,
       threadBranch: activeServerThread?.branch ?? activeDraftThread?.branch ?? null,
       gitStatus: gitStatusForActions,
     });
@@ -1272,6 +1286,7 @@ export default function GitActionsControl({
     gitStatusForActions,
     isGitActionRunning,
     isSelectingWorktreeBase,
+    worktreeBranchPrefix,
     persistThreadBranchSync,
   ]);
 

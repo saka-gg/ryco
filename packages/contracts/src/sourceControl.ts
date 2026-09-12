@@ -716,3 +716,41 @@ export function truncateSourceControlDetailContent<C extends SourceControlDetail
 
   return { body, comments: cappedComments, truncated };
 }
+
+/** Provider-owned review progress; environment storage is reserved for future adapters. */
+export const SourceControlViewedCapability = Schema.Struct({
+  storage: Schema.Literals(["host", "environment", "unsupported"]),
+});
+export const SourceControlFileViewedState = Schema.Literals(["viewed", "unviewed", "stale"]);
+export const SourceControlFileViewed = Schema.Struct({
+  path: Schema.String.check(Schema.isMinLength(1)),
+  state: SourceControlFileViewedState,
+});
+export const SourceControlGetChangeRequestFilesViewedInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  reference: TrimmedNonEmptyString,
+});
+export type SourceControlGetChangeRequestFilesViewedInput =
+  typeof SourceControlGetChangeRequestFilesViewedInput.Type;
+export const SourceControlChangeRequestFilesViewed = Schema.Struct({
+  provider: SourceControlProviderKind,
+  capability: SourceControlViewedCapability,
+  headSha: Schema.NullOr(TrimmedNonEmptyString),
+  files: Schema.Array(SourceControlFileViewed),
+});
+export type SourceControlChangeRequestFilesViewed =
+  typeof SourceControlChangeRequestFilesViewed.Type;
+export const SourceControlSetChangeRequestFileViewedInput = Schema.Struct({
+  ...SourceControlGetChangeRequestFilesViewedInput.fields,
+  path: Schema.String.check(Schema.isMinLength(1)),
+  viewed: Schema.Boolean,
+  expectedHeadSha: TrimmedNonEmptyString,
+});
+export type SourceControlSetChangeRequestFileViewedInput =
+  typeof SourceControlSetChangeRequestFileViewedInput.Type;
+export const SourceControlSetChangeRequestFileViewedResult = Schema.Struct({
+  ...SourceControlFileViewed.fields,
+  headSha: TrimmedNonEmptyString,
+});
+export type SourceControlSetChangeRequestFileViewedResult =
+  typeof SourceControlSetChangeRequestFileViewedResult.Type;

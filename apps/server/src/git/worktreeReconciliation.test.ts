@@ -273,6 +273,43 @@ describe("generatedWorktreeTitle", () => {
   it("repairs an already-adopted generated directory label", () => {
     expect(generatedWorktreeTitle({ ...input, title: "ryco-1234abcd__abcde" })).toBe(input.branch);
   });
+  it.each([
+    {
+      worktreeBranchPrefix: "team/tasks",
+      branch: "team/tasks/fix-inbox",
+      directory: "team-tasks-1234abcd__abcde",
+    },
+    {
+      worktreeBranchPrefix: "team/tasks",
+      branch: "ryco/fix-inbox",
+      directory: "ryco-1234abcd__abcde",
+    },
+    { worktreeBranchPrefix: "", branch: "fix-inbox", directory: "1234abcd__abcde" },
+  ])("repairs generated labels for $branch", ({ directory, ...settings }) => {
+    expect(
+      generatedWorktreeTitle({
+        ...settings,
+        worktreePath: `/worktrees/${directory}`,
+        title: directory,
+      }),
+    ).toBe(settings.branch);
+  });
+  it("does not title configured temporary branches or unrelated namespaces", () => {
+    expect(
+      generatedWorktreeTitle({
+        worktreeBranchPrefix: "team/tasks",
+        branch: "team/tasks/1234abcd",
+        worktreePath: "/worktrees/team-tasks-1234abcd__abcde",
+      }),
+    ).toBeNull();
+    expect(
+      generatedWorktreeTitle({
+        ...input,
+        worktreeBranchPrefix: "team/tasks",
+        branch: "other/fix-inbox",
+      }),
+    ).toBeNull();
+  });
   it("preserves custom titles, normal worktree names and temporary branches", () => {
     expect(generatedWorktreeTitle({ ...input, title: "My feature" })).toBeNull();
     expect(

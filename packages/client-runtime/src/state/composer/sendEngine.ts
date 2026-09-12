@@ -20,6 +20,7 @@ export interface SendTurnBootstrapInput {
   readonly isLocalDraftThread: boolean;
   readonly fetchOrigin?: boolean | undefined;
   readonly worktreeBranchName?: string | null | undefined;
+  readonly worktreeBranchPrefix?: string | undefined;
   readonly baseBranchForWorktree: string | null;
   readonly shouldMaterializeLegacyBranchWorktree: boolean;
   readonly projectId: ProjectId;
@@ -89,7 +90,11 @@ export function buildSendTurnBootstrap(input: SendTurnBootstrapInput): SendTurnB
             ...(input.fetchOrigin !== undefined ? { fetchOrigin: input.fetchOrigin } : {}),
             ...(input.shouldMaterializeLegacyBranchWorktree
               ? {}
-              : { branch: input.worktreeBranchName || buildTemporaryWorktreeBranchName() }),
+              : {
+                  branch:
+                    input.worktreeBranchName ||
+                    buildTemporaryWorktreeBranchName(input.worktreeBranchPrefix),
+                }),
           },
           runSetupScript: true,
         }
