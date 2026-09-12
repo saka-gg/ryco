@@ -1567,8 +1567,8 @@ export const ChatComposer = memo(
             }
             return;
           }
-          if (item.command === "goal") {
-            const replacement = "/goal ";
+          if (item.command === "goal" || item.command === "btw") {
+            const replacement = `/${item.command} `;
             const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
               snapshot.value,
               trigger.rangeEnd,

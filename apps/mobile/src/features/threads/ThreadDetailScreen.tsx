@@ -1,3 +1,4 @@
+import { useStore as useZustandStore } from "zustand";
 import { useAtomValue } from "@effect/atom-react";
 import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
 import { useNavigation } from "@react-navigation/native";
@@ -15,6 +16,10 @@ import { Pressable, ScrollView, View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 
 import { serverConfigAtom } from "@ryco/client-runtime/rpc";
+import {
+  createSideChatStore,
+  parseSideQuestionCommand,
+} from "@ryco/client-runtime/state/side-chat";
 import {
   deriveProviderSelectionPolicy,
   getProviderInteractionModeToggle,
@@ -40,7 +45,7 @@ import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { SymbolView } from "../../components/AppSymbol";
-import { ensureEnvironmentApi } from "../../connection/environmentApi";
+import { ensureEnvironmentApi, readRpcClient } from "../../connection/environmentApi";
 import {
   loadOlderThreadMessages,
   retainThreadDetailSubscription,
@@ -116,6 +121,7 @@ import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessio
 import { SessionPolicySheet } from "./SessionPolicySheet";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
 import { ThreadComposer } from "./ThreadComposer";
+import { SideChatCard } from "./SideChatCard";
 import { deriveThreadCachedView } from "./threadCachedViewModel";
 import { ThreadQueuedMessages } from "./ThreadQueuedMessages";
 import { ThreadContextBar } from "./ThreadContextBar";
@@ -238,6 +244,9 @@ export function ThreadDetailScreen(props: {
   readonly threadId: ThreadId;
 }) {
   const { environmentId, threadId } = props;
+  const [sideChatStore] = useState(createSideChatStore);
+  const sideChatKey = JSON.stringify([environmentId, threadId]);
+  const sideChat = useZustandStore(sideChatStore, (state) => state.chatsByThreadKey[sideChatKey]);
   const navigation = useNavigation();
   const headerHeight = useHeaderHeight();
   const iconColor = String(useThemeColor("--color-icon"));
@@ -480,6 +489,23 @@ export function ThreadDetailScreen(props: {
   const providers = useMemo(() => serverConfig?.providers ?? [], [serverConfig]);
   const canonicalModelSelection = thread?.modelSelection ?? project?.defaultModelSelection ?? null;
   const selectedModelSelection = stagedModelSelection ?? canonicalModelSelection;
+  const sideChatReady = !cachedView.actionsDisabled && connectionUiState === "connected";
+  useEffect(() => {
+    if (!sideChatReady) sideChatStore.getState().disconnect(sideChatKey);
+  }, [sideChatReady, sideChatKey, sideChatStore]);
+  useEffect(() => () => sideChatStore.getState().clear(sideChatKey), [sideChatKey, sideChatStore]);
+
+  const sendSideQuestion = () => {
+    if (!sideChatReady) return;
+    const api = readRpcClient(environmentId)?.textGeneration;
+    if (!api) return;
+    void sideChatStore.getState().ask(sideChatKey, {
+      threadId,
+      requestId: newMessageId(),
+      api,
+    });
+  };
+
   const threadStarted = Boolean(
     thread && (thread.latestTurn !== null || thread.messages.length > 0 || thread.session !== null),
   );
@@ -892,6 +918,28 @@ export function ThreadDetailScreen(props: {
     attachments: ReadonlyArray<DraftComposerAttachment>,
   ): Promise<boolean> => {
     setSendError(null);
+    const sideQuestion = parseSideQuestionCommand(text);
+    if (sideQuestion !== null) {
+      if (attachments.length > 0) {
+        setSendError("Side questions accept text only. Remove attachments first.");
+        return false;
+      }
+      if (!selectedModelSelection) {
+        setSendError("No model is configured for this project.");
+        return false;
+      }
+      if (sideQuestion && (!sideChatReady || sideChat?.pending)) {
+        setSendError(
+          sideChat?.pending
+            ? "Wait for the side answer or stop it first."
+            : "Reconnect to ask a side question.",
+        );
+        return false;
+      }
+      sideChatStore.getState().open(sideChatKey, selectedModelSelection, sideQuestion || undefined);
+      if (sideQuestion) sendSideQuestion();
+      return true;
+    }
     const state = useStore.getState();
     const currentThread = selectThreadByRef(state, scopeThreadRef(environmentId, threadId));
     if (!currentThread) {
@@ -1180,7 +1228,27 @@ export function ThreadDetailScreen(props: {
         }}
       />
 
+      {sideChat ? (
+        <SideChatCard
+          {...sideChat}
+          serverConfig={serverConfig}
+          disabled={!sideChatReady}
+          onOpen={() => sideChatStore.getState().open(sideChatKey, sideChat.modelSelection)}
+          onClose={() => sideChatStore.getState().close(sideChatKey)}
+          onDraftChange={(text) => sideChatStore.getState().setDraft(sideChatKey, text)}
+          onModelChange={(selection) => sideChatStore.getState().setModel(sideChatKey, selection)}
+          onSend={sendSideQuestion}
+          onCancel={() => sideChatStore.getState().cancel(sideChatKey)}
+          onClear={() => sideChatStore.getState().clear(sideChatKey)}
+        />
+      ) : null}
+
       <ThreadComposer
+        onOpenSideChat={
+          selectedModelSelection
+            ? () => sideChatStore.getState().open(sideChatKey, selectedModelSelection)
+            : undefined
+        }
         onSend={onSend}
         attachments={attachments}
         onRemoveAttachment={removeAttachment}

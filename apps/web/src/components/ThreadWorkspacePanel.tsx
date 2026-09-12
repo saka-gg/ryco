@@ -1,3 +1,4 @@
+import { useSideChatStore } from "../sideChatStore";
 import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -635,6 +636,7 @@ function WorkspaceLauncher(props: {
   showSimulator: boolean;
   isPhoneSurface: boolean;
   liveAgentCount: number;
+  onOpenSideChat: () => void;
 }) {
   const keybindings = useServerKeybindings();
   const filesTab: WorkspaceTab = { key: "files", label: "Files", mode: "files" };
@@ -680,7 +682,8 @@ function WorkspaceLauncher(props: {
         description="Start a side conversation"
         icon={MessageSquarePlusIcon}
         compact={compact}
-        disabled
+        disabled={props.isPhoneSurface || !props.activeThread}
+        onClick={props.onOpenSideChat}
       />
       <LauncherCard
         label="Browser"
@@ -1248,6 +1251,12 @@ export default function ThreadWorkspacePanel(props: {
           <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />
         ) : (
           <WorkspaceLauncher
+            onOpenSideChat={() => {
+              if (workspaceThreadRef && activeThread)
+                useSideChatStore
+                  .getState()
+                  .open(scopedThreadKey(workspaceThreadRef), activeThread.modelSelection);
+            }}
             tabs={tabs}
             activeThread={activeThread}
             onSelectTab={selectTab}

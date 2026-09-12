@@ -129,6 +129,8 @@ export interface WsRpcClient {
     readonly rerunWorkflow: RpcUnaryMethod<typeof WS_METHODS.sourceControlRerunWorkflow>;
   };
   readonly textGeneration: {
+    readonly askSideQuestion: RpcUnaryMethod<typeof WS_METHODS.textGenerationAskSideQuestion>;
+    readonly cancelSideQuestion: RpcUnaryMethod<typeof WS_METHODS.textGenerationCancelSideQuestion>;
     readonly generateIssueContent: RpcUnaryMethod<
       typeof WS_METHODS.textGenerationGenerateIssueContent
     >;
@@ -452,6 +454,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.sourceControlRerunWorkflow](input)),
     },
     textGeneration: {
+      askSideQuestion: (input) =>
+        transport.request((client) => client[WS_METHODS.textGenerationAskSideQuestion](input)),
+      cancelSideQuestion: (input) =>
+        transport.request((client) => client[WS_METHODS.textGenerationCancelSideQuestion](input)),
       generateIssueContent: (input) =>
         transport.request((client) => client[WS_METHODS.textGenerationGenerateIssueContent](input)),
       generateBranchName: (input) =>

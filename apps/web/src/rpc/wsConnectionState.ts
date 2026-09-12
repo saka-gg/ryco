@@ -1,7 +1,9 @@
+import type { EnvironmentId } from "@ryco/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
   seedWsConnectionOnlineStatus,
   wsConnectionStatusAtom,
+  wsConnectionStatusForEnvironmentAtom,
   wsConnectionOpenedCountAtom,
   type WsConnectionStatus,
 } from "@ryco/client-runtime/rpc";
@@ -20,4 +22,10 @@ export function useWsConnectionStatus(): WsConnectionStatus {
 
 export function useWsConnectionOpenedCount(): number {
   return useAtomValue(wsConnectionOpenedCountAtom);
+}
+
+export function useWsConnectionStatusForEnvironment(
+  environmentId: EnvironmentId,
+): WsConnectionStatus {
+  return useAtomValue(wsConnectionStatusForEnvironmentAtom(environmentId));
 }

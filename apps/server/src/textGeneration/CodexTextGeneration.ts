@@ -1,3 +1,4 @@
+import { sideQuestionDirectory, sideQuestionEnvironment } from "./SideQuestionIsolation.ts";
 import { Effect, FileSystem, Option, Path, Schema, Scope, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -22,6 +23,7 @@ import {
   buildPrContentPrompt,
   buildThreadTitlePrompt,
   buildThreadPriorityPrompt,
+  buildSideQuestionPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
@@ -148,7 +150,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads";
+      | "rankInboxThreads"
+      | "answerSideQuestion";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -172,6 +175,35 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         [
           "exec",
           "--ephemeral",
+          ...(operation === "answerSideQuestion"
+            ? [
+                "--ignore-user-config",
+                "--ignore-rules",
+                ...[
+                  'approval_policy="never"',
+                  'web_search="disabled"',
+                  "project_doc_max_bytes=0",
+                  "mcp_servers={}",
+                  "features.shell_tool=false",
+                  "features.view_image=false",
+                  "features.search_tool=false",
+                  "features.tool_search=false",
+                  "features.tool_suggest=false",
+                  "features.external_agent_memory_import=false",
+                  "features.unified_exec=false",
+                  "features.apply_patch_freeform=false",
+                  "features.apps=false",
+                  "features.plugins=false",
+                  "features.hooks=false",
+                  "features.codex_hooks=false",
+                  "features.plugin_hooks=false",
+                  "features.memories=false",
+                  "features.memory_tool=false",
+                  "features.js_repl=false",
+                  "features.multi_agent=false",
+                ].flatMap((config) => ["--config", config]),
+              ]
+            : []),
           "--skip-git-repo-check",
           "-s",
           "read-only",
@@ -191,7 +223,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         ],
         {
           env: {
-            ...environment,
+            ...(operation === "answerSideQuestion"
+              ? sideQuestionEnvironment(environment)
+              : environment),
             ...(codexConfig.homePath ? { CODEX_HOME: expandHomePath(codexConfig.homePath) } : {}),
           },
           cwd,
@@ -418,6 +452,21 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     }
   });
 
+  const answerSideQuestion: TextGenerationShape["answerSideQuestion"] = (input) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* sideQuestionDirectory;
+        const { prompt, outputSchema } = buildSideQuestionPrompt(input);
+        return yield* runCodexJson({
+          operation: "answerSideQuestion",
+          cwd,
+          prompt,
+          outputSchemaJson: outputSchema,
+          modelSelection: input.modelSelection,
+        });
+      }),
+    );
+
   const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
     "CodexTextGeneration.rankInboxThreads",
   )(function* (input) {
@@ -441,5 +490,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     generateThreadTitle,
     generateIssueContent,
     rankInboxThreads,
+    answerSideQuestion,
   } satisfies TextGenerationShape;
 });

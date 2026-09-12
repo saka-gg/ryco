@@ -60,6 +60,7 @@ export function ThreadComposer(props: {
   readonly modelReasoningLabel?: string | null;
   readonly modelFastEnabled?: boolean;
   readonly onOpenModel?: () => void;
+  readonly onOpenSideChat?: () => void;
   readonly pendingContextHandoff?: PendingContextHandoffPresentation | null;
 }) {
   const safeAreaInsets = useSafeAreaInsets();
@@ -125,6 +126,14 @@ export function ThreadComposer(props: {
                   disabled={props.policyDisabled}
                   onPress={props.onOpenModel}
                   className="max-w-full flex-1"
+                />
+              ) : null}
+              {props.onOpenSideChat ? (
+                <ComposerToolbarButton
+                  icon="bubble.left.and.bubble.right"
+                  accessibilityLabel="Open side chat"
+                  showChevron={false}
+                  onPress={props.onOpenSideChat}
                 />
               ) : null}
               {/* Icon only. The glyph alone says which access mode the task is

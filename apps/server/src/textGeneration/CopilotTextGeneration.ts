@@ -1,3 +1,4 @@
+import { sideQuestionDirectory, sideQuestionEnvironment } from "./SideQuestionIsolation.ts";
 import {
   CodexSettings,
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
@@ -16,7 +17,11 @@ import { Effect, Schema } from "effect";
 import { makeCopilotClientOptions } from "../provider/Layers/CopilotAdapter.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
 import { type TextGenerationShape, validateRankInboxThreadsResult } from "./TextGeneration.ts";
-import { buildThreadPriorityPrompt, buildThreadTitlePrompt } from "./TextGenerationPrompts.ts";
+import {
+  buildSideQuestionPrompt,
+  buildThreadPriorityPrompt,
+  buildThreadTitlePrompt,
+} from "./TextGenerationPrompts.ts";
 import { extractJsonObject, sanitizeThreadTitle } from "./TextGenerationUtils.ts";
 
 const COPILOT_THREAD_TITLE_TIMEOUT_MS = 60_000;
@@ -40,8 +45,14 @@ function gitTextGenerationSelection(): ModelSelection {
 export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(function* (
   copilotSettings: CopilotSettings,
   environment: NodeJS.ProcessEnv = process.env,
-  clientFactory: (cwd: string) => CopilotClient = (cwd) =>
-    new CopilotClient(makeCopilotClientOptions(copilotSettings, environment, cwd)),
+  clientFactory: (cwd: string, sideQuestion?: boolean) => CopilotClient = (cwd, sideQuestion) =>
+    new CopilotClient(
+      makeCopilotClientOptions(
+        copilotSettings,
+        sideQuestion ? sideQuestionEnvironment(environment) : environment,
+        cwd,
+      ),
+    ),
 ) {
   const codexFallback = yield* makeCodexTextGeneration(
     Schema.decodeSync(CodexSettings)({}),
@@ -119,6 +130,84 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
       return { title: sanitizeThreadTitle(parsed.title) };
     });
 
+  const answerSideQuestion: TextGenerationShape["answerSideQuestion"] = (input) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* sideQuestionDirectory;
+        const { prompt, outputSchema } = buildSideQuestionPrompt(input);
+        const client = yield* Effect.acquireRelease(
+          Effect.sync(() => clientFactory(cwd, true)),
+          (client) => Effect.promise(() => client.stop()).pipe(Effect.ignore),
+        );
+        const reasoningEffort = getModelSelectionStringOptionValue(
+          input.modelSelection,
+          "reasoningEffort",
+        );
+        const content = yield* Effect.tryPromise({
+          try: async (signal) => {
+            const session = await client.createSession({
+              model: input.modelSelection.model,
+              ...(reasoningEffort
+                ? { reasoningEffort: reasoningEffort as "low" | "medium" | "high" | "xhigh" }
+                : {}),
+              workingDirectory: cwd,
+              configDirectory: cwd,
+              streaming: false,
+              availableTools: [],
+              onPermissionRequest: () => ({ kind: "reject" }),
+              systemMessage: {
+                mode: "replace",
+                content:
+                  "Answer only from the supplied completed context. No tools, file access, or mutations are permitted.",
+              },
+              enableConfigDiscovery: false,
+              enableOnDemandInstructionDiscovery: false,
+              enableFileHooks: false,
+              enableHostGitOperations: false,
+              enableSessionStore: false,
+              enableSkills: false,
+              skipEmbeddingRetrieval: true,
+              embeddingCacheStorage: "in-memory",
+              infiniteSessions: { enabled: false },
+            });
+            const abort = () => {
+              void session.abort().catch(() => undefined);
+            };
+            signal.addEventListener("abort", abort, { once: true });
+            try {
+              if (signal.aborted) {
+                abort();
+                throw new Error("Side question cancelled.");
+              }
+              const response = await session.sendAndWait({ prompt, mode: "immediate" }, 180_000);
+              return response?.data.content ?? "";
+            } finally {
+              signal.removeEventListener("abort", abort);
+              await session.disconnect();
+            }
+          },
+          catch: (cause) =>
+            new TextGenerationError({
+              operation: "answerSideQuestion",
+              detail: "GitHub Copilot side question failed.",
+              cause,
+            }),
+        });
+        return yield* Schema.decodeEffect(Schema.fromJsonString(outputSchema))(
+          extractJsonObject(content),
+        ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new TextGenerationError({
+                operation: "answerSideQuestion",
+                detail: "GitHub Copilot returned invalid side question JSON.",
+                cause,
+              }),
+          ),
+        );
+      }),
+    );
+
   const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = (input) =>
     Effect.gen(function* () {
       const { prompt, outputSchema } = buildThreadPriorityPrompt({
@@ -189,5 +278,6 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
     generateIssueContent: (input) =>
       codexFallback.generateIssueContent(withGitFallbackSelection(input)),
     rankInboxThreads,
+    answerSideQuestion,
   } satisfies TextGenerationShape;
 });
