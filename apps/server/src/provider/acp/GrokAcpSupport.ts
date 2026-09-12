@@ -4,7 +4,6 @@ import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as EffectAcpErrors from "effect-acp/errors";
-import type * as EffectAcpSchema from "effect-acp/schema";
 import { normalizeModelSlug } from "@ryco/shared/model";
 
 import {
@@ -80,27 +79,7 @@ export function resolveGrokAcpBaseModelId(model: string | null | undefined): str
   return normalizeModelSlug(base, GROK_DRIVER_KIND) ?? "grok-build";
 }
 
-export function currentGrokModelIdFromSessionSetup(
-  sessionSetupResult:
-    | EffectAcpSchema.LoadSessionResponse
-    | EffectAcpSchema.NewSessionResponse
-    | EffectAcpSchema.ResumeSessionResponse,
-): string | undefined {
-  return sessionSetupResult.models?.currentModelId?.trim() || undefined;
-}
-
-export function applyGrokAcpModelSelection<E>(input: {
-  readonly runtime: Pick<AcpSessionRuntimeShape, "setSessionModel">;
-  readonly currentModelId: string | undefined;
-  readonly requestedModelId: string | undefined;
-  readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
-}): Effect.Effect<string | undefined, E> {
-  const shouldSwitchModel =
-    input.requestedModelId !== undefined && input.requestedModelId !== input.currentModelId;
-  if (!shouldSwitchModel) {
-    return Effect.succeed(input.currentModelId);
-  }
-  return input.runtime
-    .setSessionModel(input.requestedModelId)
-    .pipe(Effect.mapError(input.mapError), Effect.as(input.requestedModelId));
-}
+export {
+  currentAcpModelIdFromSessionSetup as currentGrokModelIdFromSessionSetup,
+  applyAcpModelSelection as applyGrokAcpModelSelection,
+} from "./AcpModelSelection.ts";

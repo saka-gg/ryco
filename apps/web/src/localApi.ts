@@ -158,6 +158,18 @@ function createBrowserLocalApi(
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getUsageSummary(input)),
       refreshProviders: () =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.refreshProviders()),
+      searchAcpRegistry: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.searchAcpRegistry(input)),
+      installAcpRegistry: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.installAcpRegistry(input)),
+      getAcpRegistryAuthMethods: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) =>
+          rpcClient.server.getAcpRegistryAuthMethods(input),
+        ),
+      authenticateAcpRegistry: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) =>
+          rpcClient.server.authenticateAcpRegistry(input),
+        ),
       updateProvider: (input) =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.updateProvider(input)),
       upsertKeybinding: (input) =>

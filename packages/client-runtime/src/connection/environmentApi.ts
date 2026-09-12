@@ -9,6 +9,10 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       : {}),
     server: {
       refreshProviders: rpcClient.server.refreshProviders,
+      searchAcpRegistry: rpcClient.server.searchAcpRegistry,
+      installAcpRegistry: rpcClient.server.installAcpRegistry,
+      getAcpRegistryAuthMethods: rpcClient.server.getAcpRegistryAuthMethods,
+      authenticateAcpRegistry: rpcClient.server.authenticateAcpRegistry,
       updateProvider: rpcClient.server.updateProvider,
       getSettings: rpcClient.server.getSettings,
       updateSettings: rpcClient.server.updateSettings,

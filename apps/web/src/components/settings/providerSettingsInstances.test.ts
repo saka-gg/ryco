@@ -41,6 +41,41 @@ describe("provider settings instance list", () => {
     expect(rows[customIndex]).toMatchObject({ isDefault: false, isDirty: true });
   });
 
+  it("does not invent a default slot for an unconfigured registry driver", () => {
+    const rows = deriveProviderSettingsInstanceRows(DEFAULT_UNIFIED_SETTINGS, []);
+    expect(rows.filter((row) => row.driver === "acpRegistry")).toEqual([]);
+  });
+
+  it("keeps explicitly configured registry instances removable, including an ID matching the driver", () => {
+    const registry = ProviderDriverKind.make("acpRegistry");
+    const instances: Record<ProviderInstanceId, ProviderInstanceConfig> = {
+      [ProviderInstanceId.make("acpRegistry")]: {
+        driver: registry,
+        enabled: true,
+        config: { agentId: "example", version: "1.2.3" },
+      },
+      [ProviderInstanceId.make("acpRegistry_work")]: {
+        driver: registry,
+        enabled: true,
+        config: { agentId: "another", version: "2.0.0" },
+      },
+    };
+    const rows = deriveProviderSettingsInstanceRows(
+      { ...DEFAULT_UNIFIED_SETTINGS, providerInstances: instances },
+      [],
+    );
+    const registryRows = rows.filter((row) => row.driver === registry);
+    expect(registryRows).toHaveLength(2);
+    expect(registryRows.map((row) => row.instanceId)).toEqual(Object.keys(instances));
+    for (const row of registryRows) {
+      expect(row).toMatchObject({
+        isDefault: false,
+        isDirty: true,
+        instance: instances[row.instanceId],
+      });
+    }
+  });
+
   it("falls back predictably when the selected custom instance is removed", () => {
     const rows = deriveProviderSettingsInstanceRows(DEFAULT_UNIFIED_SETTINGS, []);
     const selected = resolveSelectedProviderSettingsInstance(rows, customId);

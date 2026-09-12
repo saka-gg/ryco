@@ -21,6 +21,7 @@
  * @module provider/builtInDrivers
  */
 import {
+  AcpRegistrySettings,
   ClaudeSettings,
   CodexSettings,
   CopilotSettings,
@@ -31,6 +32,7 @@ import {
 } from "@ryco/contracts";
 import { Effect, Schema } from "effect";
 
+import type { AcpRegistryDriverEnv } from "./Drivers/AcpRegistryDriver.ts";
 import type { ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
 import type { CodexDriverEnv } from "./Drivers/CodexDriver.ts";
 import type { CopilotDriverEnv } from "./Drivers/CopilotDriver.ts";
@@ -51,6 +53,7 @@ import { agentControlSupportForDriver } from "../agentControl/ProviderInjection.
  * layer must provide every service in this union.
  */
 export type BuiltInDriversEnv =
+  | AcpRegistryDriverEnv
   | ClaudeDriverEnv
   | CodexDriverEnv
   | CopilotDriverEnv
@@ -173,6 +176,18 @@ const OpenCodeLazyDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv> = 
     }).pipe(Effect.flatMap(({ OpenCodeDriver }) => OpenCodeDriver.create(input))),
 };
 
+const AcpRegistryLazyDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryDriverEnv> = {
+  driverKind: ProviderDriverKind.make("acpRegistry"),
+  metadata: { displayName: "ACP Registry", supportsMultipleInstances: true },
+  configSchema: AcpRegistrySettings,
+  defaultConfig: () => Schema.decodeSync(AcpRegistrySettings)({}),
+  create: (input) =>
+    Effect.tryPromise({
+      try: () => import("./Drivers/AcpRegistryDriver.ts"),
+      catch: (cause) => driverImportError(ProviderDriverKind.make("acpRegistry"), input, cause),
+    }).pipe(Effect.flatMap(({ AcpRegistryDriver }) => AcpRegistryDriver.create(input))),
+};
+
 /**
  * Ordered list of built-in drivers. Order matters only for tie-breaking in
  * UI presentation — the registry itself is keyed by `driverKind`, so
@@ -185,4 +200,5 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
   CursorLazyDriver,
   GrokLazyDriver,
   OpenCodeLazyDriver,
+  AcpRegistryLazyDriver,
 ];

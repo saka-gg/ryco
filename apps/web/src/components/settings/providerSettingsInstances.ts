@@ -18,10 +18,16 @@ export interface ProviderSettingsInstanceRow {
   readonly isDirty: boolean;
 }
 
+function hasDefaultProviderSlot(driver: ProviderDriverKind): boolean {
+  return Object.hasOwn(DEFAULT_UNIFIED_SETTINGS.providers, driver);
+}
+
 function defaultInstanceForDriver(
   settings: UnifiedSettings,
   driver: ProviderDriverKind,
-): { readonly instance: ProviderInstanceConfig; readonly isDirty: boolean } {
+): { readonly instance: ProviderInstanceConfig; readonly isDirty: boolean } | null {
+  // Registry and future instance-only drivers require explicit installation/configuration.
+  if (!hasDefaultProviderSlot(driver)) return null;
   type LegacyProviderSettings = UnifiedSettings["providers"][keyof UnifiedSettings["providers"]];
   const legacyProviders = settings.providers as Record<string, LegacyProviderSettings>;
   const defaultLegacyProviders = DEFAULT_UNIFIED_SETTINGS.providers as Record<
@@ -72,16 +78,18 @@ export function deriveProviderSettingsInstanceRows(
   for (const driver of visibleDrivers) {
     const instanceId = defaultInstanceIdForDriver(driver);
     const defaultInstance = defaultInstanceForDriver(settings, driver);
-    rows.push({
-      instanceId,
-      instance: defaultInstance.instance,
-      driver,
-      isDefault: true,
-      isDirty: defaultInstance.isDirty,
-    });
+    if (defaultInstance) {
+      rows.push({
+        instanceId,
+        instance: defaultInstance.instance,
+        driver,
+        isDefault: true,
+        isDirty: defaultInstance.isDirty,
+      });
+    }
 
     for (const [customId, instance] of instancesByDriver.get(driver) ?? []) {
-      if (customId === instanceId) continue;
+      if (defaultInstance && customId === instanceId) continue;
       rows.push({
         instanceId: customId,
         instance,
@@ -99,7 +107,8 @@ export function deriveProviderSettingsInstanceRows(
         instanceId,
         instance,
         driver,
-        isDefault: instanceId === defaultInstanceIdForDriver(driver),
+        isDefault:
+          hasDefaultProviderSlot(driver) && instanceId === defaultInstanceIdForDriver(driver),
         isDirty: true,
       });
     }
