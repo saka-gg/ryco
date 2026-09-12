@@ -119,6 +119,7 @@ export interface SendTurnComposerDraftDeps {
   clearComposerDraftContent: (target: ComposerThreadTarget) => void;
   setComposerDraftTokenMode: (target: ComposerThreadTarget, mode: AgentTokenMode) => void;
   setComposerDraftPrompt: (target: ComposerThreadTarget, prompt: string) => void;
+  removeComposerDraftImage: (target: ComposerThreadTarget, imageId: string) => void;
   addComposerDraftImages: (target: ComposerThreadTarget, images: ComposerImageAttachment[]) => void;
   setComposerDraftTerminalContexts: (
     target: ComposerThreadTarget,
@@ -164,6 +165,8 @@ export interface SendTurnReadComposer {
 }
 
 export interface ExecuteChatSendTurnInput {
+  /** Queued sends own their snapshot independently of the live composer. */
+  preserveComposerDraft?: boolean;
   /** Stable client id; queued sends reuse the id assigned at enqueue time. */
   messageId?: MessageId;
   composer: SendTurnComposerSnapshot;
@@ -318,7 +321,7 @@ export async function buildOutgoingTurnAttachments(
 // Core send turn
 // ---------------------------------------------------------------------------
 
-export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Promise<void> {
+export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Promise<boolean> {
   const {
     composer,
     thread,
@@ -347,6 +350,12 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
   const terminalContextsSnapshot = [...composer.sendableTerminalContexts];
   const sourceControlSnapshot = [...composer.sourceControlContexts];
 
+  const draftAtStart = {
+    prompt: refs.promptRef.current,
+    images: refs.composerImagesRef.current,
+    terminalContexts: refs.composerTerminalContextsRef.current,
+  };
+
   const messageIdForSend = input.messageId ?? newMessageId();
   const messageCreatedAt = new Date().toISOString();
   const outgoingMessageText = buildOutgoingMessageText({
@@ -357,66 +366,76 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
   // Attachment-neutral send path: the web boundary encodes each DOM `File` to a
   // neutral `ComposerAttachment` via the AttachmentCodec, and the package builds
   // the outgoing turn attachment from the union alone (no `.file` in the engine).
-  const turnAttachmentsPromise = buildOutgoingTurnAttachments(imagesSnapshot);
-
-  const optimisticAttachments = imagesSnapshot.map((image) => ({
-    type: image.type,
-    id: image.id,
-    name: image.name,
-    mimeType: image.mimeType,
-    sizeBytes: image.sizeBytes,
-    previewUrl: image.previewUrl,
-  }));
-
-  // Scroll to end before optimistic message for auto-pin.
-  await scroll.scrollToEndBeforeOptimistic();
-
-  setOptimisticUserMessages((existing) => [
-    ...existing,
-    {
-      id: messageIdForSend,
-      role: "user",
-      text: outgoingMessageText,
-      ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-      createdAt: messageCreatedAt,
-      streaming: false,
-    },
-  ]);
-  scroll.scrollToEndAfterOptimistic();
-
-  setThreadError(thread.threadId, null);
-  draft.setComposerDraftTokenMode(
-    scopeThreadRef(draft.environmentId, thread.threadId),
-    settings.tokenMode,
-  );
-  if (thread.isLocalDraftThread) {
-    draft.setDraftThreadContext(draft.composerDraftTarget, {
-      tokenMode: settings.tokenMode,
-    });
-  }
-
-  if (composer.expiredTerminalContextCount > 0) {
-    const toastCopy = buildExpiredTerminalContextToastCopy(
-      composer.expiredTerminalContextCount,
-      "omitted",
-    );
-    toastManager.add(
-      stackedThreadToast({
-        type: "warning",
-        title: toastCopy.title,
-        description: toastCopy.description,
-      }),
-    );
-  }
-
-  // Clear composer
-  refs.promptRef.current = "";
-  draft.clearComposerDraftContent(draft.composerDraftTarget);
-  draft.setComposerDraftTokenMode(draft.composerDraftTarget, settings.tokenMode);
-  composerHandle.readComposer()?.resetCursorState();
-
   let turnStartSucceeded = false;
-  await (async () => {
+  let composerCleared = false;
+  try {
+    const turnAttachments = await buildOutgoingTurnAttachments(imagesSnapshot);
+
+    // Scroll to end before optimistic message for auto-pin.
+    await scroll.scrollToEndBeforeOptimistic();
+
+    const optimisticAttachments = imagesSnapshot.map(cloneComposerImageForRetry).map((image) => ({
+      type: image.type,
+      id: image.id,
+      name: image.name,
+      mimeType: image.mimeType,
+      sizeBytes: image.sizeBytes,
+      previewUrl: image.previewUrl,
+    }));
+
+    setOptimisticUserMessages((existing) => [
+      ...existing,
+      {
+        id: messageIdForSend,
+        role: "user",
+        text: outgoingMessageText,
+        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+        createdAt: messageCreatedAt,
+        streaming: false,
+      },
+    ]);
+    scroll.scrollToEndAfterOptimistic();
+
+    const consumeDraft =
+      !input.preserveComposerDraft &&
+      refs.promptRef.current === draftAtStart.prompt &&
+      refs.composerImagesRef.current === draftAtStart.images &&
+      refs.composerTerminalContextsRef.current === draftAtStart.terminalContexts;
+    setThreadError(thread.threadId, null);
+    if (consumeDraft) {
+      draft.setComposerDraftTokenMode(
+        scopeThreadRef(draft.environmentId, thread.threadId),
+        settings.tokenMode,
+      );
+      if (thread.isLocalDraftThread) {
+        draft.setDraftThreadContext(draft.composerDraftTarget, {
+          tokenMode: settings.tokenMode,
+        });
+      }
+    }
+
+    if (composer.expiredTerminalContextCount > 0) {
+      const toastCopy = buildExpiredTerminalContextToastCopy(
+        composer.expiredTerminalContextCount,
+        "omitted",
+      );
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: toastCopy.title,
+          description: toastCopy.description,
+        }),
+      );
+    }
+
+    // Queued snapshots and edits made during preparation belong to the next draft.
+    if (consumeDraft) {
+      composerCleared = true;
+      refs.promptRef.current = "";
+      draft.clearComposerDraftContent(draft.composerDraftTarget);
+      draft.setComposerDraftTokenMode(draft.composerDraftTarget, settings.tokenMode);
+      composerHandle.readComposer()?.resetCursorState();
+    }
     let firstComposerImageName: string | null = null;
     if (imagesSnapshot.length > 0) {
       const firstComposerImage = imagesSnapshot[0];
@@ -441,8 +460,6 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       selectedModel: composer.selectedModel,
       defaultModel,
     });
-
-    const turnAttachments = await turnAttachmentsPromise;
 
     const freshSourceControlContexts = await refreshStaleSourceControlContexts(
       sourceControlSnapshot,
@@ -498,22 +515,41 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       persistThreadSettingsForNextTurn: persistSettingsDeps.persistThreadSettingsForNextTurn,
     });
     turnStartSucceeded = true;
-  })().catch(async (err: unknown) => {
-    rollbackSendTurn({
-      refs,
-      composerHandle,
-      dispatch: { setOptimisticUserMessages },
-      draft,
-      messageId: messageIdForSend,
-      promptSnapshot: composer.promptForRestore ?? composer.prompt,
-      imagesSnapshot,
-      terminalContextsSnapshot,
-    });
+    if (!composerCleared && !input.preserveComposerDraft) {
+      // A prompt edit preserves the draft, but accepted uploads cannot be sent
+      // under a new command. Keep additions and replacements made during prep.
+      const consumed = refs.composerImagesRef.current.filter((live) =>
+        imagesSnapshot.some(
+          (sent) =>
+            sent.id === live.id && sent.uploadToken === live.uploadToken && sent.file === live.file,
+        ),
+      );
+      refs.composerImagesRef.current = refs.composerImagesRef.current.filter(
+        (live) => !consumed.includes(live),
+      );
+      for (const attachment of consumed) {
+        draft.removeComposerDraftImage(draft.composerDraftTarget, attachment.id);
+      }
+    }
+  } catch (err: unknown) {
+    if (composerCleared) {
+      rollbackSendTurn({
+        refs,
+        composerHandle,
+        dispatch: { setOptimisticUserMessages },
+        draft,
+        messageId: messageIdForSend,
+        promptSnapshot: composer.promptForRestore ?? composer.prompt,
+        imagesSnapshot,
+        terminalContextsSnapshot,
+      });
+    } else {
+      removeOptimisticUserMessage(setOptimisticUserMessages, messageIdForSend);
+    }
     setThreadError(thread.threadId, err instanceof Error ? err.message : "Failed to send message.");
-  });
-
-  refs.sendInFlightRef.current = false;
-  if (!turnStartSucceeded) {
-    resetLocalDispatch();
+  } finally {
+    refs.sendInFlightRef.current = false;
+    if (!turnStartSucceeded) resetLocalDispatch();
   }
+  return turnStartSucceeded;
 }

@@ -1,4 +1,4 @@
-import { Effect, FileSystem, Option, Path, Schema } from "effect";
+import { Cause, Context, Effect, Exit, FileSystem, Option, Path, Schema } from "effect";
 import {
   type ClientOrchestrationCommand,
   DEFAULT_PROJECT_METADATA_DIR,
@@ -20,6 +20,13 @@ import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
+
+// A replay must not release a reservation acquired by an earlier accepted or
+// still-running attempt with the same command ID.
+class AttachmentAdoptionAttempt extends Context.Service<
+  AttachmentAdoptionAttempt,
+  { readonly id: symbol }
+>()("ryco/attachments/AdoptionAttempt") {}
 
 function isKnownUploadAttachment(
   attachment: UploadChatAttachment,
@@ -125,6 +132,9 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       return command as OrchestrationCommand;
     }
 
+    const adoptionAttempt = Option.getOrUndefined(
+      yield* Effect.serviceOption(AttachmentAdoptionAttempt),
+    );
     const preparedAttachments = yield* Effect.forEach(
       command.message.attachments,
       (attachment) =>
@@ -141,6 +151,8 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
             const adopted = yield* chatAttachmentUploads
               .claimForAdoption({
                 uploadToken: attachment.uploadToken,
+                commandId: command.commandId,
+                attemptId: adoptionAttempt?.id,
                 threadId: command.threadId,
                 name: attachment.name,
                 mimeType: attachment.mimeType,
@@ -357,3 +369,49 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       },
     } satisfies OrchestrationCommand;
   });
+
+/** Keep streamed upload reservations until dispatch has a definitive result.
+ * This wraps both normalization and dispatch: a later invalid attachment or a
+ * rejected command must release earlier claims, while a committed command keeps
+ * them. An identical command can replay its claims before receipt deduplication.
+ * Interrupted callers retain claims: the engine may still commit their command.
+ * Do not make dispatch uninterruptible; shutdown must remain able to stop callers.
+ */
+export function withChatAttachmentAdoption<A, E, R>(
+  command: ClientOrchestrationCommand,
+  dispatch: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> {
+  const tokens =
+    command.type === "thread.turn.start" || command.type === "thread.turn.steer"
+      ? command.message.attachments.flatMap((attachment) =>
+          isKnownUploadAttachment(attachment) &&
+          attachment.type === "file" &&
+          attachment.uploadToken !== undefined
+            ? [attachment.uploadToken]
+            : [],
+        )
+      : [];
+  if (tokens.length === 0) return dispatch;
+  return Effect.gen(function* () {
+    const uploads = Option.getOrUndefined(yield* Effect.serviceOption(ChatAttachmentUploads));
+    if (!uploads) return yield* dispatch;
+    const attemptId = Symbol("attachment-adoption");
+    return yield* dispatch.pipe(
+      Effect.provideService(AttachmentAdoptionAttempt, { id: attemptId }),
+      Effect.onExit((exit) =>
+        Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
+          ? Effect.void
+          : Effect.forEach(
+              tokens,
+              (uploadToken) =>
+                (Exit.isSuccess(exit) ? uploads.commitAdoption : uploads.releaseAdoption)({
+                  uploadToken,
+                  commandId: command.commandId,
+                  attemptId,
+                }),
+              { discard: true },
+            ),
+      ),
+    );
+  });
+}
