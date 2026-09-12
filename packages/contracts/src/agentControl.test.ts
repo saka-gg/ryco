@@ -203,6 +203,15 @@ describe("AgentControlActionPlan", () => {
       riskClass: "device-control",
     };
     expect(
+      decodePlan({ kind: "deviceInstall", ...target, artifactPath: "build/Test.apk" }).kind,
+    ).toBe("deviceInstall");
+    expect(() =>
+      decodePlan({ kind: "deviceInstall", ...target, artifactPath: "../Test.apk" }),
+    ).toThrow();
+    expect(() =>
+      decodePlan({ kind: "deviceInstall", ...target, artifactPath: "/tmp/Test.apk" }),
+    ).toThrow();
+    expect(
       decodePlan({ kind: "deviceInstall", ...target, artifactPath: "build/Test.app" }).kind,
     ).toBe("deviceInstall");
     expect(() =>

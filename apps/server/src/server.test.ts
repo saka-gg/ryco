@@ -981,7 +981,8 @@ const buildAppUnderTest = (options?: {
       Layer.provideMerge(makeAuthTestLayer()),
       Layer.provideMerge(LocalDiagnosticsMetricsLive),
       Layer.provideMerge(AdvertisedEndpointRegistryLive),
-      Layer.provide(makeDeviceServiceLayer({ platform: "linux" })),
+      // Keep generic server tests off real SDKs and persistent boot ownership.
+      Layer.provide(makeDeviceServiceLayer({ platform: "freebsd" })),
       Layer.provide(workspaceAndProjectServicesLayer),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provide(layerConfig),

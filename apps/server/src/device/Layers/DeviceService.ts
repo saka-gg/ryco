@@ -2,9 +2,8 @@
  * DeviceServiceLive - one DeviceManager for the server process.
  *
  * The manager exists on every platform so no caller has to branch on `null`;
- * off darwin its backend reports `unsupported-platform` and every device call
- * fails cleanly through the same path a missing Xcode would take. `supported`
- * is what callers use to decide whether to expose the surface at all.
+ * iOS and Android adapters share its lifecycle and authorization. Tooling
+ * availability is reported by each adapter; host support gates the surface.
  *
  * @module device/Layers/DeviceService
  */
@@ -13,6 +12,8 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 
 import { makeBootOwnershipStore, NULL_BOOT_OWNERSHIP } from "../bootOwnership.ts";
+import { AndroidEmulatorBackend } from "../AndroidEmulatorBackend.ts";
+import { PlatformDeviceBackend } from "../PlatformDeviceBackend.ts";
 import { DeviceManager } from "../DeviceManager.ts";
 import { IosSimulatorBackend } from "../IosSimulatorBackend.ts";
 import { DeviceService, type DeviceServiceShape } from "../Services/DeviceService.ts";
@@ -48,21 +49,25 @@ export function makeDeviceServiceLayer(
     DeviceService,
     Effect.gen(function* () {
       const platform = options.platform ?? process.platform;
-      const backend = new IosSimulatorBackend({ platform });
-      // Only darwin can boot anything, so only darwin needs to remember doing so.
-      const bootOwnership =
-        platform === "darwin"
-          ? makeBootOwnershipStore(options.bootOwnershipPath ?? defaultBootOwnershipPath())
-          : NULL_BOOT_OWNERSHIP;
+      const supported = ["darwin", "linux", "win32"].includes(platform);
+      const backend = new PlatformDeviceBackend(
+        new IosSimulatorBackend({ platform }),
+        new AndroidEmulatorBackend({ platform }),
+      );
+      // Both adapters share one persistent boot ownership record.
+      const bootOwnership = supported
+        ? makeBootOwnershipStore(options.bootOwnershipPath ?? defaultBootOwnershipPath())
+        : NULL_BOOT_OWNERSHIP;
       const manager = new DeviceManager({ backend, bootOwnership });
-      const toolGateway =
-        platform === "darwin" ? yield* Effect.promise(() => startDeviceToolGateway(manager)) : null;
+      const toolGateway = supported
+        ? yield* Effect.promise(() => startDeviceToolGateway(manager))
+        : null;
       installProcessDeviceToolGateway(toolGateway);
 
       // A previous run that crashed left its simulators booted and no longer
       // owned by anyone: reclaim them before this run starts counting boots,
       // or they linger forever outside the cap and the idle sweep.
-      if (platform === "darwin") {
+      if (supported) {
         yield* Effect.promise(async () => {
           const reclaimed = await manager.reclaimOrphanedBoots().catch(() => []);
           if (reclaimed.length > 0) {
@@ -83,7 +88,7 @@ export function makeDeviceServiceLayer(
           await manager.dispose();
         }),
       );
-      return { supported: platform === "darwin", manager } satisfies DeviceServiceShape;
+      return { supported, manager } satisfies DeviceServiceShape;
     }),
   );
 }

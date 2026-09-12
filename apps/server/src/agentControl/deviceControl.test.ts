@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -51,7 +51,23 @@ describe("Agent Control device input policy", () => {
       ),
     ).resolves.toBe(await realpath(path.join(root, "build", "Inside.app")));
 
+    await writeFile(path.join(root, "build", "Inside.apk"), "apk fixture");
+    await writeFile(path.join(outside, "Outside.apk"), "apk fixture");
+    await symlink(path.join(outside, "Outside.apk"), path.join(root, "Escaped.apk"));
+    await expect(
+      Effect.runPromise(
+        resolveAgentControlDeviceArtifact({
+          workspaceRoot: root,
+          artifactPath: "build/Inside.apk",
+          workspaceAccess: canonicalPolicy,
+        }),
+      ),
+    ).resolves.toBe(await realpath(path.join(root, "build", "Inside.apk")));
+
     for (const artifactPath of [
+      "../Outside.apk",
+      path.join(outside, "Outside.apk"),
+      "Escaped.apk",
       "../Outside.app",
       path.join(outside, "Outside.app"),
       "Escaped.app",

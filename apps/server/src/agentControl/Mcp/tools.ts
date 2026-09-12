@@ -301,7 +301,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.listDevices,
     description:
-      "List bounded iOS Simulator availability and inventory for this exact Ryco thread, project, and provider instance.",
+      "List bounded simulator or emulator availability and inventory for this exact Ryco thread, project, and provider instance.",
     inputSchema: {
       type: "object",
       properties: { includeShutdown: { type: "boolean" } },
@@ -343,7 +343,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
     [AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown, "shut down"],
   ].map(([name, operation]) => ({
     name: name!,
-    description: `Request approval to ${operation} one exact iOS Simulator. This creates a proposal and does not mutate the device inline.`,
+    description: `Request approval to ${operation} one exact simulator or emulator. This creates a proposal and does not mutate the device inline.`,
     inputSchema: {
       type: "object",
       properties: deviceMutationTargetProperties,
@@ -354,7 +354,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeDeviceInstall,
     description:
-      "Request approval to install one exact workspace-contained .app artifact on the attached Simulator. No install occurs inline.",
+      "Request approval to install one exact workspace-contained .app or .apk artifact on the attached device. No install occurs inline.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1663,7 +1663,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
 
   const requireDevice = () => {
     if (deps.deviceService === undefined || !deps.deviceService.supported) {
-      return failTool("iOS Simulator device control is unavailable.");
+      return failTool("simulator or emulator device control is unavailable.");
     }
     return Effect.succeed(deps.deviceService);
   };
@@ -1843,7 +1843,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `Boot iOS Simulator ${input.udid}`,
+            `Boot simulator or emulator ${input.udid}`,
             "device-lifecycle",
           );
           plan = { kind: "deviceBoot", ...prepared.target };
@@ -1855,7 +1855,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `Attach iOS Simulator ${input.udid} to this thread`,
+            `Attach simulator or emulator ${input.udid} to this thread`,
             "device-lifecycle",
           );
           plan = { kind: "deviceAttach", ...prepared.target };
@@ -1867,7 +1867,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `Detach iOS Simulator ${input.udid} from this thread`,
+            `Detach simulator or emulator ${input.udid} from this thread`,
             "device-lifecycle",
           );
           plan = { kind: "deviceDetach", ...prepared.target };
@@ -1879,7 +1879,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `Install an approved workspace application on iOS Simulator ${input.udid}`,
+            `Install an approved workspace application on simulator or emulator ${input.udid}`,
             "device-control",
           );
           if (deps.workspaceAccess === undefined) {
@@ -1899,7 +1899,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `Launch installed application ${input.bundleId} on iOS Simulator ${input.udid}`,
+            `Launch installed application ${input.bundleId} on simulator or emulator ${input.udid}`,
             "device-control",
           );
           plan = { kind: "deviceLaunch", ...prepared.target, bundleId: input.bundleId };
@@ -1915,7 +1915,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `Open an approved URL or deep link on iOS Simulator ${input.udid}`,
+            `Open an approved URL or deep link on simulator or emulator ${input.udid}`,
             "open-world",
           );
           plan = { kind: "deviceOpenUrl", ...prepared.target, url: input.url };
@@ -1927,7 +1927,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `Perform one ${input.action.kind} action on iOS Simulator ${input.udid}`,
+            `Perform one ${input.action.kind} action on simulator or emulator ${input.udid}`,
             "device-control",
           );
           switch (input.action.kind) {
@@ -1966,7 +1966,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `${input.action === "start" ? "Start" : "Stop"} recording iOS Simulator ${input.udid}`,
+            `${input.action === "start" ? "Start" : "Stop"} recording simulator or emulator ${input.udid}`,
             "device-lifecycle",
           );
           plan = {
@@ -1981,7 +1981,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           const prepared = yield* prepareDeviceTarget(
             session,
             input,
-            `Shut down iOS Simulator ${input.udid}`,
+            `Shut down simulator or emulator ${input.udid}`,
             "device-lifecycle",
           );
           plan = { kind: "deviceShutdown", ...prepared.target };

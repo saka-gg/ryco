@@ -35,6 +35,21 @@ const BASE_DEVICE = {
 const GEOMETRY = { pointWidth: 402, pointHeight: 874, scale: 3 } as const;
 
 describe("DeviceDescriptor geometry", () => {
+  it("accepts Android AVD identity and setup steps over the existing device contract", () => {
+    expect(
+      decodes(DeviceListResult, {
+        devices: [{ ...BASE_DEVICE, platform: "android-emulator", udid: "android:Pixel_Test" }],
+        availability: {
+          kind: "setup-required",
+          steps: [
+            { id: "install-android-platform-tools", label: "Install Platform-Tools", done: false },
+            { id: "install-android-emulator", label: "Install Emulator", done: false },
+            { id: "create-android-avd", label: "Create an AVD", done: false },
+          ],
+        },
+      }),
+    ).toBe(true);
+  });
   it("carries point dimensions and scale for an attached device", () => {
     const decoded = decodeSync(DeviceDescriptor, { ...BASE_DEVICE, geometry: GEOMETRY });
     expect(decoded.geometry).toEqual(GEOMETRY);
