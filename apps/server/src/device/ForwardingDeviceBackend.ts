@@ -16,6 +16,8 @@ export type DeviceCall = Exclude<
   | "onDisconnect"
   | "hostSummaries"
   | "discoverDevices"
+  | "testing"
+  | "suspendTesting"
 >;
 export type DeviceArgs<K extends DeviceCall> = Parameters<DeviceBackend[K]>;
 export type DeviceResult<K extends DeviceCall> = Awaited<ReturnType<DeviceBackend[K]>>;
@@ -27,6 +29,8 @@ export abstract class ForwardingDeviceBackend implements DeviceBackend {
   abstract geometry(udid: string): DeviceGeometry | null;
   abstract attachStream(udid: string, listener: DeviceFrameListener): Promise<void>;
   abstract dispose(): Promise<void>;
+  abstract testing(input: Parameters<DeviceBackend["testing"]>[0]): Promise<void>;
+  abstract suspendTesting(udid?: string): () => void;
   availability(): ReturnType<DeviceBackend["availability"]> {
     return this.call("availability", []);
   }

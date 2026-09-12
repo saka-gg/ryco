@@ -17,6 +17,7 @@ import type {
 export interface QueuedMessage<Composer = unknown, Settings = unknown> {
   readonly id: string;
   readonly createdAt?: string;
+  readonly deliveryStatus?: "sending" | "failed";
   readonly composer: Composer;
   readonly settings: Settings;
 }

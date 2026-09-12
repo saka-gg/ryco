@@ -111,3 +111,8 @@ the device schemas, `DeviceService` construction, the Simulator picker, CLI entr
 and server dependency/lockfile. Platform adapters must support independent device
 bindings through their backend factory, keep native IDs behind the host router, and
 preserve disconnect invalidation and the authoritative boot manager.
+
+Simulator testing controls (appearance, text size, location, permissions, push and
+presets) are local-only. SSH requests for these controls are rejected and the picker
+shows their unavailability for remote devices. The remote protocol does not implement
+testing cancellation; existing SSH device operations remain supported.

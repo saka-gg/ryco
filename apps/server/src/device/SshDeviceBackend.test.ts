@@ -49,6 +49,16 @@ function fixture() {
 }
 
 describe("SSH device host transport", () => {
+  it("rejects testing before starting an SSH worker", async () => {
+    const { backend, starts } = fixture();
+    const resume = backend.suspendTesting();
+    await expect(
+      backend.testing({ udid: "FAKE-0001", action: { type: "clear-location" } }),
+    ).rejects.toThrow("unavailable on SSH");
+    resume();
+    expect(starts()).toBe(0);
+  });
+
   it("shares startup, preserves argv/stdin values and routes full device operations", async () => {
     const { backend, native, starts } = fixture();
     const [, devices] = await Promise.all([

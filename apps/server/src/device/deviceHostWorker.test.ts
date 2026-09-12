@@ -44,6 +44,11 @@ describe("SSH worker ownership", () => {
   it("fails closed on invalid methods and oversized requests", async () => {
     for (const request of [
       JSON.stringify({ id: 1, method: "dispose", args: [] }) + "\n",
+      JSON.stringify({
+        id: 1,
+        method: "testing",
+        args: [{ udid: "FAKE-0001", action: { type: "clear-location" } }],
+      }) + "\n",
       "x".repeat(65537),
     ]) {
       const backend = new FakeDeviceBackend();

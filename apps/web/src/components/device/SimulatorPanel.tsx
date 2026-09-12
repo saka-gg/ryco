@@ -1,6 +1,7 @@
 // The interaction model is adapted from Synara v0.7.2 (MIT); see THIRD_PARTY_NOTICES.md.
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { DEVICE_WS_METHODS } from "@ryco/contracts";
 import type {
   DeviceDescriptor,
   DeviceHardwareButton,
@@ -46,6 +47,11 @@ import {
 } from "./deviceFrameGate";
 import { useDeviceVideoStream } from "./useDeviceVideoStream";
 import { useDeviceScreenshotStream } from "./useDeviceScreenshotStream";
+
+import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedWorkspaceState } from "../../hostedHub/hostedConnectionCoordinator";
+
+import { SimulatorTestingDrawer } from "./SimulatorTestingDrawer";
 
 const SETUP_POLL_MS = 5_000;
 
@@ -153,6 +159,14 @@ export default function SimulatorPanel(props: {
   readonly threadId: ThreadId | null;
 }) {
   const { environmentId, threadId } = props;
+  const testingCapability = useHostedRpcCapability(DEVICE_WS_METHODS.app);
+  const hostedWorkspace = useHostedWorkspaceState();
+  const testingMutationReady =
+    testingCapability.allowed &&
+    (!testingCapability.hosted ||
+      hostedWorkspace.machines.some(
+        (machine) => machine.environmentId === environmentId && machine.canMutate,
+      ));
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const threadKey = useMemo(
     () =>
@@ -507,6 +521,28 @@ export default function SimulatorPanel(props: {
             {host.name}: {host.availability ?? "Checking device host…"}
           </div>
         ))}
+      {attached?.host?.transport === "ssh" ? (
+        <div
+          role="status"
+          className="border-b border-border/60 px-3 py-2 text-xs text-muted-foreground"
+        >
+          Simulator testing controls are unavailable on SSH hosts.
+        </div>
+      ) : attached ? (
+        <SimulatorTestingDrawer
+          key={`${environmentId}:${threadId}:${attached.udid}:${generation}`}
+          udid={attached.udid}
+          disabled={
+            busy ||
+            environmentState?.status !== "connected" ||
+            !testingMutationReady ||
+            attached.state !== "booted" ||
+            threadState?.attachedDeviceUdid !== attached.udid ||
+            threadState?.attachPhase != null
+          }
+          testing={(input) => api.testing(input)}
+        />
+      ) : null}
 
       {degraded.length > 0 ? (
         <div className="border-b border-amber-500/20 bg-amber-500/8 px-3 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">

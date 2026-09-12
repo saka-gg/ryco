@@ -45,6 +45,7 @@ import {
 } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
+import { useMessageQueueStore } from "../messageQueueStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
   useComposerDraftStore,
@@ -53,6 +54,7 @@ import {
 } from "../composerDraftStore";
 import { usePromptStashStore } from "../promptStashStore";
 import {
+  readEnvironmentApi,
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "../environmentApi";
@@ -2613,6 +2615,73 @@ describe("ChatView timeline estimator parity (full app)", () => {
   afterEach(() => {
     customWsRpcResolver = null;
     document.body.innerHTML = "";
+  });
+
+  it("retains a failed queued send and the next draft until explicit retry", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "existing-queue-test" as MessageId,
+      targetText: "Existing turn",
+    });
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    try {
+      await waitForComposerEditor();
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      let turnAttempts = 0;
+      const dispatchCommand: EnvironmentApi["orchestration"]["dispatchCommand"] = async (
+        command,
+      ) => {
+        if (command.type === "thread.turn.start") {
+          turnAttempts++;
+          if (turnAttempts === 1) throw new Error("Temporary send failure");
+        }
+        return { sequence: snapshot.snapshotSequence + 1 };
+      };
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+        ...api,
+        orchestration: { ...api.orchestration, dispatchCommand },
+      });
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep my next draft");
+      await waitForLayout();
+      const modelSelection = snapshot.threads[0]!.modelSelection;
+      useMessageQueueStore.getState().enqueue(THREAD_KEY, {
+        id: "queued-retry-browser",
+        composer: {
+          prompt: "Queued earlier",
+          trimmedPrompt: "Queued earlier",
+          images: [],
+          sendableTerminalContexts: [],
+          sourceControlContexts: [],
+          selectedProvider: ProviderDriverKind.make("codex"),
+          selectedModel: modelSelection.model,
+          selectedProviderModels: [],
+          selectedPromptEffort: null,
+          selectedModelSelection: modelSelection,
+          expiredTerminalContextCount: 0,
+        },
+        settings: { runtimeMode: "full-access", interactionMode: "default", tokenMode: "balanced" },
+      });
+      await vi.waitFor(() =>
+        expect(
+          useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]?.[0]?.deliveryStatus,
+        ).toBe("failed"),
+      );
+      expect(turnAttempts).toBe(1);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep my next draft",
+      );
+      await page.getByRole("button", { name: /Retry queued message/ }).click();
+      await vi.waitFor(() =>
+        expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(0),
+      );
+      expect(turnAttempts).toBe(2);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep my next draft",
+      );
+    } finally {
+      useMessageQueueStore.getState().clear(THREAD_KEY);
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
   });
 
   it("keeps a cached hosted thread visible while its node reconnects", async () => {

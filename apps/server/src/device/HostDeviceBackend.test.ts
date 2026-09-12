@@ -21,6 +21,70 @@ function fixture() {
 }
 
 describe("device host routing", () => {
+  it("routes object-target testing and suspends per-device factory instances independently", async () => {
+    const discovery = new FakeDeviceBackend();
+    const instances: FakeDeviceBackend[] = [];
+    const backend = new HostDeviceBackend([
+      {
+        host: { id: "local", name: "Local", transport: "local" },
+        backend: discovery,
+        createDeviceBackend: () => {
+          const instance = new FakeDeviceBackend();
+          vi.spyOn(instance, "testing").mockResolvedValue(undefined);
+          vi.spyOn(instance, "suspendTesting");
+          instances.push(instance);
+          return instance;
+        },
+      },
+    ]);
+    const a = { udid: "FAKE-0001", action: { type: "appearance", value: "dark" } } as const;
+    const b = { ...a, udid: "FAKE-0002" };
+    try {
+      await backend.listDevices({ includeShutdown: true });
+      await backend.testing(a);
+      await backend.testing(b);
+      expect(instances[0]!.testing).toHaveBeenCalledWith(a);
+      expect(instances[1]!.testing).toHaveBeenCalledWith(b);
+      const resumeA = backend.suspendTesting(a.udid);
+      expect(instances[0]!.suspendTesting).toHaveBeenCalledWith(a.udid);
+      expect(instances[1]!.suspendTesting).not.toHaveBeenCalled();
+      await expect(backend.testing(a)).rejects.toThrow("superseded");
+      await backend.testing(b);
+      const resumeAll = backend.suspendTesting();
+      expect(instances[1]!.suspendTesting).toHaveBeenCalledWith();
+      resumeA();
+      await expect(backend.testing(a)).rejects.toThrow("superseded");
+      await expect(backend.testing({ ...a, udid: "FAKE-0003" })).rejects.toThrow("superseded");
+      expect(instances).toHaveLength(2);
+      resumeAll();
+      await backend.testing(a);
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it("rejects SSH testing without dispatching to either native host", async () => {
+    const { backend, local, remote } = fixture();
+    const localTesting = vi.spyOn(local, "testing");
+    const remoteTesting = vi.spyOn(remote, "testing");
+    try {
+      await backend.listDevices({ includeShutdown: true });
+      await expect(
+        backend.testing({
+          udid: hostDeviceId("mac", "FAKE-0001"),
+          action: { type: "appearance", value: "dark" },
+        }),
+      ).rejects.toThrow("unavailable on SSH");
+      expect(localTesting).not.toHaveBeenCalled();
+      expect(remoteTesting).not.toHaveBeenCalled();
+      await backend.boot(hostDeviceId("mac", "FAKE-0001"));
+      await backend.tap(hostDeviceId("mac", "FAKE-0001"), 1, 2);
+      expect(remote.callsOfKind("tap")).toHaveLength(1);
+    } finally {
+      await backend.dispose();
+    }
+  });
+
   it("retains a cold incomplete orphan inventory and reclaims it after discovery completes", async () => {
     const { backend, local } = fixture();
     local.bootExternally("FAKE-0001");

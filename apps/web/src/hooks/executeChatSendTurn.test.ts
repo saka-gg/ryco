@@ -119,6 +119,7 @@ describe("rollbackSendTurn", () => {
       setComposerDraftTokenMode: vi.fn(),
       setComposerDraftPrompt: vi.fn(),
       addComposerDraftImages: vi.fn(),
+      removeComposerDraftImage: vi.fn(),
       setComposerDraftTerminalContexts: vi.fn(),
       setDraftThreadContext: vi.fn(),
     };
@@ -410,6 +411,7 @@ describe("executeChatSendTurn", () => {
         setComposerDraftTokenMode: vi.fn(),
         setComposerDraftPrompt: vi.fn(),
         addComposerDraftImages: vi.fn(),
+        removeComposerDraftImage: vi.fn(),
         setComposerDraftTerminalContexts: vi.fn(),
         setDraftThreadContext: vi.fn(),
       },
@@ -517,6 +519,7 @@ describe("executeChatSendTurn", () => {
         setComposerDraftTokenMode: vi.fn(),
         setComposerDraftPrompt,
         addComposerDraftImages: vi.fn(),
+        removeComposerDraftImage: vi.fn(),
         setComposerDraftTerminalContexts: vi.fn(),
         setDraftThreadContext: vi.fn(),
       },
@@ -565,5 +568,267 @@ describe("executeChatSendTurn", () => {
     expect(persistThreadSettingsForNextTurn).toHaveBeenCalledTimes(2);
     expect(refs.promptRef.current).toBe("");
     expect(input.composer.selectedModelSelection).toEqual(targetSelection);
+  });
+});
+
+function makeSendInput() {
+  const targetSelection = { instanceId: ProviderInstanceId.make("codex"), model: DEFAULT_MODEL };
+  const dispatchCommand = vi.fn(async (_command: unknown) => ({ sequence: 1 }));
+  const setComposerDraftPrompt = vi.fn();
+  const persistThreadSettingsForNextTurn = vi.fn(async () => {});
+  const refs = {
+    promptRef: { current: "My next draft" },
+    composerImagesRef: { current: [] },
+    composerTerminalContextsRef: { current: [] },
+    sendInFlightRef: { current: false },
+  };
+  const input: Parameters<typeof executeChatSendTurn>[0] = {
+    composer: {
+      prompt: "Continue with Claude",
+
+      trimmedPrompt: "Continue with Claude",
+      images: [],
+      sendableTerminalContexts: [],
+      sourceControlContexts: [],
+      selectedProvider: ProviderDriverKind.make("claudeAgent"),
+      selectedModel: "claude-sonnet-4-6",
+      selectedProviderModels: [],
+      selectedPromptEffort: null,
+      selectedModelSelection: targetSelection,
+      expiredTerminalContextCount: 0,
+    },
+    thread: {
+      threadId: ThreadId.make("thread-handoff"),
+      isFirstMessage: false,
+      isServerThread: true,
+      isLocalDraftThread: false,
+      activeThreadBranch: null,
+      worktreePath: null,
+      createdAt: "2026-08-04T00:00:00Z",
+      projectId: ProjectId.make("project-1"),
+    },
+    worktree: {
+      shouldMaterializeLegacyBranchWorktree: false,
+      baseBranchForWorktree: null,
+      shouldCreateWorktree: false,
+    },
+    settings: {
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      tokenMode: "balanced",
+    },
+    project: {
+      projectId: ProjectId.make("project-1"),
+      projectCwd: "/tmp/project",
+      defaultModelSelection: null,
+    },
+    scroll: {
+      scrollToEndBeforeOptimistic: vi.fn(async () => {}),
+      scrollToEndAfterOptimistic: vi.fn(() => {}),
+    },
+    draft: {
+      composerDraftTarget: DraftId.make("draft-handoff"),
+      environmentId: EnvironmentId.make("env-1"),
+      clearComposerDraftContent: vi.fn(),
+      setComposerDraftTokenMode: vi.fn(),
+      setComposerDraftPrompt,
+      addComposerDraftImages: vi.fn(),
+      removeComposerDraftImage: vi.fn(),
+      setComposerDraftTerminalContexts: vi.fn(),
+      setDraftThreadContext: vi.fn(),
+    },
+    dispatch: {
+      api: { orchestration: { dispatchCommand } } as never,
+      beginLocalDispatch: vi.fn(),
+      resetLocalDispatch: vi.fn(),
+      setOptimisticUserMessages: vi.fn(),
+      setThreadError: vi.fn(),
+    },
+    refs,
+    sourceControl: { fetcher: vi.fn(async (ctx) => ctx) },
+    persistSettings: { persistThreadSettingsForNextTurn },
+    composerHandle: { readComposer: () => null },
+    formatOutgoingPrompt: ({ text }) => text,
+  };
+  return { input, dispatchCommand };
+}
+
+describe("queued send draft ownership", () => {
+  it.each([false, true])(
+    "preserves the live draft and queued attachments (rejected: %s)",
+    async (reject) => {
+      const { input, dispatchCommand } = makeSendInput();
+      input.preserveComposerDraft = true;
+      input.messageId = MessageId.make("queued-1");
+      input.composer.images = [
+        {
+          id: "queued-file",
+          type: "file",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          file: null,
+          previewUrl: "",
+          uploadToken: "retained-upload",
+          expiresAt: "2099-01-01T00:00:00Z",
+        },
+      ];
+      const draftImage = { ...input.composer.images[0]!, id: "draft-file" };
+      input.refs.composerImagesRef.current = [draftImage];
+      if (reject) dispatchCommand.mockRejectedValueOnce(new Error("connection interrupted"));
+
+      const accepted = await executeChatSendTurn(input);
+      expect.soft(input.refs.promptRef.current).toBe("My next draft");
+      expect.soft(accepted).toBe(!reject);
+      expect(input.refs.composerImagesRef.current).toEqual([draftImage]);
+      expect(input.draft.clearComposerDraftContent).not.toHaveBeenCalled();
+      expect(input.draft.setComposerDraftTokenMode).not.toHaveBeenCalled();
+      expect(input.draft.setComposerDraftPrompt).not.toHaveBeenCalled();
+      expect(input.draft.addComposerDraftImages).not.toHaveBeenCalled();
+      expect(input.composer.images[0]?.uploadToken).toBe("retained-upload");
+      expect(input.refs.sendInFlightRef.current).toBe(false);
+      expect(dispatchCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.objectContaining({
+            messageId: "queued-1",
+            attachments: [expect.objectContaining({ uploadToken: "retained-upload" })],
+          }),
+        }),
+      );
+    },
+  );
+
+  it("releases send ownership when pre-send scrolling rejects without consuming the draft", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.scroll.scrollToEndBeforeOptimistic = async () => {
+      throw new Error("unmounted list");
+    };
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(input.refs.sendInFlightRef.current).toBe(false);
+    expect(input.refs.promptRef.current).toBe("My next draft");
+    expect(input.dispatch.resetLocalDispatch).toHaveBeenCalledOnce();
+    expect(input.draft.clearComposerDraftContent).not.toHaveBeenCalled();
+    expect(dispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("preserves edits made while a direct send is preparing", async () => {
+    const { input } = makeSendInput();
+    input.refs.promptRef.current = input.composer.prompt;
+    input.scroll.scrollToEndBeforeOptimistic = async () => {
+      input.refs.promptRef.current = "Typed during preparation";
+    };
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(input.refs.promptRef.current).toBe("Typed during preparation");
+    expect(input.draft.clearComposerDraftContent).not.toHaveBeenCalled();
+  });
+
+  it("removes consumed uploads after preserving a prompt edit so the next send succeeds", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    const uploaded = {
+      id: "sent-upload",
+      type: "file" as const,
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 4,
+      file: null,
+      previewUrl: "",
+      uploadToken: "single-use",
+      expiresAt: "2099-01-01T00:00:00Z",
+    };
+    input.composer.images = [uploaded];
+    input.refs.composerImagesRef.current = [uploaded];
+    input.refs.promptRef.current = input.composer.prompt;
+    const used = new Set<string>();
+    dispatchCommand.mockImplementation(async (value) => {
+      const command = value as {
+        type: string;
+        message: { attachments: Array<{ uploadToken?: string }> };
+      };
+      if (command.type === "thread.turn.start")
+        for (const attachment of command.message.attachments) {
+          if (!attachment.uploadToken) continue;
+          if (used.has(attachment.uploadToken)) throw new Error("already-used");
+          used.add(attachment.uploadToken);
+        }
+      return { sequence: 1 };
+    });
+    input.scroll.scrollToEndBeforeOptimistic = async () => {
+      input.refs.promptRef.current = "Next prompt";
+    };
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(input.refs.promptRef.current).toBe("Next prompt");
+    expect(input.draft.removeComposerDraftImage).toHaveBeenCalledWith(
+      input.draft.composerDraftTarget,
+      uploaded.id,
+    );
+    const next = {
+      ...input,
+      composer: {
+        ...input.composer,
+        prompt: "Next prompt",
+        trimmedPrompt: "Next prompt",
+        images: input.refs.composerImagesRef.current,
+      },
+      scroll: { ...input.scroll, scrollToEndBeforeOptimistic: async () => {} },
+    };
+    expect(await executeChatSendTurn(next)).toBe(true);
+    expect(input.refs.composerImagesRef.current).toEqual([]);
+  });
+
+  it.each([false, true])(
+    "keeps new and renewed attachments during direct prep (rejected: %s)",
+    async (reject) => {
+      const { input, dispatchCommand } = makeSendInput();
+      const sent = {
+        id: "sent",
+        type: "file" as const,
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 4,
+        file: null,
+        previewUrl: "",
+        uploadToken: "old",
+        expiresAt: "2099-01-01T00:00:00Z",
+      };
+      const replaced = { ...sent, id: "replaced" };
+      const renewed = { ...replaced, uploadToken: "fresh" };
+      const added = { ...sent, id: "new", uploadToken: "new" };
+      input.composer.images = [sent, replaced];
+      input.refs.composerImagesRef.current = input.composer.images;
+      input.scroll.scrollToEndBeforeOptimistic = async () => {
+        input.refs.promptRef.current = "Edited";
+        input.refs.composerImagesRef.current = [sent, renewed, added];
+      };
+      if (reject) dispatchCommand.mockRejectedValueOnce(new Error("rejected"));
+      expect(await executeChatSendTurn(input)).toBe(!reject);
+      expect(input.refs.promptRef.current).toBe("Edited");
+      expect(input.refs.composerImagesRef.current).toEqual(
+        reject ? [sent, renewed, added] : [renewed, added],
+      );
+      expect(input.draft.removeComposerDraftImage).toHaveBeenCalledTimes(reject ? 0 : 1);
+    },
+  );
+
+  it("keeps an expired queued file recoverable without consuming the new draft", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.preserveComposerDraft = true;
+    input.composer.images = [
+      {
+        id: "expired",
+        type: "file",
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 4,
+        file: null,
+        previewUrl: "",
+        uploadToken: "expired-token",
+        expiresAt: "2000-01-01T00:00:00Z",
+      },
+    ];
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(input.refs.promptRef.current).toBe("My next draft");
+    expect(input.refs.sendInFlightRef.current).toBe(false);
+    expect(input.draft.clearComposerDraftContent).not.toHaveBeenCalled();
+    expect(dispatchCommand).not.toHaveBeenCalled();
   });
 });

@@ -11,6 +11,9 @@ including code copied or adapted from the upstream project at commit
 `67a7b1a1`. The upstream project is Copyright (c) 2026 T3 Tools Inc. and is
 licensed under the MIT License.
 
+`apps/web/src/markdown-incremental.ts` is adapted from PR #11193 at commit
+`a9dabbf100d1f6c0b2ed7b5e879d469ac14fd186`, under the same copyright and license.
+
 ### MIT License
 
 Copyright (c) 2026 T3 Tools Inc.

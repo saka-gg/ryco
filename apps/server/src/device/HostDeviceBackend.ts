@@ -57,6 +57,8 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
   private readonly listeners = new Set<(udids: readonly string[]) => void>();
   private readonly unsubscribe: (() => void)[] = [];
   private disposed = false;
+  private testingSuspensions = 0;
+  private readonly deviceTestingSuspensions = new Map<string, number>();
   private readonly summaries = new Map<string, DeviceHostSummary>();
   private readonly inventories = new Map<DeviceHostBackend, readonly DeviceDescriptor[]>();
   private readonly discoveries = new Map<
@@ -269,6 +271,54 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
       this.backends.set(udid, backend);
     }
     return { ...route, backend };
+  }
+
+  suspendTesting(udid?: string): () => void {
+    if (udid === undefined) this.testingSuspensions += 1;
+    else
+      this.deviceTestingSuspensions.set(udid, (this.deviceTestingSuspensions.get(udid) ?? 0) + 1);
+    const resumes: (() => void)[] = [];
+    if (udid === undefined) {
+      // Include cached per-device instances, even if discovery removed their route.
+      const instances = new Set([
+        ...this.hosts.map((entry) => entry.backend),
+        ...this.backends.values(),
+      ]);
+      for (const backend of instances) resumes.push(backend.suspendTesting());
+    } else {
+      const host = this.hostFor(udid);
+      if (host) {
+        const nativeUdid =
+          host.host.id === "local" ? udid : udid.slice(`ssh:${host.host.id}:`.length);
+        const instances = new Set([host.backend, this.backends.get(udid)]);
+        for (const backend of instances)
+          if (backend) resumes.push(backend.suspendTesting(nativeUdid));
+      }
+    }
+    let resumed = false;
+    return () => {
+      if (resumed) return;
+      resumed = true;
+      for (const resume of resumes) resume();
+      if (udid === undefined) this.testingSuspensions -= 1;
+      else {
+        const remaining = (this.deviceTestingSuspensions.get(udid) ?? 1) - 1;
+        if (remaining === 0) this.deviceTestingSuspensions.delete(udid);
+        else this.deviceTestingSuspensions.set(udid, remaining);
+      }
+    };
+  }
+
+  async testing(input: Parameters<DeviceBackend["testing"]>[0]): Promise<void> {
+    if (this.testingSuspensions > 0 || (this.deviceTestingSuspensions.get(input.udid) ?? 0) > 0)
+      throw new DeviceBackendError("Simulator testing was superseded by a lifecycle change.");
+    const { backend, nativeUdid, host } = this.resolve(input.udid);
+    if (host.host.transport === "ssh")
+      throw new DeviceBackendError("Simulator testing controls are unavailable on SSH hosts.");
+    const generation = this.generations.get(host) ?? 0;
+    await backend.testing({ ...input, udid: nativeUdid });
+    if (this.disposed || generation !== (this.generations.get(host) ?? 0))
+      throw new DeviceBackendError("Stale device host operation");
   }
 
   async call<K extends DeviceCall>(method: K, args: DeviceArgs<K>): Promise<DeviceResult<K>> {

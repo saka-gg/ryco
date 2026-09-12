@@ -35,6 +35,7 @@ import {
   type DeviceLaunchAppResult,
   type DeviceListResult,
   type DeviceOpenPaneReason,
+  type DeviceTestingInput,
   type DeviceScreenshotResult,
   type DeviceStartRecordingResult,
   type DeviceStopRecordingResult,
@@ -517,6 +518,15 @@ export class DeviceManager {
   }
 
   async shutdown(udid: string): Promise<void> {
+    const resumeTesting = this.backend.suspendTesting(udid);
+    try {
+      await this.shutdownDeviceResources(udid);
+    } finally {
+      resumeTesting();
+    }
+  }
+
+  private async shutdownDeviceResources(udid: string): Promise<void> {
     this.deviceGenerations.set(udid, (this.deviceGenerations.get(udid) ?? 0) + 1);
     await this.boots.get(udid)?.catch(() => undefined);
     await this.stopRecordingIfActive(udid).catch(() => undefined);
@@ -869,6 +879,10 @@ export class DeviceManager {
     return await this.backend.launch(udid, bundleId, launchArguments);
   }
 
+  async testing(input: DeviceTestingInput): Promise<void> {
+    await this.backend.testing(input);
+  }
+
   async openUrl(udid: string, url: string): Promise<void> {
     await this.backend.openUrl(udid, url);
   }
@@ -968,6 +982,15 @@ export class DeviceManager {
    * alone, and release the backend.
    */
   async dispose(): Promise<void> {
+    const resumeTesting = this.backend.suspendTesting();
+    try {
+      await this.disposeDeviceResources();
+    } finally {
+      resumeTesting();
+    }
+  }
+
+  private async disposeDeviceResources(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
     if (this.recoveryTimer) this.cancel(this.recoveryTimer);

@@ -263,6 +263,15 @@ export class SshDeviceBackend extends ForwardingDeviceBackend {
     });
   }
 
+  suspendTesting(_udid?: string): () => void {
+    // No testing operation exists in the remote protocol. Nothing can be in flight.
+    return () => undefined;
+  }
+
+  async testing(_input: Parameters<ForwardingDeviceBackend["testing"]>[0]): Promise<void> {
+    throw new DeviceBackendError("Simulator testing controls are unavailable on SSH hosts.");
+  }
+
   async call<K extends DeviceCall>(method: K, args: DeviceArgs<K>): Promise<DeviceResult<K>> {
     if (method === "availability" || method === "listDevices") await this.connect();
     if (method === "install") {
