@@ -44,6 +44,14 @@ Ryco works with the platforms your team already uses:
 - Check out a teammate's branch to review code locally
 - Inspect PR details, comments, changed files, and workflow/check status from the project explorer where supported
 
+**Keep your place in a GitHub review**
+
+- In a pull request's **Files** tab, check **Viewed** beside a file. Progress is saved to GitHub using the account authenticated by `gh` in the connected environment, and survives reopening Ryco or using another machine with that account.
+- The viewed/total count tracks the complete GitHub file list. **Hide viewed** filters reviewed files out of the displayed list. Files GitHub reports as changed since viewing show **Changed since viewed** and remain visible for another review.
+- Checkboxes update immediately and roll back with an error if saving fails. **Refresh files** reloads review progress and the displayed PR data. Automatic refresh follows your source-control refresh setting.
+- Viewed-state reads and writes use separate RPCs from diff retrieval; checking a box does not download the diff again. A changed PR head requires refreshing before more files can be marked.
+- Viewed progress currently supports GitHub only. Other providers hide these controls. Provider capability metadata distinguishes host, environment, and unsupported storage so additional adapters can be added without changing the review model.
+
 ### Work From Issues And Jira Tickets
 
 **Use issues as agent context**

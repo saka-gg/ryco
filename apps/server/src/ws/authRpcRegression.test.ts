@@ -308,3 +308,61 @@ it.effect("returns a provider error when pull request merge is unsupported", () 
     }
   }),
 );
+
+it.effect("viewed files honor the source-control authorization boundary", () =>
+  Effect.gen(function* () {
+    let resolveCalls = 0;
+    const ctx = {
+      ...makeAccessGuards("client"),
+      sourceControlRegistry: {
+        resolve: () =>
+          Effect.suspend(() => {
+            resolveCalls += 1;
+            return Effect.die("must not resolve");
+          }),
+      },
+    } as unknown as WsRpcContext;
+    const handlers = makeSourceControlHandlers(ctx);
+    const input = { cwd: "/tmp/project", reference: "42" };
+    const readError = yield* handlers[WS_METHODS.sourceControlGetChangeRequestFilesViewed](
+      input,
+    ).pipe(Effect.flip, Effect.provide(sourceControlHandlerLayer));
+    const writeError = yield* handlers[WS_METHODS.sourceControlSetChangeRequestFileViewed]({
+      ...input,
+      path: "a",
+      viewed: true,
+      expectedHeadSha: "head",
+    }).pipe(Effect.flip, Effect.provide(sourceControlHandlerLayer));
+    expect(readError._tag).toBe("AuthRpcError");
+    expect(writeError._tag).toBe("AuthRpcError");
+    expect(resolveCalls).toBe(0);
+  }),
+);
+
+it.effect("unsupported providers advertise viewed capability and reject writes", () =>
+  Effect.gen(function* () {
+    const provider = { kind: "gitlab" } as SourceControlProviderShape;
+    const ctx = {
+      ...makeAccessGuards("owner"),
+      sourceControlRegistry: { resolve: () => Effect.succeed(provider) },
+    } as unknown as WsRpcContext;
+    const handlers = makeSourceControlHandlers(ctx);
+    const input = { cwd: "/tmp/project", reference: "42" };
+    const result = yield* handlers[WS_METHODS.sourceControlGetChangeRequestFilesViewed](input).pipe(
+      Effect.provide(sourceControlHandlerLayer),
+    );
+    expect(result).toEqual({
+      provider: "gitlab",
+      capability: { storage: "unsupported" },
+      headSha: null,
+      files: [],
+    });
+    const error = yield* handlers[WS_METHODS.sourceControlSetChangeRequestFileViewed]({
+      ...input,
+      path: "a",
+      viewed: true,
+      expectedHeadSha: "head",
+    }).pipe(Effect.flip, Effect.provide(sourceControlHandlerLayer));
+    expect(error._tag).toBe("SourceControlProviderError");
+  }),
+);
