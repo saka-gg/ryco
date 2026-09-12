@@ -15,6 +15,7 @@ import {
   type DeviceListInput,
   type DeviceListResult,
   type DeviceOpenUrlInput,
+  type DeviceTestingInput,
   type DevicePressButtonInput,
   type DeviceScreenshotInput,
   type DeviceScreenshotResult,
@@ -70,6 +71,7 @@ export interface DeviceRpcClient {
   ) => Promise<DeviceScrollToElementResult>;
   readonly installApp: (input: DeviceInstallAppInput) => Promise<DeviceInstallAppResult>;
   readonly launchApp: (input: DeviceLaunchAppInput) => Promise<DeviceLaunchAppResult>;
+  readonly testing: (input: DeviceTestingInput) => Promise<void>;
   readonly openUrl: (input: DeviceOpenUrlInput) => Promise<void>;
   readonly startRecording: (
     input: DeviceStartRecordingInput,
@@ -226,6 +228,12 @@ export function createDeviceRpcClient(
       return response.type === "launch-app"
         ? response.result
         : unexpectedResponse("launch-app", response.type);
+    },
+    testing: async (input) => {
+      const response = await transport.request((client) =>
+        client[DEVICE_WS_METHODS.app]({ type: "testing", input }),
+      );
+      if (response.type !== "testing") unexpectedResponse("testing", response.type);
     },
     openUrl: async (input) => {
       const response = await transport.request((client) =>

@@ -339,6 +339,19 @@ function deferred() {
 }
 
 describe("Android keyboard sequencing", () => {
+  it("rejects iOS testing through the platform router without invoking SDK tools", async () => {
+    const f = fixture();
+    const router = new PlatformDeviceBackend(new FakeDeviceBackend(), f.backend);
+    const resume = router.suspendTesting(UDID);
+    await expect(
+      router.testing({ udid: UDID, action: { type: "appearance", value: "dark" } }),
+    ).rejects.toThrow("require an iOS simulator");
+    resume();
+    await expect(
+      router.testing({ udid: UDID, action: { type: "appearance", value: "dark" } }),
+    ).rejects.toThrow("require an iOS simulator");
+    expect(f.run).not.toHaveBeenCalled();
+  });
   it("pins transport between sequential RPCs until explicit detach", async () => {
     const f = fixture();
     await f.backend.typeText(UDID, "a");

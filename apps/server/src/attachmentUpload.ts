@@ -27,6 +27,9 @@ interface UploadEntry {
   expiresAtMs: number;
   state: UploadState;
   attachmentId: string | null;
+  adoptedBy: string | null;
+  adoptionAttempts: Set<symbol>;
+  adoptionCommitted: boolean;
   mediaDimensions: AttachmentMediaDimensions | null;
 }
 
@@ -74,8 +77,20 @@ export interface ChatAttachmentUploadsShape {
     mediaDimensions?: AttachmentMediaDimensions | null,
   ) => Effect.Effect<void, ChatAttachmentUploadError>;
   readonly abortUpload: (uploadToken: string) => Effect.Effect<void>;
+  readonly commitAdoption: (input: {
+    readonly uploadToken: string;
+    readonly commandId: string;
+    readonly attemptId: symbol;
+  }) => Effect.Effect<void>;
+  readonly releaseAdoption: (input: {
+    readonly uploadToken: string;
+    readonly commandId: string;
+    readonly attemptId: symbol;
+  }) => Effect.Effect<void>;
   readonly claimForAdoption: (input: {
     readonly uploadToken: string;
+    readonly commandId: string;
+    readonly attemptId?: symbol | undefined;
     readonly threadId: string;
     readonly name: string;
     readonly mimeType: string;
@@ -230,7 +245,10 @@ export const makeChatAttachmentUploads = (options: {
             }),
           );
         }
-        if (entry.state !== "uploaded") {
+        if (
+          entry.state !== "uploaded" &&
+          !(entry.state === "adopted" && entry.adoptedBy === input.commandId)
+        ) {
           return yield* Effect.fail(
             new ChatAttachmentUploadError({
               reason: "already-used",
@@ -262,7 +280,14 @@ export const makeChatAttachmentUploads = (options: {
             }),
           );
         }
-        entry.state = "adopted";
+        if (entry.state === "uploaded") {
+          entry.state = "adopted";
+          entry.adoptedBy = input.commandId;
+        }
+        // Every overlapping replay owns a reservation until it settles. A commit
+        // permanently pins ownership even if an earlier attempt later fails.
+        if (input.attemptId === undefined) entry.adoptionCommitted = true;
+        else entry.adoptionAttempts.add(input.attemptId);
         return {
           attachmentId: entry.attachmentId,
           name: entry.name,
@@ -304,6 +329,9 @@ export const makeChatAttachmentUploads = (options: {
           expiresAtMs: nowMs + ttlMs,
           state: "pending",
           attachmentId: null,
+          adoptedBy: null,
+          adoptionAttempts: new Set(),
+          adoptionCommitted: false,
           mediaDimensions: null,
         });
         return {
@@ -319,6 +347,31 @@ export const makeChatAttachmentUploads = (options: {
       completeUpload,
       abortUpload,
       claimForAdoption,
+      commitAdoption: (input) =>
+        Effect.sync(() => {
+          const entry = entries.get(input.uploadToken);
+          if (
+            entry?.state === "adopted" &&
+            entry.adoptedBy === input.commandId &&
+            entry.adoptionAttempts.delete(input.attemptId)
+          ) {
+            entry.adoptionCommitted = true;
+          }
+        }),
+      releaseAdoption: (input) =>
+        Effect.sync(() => {
+          const entry = entries.get(input.uploadToken);
+          if (
+            entry?.state === "adopted" &&
+            entry.adoptedBy === input.commandId &&
+            entry.adoptionAttempts.delete(input.attemptId) &&
+            entry.adoptionAttempts.size === 0 &&
+            !entry.adoptionCommitted
+          ) {
+            entry.state = "uploaded";
+            entry.adoptedBy = null;
+          }
+        }),
     } satisfies ChatAttachmentUploadsShape;
   });
 

@@ -23,6 +23,8 @@ const uploadsDouble: ChatAttachmentUploadsShape = {
   beginUpload: () => Effect.die("not used"),
   completeUpload: () => Effect.die("not used"),
   abortUpload: () => Effect.die("not used"),
+  commitAdoption: () => Effect.void,
+  releaseAdoption: () => Effect.void,
   claimForAdoption: () => Effect.die("not used"),
 };
 

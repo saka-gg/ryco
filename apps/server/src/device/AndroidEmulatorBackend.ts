@@ -13,6 +13,7 @@ import type {
   DeviceStartRecordingResult,
   DeviceStopRecordingResult,
   DeviceDescribeUiResult,
+  DeviceTestingInput,
 } from "@ryco/contracts";
 import {
   DeviceBackendError,
@@ -625,6 +626,16 @@ export class AndroidEmulatorBackend implements DeviceBackend {
   async detachStream(udid: string): Promise<void> {
     this.cancelKeyboard(udid);
     this.geometries.delete(udid);
+  }
+  suspendTesting(_udid?: string): () => void {
+    // Android never admits testing operations, so there are no attempts to fence.
+    // Input/stream lifecycle cancellation remains in detachStream and shutdown.
+    return () => {};
+  }
+  testing(_input: DeviceTestingInput): Promise<void> {
+    return Promise.reject(
+      new DeviceBackendError("Simulator testing controls require an iOS simulator."),
+    );
   }
   startRecording(_udid: string): Promise<DeviceStartRecordingResult> {
     return Promise.reject(

@@ -90,6 +90,30 @@ export class PlatformDeviceBackend implements DeviceBackend {
     return this.target(args[0]).openUrl(...args);
   }
 
+  testing(...args: Parameters<DeviceBackend["testing"]>): ReturnType<DeviceBackend["testing"]> {
+    return this.target(args[0].udid).testing(...args);
+  }
+
+  suspendTesting(udid?: string): () => void {
+    if (udid !== undefined) return this.target(udid).suspendTesting(udid);
+    // Fence both adapters synchronously before manager disposal can await.
+    const resumeIos = this.ios.suspendTesting();
+    let resumeAndroid: () => void;
+    try {
+      resumeAndroid = this.android.suspendTesting();
+    } catch (error) {
+      resumeIos();
+      throw error;
+    }
+    return () => {
+      try {
+        resumeAndroid();
+      } finally {
+        resumeIos();
+      }
+    };
+  }
+
   tap(...args: Parameters<DeviceBackend["tap"]>): ReturnType<DeviceBackend["tap"]> {
     return this.target(args[0]).tap(...args);
   }

@@ -9,7 +9,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { rejectCrossOriginMutation } from "../auth/http.ts";
-import { normalizeDispatchCommand } from "./Normalizer.ts";
+import { normalizeDispatchCommand, withChatAttachmentAdoption } from "./Normalizer.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
@@ -89,14 +89,20 @@ export const orchestrationDispatchRouteLayer = HttpRouter.add(
           }),
       ),
     );
-    const normalizedCommand = yield* normalizeDispatchCommand(command);
-    const result = yield* orchestrationEngine.dispatch(normalizedCommand).pipe(
-      Effect.mapError(
-        (cause) =>
-          new OrchestrationDispatchCommandError({
-            message: "Failed to dispatch orchestration command.",
-            cause,
-          }),
+    const result = yield* withChatAttachmentAdoption(
+      command,
+      normalizeDispatchCommand(command).pipe(
+        Effect.flatMap((normalizedCommand) =>
+          orchestrationEngine.dispatch(normalizedCommand).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationDispatchCommandError({
+                  message: "Failed to dispatch orchestration command.",
+                  cause,
+                }),
+            ),
+          ),
+        ),
       ),
     );
     return HttpServerResponse.jsonUnsafe(result, { status: 200 });

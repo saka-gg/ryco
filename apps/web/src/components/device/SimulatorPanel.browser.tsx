@@ -12,6 +12,14 @@ import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import SimulatorPanel from "./SimulatorPanel";
 
 vi.mock("../../composerDraftStore", () => ({ DraftId: { make: (value: string) => value } }));
+vi.mock("../../env", () => ({ isHostedHubMode: () => false }));
+vi.mock("../../hostedHub/state", () => ({
+  useHostedHubStore: (selector: (state: { effectiveRole: string }) => unknown) =>
+    selector({ effectiveRole: "owner" }),
+}));
+vi.mock("../../hostedHub/hostedConnectionCoordinator", () => ({
+  useHostedWorkspaceState: () => ({ machines: [] }),
+}));
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -124,6 +132,9 @@ describe("Android simulator pane", () => {
   it("renders the PNG preview, maps pixel input, and exposes Android buttons", async () => {
     await mount();
     await expect.poll(() => document.querySelector("canvas")?.width).toBe(200);
+    await expect
+      .element(page.getByText("Simulator testing", { exact: true }))
+      .not.toBeInTheDocument();
     expect(mocks.nativeVideo.mock.calls.at(-1)?.[0].udid).toBeNull();
     await page.getByRole("button", { name: "Back", exact: true }).click();
     expect(mocks.api.pressButton).toHaveBeenCalledWith({ udid: android.udid, button: "back" });

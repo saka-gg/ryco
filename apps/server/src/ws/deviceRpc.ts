@@ -1,4 +1,4 @@
-import { Effect, Option, Queue, Stream } from "effect";
+import { Effect, Option, Queue, Schema, Stream } from "effect";
 import {
   type AuthRpcError,
   DEVICE_WS_METHODS,
@@ -66,6 +66,7 @@ function toDeviceRpcError(
   fallback: string,
   operation: DeviceOperation = "operation",
 ): DeviceRpcError {
+  if (Schema.is(DeviceRpcError)(cause)) return cause;
   return new DeviceRpcError({
     code: errorCode(cause, operation),
     message: safeMessage(cause, fallback),
@@ -288,6 +289,12 @@ function handleApp(
   request: DeviceAppRequest,
 ): Effect.Effect<DeviceAppResponse, DeviceRpcError> {
   switch (request.type) {
+    case "testing":
+      return invoke(
+        manager,
+        (active) => active.testing(request.input),
+        "Could not apply simulator testing action.",
+      ).pipe(Effect.as({ type: "testing" as const }));
     case "install-app":
       return invoke(
         manager,

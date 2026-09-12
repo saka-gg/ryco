@@ -13,6 +13,7 @@ import { summarizeQueuedMessage, type QueuedMessage } from "~/messageQueue.logic
 interface ComposerQueuedMessagesProps {
   messages: readonly QueuedMessage[];
   onRemove: (id: string) => void;
+  onRetry?: ((id: string) => void) | undefined;
   onMove: (id: string, direction: "up" | "down") => void;
   showSteerAction: boolean;
   steeringIds: readonly string[];
@@ -34,6 +35,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   messages,
   onRemove,
   onMove,
+  onRetry,
   showSteerAction,
   steeringIds,
   getSteerUnavailableReason,
@@ -55,6 +57,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
           const rowLabel = `queued message ${index + 1} of ${messages.length}: ${summary}`;
           const steerUnavailableReason = getSteerUnavailableReason(message);
           const isSteering = steeringIds.includes(message.id);
+          const isSending = message.deliveryStatus === "sending";
           return (
             <li
               key={message.id}
@@ -63,11 +66,22 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
               <span className="min-w-0 flex-1 truncate text-xs text-foreground" title={summary}>
                 {summary}
               </span>
+              {onRetry && message.deliveryStatus === "failed" ? (
+                <button
+                  type="button"
+                  className={cn(iconButtonClass, "w-auto px-1.5 text-[11px]")}
+                  onClick={() => onRetry(message.id)}
+                  aria-label={`Retry ${rowLabel}`}
+                  title="Send failed. Your message and attachments are still queued."
+                >
+                  Retry
+                </button>
+              ) : null}
               {showSteerAction ? (
                 <button
                   type="button"
                   className={cn(iconButtonClass, "w-auto gap-1 px-1.5 text-[11px]")}
-                  disabled={steerUnavailableReason !== null || isSteering}
+                  disabled={steerUnavailableReason !== null || isSteering || isSending}
                   onClick={() => onSteer(message)}
                   aria-label={`Steer ${rowLabel} into the active turn`}
                   title={steerUnavailableReason ?? "Send this message into the active turn"}
@@ -83,7 +97,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
               <button
                 type="button"
                 className={iconButtonClass}
-                disabled={index === 0}
+                disabled={index === 0 || isSending}
                 onClick={() => onMove(message.id, "up")}
                 aria-label={`Move ${rowLabel} up`}
               >
@@ -92,7 +106,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
               <button
                 type="button"
                 className={iconButtonClass}
-                disabled={index === messages.length - 1}
+                disabled={index === messages.length - 1 || isSending}
                 onClick={() => onMove(message.id, "down")}
                 aria-label={`Move ${rowLabel} down`}
               >
@@ -101,6 +115,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
               <button
                 type="button"
                 className={iconButtonClass}
+                disabled={isSending}
                 onClick={() => onRemove(message.id)}
                 aria-label={`Remove ${rowLabel}`}
               >

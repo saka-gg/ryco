@@ -20,6 +20,7 @@ import type {
   DeviceKeyModifier,
   DeviceLaunchAppResult,
   DevicePlatform,
+  DeviceTestingInput,
   DeviceScreenshotResult,
   DeviceStartRecordingResult,
   DeviceStopRecordingResult,
@@ -102,6 +103,10 @@ export interface DeviceBackend {
     bundleId: string,
     launchArguments?: readonly string[],
   ): Promise<DeviceLaunchAppResult>;
+  /** Suspend new testing and invalidate existing attempts before lifecycle cleanup awaits.
+   * Omitting the target fences every device during manager disposal. Release is nested-safe. */
+  suspendTesting(udid?: string): () => void;
+  testing(input: DeviceTestingInput): Promise<void>;
   openUrl(udid: string, url: string): Promise<void>;
 
   tap(udid: string, x: number, y: number): Promise<void>;

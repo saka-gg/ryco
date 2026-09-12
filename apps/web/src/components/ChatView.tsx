@@ -512,6 +512,7 @@ export default function ChatView(props: ChatViewProps) {
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
   );
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
+  const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const setComposerDraftTerminalContexts = useComposerDraftStore(
     (store) => store.setTerminalContexts,
@@ -819,7 +820,9 @@ export default function ChatView(props: ChatViewProps) {
   const enqueueMessage = useMessageQueueStore((store) => store.enqueue);
   const removeMessageFromQueue = useMessageQueueStore((store) => store.remove);
   const moveMessageInQueue = useMessageQueueStore((store) => store.move);
-  const dequeueMessage = useMessageQueueStore((store) => store.dequeue);
+  const beginQueuedSend = useMessageQueueStore((store) => store.beginSend);
+  const finishQueuedSend = useMessageQueueStore((store) => store.finishSend);
+  const retryQueuedSend = useMessageQueueStore((store) => store.retrySend);
   const beginQueuedMessageSteer = useMessageQueueStore((store) => store.beginSteer);
   const endQueuedMessageSteer = useMessageQueueStore((store) => store.endSteer);
   const queuedMessages = useMessageQueueStore((store) =>
@@ -3068,8 +3071,7 @@ export default function ChatView(props: ChatViewProps) {
   // Build the executeChatSendTurn input from a composer snapshot and dispatch it.
   // Shared by direct sends and queue flushes, so a queued message replays exactly
   // like a live send.
-  // Returns true once the send path has actually started (all guards passed), so
-  // the queue only drops an item after it is genuinely on its way.
+  // Returns true only after the turn command is accepted.
   const dispatchComposerSnapshot = async (
     composerSnapshot: SendTurnComposerSnapshot,
     settingsSnapshot: SendTurnSettings,
@@ -3197,8 +3199,8 @@ export default function ChatView(props: ChatViewProps) {
       };
     };
 
-    await executeChatSendTurn({
-      ...(messageId !== undefined ? { messageId } : {}),
+    const accepted = await executeChatSendTurn({
+      ...(messageId !== undefined ? { messageId, preserveComposerDraft: true } : {}),
       composer: composerSnapshot,
       thread: {
         threadId: threadIdForSend,
@@ -3260,6 +3262,7 @@ export default function ChatView(props: ChatViewProps) {
         setComposerDraftTokenMode,
         setComposerDraftPrompt,
         addComposerDraftImages,
+        removeComposerDraftImage,
         setComposerDraftTerminalContexts,
         setDraftThreadContext,
       },
@@ -3311,6 +3314,7 @@ export default function ChatView(props: ChatViewProps) {
       composerHandle: { readComposer },
       formatOutgoingPrompt,
     });
+    if (!accepted) return false;
     if (sourceThreadRef) {
       // The draft has served its purpose — retire it and follow the turn to
       // the thread the worktree call created.
@@ -3580,19 +3584,33 @@ export default function ChatView(props: ChatViewProps) {
     const next = queuedMessages[0];
     if (!next) return;
     if (!dispatchCapability.allowed) return;
+    // A lost RPC reply is not evidence of a rejected send. Reconcile projected
+    // messages before retrying, including failures retained across reconnects.
+    if (activeThread?.messages.some((message) => message.id === next.id)) {
+      handleRemoveQueuedMessage(next.id);
+      return;
+    }
+    if (next.deliveryStatus) return;
     if (isWorking || activeEnvironmentUnavailable) return;
     if (activePendingProgress || activePendingApproval) return;
     if (sendInFlightRef.current) return;
-    // Only remove the item once the send path has actually started; a guard
-    // early-return (missing env/thread/base branch) leaves it queued.
+    // Claim before asynchronous preparation so rerenders cannot dispatch twice.
+    // A failed attempt waits for explicit retry instead of spinning on idle updates.
     if (steeringQueuedMessageIds.includes(next.id)) return;
+    if (!beginQueuedSend(threadKey, next.id)) return;
     void dispatchComposerSnapshotRef
       .current(next.composer, next.settings, MessageId.make(next.id))
-      .then((started) => {
-        if (started) {
-          dequeueMessage(threadKey);
-        }
-      });
+      .then(
+        (accepted) => {
+          finishQueuedSend(threadKey, next.id, accepted);
+          if (accepted) {
+            for (const image of next.composer.images) {
+              if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
+            }
+          }
+        },
+        () => finishQueuedSend(threadKey, next.id, false),
+      );
   }, [
     activeThreadKey,
     queuedMessages,
@@ -3601,7 +3619,10 @@ export default function ChatView(props: ChatViewProps) {
     activePendingProgress,
     activePendingApproval,
     dispatchCapability.allowed,
-    dequeueMessage,
+    beginQueuedSend,
+    finishQueuedSend,
+    activeThread?.messages,
+    handleRemoveQueuedMessage,
     steeringQueuedMessageIds,
   ]);
 
@@ -4523,6 +4544,13 @@ export default function ChatView(props: ChatViewProps) {
                 messages={queuedMessages}
                 onRemove={handleRemoveQueuedMessage}
                 onMove={handleMoveQueuedMessage}
+                onRetry={
+                  presentationTier !== "phone"
+                    ? (id) => {
+                        if (activeThreadKey) retryQueuedSend(activeThreadKey, id);
+                      }
+                    : undefined
+                }
                 showSteerAction={presentationTier !== "phone"}
                 steeringIds={steeringQueuedMessageIds}
                 getSteerUnavailableReason={getQueuedSteerUnavailableReason}

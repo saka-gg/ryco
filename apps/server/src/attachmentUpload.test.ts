@@ -96,6 +96,7 @@ describe("chat attachment uploads", () => {
       yield* uploads.completeUpload(created.uploadToken);
 
       const adopted = yield* uploads.claimForAdoption({
+        commandId: "adoption-command",
         uploadToken: created.uploadToken,
         threadId: ThreadId.make("upload-thread"),
         name: "notes.txt",
@@ -106,6 +107,7 @@ describe("chat attachment uploads", () => {
 
       const reuse = yield* Effect.flip(
         uploads.claimForAdoption({
+          commandId: "other-command",
           uploadToken: created.uploadToken,
           threadId: ThreadId.make("upload-thread"),
           name: "notes.txt",
@@ -114,6 +116,35 @@ describe("chat attachment uploads", () => {
         }),
       );
       expect(reuse.reason).toBe("already-used");
+    }),
+  );
+
+  it.effect("releases overlapping claims only after every uncommitted attempt fails", () =>
+    Effect.gen(function* () {
+      const uploads = yield* makeRegistry();
+      const created = yield* createUpload(uploads);
+      yield* uploads.beginUpload(created.uploadToken);
+      yield* uploads.completeUpload(created.uploadToken);
+      const claim = {
+        uploadToken: created.uploadToken,
+        commandId: "overlap",
+        threadId: ThreadId.make("upload-thread"),
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 3,
+      };
+      const first = Symbol("first");
+      const second = Symbol("second");
+      yield* uploads.claimForAdoption({ ...claim, attemptId: first });
+      yield* uploads.claimForAdoption({ ...claim, attemptId: second });
+      yield* uploads.releaseAdoption({ ...claim, attemptId: first });
+      const blocked = yield* Effect.flip(
+        uploads.claimForAdoption({ ...claim, commandId: "other" }),
+      );
+      expect(blocked.reason).toBe("already-used");
+      yield* uploads.releaseAdoption({ ...claim, attemptId: second });
+      const adopted = yield* uploads.claimForAdoption({ ...claim, commandId: "other" });
+      expect(adopted.name).toBe("notes.txt");
     }),
   );
 
@@ -126,6 +157,7 @@ describe("chat attachment uploads", () => {
       yield* uploads.completeUpload(created.uploadToken);
 
       const adoptedWithoutDimensions = yield* uploads.claimForAdoption({
+        commandId: "adoption-command",
         uploadToken: created.uploadToken,
         threadId: ThreadId.make("upload-thread"),
         name: "notes.txt",
@@ -144,6 +176,7 @@ describe("chat attachment uploads", () => {
       yield* uploads.completeUpload(imageUpload.uploadToken, { width: 640, height: 360 });
 
       const adoptedImage = yield* uploads.claimForAdoption({
+        commandId: "adoption-command",
         uploadToken: imageUpload.uploadToken,
         threadId: ThreadId.make("upload-thread"),
         name: "pic.png",
@@ -164,6 +197,7 @@ describe("chat attachment uploads", () => {
 
       const threadMismatch = yield* Effect.flip(
         uploads.claimForAdoption({
+          commandId: "adoption-command",
           uploadToken: created.uploadToken,
           threadId: ThreadId.make("other-thread"),
           name: "notes.txt",
@@ -175,6 +209,7 @@ describe("chat attachment uploads", () => {
 
       const sizeMismatch = yield* Effect.flip(
         uploads.claimForAdoption({
+          commandId: "adoption-command",
           uploadToken: created.uploadToken,
           threadId: ThreadId.make("upload-thread"),
           name: "notes.txt",
@@ -186,6 +221,7 @@ describe("chat attachment uploads", () => {
 
       const mimeMismatch = yield* Effect.flip(
         uploads.claimForAdoption({
+          commandId: "adoption-command",
           uploadToken: created.uploadToken,
           threadId: ThreadId.make("upload-thread"),
           name: "notes.txt",
@@ -196,6 +232,7 @@ describe("chat attachment uploads", () => {
       expect(mimeMismatch.reason).toBe("invalid-request");
 
       const adopted = yield* uploads.claimForAdoption({
+        commandId: "adoption-command",
         uploadToken: created.uploadToken,
         threadId: ThreadId.make("upload-thread"),
         name: "notes.txt",
@@ -212,6 +249,7 @@ describe("chat attachment uploads", () => {
       const created = yield* createUpload(uploads);
       const error = yield* Effect.flip(
         uploads.claimForAdoption({
+          commandId: "adoption-command",
           uploadToken: created.uploadToken,
           threadId: ThreadId.make("upload-thread"),
           name: "notes.txt",

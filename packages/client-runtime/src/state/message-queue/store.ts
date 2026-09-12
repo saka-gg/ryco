@@ -2,12 +2,28 @@ import { create } from "zustand";
 
 import { moveQueuedMessage, removeQueuedMessage, type QueuedMessage } from "./logic.ts";
 
+function withDeliveryStatus<Composer, Settings>(
+  queue: QueuedMessage<Composer, Settings>[],
+  id: string,
+  status: QueuedMessage["deliveryStatus"],
+): QueuedMessage<Composer, Settings>[] {
+  const index = queue.findIndex((entry) => entry.id === id);
+  if (index === -1) return queue;
+  const { deliveryStatus: _previousStatus, ...message } = queue[index]!;
+  const next = queue.slice();
+  next[index] = status === undefined ? message : { ...message, deliveryStatus: status };
+  return next;
+}
+
 export interface MessageQueueState<Composer = unknown, Settings = unknown> {
   readonly queuesByThreadKey: Record<string, QueuedMessage<Composer, Settings>[]>;
   readonly steeringIdsByThreadKey: Record<string, string[]>;
   readonly enqueue: (threadKey: string, message: QueuedMessage<Composer, Settings>) => void;
   readonly remove: (threadKey: string, id: string) => void;
   readonly move: (threadKey: string, id: string, direction: "up" | "down") => void;
+  readonly beginSend: (threadKey: string, id: string) => boolean;
+  readonly finishSend: (threadKey: string, id: string, accepted: boolean) => void;
+  readonly retrySend: (threadKey: string, id: string) => void;
   readonly dequeue: (threadKey: string) => void;
   readonly clear: (threadKey: string) => void;
   readonly beginSteer: (threadKey: string, id: string) => void;
@@ -49,6 +65,54 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
           queuesByThreadKey: {
             ...state.queuesByThreadKey,
             [threadKey]: moveQueuedMessage(current, id, direction),
+          },
+        };
+      }),
+    beginSend: (threadKey, id) => {
+      let claimed = false;
+      set((state) => {
+        const queue = state.queuesByThreadKey[threadKey];
+        const message = queue?.find((entry) => entry.id === id);
+        if (
+          !message ||
+          message.deliveryStatus ||
+          queue?.some((entry) => entry.deliveryStatus === "sending") ||
+          state.steeringIdsByThreadKey[threadKey]?.includes(id)
+        )
+          return state;
+        claimed = true;
+        return {
+          queuesByThreadKey: {
+            ...state.queuesByThreadKey,
+            [threadKey]: withDeliveryStatus(queue!, id, "sending"),
+          },
+        };
+      });
+      return claimed;
+    },
+    finishSend: (threadKey, id, accepted) =>
+      set((state) => {
+        const queue = state.queuesByThreadKey[threadKey];
+        if (!queue?.some((entry) => entry.id === id && entry.deliveryStatus === "sending"))
+          return state;
+        return {
+          queuesByThreadKey: {
+            ...state.queuesByThreadKey,
+            [threadKey]: accepted
+              ? removeQueuedMessage(queue, id)
+              : withDeliveryStatus(queue, id, "failed"),
+          },
+        };
+      }),
+    retrySend: (threadKey, id) =>
+      set((state) => {
+        const queue = state.queuesByThreadKey[threadKey];
+        if (!queue?.some((entry) => entry.id === id && entry.deliveryStatus === "failed"))
+          return state;
+        return {
+          queuesByThreadKey: {
+            ...state.queuesByThreadKey,
+            [threadKey]: withDeliveryStatus(queue, id, undefined),
           },
         };
       }),
