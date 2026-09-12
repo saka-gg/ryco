@@ -31,7 +31,8 @@ export interface AgentControlApprovalsProps {
 /**
  * The Agent Control approval surface for one environment: every live
  * proposal as a decidable card — proposals raised from the active thread
- * first — plus a collapsed history of recent terminal decisions.
+ * first — plus a collapsed history of recent terminal decisions raised
+ * from the active thread.
  *
  * The Agent Control setting is enforced by the TARGET environment's server
  * (which may not be the primary node whose settings the web client
@@ -94,8 +95,15 @@ export function AgentControlApprovals({
     [queueState],
   );
   const recent = useMemo(
-    () => (queueState === null ? [] : selectRecentAgentControlProposals(queueState)),
-    [queueState],
+    () =>
+      queueState === null || activeThreadId === null
+        ? []
+        : selectRecentAgentControlProposals(queueState).filter(
+            (proposal) =>
+              proposal.principal.kind === "provider-session" &&
+              proposal.principal.threadId === activeThreadId,
+          ),
+    [queueState, activeThreadId],
   );
   const orderedActive = useMemo(() => {
     if (activeThreadId === null) return active;
