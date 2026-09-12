@@ -6,15 +6,14 @@ import type {
   VcsStatusResult,
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
+import { DEFAULT_WORKTREE_BRANCH_PREFIX } from "@ryco/contracts/settings";
 import * as Effect from "effect/Effect";
 import * as Random from "effect/Random";
 import { detectSourceControlProviderFromRemoteUrl } from "./sourceControl.ts";
 
-export const WORKTREE_BRANCH_PREFIX = "ryco";
+export const WORKTREE_BRANCH_PREFIX = DEFAULT_WORKTREE_BRANCH_PREFIX;
+// Existing managed branches remain recognizable if the default changes.
 const LEGACY_WORKTREE_BRANCH_PREFIX = "ryco";
-const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(
-  `^(?:${WORKTREE_BRANCH_PREFIX}|${LEGACY_WORKTREE_BRANCH_PREFIX})\\/[0-9a-f]{8}$`,
-);
 
 /**
  * Sanitize an arbitrary string into a valid, lowercase git refName fragment.
@@ -89,13 +88,72 @@ export function deriveLocalBranchNameFromRemoteRef(branchName: string): string {
   return branchName.slice(firstSeparatorIndex + 1);
 }
 
-export function buildTemporaryWorktreeBranchName(): string {
-  const token = Effect.runSync(Random.nextIntBetween(0, 0xffff_ffff)).toString(16).padStart(8, "0");
-  return `${WORKTREE_BRANCH_PREFIX}/${token}`;
+/** Prefixes are validated by WorktreeBranchPrefix at the server settings boundary. */
+export function prefixWorktreeBranch(fragment: string, prefix: string): string {
+  return prefix.length > 0 ? `${prefix}/${fragment}` : fragment;
 }
 
-export function isTemporaryWorktreeBranch(refName: string): boolean {
-  return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
+export function buildTemporaryWorktreeBranchName(prefix: string = WORKTREE_BRANCH_PREFIX): string {
+  const token = Effect.runSync(Random.nextIntBetween(0, 0xffff_ffff)).toString(16).padStart(8, "0");
+  return prefixWorktreeBranch(token, prefix);
+}
+
+/** Returns the original namespace, retaining legacy drafts after a settings change. */
+export function extractTemporaryWorktreeBranchPrefix(
+  refName: string,
+  prefix: string = WORKTREE_BRANCH_PREFIX,
+): string | null {
+  const ref = refName.trim();
+  for (const candidate of [prefix, LEGACY_WORKTREE_BRANCH_PREFIX]) {
+    const namespace = candidate.length > 0 ? `${candidate}/` : "";
+    if (
+      ref.toLowerCase().startsWith(namespace.toLowerCase()) &&
+      /^[0-9a-f]{8}$/i.test(ref.slice(namespace.length))
+    ) {
+      return ref.slice(0, candidate.length);
+    }
+  }
+  return null;
+}
+
+export function isTemporaryWorktreeBranch(
+  refName: string,
+  prefix: string = WORKTREE_BRANCH_PREFIX,
+): boolean {
+  return extractTemporaryWorktreeBranchPrefix(refName, prefix) !== null;
+}
+
+/** An empty namespace cannot establish ownership of arbitrary named branches. */
+export function isManagedWorktreeBranch(
+  refName: string,
+  prefix: string = WORKTREE_BRANCH_PREFIX,
+): boolean {
+  const ref = refName.trim();
+  return (
+    [prefix, LEGACY_WORKTREE_BRANCH_PREFIX].some(
+      (candidate) =>
+        candidate.length > 0 &&
+        ref.startsWith(`${candidate}/`) &&
+        ref.length > candidate.length + 1,
+    ) || isTemporaryWorktreeBranch(ref, prefix)
+  );
+}
+
+export function buildGeneratedWorktreeBranchName(
+  raw: string,
+  prefix: string = WORKTREE_BRANCH_PREFIX,
+): string {
+  const normalized = raw
+    .trim()
+    .replace(/^refs\/heads\//i, "")
+    .replace(/['"`]/g, "");
+  const existingPrefix = [prefix, LEGACY_WORKTREE_BRANCH_PREFIX].find(
+    (candidate) =>
+      candidate.length > 0 && normalized.toLowerCase().startsWith(`${candidate.toLowerCase()}/`),
+  );
+  const fragment =
+    existingPrefix === undefined ? normalized : normalized.slice(existingPrefix.length + 1);
+  return prefixWorktreeBranch(sanitizeBranchFragment(fragment), prefix);
 }
 
 /**

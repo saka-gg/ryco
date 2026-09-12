@@ -154,6 +154,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Worktree branch prefix",
+    owner: "node",
+    description: "Default prefix for generated worktree branches on this device.",
+    keywords: "git namespace branch naming ryco",
+  },
+  {
+    section: "general",
     title: "Add project starts in",
     owner: "node",
     description: "Starting directory for the Add Project browser.",

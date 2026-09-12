@@ -436,6 +436,18 @@ export const AgentControlSettings = Schema.Struct({
 });
 export type AgentControlSettings = typeof AgentControlSettings.Type;
 
+export const DEFAULT_WORKTREE_BRANCH_PREFIX = "ryco";
+
+/** A Git branch namespace without a trailing slash; empty disables the namespace. */
+export const WorktreeBranchPrefix = TrimmedString.check(
+  Schema.isMaxLength(128),
+  Schema.isPattern(
+    // Git refs cannot contain ASCII controls, including DEL.
+    // eslint-disable-next-line no-control-regex
+    /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/,
+  ),
+);
+
 export const ServerSettings = Schema.Struct({
   environmentIcon: EnvironmentMachineHint.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   // Legacy token-by-token assistant output. This is deliberately a fresh key
@@ -448,6 +460,9 @@ export const ServerSettings = Schema.Struct({
   // entirely (no npm registry contact) instead of merely hiding the update
   // notification — for users who install providers via Nix/nixpkgs/etc.
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  worktreeBranchPrefix: WorktreeBranchPrefix.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKTREE_BRANCH_PREFIX)),
+  ),
   defaultThreadEnvMode: ThreadEnvMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("local" as const satisfies ThreadEnvMode)),
   ),
@@ -574,6 +589,7 @@ export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  worktreeBranchPrefix: Schema.optionalKey(WorktreeBranchPrefix),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   defaultAgentTokenMode: Schema.optionalKey(AgentTokenMode),
   addProjectBaseDirectory: Schema.optionalKey(Schema.String),

@@ -832,3 +832,35 @@ describe("queued send draft ownership", () => {
     expect(dispatchCommand).not.toHaveBeenCalled();
   });
 });
+
+describe("worktree branch defaults", () => {
+  it.each(["team/tasks", ""])("uses the target node's current prefix (%s)", async (prefix) => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.worktree.baseBranchForWorktree = "main";
+    input.worktree.shouldCreateWorktree = true;
+    const getSettings = vi.fn(async () => ({ worktreeBranchPrefix: prefix }));
+    input.dispatch.api = {
+      orchestration: { dispatchCommand },
+      server: { getSettings },
+    } as never;
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(getSettings).toHaveBeenCalledOnce();
+    expect(dispatchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bootstrap: expect.objectContaining({
+          prepareWorktree: expect.objectContaining({
+            branch: expect.stringMatching(prefix ? /^team\/tasks\/[0-9a-f]{8}$/ : /^[0-9a-f]{8}$/),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("does not guess a default if the node settings are unavailable", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.worktree.baseBranchForWorktree = "main";
+    input.worktree.shouldCreateWorktree = true;
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(dispatchCommand).not.toHaveBeenCalled();
+  });
+});
