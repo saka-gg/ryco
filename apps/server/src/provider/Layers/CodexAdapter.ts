@@ -763,7 +763,7 @@ function mapCollabAgentEvent(
           },
         ];
       }
-      if (statusType === "idle") {
+      if (statusType === "idle" || statusType === "notLoaded") {
         return [
           {
             ...base,
@@ -2338,11 +2338,46 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
 
+  const stopAfterFailedInterrupt = (session: CodexAdapterSessionContext) =>
+    stopSessionInternal(session).pipe(
+      Effect.andThen(
+        Effect.gen(function* () {
+          // Closing the runtime also closes its event consumer. Publish settlement
+          // here so cancellation cannot lose the final exit notification in teardown.
+          yield* Queue.offer(runtimeEventQueue, {
+            eventId: EventId.make(crypto.randomUUID()),
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            runtimeSessionId: session.runtimeSessionId,
+            threadId: session.threadId,
+            createdAt: new Date().toISOString(),
+            type: "session.exited",
+            payload: {
+              reason: "Stopped Codex after background cancellation failed.",
+              exitKind: "graceful",
+            },
+          });
+          yield* runtimeEventQueueMetrics.recordEnqueued(1);
+        }),
+      ),
+    );
+
   const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) =>
         (session.agentControl ? session.agentControl.retireTurn(turnId) : Effect.void).pipe(
-          Effect.andThen(session.runtime.interruptTurn(turnId)),
+          Effect.andThen(
+            session.runtime
+              .interruptTurn(turnId)
+              .pipe(
+                Effect.catch(() =>
+                  Effect.logWarning(
+                    "Codex interrupt failed; stopping the provider session and its background work.",
+                    { threadId },
+                  ).pipe(Effect.andThen(stopAfterFailedInterrupt(session))),
+                ),
+              ),
+          ),
           Effect.timeoutOption("15 seconds"),
           Effect.flatMap(
             Option.match({
@@ -2351,15 +2386,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 Effect.logWarning(
                   "Codex turn interrupt timed out; recycling the wedged provider session.",
                   { threadId },
-                ).pipe(Effect.andThen(stopSessionInternal(session))),
+                ).pipe(Effect.andThen(stopAfterFailedInterrupt(session))),
             }),
           ),
         ),
-      ),
-      Effect.mapError((cause) =>
-        cause._tag === "ProviderAdapterSessionNotFoundError"
-          ? cause
-          : mapCodexRuntimeError(threadId, "turn/interrupt", cause),
       ),
     );
 

@@ -1666,6 +1666,13 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [activeBackgroundLiveness]);
   useEffect(() => {
+    if (!isStoppingBackgroundWork) return;
+    // Dispatch acknowledges the command, not provider cancellation. Allow a
+    // retry if no settlement arrives; never claim the agents have stopped.
+    const timeout = window.setTimeout(() => setIsStoppingBackgroundWork(false), 20_000);
+    return () => window.clearTimeout(timeout);
+  }, [isStoppingBackgroundWork]);
+  useEffect(() => {
     // Per-thread state: switching threads while A's stop is pending must not
     // disable B's Stop button.
     setIsStoppingBackgroundWork(false);

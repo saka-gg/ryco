@@ -267,7 +267,12 @@ describe("CodexSessionRuntime collab integration", () => {
 
       // Stop everything. A's interrupt hangs forever — the bounded child
       // deadline must expire and the parent interrupt must still be sent.
-      yield* runtime.interruptTurn();
+      const stopResult = yield* runtime.interruptTurn().pipe(Effect.exit);
+      assert.equal(
+        stopResult._tag,
+        "Failure",
+        "failed child cancellation must trigger adapter fallback",
+      );
 
       const parseInterruptLine = (line: string) => JSON.parse(line) as { threadId?: string };
       const interrupted = NodeFS.readFileSync(interruptsPath, "utf8")
@@ -283,6 +288,165 @@ describe("CodexSessionRuntime collab integration", () => {
       assert.isTrue(interruptedThreads.has(CHILD_B), "registered child B must be interrupted");
       assert.isTrue(interruptedThreads.has(ROOT), "parent turn must be interrupted last");
 
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live(
+    "reconciles late activity and stops a child whose turn-start notification was missed",
+    () =>
+      Effect.gen(function* () {
+        const registration = (child: string) =>
+          wireFixture.notifications.find((entry) => {
+            const item = (entry.params as { item?: { type?: string; agentThreadId?: string } })
+              .item;
+            return item?.type === "subAgentActivity" && item.agentThreadId === child;
+          });
+        const turn = wireFixture.responses.turnStart.turn;
+        NodeFS.writeFileSync(
+          scriptPath,
+          JSON.stringify({
+            rootThreadId: ROOT,
+            notifications: [registration(CHILD_A), registration(CHILD_B)],
+            childSnapshots: {
+              [CHILD_A]: {
+                status: { type: "active", activeFlags: [] },
+                turns: [{ ...turn, id: "missed-child-turn", status: "inProgress" }],
+              },
+              [CHILD_B]: { status: { type: "idle" }, turns: [{ ...turn, status: "completed" }] },
+            },
+          }),
+        );
+        const interruptsPath = `${scriptPath}.interrupts`;
+        NodeFS.rmSync(interruptsPath, { force: true });
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            NodeFS.rmSync(scriptPath, { force: true });
+            NodeFS.rmSync(interruptsPath, { force: true });
+          }),
+        );
+        const runtime = yield* makeCodexSessionRuntime({
+          threadId: ThreadId.make("thread-reconcile-children"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-reconcile-children"),
+          binaryPath: peerPath,
+          cwd: "/tmp",
+          runtimeMode: "full-access",
+          tokenMode: "off",
+          environment: { ...process.env, RYCO_CODEX_COLLAB_SCRIPT: scriptPath },
+        });
+        const idleChild = yield* runtime.events.pipe(
+          Stream.filter(
+            (event) =>
+              event.method === "collabAgent/statusChanged" &&
+              (event.payload as { agentThreadId?: string; status?: { type?: string } })
+                .agentThreadId === CHILD_B &&
+              (event.payload as { status?: { type?: string } }).status?.type === "idle",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.start();
+        yield* runtime.sendTurn({ input: "late activity for finished child" });
+        const reconciled = yield* Fiber.join(idleChild).pipe(Effect.timeoutOption("12 seconds"));
+        assert.equal(
+          reconciled._tag,
+          "Some",
+          "polling must settle stale activity without user intervention",
+        );
+        const stoppedChild = yield* runtime.events.pipe(
+          Stream.filter(
+            (event) =>
+              event.method === "collabAgent/statusChanged" &&
+              (event.payload as { agentThreadId?: string; status?: { type?: string } })
+                .agentThreadId === CHILD_A &&
+              (event.payload as { status?: { type?: string } }).status?.type === "idle",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.interruptTurn();
+        const stopped = yield* Fiber.join(stoppedChild).pipe(Effect.timeoutOption("5 seconds"));
+        assert.equal(
+          stopped._tag,
+          "Some",
+          "stop must publish confirmed settlement without a completion notification",
+        );
+        const interrupts = NodeFS.readFileSync(interruptsPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        assert.deepEqual(interrupts, [{ threadId: CHILD_A, turnId: "missed-child-turn" }]);
+        yield* runtime.close;
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("ignores a stale idle read when a child starts a newer turn", () =>
+    Effect.gen(function* () {
+      const registration = wireFixture.notifications.find((entry) => {
+        const item = (entry.params as { item?: { type?: string; agentThreadId?: string } }).item;
+        return item?.type === "subAgentActivity" && item.agentThreadId === CHILD_A;
+      });
+      NodeFS.writeFileSync(
+        scriptPath,
+        JSON.stringify({
+          rootThreadId: ROOT,
+          notifications: [registration],
+          staleReadFor: CHILD_A,
+          childSnapshots: {
+            [CHILD_A]: {
+              status: { type: "active", activeFlags: [] },
+              turns: [
+                { ...wireFixture.responses.turnStart.turn, id: "newer-turn", status: "inProgress" },
+              ],
+            },
+          },
+        }),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scriptPath, { force: true });
+          NodeFS.rmSync(`${scriptPath}.interrupts`, { force: true });
+        }),
+      );
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-child-read-race"),
+        runtimeSessionId: RuntimeSessionId.make("runtime-child-read-race"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        tokenMode: "off",
+        environment: { ...process.env, RYCO_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const seen: Array<{ method?: string; payload?: unknown }> = [];
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          Effect.sync(() => {
+            seen.push(event);
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "race snapshot against child follow-up" });
+      // Stop performs the read immediately; the mock publishes a newer turn
+      // before returning its obsolete idle snapshot.
+      yield* Effect.sleep("100 millis");
+      yield* runtime.interruptTurn();
+      const start = seen.findIndex((event) => event.method === "collabAgent/turnStarted");
+      assert.isAtLeast(start, 0);
+      const statuses = seen
+        .slice(start)
+        .filter((event) => event.method === "collabAgent/statusChanged");
+      // The only idle event is the confirmed post-interrupt read; the stale
+      // pre-interrupt snapshot must not erase the newly observed turn id.
+      assert.isAtMost(statuses.length, 1);
+      const interrupts = NodeFS.readFileSync(`${scriptPath}.interrupts`, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.deepEqual(interrupts, [{ threadId: CHILD_A, turnId: "newer-turn" }]);
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
