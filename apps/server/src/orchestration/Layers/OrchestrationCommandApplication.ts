@@ -10,7 +10,7 @@ import { TerminalManager } from "../../terminal/Services/Manager.ts";
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { WorkspacePaths } from "../../workspace/Services/WorkspacePaths.ts";
-import { normalizeDispatchCommand } from "../Normalizer.ts";
+import { normalizeDispatchCommand, withChatAttachmentAdoption } from "../Normalizer.ts";
 import {
   OrchestrationCommandApplication,
   type OrchestrationCommandApplicationShape,
@@ -96,17 +96,20 @@ export const applyOrchestrationCommand = <R>(deps: {
   readonly projections: ProjectionSnapshotQueryShape;
   readonly terminals: TerminalManagerShape;
 }) =>
-  deps.normalize(deps.command).pipe(
-    Effect.flatMap((command) =>
-      applyOrchestrationNormalizedCommand({
-        command,
-        dispatch: deps.dispatch,
-        projections: deps.projections,
-        terminals: deps.terminals,
-        normalizeFollowup: deps.normalize,
-      }),
+  withChatAttachmentAdoption(
+    deps.command,
+    deps.normalize(deps.command).pipe(
+      Effect.flatMap((command) =>
+        applyOrchestrationNormalizedCommand({
+          command,
+          dispatch: deps.dispatch,
+          projections: deps.projections,
+          terminals: deps.terminals,
+          normalizeFollowup: deps.normalize,
+        }),
+      ),
+      Effect.mapError(toDispatchError),
     ),
-    Effect.mapError(toDispatchError),
   );
 
 const makeOrchestrationCommandApplication = Effect.gen(function* () {

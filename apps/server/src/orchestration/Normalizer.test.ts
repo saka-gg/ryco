@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   CommandId,
+  OrchestrationDispatchCommandError,
   MessageId,
   ProjectId,
   ThreadId,
@@ -10,9 +11,10 @@ import {
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 import { it } from "@effect/vitest";
-import { Effect, FileSystem, Layer } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer } from "effect";
 import { expect } from "vite-plus/test";
 
+import { applyOrchestrationCommand } from "./Layers/OrchestrationCommandApplication.ts";
 import { attachmentRelativePath, resolveAttachmentPath } from "../attachmentStore.ts";
 import {
   ChatAttachmentUploads,
@@ -22,7 +24,7 @@ import {
 import { deriveServerPaths, ServerConfig } from "../config.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
-import { normalizeDispatchCommand } from "./Normalizer.ts";
+import { normalizeDispatchCommand, withChatAttachmentAdoption } from "./Normalizer.ts";
 
 const projectCreateCommand = (workspaceRoot: string): ClientOrchestrationCommand => ({
   type: "project.create",
@@ -389,7 +391,7 @@ it.effect("adopts a streamed upload through its token and extension-suffixed id"
   ),
 );
 
-it.effect("adopts a streamed upload exactly once", () =>
+it.effect("replays adoption for the same command but rejects reuse by another command", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const { uploads, layer } = yield* makeUploadNormalizerContext();
@@ -402,9 +404,13 @@ it.effect("adopts a streamed upload exactly once", () =>
       yield* normalizeDispatchCommand(fileTurnCommand({ uploadToken: lease.uploadToken })).pipe(
         Effect.provide(layer),
       );
-      const reuseError = yield* normalizeDispatchCommand(
-        fileTurnCommand({ uploadToken: lease.uploadToken }),
-      ).pipe(Effect.provide(layer), Effect.flip);
+      yield* normalizeDispatchCommand(fileTurnCommand({ uploadToken: lease.uploadToken })).pipe(
+        Effect.provide(layer),
+      );
+      const reuseError = yield* normalizeDispatchCommand({
+        ...fileTurnCommand({ uploadToken: lease.uploadToken }),
+        commandId: CommandId.make("another-command"),
+      }).pipe(Effect.provide(layer), Effect.flip);
       expect(reuseError._tag).toBe("OrchestrationDispatchCommandError");
     }),
   ),
@@ -460,6 +466,183 @@ it.effect("rejects upload references when the upload service is absent", () =>
       ).pipe(Effect.provide(layerWithoutUploads), Effect.flip);
       expect(error._tag).toBe("OrchestrationDispatchCommandError");
       expect(error.message).toContain("upload reference");
+    }),
+  ),
+);
+
+it.effect("releases streamed files after dispatch rejection so a fresh command can retry", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { uploads, layer } = yield* makeUploadNormalizerContext();
+      const { lease } = yield* completeUploadFixture(uploads, {
+        threadId: "file-attachment-thread",
+        name: "notes.txt",
+        sizeBytes: 3,
+      });
+      const command = fileTurnCommand({ uploadToken: lease.uploadToken });
+      const rejected = yield* applyOrchestrationCommand({
+        command,
+        normalize: normalizeDispatchCommand,
+        dispatch: () =>
+          Effect.fail(new OrchestrationDispatchCommandError({ message: "thread became busy" })),
+        projections: {} as never,
+        terminals: {} as never,
+      }).pipe(Effect.provide(layer), Effect.flip);
+      expect(rejected._tag).toBe("OrchestrationDispatchCommandError");
+      const retry = { ...command, commandId: CommandId.make("retry-after-rejection") };
+      const result = yield* applyOrchestrationCommand({
+        command: retry,
+        normalize: normalizeDispatchCommand,
+        dispatch: () => Effect.succeed({ sequence: 1 }),
+        projections: {} as never,
+        terminals: {} as never,
+      }).pipe(Effect.provide(layer));
+      expect(result.sequence).toBe(1);
+      // Committed claims still cannot be stolen by a different command.
+      const other = yield* normalizeDispatchCommand({
+        ...command,
+        commandId: CommandId.make("unrelated-send"),
+      }).pipe(Effect.provide(layer), Effect.flip);
+      expect(other._tag).toBe("OrchestrationDispatchCommandError");
+    }),
+  ),
+);
+
+it.effect("releases earlier claims when a later attachment fails normalization", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { uploads, layer } = yield* makeUploadNormalizerContext();
+      const { lease } = yield* completeUploadFixture(uploads, {
+        threadId: "file-attachment-thread",
+        name: "notes.txt",
+        sizeBytes: 3,
+      });
+      const command = fileTurnCommand({ uploadToken: lease.uploadToken });
+      if (command.type !== "thread.turn.start") throw new Error("Expected turn");
+      const invalid = {
+        ...command,
+        message: {
+          ...command.message,
+          attachments: [
+            ...command.message.attachments,
+            {
+              type: "file" as const,
+              name: "bad.txt",
+              mimeType: "text/plain",
+              sizeBytes: 3,
+              dataUrl: "invalid",
+            },
+          ],
+        },
+      };
+      yield* withChatAttachmentAdoption(invalid, normalizeDispatchCommand(invalid)).pipe(
+        Effect.provide(layer),
+        Effect.flip,
+      );
+      const retry = { ...command, commandId: CommandId.make("retry-after-normalization") };
+      const normalized = yield* withChatAttachmentAdoption(
+        retry,
+        normalizeDispatchCommand(retry),
+      ).pipe(Effect.provide(layer));
+      expect(normalized.type).toBe("thread.turn.start");
+    }),
+  ),
+);
+
+it.effect("retains claims for an interrupted dispatch with an unknown commit result", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { uploads, layer } = yield* makeUploadNormalizerContext();
+      const { lease } = yield* completeUploadFixture(uploads, {
+        threadId: "file-attachment-thread",
+        name: "notes.txt",
+        sizeBytes: 3,
+      });
+      const command = fileTurnCommand({ uploadToken: lease.uploadToken });
+      const interrupted = yield* withChatAttachmentAdoption(
+        command,
+        normalizeDispatchCommand(command).pipe(Effect.andThen(Effect.interrupt)),
+      ).pipe(Effect.provide(layer), Effect.exit);
+      expect(interrupted._tag).toBe("Failure");
+      yield* normalizeDispatchCommand(command).pipe(Effect.provide(layer));
+      const unrelated = yield* normalizeDispatchCommand({
+        ...command,
+        commandId: CommandId.make("different-command"),
+      }).pipe(Effect.provide(layer), Effect.flip);
+      expect(unrelated._tag).toBe("OrchestrationDispatchCommandError");
+    }),
+  ),
+);
+
+it.effect("a failed replay cannot release an earlier accepted attachment claim", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { uploads, layer } = yield* makeUploadNormalizerContext();
+      const { lease } = yield* completeUploadFixture(uploads, {
+        threadId: "file-attachment-thread",
+        name: "notes.txt",
+        sizeBytes: 3,
+      });
+      const command = fileTurnCommand({ uploadToken: lease.uploadToken });
+      yield* withChatAttachmentAdoption(command, normalizeDispatchCommand(command)).pipe(
+        Effect.provide(layer),
+      );
+      const invalidReplay = fileTurnCommand({ uploadToken: lease.uploadToken, sizeBytes: 4 });
+      yield* withChatAttachmentAdoption(
+        invalidReplay,
+        normalizeDispatchCommand(invalidReplay),
+      ).pipe(Effect.provide(layer), Effect.flip);
+      const unrelated = { ...command, commandId: CommandId.make("cannot-steal-accepted-claim") };
+      yield* withChatAttachmentAdoption(unrelated, normalizeDispatchCommand(unrelated)).pipe(
+        Effect.provide(layer),
+        Effect.flip,
+      );
+      yield* normalizeDispatchCommand(command).pipe(Effect.provide(layer));
+    }),
+  ),
+);
+
+it.effect("keeps a committed overlapping replay when the first attempt later fails", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { uploads, layer } = yield* makeUploadNormalizerContext();
+      const { lease } = yield* completeUploadFixture(uploads, {
+        threadId: "file-attachment-thread",
+        name: "notes.txt",
+        sizeBytes: 3,
+      });
+      const command = fileTurnCommand({ uploadToken: lease.uploadToken });
+      const firstClaimed = yield* Deferred.make<void>();
+      const failFirst = yield* Deferred.make<void>();
+      const first = yield* withChatAttachmentAdoption(
+        command,
+        Effect.gen(function* () {
+          yield* normalizeDispatchCommand(command);
+          yield* Deferred.succeed(firstClaimed, undefined);
+          yield* Deferred.await(failFirst);
+          // A later validation failure in A occurs only after B has committed.
+          return yield* normalizeDispatchCommand(fileTurnCommand({ dataUrl: "invalid" }));
+        }),
+      ).pipe(Effect.provide(layer), Effect.exit, Effect.forkChild);
+      yield* Deferred.await(firstClaimed);
+      yield* applyOrchestrationCommand({
+        command,
+        normalize: normalizeDispatchCommand,
+        dispatch: () => Effect.succeed({ sequence: 1 }),
+        projections: {} as never,
+        terminals: {} as never,
+      }).pipe(Effect.provide(layer));
+      yield* Deferred.succeed(failFirst, undefined);
+      expect((yield* Fiber.join(first))._tag).toBe("Failure");
+      const third = {
+        ...command,
+        commandId: CommandId.make("cannot-claim-after-overlapping-commit"),
+      };
+      const result = yield* withChatAttachmentAdoption(third, normalizeDispatchCommand(third)).pipe(
+        Effect.provide(layer),
+        Effect.exit,
+      );
+      expect(result._tag).toBe("Failure");
     }),
   ),
 );
