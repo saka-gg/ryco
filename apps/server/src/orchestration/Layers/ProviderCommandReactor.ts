@@ -1,4 +1,4 @@
-import { lstatSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import nodePath from "node:path";
 
 import {
@@ -73,6 +73,15 @@ type ProviderIntentEvent = Extract<
       | "thread.session-stop-requested";
   }
 >;
+
+// Git canonicalizes registered paths, while saved paths can contain symlinked parents.
+function worktreeIdentity(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return nodePath.resolve(path);
+  }
+}
 
 function toNonEmptyProviderInput(value: string | undefined): string | undefined {
   const normalized = value?.trim();
@@ -383,14 +392,14 @@ const make = Effect.gen(function* () {
 
     const repositoryRoot = nodePath.resolve(project.workspaceRoot);
     const worktreePath = nodePath.resolve(thread.worktreePath);
-    if (worktreePath === repositoryRoot) {
+    if (worktreeIdentity(worktreePath) === worktreeIdentity(repositoryRoot)) {
       return;
     }
 
     const registeredWorktreePaths = () =>
       gitWorkflow
         .listWorktreePaths(repositoryRoot)
-        .pipe(Effect.map((paths) => paths.map((entry) => nodePath.resolve(entry))));
+        .pipe(Effect.map((paths) => paths.map(worktreeIdentity)));
     const failRecovery = (detail: string) =>
       new ProviderAdapterRequestError({
         provider: providerErrorLabel(String(thread.modelSelection.instanceId)),
@@ -400,7 +409,7 @@ const make = Effect.gen(function* () {
 
     if (pathEntryExists(worktreePath)) {
       const registeredPaths = yield* registeredWorktreePaths();
-      if (!registeredPaths.includes(worktreePath)) {
+      if (!registeredPaths.includes(worktreeIdentity(worktreePath))) {
         return yield* failRecovery(
           `Refusing to use '${worktreePath}' because it exists but is not a registered worktree for '${repositoryRoot}'.`,
         );
@@ -427,7 +436,7 @@ const make = Effect.gen(function* () {
     // Another process may have recreated the path while the stale metadata was pruned.
     if (pathEntryExists(worktreePath)) {
       const registeredPaths = yield* registeredWorktreePaths();
-      if (registeredPaths.includes(worktreePath)) {
+      if (registeredPaths.includes(worktreeIdentity(worktreePath))) {
         return;
       }
       return yield* failRecovery(
@@ -442,7 +451,7 @@ const make = Effect.gen(function* () {
       dependencyHydration: "none",
     });
     if (
-      nodePath.resolve(recreated.worktree.path) !== worktreePath ||
+      worktreeIdentity(recreated.worktree.path) !== worktreeIdentity(worktreePath) ||
       recreated.worktree.refName !== branch
     ) {
       return yield* failRecovery(

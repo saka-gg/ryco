@@ -6,14 +6,6 @@ import {
 } from "@ryco/contracts";
 
 /**
- * The node currently has owner-role authorization, but no authoritative
- * fresh-reauthentication evidence that survives from approval to executor.
- * Settings mutations therefore remain unavailable until that boundary exists.
- */
-export const AGENT_CONTROL_SETTINGS_CHANGE_UNSUPPORTED_REASON =
-  "Settings changes are unavailable because Ryco cannot yet enforce fresh owner reauthentication at both approval and execution.";
-
-/**
  * Deliberately narrow, non-secret allowlist. These are presentation/runtime
  * preferences only; workspace, provider, credential, endpoint, and Agent
  * Control policy fields are structurally absent.
@@ -26,15 +18,15 @@ export const agentControlSettingsSummary = (
       kind: "legacyTokenStreaming",
       label: "Legacy token streaming",
       value: settings.enableLegacyTokenStreaming,
-      changeSupported: false,
-      unsupportedReason: AGENT_CONTROL_SETTINGS_CHANGE_UNSUPPORTED_REASON,
+      changeSupported: true,
+      unsupportedReason: null,
     },
     {
       kind: "providerUpdateChecks",
       label: "Provider update checks",
       value: settings.enableProviderUpdateChecks,
-      changeSupported: false,
-      unsupportedReason: AGENT_CONTROL_SETTINGS_CHANGE_UNSUPPORTED_REASON,
+      changeSupported: true,
+      unsupportedReason: null,
     },
   ],
   redacted: true,

@@ -366,14 +366,34 @@ const validatePlanAgainstSnapshot = (input: {
       if (
         input.plan.title === undefined &&
         input.plan.archived === undefined &&
-        input.plan.persistentGoal === undefined
+        input.plan.persistentGoal === undefined &&
+        input.plan.modelSelection === undefined &&
+        input.plan.runtimeMode === undefined &&
+        input.plan.interactionMode === undefined &&
+        input.plan.tokenMode === undefined
       ) {
         return yield* fail("invalid-plan", "At least one supported thread update is required.");
+      }
+      if (input.plan.modelSelection !== undefined)
+        yield* providerForSelection(input.providers, input.plan.modelSelection);
+      if (
+        input.plan.runtimeMode !== undefined &&
+        runtimeRank[input.plan.runtimeMode] > runtimeRank[input.originRuntimeMode]
+      ) {
+        return yield* fail(
+          "privilege-escalation",
+          "The requested runtime mode is more privileged than the caller.",
+        );
       }
       if (
         target.archivedAt !== null &&
         input.plan.archived !== false &&
-        (input.plan.title !== undefined || input.plan.persistentGoal !== undefined)
+        (input.plan.title !== undefined ||
+          input.plan.persistentGoal !== undefined ||
+          input.plan.modelSelection !== undefined ||
+          input.plan.runtimeMode !== undefined ||
+          input.plan.interactionMode !== undefined ||
+          input.plan.tokenMode !== undefined)
       ) {
         return yield* fail("thread-unavailable", "Archived thread metadata cannot be updated.");
       }
@@ -476,12 +496,6 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       }
 
       const originEnvMode = agentControlThreadEnvMode(caller);
-      if (input.plan.kind === "changeSettings") {
-        return yield* fail(
-          "settings-unsupported",
-          "Settings changes require fresh owner reauthentication that this server cannot enforce.",
-        );
-      }
       if (input.plan.kind === "automationRun") {
         return yield* fail("invalid-plan", "Scheduled run proposals are server-owned.");
       }
@@ -529,6 +543,8 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+      } else if (input.plan.kind === "changeSettings") {
+        // Closed schema: only non-secret boolean preferences are supported.
       } else if (isProjectPlan(input.plan)) {
         if (deps.projectPlans === undefined) {
           return yield* fail("project-unavailable", "Project proposal validation is unavailable.");
@@ -732,10 +748,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       }
 
       if (proposal.plan.kind === "changeSettings") {
-        return yield* fail(
-          "settings-unsupported",
-          "Settings changes require fresh owner reauthentication that this server cannot enforce.",
-        );
+        if (principal.kind !== "provider-session")
+          return yield* fail(
+            "privilege-escalation",
+            "External integrations cannot change settings.",
+          );
+        return;
       }
       if (isAgentControlDevicePlan(proposal.plan)) {
         if (principal.kind !== "provider-session") {

@@ -755,6 +755,44 @@ describe("ProviderCommandReactor", () => {
     ).toBeLessThan(harness.startSession.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER);
   });
 
+  it("accepts a registered worktree through a symlinked parent directory", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-worktree-alias-"));
+    const harness = await createHarness({ baseDir });
+    const actualPath = path.join(baseDir, "actual");
+    const aliasPath = path.join(baseDir, "alias");
+    fs.mkdirSync(actualPath);
+    fs.symlinkSync(actualPath, aliasPath, "dir");
+    harness.listWorktreePaths.mockReturnValue(Effect.succeed([fs.realpathSync(actualPath)]));
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-record-alias-worktree"),
+        threadId: ThreadId.make("thread-1"),
+        branch: "feature/alias",
+        worktreePath: aliasPath,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-alias-worktree"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-alias"),
+          role: "user",
+          text: "continue",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ cwd: aliasPath });
+    expect(harness.createWorktree).not.toHaveBeenCalled();
+  });
+
   it("does not overwrite an existing directory that is not a registered worktree", async () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-worktree-collision-"));
     const harness = await createHarness({ baseDir });

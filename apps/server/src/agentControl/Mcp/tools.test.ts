@@ -386,6 +386,26 @@ it.effect("advertises capability-scoped reads and all proposal-only writes with 
   }),
 );
 
+it.effect(
+  "advertises the same mutation catalog before the first turn and after turn retirement",
+  () =>
+    Effect.gen(function* () {
+      const beforeTurn = makeAgentControlMcpTools(makeDeps());
+      const duringTurn = makeAgentControlMcpTools(
+        makeDeps({ getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)) }),
+      );
+      const before = yield* beforeTurn.descriptorsFor(writeSession);
+      assert.deepStrictEqual(before, yield* duringTurn.descriptorsFor(writeSession));
+      assert.include(
+        before.map((tool) => tool.name),
+        "ryco_create_threads",
+      );
+      const denied = yield* beforeTurn.callTool(writeSession, "ryco_create_threads", {});
+      assert.isTrue(denied.isError);
+      assert.include(denied.content[0]!.text, "active-turn");
+    }),
+);
+
 it.effect("device mutation tools create immutable proposals without touching DeviceService", () =>
   Effect.gen(function* () {
     let managerAccessed = false;
@@ -1086,7 +1106,7 @@ it.effect("project write tools create exact inert proposals and never dispatch m
   }),
 );
 
-it.effect("settings proposals fail closed before persistence without fresh owner step-up", () =>
+it.effect("settings requests rejected by validation never reach persistence", () =>
   Effect.gen(function* () {
     let submitted = false;
     const deps = makeDeps({
@@ -1098,7 +1118,7 @@ it.effect("settings proposals fail closed before persistence without fresh owner
             ? Effect.fail(
                 new AgentControlPlanValidationError({
                   reason: "settings-unsupported",
-                  detail: "Fresh owner reauthentication is unavailable.",
+                  detail: "The requested settings change is invalid.",
                 }),
               )
             : Effect.die("unexpected plan"),
@@ -1123,7 +1143,7 @@ it.effect("settings proposals fail closed before persistence without fresh owner
       writeSession,
     );
     assert.isTrue(result.isError);
-    assert.include(result.content[0]?.text ?? "", "reauthentication");
+    assert.include(result.content[0]?.text ?? "", "settings change is invalid");
     assert.isFalse(submitted);
   }),
 );

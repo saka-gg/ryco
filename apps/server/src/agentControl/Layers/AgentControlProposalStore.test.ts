@@ -590,3 +590,37 @@ enabledLayer("AgentControlProposalStore", (it) => {
     }),
   );
 });
+
+enabledLayer("private routine authorization", (it) => {
+  it.effect("atomically approves routine requests and replays the same durable receipt", () =>
+    Effect.gen(function* () {
+      const store = yield* AgentControlProposalStore;
+      const input = { ...submitInput("routine-create"), authorizeRoutine: true };
+      const first = yield* store.submit(input);
+      assert.strictEqual(first.proposal.status, "approved");
+      assert.strictEqual(first.proposal.decidedAt, input.now);
+      const replay = yield* store.submit(input);
+      assert.isTrue(replay.replayed);
+      assert.strictEqual(replay.proposal.proposalId, first.proposal.proposalId);
+    }),
+  );
+  it.effect(
+    "keeps archive and runtime security changes pending despite routine authorization",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* AgentControlProposalStore;
+        for (const [index, plan] of [
+          { kind: "updateThread", threadId: ThreadId.make("child"), archived: true },
+          { kind: "updateThread", threadId: ThreadId.make("child"), runtimeMode: "full-access" },
+        ].entries()) {
+          const result = yield* store.submit({
+            ...submitInput(`sensitive-${index}`),
+            authorizeRoutine: true,
+            plan: plan as AgentControlActionPlan,
+          });
+          assert.strictEqual(result.proposal.status, "pending-user-approval");
+          assert.strictEqual(result.proposal.decidedAt, null);
+        }
+      }),
+  );
+});

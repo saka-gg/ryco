@@ -113,7 +113,7 @@ disabledLayer("AgentControlProposalService (feature disabled)", (it) => {
 
 enabledLayer("AgentControlProposalService", (it) => {
   it.effect(
-    "keeps allowlisted settings proposals inert when fresh owner step-up is unavailable",
+    "accepts a non-secret settings proposal without mutating settings in the approval service",
     () =>
       Effect.gen(function* () {
         const service = yield* AgentControlProposalService;
@@ -133,18 +133,13 @@ enabledLayer("AgentControlProposalService", (it) => {
           now: "2026-08-17T00:00:00.000Z",
         });
 
-        const unsupported = yield* Effect.flip(
-          service.accept({
-            proposalId: submitted.proposal.proposalId,
-            decidedAt: "2026-08-17T00:05:00.000Z",
-          }),
-        );
-        assert.strictEqual(unsupported._tag, "AgentControlSettingsChangeUnsupportedError");
-        if (unsupported._tag !== "AgentControlSettingsChangeUnsupportedError") return;
-        assert.include(unsupported.detail, "reauthentication");
-
+        const receipt = yield* service.accept({
+          proposalId: submitted.proposal.proposalId,
+          decidedAt: "2026-08-17T00:05:00.000Z",
+        });
+        assert.strictEqual(receipt.status, "approved");
         const unchanged = Option.getOrThrow(yield* store.getById(submitted.proposal.proposalId));
-        assert.strictEqual(unchanged.status, "pending-user-approval");
+        assert.strictEqual(unchanged.status, "approved");
         assert.strictEqual(unchanged.result, null);
         assert.strictEqual(
           (yield* settings.getSettings).enableLegacyTokenStreaming,

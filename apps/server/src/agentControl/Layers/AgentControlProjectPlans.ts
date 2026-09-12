@@ -65,6 +65,10 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
     workspaceRoot: project.workspaceRoot,
     repositoryIdentityKey: project.repositoryIdentity?.canonicalKey ?? null,
     updatedAt: project.updatedAt,
+    defaultModelSelection: project.defaultModelSelection,
+    customSystemPrompt: project.customSystemPrompt,
+    scripts: project.scripts,
+    preferredRemoteName: project.preferredRemoteName,
   });
 
   const targetFor = (input: {
@@ -135,7 +139,16 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
 
   const prepareUpdate: AgentControlProjectPlansShape["prepareUpdate"] = (input) =>
     Effect.gen(function* () {
-      if (input.title === undefined && input.workspaceRoot === undefined) {
+      if (
+        [
+          input.title,
+          input.workspaceRoot,
+          input.defaultModelSelection,
+          input.customSystemPrompt,
+          input.scripts,
+          input.preferredRemoteName,
+        ].every((value) => value === undefined)
+      ) {
         return yield* fail("invalid-plan", "At least one supported project update is required.");
       }
       const { project, snapshot } = yield* requireProject(input.projectId);
@@ -152,7 +165,29 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
         exceptProjectId: project.id,
       });
       const title = input.title ?? project.title;
-      if (title === project.title && workspaceRoot === project.workspaceRoot) {
+      const preferences = {
+        defaultModelSelection:
+          input.defaultModelSelection === undefined
+            ? project.defaultModelSelection
+            : input.defaultModelSelection,
+        customSystemPrompt:
+          input.customSystemPrompt === undefined
+            ? project.customSystemPrompt
+            : input.customSystemPrompt,
+        scripts: input.scripts ?? project.scripts,
+        preferredRemoteName:
+          input.preferredRemoteName === undefined
+            ? project.preferredRemoteName
+            : input.preferredRemoteName,
+      };
+      if (
+        title === project.title &&
+        workspaceRoot === project.workspaceRoot &&
+        Object.entries(preferences).every(
+          ([key, value]) =>
+            JSON.stringify(value) === JSON.stringify(project[key as keyof typeof project]),
+        )
+      ) {
         return yield* fail("invalid-plan", "The requested project metadata is unchanged.");
       }
       const repositoryIdentityKey = yield* identityKey(workspaceRoot);
@@ -160,7 +195,7 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
         kind: "updateProject",
         projectId: project.id,
         before: stateFor(project),
-        after: targetFor({ title, workspaceRoot, repositoryIdentityKey }),
+        after: { ...targetFor({ title, workspaceRoot, repositoryIdentityKey }), ...preferences },
       } satisfies AgentControlUpdateProjectPlan;
     });
 

@@ -326,7 +326,7 @@ it.effect("rejects a boot plan for a device deliberately attached to another thr
   }),
 );
 
-it.effect("scopes project mutations and fails settings changes closed", () =>
+it.effect("scopes project mutations and allows closed non-secret settings plans", () =>
   Effect.gen(function* () {
     const snapshot = yield* Ref.make(makeSnapshot());
     const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
@@ -379,17 +379,15 @@ it.effect("scopes project mutations and fails settings changes closed", () =>
     );
     assert.strictEqual(scopeError.reason, "project-scope");
 
-    const settingsError = yield* Effect.flip(
-      validator.validateSubmission({
-        session,
-        authority,
-        plan: {
-          kind: "changeSettings",
-          change: { kind: "legacyTokenStreaming", before: false, after: true },
-        },
-      }),
-    );
-    assert.strictEqual(settingsError.reason, "settings-unsupported");
+    const settingsPrincipal = yield* validator.validateSubmission({
+      session,
+      authority,
+      plan: {
+        kind: "changeSettings",
+        change: { kind: "legacyTokenStreaming", before: false, after: true },
+      },
+    });
+    assert.strictEqual(settingsPrincipal.kind, "provider-session");
   }),
 );
 

@@ -53,14 +53,14 @@ export const AGENT_CONTROL_MCP_SERVER_INFO = {
 } as const;
 
 /**
- * The adapter must not inject this server at all when setup fails. Mutation
- * tools are advertised only during an exact active turn. Ryco state mutations create
+ * The adapter must not inject this server at all when setup fails. Tools are advertised at session startup; execution requires an exact active turn. Ryco state mutations create
  * approval proposals; desktop control uses its separate local consent policy.
  */
 export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "Ryco Agent Control tools over a private local connection. Read tools inspect Ryco state. " +
-  "During this exact active turn, mutation tools may request immutable action plans; every " +
-  "such request requires user approval in Ryco and never mutates inline. " +
+  "During an exact active turn, control tools submit durable operations. Routine actions execute automatically; " +
+  "destructive and security-sensitive actions wait for user approval. Never approve your own requests. " +
+  "Use ryco_wait_for_control_request for dispatch receipts and ryco_wait_threads for task completion. " +
   "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
   "these tools act directly and require an exact active turn. " +
   "When available, ryco_attach_file directly delivers a workspace file to this thread's timeline under exact active-turn authority. " +

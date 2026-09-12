@@ -4,8 +4,8 @@
  * Schema-only definitions for the Agent Control control plane: principals,
  * capabilities, immutable action plans, approval proposals, and durable
  * execution operations. Agents never receive ambient write access — every
- * mutation is first captured as an immutable `AgentControlProposal` that a
- * user must approve, and only the server-side executor may move an accepted
+ * mutation is first captured as an immutable `AgentControlProposal`. Routine private-session
+ * actions may be authorized by policy; other actions require user approval. Only the executor moves an accepted
  * proposal into execution.
  *
  * Extension rules
@@ -39,6 +39,10 @@ import {
 } from "./baseSchemas.ts";
 import {
   ModelSelection,
+  AgentTokenMode,
+  ProviderInteractionMode,
+  ProjectCustomSystemPrompt,
+  ProjectScript,
   OrchestrationSessionStatus,
   ProjectMetadataDir,
   RuntimeMode,
@@ -358,9 +362,25 @@ export const AgentControlInterruptThreadPlan = Schema.Struct({
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type AgentControlInterruptThreadPlan = typeof AgentControlInterruptThreadPlan.Type;
 
+export const AgentControlThreadPreferences = Schema.Struct({
+  modelSelection: Schema.optional(ModelSelection),
+  runtimeMode: Schema.optional(RuntimeMode),
+  interactionMode: Schema.optional(ProviderInteractionMode),
+  tokenMode: Schema.optional(AgentTokenMode),
+});
+
+export const AgentControlProjectPreferences = Schema.Struct({
+  defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  customSystemPrompt: Schema.optional(Schema.NullOr(ProjectCustomSystemPrompt)),
+  scripts: Schema.optional(Schema.Array(ProjectScript).check(Schema.isMaxLength(100))),
+  preferredRemoteName: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+});
+export type AgentControlProjectPreferences = typeof AgentControlProjectPreferences.Type;
+
 export const AgentControlUpdateThreadPlan = Schema.Struct({
   kind: Schema.Literal("updateThread"),
   threadId: ThreadId,
+  ...AgentControlThreadPreferences.fields,
   title: Schema.optional(AgentControlTitle),
   archived: Schema.optional(Schema.Boolean),
   /** An explicitly requested persistent goal; `null` clears it. */
@@ -379,6 +399,7 @@ const AgentControlRepositoryIdentityKey = Schema.NullOr(
 
 /** Canonical project state captured when a mutable project proposal is created. */
 export const AgentControlProjectState = Schema.Struct({
+  ...AgentControlProjectPreferences.fields,
   title: AgentControlTitle,
   workspaceRoot: AgentControlWorkspaceRoot,
   repositoryIdentityKey: AgentControlRepositoryIdentityKey,
@@ -387,6 +408,7 @@ export const AgentControlProjectState = Schema.Struct({
 export type AgentControlProjectState = typeof AgentControlProjectState.Type;
 
 export const AgentControlProjectTarget = Schema.Struct({
+  ...AgentControlProjectPreferences.fields,
   title: AgentControlTitle,
   workspaceRoot: AgentControlWorkspaceRoot,
   repositoryIdentityKey: AgentControlRepositoryIdentityKey,
@@ -404,7 +426,7 @@ export const AgentControlCreateProjectPlan = Schema.Struct({
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type AgentControlCreateProjectPlan = typeof AgentControlCreateProjectPlan.Type;
 
-/** Exact before/after metadata update; only display name and workspace path are supported. */
+/** Exact before/after project metadata and preference update. */
 export const AgentControlUpdateProjectPlan = Schema.Struct({
   kind: Schema.Literal("updateProject"),
   projectId: ProjectId,
@@ -1400,6 +1422,7 @@ export type AgentControlMcpInterruptThreadInput = typeof AgentControlMcpInterrup
 export const AgentControlMcpUpdateThreadInput = Schema.Struct({
   requestId: AgentControlRequestId,
   threadId: ThreadId,
+  ...AgentControlThreadPreferences.fields,
   title: Schema.optional(AgentControlTitle),
   archived: Schema.optional(Schema.Boolean),
   persistentGoal: Schema.optional(
@@ -1420,6 +1443,7 @@ export type AgentControlMcpProposeProjectCreateInput =
   typeof AgentControlMcpProposeProjectCreateInput.Type;
 
 export const AgentControlMcpProposeProjectUpdateInput = Schema.Struct({
+  ...AgentControlProjectPreferences.fields,
   requestId: AgentControlRequestId,
   projectId: ProjectId,
   expectedUpdatedAt: IsoDateTime,
@@ -1748,15 +1772,15 @@ export const AgentControlMcpSettingsSummaryItem = Schema.Union([
     kind: Schema.Literal("legacyTokenStreaming"),
     label: Schema.Literal("Legacy token streaming"),
     value: Schema.Boolean,
-    changeSupported: Schema.Literal(false),
-    unsupportedReason: TrimmedNonEmptyString,
+    changeSupported: Schema.Boolean,
+    unsupportedReason: Schema.NullOr(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     kind: Schema.Literal("providerUpdateChecks"),
     label: Schema.Literal("Provider update checks"),
     value: Schema.Boolean,
-    changeSupported: Schema.Literal(false),
-    unsupportedReason: TrimmedNonEmptyString,
+    changeSupported: Schema.Boolean,
+    unsupportedReason: Schema.NullOr(TrimmedNonEmptyString),
   }),
 ]);
 export type AgentControlMcpSettingsSummaryItem = typeof AgentControlMcpSettingsSummaryItem.Type;

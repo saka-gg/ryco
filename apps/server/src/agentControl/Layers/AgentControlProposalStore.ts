@@ -1,3 +1,4 @@
+import { isRoutineAgentControlAction } from "../routineActions.ts";
 import {
   AGENT_CONTROL_ERROR_CODES,
   AGENT_CONTROL_PLAN_VERSION,
@@ -376,6 +377,8 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
     Effect.gen(function* () {
       yield* policy.requireEnabled("AgentControlProposalStore.submit");
 
+      const routine =
+        input.authorizeRoutine === true && isRoutineAgentControlAction(input.principal, input.plan);
       const planDigest = computeAgentControlPlanDigest(input.plan);
       const principalScope = agentControlPrincipalScope(input.principal);
       const proposal: AgentControlProposal = {
@@ -387,11 +390,11 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
         planDigest,
         riskTags: input.riskTags,
         promptSummary: input.promptSummary,
-        status: "pending-user-approval",
+        status: routine ? "approved" : "pending-user-approval",
         createdAt: input.now,
         updatedAt: input.now,
         expiresAt: input.expiresAt,
-        decidedAt: null,
+        decidedAt: routine ? input.now : null,
         result: null,
       };
 
@@ -403,6 +406,9 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
             yield* appendAudit({
               proposal,
               principalScope,
+              extraMetadata: {
+                authorization: routine ? "private-session-routine" : "user-approval-required",
+              },
               eventKind: AGENT_CONTROL_AUDIT_EVENT_KINDS.proposalCreated,
               createdAt: input.now,
             });

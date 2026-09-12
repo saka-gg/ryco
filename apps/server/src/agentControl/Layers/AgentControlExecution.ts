@@ -1,3 +1,4 @@
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
@@ -219,6 +220,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const operations = yield* AgentControlOperationStore;
     const proposalEvents = yield* AgentControlProposalEvents;
     const validator = yield* AgentControlActionValidator;
+    const settingsService = yield* Effect.serviceOption(ServerSettingsService);
     const automations = yield* Effect.serviceOption(AgentControlAutomationService);
     const commandApplication = yield* OrchestrationCommandApplication;
     const engine = yield* OrchestrationEngineService;
@@ -677,6 +679,16 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             commandId: commandIdFor(operation.operationId, "project-update"),
             projectId: plan.projectId,
             expectedUpdatedAt: plan.before.updatedAt,
+            ...(plan.after.defaultModelSelection === undefined
+              ? {}
+              : { defaultModelSelection: plan.after.defaultModelSelection }),
+            ...(plan.after.customSystemPrompt === undefined
+              ? {}
+              : { customSystemPrompt: plan.after.customSystemPrompt }),
+            ...(plan.after.scripts === undefined ? {} : { scripts: plan.after.scripts }),
+            ...(plan.after.preferredRemoteName === undefined
+              ? {}
+              : { preferredRemoteName: plan.after.preferredRemoteName }),
             ...(plan.after.title === plan.before.title ? {} : { title: plan.after.title }),
             ...(plan.after.workspaceRoot === plan.before.workspaceRoot
               ? {}
@@ -714,9 +726,25 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         }
 
         if (proposal.plan.kind === "changeSettings") {
-          return yield* Effect.fail(
-            new Error("Settings changes require fresh owner reauthentication."),
-          );
+          if (operation.state.completedSteps.includes("settings-updated")) return operation;
+          if (Option.isNone(settingsService))
+            return yield* Effect.fail(new Error("Settings service unavailable."));
+          const change = proposal.plan.change;
+          const settings = yield* settingsService.value.getSettings;
+          const key =
+            change.kind === "legacyTokenStreaming"
+              ? "enableLegacyTokenStreaming"
+              : "enableProviderUpdateChecks";
+          if (settings[key] !== change.before)
+            return yield* Effect.fail(
+              new Error("Settings changed after the request was prepared."),
+            );
+          yield* settingsService.value.updateSettings({ [key]: change.after });
+          yield* checkpoint({
+            ...operation.state,
+            completedSteps: unique([...operation.state.completedSteps, "settings-updated"]),
+          });
+          return operation;
         }
 
         if (
@@ -931,7 +959,6 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 attachments: [],
               },
               modelSelection: entry.modelSelection,
-              titleSeed: entry.title,
               runtimeMode: entry.runtimeMode,
               interactionMode: "default",
               createdAt,
@@ -1099,12 +1126,40 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         }
 
         const plan = proposal.plan;
-        if (plan.title !== undefined) {
+        if (plan.title !== undefined || plan.modelSelection !== undefined) {
           yield* dispatch("thread-title-updated", {
             type: "thread.meta.update",
             commandId: commandIdFor(operation.operationId, "thread-title"),
             threadId: plan.threadId,
-            title: plan.title,
+            ...(plan.title === undefined ? {} : { title: plan.title }),
+            ...(plan.modelSelection === undefined ? {} : { modelSelection: plan.modelSelection }),
+          });
+        }
+        if (plan.runtimeMode !== undefined) {
+          yield* dispatch("thread-runtime-mode-set", {
+            type: "thread.runtime-mode.set",
+            commandId: commandIdFor(operation.operationId, "runtime-mode"),
+            threadId: plan.threadId,
+            runtimeMode: plan.runtimeMode,
+            createdAt: new Date().toISOString(),
+          });
+        }
+        if (plan.interactionMode !== undefined) {
+          yield* dispatch("thread-interaction-mode-set", {
+            type: "thread.interaction-mode.set",
+            commandId: commandIdFor(operation.operationId, "interaction-mode"),
+            threadId: plan.threadId,
+            interactionMode: plan.interactionMode,
+            createdAt: new Date().toISOString(),
+          });
+        }
+        if (plan.tokenMode !== undefined) {
+          yield* dispatch("thread-token-mode-set", {
+            type: "thread.token-mode.set",
+            commandId: commandIdFor(operation.operationId, "token-mode"),
+            threadId: plan.threadId,
+            tokenMode: plan.tokenMode,
+            createdAt: new Date().toISOString(),
           });
         }
         if (plan.persistentGoal !== undefined) {

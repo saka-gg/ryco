@@ -1,3 +1,4 @@
+import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   AgentControlOperationId,
   AgentControlProposalId,
@@ -963,5 +964,121 @@ it.effect(
         attempted: true,
         completed: true,
       });
+    }),
+);
+
+it.effect("executes model and interaction preferences through orchestration exactly once", () =>
+  Effect.gen(function* () {
+    const nextPlan = {
+      kind: "updateThread" as const,
+      threadId,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-model" },
+      interactionMode: "plan" as const,
+      tokenMode: "aggressive" as const,
+    };
+    const proposal = {
+      ...approvedProposal,
+      plan: nextPlan,
+      planDigest: computeAgentControlPlanDigest(nextPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const commands: Array<{ type: string }> = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: { getThreadShellById: () => Effect.succeed(Option.some(target)) },
+      commandApplication: {
+        apply: (command: { type: string }) => {
+          commands.push(command);
+          return Effect.succeed({ sequence: commands.length });
+        },
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.deepStrictEqual(
+      commands.map((command) => command.type),
+      ["thread.meta.update", "thread.interaction-mode.set", "thread.token-mode.set"],
+    );
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+  }),
+);
+
+it.effect("executes only the captured non-secret setting and rejects stale before values", () =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettingsService;
+    for (const [before, expected] of [
+      [false, "completed"],
+      [false, "failed"],
+    ] as const) {
+      const nextPlan = {
+        kind: "changeSettings" as const,
+        change: { kind: "legacyTokenStreaming" as const, before, after: true },
+      };
+      const proposal = {
+        ...approvedProposal,
+        plan: nextPlan,
+        planDigest: computeAgentControlPlanDigest(nextPlan),
+      };
+      const stores = yield* makeExecutionStores(proposal);
+      const execution = yield* makeTestExecution({
+        ...stores,
+        projections: {},
+        commandApplication: {},
+      });
+      yield* execution.executeApproved(proposal.proposalId);
+      assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, expected);
+    }
+    assert.isTrue((yield* settings.getSettings).enableLegacyTokenStreaming);
+  }).pipe(Effect.provide(ServerSettingsService.layerTest({ enableLegacyTokenStreaming: false }))),
+);
+
+it.effect(
+  "preserves an explicit created thread title instead of treating it as a generated-title seed",
+  () =>
+    Effect.gen(function* () {
+      const nextPlan = {
+        kind: "createThreads" as const,
+        entries: [
+          {
+            projectId,
+            title: "Named worker",
+            prompt: "Reply ready",
+            envMode: "local" as const,
+            runtimeMode: "auto" as const,
+            modelSelection: target.modelSelection,
+          },
+        ],
+      };
+      const proposal = {
+        ...approvedProposal,
+        plan: nextPlan,
+        planDigest: computeAgentControlPlanDigest(nextPlan),
+      };
+      const stores = yield* makeExecutionStores(proposal);
+      const commands: ClientOrchestrationCommand[] = [];
+      const executor = yield* makeTestExecution({
+        ...stores,
+        projections: {
+          getShellSnapshot: () =>
+            Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+          getThreadShellById: () => Effect.succeed(Option.none()),
+        },
+        commandApplication: {
+          apply: (command: ClientOrchestrationCommand) => {
+            commands.push(command);
+            return Effect.succeed({ sequence: commands.length });
+          },
+        },
+      });
+      yield* executor.executeApproved(proposal.proposalId);
+      assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+      assert.deepInclude(
+        commands.find((c) => c.type === "thread.create"),
+        { title: "Named worker" },
+      );
+      assert.notProperty(
+        commands.find((c) => c.type === "thread.turn.start"),
+        "titleSeed",
+      );
     }),
 );

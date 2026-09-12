@@ -202,6 +202,44 @@ const isPrivateDeviceContentResult = (value: unknown): value is PrivateDeviceCon
 
 const failTool = (reason: string) => Effect.fail(new ToolFailure(reason));
 
+const modelSelectionSchema = {
+  type: "object",
+  properties: {
+    instanceId: { type: "string", description: "Provider instance ID from ryco_capabilities." },
+    model: { type: "string", description: "Exact model slug from that provider instance." },
+    options: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          value: { anyOf: [{ type: "string" }, { type: "boolean" }] },
+        },
+        required: ["id", "value"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["instanceId", "model"],
+  additionalProperties: false,
+} as const;
+const projectScriptsSchema = {
+  type: "array",
+  maxItems: 100,
+  items: {
+    type: "object",
+    properties: {
+      id: { type: "string" },
+      name: { type: "string" },
+      command: { type: "string" },
+      icon: { type: "string", enum: ["play", "test", "lint", "configure", "build", "debug"] },
+      runOnWorktreeCreate: { type: "boolean" },
+    },
+    required: ["id", "name", "command", "icon", "runOnWorktreeCreate"],
+    additionalProperties: false,
+  },
+} as const;
+
 const cursorSchemaProperty = { type: "string", maxLength: 1_024 } as const;
 const AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_CHARS = 512 * 1_024;
 const limitSchemaProperty = (maximum: number) =>
@@ -498,7 +536,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.createThreads,
     description:
-      "Request user approval for one exact bounded batch of Ryco threads. This creates a proposal and does not create threads immediately.",
+      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs.",
     inputSchema: {
       type: "object",
       properties: {
@@ -513,7 +551,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
               projectId: { type: "string", maxLength: 256 },
               title: { type: "string", minLength: 1, maxLength: 200 },
               prompt: { type: "string", minLength: 1, maxLength: 120000 },
-              modelSelection: { type: "object" },
+              modelSelection: modelSelectionSchema,
               runtimeMode: {
                 type: "string",
                 enum: ["approval-required", "auto-accept-edits", "auto", "full-access"],
@@ -533,7 +571,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.sendMessage,
     description:
-      "Request user approval to queue or steer one exact message to a Ryco thread. This does not send immediately.",
+      "Queue or steer a message to a Ryco thread through the durable operation queue. Use a stable requestId for retries and read or wait for the returned receipt.",
     inputSchema: {
       type: "object",
       properties: {
@@ -549,7 +587,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.interruptThread,
     description:
-      "Request user approval to interrupt one Ryco thread (optionally only an exact turn). This does not interrupt immediately.",
+      "Interrupt a Ryco thread, optionally only an exact turn, through the durable operation queue.",
     inputSchema: {
       type: "object",
       properties: {
@@ -564,7 +602,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.updateThread,
     description:
-      "Request user approval to change only a thread title, archive state, or explicitly supplied persistent goal.",
+      "Update thread title, model and options, interaction mode, token mode, archive state, or persistent goal. Archiving and runtime permission changes require approval; other changes execute asynchronously.",
     inputSchema: {
       type: "object",
       properties: {
@@ -573,6 +611,13 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
         title: { type: "string", minLength: 1, maxLength: 200 },
         archived: { type: "boolean" },
         persistentGoal: { anyOf: [{ type: "string", maxLength: 4000 }, { type: "null" }] },
+        modelSelection: modelSelectionSchema,
+        runtimeMode: {
+          type: "string",
+          enum: ["approval-required", "auto-accept-edits", "auto", "full-access"],
+        },
+        interactionMode: { type: "string", enum: ["default", "plan", "ask"] },
+        tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
       },
       required: ["requestId", "threadId"],
       additionalProperties: false,
@@ -603,10 +648,14 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeProjectUpdate,
     description:
-      "Request user approval for an exact project display-name and/or existing authorized workspace-path change, guarded by the project's updatedAt revision.",
+      "Update project metadata and preferences with an updatedAt revision guard. Title, default model and preferred remote changes execute asynchronously; workspace, scripts and system prompt changes require approval.",
     inputSchema: {
       type: "object",
       properties: {
+        defaultModelSelection: { anyOf: [modelSelectionSchema, { type: "null" }] },
+        customSystemPrompt: { anyOf: [{ type: "string", maxLength: 20000 }, { type: "null" }] },
+        scripts: projectScriptsSchema,
+        preferredRemoteName: { anyOf: [{ type: "string" }, { type: "null" }] },
         requestId: { type: "string", maxLength: 128 },
         projectId: { type: "string", minLength: 1, maxLength: 256 },
         expectedUpdatedAt: { type: "string", minLength: 1 },
@@ -636,7 +685,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeSettingsChange,
     description:
-      "Request an exact allowlisted non-secret settings change. This fails closed until Ryco can enforce fresh owner reauthentication at approval and execution.",
+      "Change an allowlisted non-secret boolean preference through the durable operation queue. Secrets, provider configuration, network access and Agent Control policy cannot be changed by this tool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1158,9 +1207,12 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     );
 
   const descriptorsFor = (session: AgentControlSessionRecord) =>
-    hasWriteAuthority(session).pipe(
-      Effect.map((canWrite) =>
+    deps.policy.isEnabled.pipe(
+      Effect.map((enabled) =>
         TOOL_DESCRIPTORS.filter((descriptor) => {
+          // Providers discover and cache tools before the first turn starts.
+          // Discovery is session-scoped; callTool enforces exact-turn authority.
+          if (!enabled) return false;
           if (
             DEVICE_CONTROL_TOOL_NAMES.has(descriptor.name) &&
             deps.deviceService?.supported !== true
@@ -1169,7 +1221,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           }
           const capability = writeCapabilityForTool(descriptor.name);
           if (capability !== null) {
-            return canWrite && session.grantedCapabilities.includes(capability);
+            return session.grantedCapabilities.includes(capability);
           }
           return session.grantedCapabilities.includes(readCapabilityForTool(descriptor.name));
         }),
@@ -1259,7 +1311,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       const enabled = yield* deps.policy.isEnabled;
       const providers = yield* deps.getProviders;
       const tools = yield* descriptorsFor(session);
-      const writeToolsAvailable = tools.some((tool) => WRITE_TOOL_NAMES.has(tool.name));
+      const writeToolsAvailable = yield* hasWriteAuthority(session);
       return Schema.encodeSync(AgentControlMcpCapabilitiesResult)({
         enabled,
         readOnly: !writeToolsAvailable,
@@ -1391,6 +1443,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       });
       const now = new Date();
       const submitted = yield* deps.proposals.submit({
+        authorizeRoutine: true,
         principal,
         requestId: input.requestId,
         plan: input.plan,
@@ -1489,6 +1542,12 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           ...(input.title === undefined ? {} : { title: input.title }),
           ...(input.archived === undefined ? {} : { archived: input.archived }),
           ...(input.persistentGoal === undefined ? {} : { persistentGoal: input.persistentGoal }),
+          ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+          ...(input.runtimeMode === undefined ? {} : { runtimeMode: input.runtimeMode }),
+          ...(input.interactionMode === undefined
+            ? {}
+            : { interactionMode: input.interactionMode }),
+          ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
         },
       });
     });
@@ -2534,3 +2593,30 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     callTool,
   };
 };
+
+/** Keep capabilities in sync with every optional catalog extension. */
+export const withCompleteAgentControlCatalog = (
+  base: AgentControlMcpTools,
+): AgentControlMcpTools => ({
+  ...base,
+  callTool: (session, name, args) =>
+    base.callTool(session, name, args).pipe(
+      Effect.flatMap((result) => {
+        if (name !== AGENT_CONTROL_MCP_TOOLS.capabilities || result.isError)
+          return Effect.succeed(result);
+        const capabilities = Schema.decodeUnknownOption(AgentControlMcpCapabilitiesResult)(
+          result.structuredContent,
+        );
+        if (Option.isNone(capabilities)) return Effect.succeed(result);
+        return base.descriptorsFor(session).pipe(
+          Effect.map((descriptors) => {
+            const value = { ...capabilities.value, tools: descriptors.map((tool) => tool.name) };
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify(value) }],
+              structuredContent: value,
+            };
+          }),
+        );
+      }),
+    ),
+});
