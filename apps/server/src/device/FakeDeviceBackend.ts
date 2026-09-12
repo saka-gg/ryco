@@ -12,6 +12,7 @@ import * as path from "node:path";
 
 import type {
   DeviceAvailability,
+  DeviceTestingInput,
   DeviceDescribeUiResult,
   DeviceDescriptor,
   DeviceGeometry,
@@ -41,6 +42,7 @@ export interface FakeDeviceSeed {
 }
 
 export type FakeDeviceCall =
+  | { readonly kind: "testing"; readonly input: DeviceTestingInput }
   | { readonly kind: "boot"; readonly udid: string }
   | { readonly kind: "shutdown"; readonly udid: string }
   | { readonly kind: "install"; readonly udid: string; readonly appPath: string }
@@ -239,6 +241,14 @@ export class FakeDeviceBackend implements DeviceBackend {
     this.record({ kind: "launch", udid, bundleId });
     this.requireBooted(udid);
     return { udid, bundleId, pid: 4_242 };
+  }
+
+  suspendTesting(_udid?: string): () => void {
+    return () => {};
+  }
+
+  async testing(input: DeviceTestingInput): Promise<void> {
+    this.record({ kind: "testing", input });
   }
 
   async openUrl(udid: string, url: string): Promise<void> {

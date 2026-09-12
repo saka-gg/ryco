@@ -463,6 +463,74 @@ export const DeviceOpenUrlInput = Schema.Struct({
 });
 export type DeviceOpenUrlInput = typeof DeviceOpenUrlInput.Type;
 
+// Testing actions use the existing owner-only app envelope. Keep values bounded
+// and explicit: no arbitrary simctl commands or implicit "booted" targets.
+export const DeviceTestingTextSize = Schema.Literals([
+  "extra-small",
+  "small",
+  "medium",
+  "large",
+  "extra-large",
+  "extra-extra-large",
+  "extra-extra-extra-large",
+  "accessibility-medium",
+  "accessibility-large",
+  "accessibility-extra-large",
+  "accessibility-extra-extra-large",
+  "accessibility-extra-extra-extra-large",
+]);
+export type DeviceTestingTextSize = typeof DeviceTestingTextSize.Type;
+
+export const DeviceTestingPermission = Schema.Literals([
+  "calendar",
+  "contacts-limited",
+  "contacts",
+  "location",
+  "location-always",
+  "photos-add",
+  "photos",
+  "media-library",
+  "microphone",
+  "motion",
+  "reminders",
+  "siri",
+]);
+export type DeviceTestingPermission = typeof DeviceTestingPermission.Type;
+
+const DeviceTestingBundleId = DeviceBundleId.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9.-]*$/));
+export const DeviceTestingAction = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("appearance"), value: Schema.Literals(["light", "dark"]) }),
+  Schema.Struct({ type: Schema.Literal("text-size"), value: DeviceTestingTextSize }),
+  Schema.Struct({
+    type: Schema.Literal("location"),
+    latitude: Schema.Finite.check(Schema.isBetween({ minimum: -90, maximum: 90 })),
+    longitude: Schema.Finite.check(Schema.isBetween({ minimum: -180, maximum: 180 })),
+  }),
+  Schema.Struct({ type: Schema.Literal("clear-location") }),
+  Schema.Struct({
+    type: Schema.Literal("permission"),
+    bundleId: DeviceTestingBundleId,
+    service: DeviceTestingPermission,
+    decision: Schema.Literals(["grant", "revoke", "reset"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("push"),
+    bundleId: DeviceTestingBundleId,
+    // JSON and UTF-8 byte validation also run before any subprocess starts.
+    payload: Schema.String.check(Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("preset"),
+    value: Schema.Literals(["dark", "large-text", "dark-large-text", "standard"]),
+  }),
+]);
+export type DeviceTestingAction = typeof DeviceTestingAction.Type;
+export const DeviceTestingInput = Schema.Struct({
+  udid: DeviceUdid.check(Schema.isPattern(/^(?!booted$|all$).+$/i)),
+  action: DeviceTestingAction,
+});
+export type DeviceTestingInput = typeof DeviceTestingInput.Type;
+
 // ── Read tools ───────────────────────────────────────────────────────
 
 export const DeviceScreenshotInput = Schema.Struct({
@@ -677,6 +745,7 @@ export const DeviceInputResponse = Schema.Union([
 export type DeviceInputResponse = typeof DeviceInputResponse.Type;
 
 export const DeviceAppRequest = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("testing"), input: DeviceTestingInput }),
   Schema.Struct({ type: Schema.Literal("install-app"), input: DeviceInstallAppInput }),
   Schema.Struct({ type: Schema.Literal("launch-app"), input: DeviceLaunchAppInput }),
   Schema.Struct({ type: Schema.Literal("open-url"), input: DeviceOpenUrlInput }),
@@ -684,6 +753,7 @@ export const DeviceAppRequest = Schema.Union([
 export type DeviceAppRequest = typeof DeviceAppRequest.Type;
 
 export const DeviceAppResponse = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("testing") }),
   Schema.Struct({ type: Schema.Literal("install-app"), result: DeviceInstallAppResult }),
   Schema.Struct({ type: Schema.Literal("launch-app"), result: DeviceLaunchAppResult }),
   Schema.Struct({ type: Schema.Literal("open-url") }),
