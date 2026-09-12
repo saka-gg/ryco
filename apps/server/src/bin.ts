@@ -39,7 +39,16 @@ const externalMcpArgs = (): {
 
 const external = externalMcpArgs();
 
-if (process.argv[2] === AGENT_CONTROL_STDIO_PROXY_ARG) {
+if (process.argv[2] === "device-host-stdio") {
+  void import("./device/deviceHostWorker.ts")
+    .then(({ runDeviceHostWorker }) => runDeviceHostWorker())
+    .catch(() => {
+      process.stderr.write(
+        "Ryco device host unavailable. Check macOS requirements and whether another coding node owns this host.\n",
+      );
+      process.exitCode = 1;
+    });
+} else if (process.argv[2] === AGENT_CONTROL_STDIO_PROXY_ARG) {
   runAgentControlStdioProxyFromProcess();
 } else if (external !== null) {
   const operation =

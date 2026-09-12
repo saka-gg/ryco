@@ -580,7 +580,25 @@ export default function SimulatorPanel(props: {
         </Button>
       </div>
 
-      {attached?.platform === "ios-simulator" ? (
+      {threadState?.hosts
+        ?.filter((host) => host.transport === "ssh" && host.status !== "available")
+        .map((host) => (
+          <div
+            key={host.id}
+            role="status"
+            className="border-b border-border/60 px-3 py-2 text-xs text-muted-foreground"
+          >
+            {host.name}: {host.availability ?? "Checking device host…"}
+          </div>
+        ))}
+      {attached?.host?.transport === "ssh" ? (
+        <div
+          role="status"
+          className="border-b border-border/60 px-3 py-2 text-xs text-muted-foreground"
+        >
+          Simulator testing controls are unavailable on SSH hosts.
+        </div>
+      ) : attached?.platform === "ios-simulator" ? (
         <SimulatorTestingDrawer
           key={`${environmentId}:${threadId}:${attached.udid}:${generation}`}
           udid={attached.udid}

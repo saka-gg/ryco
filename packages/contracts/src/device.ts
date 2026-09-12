@@ -21,7 +21,7 @@ export const DEVICE_WS_CHANNELS = {
 
 // ── Core identifiers and enums ───────────────────────────────────────
 
-const DEVICE_UDID_MAX_LENGTH = 128;
+const DEVICE_UDID_MAX_LENGTH = 255;
 const DEVICE_TEXT_MAX_LENGTH = 4_096;
 const DEVICE_PATH_MAX_LENGTH = 1_024;
 const DEVICE_URL_MAX_LENGTH = 8_192;
@@ -89,7 +89,24 @@ export type DeviceBootSource = typeof DeviceBootSource.Type;
 export const DeviceFamily = Schema.Literals(["phone", "tablet"]);
 export type DeviceFamily = typeof DeviceFamily.Type;
 
+/** Server-owned identity. Remote IDs include a fingerprint of the SSH destination. */
+export const DeviceHostId = TrimmedNonEmptyString.check(Schema.isMaxLength(64)).check(
+  Schema.isPattern(/^[A-Za-z0-9._-]+$/),
+);
+export const DeviceHostSummary = Schema.Struct({
+  id: DeviceHostId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  transport: Schema.Literals(["local", "ssh"]),
+  status: Schema.optional(
+    Schema.Literals(["unknown", "available", "setup-required", "disconnected"]),
+  ),
+  availability: Schema.optional(Schema.String.check(Schema.isMaxLength(2048))),
+});
+export type DeviceHostSummary = typeof DeviceHostSummary.Type;
+
 export const DeviceDescriptor = Schema.Struct({
+  host: Schema.optional(DeviceHostSummary),
+  nativeUdid: Schema.optional(DeviceUdid),
   platform: DevicePlatform,
   udid: DeviceUdid,
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
@@ -270,6 +287,7 @@ export const DeviceAttachPhase = Schema.Literals([
 export type DeviceAttachPhase = typeof DeviceAttachPhase.Type;
 
 export const ThreadDeviceState = Schema.Struct({
+  hosts: Schema.optional(Schema.Array(DeviceHostSummary).check(Schema.isMaxLength(17))),
   threadId: ThreadId,
   /** Monotonic per thread; lets the pane drop out-of-order pushes. */
   version: NonNegativeInt,
@@ -282,7 +300,7 @@ export const ThreadDeviceState = Schema.Struct({
    */
   attachPhase: Schema.optional(Schema.NullOr(DeviceAttachPhase)),
   /** Devices the pane may show: booted devices plus anything Ryco is booting. */
-  devices: Schema.Array(DeviceDescriptor).check(Schema.isMaxLength(64)),
+  devices: Schema.Array(DeviceDescriptor).check(Schema.isMaxLength(256)),
   /** True while an agent tool is driving input, so the pane can show the badge. */
   agentActive: Schema.Boolean,
   availability: DeviceAvailability,
@@ -304,6 +322,7 @@ export const DeviceListInput = Schema.Struct({
 export type DeviceListInput = typeof DeviceListInput.Type;
 
 export const DeviceListResult = Schema.Struct({
+  hosts: Schema.optional(Schema.Array(DeviceHostSummary).check(Schema.isMaxLength(17))),
   devices: Schema.Array(DeviceDescriptor).check(Schema.isMaxLength(256)),
   availability: DeviceAvailability,
 });

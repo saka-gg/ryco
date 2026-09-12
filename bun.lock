@@ -17,7 +17,7 @@
     },
     "apps/desktop": {
       "name": "@ryco/desktop",
-      "version": "0.1.22",
+      "version": "0.1.25",
       "dependencies": {
         "@effect/platform-node": "catalog:",
         "effect": "catalog:",
@@ -162,7 +162,7 @@
     },
     "apps/server": {
       "name": "ryco-cli",
-      "version": "0.1.22",
+      "version": "0.1.25",
       "bin": {
         "ryco": "dist/bin.mjs",
         "ryco-cli": "dist/bin.mjs",
@@ -188,6 +188,7 @@
         "@ryco/client-runtime": "workspace:*",
         "@ryco/contracts": "workspace:*",
         "@ryco/shared": "workspace:*",
+        "@ryco/ssh": "workspace:*",
         "@ryco/tailscale": "workspace:*",
         "@ryco/web": "workspace:*",
         "@types/bun": "catalog:",
@@ -202,7 +203,7 @@
     },
     "apps/web": {
       "name": "@ryco/web",
-      "version": "0.1.22",
+      "version": "0.1.25",
       "dependencies": {
         "@base-ui/react": "^1.8.0",
         "@dnd-kit/core": "^6.3.1",
@@ -286,7 +287,7 @@
     },
     "packages/contracts": {
       "name": "@ryco/contracts",
-      "version": "0.1.22",
+      "version": "0.1.25",
       "dependencies": {
         "effect": "catalog:",
       },

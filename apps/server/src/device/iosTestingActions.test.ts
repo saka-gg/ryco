@@ -1,6 +1,7 @@
 import { DeviceTestingInput } from "@ryco/contracts";
 import { Schema } from "effect";
 import { describe, expect, it, vi } from "vitest";
+import { HostDeviceBackend } from "./HostDeviceBackend.ts";
 import { DeviceManager } from "./DeviceManager.ts";
 import { IosSimulatorBackend } from "./IosSimulatorBackend.ts";
 import { PlatformDeviceBackend } from "./PlatformDeviceBackend.ts";
@@ -256,21 +257,34 @@ describe("iOS simulator testing", () => {
   });
 
   it.each([
-    ["shutdown", false],
-    ["dispose", false],
-    ["shutdown", true],
-    ["dispose", true],
+    ["shutdown", "direct"],
+    ["dispose", "direct"],
+    ["shutdown", "platform"],
+    ["dispose", "platform"],
+    ["shutdown", "host"],
+    ["dispose", "host"],
+    ["shutdown", "host-platform"],
+    ["dispose", "host-platform"],
   ] as const)(
-    "fences testing at manager %s entry while stream cleanup is pending (platform router: %s)",
-    async (lifecycle, routed) => {
+    "fences testing at manager %s while cleanup is pending (%s)",
+    async (lifecycle, routing) => {
       const test = backend();
       vi.spyOn(test.backend, "availability").mockResolvedValue({ kind: "available" });
       const attach = vi.spyOn(test.backend, "attachStream").mockResolvedValue(undefined);
-      const manager = new DeviceManager({
-        backend: routed
-          ? new PlatformDeviceBackend(test.backend, new FakeDeviceBackend())
-          : test.backend,
-      });
+      const routed = routing.includes("platform")
+        ? new PlatformDeviceBackend(test.backend, new FakeDeviceBackend())
+        : test.backend;
+      const target = routing.startsWith("host")
+        ? new HostDeviceBackend([
+            {
+              host: { id: "local", name: "Local", transport: "local" },
+              backend: backend().backend,
+              createDeviceBackend: () => routed,
+            },
+          ])
+        : routed;
+      await target.listDevices({ includeShutdown: true });
+      const manager = new DeviceManager({ backend: target });
       await manager.attach("testing-thread", udid);
       await vi.waitFor(() => expect(attach).toHaveBeenCalled());
       // Wait until stream reconciliation has finished, not merely entered the adapter.

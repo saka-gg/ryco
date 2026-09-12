@@ -2,8 +2,8 @@
  * DeviceServiceLive - one DeviceManager for the server process.
  *
  * The manager exists on every platform so no caller has to branch on `null`;
- * iOS and Android adapters share its lifecycle and authorization. Tooling
- * availability is reported by each adapter; host support gates the surface.
+ * local iOS/Android adapters and configured SSH hosts share its lifecycle
+ * and authorization surface.
  *
  * @module device/Layers/DeviceService
  */
@@ -12,10 +12,11 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 
 import { makeBootOwnershipStore, NULL_BOOT_OWNERSHIP } from "../bootOwnership.ts";
-import { AndroidEmulatorBackend } from "../AndroidEmulatorBackend.ts";
-import { PlatformDeviceBackend } from "../PlatformDeviceBackend.ts";
+import { HostDeviceBackend } from "../HostDeviceBackend.ts";
+import { SshDeviceBackend } from "../SshDeviceBackend.ts";
+import { readDeviceHostConfig, sshDeviceHostId } from "../deviceHostConfig.ts";
 import { DeviceManager } from "../DeviceManager.ts";
-import { IosSimulatorBackend } from "../IosSimulatorBackend.ts";
+import { localDeviceHost } from "../localDeviceHost.ts";
 import { DeviceService, type DeviceServiceShape } from "../Services/DeviceService.ts";
 import {
   installProcessDeviceToolGateway,
@@ -24,6 +25,7 @@ import {
 
 export interface DeviceServiceLiveOptions {
   readonly platform?: NodeJS.Platform;
+  readonly hostsFile?: string;
   /** Where to remember this run's boots; omit to remember nothing. */
   readonly bootOwnershipPath?: string;
 }
@@ -49,12 +51,18 @@ export function makeDeviceServiceLayer(
     DeviceService,
     Effect.gen(function* () {
       const platform = options.platform ?? process.platform;
-      const supported = ["darwin", "linux", "win32"].includes(platform);
-      const backend = new PlatformDeviceBackend(
-        new IosSimulatorBackend({ platform }),
-        new AndroidEmulatorBackend({ platform }),
+      const hosts = yield* Effect.promise(() =>
+        readDeviceHostConfig(options.hostsFile ?? process.env.RYCO_DEVICE_HOSTS_FILE),
       );
-      // Both adapters share one persistent boot ownership record.
+      const supported = ["darwin", "linux", "win32"].includes(platform) || hosts.length > 0;
+      const backend = new HostDeviceBackend([
+        localDeviceHost(platform),
+        ...hosts.map((config) => ({
+          host: { id: sshDeviceHostId(config), name: config.name, transport: "ssh" as const },
+          backend: new SshDeviceBackend(config),
+        })),
+      ]);
+      // Local boots are recovered here; SSH workers recover their own boots on the Mac.
       const bootOwnership = supported
         ? makeBootOwnershipStore(options.bootOwnershipPath ?? defaultBootOwnershipPath())
         : NULL_BOOT_OWNERSHIP;

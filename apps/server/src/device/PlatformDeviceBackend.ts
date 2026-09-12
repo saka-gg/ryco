@@ -1,6 +1,10 @@
 /** Routes platform operations through one manager, boot budget and authorization surface. */
 import type { DeviceAvailability, DeviceDescriptor } from "@ryco/contracts";
-import { type DeviceBackend, type DeviceListOptions } from "./DeviceBackend.ts";
+import {
+  type DeviceBackend,
+  type DeviceDiscovery,
+  type DeviceListOptions,
+} from "./DeviceBackend.ts";
 
 export class PlatformDeviceBackend implements DeviceBackend {
   // The manager never uses this field for routing; descriptors carry their platform.
@@ -34,25 +38,27 @@ export class PlatformDeviceBackend implements DeviceBackend {
     return states[0]!;
   }
 
-  async listDevices(options?: DeviceListOptions) {
-    // An absent SDK must not hide iOS, and an absent Xcode must not hide Android.
+  async discoverDevices(): Promise<DeviceDiscovery> {
+    const complete = new Set<DeviceBackend>();
     const devices = await Promise.all(
       [this.ios, this.android].map(async (backend) => {
         try {
           const listed = await backend.listDevices({ includeShutdown: true });
           this.observed.set(backend, listed);
+          complete.add(backend);
           return listed;
         } catch {
-          // A failed SDK probe is not evidence that an owned device shut down.
-          // Keep its last observation so manager reconciliation does not lose ownership.
-          // Input and attachment still revalidate through the actual platform adapter.
+          // Cached SDK failures retain their last observation but never prove absence.
           return this.observed.get(backend) ?? [];
         }
       }),
     );
-    return devices
-      .flat()
-      .filter((device) => options?.includeShutdown || device.state !== "shutdown");
+    return { devices: devices.flat(), completeFor: (udid) => complete.has(this.target(udid)) };
+  }
+
+  async listDevices(options?: DeviceListOptions) {
+    const { devices } = await this.discoverDevices();
+    return devices.filter((device) => options?.includeShutdown || device.state !== "shutdown");
   }
 
   async boot(...args: Parameters<DeviceBackend["boot"]>): ReturnType<DeviceBackend["boot"]> {

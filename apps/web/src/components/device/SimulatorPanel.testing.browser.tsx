@@ -101,6 +101,33 @@ beforeEach(() => {
 });
 
 describe("SimulatorPanel testing readiness", () => {
+  it("shows the SSH testing limitation instead of offering unsupported controls", async () => {
+    const remote = {
+      ...device,
+      udid: "ssh:mac:AAAA-1111",
+      host: { id: "mac", name: "Mac", transport: "ssh" as const },
+    };
+    const store = useDeviceStateStore.getState();
+    const generation = store.environmentById[environmentId]!.generation;
+    store.applyInventory(environmentId, generation, [remote], { kind: "available" });
+    store.applyThreadSnapshot(environmentId, generation, {
+      ...snapshot,
+      version: 2,
+      attachedDeviceUdid: remote.udid,
+      devices: [remote],
+    });
+    const screen = await render(
+      <SimulatorPanel environmentId={environmentId} threadId={threadId} />,
+    );
+    await expect
+      .element(screen.getByText("Simulator testing controls are unavailable on SSH hosts."))
+      .toBeVisible();
+    await expect
+      .element(screen.getByText("Simulator testing", { exact: true }))
+      .not.toBeInTheDocument();
+    expect(mocks.testing).not.toHaveBeenCalled();
+  });
+
   it("disables cached attached devices through reconnect/error until current connection inventory arrives", async () => {
     const screen = await render(
       <SimulatorPanel environmentId={environmentId} threadId={threadId} />,
