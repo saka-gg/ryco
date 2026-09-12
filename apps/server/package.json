@@ -46,6 +46,7 @@
     "@ryco/client-runtime": "workspace:*",
     "@ryco/contracts": "workspace:*",
     "@ryco/shared": "workspace:*",
+    "@ryco/ssh": "workspace:*",
     "@ryco/tailscale": "workspace:*",
     "@ryco/web": "workspace:*",
     "@types/bun": "catalog:",

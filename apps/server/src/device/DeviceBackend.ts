@@ -15,6 +15,7 @@
 import type {
   DeviceAvailability,
   DeviceGeometry,
+  DeviceHostSummary,
   DeviceDescribeUiResult,
   DeviceDescriptor,
   DeviceHardwareButton,
@@ -79,8 +80,19 @@ export interface DeviceKeyEvent {
   readonly direction: "down" | "up";
 }
 
+export interface DeviceDiscovery {
+  readonly devices: readonly DeviceDescriptor[];
+  /** Fresh, complete discovery for this target's host, including shutdown devices. */
+  readonly completeFor: (udid: string) => boolean;
+}
+
 export interface DeviceBackend {
+  /** Optional host-aware discovery; a boot need only wait for its target host. */
+  discoverDevices?(targetUdid?: string): Promise<DeviceDiscovery>;
   readonly platform: DevicePlatform;
+  /** Loss of transport invalidates every attachment on these devices. */
+  hostSummaries?(): readonly DeviceHostSummary[];
+  onDisconnect?(listener: (udids: readonly string[]) => void): () => void;
 
   /**
    * Whether the pane can run at all, and which setup steps remain. Cheap enough

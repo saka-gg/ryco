@@ -2,9 +2,8 @@
  * DeviceServiceLive - one DeviceManager for the server process.
  *
  * The manager exists on every platform so no caller has to branch on `null`;
- * off darwin its backend reports `unsupported-platform` and every device call
- * fails cleanly through the same path a missing Xcode would take. `supported`
- * is what callers use to decide whether to expose the surface at all.
+ * local discovery is unsupported off darwin, but configured SSH hosts remain
+ * available through the same manager and authorization surface.
  *
  * @module device/Layers/DeviceService
  */
@@ -13,8 +12,11 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 
 import { makeBootOwnershipStore, NULL_BOOT_OWNERSHIP } from "../bootOwnership.ts";
+import { HostDeviceBackend } from "../HostDeviceBackend.ts";
+import { SshDeviceBackend } from "../SshDeviceBackend.ts";
+import { readDeviceHostConfig, sshDeviceHostId } from "../deviceHostConfig.ts";
 import { DeviceManager } from "../DeviceManager.ts";
-import { IosSimulatorBackend } from "../IosSimulatorBackend.ts";
+import { localDeviceHost } from "../localDeviceHost.ts";
 import { DeviceService, type DeviceServiceShape } from "../Services/DeviceService.ts";
 import {
   installProcessDeviceToolGateway,
@@ -23,6 +25,7 @@ import {
 
 export interface DeviceServiceLiveOptions {
   readonly platform?: NodeJS.Platform;
+  readonly hostsFile?: string;
   /** Where to remember this run's boots; omit to remember nothing. */
   readonly bootOwnershipPath?: string;
 }
@@ -48,15 +51,26 @@ export function makeDeviceServiceLayer(
     DeviceService,
     Effect.gen(function* () {
       const platform = options.platform ?? process.platform;
-      const backend = new IosSimulatorBackend({ platform });
-      // Only darwin can boot anything, so only darwin needs to remember doing so.
+      const hosts = yield* Effect.promise(() =>
+        readDeviceHostConfig(options.hostsFile ?? process.env.RYCO_DEVICE_HOSTS_FILE),
+      );
+      const supported = platform === "darwin" || hosts.length > 0;
+      const backend = new HostDeviceBackend([
+        localDeviceHost(platform),
+        ...hosts.map((config) => ({
+          host: { id: sshDeviceHostId(config), name: config.name, transport: "ssh" as const },
+          backend: new SshDeviceBackend(config),
+        })),
+      ]);
+      // Local boots are recovered here; SSH workers recover their own boots on the Mac.
       const bootOwnership =
         platform === "darwin"
           ? makeBootOwnershipStore(options.bootOwnershipPath ?? defaultBootOwnershipPath())
           : NULL_BOOT_OWNERSHIP;
       const manager = new DeviceManager({ backend, bootOwnership });
-      const toolGateway =
-        platform === "darwin" ? yield* Effect.promise(() => startDeviceToolGateway(manager)) : null;
+      const toolGateway = supported
+        ? yield* Effect.promise(() => startDeviceToolGateway(manager))
+        : null;
       installProcessDeviceToolGateway(toolGateway);
 
       // A previous run that crashed left its simulators booted and no longer
@@ -83,7 +97,7 @@ export function makeDeviceServiceLayer(
           await manager.dispose();
         }),
       );
-      return { supported: platform === "darwin", manager } satisfies DeviceServiceShape;
+      return { supported, manager } satisfies DeviceServiceShape;
     }),
   );
 }

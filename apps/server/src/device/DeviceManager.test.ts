@@ -348,7 +348,21 @@ describe("DeviceManager stream transition ordering", () => {
     expect(backend.callsOfKind("detachStream")).toHaveLength(1);
   });
 
-  it("lets the latest device win when singleton stream starts overlap", async () => {
+  it("restarts a stream when unsubscribe and resubscribe happen in the same turn", async () => {
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+    const sink = { send: () => undefined, bufferedAmount: () => 0, isOpen: () => true };
+    const unsubscribe = manager.subscribeFrames(DEVICE_A, sink);
+    await waitForStream(backend, DEVICE_A, true);
+    unsubscribe();
+    const stop = manager.subscribeFrames(DEVICE_A, sink);
+    await waitForBackendCall(backend, "attachStream", 2);
+    expect(backend.hasStream(DEVICE_A)).toBe(true);
+    stop();
+    await manager.dispose();
+  });
+
+  it("keeps independent devices streaming when starts overlap", async () => {
     const backend = new FakeDeviceBackend();
     await backend.boot(DEVICE_A);
     await backend.boot(DEVICE_B);
@@ -371,12 +385,32 @@ describe("DeviceManager stream transition ordering", () => {
     allowFirstAttach.resolve();
 
     await waitForStream(backend, DEVICE_B, true);
-    expect(backend.hasStream(DEVICE_A)).toBe(false);
-    expect(backend.callsOfKind("detachStream").map((call) => call.udid)).toContain(DEVICE_A);
+    expect(backend.hasStream(DEVICE_A)).toBe(true);
+    expect(backend.callsOfKind("detachStream")).toHaveLength(0);
   });
 });
 
 describe("DeviceManager boot ownership", () => {
+  it("frees a deleted device's slot after successful discovery, but not after failure", async () => {
+    const backend = new FakeDeviceBackend();
+    const manager = new DeviceManager({ backend, bootLimit: 1 });
+    const list = backend.listDevices.bind(backend);
+    try {
+      await manager.boot(DEVICE_A);
+      backend.listDevices = async () => {
+        throw new Error("discovery unavailable");
+      };
+      expect(await manager.rycoBootedDevices()).toEqual([]);
+      backend.listDevices = list;
+      expect((await manager.boot(DEVICE_B)).kind).toBe("boot-limit-reached");
+      backend.listDevices = async (options) =>
+        (await list(options)).filter((d) => d.udid !== DEVICE_A);
+      expect((await manager.boot(DEVICE_B)).kind).toBe("booted");
+    } finally {
+      await manager.dispose();
+    }
+  });
+
   it("marks devices it booted as ryco-owned and leaves discovered ones alone", async () => {
     const { backend, manager } = makeManager();
     backend.bootExternally(DEVICE_B);
@@ -564,30 +598,24 @@ describe("DeviceManager device switching", () => {
 
     await manager.attach(THREAD_A, DEVICE_B);
 
-    // The device stays up for the thread still watching it. Its stream does
-    // not: the helper holds one attachment, so B's stream replaces A's either
-    // way, and stopping A explicitly is what keeps the manager's record honest
-    // instead of leaving a pane frozen on a stream the helper already dropped.
+    // The other thread retains both its boot and its independent stream.
     expect(backend.callsOfKind("shutdown")).toHaveLength(0);
     await waitForStream(backend, DEVICE_B, true);
-    await waitForStream(backend, DEVICE_A, false);
+    await waitForStream(backend, DEVICE_A, true);
   });
 
-  it("streams one device at a time, because the helper attaches to one", async () => {
+  it("streams devices independently for different threads", async () => {
     const { backend, manager } = makeManager();
     await manager.boot(DEVICE_A);
     await manager.boot(DEVICE_B);
     await manager.attach(THREAD_A, DEVICE_A);
     await waitForStream(backend, DEVICE_A, true);
 
-    // A second thread on a different device: the helper's startStream stops
-    // whatever it was streaming before binding the new one, so believing both
-    // were live left the first pane on a frozen last frame with nothing to
-    // explain it.
+    // Each device has its own native helper binding.
     await manager.attach(THREAD_B, DEVICE_B);
 
     await waitForStream(backend, DEVICE_B, true);
-    await waitForStream(backend, DEVICE_A, false);
+    await waitForStream(backend, DEVICE_A, true);
   });
 
   it("frees the slot for the next boot rather than refusing it", async () => {
@@ -677,6 +705,133 @@ describe("surviving a crash", () => {
 
     expect(reclaimed).toEqual([DEVICE_A]);
     expect(backend.callsOfKind("shutdown").map((call) => call.udid)).toEqual([DEVICE_A]);
+  });
+
+  it("explicit use adopts an orphan while a recovery inventory is in flight", async () => {
+    const owner = makeStore();
+    const { backend, manager } = makeManager(new FakeDeviceBackend(), {
+      bootOwnership: owner.store,
+    });
+    await owner.store.write([DEVICE_A]);
+    backend.bootExternally(DEVICE_A);
+    const list = backend.listDevices.bind(backend);
+    backend.listDevices = async () => {
+      throw new Error("initial discovery failed");
+    };
+    await manager.reclaimOrphanedBoots(() => false);
+    const gate = deferred();
+    let started = false;
+    backend.listDevices = async (options) => {
+      const inventory = await list(options);
+      started = true;
+      await gate.promise;
+      return inventory;
+    };
+    const recovery = manager.reclaimOrphanedBoots(() => false);
+    try {
+      await expect.poll(() => started).toBe(true);
+      backend.listDevices = list;
+      expect((await manager.boot(DEVICE_A)).kind).toBe("booted");
+      await manager.attach(THREAD_A, DEVICE_A);
+      gate.resolve();
+      expect(await recovery).toEqual([]);
+      expect(await manager.reclaimOrphanedBoots(() => false)).toEqual([]);
+      expect(backend.callsOfKind("shutdown")).toEqual([]);
+      expect(owner.saved?.udids).toEqual([DEVICE_A]);
+    } finally {
+      gate.resolve();
+      await recovery;
+      await manager.dispose();
+    }
+  });
+
+  it.each(["boot", "attach"] as const)(
+    "serializes explicit %s after an already dispatched recovery shutdown",
+    async (use) => {
+      const owner = makeStore();
+      const { backend, manager } = makeManager(new FakeDeviceBackend(), {
+        bootOwnership: owner.store,
+      });
+      await owner.store.write([DEVICE_A]);
+      backend.bootExternally(DEVICE_A);
+      const shutdown = backend.shutdown.bind(backend);
+      const gate = deferred();
+      let started = false;
+      backend.shutdown = async (udid) => {
+        started = true;
+        await gate.promise;
+        await shutdown(udid);
+      };
+      const recovery = manager.reclaimOrphanedBoots(() => false);
+      try {
+        await expect.poll(() => started).toBe(true);
+        let completed = false;
+        const explicitUse = (
+          use === "boot" ? manager.boot(DEVICE_A) : manager.attach(THREAD_A, DEVICE_A)
+        ).then(() => {
+          completed = true;
+        });
+        await Promise.resolve();
+        expect(completed).toBe(false);
+        gate.resolve();
+        await recovery;
+        await explicitUse;
+        expect((await backend.listDevices()).find((d) => d.udid === DEVICE_A)?.state).toBe(
+          "booted",
+        );
+        expect(owner.saved?.udids).toEqual([DEVICE_A]);
+        expect(await manager.reclaimOrphanedBoots(() => false)).toEqual([]);
+        expect(backend.callsOfKind("shutdown")).toHaveLength(1);
+      } finally {
+        gate.resolve();
+        await recovery;
+        await manager.dispose();
+      }
+    },
+  );
+
+  it("retains orphan evidence through discovery and shutdown failures, including quit", async () => {
+    const owner = makeStore();
+    const { backend, manager } = makeManager(new FakeDeviceBackend(), {
+      bootOwnership: owner.store,
+    });
+    await owner.store.write([DEVICE_A]);
+    backend.bootExternally(DEVICE_A);
+    const list = backend.listDevices.bind(backend);
+    backend.listDevices = async () => {
+      throw new Error("discovery failed");
+    };
+    expect(await manager.reclaimOrphanedBoots(() => false)).toEqual([]);
+    expect(owner.saved?.udids).toEqual([DEVICE_A]);
+    expect(backend.callsOfKind("shutdown")).toEqual([]);
+    backend.listDevices = list;
+    backend.shutdown = async () => {
+      throw new Error("shutdown failed");
+    };
+    expect(await manager.reclaimOrphanedBoots(() => false)).toEqual([]);
+    expect(owner.saved?.udids).toEqual([DEVICE_A]);
+    await manager.dispose();
+    expect(owner.saved?.udids).toEqual([DEVICE_A]);
+  });
+
+  it("retries failed orphan discovery and releases only confirmed missing records", async () => {
+    const owner = makeStore();
+    const { backend, manager } = makeManager(new FakeDeviceBackend(), {
+      bootOwnership: owner.store,
+    });
+    await owner.store.write([DEVICE_A, DEVICE_B]);
+    backend.bootExternally(DEVICE_A);
+    const list = backend.listDevices.bind(backend);
+    backend.listDevices = async () => {
+      throw new Error("discovery failed");
+    };
+    expect(await manager.reclaimOrphanedBoots(() => false)).toEqual([]);
+    backend.listDevices = async (options) =>
+      (await list(options)).filter((d) => d.udid !== DEVICE_B);
+    expect(await manager.reclaimOrphanedBoots(() => false)).toEqual([DEVICE_A]);
+    expect(owner.saved?.udids).toEqual([]);
+    expect(backend.callsOfKind("shutdown").map((call) => call.udid)).toEqual([DEVICE_A]);
+    await manager.dispose();
   });
 
   it("leaves the devices of a server that is still running", async () => {

@@ -4,10 +4,8 @@ import type { DeviceManager } from "../DeviceManager.ts";
 
 export interface DeviceServiceShape {
   /**
-   * True only where a device backend can actually exist (macOS today). Off
-   * darwin the manager still answers, but every call reports
-   * `unsupported-platform`, and callers use this to hide the surface entirely
-   * rather than offering an agent eleven tools that cannot work.
+   * True for local macOS simulators or configured SSH device hosts. Callers
+   * use this to expose the same policy-gated tools on Linux coding nodes.
    */
   readonly supported: boolean;
   readonly manager: DeviceManager;

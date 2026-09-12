@@ -20,12 +20,7 @@
  *
  * @module device/DeviceManager
  */
-import {
-  NULL_BOOT_OWNERSHIP,
-  orphanedBootUdids,
-  processIsAlive,
-  type BootOwnershipStore,
-} from "./bootOwnership.ts";
+import { NULL_BOOT_OWNERSHIP, processIsAlive, type BootOwnershipStore } from "./bootOwnership.ts";
 import {
   DEVICE_RYCO_BOOT_LIMIT,
   ThreadId,
@@ -50,6 +45,7 @@ import {
 import {
   DeviceBackendError,
   type DeviceBackend,
+  type DeviceDiscovery,
   type DeviceKeyEvent,
   type DeviceSwipeGesture,
 } from "./DeviceBackend.ts";
@@ -162,11 +158,28 @@ export class DeviceManager {
   private readonly threads = new Map<string, ThreadAttachment>();
   /** Devices this manager booted, and therefore may shut down again. */
   private readonly rycoBooted = new Set<string>();
+  /** Dead-owner evidence adopted by this manager until discovery/shutdown confirms release. */
+  private readonly recoveryPending = new Set<string>();
+  private readonly recoveryShutdowns = new Map<string, Promise<void>>();
+  private recoveryInitialized = false;
+  private recoveryTimer: NodeJS.Timeout | undefined;
+  private recoveryWork: Promise<readonly string[]> | undefined;
   private readonly idleTimers = new Map<string, NodeJS.Timeout>();
-  private activeStreamUdid: string | null = null;
-  private desiredStreamUdid: string | null = null;
-  /** Serializes the native helper's single stream while allowing the desired device to change. */
-  private streamTransition: Promise<void> = Promise.resolve();
+  private readonly streams = new Map<
+    string,
+    {
+      active: boolean;
+      activeGeneration: number;
+      desired: boolean;
+      generation: number;
+      transition: Promise<void>;
+    }
+  >();
+  private readonly deviceGenerations = new Map<string, number>();
+  private readonly bootRevisions = new Map<string, number>();
+  private nextBootRevision = 0;
+  private readonly boots = new Map<string, Promise<DeviceBootResult>>();
+  private readonly unsubscribeDisconnect: (() => void) | undefined;
   private readonly recording = new Set<string>();
   private readonly listeners = new Set<DeviceEventListener>();
   private disposed = false;
@@ -182,6 +195,32 @@ export class DeviceManager {
     this.schedule = options.setTimeout ?? ((handler, ms) => setTimeout(handler, ms));
     this.cancel = options.clearTimeout ?? ((handle) => clearTimeout(handle));
     this.now = options.now ?? Date.now;
+    this.unsubscribeDisconnect = this.backend.onDisconnect?.((udids) => {
+      for (const udid of udids) {
+        this.deviceGenerations.set(udid, (this.deviceGenerations.get(udid) ?? 0) + 1);
+        const stream = this.streams.get(udid);
+        if (stream) {
+          stream.desired = false;
+          stream.active = false;
+          stream.generation += 1;
+        }
+        this.transport.resetDevice(udid);
+        if (!this.recoveryPending.has(udid)) this.rycoBooted.delete(udid);
+        this.recording.delete(udid);
+        this.clearIdleTimer(udid);
+      }
+      for (const [threadId, attachment] of this.threads) {
+        if (!attachment.attachedDeviceUdid || !udids.includes(attachment.attachedDeviceUdid))
+          continue;
+        attachment.attachedDeviceUdid = null;
+        attachment.attachToken += 1;
+        attachment.attachPhase = null;
+        attachment.lastError =
+          "Device host disconnected. Refresh devices and select the device again.";
+        void this.publish(threadId).catch(() => undefined);
+      }
+      void this.recordBootOwnership();
+    });
   }
 
   private async recordBootOwnership(): Promise<void> {
@@ -191,7 +230,8 @@ export class DeviceManager {
   /**
    * Shut down simulators a previous run booted and never got to clean up.
    *
-   * Called once at startup. A clean quit leaves an empty record, so this is a
+   * Started at startup and retried while discovery or shutdown is uncertain.
+   * A clean quit leaves an empty record, so this is a
    * no-op; a crash leaves udids behind, and without this they would linger
    * forever, because the next run sees them as user-booted and therefore
    * outside the cap, the idle sweep and the quit-time shutdown alike.
@@ -202,22 +242,75 @@ export class DeviceManager {
   async reclaimOrphanedBoots(
     isProcessAlive: (pid: number) => boolean = processIsAlive,
   ): Promise<readonly string[]> {
-    const recorded = await this.bootOwnership.read().catch(() => null);
-    if (recorded === null || recorded.udids.length === 0) return [];
+    if (this.disposed) return [];
+    if (this.recoveryWork) return this.recoveryWork;
+    if (this.recoveryTimer) this.cancel(this.recoveryTimer);
+    this.recoveryTimer = undefined;
+    const work = this.recoverBoots(isProcessAlive).finally(() => {
+      this.recoveryWork = undefined;
+      if (!this.disposed && (!this.recoveryInitialized || this.recoveryPending.size > 0)) {
+        this.recoveryTimer = this.schedule(() => {
+          this.recoveryTimer = undefined;
+          void this.reclaimOrphanedBoots(isProcessAlive).catch(() => undefined);
+        }, 1000);
+        this.recoveryTimer.unref?.();
+      }
+    });
+    this.recoveryWork = work;
+    return work;
+  }
 
-    const devices = await this.backend.listDevices({ includeShutdown: false }).catch(() => []);
-    const orphans = orphanedBootUdids(
-      recorded,
-      devices.map((device) => device.udid),
-      isProcessAlive,
-    );
-    for (const udid of orphans) {
-      await this.backend.shutdown(udid).catch(() => undefined);
+  private async recoverBoots(isProcessAlive: (pid: number) => boolean): Promise<readonly string[]> {
+    if (!this.recoveryInitialized) {
+      const recorded = await this.bootOwnership.read();
+      if (this.disposed) return [];
+      this.recoveryInitialized = true;
+      if (
+        recorded === null ||
+        recorded.udids.length === 0 ||
+        (recorded.pid > 0 && isProcessAlive(recorded.pid))
+      )
+        return [];
+      for (const udid of recorded.udids) {
+        this.recoveryPending.add(udid);
+        this.rycoBooted.add(udid);
+        this.bootRevisions.set(udid, ++this.nextBootRevision);
+      }
+      // Adopt the dead owner's evidence before any bounded/partial discovery.
+      // Later normal boots and quit must also persist these unresolved reservations.
+      await this.recordBootOwnership();
     }
-    // Cleared even when nothing was shut down: the record described a dead
-    // process, so keeping it would re-run this every start.
-    if (!isProcessAlive(recorded.pid)) await this.bootOwnership.clear().catch(() => undefined);
-    return orphans;
+    if (this.recoveryPending.size === 0) return [];
+    const discovery = await this.discoverForBoot();
+    if (this.disposed) return [];
+    const reclaimed: string[] = [];
+    for (const udid of this.recoveryPending) {
+      if (!discovery.completeFor(udid)) continue;
+      const device = discovery.devices.find((candidate) => candidate.udid === udid);
+      if (device && device.state !== "shutdown") {
+        // Publish the shutdown barrier before yielding. Explicit use either
+        // removes the pending entry first, or waits for this shutdown to finish.
+        const shutdown = (async () => {
+          await this.backend.shutdown(udid);
+          this.rycoBooted.delete(udid);
+          this.recoveryPending.delete(udid);
+          await this.recordBootOwnership();
+        })();
+        this.recoveryShutdowns.set(udid, shutdown);
+        try {
+          await shutdown;
+        } catch {
+          continue;
+        } finally {
+          this.recoveryShutdowns.delete(udid);
+        }
+        reclaimed.push(udid);
+      }
+      this.recoveryPending.delete(udid);
+      this.rycoBooted.delete(udid);
+    }
+    await this.recordBootOwnership();
+    return reclaimed;
   }
 
   /** Waits without holding the process open, and shares the injected scheduler. */
@@ -244,7 +337,11 @@ export class DeviceManager {
   async list(options: { readonly includeShutdown?: boolean } = {}): Promise<DeviceListResult> {
     const availability = await this.backend.availability();
     const devices = await this.discover(availability, options);
-    return { devices, availability };
+    return {
+      devices,
+      availability,
+      ...(this.backend.hostSummaries ? { hosts: this.backend.hostSummaries() } : {}),
+    };
   }
 
   /**
@@ -275,9 +372,9 @@ export class DeviceManager {
 
   /** Devices the pane may offer as shutdown candidates when the cap is hit. */
   async rycoBootedDevices(): Promise<readonly DeviceDescriptor[]> {
-    const devices = await this.backend.listDevices({ includeShutdown: true }).catch(() => []);
-    this.reconcileRycoBooted(devices);
-    return devices
+    const discovery = await this.discoverForBoot();
+    await this.reconcileRycoBooted(discovery);
+    return discovery.devices
       .filter((device) => this.rycoBooted.has(device.udid))
       .map((device) => this.describe(device));
   }
@@ -307,27 +404,78 @@ export class DeviceManager {
    * Reconciled from the listing every caller already has rather than by polling:
    * the cap is only consulted on boot, and that path lists devices anyway.
    */
-  private reconcileRycoBooted(devices: readonly DeviceDescriptor[]): void {
+  private async discoverForBoot(targetUdid?: string): Promise<DeviceDiscovery> {
+    const revisions = new Map(this.bootRevisions);
+    const pendingAtStart = new Set(this.boots.keys());
+    if (targetUdid !== undefined) pendingAtStart.delete(targetUdid);
+    try {
+      const discovery = this.backend.discoverDevices
+        ? await this.backend.discoverDevices(targetUdid)
+        : {
+            devices: await this.backend.listDevices({ includeShutdown: true }),
+            completeFor: () => true,
+          };
+      return {
+        devices: discovery.devices,
+        completeFor: (udid) =>
+          discovery.completeFor(udid) &&
+          !pendingAtStart.has(udid) &&
+          (!this.rycoBooted.has(udid) || revisions.get(udid) === this.bootRevisions.get(udid)),
+      };
+    } catch {
+      return { devices: [], completeFor: () => false };
+    }
+  }
+
+  private async reconcileRycoBooted({ devices, completeFor }: DeviceDiscovery): Promise<void> {
+    let changed = false;
     const running = new Set(
       devices
         .filter((device) => device.state === "booted" || device.state === "booting")
         .map((device) => device.udid),
     );
     for (const udid of this.rycoBooted) {
-      if (running.has(udid)) continue;
+      if (running.has(udid) || this.boots.has(udid) || !completeFor(udid)) continue;
       this.rycoBooted.delete(udid);
+      this.recoveryPending.delete(udid);
+      changed = true;
       this.clearIdleTimer(udid);
     }
+    if (changed) await this.recordBootOwnership();
   }
 
   // ── Boot / shutdown ────────────────────────────────────────────────
 
-  async boot(udid: string): Promise<DeviceBootResult> {
-    const devices = await this.backend.listDevices({ includeShutdown: true }).catch(() => []);
+  /** Explicit use adopts an orphan into normal ownership without freeing its slot. */
+  private claimRecoveredDevice(udid: string): Promise<void> | undefined {
+    if (this.recoveryPending.delete(udid)) {
+      this.bootRevisions.set(udid, ++this.nextBootRevision);
+    }
+    return this.recoveryShutdowns.get(udid);
+  }
+
+  boot(udid: string): Promise<DeviceBootResult> {
+    if (this.disposed) return Promise.reject(new DeviceBackendError("Device manager disposed"));
+    const existing = this.boots.get(udid);
+    if (existing) return existing;
+    const boot = this.bootDevice(udid).finally(() => {
+      this.boots.delete(udid);
+    });
+    this.boots.set(udid, boot);
+    return boot;
+  }
+
+  private async bootDevice(udid: string): Promise<DeviceBootResult> {
+    const recoveryShutdown = this.claimRecoveredDevice(udid);
+    if (recoveryShutdown) await recoveryShutdown.catch(() => undefined);
+    const discovery = await this.discoverForBoot(udid);
+    const { devices } = discovery;
     // Devices that stopped without Ryco doing it still held their slots, so
     // three shutdowns from a shell were enough to make every later boot refuse.
-    this.reconcileRycoBooted(devices);
+    await this.reconcileRycoBooted(discovery);
     const known = devices.find((device) => device.udid === udid) ?? null;
+    if (!known || !discovery.completeFor(udid) || this.disposed)
+      throw new DeviceBackendError("Unknown, disconnected or disposed device");
     // Viewing an already-booted device is uncapped: the cap exists to stop
     // Ryco from accumulating simulators, not to limit what the user watches.
     if (known?.state === "booted") {
@@ -337,7 +485,9 @@ export class DeviceManager {
       return {
         kind: "boot-limit-reached",
         limit: this.bootLimit,
-        rycoBooted: await this.rycoBootedDevices(),
+        rycoBooted: devices
+          .filter((device) => this.rycoBooted.has(device.udid))
+          .map((device) => this.describe(device)),
       };
     }
 
@@ -347,6 +497,7 @@ export class DeviceManager {
     // exists to stop Ryco accumulating multi-gigabyte simulators would be
     // exceeded by however many requests arrived inside that window.
     this.rycoBooted.add(udid);
+    this.bootRevisions.set(udid, ++this.nextBootRevision);
     let device: DeviceDescriptor;
     try {
       device = await this.backend.boot(udid);
@@ -366,10 +517,13 @@ export class DeviceManager {
   }
 
   async shutdown(udid: string): Promise<void> {
+    this.deviceGenerations.set(udid, (this.deviceGenerations.get(udid) ?? 0) + 1);
+    await this.boots.get(udid)?.catch(() => undefined);
     await this.stopRecordingIfActive(udid).catch(() => undefined);
     await this.stopStream(udid);
     await this.backend.shutdown(udid);
     this.rycoBooted.delete(udid);
+    this.recoveryPending.delete(udid);
     await this.recordBootOwnership();
     this.clearIdleTimer(udid);
     // Any thread watching this device loses its attachment rather than pointing
@@ -399,6 +553,14 @@ export class DeviceManager {
    * it was told to show from the first frame of the interaction.
    */
   async attach(threadId: string, udid: string): Promise<ThreadDeviceState> {
+    if (this.disposed) throw new DeviceBackendError("Device manager disposed");
+    const recoveryShutdown = this.claimRecoveredDevice(udid);
+    if (recoveryShutdown) {
+      await recoveryShutdown.catch(() => undefined);
+      const result = await this.boot(udid);
+      if (result.kind !== "booted") throw new DeviceBackendError("Device boot limit reached");
+      if (this.disposed) throw new DeviceBackendError("Device manager disposed");
+    }
     const attachment = this.threadState(threadId);
     const previous = attachment.attachedDeviceUdid;
     // Cleared before releasing: `releaseDevice` asks whether anyone still holds
@@ -412,7 +574,7 @@ export class DeviceManager {
 
     // Already streaming (another thread is watching the same device): there is
     // nothing to wait for, so the phase clears without a round trip.
-    if (this.activeStreamUdid === udid || this.desiredStreamUdid === udid) {
+    if (this.streams.get(udid)?.active) {
       attachment.attachPhase = null;
       return await this.publish(threadId);
     }
@@ -442,13 +604,14 @@ export class DeviceManager {
 
       try {
         const started = await this.startStream(udid);
-        if (!started) return;
+        if (!started || attachment.attachToken !== token || this.disposed) return;
         if (attachment.attachPhase === null && attachment.lastError === null) return;
         attachment.attachPhase = null;
         attachment.lastError = null;
         await this.publish(threadId);
         return;
       } catch (error) {
+        if (attachment.attachToken !== token || this.disposed) return;
         if (!isTransientAttachFailure(error)) {
           attachment.attachPhase = null;
           attachment.lastError = errorMessage(error);
@@ -563,7 +726,9 @@ export class DeviceManager {
     target: DeviceUiTarget,
     options: { readonly maxScrolls?: number | undefined } = {},
   ): Promise<DeviceUiTargetMatch> {
+    const assertCurrent = this.operationGuard(udid);
     const match = await this.scrollToElement(udid, target, options);
+    assertCurrent();
     await this.backend.tap(udid, match.point.x, match.point.y);
     return match;
   }
@@ -587,8 +752,10 @@ export class DeviceManager {
     target: DeviceUiTarget,
     options: { readonly maxScrolls?: number | undefined } = {},
   ): Promise<DeviceUiTargetMatch> {
+    const assertCurrent = this.operationGuard(udid);
     const maxScrolls = options.maxScrolls ?? DEVICE_DEFAULT_MAX_SCROLLS;
     let tree = await this.describeUi(udid);
+    assertCurrent();
     let match = this.locate(tree.root, target);
     let previousPosition: string | null = null;
 
@@ -599,8 +766,11 @@ export class DeviceManager {
         match === null ? this.pageDownStep(tree.root) : planScrollStep(match.node, tree.root);
       if (step === null) return match as DeviceUiTargetMatch;
 
+      assertCurrent();
       await this.backend.swipe(udid, step);
+      assertCurrent();
       tree = await this.describeUi(udid);
+      assertCurrent();
       match = this.locate(tree.root, target);
 
       // A list at its end keeps rendering the same thing; swiping again would
@@ -630,6 +800,17 @@ export class DeviceManager {
   }
 
   /** The match, or null when the label has not been rendered into the tree yet. */
+  private operationGuard(udid: string): () => void {
+    const generation = this.deviceGenerations.get(udid) ?? 0;
+    return () => {
+      if (this.disposed || generation !== (this.deviceGenerations.get(udid) ?? 0)) {
+        throw new DeviceBackendError(
+          "Stale device operation: device host disconnected or lifecycle changed",
+        );
+      }
+    };
+  }
+
   private locate(root: DeviceUiNode, target: DeviceUiTarget): DeviceUiTargetMatch | null {
     try {
       return findTarget(root, target);
@@ -789,20 +970,29 @@ export class DeviceManager {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.recoveryTimer) this.cancel(this.recoveryTimer);
+    await this.recoveryWork?.catch(() => undefined);
     for (const [, timer] of this.idleTimers) this.cancel(timer);
     this.idleTimers.clear();
+    this.unsubscribeDisconnect?.();
+    await Promise.allSettled(this.boots.values());
     // Snapshotted: both loops mutate the set they are walking.
     const recording = Array.from(this.recording);
     const booted = Array.from(this.rycoBooted);
-    this.desiredStreamUdid = null;
-    await this.queueStreamReconciliation().catch(() => undefined);
+    await Promise.allSettled([...this.streams.keys()].map((udid) => this.stopStream(udid)));
     for (const udid of recording) await this.stopRecordingIfActive(udid).catch(() => undefined);
     for (const udid of booted) {
-      await this.backend.shutdown(udid).catch(() => undefined);
+      try {
+        await this.backend.shutdown(udid);
+      } catch {
+        continue;
+      }
       this.rycoBooted.delete(udid);
+      this.recoveryPending.delete(udid);
     }
-    // Nothing is ours any more, so a later start must not adopt these.
-    await this.bootOwnership.clear().catch(() => undefined);
+    // A failed shutdown is still owned; leave evidence for the next process.
+    if (this.rycoBooted.size > 0) await this.recordBootOwnership();
+    else await this.bootOwnership.clear().catch(() => undefined);
     this.listeners.clear();
     await this.backend.dispose().catch(() => undefined);
   }
@@ -847,9 +1037,10 @@ export class DeviceManager {
 
   private async startStream(udid: string): Promise<boolean> {
     if (this.disposed) return false;
-    this.desiredStreamUdid = udid;
-    await this.queueStreamReconciliation();
-    return this.activeStreamUdid === udid;
+    const stream = this.streamState(udid);
+    stream.desired = true;
+    await this.queueStreamReconciliation(udid);
+    return stream.active && stream.desired;
   }
 
   /** Clear stale startup state from every thread now watching this device. */
@@ -881,68 +1072,76 @@ export class DeviceManager {
    * a keyframe from the previous generation.
    */
   async requestKeyframe(udid: string): Promise<void> {
-    if (this.activeStreamUdid !== udid || this.disposed) return;
-    this.desiredStreamUdid = null;
-    await this.queueStreamReconciliation();
-    if (
-      this.disposed ||
-      this.desiredStreamUdid !== null ||
-      this.transport.deviceSubscriberCount(udid) === 0
-    ) {
-      return;
-    }
+    if (!this.streams.get(udid)?.active || this.disposed) return;
+    await this.stopStream(udid);
+    if (this.disposed || this.transport.deviceSubscriberCount(udid) === 0) return;
     await this.startStream(udid);
   }
 
-  private async stopStream(udid: string): Promise<void> {
-    if (this.desiredStreamUdid === udid) {
-      this.desiredStreamUdid = null;
-    } else if (this.desiredStreamUdid !== null || this.activeStreamUdid !== udid) {
-      return;
+  private streamState(udid: string) {
+    let stream = this.streams.get(udid);
+    if (!stream) {
+      stream = {
+        active: false,
+        activeGeneration: -1,
+        desired: false,
+        generation: 0,
+        transition: Promise.resolve(),
+      };
+      this.streams.set(udid, stream);
     }
-    await this.queueStreamReconciliation();
+    return stream;
   }
 
-  private queueStreamReconciliation(): Promise<void> {
-    const transition = this.streamTransition.then(() => this.reconcileStream());
-    this.streamTransition = transition.catch(() => undefined);
+  private async stopStream(udid: string): Promise<void> {
+    const stream = this.streamState(udid);
+    stream.desired = false;
+    stream.generation += 1;
+    this.transport.resetDevice(udid);
+    await this.queueStreamReconciliation(udid);
+  }
+
+  private queueStreamReconciliation(udid: string): Promise<void> {
+    const stream = this.streamState(udid);
+    const transition = stream.transition.then(() => this.reconcileStream(udid));
+    stream.transition = transition.catch(() => undefined);
     return transition;
   }
 
-  private async reconcileStream(): Promise<void> {
+  private async reconcileStream(udid: string): Promise<void> {
+    const stream = this.streamState(udid);
     while (true) {
-      const desired = this.disposed ? null : this.desiredStreamUdid;
-      if (this.activeStreamUdid === desired) return;
-      if (this.activeStreamUdid !== null) {
-        const active = this.activeStreamUdid;
-        this.activeStreamUdid = null;
-        this.transport.resetDevice(active);
-        await this.backend.detachStream(active);
+      const desired = !this.disposed && stream.desired;
+      if (stream.active === desired && (!desired || stream.activeGeneration === stream.generation))
+        return;
+      if (stream.active) {
+        stream.active = false;
+        this.transport.resetDevice(udid);
+        await this.backend.detachStream(udid);
         continue;
       }
-      if (desired === null) return;
-
+      if (!desired) return;
+      const generation = stream.generation;
       try {
-        await this.backend.attachStream(desired, (frame) => {
-          if (this.desiredStreamUdid === desired || this.activeStreamUdid === desired) {
-            this.transport.publish(desired, frame);
-          }
+        await this.backend.attachStream(udid, (frame) => {
+          if (!this.disposed && stream.desired && stream.generation === generation)
+            this.transport.publish(udid, frame);
         });
       } catch (error) {
-        if (!this.disposed && this.desiredStreamUdid === desired) {
-          this.desiredStreamUdid = null;
+        if (!this.disposed && stream.desired && stream.generation === generation) {
+          stream.desired = false;
           throw error;
         }
         continue;
       }
-
-      if (this.disposed || this.desiredStreamUdid !== desired) {
-        this.transport.resetDevice(desired);
-        await this.backend.detachStream(desired);
+      if (this.disposed || !stream.desired || stream.generation !== generation) {
+        this.transport.resetDevice(udid);
+        await this.backend.detachStream(udid);
         continue;
       }
-      this.activeStreamUdid = desired;
-      await this.clearStreamStartupState(desired);
+      stream.active = true;
+      stream.activeGeneration = generation;
+      await this.clearStreamStartupState(udid);
     }
   }
 
@@ -1012,6 +1211,7 @@ export class DeviceManager {
     const availability = await this.backend.availability();
     const devices = await this.discover(availability, { includeShutdown: true });
     return {
+      ...(this.backend.hostSummaries ? { hosts: this.backend.hostSummaries() } : {}),
       threadId: threadId as ThreadDeviceState["threadId"],
       version: attachment.version,
       attachedDeviceUdid: attachment.attachedDeviceUdid as ThreadDeviceState["attachedDeviceUdid"],

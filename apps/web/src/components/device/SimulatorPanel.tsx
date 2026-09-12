@@ -496,6 +496,18 @@ export default function SimulatorPanel(props: {
         </Button>
       </div>
 
+      {threadState?.hosts
+        ?.filter((host) => host.transport === "ssh" && host.status !== "available")
+        .map((host) => (
+          <div
+            key={host.id}
+            role="status"
+            className="border-b border-border/60 px-3 py-2 text-xs text-muted-foreground"
+          >
+            {host.name}: {host.availability ?? "Checking device host…"}
+          </div>
+        ))}
+
       {degraded.length > 0 ? (
         <div className="border-b border-amber-500/20 bg-amber-500/8 px-3 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">
           Limited by this Xcode: {degraded.map((item) => item.id).join(", ")}.
