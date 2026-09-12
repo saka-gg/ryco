@@ -270,4 +270,103 @@ describe("ChatMarkdown", () => {
       await screen.unmount();
     }
   });
+
+  it("retains completed DOM and workspace images across streaming suffix updates", async () => {
+    const prefix = "![Architecture](./assets/diagram.png)\n\n```ts\nconst retained = 1;\n```\n\n";
+    const props = {
+      cwd: "/repo/project",
+      environmentId: EnvironmentId.make("local"),
+      isStreaming: true,
+    };
+    const screen = await render(<ChatMarkdown {...props} text={prefix + "start"} />);
+    try {
+      await vi.waitFor(() => expect(readFileBinaryMock).toHaveBeenCalledTimes(1));
+      const image = document.querySelector("img");
+      const code = document.querySelector("pre code");
+      for (let update = 1; update <= 4; update++) {
+        const tail = `start ${"word ".repeat(update)}end`;
+        await screen.rerender(<ChatMarkdown {...props} text={prefix + tail} />);
+        await vi.waitFor(() => expect(document.body.textContent).toContain(tail));
+        expect(document.querySelector("pre code")).toBe(code);
+        expect(document.querySelector("img")).toBe(image);
+      }
+      expect(readFileBinaryMock).toHaveBeenCalledTimes(1);
+      expect(getSharedHighlighterMock).not.toHaveBeenCalled();
+      await screen.rerender(
+        <ChatMarkdown
+          {...props}
+          isStreaming={false}
+          text={prefix.replace("retained = 1", "final = 2") + "Final update"}
+        />,
+      );
+      await vi.waitFor(() =>
+        expect(codeToHtmlMock).toHaveBeenCalledWith("const final = 2;\n", expect.anything()),
+      );
+      await expect.element(page.getByText("Final update")).toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("refreshes completed link labels and search hits when the suffix or search changes", async () => {
+    const prefix = "needle [one](./src/a.ts)\n\n```ts\nconst search = 1;\n```\n\n";
+    const screen = await render(<ChatMarkdown cwd="/repo" text={prefix} isStreaming />);
+    try {
+      const text = prefix + "needle [two](./other/a.ts)";
+      await screen.rerender(
+        <ChatMarkdown
+          cwd="/repo"
+          text={text}
+          isStreaming
+          searchHighlight={{ query: "needle", activeOccurrenceIndex: 1 }}
+        />,
+      );
+      await expect.element(page.getByRole("link", { name: "a.ts · ./src" })).toBeInTheDocument();
+      await expect.element(page.getByRole("link", { name: "a.ts · ./other" })).toBeInTheDocument();
+      await vi.waitFor(() => expect(document.querySelectorAll("mark")).toHaveLength(2));
+      expect(
+        document.querySelectorAll("mark")[1]?.getAttribute("data-thread-message-search-active"),
+      ).toBe("true");
+      await screen.rerender(
+        <ChatMarkdown
+          cwd="/repo"
+          text={text}
+          isStreaming
+          searchHighlight={{ query: "absent", activeOccurrenceIndex: null }}
+        />,
+      );
+      expect(document.querySelectorAll("mark")).toHaveLength(0);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps streaming attachment manifests hidden and applies a final replacement immediately", async () => {
+    const prefix = "```ts\nconst beforeFiles = 1;\n```\n\n";
+    const screen = await render(
+      <ChatMarkdown
+        cwd="/repo/project"
+        text={prefix + '```ryco-attachments\n{"files":['}
+        isStreaming
+      />,
+    );
+    try {
+      await expect.element(page.getByRole("status")).toHaveTextContent("Preparing files…");
+      const manifest =
+        '```ryco-attachments\n{"files":[{"path":"output/result.png"}]}\n```\n\nReady';
+      await screen.rerender(
+        <ChatMarkdown cwd="/repo/project" text={prefix + manifest} isStreaming />,
+      );
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Ready"));
+      expect(document.body.textContent).not.toContain("output/result.png");
+      // The attachment projection removes manifests on completion. Its final
+      // replacement must bypass the deferred stream and any cached prefix.
+      await screen.rerender(<ChatMarkdown cwd="/repo/project" text="Your files are ready." />);
+      await expect.element(page.getByText("Your files are ready.")).toBeInTheDocument();
+      expect(document.querySelector("[role=status]")).toBeNull();
+      expect(document.body.textContent).not.toContain("beforeFiles");
+    } finally {
+      await screen.unmount();
+    }
+  });
 });
