@@ -238,6 +238,14 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
           }),
         );
       const textGeneration: TextGenerationShape = {
+        answerSideQuestion: () =>
+          Effect.fail(
+            new TextGenerationError({
+              operation: "answerSideQuestion",
+              detail:
+                "ACP Registry agents do not provide an enforceable tool-free side question mode. Select Codex, Claude, or GitHub Copilot for side chat.",
+            }),
+          ),
         generateCommitMessage: () => unsupported("generateCommitMessage"),
         generatePrContent: () => unsupported("generatePrContent"),
         generateBranchName: () => unsupported("generateBranchName"),

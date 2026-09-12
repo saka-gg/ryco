@@ -35,6 +35,27 @@ it.layer(layer)("ACP registry driver", (it) => {
         assert.deepStrictEqual(yield* driver.adapter.listSessions(), []);
       }),
   );
+  it.effect("rejects side questions without starting an ACP session", () =>
+    Effect.gen(function* () {
+      const driver = yield* makeDriver();
+      const error = yield* driver.textGeneration
+        .answerSideQuestion({
+          cwd: process.cwd(),
+          context: "Completed context",
+          question: "Explain this change",
+          history: [],
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("registry-test"),
+            model: "default",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "TextGenerationError");
+      assert.equal(error.operation, "answerSideQuestion");
+      assert.include(error.detail, "tool-free side question mode");
+      assert.deepStrictEqual(yield* driver.adapter.listSessions(), []);
+    }),
+  );
   it.effect("disabled provider reports disabled without starting any agent", () =>
     Effect.gen(function* () {
       const driver = yield* makeDriver(false);
