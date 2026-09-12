@@ -1,3 +1,4 @@
+import { ModelSelection } from "./orchestration.ts";
 import {
   ResourceTelemetrySnapshot,
   ResourceTelemetryHistoryInput,
@@ -394,6 +395,8 @@ export const WS_METHODS = {
 
   // Text generation methods
   textGenerationGenerateIssueContent: "textGeneration.generateIssueContent",
+  textGenerationAskSideQuestion: "textGeneration.askSideQuestion",
+  textGenerationCancelSideQuestion: "textGeneration.cancelSideQuestion",
   textGenerationGenerateBranchName: "textGeneration.generateBranchName",
 
   // Atlassian connection methods
@@ -449,6 +452,30 @@ export const SourceControlCreateIssueWithWorktreeResult = Schema.Struct({
 });
 export type SourceControlCreateIssueWithWorktreeResult =
   typeof SourceControlCreateIssueWithWorktreeResult.Type;
+
+/** Ephemeral questions: context and cwd are always resolved by the server. */
+export const SideQuestionInput = Schema.Struct({
+  threadId: ThreadId,
+  requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  question: TrimmedNonEmptyString.check(Schema.isMaxLength(16_000)),
+  history: Schema.Array(
+    Schema.Struct({
+      question: Schema.String.check(Schema.isMaxLength(16_000)),
+      answer: Schema.String.check(Schema.isMaxLength(32_000)),
+    }),
+  ).check(Schema.isMaxLength(20)),
+  modelSelection: ModelSelection,
+});
+export type SideQuestionInput = typeof SideQuestionInput.Type;
+export const SideQuestionResult = Schema.Struct({
+  requestId: Schema.String,
+  answer: TrimmedNonEmptyString.check(Schema.isMaxLength(32_000)),
+});
+export type SideQuestionResult = typeof SideQuestionResult.Type;
+export const SideQuestionCancelInput = Schema.Struct({
+  requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+});
+export type SideQuestionCancelInput = typeof SideQuestionCancelInput.Type;
 
 export const TextGenerationIssueContentMode = Schema.Literals(["polish", "title"]);
 export type TextGenerationIssueContentMode = typeof TextGenerationIssueContentMode.Type;
@@ -948,6 +975,23 @@ export const WsSourceControlRerunWorkflowRpc = Rpc.make(WS_METHODS.sourceControl
   success: SourceControlWorkflowRerunResult,
   error: Schema.Union([SourceControlProviderError, AuthRpcError]),
 });
+
+export const WsTextGenerationAskSideQuestionRpc = Rpc.make(
+  WS_METHODS.textGenerationAskSideQuestion,
+  {
+    payload: SideQuestionInput,
+    success: SideQuestionResult,
+    error: Schema.Union([AuthRpcError, TextGenerationError]),
+  },
+);
+export const WsTextGenerationCancelSideQuestionRpc = Rpc.make(
+  WS_METHODS.textGenerationCancelSideQuestion,
+  {
+    payload: SideQuestionCancelInput,
+    success: Schema.Struct({}),
+    error: Schema.Union([AuthRpcError, TextGenerationError]),
+  },
+);
 
 export const WsTextGenerationGenerateIssueContentRpc = Rpc.make(
   WS_METHODS.textGenerationGenerateIssueContent,
@@ -1722,6 +1766,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlGetWorkflowRunJobsRpc
   | typeof WsSourceControlGetWorkflowJobLogRpc
   | typeof WsSourceControlRerunWorkflowRpc
+  | typeof WsTextGenerationAskSideQuestionRpc
+  | typeof WsTextGenerationCancelSideQuestionRpc
   | typeof WsTextGenerationGenerateIssueContentRpc
   | typeof WsTextGenerationGenerateBranchNameRpc
   | typeof WsAtlassianListConnectionsRpc
@@ -1869,6 +1915,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlGetWorkflowRunJobsRpc,
   WsSourceControlGetWorkflowJobLogRpc,
   WsSourceControlRerunWorkflowRpc,
+  WsTextGenerationAskSideQuestionRpc,
+  WsTextGenerationCancelSideQuestionRpc,
   WsTextGenerationGenerateIssueContentRpc,
   WsTextGenerationGenerateBranchNameRpc,
   WsAtlassianListConnectionsRpc,

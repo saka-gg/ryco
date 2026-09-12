@@ -1,3 +1,4 @@
+import { sideQuestionDirectory, sideQuestionEnvironment } from "./SideQuestionIsolation.ts";
 /**
  * ClaudeTextGeneration – Text generation layer using the Claude CLI.
  *
@@ -23,6 +24,7 @@ import {
   buildPrContentPrompt,
   buildThreadTitlePrompt,
   buildThreadPriorityPrompt,
+  buildSideQuestionPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
@@ -94,7 +96,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads";
+      | "rankInboxThreads"
+      | "answerSideQuestion";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -119,6 +122,13 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const fastMode =
       fastModeDescriptor?.type === "boolean" ? fastModeDescriptor.currentValue : undefined;
     const settings = {
+      ...(operation === "answerSideQuestion"
+        ? {
+            disableAllHooks: true,
+            autoMemoryEnabled: false,
+            claudeMdExcludes: ["**"],
+          }
+        : {}),
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
       ...(fastMode ? { fastMode: true } : {}),
       ...(ultracode ? { ultracode: true } : {}),
@@ -129,6 +139,18 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         claudeSettings.binaryPath || "claude",
         [
           "-p",
+          ...(operation === "answerSideQuestion"
+            ? [
+                "--no-session-persistence",
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--mcp-config",
+                '{"mcpServers":{}}',
+                "--system-prompt",
+                "Answer only from the supplied context. You have no tools or mutation authority.",
+              ]
+            : []),
           "--output-format",
           "json",
           "--json-schema",
@@ -140,7 +162,10 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           ...(toolsEnabled ? ["--dangerously-skip-permissions"] : ["--tools", ""]),
         ],
         {
-          env: claudeEnvironment,
+          env:
+            operation === "answerSideQuestion"
+              ? sideQuestionEnvironment(claudeEnvironment)
+              : claudeEnvironment,
           cwd,
           shell: process.platform === "win32",
           stdin: {
@@ -357,6 +382,22 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     }
   });
 
+  const answerSideQuestion: TextGenerationShape["answerSideQuestion"] = (input) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* sideQuestionDirectory;
+        const { prompt, outputSchema } = buildSideQuestionPrompt(input);
+        return yield* runClaudeJson({
+          operation: "answerSideQuestion",
+          cwd,
+          prompt,
+          outputSchemaJson: outputSchema,
+          modelSelection: input.modelSelection,
+          toolsEnabled: false,
+        });
+      }),
+    );
+
   const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
     "ClaudeTextGeneration.rankInboxThreads",
   )(function* (input) {
@@ -381,5 +422,6 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     generateThreadTitle,
     generateIssueContent,
     rankInboxThreads,
+    answerSideQuestion,
   } satisfies TextGenerationShape;
 });

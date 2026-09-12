@@ -84,6 +84,27 @@ function waitForFileContent(path: string): Effect.Effect<string> {
 }
 
 it.layer(CursorTextGenerationTestLayer)("CursorTextGeneration", (it) => {
+  it.effect("rejects side questions before starting an unsafe provider runtime", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* makeCursorTextGeneration(
+          Schema.decodeSync(CursorSettings)({ binaryPath: "/missing-side-question-provider" }),
+        );
+        const error = yield* service
+          .answerSideQuestion({
+            cwd: process.cwd(),
+            context: "completed",
+            question: "Why?",
+            history: [],
+            modelSelection: { instanceId: ProviderInstanceId.make("test"), model: "test" },
+          })
+          .pipe(Effect.flip);
+        expect(error.operation).toBe("answerSideQuestion");
+        expect(error.detail).toContain("tool-free side question");
+      }),
+    ),
+  );
+
   it.effect("ranks inbox threads through tool-disabled ACP", () => {
     const requestLogDir = mkdtempSync(path.join(os.tmpdir(), "ryco-cursor-rank-log-"));
     const requestLogPath = path.join(requestLogDir, "requests.ndjson");

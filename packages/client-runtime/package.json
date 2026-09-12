@@ -91,6 +91,10 @@
     "./state/workspace": {
       "types": "./src/state/workspace/index.ts",
       "import": "./src/state/workspace/index.ts"
+    },
+    "./state/side-chat": {
+      "types": "./src/state/side-chat/index.ts",
+      "import": "./src/state/side-chat/index.ts"
     }
   },
   "scripts": {

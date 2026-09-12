@@ -1,3 +1,4 @@
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import type {
   ChangeRequest,
   ComposerSourceControlContext,
@@ -75,6 +76,7 @@ export function useComposerAttachmentMenus(
     composerHighlightedSearchKey,
   } = params;
 
+  const presentationTier = usePresentationTier();
   const composerTriggerKind = composerTrigger?.kind ?? null;
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
@@ -123,6 +125,17 @@ export function useComposerAttachmentMenus(
     }
     if (composerTrigger.kind === "slash-command") {
       const builtInSlashCommandItems = [
+        ...(presentationTier !== "phone"
+          ? [
+              {
+                id: "slash:btw",
+                type: "slash-command" as const,
+                command: "btw" as const,
+                label: "/btw",
+                description: "Ask a read-only side question while the main turn continues",
+              },
+            ]
+          : []),
         {
           id: "slash:model",
           type: "slash-command",
@@ -194,6 +207,7 @@ export function useComposerAttachmentMenus(
     }
     return [];
   }, [
+    presentationTier,
     composerTrigger,
     issueListQuery.data,
     changeRequestListQuery.data,

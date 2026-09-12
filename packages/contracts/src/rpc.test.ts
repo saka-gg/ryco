@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { AtlassianSaveProjectLinkInput } from "./atlassian.ts";
 import { CONTEXT_HANDOFF_WS_METHODS, ORCHESTRATION_WS_METHODS } from "./orchestration.ts";
-import { WS_METHODS, WsRpcGroup } from "./rpc.ts";
+import { SideQuestionInput, SideQuestionResult, WS_METHODS, WsRpcGroup } from "./rpc.ts";
 import { ThreadPriorityEnsureCurrentInput } from "./threadPriority.ts";
 import { StatisticsSnapshot } from "./statistics.ts";
 import { USAGE_CONTRACT_VERSION } from "./usage.ts";
@@ -161,5 +161,28 @@ describe("Statistics contract", () => {
 
   it("keeps the usage contract version explicit", () => {
     expect(USAGE_CONTRACT_VERSION).toBe(1);
+  });
+});
+
+describe("side question RPC contracts", () => {
+  it("accepts bounded answers that remain valid follow-up history", () => {
+    const result = Schema.decodeUnknownSync(SideQuestionResult)({
+      requestId: "q",
+      answer: "x".repeat(32_000),
+    });
+    expect(() =>
+      Schema.decodeUnknownSync(SideQuestionInput)({
+        threadId: "thread",
+        requestId: "followup",
+        question: "Why?",
+        history: [{ question: "Earlier?", answer: result.answer }],
+        modelSelection: { instanceId: "codex", model: "gpt-6" },
+      }),
+    ).not.toThrow();
+    for (const answer of ["", "   ", "x".repeat(32_001)]) {
+      expect(() =>
+        Schema.decodeUnknownSync(SideQuestionResult)({ requestId: "q", answer }),
+      ).toThrow();
+    }
   });
 });

@@ -147,6 +147,15 @@ export interface ProjectionSnapshotQueryShape {
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThread>, ProjectionRepositoryError>;
 
+  /** Bounded successful-turn context, excluding queued and live primary output. */
+  readonly getCompletedSideQuestionContext?: (threadId: ThreadId) => Effect.Effect<
+    {
+      readonly messages: ReadonlyArray<{ readonly role: string; readonly text: string }>;
+      readonly activities: ReadonlyArray<{ readonly kind: string; readonly summary: string }>;
+    },
+    ProjectionRepositoryError
+  >;
+
   /** Read the newest bounded history window for one active thread. */
   readonly getThreadWindow?: (
     input: OrchestrationGetThreadWindowInput,

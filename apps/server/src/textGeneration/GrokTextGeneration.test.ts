@@ -81,6 +81,27 @@ function readJsonRpcRequests(
 }
 
 it.layer(GrokTextGenerationTestLayer)("GrokTextGeneration", (it) => {
+  it.effect("rejects side questions before starting an unsafe provider runtime", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* makeGrokTextGeneration(
+          Schema.decodeSync(GrokSettings)({ binaryPath: "/missing-side-question-provider" }),
+        );
+        const error = yield* service
+          .answerSideQuestion({
+            cwd: process.cwd(),
+            context: "completed",
+            question: "Why?",
+            history: [],
+            modelSelection: { instanceId: ProviderInstanceId.make("test"), model: "test" },
+          })
+          .pipe(Effect.flip);
+        expect(error.operation).toBe("answerSideQuestion");
+        expect(error.detail).toContain("tool-free side question");
+      }),
+    ),
+  );
+
   it.effect("ranks inbox threads through tool-disabled Grok ACP", () => {
     const requestLogDir = mkdtempSync(path.join(os.tmpdir(), "ryco-grok-rank-log-"));
     const requestLogPath = path.join(requestLogDir, "requests.ndjson");

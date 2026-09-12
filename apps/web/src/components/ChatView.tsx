@@ -1,3 +1,8 @@
+import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
+import { readEnvironmentConnection } from "../environments/runtime";
+import { SideChatPanel } from "./SideChatPanel";
+import { useSideChatStore } from "../sideChatStore";
+import { parseSideQuestionCommand } from "@ryco/client-runtime/state/side-chat";
 import { useDeviceName } from "../deviceName";
 import { resolveBuildModeModelSelection } from "../buildMode";
 import { newWorktreeBaseBranch } from "./chat/NewThreadWorkLocation.logic";
@@ -450,6 +455,7 @@ export default function ChatView(props: ChatViewProps) {
   usePerfMark("ChatView");
   const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
   const terminalCapability = useHostedRpcCapability(WS_METHODS.terminalOpen);
+  const sideChatCapability = useHostedRpcCapability(WS_METHODS.textGenerationAskSideQuestion);
   const {
     environmentId,
     threadId,
@@ -1022,6 +1028,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeSavedEnvironmentConnectionState = activeSavedEnvironmentRecord
     ? (activeSavedEnvironmentRuntime?.connectionState ?? "disconnected")
     : "connected";
+  const sideChatConnection = useWsConnectionStatusForEnvironment(environmentId);
   const activeEnvironmentUnavailable =
     activeSavedEnvironmentRecord !== null && activeSavedEnvironmentConnectionState !== "connected";
   const activeSavedEnvironmentId = activeSavedEnvironmentRecord?.environmentId ?? null;
@@ -3368,6 +3375,44 @@ export default function ChatView(props: ChatViewProps) {
     const api = readEnvironmentApi(environmentId);
     // When a turn is already running the submit is queued, so don't let the
     // transient post-dispatch `isSendBusy` window swallow a mid-turn message.
+    const sideQuestion = parseSideQuestionCommand(promptRef.current);
+    if (sideQuestion !== null && presentationTier !== "phone" && activeThreadRef && activeThread) {
+      const sideContext = readComposer()?.getSendContext();
+      if (
+        sideContext &&
+        (sideContext.images.length > 0 ||
+          sideContext.terminalContexts.length > 0 ||
+          sideContext.sourceControlContexts.length > 0)
+      ) {
+        toastManager.add({
+          type: "info",
+          title: "Side questions accept text only",
+          description:
+            "Remove attached images, terminal selections, and source-control references before using /btw.",
+        });
+        return;
+      }
+      const key = scopedThreadKey(activeThreadRef);
+      useSideChatStore.getState().open(key, activeThread.modelSelection, sideQuestion || undefined);
+      const sideApi = readEnvironmentConnection(activeThreadRef.environmentId)?.client
+        .textGeneration;
+      if (
+        sideQuestion &&
+        sideApi &&
+        sideChatCapability.allowed &&
+        sideChatConnection.phase === "connected" &&
+        !isConnecting &&
+        !activeEnvironmentUnavailable
+      ) {
+        void useSideChatStore
+          .getState()
+          .ask(key, { threadId: activeThreadRef.threadId, requestId: randomUUID(), api: sideApi });
+      }
+      promptRef.current = "";
+      setComposerDraftPrompt(composerDraftTarget, "");
+      readComposer()?.resetCursorState();
+      return;
+    }
     const turnActive = phase === "running";
     if (
       !api ||
@@ -4197,6 +4242,17 @@ export default function ChatView(props: ChatViewProps) {
       ref={chatShellRef}
       className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
     >
+      {!isPhoneTier && activeThreadRef ? (
+        <SideChatPanel
+          threadRef={activeThreadRef}
+          providers={providerStatuses}
+          connected={
+            sideChatConnection.phase === "connected" &&
+            !isConnecting &&
+            !activeEnvironmentUnavailable
+          }
+        />
+      ) : null}
       {/* Top bar */}
       <header
         ref={headerOverlayRef}

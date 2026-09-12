@@ -2835,6 +2835,35 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       );
     });
 
+  const getCompletedSideQuestionContext = (threadId: ThreadId) =>
+    sql
+      .withTransaction(
+        Effect.all({
+          messages: sql<{ role: string; text: string }>`
+        SELECT m.role, substr(m.text, 1, 64001) AS text FROM projection_thread_messages m
+        JOIN projection_turns t ON t.thread_id = m.thread_id
+          AND (t.turn_id = m.turn_id OR t.pending_message_id = m.message_id)
+        WHERE m.thread_id = ${threadId} AND t.state = 'completed' AND m.is_streaming = 0
+          AND NOT EXISTS (SELECT 1 FROM projection_thread_sessions s
+            WHERE s.thread_id = t.thread_id AND s.active_turn_id = t.turn_id)
+        ORDER BY m.created_at ASC, m.message_id ASC LIMIT 201
+      `,
+          activities: sql<{ kind: string; summary: string }>`
+        SELECT a.kind, substr(a.summary, 1, 64001) AS summary FROM projection_thread_activities a
+        JOIN projection_turns t ON t.thread_id = a.thread_id AND t.turn_id = a.turn_id
+        WHERE a.thread_id = ${threadId} AND t.state = 'completed'
+          AND NOT EXISTS (SELECT 1 FROM projection_thread_sessions s
+            WHERE s.thread_id = t.thread_id AND s.active_turn_id = t.turn_id)
+        ORDER BY a.created_at ASC, a.activity_id ASC LIMIT 201
+      `,
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.getCompletedSideQuestionContext"),
+        ),
+      );
+
   const getThreadWindow: ProjectionSnapshotQueryShape["getThreadWindow"] = (input) =>
     Effect.gen(function* () {
       const limits = {
@@ -3471,6 +3500,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getWorktreeShellById,
     getThreadDetailById,
     getThreadWindow,
+    getCompletedSideQuestionContext,
     getThreadHistoryPage,
     getThreadMessageById,
     listThreadMessagesByTurn,

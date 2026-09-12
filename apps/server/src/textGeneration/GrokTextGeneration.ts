@@ -327,5 +327,13 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     generateThreadTitle,
     generateIssueContent,
     rankInboxThreads,
+    answerSideQuestion: (_input: Parameters<TextGenerationShape["answerSideQuestion"]>[0]) =>
+      Effect.fail(
+        new TextGenerationError({
+          operation: "answerSideQuestion",
+          detail:
+            "Grok does not provide an enforceable tool-free side question mode. Select Codex, Claude, or GitHub Copilot for side chat.",
+        }),
+      ),
   } satisfies TextGenerationShape;
 });

@@ -28,6 +28,17 @@ describe("shared RPC access policy", () => {
     expect(rpcAccessFor(WS_METHODS.threadPriorityEnsureCurrent)).toBe("operator");
   });
 
+  it("requires current operator authority for side questions and cancellation", () => {
+    for (const method of [
+      WS_METHODS.textGenerationAskSideQuestion,
+      WS_METHODS.textGenerationCancelSideQuestion,
+    ]) {
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method, false)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(true);
+    }
+  });
+
   it("fails closed for missing or stale hosted roles", () => {
     for (const method of [
       WS_METHODS.serverSignalDiagnosticProcess,

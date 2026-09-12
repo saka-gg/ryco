@@ -173,6 +173,29 @@ const advanceIdleClock = Effect.gen(function* () {
 });
 
 it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
+  it.effect("rejects side questions before starting an unsafe provider runtime", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* makeOpenCodeTextGeneration(
+          Schema.decodeSync(OpenCodeSettings)({ binaryPath: "/missing-side-question-provider" }),
+        );
+        const error = yield* service
+          .answerSideQuestion({
+            cwd: process.cwd(),
+            context: "completed",
+            question: "Why?",
+            history: [],
+            modelSelection: { instanceId: ProviderInstanceId.make("test"), model: "test" },
+          })
+          .pipe(Effect.flip);
+        expect(error.operation).toBe("answerSideQuestion");
+        expect(error.detail).toContain("tool-free side question");
+        expect(runtimeMock.state.startCalls).toEqual([]);
+        expect(runtimeMock.state.promptUrls).toEqual([]);
+      }),
+    ),
+  );
+
   it.effect("reuses a warm server across back-to-back requests and closes it after idling", () =>
     withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {
