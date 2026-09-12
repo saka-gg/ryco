@@ -105,6 +105,55 @@ it.effect("loads every project and its history when optional Git identity probes
 });
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("side questions use only successful terminal turns scoped to their thread", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      for (const state of ["completed", "running", "interrupted", "error", "pending"]) {
+        yield* sql`INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, checkpoint_files_json)
+          VALUES ('side-context-thread', ${`side-${state}`}, ${state}, '2026-09-12T00:00:00.000Z', '[]')`;
+      }
+      yield* sql`INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, checkpoint_files_json)
+        VALUES ('another-side-thread', 'foreign-completed', 'completed', '2026-09-12T00:00:00.000Z', '[]')`;
+      for (const state of ["completed", "running", "interrupted", "error", "pending"]) {
+        yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+          VALUES (${`side-message-${state}`}, 'side-context-thread', ${`side-${state}`}, 'assistant', ${state}, 0, '2026-09-12T00:00:00.000Z', '2026-09-12T00:00:00.000Z')`;
+        yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
+          VALUES (${`side-activity-${state}`}, 'side-context-thread', ${`side-${state}`}, 'tool', 'tool', ${state}, '{}', '2026-09-12T00:00:00.000Z')`;
+      }
+      yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('side-streaming', 'side-context-thread', 'side-completed', 'assistant', 'partial', 1, '2026-09-12T00:00:00.000Z', '2026-09-12T00:00:00.000Z')`;
+      // A very long live turn must not displace or count against completed context.
+      for (let index = 0; index < 220; index++) {
+        yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+          VALUES (${`side-active-${index}`}, 'side-context-thread', 'side-running', 'assistant', 'active', 0, '2026-09-12T00:00:01.000Z', '2026-09-12T00:00:01.000Z')`;
+      }
+      yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('side-user', 'side-context-thread', NULL, 'user', 'original question', 0, '2026-09-11T00:00:00.000Z', '2026-09-11T00:00:00.000Z'),
+               ('side-queued', 'side-context-thread', NULL, 'user', 'queued', 0, '2026-09-11T00:00:00.000Z', '2026-09-11T00:00:00.000Z')`;
+      yield* sql`UPDATE projection_turns SET pending_message_id = 'side-user' WHERE turn_id = 'side-completed'`;
+      // Non-streaming assistant items mark a turn completed before its lifecycle ends.
+      yield* sql`UPDATE projection_turns SET state = 'completed' WHERE turn_id = 'side-running'`;
+      yield* sql`INSERT INTO projection_thread_sessions (thread_id, status, active_turn_id, updated_at)
+        VALUES ('side-context-thread', 'running', 'side-running', '2026-09-12T00:00:01.000Z')`;
+      const context = yield* query.getCompletedSideQuestionContext!(
+        ThreadId.make("side-context-thread"),
+      );
+      assert.deepStrictEqual(
+        context.messages.map((message) => message.text),
+        ["original question", "completed"],
+      );
+      assert.deepStrictEqual(
+        context.activities.map((activity) => activity.summary),
+        ["completed"],
+      );
+      yield* sql`DELETE FROM projection_thread_sessions WHERE thread_id = 'side-context-thread'`;
+      yield* sql`DELETE FROM projection_thread_messages WHERE thread_id = 'side-context-thread'`;
+      yield* sql`DELETE FROM projection_thread_activities WHERE thread_id = 'side-context-thread'`;
+      yield* sql`DELETE FROM projection_turns WHERE thread_id IN ('side-context-thread', 'another-side-thread')`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

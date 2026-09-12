@@ -421,6 +421,17 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     }
   });
 
+  // A remote or managed OpenCode server can load configured plugins before session
+  // permissions take effect. A deny-all session alone is not sufficient isolation.
+  const answerSideQuestion: TextGenerationShape["answerSideQuestion"] = () =>
+    Effect.fail(
+      new TextGenerationError({
+        operation: "answerSideQuestion",
+        detail:
+          "OpenCode cannot isolate configured server plugins for a tool-free side question. Select Codex, Claude, or GitHub Copilot for side chat.",
+      }),
+    );
+
   const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
     "OpenCodeTextGeneration.rankInboxThreads",
   )(function* (input) {
@@ -444,5 +455,6 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     generateThreadTitle,
     generateIssueContent,
     rankInboxThreads,
+    answerSideQuestion,
   } satisfies TextGenerationShape;
 });

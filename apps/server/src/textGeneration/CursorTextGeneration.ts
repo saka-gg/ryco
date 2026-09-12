@@ -333,5 +333,13 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     generateThreadTitle,
     generateIssueContent,
     rankInboxThreads,
+    answerSideQuestion: (_input: Parameters<TextGenerationShape["answerSideQuestion"]>[0]) =>
+      Effect.fail(
+        new TextGenerationError({
+          operation: "answerSideQuestion",
+          detail:
+            "Cursor does not provide an enforceable tool-free side question mode. Select Codex, Claude, or GitHub Copilot for side chat.",
+        }),
+      ),
   } satisfies TextGenerationShape;
 });

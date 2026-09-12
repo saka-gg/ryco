@@ -16,6 +16,18 @@ import {
 
 export type TextGenerationProvider = "codex" | "claudeAgent" | "cursor" | "grok" | "opencode";
 
+export interface SideQuestionInput {
+  cwd: string;
+  context: string;
+  question: string;
+  history: ReadonlyArray<{ question: string; answer: string }>;
+  modelSelection: ModelSelection;
+}
+
+export interface SideQuestionResult {
+  answer: string;
+}
+
 export interface CommitMessageGenerationInput {
   cwd: string;
   branch: string | null;
@@ -133,12 +145,18 @@ export interface TextGenerationService {
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
   generateIssueContent(input: IssueContentGenerationInput): Promise<IssueContentGenerationResult>;
   rankInboxThreads(input: RankInboxThreadsInput): Promise<RankInboxThreadsResult>;
+  answerSideQuestion(input: SideQuestionInput): Promise<SideQuestionResult>;
 }
 
 /**
  * TextGenerationShape - Service API for commit/PR text generation.
  */
 export interface TextGenerationShape {
+  /** Answer from a frozen completed-context snapshot in an isolated, tool-free request. */
+  readonly answerSideQuestion: (
+    input: SideQuestionInput,
+  ) => Effect.Effect<SideQuestionResult, TextGenerationError>;
+
   /**
    * Generate a commit message from staged change context.
    */
@@ -193,7 +211,8 @@ type TextGenerationOp =
   | "generateBranchName"
   | "generateThreadTitle"
   | "generateIssueContent"
-  | "rankInboxThreads";
+  | "rankInboxThreads"
+  | "answerSideQuestion";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistryShape,
@@ -216,6 +235,10 @@ const resolveInstance = (
 export const makeTextGenerationFromRegistry = (
   registry: ProviderInstanceRegistryShape,
 ): TextGenerationShape => ({
+  answerSideQuestion: (input) =>
+    resolveInstance(registry, "answerSideQuestion", input.modelSelection.instanceId).pipe(
+      Effect.flatMap((textGeneration) => textGeneration.answerSideQuestion(input)),
+    ),
   generateCommitMessage: (input) =>
     resolveInstance(registry, "generateCommitMessage", input.modelSelection.instanceId).pipe(
       Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),

@@ -1,3 +1,4 @@
+import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -8,6 +9,7 @@ import {
   buildPrContentPrompt,
   buildThreadTitlePrompt,
   buildThreadPriorityPrompt,
+  buildSideQuestionPrompt,
 } from "./TextGenerationPrompts.ts";
 import { limitUnicode, normalizeCliError, sanitizeThreadTitle } from "./TextGenerationUtils.ts";
 import { TextGenerationError } from "@ryco/contracts";
@@ -253,5 +255,19 @@ describe("buildIssueContentTitlePrompt", () => {
     expect(prompt).toContain('"title"');
     expect(prompt).toContain("Safari 17 CORS error");
     expect(prompt).toContain("72");
+  });
+});
+
+describe("buildSideQuestionPrompt", () => {
+  it("bounds answers so successful output remains valid follow-up history", () => {
+    const { outputSchema } = buildSideQuestionPrompt({
+      context: "Completed",
+      question: "Why?",
+      history: [],
+    });
+    const decode = Schema.decodeSync(outputSchema);
+    expect(decode({ answer: "a".repeat(32_000) }).answer).toHaveLength(32_000);
+    expect(() => decode({ answer: "a".repeat(32_001) })).toThrow();
+    expect(() => decode({ answer: "" })).toThrow();
   });
 });

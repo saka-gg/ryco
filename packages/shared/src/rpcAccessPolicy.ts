@@ -159,6 +159,8 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.terminalResize]: "operator",
   [WS_METHODS.terminalRestart]: "operator",
   [WS_METHODS.terminalWrite]: "operator",
+  [WS_METHODS.textGenerationAskSideQuestion]: "operator",
+  [WS_METHODS.textGenerationCancelSideQuestion]: "operator",
   [WS_METHODS.textGenerationGenerateBranchName]: "operator",
   [WS_METHODS.textGenerationGenerateIssueContent]: "operator",
   [WS_METHODS.threadPriorityEnsureCurrent]: "operator",

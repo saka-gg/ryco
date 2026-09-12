@@ -1,3 +1,4 @@
+import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
 import { RpcSerialization } from "effect/unstable/rpc";
@@ -26,6 +27,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeOrchestrationHandlers(ctx),
       ...makeContextHandoffHandlers(ctx),
       ...makeProviderHandlers(ctx),
+      ...makeSideQuestionHandlers(ctx),
       ...makeStatisticsHandlers(ctx),
       ...makeSourceControlHandlers(ctx),
       ...makeProjectHandlers(ctx),
