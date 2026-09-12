@@ -1,3 +1,7 @@
+import { WorkspaceFileSystem } from "../../workspace/Services/WorkspaceFileSystem.ts";
+import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
+import { withInspectionTools } from "../Mcp/inspectionTools.ts";
+import { TerminalManager } from "../../terminal/Services/Manager.ts";
 /**
  * AgentControlMcpServer - Lifecycle owner of the private Agent Control
  * MCP listener.
@@ -29,7 +33,7 @@ import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { makeAgentControlMcpListener } from "../Mcp/listener.ts";
-import { makeAgentControlMcpTools } from "../Mcp/tools.ts";
+import { makeAgentControlMcpTools, withCompleteAgentControlCatalog } from "../Mcp/tools.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
@@ -59,7 +63,10 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const config = yield* Effect.serviceOption(ServerConfig);
   const engine = yield* Effect.serviceOption(OrchestrationEngineService);
 
-  const baseTools = makeAgentControlMcpTools({
+  const files = yield* Effect.serviceOption(WorkspaceFileSystem);
+  const diffs = yield* Effect.serviceOption(CheckpointDiffQuery);
+  const terminals = yield* Effect.serviceOption(TerminalManager);
+  const toolDeps = {
     policy,
     proposals,
     proposalEvents,
@@ -73,6 +80,12 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     ...(Option.isSome(validator) ? { validator: validator.value } : {}),
     ...(Option.isSome(projectPlans) ? { projectPlans: projectPlans.value } : {}),
     getTurnAuthority: registry.getTurnAuthority,
+  };
+  const baseTools = withInspectionTools(makeAgentControlMcpTools(toolDeps), {
+    ...toolDeps,
+    ...(Option.isSome(files) ? { files: files.value } : {}),
+    ...(Option.isSome(diffs) ? { diffs: diffs.value } : {}),
+    ...(Option.isSome(terminals) ? { terminals: terminals.value } : {}),
   });
   const fileTools =
     Option.isSome(config) && Option.isSome(workspaceAccess) && Option.isSome(engine)
@@ -85,13 +98,15 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
           engine: engine.value,
         })
       : baseTools;
-  const tools = withComputerUseTools(fileTools, {
-    ...(Option.isSome(config) && config.value.computerUseBridge
-      ? { config: config.value.computerUseBridge }
-      : {}),
-    policy,
-    registry,
-  });
+  const tools = withCompleteAgentControlCatalog(
+    withComputerUseTools(fileTools, {
+      ...(Option.isSome(config) && config.value.computerUseBridge
+        ? { config: config.value.computerUseBridge }
+        : {}),
+      policy,
+      registry,
+    }),
+  );
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

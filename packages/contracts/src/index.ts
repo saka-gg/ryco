@@ -43,3 +43,5 @@ export * from "./resourceTelemetry.ts";
 export * from "./computerUse.ts";
 
 export * from "./projectBrowser.ts";
+
+export * from "./agentControlInspection.ts";

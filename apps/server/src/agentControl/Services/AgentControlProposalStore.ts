@@ -47,6 +47,8 @@ import type {
 import type { AgentControlTransitionActor } from "../transitions.ts";
 
 export interface SubmitAgentControlProposalInput {
+  /** Set only after private session validation; the store independently classifies the plan. */
+  readonly authorizeRoutine?: boolean;
   readonly principal: AgentControlPrincipal;
   readonly requestId: AgentControlRequestId;
   readonly plan: AgentControlActionPlan;

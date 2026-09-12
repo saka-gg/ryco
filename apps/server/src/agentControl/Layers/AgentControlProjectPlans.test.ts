@@ -216,3 +216,53 @@ it.effect("captures revisions and exact thread targets, then rejects stale proje
     }).pipe(Effect.provide(NodeServices.layer)),
   ),
 );
+
+it.effect(
+  "captures project preferences and rejects stale edits with the shared revision guard",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs
+          .makeTempDirectoryScoped({ prefix: "ryco-ac-preferences-" })
+          .pipe(Effect.flatMap((path) => fs.realPath(path)));
+        const snapshot = {
+          snapshotSequence: 1,
+          projects: [project(root)],
+          threads: [],
+          updatedAt: NOW,
+        };
+        yield* Effect.gen(function* () {
+          const plans = yield* AgentControlProjectPlans;
+          const update = yield* plans.prepareUpdate({
+            projectId: ProjectId.make("project-1"),
+            expectedUpdatedAt: NOW,
+            defaultModelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "test-model",
+            },
+            customSystemPrompt: "Keep changes focused.",
+            scripts: [
+              {
+                id: "test",
+                name: "Test",
+                command: "bun run test",
+                icon: "test",
+                runOnWorktreeCreate: false,
+              },
+            ],
+            preferredRemoteName: "origin",
+          });
+          assert.strictEqual(update.before.defaultModelSelection, null);
+          assert.strictEqual(update.after.defaultModelSelection?.model, "test-model");
+          assert.strictEqual(update.after.scripts?.[0]?.command, "bun run test");
+          yield* plans.revalidate(update);
+          snapshot.projects = [{ ...project(root), updatedAt: "2026-08-18T00:01:00.000Z" }];
+          assert.strictEqual(
+            (yield* plans.revalidate(update).pipe(Effect.flip)).reason,
+            "project-stale",
+          );
+        }).pipe(Effect.provide(makeLayer(root, () => Effect.succeed(snapshot))));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);

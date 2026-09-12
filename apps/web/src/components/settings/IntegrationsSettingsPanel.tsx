@@ -65,7 +65,8 @@ function NodeIntegrationsSettingsPanel() {
             </h2>
             <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground/80">
               Ryco sessions receive the tools automatically. Connect supported standalone provider
-              profiles with one click. Every requested change still waits for explicit approval.
+              profiles with one click. Routine private-session actions run directly. Destructive and
+              security-sensitive changes require approval.
             </p>
             <p className="mt-2 max-w-2xl text-xs leading-relaxed text-muted-foreground">
               {enabled

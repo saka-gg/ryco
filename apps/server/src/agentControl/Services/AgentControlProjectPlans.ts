@@ -1,5 +1,6 @@
 import type {
   AgentControlCreateProjectPlan,
+  AgentControlProjectPreferences,
   AgentControlRemoveProjectPlan,
   AgentControlUpdateProjectPlan,
   IsoDateTime,
@@ -16,7 +17,7 @@ export interface PrepareAgentControlProjectCreateInput {
   readonly workspaceRoot: string;
 }
 
-export interface PrepareAgentControlProjectUpdateInput {
+export interface PrepareAgentControlProjectUpdateInput extends AgentControlProjectPreferences {
   readonly projectId: ProjectId;
   readonly expectedUpdatedAt: IsoDateTime;
   readonly title?: string | undefined;

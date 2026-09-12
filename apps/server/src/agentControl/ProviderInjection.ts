@@ -95,7 +95,7 @@ export const agentControlSupportForDriver = (
 
 export const agentControlHostContext = (available: boolean): string =>
   available
-    ? "Ryco Agent Control tools (ryco_*) are available through the private 'ryco' MCP server. Control write tools create approval requests. When available, ryco_attach_file directly delivers a workspace file to this conversation. If the server rejects access, treat the tools as unavailable instead of retrying."
+    ? "Ryco Agent Control tools (ryco_*) are available through the private MCP server. Use ryco_capabilities to discover provider instances/models, ryco_create_threads with envMode worktree for isolated work, ryco_read_thread and ryco_inspect_thread for messages, subagents, plans and status, and ryco_wait_threads to follow work. Routine changes execute asynchronously; use the returned receipt to verify execution. Destructive and security-sensitive changes require approval. Never approve your own pending requests. When available, ryco_attach_file directly delivers a workspace file to this conversation. If the server rejects access, treat the tools as unavailable instead of retrying."
     : "Ryco Agent Control tools (ryco_*) are unavailable for this provider session. Do not claim or attempt to use them.";
 
 export type AgentControlProviderBridge = Pick<

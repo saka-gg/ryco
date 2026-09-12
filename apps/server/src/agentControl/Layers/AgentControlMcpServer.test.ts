@@ -263,6 +263,10 @@ it.live("speaks the MCP protocol: initialize, ping, tools/list, tools/call", () 
           AGENT_CONTROL_MCP_TOOLS.readControlRequest,
           AGENT_CONTROL_MCP_TOOLS.waitForControlRequest,
           AGENT_CONTROL_MCP_TOOLS.settingsSummary,
+          AGENT_CONTROL_MCP_TOOLS.proposeProjectCreate,
+          AGENT_CONTROL_MCP_TOOLS.proposeProjectUpdate,
+          AGENT_CONTROL_MCP_TOOLS.proposeProjectRemove,
+          AGENT_CONTROL_MCP_TOOLS.proposeSettingsChange,
         ].toSorted(),
       );
 

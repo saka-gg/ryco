@@ -190,6 +190,11 @@ function planPresentation(proposal: AgentControlProposal): {
     case "updateThread": {
       const changes: string[] = [];
       if (plan.title !== undefined) changes.push(`Title: ${plan.title}`);
+      if (plan.modelSelection !== undefined)
+        changes.push(`Model: ${JSON.stringify(plan.modelSelection)}`);
+      if (plan.runtimeMode !== undefined) changes.push(`Runtime permissions: ${plan.runtimeMode}`);
+      if (plan.interactionMode !== undefined) changes.push(`Interaction: ${plan.interactionMode}`);
+      if (plan.tokenMode !== undefined) changes.push(`Token mode: ${plan.tokenMode}`);
       if (plan.archived !== undefined) {
         changes.push(plan.archived ? "Archive thread" : "Unarchive thread");
       }
@@ -238,6 +243,7 @@ function planPresentation(proposal: AgentControlProposal): {
               `Workspace path: ${plan.before.workspaceRoot}`,
               `Repository identity: ${plan.before.repositoryIdentityKey ?? "none"}`,
               `Expected revision: ${plan.before.updatedAt}`,
+              ...projectPreferenceLines(plan.before),
             ],
           },
           {
@@ -246,6 +252,7 @@ function planPresentation(proposal: AgentControlProposal): {
               `Display name: ${plan.after.title}`,
               `Workspace path: ${plan.after.workspaceRoot}`,
               `Repository identity: ${plan.after.repositoryIdentityKey ?? "none"}`,
+              ...projectPreferenceLines(plan.after),
             ],
           },
         ],
@@ -562,4 +569,16 @@ export function buildAgentControlProposalCardModel(
     affectedProjectIds: execution.affectedProjectIds,
     detailSections: plan.detailSections,
   };
+}
+
+function projectPreferenceLines(
+  value: import("@ryco/contracts").AgentControlProjectPreferences,
+): string[] {
+  return Object.entries(value)
+    .filter(([key]) =>
+      ["defaultModelSelection", "customSystemPrompt", "scripts", "preferredRemoteName"].includes(
+        key,
+      ),
+    )
+    .map(([key, value]) => `${key}: ${JSON.stringify(value)}`);
 }

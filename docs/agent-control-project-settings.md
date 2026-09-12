@@ -11,7 +11,8 @@ write a projection, or touch workspace contents.
   project id, display name, canonical workspace root, metadata directory, and
   repository identity. Execution dispatches `project.create` with directory
   creation disabled.
-- `updateProject` changes only the display name and/or canonical workspace root.
+- `updateProject` changes the display name, canonical workspace root, default model selection, custom system prompt,
+  scripts, and/or preferred remote.
   The plan records exact before/after values, repository identities, and the
   expected `updatedAt` revision.
 - `removeProject` unlinks the Ryco project record. The plan records the exact
@@ -25,27 +26,22 @@ workspace normalization, repository identity, projection snapshot, and caller
 project-scope checks. Execution revalidates the exact project revision, paths,
 repository identity, thread set, and target availability.
 
-## Settings allowlist and current prerequisite
+## Routine preferences and approval
 
-The typed non-secret allowlist is deliberately limited to:
+Private-session project title, default model and preferred remote updates execute automatically.
+Workspace changes, script edits and custom system prompt edits still require approval. The immutable
+plan includes before/after preferences, and the project revision guard rejects stale updates.
+Previously persisted plans without preference fields remain readable and do not reset preferences.
 
-- `legacyTokenStreaming` (`enableLegacyTokenStreaming`)
-- `providerUpdateChecks` (`enableProviderUpdateChecks`)
+The global settings allowlist contains only `legacyTokenStreaming` (`enableLegacyTokenStreaming`)
+and `providerUpdateChecks` (`enableProviderUpdateChecks`). These non-secret boolean preferences
+can execute for a private session through the same durable executor. Execution verifies the captured
+before value and refuses stale requests. The settings service persists only the selected key.
 
-The settings summary exposes only these boolean values and marks mutation as
-unsupported. The current node can require an owner role for the approval RPC,
-but it cannot carry authoritative, fresh reauthentication evidence from that
-approval into executor-time revalidation. Consequently settings changes fail
-closed before proposal persistence, again at approval if a proposal was
-created through an internal trusted service, and again during execution. No
-setting is mutated until an owner step-up authority with freshness and replay
-semantics exists at both boundaries.
-
-The allowlist structurally excludes secrets and credentials; provider command,
-environment, and connection configuration; MCP server command, URL, and auth
-configuration; remote, relay, hosted-Hub, authentication, filesystem-root, and
-network-exposure configuration; Agent Control policy; and all other settings.
-There is no generic key/value or JSON-patch settings interface.
+Secrets, credentials, provider commands and environment, MCP connection/auth configuration,
+remote/relay/hosted authentication, filesystem roots, network exposure and Agent Control policy
+remain outside the schema. There is no generic settings JSON patch tool. Standalone external
+integrations cannot change global settings or manage projects.
 
 ## Audit and approval presentation
 
