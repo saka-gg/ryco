@@ -1,3 +1,5 @@
+import { DEFAULT_WORKTREE_BRANCH_PREFIX } from "@ryco/contracts";
+import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -114,8 +116,11 @@ const threadIdFor = (operationId: AgentControlOperationId, index: number): Threa
 const worktreeIdFor = (operationId: AgentControlOperationId, index: number): WorktreeId =>
   WorktreeId.make(`worktree-agent-control-${operationSlug(operationId)}-${index + 1}`);
 
-const branchFor = (operationId: AgentControlOperationId, index: number): string =>
-  `ryco/agent-control-${operationSlug(operationId)}-${index + 1}`;
+const branchFor = (operationId: AgentControlOperationId, index: number, prefix: string): string =>
+  buildGeneratedWorktreeBranchName(
+    `agent-control-${operationSlug(operationId)}-${index + 1}`,
+    prefix,
+  );
 
 const messageIdFor = (operationId: AgentControlOperationId, step: string): MessageId =>
   MessageId.make(`message-agent-control-${operationSlug(operationId)}-${step}`);
@@ -813,12 +818,16 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             readonly baseRef: string;
           }>;
 
+          const worktreeBranchPrefix = Option.isSome(settingsService)
+            ? (yield* settingsService.value.getSettings).worktreeBranchPrefix
+            : DEFAULT_WORKTREE_BRANCH_PREFIX;
+
           // Entire batch preflight completes before any thread command is dispatched.
           for (const [index, entry] of entries.entries()) {
             if (entry.envMode !== "worktree") continue;
             const project = snapshot.projects.find((candidate) => candidate.id === entry.projectId);
             if (!project) return yield* Effect.fail(new Error("Requested project is unavailable."));
-            const branch = branchFor(operation.operationId, index);
+            const branch = branchFor(operation.operationId, index, worktreeBranchPrefix);
             const checkoutPath = resolveWorktreeCheckoutPath({
               location: undefined,
               appWorktreesRoot: managedWorktreesRoot,

@@ -24,6 +24,14 @@ describe("shared RPC access policy", () => {
     expect(rpcAccessFor(ORCHESTRATION_WS_METHODS.searchThreadMessages)).toBe("viewer");
     expect(rpcAccessFor(AGENT_CONTROL_WS_METHODS.listProposals)).toBe("owner");
     expect(rpcAccessFor(AGENT_CONTROL_WS_METHODS.acceptProposal)).toBe("owner");
+    expect(rpcAccessFor(WS_METHODS.sourceControlGetChangeRequestFilesViewed)).toBe("operator");
+    expect(rpcAccessFor(WS_METHODS.sourceControlSetChangeRequestFileViewed)).toBe("operator");
+    expect(
+      hostedRoleAllows("owner", WS_METHODS.sourceControlSetChangeRequestFileViewed, false),
+    ).toBe(false);
+    expect(hostedRoleAllows("viewer", WS_METHODS.sourceControlSetChangeRequestFileViewed)).toBe(
+      false,
+    );
     expect(rpcAccessFor(WS_METHODS.sourceControlMergeChangeRequest)).toBe("operator");
     expect(rpcAccessFor(WS_METHODS.threadPriorityEnsureCurrent)).toBe("operator");
   });

@@ -466,11 +466,22 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       sourceControl,
     );
 
+    // Resolve the node-owned default at creation time, including for queued drafts.
+    let worktreeBranchPrefix: string | undefined;
+    if (
+      worktree.baseBranchForWorktree &&
+      !worktree.shouldMaterializeLegacyBranchWorktree &&
+      !worktree.worktreeBranchName
+    ) {
+      if (!api.server) throw new Error("Server settings are unavailable for worktree creation.");
+      worktreeBranchPrefix = (await api.server.getSettings()).worktreeBranchPrefix;
+    }
     const bootstrap = buildSendTurnBootstrap({
       isLocalDraftThread: thread.isLocalDraftThread,
       baseBranchForWorktree: worktree.baseBranchForWorktree,
       fetchOrigin: worktree.fetchOrigin,
       worktreeBranchName: worktree.worktreeBranchName,
+      worktreeBranchPrefix,
       shouldMaterializeLegacyBranchWorktree: worktree.shouldMaterializeLegacyBranchWorktree,
       projectId: project.projectId,
       projectCwd: project.projectCwd,

@@ -854,3 +854,159 @@ describe("GitHubCli.layer", () => {
     );
   });
 });
+
+describe("pull request viewed files", () => {
+  const identity = {
+    id: "PR_42",
+    headRefOid: "head",
+    url: "https://github.example/acme/repo/pull/42",
+  };
+  const respond = (value: unknown) =>
+    mockRun.mockReturnValueOnce(Effect.succeed(processOutput(JSON.stringify(value))));
+  const page = (
+    nodes: ReadonlyArray<{ path: string; viewerViewedState: string }>,
+    hasNextPage = false,
+    endCursor: string | null = null,
+    headRefOid = "head",
+  ) => ({ data: { node: { headRefOid, files: { nodes, pageInfo: { hasNextPage, endCursor } } } } });
+
+  it.effect("paginates native review state and uses the resolved enterprise host", () =>
+    Effect.gen(function* () {
+      respond(identity);
+      respond(page([{ path: "one.ts", viewerViewedState: "VIEWED" }], true, "next"));
+      respond(
+        page([
+          { path: "two.ts", viewerViewedState: "DISMISSED" },
+          { path: "three.ts", viewerViewedState: "UNVIEWED" },
+        ]),
+      );
+      const gh = yield* GitHubCli.GitHubCli;
+      const result = yield* gh.getPullRequestFilesViewed({ cwd: "/repo", reference: "42" });
+      expect(result).toEqual({
+        provider: "github",
+        capability: { storage: "host" },
+        headSha: "head",
+        files: [
+          { path: "one.ts", state: "viewed" },
+          { path: "two.ts", state: "stale" },
+          { path: "three.ts", state: "unviewed" },
+        ],
+      });
+      expect(mockRun.mock.calls[1]?.[0].args).toContain("github.example");
+      expect(mockRun.mock.calls[2]?.[0].args).toContain("cursor=next");
+      expect(mockRun.mock.calls.some(([input]) => input.args.includes("diff"))).toBe(false);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("rejects incomplete pagination rather than returning partial progress", () =>
+    Effect.gen(function* () {
+      respond(identity);
+      respond(page([], true, null));
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .getPullRequestFilesViewed({ cwd: "/repo", reference: "42" })
+        .pipe(Effect.flip);
+      expect(error.detail).toContain("pagination");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("rejects unknown native states", () =>
+    Effect.gen(function* () {
+      respond(identity);
+      respond(page([{ path: "a", viewerViewedState: "UNKNOWN" }]));
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .getPullRequestFilesViewed({ cwd: "/repo", reference: "42" })
+        .pipe(Effect.flip);
+      expect(error.detail).toContain("Invalid viewed file response");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("rejects a push during pagination", () =>
+    Effect.gen(function* () {
+      respond(identity);
+      respond(page([], false, null, "new-head"));
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .getPullRequestFilesViewed({ cwd: "/repo", reference: "42" })
+        .pipe(Effect.flip);
+      expect(error.detail).toContain("changed while loading");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("refuses to mark a stale displayed diff", () =>
+    Effect.gen(function* () {
+      respond(identity);
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .setPullRequestFileViewed({
+          cwd: "/repo",
+          reference: "42",
+          path: "a",
+          viewed: true,
+          expectedHeadSha: "old",
+        })
+        .pipe(Effect.flip);
+      expect(error.detail).toContain("Refresh the diff");
+      expect(mockRun).toHaveBeenCalledTimes(1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  for (const viewed of [true, false]) {
+    it.effect(`persists ${viewed ? "viewed" : "unviewed"} without retrieving a diff`, () =>
+      Effect.gen(function* () {
+        respond(identity);
+        const mutation = viewed ? "markFileAsViewed" : "unmarkFileAsViewed";
+        respond({ data: { [mutation]: { pullRequest: identity } } });
+        const gh = yield* GitHubCli.GitHubCli;
+        const result = yield* gh.setPullRequestFileViewed({
+          cwd: "/repo",
+          reference: "42",
+          path: " a $file.ts ",
+          viewed,
+          expectedHeadSha: "head",
+        });
+        expect(result).toEqual({
+          path: " a $file.ts ",
+          state: viewed ? "viewed" : "unviewed",
+          headSha: "head",
+        });
+        expect(mockRun.mock.calls[1]?.[0].args).toContain("path= a $file.ts ");
+        expect(mockRun).toHaveBeenCalledTimes(2);
+      }).pipe(Effect.provide(layer)),
+    );
+  }
+
+  it.effect("undoes a mark raced by a push", () =>
+    Effect.gen(function* () {
+      respond(identity);
+      respond({ data: { markFileAsViewed: { pullRequest: { ...identity, headRefOid: "new" } } } });
+      respond({ data: { unmarkFileAsViewed: { pullRequest: { id: identity.id } } } });
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .setPullRequestFileViewed({
+          cwd: "/repo",
+          reference: "42",
+          path: "a",
+          viewed: true,
+          expectedHeadSha: "head",
+        })
+        .pipe(Effect.flip);
+      expect(error.detail).toContain("changed while updating");
+      expect(mockRun.mock.calls[2]?.[0].args.join(" ")).toContain("unmarkFileAsViewed");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("discards a diff if its head changed during retrieval", () =>
+    Effect.gen(function* () {
+      respond(identity);
+      mockRun.mockReturnValueOnce(Effect.succeed(processOutput("diff contents")));
+      respond({ ...identity, headRefOid: "new" });
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .getPullRequestDiff({ cwd: "/repo", reference: "42", expectedHeadSha: "head" })
+        .pipe(Effect.flip);
+      expect(error.detail).toContain("changed while loading the diff");
+    }).pipe(Effect.provide(layer)),
+  );
+});

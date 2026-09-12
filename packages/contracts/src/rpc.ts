@@ -221,6 +221,10 @@ import {
   ThreadPriorityRpcError,
 } from "./threadPriority.ts";
 import {
+  SourceControlGetChangeRequestFilesViewedInput,
+  SourceControlChangeRequestFilesViewed,
+  SourceControlSetChangeRequestFileViewedInput,
+  SourceControlSetChangeRequestFileViewedResult,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
   SourceControlDiscoveryResult,
@@ -388,6 +392,8 @@ export const WS_METHODS = {
   sourceControlListChangeRequests: "sourceControl.listChangeRequests",
   sourceControlSearchChangeRequests: "sourceControl.searchChangeRequests",
   sourceControlGetChangeRequestDetail: "sourceControl.getChangeRequestDetail",
+  sourceControlGetChangeRequestFilesViewed: "sourceControl.getChangeRequestFilesViewed",
+  sourceControlSetChangeRequestFileViewed: "sourceControl.setChangeRequestFileViewed",
   sourceControlGetChangeRequestDiff: "sourceControl.getChangeRequestDiff",
   sourceControlMergeChangeRequest: "sourceControl.mergeChangeRequest",
   sourceControlCreateIssue: "sourceControl.createIssue",
@@ -908,12 +914,30 @@ export const WsSourceControlGetChangeRequestDetailRpc = Rpc.make(
   },
 );
 
+export const WsSourceControlGetChangeRequestFilesViewedRpc = Rpc.make(
+  WS_METHODS.sourceControlGetChangeRequestFilesViewed,
+  {
+    payload: SourceControlGetChangeRequestFilesViewedInput,
+    success: SourceControlChangeRequestFilesViewed,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+export const WsSourceControlSetChangeRequestFileViewedRpc = Rpc.make(
+  WS_METHODS.sourceControlSetChangeRequestFileViewed,
+  {
+    payload: SourceControlSetChangeRequestFileViewedInput,
+    success: SourceControlSetChangeRequestFileViewedResult,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
 export const WsSourceControlGetChangeRequestDiffRpc = Rpc.make(
   WS_METHODS.sourceControlGetChangeRequestDiff,
   {
     payload: Schema.Struct({
       cwd: Schema.String,
       reference: Schema.String,
+      expectedHeadSha: Schema.optional(TrimmedNonEmptyString),
     }),
     success: Schema.String,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
@@ -1780,6 +1804,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlListChangeRequestsRpc
   | typeof WsSourceControlSearchChangeRequestsRpc
   | typeof WsSourceControlGetChangeRequestDetailRpc
+  | typeof WsSourceControlGetChangeRequestFilesViewedRpc
+  | typeof WsSourceControlSetChangeRequestFileViewedRpc
   | typeof WsSourceControlGetChangeRequestDiffRpc
   | typeof WsSourceControlMergeChangeRequestRpc
   | typeof WsSourceControlCreateIssueRpc
@@ -1931,6 +1957,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlListChangeRequestsRpc,
   WsSourceControlSearchChangeRequestsRpc,
   WsSourceControlGetChangeRequestDetailRpc,
+  WsSourceControlGetChangeRequestFilesViewedRpc,
+  WsSourceControlSetChangeRequestFileViewedRpc,
   WsSourceControlGetChangeRequestDiffRpc,
   WsSourceControlMergeChangeRequestRpc,
   WsSourceControlCreateIssueRpc,

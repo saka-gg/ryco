@@ -105,6 +105,9 @@ const runtimeMock = {
     messages: [] as MessageEntry[],
     children: [] as Array<unknown>,
     subscribedEvents: [] as unknown[],
+    subscribeError: null as Error | null,
+    streamReadError: null as Error | null,
+    startupOrder: [] as string[],
   },
   reset() {
     this.state.startCalls.length = 0;
@@ -128,6 +131,9 @@ const runtimeMock = {
     this.state.messages = [];
     this.state.children = [];
     this.state.subscribedEvents = [];
+    this.state.subscribeError = null;
+    this.state.streamReadError = null;
+    this.state.startupOrder = [];
   },
 };
 
@@ -211,7 +217,10 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             throw runtimeMock.state.promptAsyncError;
           }
         },
-        messages: async () => ({ data: runtimeMock.state.messages }),
+        messages: async () => {
+          runtimeMock.state.startupOrder.push("history");
+          return { data: runtimeMock.state.messages };
+        },
         children: async () => ({ data: runtimeMock.state.children }),
         revert: async ({ sessionID, messageID }: { sessionID: string; messageID?: string }) => {
           runtimeMock.state.revertCalls.push({
@@ -233,13 +242,18 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         },
       },
       event: {
-        subscribe: async () => ({
-          stream: (async function* () {
-            for (const event of runtimeMock.state.subscribedEvents) {
-              yield event;
-            }
-          })(),
-        }),
+        subscribe: async () => {
+          if (runtimeMock.state.subscribeError) throw runtimeMock.state.subscribeError;
+          return {
+            stream: (async function* () {
+              runtimeMock.state.startupOrder.push("stream");
+              if (runtimeMock.state.streamReadError) throw runtimeMock.state.streamReadError;
+              for (const event of runtimeMock.state.subscribedEvents) {
+                yield event;
+              }
+            })(),
+          };
+        },
       },
       permission: {
         list: async () => ({ data: runtimeMock.state.pendingPermissions }),
@@ -331,7 +345,247 @@ const makeChildSession = (id: string, parentID: string) => ({
   },
 });
 
+const taskRoot = "http://127.0.0.1:9999/session";
+const nativeTaskPart = (status: "running" | "completed" | "error", background = false) => ({
+  id: "native-task",
+  sessionID: taskRoot,
+  messageID: "native-message",
+  type: "tool",
+  callID: "native-call",
+  tool: "task",
+  state: {
+    status,
+    input: { description: "Inspect native lifecycle", subagent_type: "explore" },
+    title: "Inspect native lifecycle",
+    time: { start: 1, end: 2 },
+    ...(status === "error"
+      ? { error: "Task failed" }
+      : {
+          metadata: {
+            sessionId: "native-child",
+            model: { providerID: "test", modelID: "child-model" },
+            background,
+          },
+          output: "<task_result>Inspection finished</task_result>",
+        }),
+  },
+});
+const nativePartEvent = (part: unknown) => ({
+  type: "message.part.updated",
+  properties: { sessionID: taskRoot, part },
+});
+const taskSentinel = () =>
+  nativePartEvent({
+    ...nativeTaskPart("completed"),
+    id: "sentinel",
+    callID: "sentinel",
+    tool: "read",
+  });
+
 it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+  it.effect(
+    "projects native Task failures without losing tool rows or duplicating child identity",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("native-task-failure");
+        const child = makeChildSession("native-child", taskRoot);
+        runtimeMock.state.subscribedEvents = [
+          { type: "session.created", properties: { info: child } },
+          nativePartEvent(nativeTaskPart("running")),
+          nativePartEvent(nativeTaskPart("running")),
+          { type: "session.idle", properties: { sessionID: child.id } },
+          nativePartEvent(nativeTaskPart("error")),
+          nativePartEvent(nativeTaskPart("error")),
+          taskSentinel(),
+        ];
+        const fiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.takeUntil((event) => event.itemId === "sentinel"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("native-failure"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds"));
+        const starts = events.filter((event) => event.type === "subagent.started");
+        const terminals = events.filter((event) => event.type === "subagent.completed");
+        assert.equal(starts.length, 1);
+        assert.equal(terminals.length, 1);
+        assert.equal(terminals[0]?.payload.status, "failed");
+        assert.equal(
+          terminals[0]?.payload.subagent.subagentId,
+          starts[0]?.payload.subagent.subagentId,
+        );
+        assert.equal(terminals[0]?.payload.subagent.model, "test/child-model");
+        assert.equal(terminals[0]?.payload.subagent.parentProviderItemId, "native-call");
+        assert.equal(events.filter((event) => event.itemId === "native-call").length, 4);
+        yield* adapter.stopSession(threadId);
+      }),
+  );
+
+  it.effect("keeps background Tasks running until a native completion notification", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("native-task-background");
+      const notice = {
+        type: "text",
+        id: "notice",
+        sessionID: taskRoot,
+        messageID: "notice-message",
+        synthetic: true,
+        text: '<task id="native-child" state="completed"><task_result>Background finished</task_result></task>',
+      };
+      runtimeMock.state.subscribedEvents = [
+        nativePartEvent(nativeTaskPart("completed", true)),
+        { type: "session.idle", properties: { sessionID: "native-child" } },
+        nativePartEvent(notice),
+        nativePartEvent(notice),
+        taskSentinel(),
+      ];
+      const fiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.itemId === "sentinel"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("native-background"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const events = yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds"));
+      const terminals = events.filter((event) => event.type === "subagent.completed");
+      assert.equal(terminals.length, 1);
+      assert.equal(terminals[0]?.payload.summary, "Background finished");
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("reconstructs Task terminals on resume and deduplicates buffered live replay", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("native-task-history");
+      runtimeMock.state.resumableSession = { id: taskRoot };
+      runtimeMock.state.messages = [
+        { info: { id: "native-message", role: "assistant" }, parts: [nativeTaskPart("completed")] },
+      ];
+      runtimeMock.state.children = [makeChildSession("native-child", taskRoot)];
+      const ids: string[] = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        runtimeMock.state.subscribedEvents = [
+          nativePartEvent(nativeTaskPart("completed")),
+          taskSentinel(),
+        ];
+        const fiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.takeUntil((event) => event.itemId === "sentinel"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make(`native-history-${attempt}`),
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: taskRoot },
+        });
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds"));
+        const terminals = events.filter((event) => event.type === "subagent.completed");
+        assert.equal(terminals.length, 1);
+        assert.equal(terminals[0]?.payload.subagent.model, "test/child-model");
+        ids.push(terminals[0]!.eventId);
+        yield* adapter.stopSession(threadId);
+      }
+      assert.equal(ids[0], ids[1]);
+      assert.deepEqual(runtimeMock.state.startupOrder, ["stream", "history", "stream", "history"]);
+    }),
+  );
+
+  it.effect("interrupts active native Tasks even without child-session discovery", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("native-task-interrupt");
+      runtimeMock.state.subscribedEvents = [
+        nativePartEvent(nativeTaskPart("running")),
+        taskSentinel(),
+      ];
+      const ready = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.itemId === "sentinel"),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("native-interrupt"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* Fiber.join(ready).pipe(Effect.timeout("2 seconds"));
+      const completed = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) => event.threadId === threadId && event.type === "subagent.completed",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.interruptTurn(threadId);
+      const events = yield* Fiber.join(completed).pipe(Effect.timeout("2 seconds"));
+      assert.equal(events[0]?.type, "subagent.completed");
+      if (events[0]?.type === "subagent.completed")
+        assert.equal(events[0].payload.status, "stopped");
+      assert.ok(runtimeMock.state.abortCalls.includes("native-child"));
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("does not publish or abort a reused session when subscription startup fails", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("native-subscribe-failure");
+      runtimeMock.state.resumableSession = { id: taskRoot };
+      runtimeMock.state.subscribeError = new Error("subscription unavailable");
+      const result = yield* adapter
+        .startSession({
+          runtimeSessionId: RuntimeSessionId.make("native-subscribe-failure"),
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: taskRoot },
+        })
+        .pipe(Effect.exit);
+      assert.equal(result._tag, "Failure");
+      assert.deepEqual(runtimeMock.state.abortCalls, []);
+      assert.equal(
+        (yield* adapter.listSessions()).some((session) => session.threadId === threadId),
+        false,
+      );
+    }),
+  );
+
+  it.effect("cleans up when the lazy event stream fails on its first read", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("native-lazy-subscribe-failure");
+      runtimeMock.state.streamReadError = new Error("lazy fetch failed");
+      const result = yield* adapter
+        .startSession({
+          runtimeSessionId: RuntimeSessionId.make("native-lazy-failure"),
+          threadId,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.exit);
+      assert.equal(result._tag, "Failure");
+      assert.equal(
+        (yield* adapter.listSessions()).some((session) => session.threadId === threadId),
+        false,
+      );
+      assert.deepEqual(runtimeMock.state.abortCalls, [taskRoot]);
+    }),
+  );
+
   it.effect("reuses a configured OpenCode server URL instead of spawning a local server", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;

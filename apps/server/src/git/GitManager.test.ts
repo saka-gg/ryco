@@ -544,6 +544,8 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
 
   return {
     service: {
+      getPullRequestFilesViewed: () => Effect.die("unused"),
+      setPullRequestFileViewed: () => Effect.die("unused"),
       execute,
       listOpenPullRequests: (input) =>
         execute({
@@ -722,6 +724,7 @@ function preparePullRequestThread(
 }
 
 function makeManager(input?: {
+  worktreeBranchPrefix?: string;
   ghScenario?: FakeGhScenario;
   textGeneration?: Partial<FakeGitTextGeneration>;
   setupScriptRunner?: ProjectSetupScriptRunnerShape;
@@ -736,7 +739,9 @@ function makeManager(input?: {
     prefix: "ryco-git-manager-test-",
   });
 
-  const serverSettingsLayer = ServerSettingsService.layerTest();
+  const serverSettingsLayer = ServerSettingsService.layerTest({
+    worktreeBranchPrefix: input?.worktreeBranchPrefix ?? "ryco",
+  });
 
   const vcsDriverLayer = GitVcsDriver.layer.pipe(
     Layer.provideMerge(VcsProcess.layer),
@@ -3111,6 +3116,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         const mainBefore = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
 
         const { manager } = yield* makeManager({
+          worktreeBranchPrefix: "team/tasks",
           ghScenario: {
             pullRequest: {
               number: 91,
@@ -3138,8 +3144,17 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           mode: "worktree",
         });
 
-        expect(result.branch).toBe("ryco/pr-91/main");
+        expect(result.branch).toBe("team/tasks/pr-91/main");
         expect(result.worktreePath).not.toBeNull();
+        // A later settings change must retain an existing legacy Ryco PR checkout.
+        yield* runGit(result.worktreePath as string, ["branch", "-m", "ryco/pr-91/main"]);
+        const reused = yield* preparePullRequestThread(manager, {
+          cwd: repoDir,
+          reference: "91",
+          mode: "worktree",
+        });
+        expect(reused.branch).toBe("ryco/pr-91/main");
+        expect(fs.realpathSync(reused.worktreePath!)).toBe(fs.realpathSync(result.worktreePath!));
         expect((yield* runGit(repoDir, ["branch", "--show-current"])).stdout.trim()).toBe("main");
         expect((yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim()).toBe(mainBefore);
         expect(
@@ -3149,6 +3164,40 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           ])).stdout.trim(),
         ).toBe("ryco/pr-91/main");
       }),
+  );
+
+  it.effect("reuses long legacy fork worktree branches after prefix changes", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const headBranch = `feature/${"a".repeat(56)}`;
+      const legacyBranch = `ryco/pr-93/${headBranch}`;
+      const worktreePath = path.join(repoDir, "long-legacy-worktree");
+      yield* runGit(repoDir, ["worktree", "add", "-b", legacyBranch, worktreePath, "main"]);
+      const { manager } = yield* makeManager({
+        worktreeBranchPrefix: "team/tasks",
+        ghScenario: {
+          pullRequest: {
+            number: 93,
+            title: "Long legacy fork PR",
+            url: "https://github.com/pingdotgg/codething-mvp/pull/93",
+            baseRefName: "main",
+            headRefName: headBranch,
+            state: "open",
+            isCrossRepository: true,
+            headRepositoryNameWithOwner: "octocat/codething-mvp",
+            headRepositoryOwnerLogin: "octocat",
+          },
+        },
+      });
+      const reused = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "93",
+        mode: "worktree",
+      });
+      expect(reused.branch).toBe(legacyBranch);
+      expect(fs.realpathSync(reused.worktreePath!)).toBe(fs.realpathSync(worktreePath));
+    }),
   );
 
   it.effect(

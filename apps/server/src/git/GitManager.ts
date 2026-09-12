@@ -33,11 +33,11 @@ import {
   ModelSelection,
 } from "@ryco/contracts";
 import {
+  prefixWorktreeBranch,
   mergeGitStatusParts,
   resolveAutoFeatureBranchName,
   sanitizeBranchFragment,
   sanitizeFeatureBranchName,
-  WORKTREE_BRANCH_PREFIX,
 } from "@ryco/shared/git";
 import {
   getChangeRequestTerminologyForKind,
@@ -181,6 +181,7 @@ function resolveHeadRepositoryNameWithOwner(
 
 function resolvePullRequestWorktreeLocalBranchName(
   pullRequest: ResolvedPullRequest & PullRequestHeadRemoteInfo,
+  prefix: string,
 ): string {
   if (!pullRequest.isCrossRepository) {
     return pullRequest.headBranch;
@@ -188,7 +189,7 @@ function resolvePullRequestWorktreeLocalBranchName(
 
   const sanitizedHeadBranch = sanitizeBranchFragment(pullRequest.headBranch).trim();
   const suffix = sanitizedHeadBranch.length > 0 ? sanitizedHeadBranch : "head";
-  return `${WORKTREE_BRANCH_PREFIX}/pr-${pullRequest.number}/${suffix}`;
+  return prefixWorktreeBranch(`pr-${pullRequest.number}/${suffix}`, prefix);
 }
 
 function parseGitHubRepositoryNameWithOwnerFromRemoteUrl(url: string | null): string | null {
@@ -1552,8 +1553,29 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         ...pullRequest,
         ...toPullRequestHeadRemoteInfo(pullRequestSummary),
       } as const;
-      const localPullRequestBranch =
-        resolvePullRequestWorktreeLocalBranchName(pullRequestWithRemoteInfo);
+      const { worktreeBranchPrefix } = yield* serverSettingsService.getSettings.pipe(
+        Effect.mapError((cause) =>
+          gitManagerError("preparePullRequestThread", "Failed to get server settings.", cause),
+        ),
+      );
+      const legacyPullRequestBranch = resolvePullRequestWorktreeLocalBranchName(
+        pullRequestWithRemoteInfo,
+        "ryco",
+      );
+      const preferredPullRequestBranch = resolvePullRequestWorktreeLocalBranchName(
+        pullRequestWithRemoteInfo,
+        worktreeBranchPrefix,
+      );
+      const localRefs = yield* gitCore.listRefs({ cwd: input.cwd });
+      const localPullRequestBranch = localRefs.refs.some(
+        (branch) => !branch.isRemote && branch.name === preferredPullRequestBranch,
+      )
+        ? preferredPullRequestBranch
+        : localRefs.refs.some(
+              (branch) => !branch.isRemote && branch.name === legacyPullRequestBranch,
+            )
+          ? legacyPullRequestBranch
+          : preferredPullRequestBranch;
 
       const findLocalHeadBranch = Effect.fn("findLocalHeadBranch")(function* (cwd: string) {
         const result = yield* gitCore.listRefs({ cwd });

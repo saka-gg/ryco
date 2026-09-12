@@ -3,16 +3,13 @@ import type {
   SourceControlCommentReactionContent,
   SourceControlChangeRequestCommit,
   SourceControlChangeRequestDetail,
-  SourceControlChangeRequestFile,
   SourceControlChangeRequestMergeMethod,
 } from "@ryco/contracts";
 import { DateTime, Option } from "effect";
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
-  ChevronRightIcon,
   Clock3Icon,
   ExternalLinkIcon,
-  FileIcon,
   FileTextIcon,
   GitBranchIcon,
   GitCommitIcon,
@@ -25,7 +22,6 @@ import {
   useAddChangeRequestCommentReactionMutation,
   useMergeChangeRequestMutation,
   useSourceControlChangeRequestDetail,
-  useSourceControlChangeRequestDiff,
   useSourceControlWorkflowRuns,
 } from "~/rpc/useSourceControl";
 import { errorMessage } from "~/lib/errorMessage";
@@ -62,14 +58,13 @@ import {
   SourceControlTimelineNotice,
 } from "./SourceControlTimeline";
 import { changeRequestStateKind, StateBadge } from "./StateBadge";
-import { type DiffLine, parseDiffLines } from "./diffLines";
 import {
   getPrCheckStatusForQuery,
   getPrCheckStatusFromChangeRequest,
   getPrCheckStatusFromWorkflowRuns,
   shouldRefreshPrCheckStatus,
 } from "./prCheckStatus";
-import { splitUnifiedDiffByFile } from "./unifiedDiffSplit";
+import { PullRequestFilesTab } from "./PullRequestFilesTab";
 import { usePrCheckPassNotifications } from "./usePrCheckPassNotifications";
 import {
   assessPullRequestStack,
@@ -574,8 +569,10 @@ function PullRequestDetailBody(props: {
             </div>
           ) : (
             <div className="mx-auto w-full max-w-[1180px]">
-              <FilesTab
+              <PullRequestFilesTab
+                key={`${props.environmentId}:${props.cwd}:${detail.number}`}
                 files={detail.files ?? []}
+                headSha={detail.headSha ?? null}
                 environmentId={props.environmentId}
                 cwd={props.cwd}
                 reference={String(detail.number)}
@@ -812,178 +809,6 @@ function CommitsTab({
       ))}
     </ol>
   );
-}
-
-function FilesTab(props: {
-  files: ReadonlyArray<SourceControlChangeRequestFile>;
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  reference: string;
-  active: boolean;
-}) {
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const anyExpanded = expanded.size > 0;
-  const diffQuery = useSourceControlChangeRequestDiff({
-    environmentId: props.environmentId,
-    cwd: props.cwd,
-    reference: props.reference,
-    enabled:
-      props.active &&
-      anyExpanded &&
-      props.environmentId !== null &&
-      props.cwd !== null &&
-      props.reference !== "",
-  });
-
-  const diffByPath = useMemo(
-    () => (diffQuery.data ? splitUnifiedDiffByFile(diffQuery.data) : null),
-    [diffQuery.data],
-  );
-
-  const toggle = (path: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-      }
-      return next;
-    });
-  };
-
-  if (props.files.length === 0) {
-    return <EmptyTabState message="No file change information available." />;
-  }
-
-  return (
-    <ol className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
-      {props.files.map((file) => {
-        const isOpen = expanded.has(file.path);
-        const filePatch = diffByPath?.get(file.path) ?? null;
-        return (
-          <li key={file.path} className="bg-muted/12">
-            <button
-              type="button"
-              onClick={() => toggle(file.path)}
-              aria-expanded={isOpen}
-              className="flex w-full items-center gap-3 px-3 py-2 text-left text-xs hover:bg-accent/40"
-            >
-              <ChevronRightIcon
-                className={cn(
-                  "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
-                  isOpen ? "rotate-90" : "",
-                )}
-              />
-              <FileIcon className="size-3 shrink-0 text-muted-foreground/70" />
-              <span className="min-w-0 flex-1 truncate font-mono text-foreground/90">
-                {file.path}
-              </span>
-              <span className="shrink-0 font-mono text-[10px] tabular-nums">
-                <span className="text-emerald-600 dark:text-emerald-400">
-                  +{numberFmt.format(file.additions)}
-                </span>
-                <span className="text-muted-foreground/60"> / </span>
-                <span className="text-rose-600 dark:text-rose-400">
-                  −{numberFmt.format(file.deletions)}
-                </span>
-              </span>
-            </button>
-            {isOpen ? (
-              <FileDiffViewer
-                patch={filePatch}
-                isLoading={diffQuery.isLoading || diffQuery.isFetching}
-                error={diffQuery.error instanceof Error ? diffQuery.error.message : null}
-              />
-            ) : null}
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-function FileDiffViewer(props: { patch: string | null; isLoading: boolean; error: string | null }) {
-  if (props.isLoading && props.patch === null) {
-    return (
-      <div className="flex items-center gap-2 border-border/60 border-t bg-background/40 px-3 py-2 text-muted-foreground text-xs">
-        <Spinner className="size-3" />
-        Loading diff…
-      </div>
-    );
-  }
-  if (props.error !== null) {
-    return (
-      <div className="border-border/60 border-t bg-background/40 px-3 py-2 text-destructive text-xs">
-        {props.error}
-      </div>
-    );
-  }
-
-  const parsedLines = props.patch ? parseDiffLines(props.patch) : [];
-  if (parsedLines.length === 0) {
-    return (
-      <div className="border-border/60 border-t bg-background/40 px-3 py-2 text-muted-foreground/70 text-xs italic">
-        No diff available for this file.
-      </div>
-    );
-  }
-  const maxLine = parsedLines.reduce((max, line) => {
-    const n = Math.max(line.oldLineNumber ?? 0, line.newLineNumber ?? 0);
-    return n > max ? n : max;
-  }, 0);
-  const gutterDigits = Math.max(2, String(maxLine).length);
-  const gutterCh = `${gutterDigits}ch`;
-  return (
-    <div className="overflow-x-auto border-border/60 border-t bg-background/40">
-      <pre className="font-mono text-[11px] leading-snug">
-        {parsedLines.map((line, index) => (
-          <DiffLineRow
-            // eslint-disable-next-line react/no-array-index-key
-            key={index}
-            line={line}
-            gutterCh={gutterCh}
-          />
-        ))}
-      </pre>
-    </div>
-  );
-}
-
-function DiffLineRow({ line, gutterCh }: { line: DiffLine; gutterCh: string }) {
-  const tone = lineToneForKind(line.kind);
-  const oldText = line.oldLineNumber === null ? "" : String(line.oldLineNumber);
-  const newText = line.newLineNumber === null ? "" : String(line.newLineNumber);
-  return (
-    <div className={cn("flex whitespace-pre", tone)}>
-      <span
-        className="shrink-0 select-none border-border/40 border-r bg-muted/24 px-1.5 text-right text-muted-foreground/60"
-        style={{ width: gutterCh }}
-      >
-        {oldText}
-      </span>
-      <span
-        className="shrink-0 select-none border-border/40 border-r bg-muted/16 px-1.5 text-right text-muted-foreground/60"
-        style={{ width: gutterCh }}
-      >
-        {newText}
-      </span>
-      <span className="min-w-0 flex-1 px-2">{line.text === "" ? " " : line.text}</span>
-    </div>
-  );
-}
-
-function lineToneForKind(kind: DiffLine["kind"]): string {
-  if (kind === "hunk") {
-    return "bg-sky-500/8 text-sky-700 dark:text-sky-400";
-  }
-  if (kind === "add") {
-    return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
-  }
-  if (kind === "remove") {
-    return "bg-rose-500/10 text-rose-700 dark:text-rose-300";
-  }
-  return "text-foreground/80";
 }
 
 function EmptyTabState({ message }: { message: string }) {
