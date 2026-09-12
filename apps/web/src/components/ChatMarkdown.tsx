@@ -24,6 +24,7 @@ import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
 import {
   renderSkillInlineMarkdownChildren,
@@ -648,6 +649,13 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   usePerfMark("ChatMarkdown");
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
+  const incrementalParsing = isStreaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
+  // Own the cache for this streaming renderer only; completion returns to the
+  // full parser so final replacements and highlighting always take effect.
+  const remarkPlugins = useMemo(
+    () => [remarkGfm, ...(incrementalParsing ? [createIncrementalMarkdownPlugin()] : [])],
+    [incrementalParsing],
+  );
   const searchHighlightCursorRef = useRef({ occurrenceIndex: 0 });
   searchHighlightCursorRef.current.occurrenceIndex = 0;
   const markdownSearchHighlightRef = useRef<SkillInlineTextSearchHighlight | undefined>(undefined);
@@ -658,12 +666,15 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
         keyPrefix: "chat-markdown",
       }
     : undefined;
+  // Growing prose/code must not recreate every custom Markdown component (and
+  // remount completed images/code blocks) when the link destinations are unchanged.
+  const markdownLinkHrefsKey = JSON.stringify(extractMarkdownLinkHrefs(text));
   const markdownFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
       string,
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
     >();
-    for (const href of extractMarkdownLinkHrefs(text)) {
+    for (const href of JSON.parse(markdownLinkHrefsKey) as string[]) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
       const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd);
@@ -672,7 +683,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       }
     }
     return metaByHref;
-  }, [cwd, text]);
+  }, [cwd, markdownLinkHrefsKey]);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
@@ -873,7 +884,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   return (
     <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={remarkPlugins}
         components={markdownComponents}
         urlTransform={markdownUrlTransform}
       >
