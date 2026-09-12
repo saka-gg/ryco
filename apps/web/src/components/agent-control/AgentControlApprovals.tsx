@@ -152,7 +152,7 @@ export function AgentControlApprovals({
   }
 
   return (
-    <div data-testid="agent-control-approvals">
+    <div className="mx-auto w-full min-w-0 max-w-208" data-testid="agent-control-approvals">
       {orderedActive.map((proposal) => (
         <AgentControlProposalCard
           key={proposal.proposalId}
