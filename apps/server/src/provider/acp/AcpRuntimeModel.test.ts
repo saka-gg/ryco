@@ -11,6 +11,21 @@ import {
 } from "./AcpRuntimeModel.ts";
 
 describe("AcpRuntimeModel", () => {
+  it("preserves native slash command metadata and explicit empty updates", () => {
+    const commands = [{ name: "review", description: "Review changes", input: { hint: "files" } }];
+    expect(
+      parseSessionUpdateEvent({
+        sessionId: "s",
+        update: { sessionUpdate: "available_commands_update", availableCommands: commands },
+      }).events,
+    ).toEqual([{ _tag: "CommandsUpdated", commands }]);
+    expect(
+      parseSessionUpdateEvent({
+        sessionId: "s",
+        update: { sessionUpdate: "available_commands_update", availableCommands: [] },
+      }).events,
+    ).toEqual([{ _tag: "CommandsUpdated", commands: [] }]);
+  });
   it("parses session mode state from typed ACP session setup responses", () => {
     const modeState = parseSessionModeState({
       sessionId: "session-1",

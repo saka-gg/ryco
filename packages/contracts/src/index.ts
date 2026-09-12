@@ -45,3 +45,5 @@ export * from "./computerUse.ts";
 export * from "./projectBrowser.ts";
 
 export * from "./agentControlInspection.ts";
+
+export * from "./acpRegistry.ts";

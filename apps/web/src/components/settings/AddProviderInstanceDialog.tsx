@@ -13,7 +13,7 @@ import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Button } from "../ui/button";
-import { ACPRegistryIcon, Gemini, PiAgentIcon, type Icon } from "../Icons";
+import { Gemini, PiAgentIcon, type Icon } from "../Icons";
 import {
   Dialog,
   DialogDescription,
@@ -28,6 +28,7 @@ import { RadioGroup } from "../ui/radio-group";
 import { toastManager } from "../ui/toast";
 import { DRIVER_OPTION_BY_VALUE, DRIVER_OPTIONS } from "./providerDriverMeta";
 import { ProviderSettingsForm, deriveProviderSettingsFields } from "./ProviderSettingsForm";
+import { AcpRegistrySettings } from "./AcpRegistrySettings";
 import { AnimatedHeight } from "../AnimatedHeight";
 
 const PROVIDER_ACCENT_SWATCHES = [
@@ -75,11 +76,6 @@ const COMING_SOON_DRIVER_OPTIONS: readonly ComingSoonDriverOption[] = [
     value: ProviderDriverKind.make("gemini"),
     label: "Gemini",
     icon: Gemini,
-  },
-  {
-    value: ProviderDriverKind.make("acpRegistry"),
-    label: "ACP Registry",
-    icon: ACPRegistryIcon,
   },
   {
     value: ProviderDriverKind.make("piAgent"),
@@ -186,6 +182,7 @@ export function AddProviderInstanceDialog({
   const handleSave = useCallback(() => {
     setHasAttemptedSubmit(true);
     if (instanceIdError !== null) return;
+    if (driver === "acpRegistry" && (!configDraft.agentId || !configDraft.version)) return;
 
     const config = configByDriver[driver] ?? {};
     const hasConfig = Object.keys(config).length > 0;
@@ -227,6 +224,7 @@ export function AddProviderInstanceDialog({
     driver,
     driverOption,
     configByDriver,
+    configDraft,
     instanceId,
     instanceIdError,
     label,
@@ -442,7 +440,11 @@ export function AddProviderInstanceDialog({
                 </span>
               </div>
 
-              {driverSettingsFields.length > 0 ? (
+              {driver === "acpRegistry" ? (
+                wizardStep === 2 ? (
+                  <AcpRegistrySettings value={configDraft} onChange={setConfigDraft} />
+                ) : null
+              ) : driverSettingsFields.length > 0 ? (
                 <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
                   <ProviderSettingsForm
                     definition={driverOption}
@@ -481,7 +483,13 @@ export function AddProviderInstanceDialog({
                 Next
               </Button>
             ) : (
-              <Button size="sm" onClick={handleSave}>
+              <Button
+                size="sm"
+                onClick={handleSave}
+                disabled={
+                  driver === "acpRegistry" && (!configDraft.agentId || !configDraft.version)
+                }
+              >
                 Add instance
               </Button>
             )}

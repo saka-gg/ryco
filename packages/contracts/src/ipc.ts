@@ -1,4 +1,16 @@
 import type {
+  AcpRegistrySearchInput,
+  AcpRegistrySearchResult,
+  AcpRegistryInstallInput,
+  AcpRegistryInstallation,
+} from "./acpRegistry.ts";
+import type {
+  AcpRegistryAuthInput,
+  AcpRegistryAuthenticateInput,
+  AcpRegistryAuthMethod,
+  AcpRegistryAuthenticationResult,
+} from "./rpc.ts";
+import type {
   ChatAttachmentReadChunkInput,
   ChatAttachmentReadChunkResult,
 } from "./orchestration.ts";
@@ -792,6 +804,16 @@ export interface LocalApi {
     refreshProviders: (input?: {
       readonly instanceId?: ProviderInstanceId;
     }) => Promise<ServerProviderUpdatedPayload>;
+    searchAcpRegistry?: (
+      input: typeof AcpRegistrySearchInput.Type,
+    ) => Promise<typeof AcpRegistrySearchResult.Type>;
+    installAcpRegistry?: (input: AcpRegistryInstallInput) => Promise<AcpRegistryInstallation>;
+    getAcpRegistryAuthMethods?: (
+      input: AcpRegistryAuthInput,
+    ) => Promise<readonly AcpRegistryAuthMethod[]>;
+    authenticateAcpRegistry?: (
+      input: AcpRegistryAuthenticateInput,
+    ) => Promise<AcpRegistryAuthenticationResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
     upsertKeybinding: (input: ServerUpsertKeybindingInput) => Promise<ServerUpsertKeybindingResult>;
     getSettings: () => Promise<ServerSettings>;
@@ -847,6 +869,16 @@ export interface EnvironmentApi {
     refreshProviders: (input?: {
       readonly instanceId?: ProviderInstanceId;
     }) => Promise<ServerProviderUpdatedPayload>;
+    searchAcpRegistry?: (
+      input: typeof AcpRegistrySearchInput.Type,
+    ) => Promise<typeof AcpRegistrySearchResult.Type>;
+    installAcpRegistry?: (input: AcpRegistryInstallInput) => Promise<AcpRegistryInstallation>;
+    getAcpRegistryAuthMethods?: (
+      input: AcpRegistryAuthInput,
+    ) => Promise<readonly AcpRegistryAuthMethod[]>;
+    authenticateAcpRegistry?: (
+      input: AcpRegistryAuthenticateInput,
+    ) => Promise<AcpRegistryAuthenticationResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
     getSettings: () => Promise<ServerSettings>;
     updateSettings: (patch: ServerSettingsPatch) => Promise<ServerSettings>;

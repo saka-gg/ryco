@@ -4,6 +4,7 @@ import {
   getModelDisplayName as getSharedModelDisplayName,
 } from "@ryco/shared/model";
 import {
+  ACPRegistryIcon,
   ClaudeAI,
   CursorIcon,
   GithubCopilotIcon,
@@ -15,6 +16,7 @@ import {
 import { PROVIDER_OPTIONS } from "../../session-logic";
 
 export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
+  [ProviderDriverKind.make("acpRegistry")]: ACPRegistryIcon,
   [ProviderDriverKind.make("codex")]: OpenAI,
   [ProviderDriverKind.make("claudeAgent")]: ClaudeAI,
   [ProviderDriverKind.make("copilot")]: GithubCopilotIcon,

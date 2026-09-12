@@ -1,4 +1,5 @@
 import {
+  AcpRegistrySettings,
   ClaudeSettings,
   CopilotSettings,
   CodexSettings,
@@ -9,6 +10,7 @@ import {
 } from "@ryco/contracts";
 import type { Schema } from "effect";
 import {
+  ACPRegistryIcon,
   ClaudeAI,
   CursorIcon,
   GithubCopilotIcon,
@@ -81,6 +83,12 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "OpenCode",
     icon: OpenCodeIcon,
     settingsSchema: OpenCodeSettings,
+  },
+  {
+    value: ProviderDriverKind.make("acpRegistry"),
+    label: "ACP Registry",
+    icon: ACPRegistryIcon,
+    settingsSchema: AcpRegistrySettings,
   },
 ];
 

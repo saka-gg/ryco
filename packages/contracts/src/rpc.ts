@@ -1,5 +1,11 @@
 import { ModelSelection } from "./orchestration.ts";
 import {
+  AcpRegistrySearchInput,
+  AcpRegistrySearchResult,
+  AcpRegistryInstallInput,
+  AcpRegistryInstallation,
+} from "./acpRegistry.ts";
+import {
   ResourceTelemetrySnapshot,
   ResourceTelemetryHistoryInput,
   ResourceTelemetryHistory,
@@ -346,6 +352,10 @@ export const WS_METHODS = {
   serverGetConfig: "server.getConfig",
   serverGetAdvertisedEndpoints: "server.getAdvertisedEndpoints",
   serverGetDiagnosticsMetrics: "server.getDiagnosticsMetrics",
+  serverSearchAcpRegistry: "server.searchAcpRegistry",
+  serverInstallAcpRegistry: "server.installAcpRegistry",
+  serverGetAcpRegistryAuthMethods: "server.getAcpRegistryAuthMethods",
+  serverAuthenticateAcpRegistry: "server.authenticateAcpRegistry",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
@@ -624,6 +634,63 @@ export const WsServerGetDiagnosticsMetricsRpc = Rpc.make(WS_METHODS.serverGetDia
   success: ServerLocalDiagnosticsMetrics,
   error: AuthRpcError,
 });
+
+export class AcpRegistryOperationError extends Schema.TaggedError<AcpRegistryOperationError>()(
+  "AcpRegistryOperationError",
+  { message: Schema.String },
+) {}
+export const AcpRegistryAuthMethod = Schema.Struct({
+  type: Schema.optionalKey(Schema.Literals(["agent", "env_var", "terminal"])),
+  variables: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        label: Schema.optionalKey(Schema.String),
+        optional: Schema.Boolean,
+        secret: Schema.Boolean,
+      }),
+    ),
+  ),
+  id: Schema.String,
+  name: Schema.String,
+  description: Schema.optionalKey(Schema.String),
+});
+export type AcpRegistryAuthMethod = typeof AcpRegistryAuthMethod.Type;
+export const AcpRegistryAuthInput = Schema.Struct({ instanceId: ProviderInstanceId });
+export type AcpRegistryAuthInput = typeof AcpRegistryAuthInput.Type;
+export const AcpRegistryAuthenticateInput = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  methodId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+});
+export type AcpRegistryAuthenticateInput = typeof AcpRegistryAuthenticateInput.Type;
+export const AcpRegistryAuthenticationResult = Schema.Struct({ authenticated: Schema.Boolean });
+export type AcpRegistryAuthenticationResult = typeof AcpRegistryAuthenticationResult.Type;
+export const WsServerSearchAcpRegistryRpc = Rpc.make(WS_METHODS.serverSearchAcpRegistry, {
+  payload: AcpRegistrySearchInput,
+  success: AcpRegistrySearchResult,
+  error: Schema.Union([AcpRegistryOperationError, AuthRpcError]),
+});
+export const WsServerInstallAcpRegistryRpc = Rpc.make(WS_METHODS.serverInstallAcpRegistry, {
+  payload: AcpRegistryInstallInput,
+  success: AcpRegistryInstallation,
+  error: Schema.Union([AcpRegistryOperationError, AuthRpcError]),
+});
+export const WsServerGetAcpRegistryAuthMethodsRpc = Rpc.make(
+  WS_METHODS.serverGetAcpRegistryAuthMethods,
+  {
+    payload: AcpRegistryAuthInput,
+    success: Schema.Array(AcpRegistryAuthMethod),
+    error: Schema.Union([AcpRegistryOperationError, AuthRpcError]),
+  },
+);
+export const WsServerAuthenticateAcpRegistryRpc = Rpc.make(
+  WS_METHODS.serverAuthenticateAcpRegistry,
+  {
+    payload: AcpRegistryAuthenticateInput,
+    success: AcpRegistryAuthenticationResult,
+    error: Schema.Union([AcpRegistryOperationError, AuthRpcError]),
+  },
+);
 
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
   payload: Schema.Struct({
@@ -1746,6 +1813,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerGetDiagnosticsMetricsRpc
   | typeof WsServerGetStatisticsRpc
   | typeof WsServerGetUsageSummaryRpc
+  | typeof WsServerSearchAcpRegistryRpc
+  | typeof WsServerInstallAcpRegistryRpc
+  | typeof WsServerGetAcpRegistryAuthMethodsRpc
+  | typeof WsServerAuthenticateAcpRegistryRpc
   | typeof WsServerRefreshProvidersRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
@@ -1897,6 +1968,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerGetDiagnosticsMetricsRpc,
   WsServerGetStatisticsRpc,
   WsServerGetUsageSummaryRpc,
+  WsServerSearchAcpRegistryRpc,
+  WsServerInstallAcpRegistryRpc,
+  WsServerGetAcpRegistryAuthMethodsRpc,
+  WsServerAuthenticateAcpRegistryRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,

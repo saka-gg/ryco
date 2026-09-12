@@ -199,7 +199,21 @@ export const ServerProviderUpdateState = Schema.Struct({
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
+/** Negotiated or observed ACP features; absent for providers without ACP metadata. */
+export const AcpProviderCapabilities = Schema.Struct({
+  resumeSession: Schema.Boolean,
+  loadSession: Schema.Boolean,
+  models: Schema.Boolean,
+  commands: Schema.Boolean,
+  usage: Schema.Boolean,
+  terminal: Schema.Boolean,
+  promptImages: Schema.Boolean,
+  promptAudio: Schema.Boolean,
+});
+export type AcpProviderCapabilities = typeof AcpProviderCapabilities.Type;
+
 export const ServerProvider = Schema.Struct({
+  acpCapabilities: Schema.optionalKey(AcpProviderCapabilities),
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
   instanceId: ProviderInstanceId,

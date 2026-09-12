@@ -22,6 +22,7 @@ export interface AcpSpawnInput {
   readonly args: ReadonlyArray<string>;
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
+  readonly shell?: boolean;
 }
 
 export interface AcpSessionRuntimeOptions {
@@ -33,7 +34,12 @@ export interface AcpSessionRuntimeOptions {
     readonly name: string;
     readonly version: string;
   };
-  readonly authMethodId: string;
+  readonly authMethodId?: string;
+  /** Registry agents authenticate only after explicit method selection. */
+  readonly negotiateAuth?: boolean;
+  readonly strictResume?: boolean;
+  readonly preferModelConfig?: boolean;
+  readonly requireProtocolVersion?: number;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   /** Resolve runtime-scoped MCP servers only after the agent advertises capabilities. */
   readonly resolveMcpServers?: (
@@ -83,6 +89,10 @@ export interface AcpSessionRuntimeShape {
   readonly handleUnknownExtNotification: EffectAcpClient.AcpClientShape["handleUnknownExtNotification"];
   readonly handleExtRequest: EffectAcpClient.AcpClientShape["handleExtRequest"];
   readonly handleExtNotification: EffectAcpClient.AcpClientShape["handleExtNotification"];
+  readonly initialize: Effect.Effect<EffectAcpSchema.InitializeResponse, EffectAcpErrors.AcpError>;
+  readonly authenticate: (
+    methodId: string,
+  ) => Effect.Effect<EffectAcpSchema.AuthenticateResponse, EffectAcpErrors.AcpError>;
   readonly start: () => Effect.Effect<AcpSessionRuntimeStartResult, EffectAcpErrors.AcpError>;
   readonly getEvents: () => Stream.Stream<AcpParsedSessionEvent, never>;
   readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
@@ -174,6 +184,11 @@ const makeAcpSessionRuntime = (
       logRequest({ method, payload, status: "started" }).pipe(
         Effect.flatMap(() =>
           effect.pipe(
+            Effect.catchDefect((cause) =>
+              Effect.fail(
+                new EffectAcpErrors.AcpTransportError({ detail: "ACP request failed", cause }),
+              ),
+            ),
             Effect.tap((result) =>
               logRequest({
                 method,
@@ -199,7 +214,7 @@ const makeAcpSessionRuntime = (
         ChildProcess.make(options.spawn.command, [...options.spawn.args], {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
           ...(options.spawn.env ? { env: { ...process.env, ...options.spawn.env } } : {}),
-          shell: process.platform === "win32",
+          shell: options.spawn.shell ?? process.platform === "win32",
         }),
       )
       .pipe(
@@ -370,28 +385,61 @@ const makeAcpSessionRuntime = (
         ),
       );
 
-    const startOnce = Effect.gen(function* () {
-      const initializePayload = {
-        protocolVersion: 1,
-        clientCapabilities: initializeClientCapabilities,
-        clientInfo: options.clientInfo,
-      } satisfies EffectAcpSchema.InitializeRequest;
-
-      const initializeResult = yield* runLoggedRequest(
+    const initializePayload = {
+      protocolVersion: 1,
+      clientCapabilities: initializeClientCapabilities,
+      clientInfo: options.clientInfo,
+    } satisfies EffectAcpSchema.InitializeRequest;
+    const initialize = yield* Effect.cached(
+      runLoggedRequest(
         "initialize",
         initializePayload,
         acp.agent.initialize(initializePayload),
-      );
-
-      const authenticatePayload = {
-        methodId: options.authMethodId,
-      } satisfies EffectAcpSchema.AuthenticateRequest;
-
-      yield* runLoggedRequest(
-        "authenticate",
-        authenticatePayload,
-        acp.agent.authenticate(authenticatePayload),
-      );
+      ).pipe(
+        Effect.flatMap((response) =>
+          options.requireProtocolVersion !== undefined &&
+          response.protocolVersion !== options.requireProtocolVersion
+            ? Effect.fail(
+                new EffectAcpErrors.AcpRequestError({
+                  code: -32602,
+                  errorMessage: `Unsupported ACP protocol version ${response.protocolVersion}; this driver requires ${options.requireProtocolVersion}.`,
+                }),
+              )
+            : Effect.succeed(response),
+        ),
+      ),
+    );
+    const authenticate = (methodId: string) =>
+      Effect.gen(function* () {
+        const initialized = yield* initialize;
+        if (!initialized.authMethods?.some((method) => method.id === methodId)) {
+          return yield* new EffectAcpErrors.AcpRequestError({
+            code: -32602,
+            errorMessage: "Authentication method was not advertised by this agent.",
+          });
+        }
+        return yield* acp.agent.authenticate({ methodId }).pipe(
+          Effect.catchDefect((cause) =>
+            Effect.fail(
+              new EffectAcpErrors.AcpTransportError({
+                detail: "ACP authentication failed",
+                cause,
+              }),
+            ),
+          ),
+        );
+      });
+    const startOnce = Effect.gen(function* () {
+      const initializeResult = yield* initialize;
+      if (options.authMethodId) {
+        if (options.negotiateAuth) yield* authenticate(options.authMethodId);
+        else
+          yield* runLoggedRequest(
+            "authenticate",
+            { methodId: options.authMethodId },
+            acp.agent.authenticate({ methodId: options.authMethodId }),
+          );
+      }
 
       const staticMcpServers = options.mcpServers ?? [];
       const resolvedMcpServers = options.resolveMcpServers
@@ -423,20 +471,34 @@ const makeAcpSessionRuntime = (
         return yield* createSession(staticMcpServers);
       });
       if (options.resumeSessionId) {
+        const useResume =
+          options.strictResume === true &&
+          initializeResult.agentCapabilities?.sessionCapabilities?.resume != null;
+        if (
+          options.strictResume &&
+          !useResume &&
+          !initializeResult.agentCapabilities?.loadSession
+        ) {
+          return yield* new EffectAcpErrors.AcpRequestError({
+            code: -32601,
+            errorMessage: "This agent does not advertise session loading or resumption.",
+          });
+        }
         const loadPayload = {
           sessionId: options.resumeSessionId,
           cwd: options.cwd,
           mcpServers,
         } satisfies EffectAcpSchema.LoadSessionRequest;
         const resumed = yield* runLoggedRequest(
-          "session/load",
+          useResume ? "session/resume" : "session/load",
           loadPayload,
-          acp.agent.loadSession(loadPayload),
+          useResume ? acp.agent.resumeSession(loadPayload) : acp.agent.loadSession(loadPayload),
         ).pipe(Effect.exit);
         if (Exit.isSuccess(resumed)) {
           sessionId = options.resumeSessionId;
           sessionSetupResult = resumed.value;
         } else {
+          if (options.strictResume) return yield* Effect.failCause(resumed.cause);
           const created = yield* createSessionWithFallback;
           sessionId = created.sessionId;
           sessionSetupResult = created;
@@ -507,6 +569,8 @@ const makeAcpSessionRuntime = (
       handleUnknownExtNotification: acp.handleUnknownExtNotification,
       handleExtRequest: acp.handleExtRequest,
       handleExtNotification: acp.handleExtNotification,
+      initialize,
+      authenticate,
       start: () => start,
       getEvents: () => Stream.fromQueue(eventQueue),
       getModeState: Ref.get(modeStateRef),
@@ -562,6 +626,11 @@ const makeAcpSessionRuntime = (
       setSessionModel: (modelId) =>
         getStartedState.pipe(
           Effect.flatMap((started) => {
+            if (options.preferModelConfig && started.modelConfigId) {
+              return setConfigOption(started.modelConfigId, modelId).pipe(
+                Effect.as({} satisfies EffectAcpSchema.SetSessionModelResponse),
+              );
+            }
             const requestPayload = {
               sessionId: started.sessionId,
               modelId,

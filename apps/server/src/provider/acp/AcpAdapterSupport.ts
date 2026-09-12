@@ -36,7 +36,7 @@ export function mapAcpToAdapterError(
   return new ProviderAdapterRequestError({
     provider,
     method,
-    detail: error.message,
+    detail: Schema.is(EffectAcpErrors.AcpTransportError)(error) ? error.detail : error.message,
     cause: error,
   });
 }

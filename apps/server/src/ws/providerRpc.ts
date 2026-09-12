@@ -1,8 +1,16 @@
+import * as NodePath from "node:path";
+import { AcpRegistryOperationError, AcpRegistrySettings } from "@ryco/contracts";
+import { makeAcpRegistryCatalog } from "../provider/acp/AcpRegistryCatalog.ts";
+import {
+  getAcpRegistryAuthMethods,
+  authenticateAcpRegistry,
+} from "../provider/acp/AcpRegistrySupport.ts";
+import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import {
   readResourceTelemetryHistory,
   retryResourceTelemetry,
 } from "../diagnostics/ResourceTelemetry.ts";
-import { Duration, Effect, Ref, Stream } from "effect";
+import { Duration, Effect, Ref, Stream, Schema } from "effect";
 import { type AuthAccessStreamEvent, TextGenerationError, WS_METHODS } from "@ryco/contracts";
 
 import { signalDiagnosticProcess } from "../diagnostics/ProcessDiagnostics.ts";
@@ -48,7 +56,76 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     currentSessionId,
   } = ctx;
 
+  const registry = makeAcpRegistryCatalog({
+    installationRoot: NodePath.join(config.stateDir, "acp-registry"),
+  });
+  const registryError = (cause: unknown) =>
+    new AcpRegistryOperationError({
+      // Do not expose environment variables, filesystem paths, or agent auth payloads.
+      message:
+        cause instanceof Error && !("code" in cause) && cause.message.startsWith("Registry ")
+          ? cause.message
+          : "ACP Registry operation failed. Check the selected version, installation, and provider authentication.",
+    });
+  const registryInstance = (instanceId: import("@ryco/contracts").ProviderInstanceId) =>
+    Effect.gen(function* () {
+      const settings = yield* serverSettings.getSettings.pipe(Effect.mapError(registryError));
+      const instance = settings.providerInstances[instanceId];
+      if (!instance || instance.driver !== "acpRegistry" || !instance.enabled) {
+        return yield* Effect.fail(
+          new AcpRegistryOperationError({
+            message: "Select an enabled ACP Registry provider instance.",
+          }),
+        );
+      }
+      const settingsConfig = yield* Schema.decodeUnknownEffect(AcpRegistrySettings)(
+        instance.config ?? {},
+      ).pipe(Effect.mapError(registryError));
+      return {
+        config: settingsConfig,
+        environment: mergeProviderInstanceEnvironment(instance.environment),
+      };
+    });
+
   return defineWsHandlers({
+    [WS_METHODS.serverSearchAcpRegistry]: (input) =>
+      ownerEffect(
+        WS_METHODS.serverSearchAcpRegistry,
+        Effect.tryPromise({ try: () => registry.search(input.query), catch: registryError }).pipe(
+          Effect.map((agents) => ({ agents })),
+        ),
+      ),
+    [WS_METHODS.serverInstallAcpRegistry]: (input) =>
+      ownerEffect(
+        WS_METHODS.serverInstallAcpRegistry,
+        Effect.tryPromise({ try: () => registry.install(input), catch: registryError }),
+      ),
+    [WS_METHODS.serverGetAcpRegistryAuthMethods]: (input) =>
+      ownerEffect(
+        WS_METHODS.serverGetAcpRegistryAuthMethods,
+        Effect.gen(function* () {
+          const instance = yield* registryInstance(input.instanceId);
+          const methods = yield* getAcpRegistryAuthMethods(
+            instance.config,
+            instance.environment,
+          ).pipe(Effect.mapError(registryError));
+          return methods;
+        }),
+      ),
+    [WS_METHODS.serverAuthenticateAcpRegistry]: (input) =>
+      ownerEffect(
+        WS_METHODS.serverAuthenticateAcpRegistry,
+        Effect.gen(function* () {
+          const instance = yield* registryInstance(input.instanceId);
+          yield* authenticateAcpRegistry(
+            instance.config,
+            input.methodId,
+            instance.environment,
+          ).pipe(Effect.mapError(registryError));
+          yield* providerRegistry.refreshInstance(input.instanceId);
+          return { authenticated: true };
+        }),
+      ),
     [WS_METHODS.serverGetConfig]: (_input) =>
       observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {
         "rpc.aggregate": "server",

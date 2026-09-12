@@ -43,6 +43,14 @@ describe("ProviderSettingsForm helpers", () => {
     expect(deriveProviderSettingsFields(grok!).map((field) => field.key)).toEqual(["binaryPath"]);
   });
 
+  it("exposes ACP Registry without editable installation identity fields", () => {
+    const registry = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("acpRegistry")];
+
+    expect(registry).toMatchObject({ label: "ACP Registry" });
+    // Installation identity must come from the explicit verified install flow.
+    expect(deriveProviderSettingsFields(registry!)).toEqual([]);
+  });
+
   it("preserves unknown config keys while omitting empty configurable fields", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();
