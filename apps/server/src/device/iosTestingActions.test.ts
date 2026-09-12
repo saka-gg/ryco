@@ -3,6 +3,8 @@ import { Schema } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { DeviceManager } from "./DeviceManager.ts";
 import { IosSimulatorBackend } from "./IosSimulatorBackend.ts";
+import { PlatformDeviceBackend } from "./PlatformDeviceBackend.ts";
+import { FakeDeviceBackend } from "./FakeDeviceBackend.ts";
 import { planIosTestingAction } from "./iosTestingActions.ts";
 import type { runProcess } from "../processRunner.ts";
 
@@ -127,6 +129,22 @@ describe("iOS simulator testing", () => {
       test.run.mock.calls.some(([, args]) => args.includes("boot") || args.includes("bootstatus")),
     ).toBe(false);
   });
+  it("preserves nested platform-wide and targeted testing suspension", async () => {
+    const test = backend();
+    const android = new FakeDeviceBackend({ devices: [] });
+    const suspendAndroid = vi.spyOn(android, "suspendTesting");
+    const router = new PlatformDeviceBackend(test.backend, android);
+    const resumeAll = router.suspendTesting();
+    const resumeTarget = router.suspendTesting(udid);
+    expect(suspendAndroid).toHaveBeenCalledExactlyOnceWith();
+    resumeAll();
+    await expect(router.testing(input({ type: "appearance", value: "dark" }))).rejects.toThrow(
+      "superseded",
+    );
+    resumeTarget();
+    await router.testing(input({ type: "appearance", value: "dark" }));
+    expect(test.run.mock.calls.filter(([, args]) => args[1] === "ui")).toHaveLength(1);
+  });
 
   it("does not report a timed-out action as successful even if the process exits zero", async () => {
     const test = backend();
@@ -237,13 +255,22 @@ describe("iOS simulator testing", () => {
     expect(run.mock.calls.some(([command]) => command === "xcrun")).toBe(false);
   });
 
-  it.each(["shutdown", "dispose"] as const)(
-    "fences testing at manager %s entry while stream cleanup is still pending",
-    async (lifecycle) => {
+  it.each([
+    ["shutdown", false],
+    ["dispose", false],
+    ["shutdown", true],
+    ["dispose", true],
+  ] as const)(
+    "fences testing at manager %s entry while stream cleanup is pending (platform router: %s)",
+    async (lifecycle, routed) => {
       const test = backend();
       vi.spyOn(test.backend, "availability").mockResolvedValue({ kind: "available" });
       const attach = vi.spyOn(test.backend, "attachStream").mockResolvedValue(undefined);
-      const manager = new DeviceManager({ backend: test.backend });
+      const manager = new DeviceManager({
+        backend: routed
+          ? new PlatformDeviceBackend(test.backend, new FakeDeviceBackend())
+          : test.backend,
+      });
       await manager.attach("testing-thread", udid);
       await vi.waitFor(() => expect(attach).toHaveBeenCalled());
       // Wait until stream reconciliation has finished, not merely entered the adapter.

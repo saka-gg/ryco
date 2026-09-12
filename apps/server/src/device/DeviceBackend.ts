@@ -1,10 +1,8 @@
 /**
  * DeviceBackend - platform abstraction behind the device pane.
  *
- * One interface, one implementation per device platform. The iOS simulator
- * backend is the only one today; the contracts and this interface are written
- * so an Android emulator backend can be added without touching the manager,
- * the WebSocket surface, or the MCP tools.
+ * One interface, one implementation per device platform. The platform router
+ * lets iOS and Android share the manager, WebSocket surface and MCP tools.
  *
  * Backends speak plain promises rather than Effect: they are thin adapters over
  * subprocesses and sockets, and keeping them promise-shaped makes the fake

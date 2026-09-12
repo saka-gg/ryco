@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import ThreadWorkspacePanel, { AgentThreadPanel } from "./ThreadWorkspacePanel";
 import type { ThreadSubagentView } from "../threadWorkspaceViewModel";
 
-vi.mock("@tanstack/react-router", () => ({
+vi.mock("@tanstack/react-router", async () => ({
+  ...(await vi.importActual<typeof import("@tanstack/react-router")>("@tanstack/react-router")),
   useNavigate: () => vi.fn(),
   useParams: vi.fn((options?: { select?: (params: Record<string, string>) => unknown }) => {
     const params = {};

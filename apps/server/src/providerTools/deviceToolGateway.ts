@@ -108,7 +108,14 @@ export function isViewerFacingDeviceToolError(error: unknown): boolean {
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
 const UDID = { type: "string", description: "Device udid from device_list." } as const;
-const BUTTONS: readonly DeviceHardwareButton[] = ["home", "lock", "volume-up", "volume-down"];
+const BUTTONS: readonly DeviceHardwareButton[] = [
+  "home",
+  "back",
+  "recents",
+  "lock",
+  "volume-up",
+  "volume-down",
+];
 
 export interface DeviceToolDefinition {
   readonly name: DeviceToolName;
@@ -121,7 +128,7 @@ export const DEVICE_TOOL_DEFINITIONS: readonly DeviceToolDefinition[] = [
   {
     name: "device_list",
     description:
-      "List iOS simulators Ryco can drive, including runtime, boot state, and boot ownership. Call this before another device tool to get a udid.",
+      "List iOS simulators and Android emulators Ryco can drive, including runtime, boot state, and boot ownership. Call this before another device tool to get a udid.",
     inputSchema: {
       type: "object",
       properties: { includeShutdown: { type: "boolean" } },
@@ -132,7 +139,7 @@ export const DEVICE_TOOL_DEFINITIONS: readonly DeviceToolDefinition[] = [
   {
     name: "device_boot",
     description:
-      "Boot an iOS simulator. Ryco caps its own boots; boot-limit-reached is a user decision, not something to retry.",
+      "Boot an iOS simulator or Android emulator. Ryco caps its own boots; boot-limit-reached is a user decision, not something to retry.",
     inputSchema: {
       type: "object",
       properties: { udid: UDID },
@@ -144,7 +151,7 @@ export const DEVICE_TOOL_DEFINITIONS: readonly DeviceToolDefinition[] = [
   {
     name: "device_install",
     description:
-      "Install a built .app bundle on a booted simulator. Build the app first and pass its absolute bundle path.",
+      "Install a built iOS .app bundle or Android .apk on a booted device. Build the app first and pass its absolute path.",
     inputSchema: {
       type: "object",
       properties: { udid: UDID, appPath: { type: "string" } },
@@ -232,7 +239,7 @@ export const DEVICE_TOOL_DEFINITIONS: readonly DeviceToolDefinition[] = [
   },
   {
     name: "device_press_button",
-    description: "Press home, lock, volume-up, or volume-down.",
+    description: "Press home, lock, volume-up, volume-down, or Android back/recents.",
     inputSchema: {
       type: "object",
       properties: { udid: UDID, button: { type: "string", enum: [...BUTTONS] } },
