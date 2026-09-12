@@ -14,6 +14,7 @@ import {
 } from "@ryco/contracts";
 import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 
+import type { ServerSettingsShape } from "../../serverSettings.ts";
 import type { OrchestrationDispatchError } from "../../orchestration/Errors.ts";
 import { resolveManagedWorktreesRoot, type ServerConfigShape } from "../../config.ts";
 import type { GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
@@ -39,7 +40,6 @@ import {
   buildWorkItemBranchNameFallback,
   buildWorkItemBranchNameMessage,
   ensureWorkItemBranchNameIncludesKey,
-  randomShortId,
 } from "./branchNaming.ts";
 import {
   failGitWorkflow,
@@ -69,6 +69,7 @@ export const makeWorktreeOperations = (deps: {
   readonly gitWorkflow: GitWorkflowServiceShape;
   readonly vcsProvisioning: VcsProvisioningServiceShape;
   readonly config: ServerConfigShape;
+  readonly serverSettings: ServerSettingsShape;
   readonly workspaceAccessPolicy: WorkspaceAccessPolicyShape;
   readonly textGeneration: TextGenerationShape;
   readonly projectSetupScriptRunner: ProjectSetupScriptRunnerShape;
@@ -85,6 +86,7 @@ export const makeWorktreeOperations = (deps: {
     gitWorkflow,
     vcsProvisioning,
     config,
+    serverSettings,
     workspaceAccessPolicy,
     textGeneration,
     projectSetupScriptRunner,
@@ -312,6 +314,11 @@ export const makeWorktreeOperations = (deps: {
       }
 
       const project = yield* loadProjectForGitWorkflow(operation, input.projectId);
+      const { worktreeBranchPrefix } = yield* serverSettings.getSettings.pipe(
+        Effect.mapError((cause) =>
+          toGitManagerError(operation, "Failed to load server settings.", cause),
+        ),
+      );
       const modelSelection = project.defaultModelSelection;
       if (modelSelection === null) {
         return yield* failGitWorkflow(
@@ -348,12 +355,13 @@ export const makeWorktreeOperations = (deps: {
       switch (input.intent.kind) {
         case "branch":
           refName = input.intent.branchName;
-          branch = buildTemporaryWorktreeBranchName();
+          branch = buildTemporaryWorktreeBranchName(worktreeBranchPrefix);
           newRefName = branch;
           title = refName;
           break;
         case "newBranch":
-          branch = input.intent.branchName ?? `task/${randomShortId(6)}`;
+          branch =
+            input.intent.branchName ?? buildTemporaryWorktreeBranchName(worktreeBranchPrefix);
           refName = input.intent.baseBranch ?? (input.fetchOrigin ? "origin/HEAD" : "HEAD");
           newRefName = branch;
           title = branch;
@@ -666,6 +674,11 @@ export const makeWorktreeOperations = (deps: {
             toGitManagerError(operation, "Failed to load project sessions.", cause),
           ),
         );
+      const { worktreeBranchPrefix } = yield* serverSettings.getSettings.pipe(
+        Effect.mapError((cause) =>
+          toGitManagerError(operation, "Failed to load server settings.", cause),
+        ),
+      );
       for (const worktree of snapshot.worktrees ?? []) {
         if (
           worktree.projectId !== projectId ||
@@ -673,7 +686,7 @@ export const makeWorktreeOperations = (deps: {
           worktree.title == null
         )
           continue;
-        const title = generatedWorktreeTitle(worktree);
+        const title = generatedWorktreeTitle({ ...worktree, worktreeBranchPrefix });
         if (title === null || title === worktree.title) continue;
         yield* dispatchWorktreeCommand(
           {
@@ -687,6 +700,7 @@ export const makeWorktreeOperations = (deps: {
         );
       }
       const plan = planWorktreeReconciliation({
+        worktreeBranchPrefix,
         canonicalizePath: canonicalizeFilesystemPath,
         caseSensitiveFileSystem: isCaseSensitiveFileSystem(),
         gitWorktreePaths,

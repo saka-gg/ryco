@@ -4,6 +4,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   applyGitStatusStreamEvent,
   buildTemporaryWorktreeBranchName,
+  buildGeneratedWorktreeBranchName,
+  extractTemporaryWorktreeBranchPrefix,
+  isManagedWorktreeBranch,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
@@ -129,5 +132,49 @@ describe("applyGitStatusStreamEvent", () => {
       behindCount: 1,
       pr: null,
     });
+  });
+});
+
+describe("configurable worktree namespaces", () => {
+  it.each(["team/agents", "Team", "", "team.v2"])(
+    "generates and recognizes %j temporary branches",
+    (prefix) => {
+      const branch = buildTemporaryWorktreeBranchName(prefix);
+      expect(extractTemporaryWorktreeBranchPrefix(branch, prefix)).toBe(prefix);
+      expect(isTemporaryWorktreeBranch(branch, prefix)).toBe(true);
+      expect(isManagedWorktreeBranch(branch, prefix)).toBe(true);
+      expect(isTemporaryWorktreeBranch("ryco/deadbeef", prefix)).toBe(true);
+      expect(extractTemporaryWorktreeBranchPrefix("ryco/deadbeef", prefix)).toBe("ryco");
+    },
+  );
+
+  it("keeps unrelated namespaces and non-temporary suffixes out", () => {
+    expect(isTemporaryWorktreeBranch("someone/deadbeef", "team")).toBe(false);
+    expect(isTemporaryWorktreeBranch("team/deadbeef-extra", "team")).toBe(false);
+    expect(isTemporaryWorktreeBranch("team/DEADBEEF", "team")).toBe(true);
+    expect(extractTemporaryWorktreeBranchPrefix("RYCO/DEADBEEF", "team")).toBe("RYCO");
+    expect(isTemporaryWorktreeBranch("teamXv2/deadbeef", "team.v2")).toBe(false);
+    expect(isManagedWorktreeBranch("ryco/fix", "team")).toBe(true);
+    expect(isManagedWorktreeBranch("team/fix", "team")).toBe(true);
+    expect(isManagedWorktreeBranch("teamwork/fix", "team")).toBe(false);
+    expect(isManagedWorktreeBranch("main", "")).toBe(false);
+    expect(isManagedWorktreeBranch("feature/fix", "")).toBe(false);
+  });
+
+  it.each([
+    ["refs/heads/ryco/Fix Login", "team/agents", "team/agents/fix-login"],
+    ["team/agents/Fix Login", "team/agents", "team/agents/fix-login"],
+    ["ryco/Fix Login", "", "fix-login"],
+    ["feature/New Login", "Team", "Team/feature/new-login"],
+    ["???", "team", "team/update"],
+    ["ryco/Fix Login", "ryco", "ryco/fix-login"],
+  ])("builds %j using %j", (raw, prefix, expected) => {
+    expect(buildGeneratedWorktreeBranchName(raw, prefix)).toBe(expected);
+  });
+
+  it("limits generated suffixes to 64 characters without truncating the prefix", () => {
+    expect(buildGeneratedWorktreeBranchName("A".repeat(100), "team/agents")).toBe(
+      `team/agents/${"a".repeat(64)}`,
+    );
   });
 });

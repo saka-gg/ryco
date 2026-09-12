@@ -14,7 +14,8 @@ import {
   type ScopedThreadRef,
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
+import { DEFAULT_UNIFIED_SETTINGS, WorktreeBranchPrefix } from "@ryco/contracts/settings";
+import { Schema } from "effect";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
   canCheckForUpdate,
@@ -746,6 +747,50 @@ export function GeneralSettingsPanel({
             </Select>
           }
         />
+
+        {!isPhoneTier && (
+          <SettingsRow
+            title="Worktree branch prefix"
+            description="Prefix for generated branches on this device. Use a Git namespace such as team/agent, without a trailing slash. Leave empty for no prefix. Existing branches keep their names."
+            owner="node"
+            scope={nodeScopeLabel}
+            resetAction={
+              settings.worktreeBranchPrefix !== DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix ? (
+                <SettingResetButton
+                  label="worktree branch prefix"
+                  onClick={() =>
+                    updateSettings({
+                      worktreeBranchPrefix: DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <DraftInput
+                className="w-full sm:w-72"
+                value={settings.worktreeBranchPrefix}
+                onCommit={(next) => {
+                  const prefix = next.trim();
+                  if (!Schema.is(WorktreeBranchPrefix)(prefix)) {
+                    toastManager.add({
+                      type: "error",
+                      title: "Invalid worktree branch prefix",
+                      description:
+                        "Use a valid Git namespace of up to 128 characters without a trailing slash, or leave it empty.",
+                    });
+                    return;
+                  }
+                  updateSettings({ worktreeBranchPrefix: prefix });
+                }}
+                placeholder="ryco"
+                spellCheck={false}
+                autoCapitalize="none"
+                aria-label="Worktree branch prefix"
+              />
+            }
+          />
+        )}
 
         <SettingsRow
           title="Add project starts in"

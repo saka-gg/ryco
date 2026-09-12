@@ -28,6 +28,7 @@ describe("send engine — bootstrap", () => {
       baseBranchForWorktree: "origin/main",
       fetchOrigin: true,
       worktreeBranchName: name,
+      worktreeBranchPrefix: "team/tasks",
       shouldMaterializeLegacyBranchWorktree: false,
       projectId: ProjectId.make("project-1"),
       projectCwd: "/workspace",
@@ -43,7 +44,7 @@ describe("send engine — bootstrap", () => {
     expect(bootstrap?.prepareWorktree?.fetchOrigin).toBe(true);
     expect(bootstrap?.prepareWorktree?.baseBranch).toBe("origin/main");
     if (name) expect(bootstrap?.prepareWorktree?.branch).toBe(name);
-    else expect(bootstrap?.prepareWorktree?.branch).toMatch(/^ryco\//);
+    else expect(bootstrap?.prepareWorktree?.branch).toMatch(/^team\/tasks\//);
   });
   it("does not resolve a bootstrap for an existing thread without a worktree", () => {
     expect(

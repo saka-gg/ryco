@@ -12,3 +12,9 @@ Settings have two destinations:
 Computer use and operating system permissions require the native app on the target device. Remote device settings explain where to enable them and never mount the current desktop's native permission controls. Opening settings does not request system permissions; permission checks and changes remain explicit actions. Connection security remains under Connections → Advanced.
 
 Name lookup uses existing descriptor and directory state. It does not probe the operating system, open additional connections, poll permissions, or restart a device.
+
+## Worktree branch prefix
+
+Under **Projects & threads**, **Worktree branch prefix** sets the selected server's default namespace for automatically generated worktree branches. The default is `ryco`; `team/agent` produces branches such as `team/agent/deadbeef`. Leave it empty to generate branches without a namespace. Enter a valid Git namespace without a trailing slash (maximum 128 characters).
+
+The setting applies to every client connected to that server, including native mobile and agent-created worktrees. Explicit branch names and source-specific issue naming keep their existing behavior. First-turn generated names retain the temporary branch's namespace. Changing the setting does not rename existing branches; reconciliation continues recognizing legacy `ryco/` branches. Internal checkpoint refs remain stable so existing checkpoints stay readable. There is no project override.

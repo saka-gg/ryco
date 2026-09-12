@@ -286,3 +286,55 @@ describe("node-owned device icons", () => {
     ).toBeNull();
   });
 });
+
+describe("worktree branch prefix settings", () => {
+  it("defaults historical settings to the legacy namespace", () => {
+    expect(decodeServerSettings({}).worktreeBranchPrefix).toBe("ryco");
+    expect(DEFAULT_SERVER_SETTINGS.worktreeBranchPrefix).toBe("ryco");
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("worktreeBranchPrefix");
+  });
+
+  it.each(["", "team", "Team/agents", "team.v2", "agent_work", "team-1"])(
+    "accepts %j",
+    (prefix) => {
+      expect(decodeServerSettings({ worktreeBranchPrefix: prefix }).worktreeBranchPrefix).toBe(
+        prefix,
+      );
+      expect(decodeServerSettingsPatch({ worktreeBranchPrefix: prefix }).worktreeBranchPrefix).toBe(
+        prefix,
+      );
+    },
+  );
+
+  it("trims surrounding whitespace", () => {
+    expect(
+      decodeServerSettingsPatch({ worktreeBranchPrefix: " team/agents " }).worktreeBranchPrefix,
+    ).toBe("team/agents");
+  });
+
+  it.each([
+    "/team",
+    "team/",
+    "team//agents",
+    "-team",
+    ".team",
+    "team/.hidden",
+    "team..agents",
+    "team.lock",
+    "team.lock/agents",
+    "team.",
+    "team agents",
+    "team:agents",
+    "team?",
+    "team*",
+    "team[",
+    "team\\agents",
+    "team~",
+    "team^",
+    "team@{1}",
+    "a".repeat(129),
+  ])("rejects invalid Git namespace %j", (prefix) => {
+    expect(() => decodeServerSettings({ worktreeBranchPrefix: prefix })).toThrow();
+    expect(() => decodeServerSettingsPatch({ worktreeBranchPrefix: prefix })).toThrow();
+  });
+});

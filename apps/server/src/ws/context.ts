@@ -693,6 +693,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       initializeGitForProject,
       reconcileAllWorktrees,
     } = makeWorktreeOperations({
+      serverSettings,
       projectionSnapshotQuery,
       projectionWorktrees,
       gitWorkflow,
