@@ -105,7 +105,8 @@ export interface SendTurnSettings {
 export interface SendTurnProjectContext {
   projectId: ProjectId;
   projectCwd: string;
-  defaultModelSelection: ModelSelection | null;
+  /** @deprecated Retained for older callers; never used for model resolution. */
+  defaultModelSelection?: ModelSelection | null;
 }
 
 export interface SendTurnScrollDeps {
@@ -454,11 +455,9 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       }),
     );
 
-    const defaultModel = project.defaultModelSelection?.model ?? null;
     const threadCreateModelSelection = resolveThreadCreateModelSelection({
       selectedModelSelection: composer.selectedModelSelection,
       selectedModel: composer.selectedModel,
-      defaultModel,
     });
 
     const freshSourceControlContexts = await refreshStaleSourceControlContexts(

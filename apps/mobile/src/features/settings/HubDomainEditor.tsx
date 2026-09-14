@@ -19,7 +19,6 @@ import {
 } from "../../hostedHub/hubCapability";
 import {
   createHubProfile,
-  HUB_PROFILE_LABEL_MAX_LENGTH,
   normalizeHubOrigin,
   type HubOriginFailureReason,
   type HubProfile,
@@ -58,7 +57,6 @@ export function HubDomainEditor(props: {
   const insets = useSafeAreaInsets();
   const primaryForegroundColor = useThemeColor("--color-primary-foreground");
   const [origin, setOrigin] = useState("");
-  const [label, setLabel] = useState("");
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkedProfile, setCheckedProfile] = useState<HubProfile | null>(null);
@@ -72,7 +70,6 @@ export function HubDomainEditor(props: {
     checkGeneration.current += 1;
     if (!props.visible) return;
     setOrigin(props.currentProfile?.origin ?? props.buildOrigin ?? "");
-    setLabel(props.currentProfile?.label ?? "");
     setChecking(false);
     setError(null);
     setCheckedProfile(null);
@@ -110,7 +107,7 @@ export function HubDomainEditor(props: {
       }
       const profile = createHubProfile({
         origin: normalized.origin,
-        label: label || result.capability.relyingParty.displayName,
+        label: result.capability.relyingParty.displayName,
         allowInsecure: props.allowInsecure,
         compatibility: {
           status: "compatible",
@@ -140,141 +137,145 @@ export function HubDomainEditor(props: {
     <Modal
       visible={props.visible}
       animationType="slide"
-      presentationStyle={props.requireNativeIdentity ? "fullScreen" : "pageSheet"}
+      transparent={!props.requireNativeIdentity}
+      presentationStyle={props.requireNativeIdentity ? "fullScreen" : "overFullScreen"}
       onRequestClose={dismiss}
     >
+      {!props.requireNativeIdentity ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss Hub domain"
+          onPress={dismiss}
+          className="absolute inset-0 bg-black/40"
+        />
+      ) : null}
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
-        className="flex-1 bg-screen"
+        pointerEvents="box-none"
+        style={{ flex: 1, justifyContent: "flex-end" }}
       >
-        <ScrollView
-          keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{
-            paddingHorizontal: 20,
-            paddingTop: props.requireNativeIdentity ? insets.top + 8 : 20,
-            paddingBottom: props.requireNativeIdentity ? Math.max(40, insets.bottom + 20) : 40,
-            gap: 18,
-          }}
+        <View
+          className="bg-screen"
+          style={
+            props.requireNativeIdentity
+              ? { flex: 1 }
+              : {
+                  width: "100%",
+                  maxWidth: 560,
+                  alignSelf: "center",
+                  maxHeight: "90%",
+                  borderTopLeftRadius: 28,
+                  borderTopRightRadius: 28,
+                  overflow: "hidden",
+                }
+          }
         >
-          <View className="flex-row items-center">
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Cancel Hub domain"
-              onPress={dismiss}
-              className="h-11 min-w-16 items-center justify-center rounded-full active:bg-subtle"
-            >
-              <Text className="text-base font-ryco-medium text-foreground">Cancel</Text>
-            </Pressable>
-            <Text className="flex-1 text-center text-lg font-ryco-bold text-foreground">
-              Hub domain
-            </Text>
-            <View className="h-11 min-w-16" />
-          </View>
-
-          <Text className="font-sans text-sm leading-relaxed text-foreground-muted">
-            Enter the public origin of one Ryco Hub. Ryco checks its bounded mobile capability
-            document before saving it. Credentials are never stored in this profile.
-          </Text>
-
-          <View className="gap-2">
-            <Text className="px-1 text-sm font-ryco-medium text-foreground-muted">Domain</Text>
-            <AppTextInput
-              accessibilityLabel="Hub domain"
-              value={origin}
-              onChangeText={updateOrigin}
-              placeholder="https://hub.your-domain.com"
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              className="min-h-14 px-4"
-            />
-          </View>
-
-          <View className="gap-2">
-            <Text className="px-1 text-sm font-ryco-medium text-foreground-muted">
-              Name (optional)
-            </Text>
-            <AppTextInput
-              accessibilityLabel="Hub name"
-              value={label}
-              onChangeText={(value) => {
-                checkGeneration.current += 1;
-                setChecking(false);
-                setLabel(value);
-                setCheckedProfile(null);
-                setError(null);
-              }}
-              maxLength={HUB_PROFILE_LABEL_MAX_LENGTH}
-              placeholder="Studio Hub"
-              autoCapitalize="words"
-              className="min-h-14 px-4"
-            />
-          </View>
-
-          {error ? <ErrorBanner message={error} /> : null}
-          {checkedProfile ? (
-            <View className="rounded-2xl border border-success-border bg-success-bg p-4">
-              <Text className="text-sm font-ryco-bold text-success">Compatible Hub</Text>
-              <Text className="mt-1 font-sans text-xs leading-relaxed text-foreground-muted">
-                {props.requireNativeIdentity
-                  ? "Native account access v2 and handoff v"
-                  : "System-browser handoff v"}
-                {checkedProfile.compatibility.status === "compatible"
-                  ? checkedProfile.compatibility.handoffVersion
-                  : 1}{" "}
-                is advertised. Saving the profile does not store a session or handoff secret.
-              </Text>
-            </View>
-          ) : null}
-
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Check Hub compatibility"
-            disabled={checking}
-            onPress={() => void check()}
-            className="h-12 items-center justify-center rounded-full bg-primary px-5 active:opacity-80 disabled:opacity-40"
-          >
-            {checking ? (
-              <ActivityIndicator color={primaryForegroundColor as string} />
-            ) : (
-              <Text className="text-base font-ryco-bold text-primary-foreground">
-                Check compatibility
-              </Text>
-            )}
-          </Pressable>
-
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Save Hub profile"
-            disabled={!checkedProfile || checking}
-            onPress={() => {
-              if (checkedProfile) {
-                checkGeneration.current += 1;
-                props.onSave(checkedProfile);
-              }
+          <ScrollView
+            style={props.requireNativeIdentity ? { flex: 1 } : { flexGrow: 0 }}
+            keyboardShouldPersistTaps="handled"
+            contentContainerStyle={{
+              paddingHorizontal: 20,
+              paddingTop: props.requireNativeIdentity ? insets.top + 8 : 12,
+              paddingBottom: Math.max(20, insets.bottom + 12),
+              gap: 14,
             }}
-            className="h-12 items-center justify-center rounded-full border border-border bg-card px-5 active:bg-card-alt disabled:opacity-40"
           >
-            <Text className="text-base font-ryco-bold text-foreground">Save Hub</Text>
-          </Pressable>
+            <View className="flex-row items-center">
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel Hub domain"
+                onPress={dismiss}
+                className="h-11 min-w-16 items-center justify-center rounded-full active:bg-subtle"
+              >
+                <Text className="text-base font-ryco-medium text-foreground">Cancel</Text>
+              </Pressable>
+              <Text className="flex-1 text-center text-lg font-ryco-bold text-foreground">
+                Hub domain
+              </Text>
+              <View className="h-11 min-w-16" />
+            </View>
 
-          {props.onUseBuildDefault ? (
+            <Text className="font-sans text-sm leading-relaxed text-foreground-muted">
+              Enter your Hub domain, then check compatibility before saving.
+            </Text>
+
+            <View className="gap-2">
+              <Text className="px-1 text-sm font-ryco-medium text-foreground-muted">Domain</Text>
+              <AppTextInput
+                accessibilityLabel="Hub domain"
+                value={origin}
+                onChangeText={updateOrigin}
+                placeholder="https://hub.your-domain.com"
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+                className="min-h-14 px-4"
+              />
+            </View>
+
+            {error ? <ErrorBanner message={error} /> : null}
+            {checkedProfile ? (
+              <View className="rounded-2xl border border-success-border bg-success-bg p-4">
+                <Text className="text-sm font-ryco-bold text-success">Compatible Hub</Text>
+                <Text className="mt-1 font-sans text-xs leading-relaxed text-foreground-muted">
+                  {props.requireNativeIdentity
+                    ? "Native account access v2 and handoff v"
+                    : "System-browser handoff v"}
+                  {checkedProfile.compatibility.status === "compatible"
+                    ? checkedProfile.compatibility.handoffVersion
+                    : 1}{" "}
+                  is advertised. Saving the profile does not store a session or handoff secret.
+                </Text>
+              </View>
+            ) : null}
+
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Use build default Hub"
-              onPress={() => {
-                checkGeneration.current += 1;
-                setChecking(false);
-                props.onUseBuildDefault?.();
-              }}
-              className="h-11 items-center justify-center rounded-full active:bg-subtle"
+              accessibilityLabel="Check Hub compatibility"
+              disabled={checking}
+              onPress={() => void check()}
+              className="h-12 items-center justify-center rounded-full bg-primary px-5 active:opacity-80 disabled:opacity-40"
             >
-              <Text className="text-sm font-ryco-bold text-foreground-muted">
-                Use build default
-              </Text>
+              {checking ? (
+                <ActivityIndicator color={primaryForegroundColor as string} />
+              ) : (
+                <Text className="text-base font-ryco-bold text-primary-foreground">
+                  Check compatibility
+                </Text>
+              )}
             </Pressable>
-          ) : null}
-        </ScrollView>
+
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Save Hub profile"
+              disabled={!checkedProfile || checking}
+              onPress={() => {
+                if (checkedProfile) {
+                  checkGeneration.current += 1;
+                  props.onSave(checkedProfile);
+                }
+              }}
+              className="h-12 items-center justify-center rounded-full border border-border bg-card px-5 active:bg-card-alt disabled:opacity-40"
+            >
+              <Text className="text-base font-ryco-bold text-foreground">Save Hub</Text>
+            </Pressable>
+
+            {props.onUseBuildDefault ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Use default"
+                onPress={() => {
+                  checkGeneration.current += 1;
+                  setChecking(false);
+                  props.onUseBuildDefault?.();
+                }}
+                className="h-11 items-center justify-center rounded-full active:bg-subtle"
+              >
+                <Text className="text-sm font-ryco-bold text-foreground-muted">Use default</Text>
+              </Pressable>
+            ) : null}
+          </ScrollView>
+        </View>
       </KeyboardAvoidingView>
     </Modal>
   );

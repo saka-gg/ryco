@@ -110,7 +110,19 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     }
   };
 
-  const capture = async (environmentId: EnvironmentId): Promise<void> => {
+  // A clear must finish after any write that was already in flight for this node.
+  const writes = new Map<EnvironmentId, Promise<void>>();
+  const serialize = (environmentId: EnvironmentId, action: () => Promise<void>): Promise<void> => {
+    const result = (writes.get(environmentId) ?? Promise.resolve()).catch(() => {}).then(action);
+    writes.set(environmentId, result);
+    void result
+      .finally(() => {
+        if (writes.get(environmentId) === result) writes.delete(environmentId);
+      })
+      .catch(() => {});
+    return result;
+  };
+  const captureNow = async (environmentId: EnvironmentId): Promise<void> => {
     const environmentState = deps.store.getState().environmentStateById[environmentId];
     // Only a live, settled projection is worth persisting: never before the
     // first full shell snapshot (that would write a partial projection as
@@ -133,6 +145,9 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     await evictToCapacity(environmentId);
   };
 
+  const capture = (environmentId: EnvironmentId): Promise<void> =>
+    serialize(environmentId, () => captureNow(environmentId));
+
   const markDirty = (environmentId: EnvironmentId): void => {
     if (disposed) return;
     const pending = dirtyTimers.get(environmentId);
@@ -152,7 +167,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       clearTimeout(pending);
       dirtyTimers.delete(environmentId);
     }
-    await deps.db.removeEnvironmentSnapshot(environmentId);
+    await serialize(environmentId, () => deps.db.removeEnvironmentSnapshot(environmentId));
   };
 
   const persistRosterDebounced = (): void => {
@@ -362,4 +377,33 @@ export function resetMobileSnapshotPersistenceForTests(): void {
   sharedDb = null;
   uninstallSelectionPersistence?.();
   uninstallSelectionPersistence = null;
+}
+
+/** Storage settings reports stored payload bytes, not SQLite allocation or free disk space. */
+export async function listEnvironmentCacheStorage() {
+  const db = getSharedSnapshotDb();
+  const stats = await db.listEnvironmentSnapshotStats();
+  return Promise.all(
+    stats.map(async (stat) => {
+      const stored = await db.loadEnvironmentSnapshot(stat.environmentId);
+      const snapshot = stored
+        ? decodeStoredEnvironmentSnapshot(stored.payload, stat.environmentId as EnvironmentId)
+        : null;
+      return {
+        environmentId: stat.environmentId,
+        payloadBytes: stat.payloadBytes,
+        threads: snapshot?.threads.length ?? 0,
+        projects: snapshot?.projects.length ?? 0,
+      };
+    }),
+  );
+}
+export async function clearEnvironmentSnapshotCache(environmentId: EnvironmentId): Promise<void> {
+  if (activeRuntime) await activeRuntime.purgeEnvironment(environmentId);
+  else await getSharedSnapshotDb().removeEnvironmentSnapshot(environmentId);
+  // Evict only offline-hydrated presentation state. Live synchronization retains ownership.
+  const state = useStore.getState();
+  if (state.environmentStateById[environmentId]?.hydratedFromCacheAt !== undefined) {
+    state.removeEnvironmentState(environmentId);
+  }
 }

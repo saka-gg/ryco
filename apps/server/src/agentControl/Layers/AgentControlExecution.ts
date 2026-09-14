@@ -663,7 +663,6 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             workspaceRoot: plan.workspaceRoot,
             projectMetadataDir: plan.projectMetadataDir,
             createWorkspaceRootIfMissing: false,
-            defaultModelSelection: null,
             createdAt: new Date().toISOString(),
           });
           return operation;
@@ -684,9 +683,6 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             commandId: commandIdFor(operation.operationId, "project-update"),
             projectId: plan.projectId,
             expectedUpdatedAt: plan.before.updatedAt,
-            ...(plan.after.defaultModelSelection === undefined
-              ? {}
-              : { defaultModelSelection: plan.after.defaultModelSelection }),
             ...(plan.after.customSystemPrompt === undefined
               ? {}
               : { customSystemPrompt: plan.after.customSystemPrompt }),

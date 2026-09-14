@@ -1,14 +1,14 @@
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useNavigation } from "@react-navigation/native";
 import { useHeaderHeight } from "@react-navigation/elements";
 import { getQueuedThreadKeys } from "@ryco/client-runtime/state/message-queue";
 import { useEffect, useLayoutEffect, useMemo, useReducer, useState } from "react";
-import { AppState, Pressable, TextInput, View } from "react-native";
+import { AppState, Pressable, View } from "react-native";
 
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import { HomeModeControl } from "../../components/HomeModeControl";
-import { NewTaskFab } from "../../components/NewTaskFab";
-import { NodeScopeControl } from "../../components/NodeScopeControl";
+import { HomeBottomToolbar } from "../../components/HomeBottomToolbar";
 import { RycoWordmark } from "../../components/RycoWordmark";
 import { SymbolView } from "../../components/AppSymbol";
 import { useThemeColor } from "../../lib/useThemeColor";
@@ -30,10 +30,7 @@ export function HomeScreen() {
   const navigation = useNavigation();
   const headerHeight = useHeaderHeight();
   const [home, dispatch] = useReducer(reduceHomeModeState, undefined, () => createHomeModeState());
-  const [searchVisible, setSearchVisible] = useState(false);
   const iconColor = useThemeColor("--color-icon");
-  const placeholderColor = useThemeColor("--color-placeholder");
-  const textColor = useThemeColor("--color-foreground");
   const environments = useHomeEnvironments();
   const eligibleEnvironmentIds = useMemo(
     () => new Set(environments.map((environment) => environment.environmentId)),
@@ -72,7 +69,7 @@ export function HomeScreen() {
         nodeScope: home.nodeScopeByMode.inbox,
         localQueuedThreadIds,
         aiFocusEnabled: preferences.aiFocusEnabled ?? false,
-        autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays ?? null,
+        autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
         nowMs,
       }),
     [
@@ -110,7 +107,7 @@ export function HomeScreen() {
     ],
   );
 
-  const chrome = buildHomeChromeModel({ mode: home.mode, searchVisible });
+  const chrome = useMemo(() => buildHomeChromeModel({ mode: home.mode }), [home.mode]);
 
   const openNewTask = () =>
     navigation.navigate("NewTask", {
@@ -133,25 +130,14 @@ export function HomeScreen() {
         </Pressable>
       ),
       headerRight: () => (
-        <View className="flex-row items-center gap-2">
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={chrome.headerRight[0].accessibilityLabel}
-            accessibilityState={{ expanded: chrome.searchExpanded }}
-            className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
-            onPress={() => setSearchVisible((visible) => !visible)}
-          >
-            <SymbolView name="magnifyingglass" size={20} tintColor={iconColor} type="monochrome" />
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={chrome.headerRight[1].accessibilityLabel}
-            className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
-            onPress={() => navigation.navigate("SettingsSheet")}
-          >
-            <SymbolView name="gearshape" size={20} tintColor={iconColor} type="monochrome" />
-          </Pressable>
-        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={chrome.headerRight[0].accessibilityLabel}
+          className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
+          onPress={() => navigation.navigate("SettingsSheet")}
+        >
+          <SymbolView name="gearshape" size={20} tintColor={iconColor} type="monochrome" />
+        </Pressable>
       ),
     });
   }, [chrome, iconColor, navigation]);
@@ -184,101 +170,63 @@ export function HomeScreen() {
   });
 
   return (
-    <View className="flex-1 bg-screen" style={{ paddingTop: headerHeight }}>
-      <HomeModeControl mode={home.mode} onSelect={selectMode} />
-      {searchVisible ? (
-        <View className="mx-4 mt-3 flex-row items-center rounded-2xl bg-sidebar-search px-4">
-          <SymbolView
-            name="magnifyingglass"
-            size={16}
-            tintColor={placeholderColor as string}
-            type="monochrome"
-          />
-          <TextInput
-            autoFocus
-            accessibilityLabel={`Search ${chrome.title}`}
-            value={currentQuery}
-            onChangeText={(query) => dispatch({ type: "set-query", mode: home.mode, query })}
-            placeholder={`Search ${chrome.title.toLocaleLowerCase()}`}
-            placeholderTextColor={placeholderColor as string}
-            className="h-11 flex-1 px-3 font-sans text-base"
-            style={{ color: textColor as string }}
-            returnKeyType="search"
-          />
-          {currentQuery ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Clear search"
-              onPress={() => dispatch({ type: "set-query", mode: home.mode, query: "" })}
-              className="h-11 w-11 items-center justify-center"
-            >
-              <SymbolView
-                name="xmark.circle.fill"
-                size={17}
-                tintColor={placeholderColor as string}
-                type="monochrome"
-              />
-            </Pressable>
-          ) : null}
-        </View>
-      ) : null}
-      {/* Wave 4 demotes the machine filter out of the primary chrome: it rides
-          with search. An ACTIVE scope keeps it visible even with search closed —
-          a filter the user cannot see or dismiss would silently hide work. */}
-      {searchVisible || currentNodeScope !== null ? (
-        <NodeScopeControl
-          options={environments}
-          selected={currentNodeScope}
-          onSelect={(environmentId) =>
-            dispatch({
-              type: "set-node-scope",
-              mode: home.mode,
-              environmentId,
-            })
-          }
-        />
-      ) : null}
-      <View className="min-h-0 flex-1">
-        <NeedsVerificationSection />
-        {home.mode === "inbox" ? (
-          <InboxScreen
-            sections={inboxSections}
-            emptyState={inboxEmptyState}
-            initialScrollOffset={home.scrollOffsetByMode.inbox}
-            onScrollOffset={(offset) =>
-              dispatch({ type: "set-scroll-offset", mode: "inbox", offset })
-            }
-            onOpenThread={(row) => openThread(row)}
-            onEmptyAction={(state) => {
-              if (state === "connect-node") {
-                openMachines();
-              } else if (state === "clear-filter") {
-                clearFilters();
-              } else {
-                selectMode("projects");
+    <KeyboardAvoidingView behavior="padding" automaticOffset style={{ flex: 1 }}>
+      <View className="flex-1 bg-screen" style={{ paddingTop: headerHeight }}>
+        <HomeModeControl mode={home.mode} onSelect={selectMode} />
+        <View className="min-h-0 flex-1">
+          <NeedsVerificationSection />
+          {home.mode === "inbox" ? (
+            <InboxScreen
+              filterKey={JSON.stringify([currentQuery, currentNodeScope])}
+              sections={inboxSections}
+              emptyState={inboxEmptyState}
+              initialScrollOffset={home.scrollOffsetByMode.inbox}
+              onScrollOffset={(offset) =>
+                dispatch({ type: "set-scroll-offset", mode: "inbox", offset })
               }
-            }}
-          />
-        ) : (
-          <ProjectsScreen
-            rows={projectRows}
-            hasMachines={environments.length > 0}
-            initialScrollOffset={home.scrollOffsetByMode.projects}
-            onScrollOffset={(offset) =>
-              dispatch({ type: "set-scroll-offset", mode: "projects", offset })
-            }
-            onAddProject={() => navigation.navigate("AddProject")}
-            onOpenProject={(row) =>
-              navigation.navigate("Project", {
-                environmentId: row.open.environmentId,
-                projectId: row.open.projectId,
-              })
-            }
-            onAddMachine={openMachines}
-          />
-        )}
+              onOpenThread={(row) => openThread(row)}
+              onEmptyAction={(state) => {
+                if (state === "connect-node") {
+                  openMachines();
+                } else if (state === "clear-filter") {
+                  clearFilters();
+                } else {
+                  selectMode("projects");
+                }
+              }}
+            />
+          ) : (
+            <ProjectsScreen
+              filterKey={JSON.stringify([currentQuery, currentNodeScope])}
+              rows={projectRows}
+              hasMachines={environments.length > 0}
+              initialScrollOffset={home.scrollOffsetByMode.projects}
+              onScrollOffset={(offset) =>
+                dispatch({ type: "set-scroll-offset", mode: "projects", offset })
+              }
+              onAddProject={() => navigation.navigate("AddProject")}
+              onOpenProject={(row) =>
+                navigation.navigate("Project", {
+                  environmentId: row.open.environmentId,
+                  projectId: row.open.projectId,
+                })
+              }
+              onAddMachine={openMachines}
+            />
+          )}
+        </View>
+        <HomeBottomToolbar
+          query={currentQuery}
+          searchLabel={chrome.search.accessibilityLabel}
+          onQueryChange={(query) => dispatch({ type: "set-query", mode: home.mode, query })}
+          machines={environments}
+          selectedMachine={currentNodeScope}
+          onSelectMachine={(environmentId) =>
+            dispatch({ type: "set-node-scope", mode: home.mode, environmentId })
+          }
+          onNewTask={openNewTask}
+        />
       </View>
-      <NewTaskFab accessibilityLabel={chrome.newTask.accessibilityLabel} onPress={openNewTask} />
-    </View>
+    </KeyboardAvoidingView>
   );
 }

@@ -1,9 +1,11 @@
+import { IconGitBranch, IconGitFork } from "@tabler/icons-react-native";
+import { ChangeRequestBadge } from "../../components/ChangeRequestBadge";
+import { buildChangeRequestBadge } from "../../lib/changeRequestBadge";
 import { Pressable, View } from "react-native";
 
 import type { SidebarWorktreeSummary } from "@ryco/client-runtime/state/threads";
 
 import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
 import { useThemeColor } from "../../lib/useThemeColor";
 
 function SmallAction(props: {
@@ -42,34 +44,42 @@ export function WorktreeRow(props: {
 }) {
   const iconColor = useThemeColor("--color-icon-muted");
   const title = props.worktree.title?.trim() || props.worktree.branch;
+  const WorkspaceIcon = props.worktree.worktreePath ? IconGitFork : IconGitBranch;
+  const badge = buildChangeRequestBadge(props.worktree);
   const archived = props.worktree.archivedAt !== null;
 
   return (
     <View className="rounded-2xl bg-card p-4">
-      <View className="flex-row items-start gap-3">
-        <View className="h-10 w-10 items-center justify-center rounded-xl bg-subtle">
-          <SymbolView
-            name="arrow.triangle.branch"
-            size={18}
-            tintColor={iconColor as string}
-            type="monochrome"
-          />
+      <View className="flex-row items-start gap-2">
+        <View className="pt-0.5">
+          <WorkspaceIcon size={18} strokeWidth={1.75} color={iconColor as string} />
         </View>
-        <View className="min-w-0 flex-1 gap-1">
-          <Text className="text-[17px] font-ryco-bold text-foreground" numberOfLines={1}>
-            {title}
-          </Text>
-          <Text className="font-mono text-xs text-foreground-muted" numberOfLines={1}>
-            {props.worktree.branch}
-          </Text>
-          <Text className="text-xs font-ryco-medium text-foreground-tertiary">
-            {props.threadCount} task{props.threadCount === 1 ? "" : "s"}
-            {props.worktree.worktreePath ? " · Node workspace ready" : " · Managed by node"}
-          </Text>
-        </View>
+        <Text
+          className="min-w-0 flex-1 text-[16px] leading-[21px] font-ryco-medium text-foreground"
+          numberOfLines={2}
+        >
+          {title}
+        </Text>
+        {badge ? <ChangeRequestBadge badge={badge} /> : null}
       </View>
-
-      <View className="mt-3 flex-row flex-wrap gap-2 pl-[52px]">
+      {title !== props.worktree.branch ? (
+        <Text
+          className="mt-2 font-mono text-xs text-foreground-muted"
+          numberOfLines={1}
+          ellipsizeMode="middle"
+        >
+          {props.worktree.branch}
+        </Text>
+      ) : null}
+      <View className="mt-2 flex-row flex-wrap items-center gap-2">
+        <Text className="text-xs text-foreground-tertiary">
+          {props.worktree.worktreePath ? "Worktree" : "Original directory"}
+        </Text>
+        <Text className="text-xs text-foreground-tertiary">
+          · {props.threadCount} task{props.threadCount === 1 ? "" : "s"}
+        </Text>
+      </View>
+      <View className="mt-3 flex-row flex-wrap gap-2">
         {archived && props.onRestore ? (
           <SmallAction label="Restore" onPress={props.onRestore} />
         ) : (

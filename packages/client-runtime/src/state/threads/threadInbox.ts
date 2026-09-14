@@ -9,6 +9,7 @@ import type {
   WorktreeId,
 } from "@ryco/contracts";
 import {
+  resolveAutoSettleAfterDays,
   canSettleThread,
   classifyThreadSettlement,
   compareActiveInboxEntries,
@@ -342,7 +343,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       environment,
       hasLocalQueuedMessage: localQueueKeys.has(key),
       deliveryUnknown: deliveryUnknownKeys.has(key),
-      autoSettleAfterDays: input.autoSettleAfterDays ?? null,
+      autoSettleAfterDays: resolveAutoSettleAfterDays(input.autoSettleAfterDays),
       nowMs: input.nowMs,
     });
     const nextEvaluationAtMs = getNextThreadSettlementEvaluationAtMs(policyInput);

@@ -648,11 +648,10 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeProjectUpdate,
     description:
-      "Update project metadata and preferences with an updatedAt revision guard. Title, default model and preferred remote changes execute asynchronously; workspace, scripts and system prompt changes require approval.",
+      "Update project metadata and preferences with an updatedAt revision guard. Title and preferred remote changes execute asynchronously; workspace, scripts and system prompt changes require approval.",
     inputSchema: {
       type: "object",
       properties: {
-        defaultModelSelection: { anyOf: [modelSelectionSchema, { type: "null" }] },
         customSystemPrompt: { anyOf: [{ type: "string", maxLength: 20000 }, { type: "null" }] },
         scripts: projectScriptsSchema,
         preferredRemoteName: { anyOf: [{ type: "string" }, { type: "null" }] },

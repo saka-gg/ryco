@@ -1,3 +1,4 @@
+import { DeviceCacheStorage } from "./DeviceCacheStorage";
 import { ScrollView } from "react-native";
 
 import { LoadingScreen } from "../../components/LoadingScreen";
@@ -40,6 +41,7 @@ export function SettingsClientStorageRouteScreen() {
           value={preferences.baseFontSize ? `${preferences.baseFontSize}pt` : "Default"}
         />
       </SettingsSection>
+      <DeviceCacheStorage />
     </ScrollView>
   );
 }

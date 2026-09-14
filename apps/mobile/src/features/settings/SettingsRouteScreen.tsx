@@ -63,6 +63,11 @@ export function SettingsRouteScreen() {
           onPress={() => navigation.navigate("SettingsInbox" as never)}
         />
         <SettingsRow
+          label="Statistics"
+          value="Usage, activity, limits"
+          onPress={() => navigation.navigate("SettingsStatistics" as never)}
+        />
+        <SettingsRow
           label="Defaults"
           onPress={() => navigation.navigate("SettingsWorkspace" as never)}
         />
@@ -79,7 +84,7 @@ export function SettingsRouteScreen() {
       <SettingsSection title="App">
         <SettingsRow
           first
-          label="Local storage"
+          label="Storage & cache"
           onPress={() => navigation.navigate("SettingsClientStorage" as never)}
         />
         <SettingsRow

@@ -575,10 +575,6 @@ function projectPreferenceLines(
   value: import("@ryco/contracts").AgentControlProjectPreferences,
 ): string[] {
   return Object.entries(value)
-    .filter(([key]) =>
-      ["defaultModelSelection", "customSystemPrompt", "scripts", "preferredRemoteName"].includes(
-        key,
-      ),
-    )
+    .filter(([key]) => ["customSystemPrompt", "scripts", "preferredRemoteName"].includes(key))
     .map(([key, value]) => `${key}: ${JSON.stringify(value)}`);
 }

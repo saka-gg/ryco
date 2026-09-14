@@ -7,7 +7,6 @@ import type {
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
 
-import { NODE_TRUST_UNVERIFIED_LABEL } from "../home/nodeTrustModel";
 import { buildInboxSections, resolveInboxEmptyState, type InboxEnvironment } from "./inboxModel";
 
 const NODE_A = "node-a" as EnvironmentId;
@@ -390,32 +389,18 @@ describe("inbox row provenance", () => {
     }).flatMap((section) => section.rows);
   }
 
-  it("labels an unverified node in the runtime's own words", () => {
-    const row = rowsFor({
-      environmentId: NODE_A,
-      label: "Work Mac",
-      connectionState: "connected",
-      trust: "unverified",
-    })[0];
-
-    expect(row?.trustLabel).toBe(NODE_TRUST_UNVERIFIED_LABEL);
-    expect(row?.trustLabel).toBe("Not verified");
-  });
-
-  it("makes no trust claim for a verified node or for one with no evidence", () => {
-    expect(
-      rowsFor({
+  it.each(["unverified", "account-trusted", "verified"] as const)(
+    "keeps %s trust metadata out of task rows",
+    (trust) => {
+      const row = rowsFor({
         environmentId: NODE_A,
         label: "Work Mac",
         connectionState: "connected",
-        trust: "verified",
-      })[0]?.trustLabel,
-    ).toBeNull();
-    expect(
-      rowsFor({ environmentId: NODE_A, label: "Work Mac", connectionState: "connected" })[0]
-        ?.trustLabel,
-    ).toBeNull();
-  });
+        trust,
+      })[0];
+      expect(row).not.toHaveProperty("trustLabel");
+    },
+  );
 
   it("surfaces the role only when it changes what the user may do", () => {
     expect(
@@ -442,9 +427,7 @@ describe("inbox row provenance", () => {
     ).toBeNull();
   });
 
-  it("composes provenance beside wave 2's staleness rather than replacing it", () => {
-    // Staleness and trust are independent facts about the row: the status text
-    // stays the presence-derived phrase, and the trust marker sits next to it.
+  it("preserves offline and viewer information without trust metadata", () => {
     const row = rowsFor({
       environmentId: NODE_A,
       label: "Work Mac",
@@ -458,6 +441,122 @@ describe("inbox row provenance", () => {
     expect(row?.state).toBe("offline");
     expect(row?.statusLabel).toBe("Offline · last seen 2h ago");
     expect(row?.roleLabel).toBe("Viewer");
-    expect(row?.trustLabel).toBe("Not verified");
+    expect(row).not.toHaveProperty("trustLabel");
+  });
+});
+
+describe("mobile settlement and attention policy", () => {
+  const nowMs = Date.parse("2026-09-12T12:00:00Z");
+  const activityAt = "2026-09-05T12:00:00.000Z";
+  const environment: InboxEnvironment = {
+    environmentId: NODE_A,
+    label: "Mac",
+    connectionState: "connected",
+    threadSettlementSupported: true,
+    mutationReady: true,
+    shellCurrent: true,
+  };
+  function build(overrides: Partial<Parameters<typeof buildInboxSections>[0]> = {}) {
+    return buildInboxSections({
+      projects: [project(NODE_A, "p", "Ryco")],
+      worktrees: [],
+      environments: [environment],
+      threads: [thread(NODE_A, "old", "p", { latestUserMessageAt: activityAt })],
+      nowMs,
+      ...overrides,
+    });
+  }
+  it("settles at exactly seven days, leaves Off disabled, and honors custom intervals", () => {
+    expect(build({ nowMs: nowMs - 1 })[0]?.key).toBe("active");
+    expect(build()[0]?.key).toBe("settled");
+    expect(build()[0]?.rows[0]?.updatedAt).toBe("2026-09-12T12:00:00.000Z");
+    expect(build({ autoSettleAfterDays: null })[0]?.key).toBe("active");
+    expect(build({ autoSettleAfterDays: 14 })[0]?.key).toBe("active");
+  });
+  it("protects queued messages and environment-level unknown delivery", () => {
+    expect(build({ localQueuedThreadIds: new Set(["node-a:old"]) })[0]?.rows[0]).toMatchObject({
+      attentionState: "active",
+      canSettle: false,
+    });
+    expect(
+      build({ environments: [{ ...environment, deliveryUnknown: true }] })[0]?.rows[0],
+    ).toMatchObject({ attentionState: "active", state: "delivery-unknown", canSettle: false });
+  });
+  it("keeps running, pending input, open PRs, and manual Active overrides out of Settled", () => {
+    const open = {
+      ...worktree(NODE_A, "tree", "p", "feat/inbox"),
+      prNumber: 42,
+      prState: "open" as const,
+    };
+    const sections = build({
+      worktrees: [open],
+      threads: [
+        thread(NODE_A, "running", "p", {
+          latestUserMessageAt: activityAt,
+          latestTurn: { state: "running", requestedAt: activityAt } as never,
+        }),
+        thread(NODE_A, "input", "p", {
+          latestUserMessageAt: activityAt,
+          hasPendingUserInput: true,
+        }),
+        thread(NODE_A, "open", "p", { latestUserMessageAt: activityAt, worktreeId: "tree" }),
+        thread(NODE_A, "kept", "p", { latestUserMessageAt: activityAt, settledOverride: "active" }),
+      ],
+    });
+    expect(sections.map((section) => section.key)).toEqual(["active"]);
+    expect(sections[0]?.rows).toHaveLength(4);
+  });
+  it("puts pending input in Focus when enabled without duplicating it in Active", () => {
+    const sections = build({
+      aiFocusEnabled: true,
+      threads: [
+        thread(NODE_A, "input", "p", {
+          latestUserMessageAt: activityAt,
+          hasPendingUserInput: true,
+        }),
+        thread(NODE_A, "old", "p", { latestUserMessageAt: activityAt }),
+      ],
+    });
+    expect(sections.map((section) => section.key)).toEqual(["focus", "settled"]);
+    expect(sections[0]?.rows[0]).toMatchObject({ state: "needs-input", canSettle: false });
+    expect(new Set(sections.flatMap((section) => section.rows.map((row) => row.key))).size).toBe(2);
+  });
+  it("keeps cached rows offline and read-only even when their known lifecycle is settled", () => {
+    expect(
+      build({
+        environments: [
+          {
+            ...environment,
+            connectionState: "offline",
+            stale: true,
+            mutationReady: false,
+            shellCurrent: false,
+          },
+        ],
+      })[0]?.rows[0],
+    ).toMatchObject({ attentionState: "settled", state: "offline", mutationEnabled: false });
+  });
+  it("carries project artwork and distinguishes a worktree from the original checkout", () => {
+    const p = { ...project(NODE_A, "p", "Ryco"), customAvatarContentHash: "avatar" };
+    const wt = { ...worktree(NODE_A, "tree", "p", "feat/inbox"), worktreePath: "/worktrees/inbox" };
+    const sections = build({
+      projects: [p],
+      worktrees: [wt],
+      threads: [
+        thread(NODE_A, "main", "p", { branch: "main" }),
+        thread(NODE_A, "worktree", "p", { worktreeId: "tree" }),
+      ],
+    });
+    const rows = sections.flatMap((section) => section.rows);
+    expect(rows.find((row) => row.threadId === "main")).toMatchObject({
+      project: p,
+      isWorktree: false,
+      worktreeLabel: "main",
+    });
+    expect(rows.find((row) => row.threadId === "worktree")).toMatchObject({
+      project: p,
+      isWorktree: true,
+      worktreeLabel: "feat/inbox",
+    });
   });
 });

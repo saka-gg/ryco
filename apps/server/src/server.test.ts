@@ -4091,7 +4091,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(createdWorktreeInput?.newRefName, "fix/generated-issue-branch");
       const branchGenerationInput = generateBranchName.mock.calls[0]?.[0];
       assert.equal(branchGenerationInput?.cwd, "/tmp/project");
-      assert.equal(branchGenerationInput?.modelSelection, defaultModelSelection);
+      assert.deepEqual(
+        branchGenerationInput?.modelSelection,
+        DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+      );
       assert.match(branchGenerationInput?.message ?? "", /Fix broken reconnects/);
       assert.match(branchGenerationInput?.message ?? "", /Sessions should recover after restart/);
 

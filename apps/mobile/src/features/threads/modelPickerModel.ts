@@ -7,6 +7,7 @@ import type {
 import {
   buildProviderOptionSelectionsFromDescriptors,
   getModelSelectionOptionDescriptors,
+  getProviderOptionCurrentValue,
 } from "@ryco/shared/model";
 
 import { buildModelOptions, groupByProvider, type ModelOption } from "../../lib/modelOptions";
@@ -118,10 +119,22 @@ function matches(option: ModelOption, query: string): boolean {
 }
 
 export function buildModelPickerModel(input: ModelPickerInput): ModelPickerModel {
+  return buildModelPickerModelFromOptions({
+    ...input,
+    modelOptions: buildModelOptions(input.serverConfig, input.currentSelection),
+    loading: input.serverConfig === null || input.serverConfig === undefined,
+  });
+}
+
+export function buildModelPickerModelFromOptions(
+  input: Omit<ModelPickerInput, "serverConfig"> & {
+    readonly modelOptions: ReadonlyArray<ModelOption>;
+    readonly loading?: boolean;
+  },
+): ModelPickerModel {
   const query = input.query?.trim().toLocaleLowerCase() ?? "";
-  // A config that has not arrived is different from a config with no providers.
-  const loading = input.serverConfig === null || input.serverConfig === undefined;
-  const options = buildModelOptions(input.serverConfig, input.currentSelection);
+  const loading = input.loading ?? false;
+  const options = input.modelOptions;
   const lockedProviderKey =
     input.lockedProviderKey ??
     (input.providerLocked ? (input.currentSelection?.instanceId ?? null) : null);
@@ -132,11 +145,7 @@ export function buildModelPickerModel(input: ModelPickerInput): ModelPickerModel
     : null;
   const selectedOption = options.find((option) => option.key === selectedKey) ?? null;
 
-  const descriptors = getModelSelectionOptionDescriptors(
-    input.currentSelection,
-    selectedOption?.capabilities,
-  );
-  const controls = descriptors.map((descriptor) => toControl(descriptor));
+  const controls = buildModelOptionControls(input.currentSelection, selectedOption?.capabilities);
 
   const groups = groupByProvider(options)
     .map((group) => {
@@ -226,6 +235,13 @@ export function shortChoiceLabel(choice: { readonly id: string; readonly label: 
   return second ? `${first.slice(0, 5)}${second[0]!.toLocaleUpperCase()}` : first.slice(0, 6);
 }
 
+export function buildModelOptionControls(
+  selection: ModelSelection | null,
+  capabilities: Parameters<typeof getModelSelectionOptionDescriptors>[1],
+): ReadonlyArray<ModelOptionControl> {
+  return getModelSelectionOptionDescriptors(selection, capabilities).map(toControl);
+}
+
 function toControl(descriptor: ProviderOptionDescriptor): ModelOptionControl {
   if (descriptor.type === "boolean") {
     return {
@@ -246,7 +262,7 @@ function toControl(descriptor: ProviderOptionDescriptor): ModelOptionControl {
       id: choice.id,
       label: choice.label,
       shortLabel: shortChoiceLabel(choice),
-      selected: choice.id === descriptor.currentValue,
+      selected: choice.id === getProviderOptionCurrentValue(descriptor),
     })),
     enabled: false,
   };
@@ -266,6 +282,14 @@ export function applyModelOption(
   value: ProviderOptionSelectionValue,
 ): ModelSelection {
   const descriptors = getModelSelectionOptionDescriptors(selection, capabilities);
+  const target = descriptors.find((descriptor) => descriptor.id === optionId);
+  if (
+    !target ||
+    (target.type === "boolean"
+      ? typeof value !== "boolean"
+      : !target.options.some((choice) => choice.id === value))
+  )
+    return selection;
   const next = descriptors.map((descriptor) =>
     descriptor.id === optionId ? { ...descriptor, currentValue: value } : descriptor,
   ) as ReadonlyArray<ProviderOptionDescriptor>;

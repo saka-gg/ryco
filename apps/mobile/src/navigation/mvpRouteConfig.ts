@@ -81,10 +81,14 @@ export const MVP_ROOT_ROUTES = {
   },
   NewTask: {
     linking: "tasks/new",
-    overlay: false,
-    headerPreset: "glass",
-    headerAction: "back",
-    ios: { presentation: "card" },
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: {
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.62, 0.94],
+      sheetGrabberVisible: true,
+    },
     android: { presentation: "card" },
   },
   Thread: {
@@ -175,13 +179,12 @@ export const MVP_ROOT_ROUTES = {
     overlay: true,
     headerPreset: "none",
     headerAction: "none",
-    // Settings owns a nested stack, so present it full-screen on iPhone. The
-    // floating form/adaptive modal styles on iOS 26 expose live Inbox controls
-    // around the rounded bottom corners and duplicate the status-bar chrome
-    // behind the nested security header. Its nested settings stack supplies the
-    // headers inside. Android keeps the card: a nested stack inside an Android
-    // modal is unverified, and there is no Android QA yet.
-    ios: { presentation: "fullScreenModal" },
+    // Start compact; the native grabber expands longer settings screens.
+    ios: {
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.78, 0.94],
+      sheetGrabberVisible: true,
+    },
     android: { presentation: "card" },
   },
   NotFound: {
@@ -220,11 +223,12 @@ const SETTINGS_PUSH = {
   android: { presentation: "card" },
 } as const satisfies Pick<MvpSettingsRouteDescriptor, "ios" | "android">;
 
-// Nested routes inside the full-screen Settings stack.
+// Nested routes inside the Settings sheet.
 export const MVP_SETTINGS_SHEET_ROUTES = {
   Settings: { linking: "", headerAction: "none", ...SETTINGS_PUSH },
   SettingsHub: { linking: "hub", headerAction: "back", ...SETTINGS_PUSH },
   SettingsWorkspace: { linking: "workspace", headerAction: "back", ...SETTINGS_PUSH },
+  SettingsStatistics: { linking: "statistics", headerAction: "back", ...SETTINGS_PUSH },
   SettingsInbox: { linking: "inbox", headerAction: "back", ...SETTINGS_PUSH },
   // Hosted Hub account. Account management stays nested; voluntary sign-in
   // opens the full-screen root Access route rather than a dismissible sheet.

@@ -1,9 +1,20 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { Project, SidebarWorktreeSummary } from "@ryco/client-runtime/state/threads";
-import { EnvironmentId, ProjectId, WorktreeId } from "@ryco/contracts";
+import {
+  DEFAULT_MODEL,
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  WorktreeId,
+} from "@ryco/contracts";
 
-import { deriveNewTaskDefaults, inferTaskTitle, newTaskContextLabel } from "./newTaskModel";
+import {
+  deriveNewTaskDefaults,
+  inferTaskTitle,
+  newTaskContextLabel,
+  resolveNewTaskProjectChoice,
+} from "./newTaskModel";
 
 const readyEnvironment = {
   environmentId: EnvironmentId.make("ready"),
@@ -50,6 +61,24 @@ describe("New Task defaults", () => {
     });
   });
 
+  it("ignores a model stored by older versions on the selected project", () => {
+    const defaults = deriveNewTaskDefaults({
+      environments: [readyEnvironment],
+      projects: [
+        {
+          ...project,
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("legacy-provider"),
+            model: "legacy-project-model",
+          },
+        },
+      ],
+      worktrees: [],
+    });
+    expect(defaults.project?.id).toBe(project.id);
+    expect(defaults.modelSelection).toEqual({ instanceId: "codex", model: DEFAULT_MODEL });
+  });
+
   it("preserves an active launched project and worktree", () => {
     const defaults = deriveNewTaskDefaults({
       launch: {
@@ -85,5 +114,33 @@ describe("New Task defaults", () => {
     ).toBe("Studio · Ryco · Mobile");
     expect(inferTaskTitle(`  ${"a".repeat(90)}\nsecond line`)).toHaveLength(70);
     expect(inferTaskTitle("")).toBe("New task");
+  });
+});
+
+describe("Project picker machine selection", () => {
+  it("uses the selected machine even when another machine has the same project id", () => {
+    const secondEnvironment = {
+      ...readyEnvironment,
+      environmentId: EnvironmentId.make("second"),
+      label: "Laptop",
+    };
+    const secondProject = {
+      ...project,
+      environmentId: secondEnvironment.environmentId,
+      cwd: "/laptop/ryco",
+    };
+    const input = {
+      target: { environmentId: secondEnvironment.environmentId, projectId: project.id },
+      environments: [readyEnvironment, secondEnvironment],
+      projects: [project, secondProject],
+    };
+    expect(resolveNewTaskProjectChoice(input)).toBe(secondProject);
+    expect(resolveNewTaskProjectChoice({ ...input, projects: [project] })).toBeNull();
+    expect(
+      resolveNewTaskProjectChoice({
+        ...input,
+        environments: [readyEnvironment, { ...secondEnvironment, connectionState: "read-only" }],
+      }),
+    ).toBeNull();
   });
 });

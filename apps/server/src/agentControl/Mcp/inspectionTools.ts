@@ -70,7 +70,7 @@ const descriptors: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: "ryco_read_project",
     description:
-      "Read a project's current preferences and revision: default model, system prompt, scripts and preferred remote. Use updatedAt as expectedUpdatedAt when updating. Workspace paths and credentials are omitted.",
+      "Read a project's current preferences and revision: system prompt, scripts and preferred remote. Use updatedAt as expectedUpdatedAt when updating. Workspace paths and credentials are omitted.",
     inputSchema: {
       type: "object",
       properties: { projectId: { type: "string" } },
@@ -212,7 +212,6 @@ export function withInspectionTools(
               projectId: p.id,
               title: p.title,
               updatedAt: p.updatedAt,
-              defaultModelSelection: p.defaultModelSelection,
               customSystemPrompt: p.customSystemPrompt,
               scripts: p.scripts,
               preferredRemoteName: p.preferredRemoteName,

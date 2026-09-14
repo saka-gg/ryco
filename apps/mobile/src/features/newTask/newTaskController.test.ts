@@ -5,6 +5,7 @@ import {
   EnvironmentId,
   MessageId,
   ProjectId,
+  ProviderInstanceId,
   ThreadId,
   WorktreeId,
   type ClientOrchestrationCommand,
@@ -51,36 +52,53 @@ function deps(
 }
 
 describe("New Task controller", () => {
-  it("creates a thread and starts its first turn for an existing local workspace", async () => {
-    const attempt = createNewTaskAttempt({
-      environmentId,
-      prompt: "Fix the mobile header",
-      project: {
-        kind: "existing",
-        projectId: existingProjectId,
-        workspaceRoot: "/code/ryco",
-      },
-      worktree: { kind: "local" },
-      createdAt,
-      ids,
-    });
-    const runtime = deps();
-    const result = await runNewTaskAttempt(attempt, runtime);
+  it.each(["default", "plan", "ask"] as const)(
+    "starts a thread in %s mode with the selected model options",
+    async (interactionMode) => {
+      const modelSelection = {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.6-sol",
+        options: [
+          { id: "reasoning", value: "high" },
+          { id: "fast", value: true },
+        ],
+      };
+      const attempt = createNewTaskAttempt({
+        environmentId,
+        prompt: "Fix the mobile header",
+        modelSelection,
+        interactionMode,
+        project: {
+          kind: "existing",
+          projectId: existingProjectId,
+          workspaceRoot: "/code/ryco",
+        },
+        worktree: { kind: "local" },
+        createdAt,
+        ids,
+      });
+      const runtime = deps();
+      const result = await runNewTaskAttempt(attempt, runtime);
 
-    expect(result.ok).toBe(true);
-    expect(runtime.commands.map((command) => command.type)).toEqual([
-      "thread.create",
-      "thread.turn.start",
-    ]);
-    expect(runtime.commands[0]).toMatchObject({
-      commandId: ids.threadCommandId,
-      threadId: ids.threadId,
-    });
-    expect(runtime.commands[1]).toMatchObject({
-      commandId: ids.turnCommandId,
-      message: { messageId: ids.messageId, text: "Fix the mobile header" },
-    });
-  });
+      expect(result.ok).toBe(true);
+      expect(runtime.commands.map((command) => command.type)).toEqual([
+        "thread.create",
+        "thread.turn.start",
+      ]);
+      expect(runtime.commands[0]).toMatchObject({
+        commandId: ids.threadCommandId,
+        threadId: ids.threadId,
+        modelSelection,
+        interactionMode,
+      });
+      expect(runtime.commands[1]).toMatchObject({
+        commandId: ids.turnCommandId,
+        message: { messageId: ids.messageId, text: "Fix the mobile header" },
+        modelSelection,
+        interactionMode,
+      });
+    },
+  );
 
   it("waits for a new project before creating its thread", async () => {
     const order: string[] = [];
@@ -117,36 +135,40 @@ describe("New Task controller", () => {
     ]);
   });
 
-  it("uses the server-managed worktree result and does not create a second thread", async () => {
-    const createWorktree = vi.fn(async () => ({
-      worktreeId: WorktreeId.make("worktree-created"),
-      threadId: ThreadId.make("thread-from-worktree"),
-    }));
-    const runtime = deps({ createWorktree });
-    const result = await runNewTaskAttempt(
-      createNewTaskAttempt({
-        environmentId,
-        prompt: "Isolate this change",
-        project: {
-          kind: "existing",
-          projectId: existingProjectId,
-          workspaceRoot: "/code/ryco",
-        },
-        worktree: { kind: "new", branch: "feat/mobile" },
-        createdAt,
-        ids,
-      }),
-      runtime,
-    );
+  it.each([undefined, " release/v2 "])(
+    "uses the server-managed worktree with source %s and does not create a second thread",
+    async (baseBranch) => {
+      const createWorktree = vi.fn(async () => ({
+        worktreeId: WorktreeId.make("worktree-created"),
+        threadId: ThreadId.make("thread-from-worktree"),
+      }));
+      const runtime = deps({ createWorktree });
+      const result = await runNewTaskAttempt(
+        createNewTaskAttempt({
+          environmentId,
+          prompt: "Isolate this change",
+          project: {
+            kind: "existing",
+            projectId: existingProjectId,
+            workspaceRoot: "/code/ryco",
+          },
+          worktree: { kind: "new", branch: "feat/mobile", ...(baseBranch ? { baseBranch } : {}) },
+          createdAt,
+          ids,
+        }),
+        runtime,
+      );
 
-    expect(result.ok).toBe(true);
-    expect(createWorktree).toHaveBeenCalledWith({
-      projectId: existingProjectId,
-      branch: "feat/mobile",
-    });
-    expect(runtime.commands.map((command) => command.type)).toEqual(["thread.turn.start"]);
-    expect(result.attempt.threadId).toBe("thread-from-worktree");
-  });
+      expect(result.ok).toBe(true);
+      expect(createWorktree).toHaveBeenCalledWith({
+        projectId: existingProjectId,
+        branch: "feat/mobile",
+        ...(baseBranch ? { baseBranch: "release/v2" } : {}),
+      });
+      expect(runtime.commands.map((command) => command.type)).toEqual(["thread.turn.start"]);
+      expect(result.attempt.threadId).toBe("thread-from-worktree");
+    },
+  );
 
   it("retains successful hierarchy steps and retries only the failed thread step", async () => {
     let failThread = true;

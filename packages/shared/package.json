@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./lruCache": {
+      "types": "./src/lruCache.ts",
+      "import": "./src/lruCache.ts"
+    },
     "./environmentIcon": {
       "types": "./src/environmentIcon.ts",
       "import": "./src/environmentIcon.ts"

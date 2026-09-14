@@ -31,7 +31,7 @@ export const SidebarAutoSettleAfterDays = Schema.NullOr(
   Schema.Literals(SIDEBAR_AUTO_SETTLE_DAY_OPTIONS),
 );
 export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
-export const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = null;
+export const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = 7;
 
 export const SidebarProjectGroupingMode = Schema.Literals([
   "repository",

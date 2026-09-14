@@ -86,14 +86,14 @@ describe("send engine — model resolution", () => {
     expect(resolved.options).toEqual(selection.options);
   });
 
-  it("falls back to the project default model when the composer has no model", () => {
+  it("ignores a legacy project default when the composer has no model", () => {
     expect(
       resolveThreadCreateModelSelection({
         selectedModelSelection: selection,
         selectedModel: "",
         defaultModel: "project-default",
       }).model,
-    ).toBe("project-default");
+    ).toBe(DEFAULT_MODEL);
   });
 
   it("falls back to the global default when neither composer nor project supply a model", () => {

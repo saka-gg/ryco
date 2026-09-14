@@ -11,6 +11,7 @@ import * as Linking from "expo-linking";
 import { Image, Pressable, ScrollView, Share, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
+import { CopyTextButton } from "../../components/CopyTextButton";
 import { resolveNativeMarkdownTypography } from "../../lib/appearancePreferences";
 import { useFontFamily } from "../../lib/useFontFamily";
 import { useThemeColor } from "../../lib/useThemeColor";
@@ -27,6 +28,11 @@ import {
   readAttachmentDimensions,
 } from "./threadAttachmentModel";
 import { threadMessagePresentation } from "./threadPresentation";
+
+const sentTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
 
 function isChatFileAttachment(
   attachment: ChatFileAttachment | ChatImageAttachment | ChatUnknownAttachment,
@@ -161,6 +167,8 @@ function AudioAttachmentRow({ attachment }: { readonly attachment: ChatFileAttac
 
 export function ThreadMessage(props: { readonly message: ChatMessage }) {
   const isUser = props.message.role === "user";
+  const sentAt = isUser ? Date.parse(props.message.createdAt) : Number.NaN;
+  const sentLabel = Number.isFinite(sentAt) ? sentTimeFormatter.format(sentAt) : null;
   const presentation = threadMessagePresentation(isUser ? "user" : "assistant");
   const bodyText = useScaledTextRole("body");
   const typography = resolveNativeMarkdownTypography(bodyText.fontSize);
@@ -169,6 +177,7 @@ export function ThreadMessage(props: { readonly message: ChatMessage }) {
   const bodyColor = useThemeColor("--color-md-body");
   const strongColor = useThemeColor("--color-md-strong");
   const mutedColor = useThemeColor("--color-foreground-muted");
+  const metadataColor = useThemeColor("--color-foreground-tertiary");
   const linkColor = useThemeColor("--color-md-link");
   const codeColor = useThemeColor("--color-md-code-text");
   const codeBackground = useThemeColor("--color-md-code-bg");
@@ -310,6 +319,27 @@ export function ThreadMessage(props: { readonly message: ChatMessage }) {
           </ScrollView>
         ) : null}
       </View>
+      {isUser ? (
+        <View className="mt-1 max-w-[88%] flex-row items-center gap-1 pr-1">
+          {sentLabel ? (
+            <Text
+              accessibilityLabel={`Sent ${sentLabel}`}
+              className="shrink text-2xs text-foreground-tertiary"
+            >
+              {sentLabel}
+            </Text>
+          ) : null}
+          {props.message.text ? (
+            <CopyTextButton
+              accessibilityLabel="Copy message"
+              text={props.message.text}
+              tintColor={metadataColor}
+              iconSize={12}
+              buttonSize={28}
+            />
+          ) : null}
+        </View>
+      ) : null}
     </View>
   );
 }

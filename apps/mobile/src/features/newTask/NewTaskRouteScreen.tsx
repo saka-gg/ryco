@@ -1,18 +1,20 @@
-import { useAtomValue } from "@effect/atom-react";
+import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
 import { StackActions, type StaticScreenProps, useNavigation } from "@react-navigation/native";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Modal, Pressable, ScrollView, TextInput, View } from "react-native";
+import { Pressable, ScrollView, TextInput, View } from "react-native";
 
+import { normalizeInteractionModeForProviderTarget } from "@ryco/client-runtime/state/composer";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { serverConfigAtom } from "@ryco/client-runtime/rpc";
 import {
   EnvironmentId,
   ProjectId,
   WorktreeId,
   type ModelSelection,
   type RuntimeMode,
+  type ProviderInteractionMode,
 } from "@ryco/contracts";
 
+import { OverlayPortalScope } from "../../components/OverlayPortal";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
@@ -24,6 +26,7 @@ import {
 import { newCommandId, newMessageId, newProjectId, newThreadId } from "../../lib/ids";
 import { buildModelOptions } from "../../lib/modelOptions";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
 import {
   selectProjectByRef,
@@ -45,7 +48,8 @@ import {
 } from "./newTaskController";
 import { NewTaskComposer } from "./NewTaskComposer";
 import { NewTaskContextSheet, type NewTaskWorktreeSelection } from "./NewTaskContextSheet";
-import { deriveNewTaskDefaults, newTaskContextLabel } from "./newTaskModel";
+import { deriveNewTaskDefaults, resolveNewTaskProjectChoice } from "./newTaskModel";
+import { useNewTaskRepository } from "./useNewTaskRepository";
 
 type NewTaskRouteScreenProps = StaticScreenProps<{
   readonly environmentId?: string;
@@ -68,6 +72,15 @@ async function waitForAuthoritative(read: () => boolean, label: string): Promise
 }
 
 export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
+  return (
+    <OverlayPortalScope>
+      <NewTaskContent {...props} />
+    </OverlayPortalScope>
+  );
+}
+
+function NewTaskContent(props: NewTaskRouteScreenProps) {
+  const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const navigation = useNavigation();
   const environments = useHomeEnvironments();
   const eligibleEnvironmentIds = useMemo(
@@ -116,12 +129,14 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
   const [newProjectPath, setNewProjectPath] = useState("");
   const [newProjectTitle, setNewProjectTitle] = useState("");
   const [newBranch, setNewBranch] = useState("");
+  const [baseBranch, setBaseBranch] = useState("");
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerImageAttachment>>([]);
   const [modelSelection, setModelSelection] = useState<ModelSelection>(defaults.modelSelection);
+  const [selectedInteractionMode, setInteractionMode] =
+    useState<ProviderInteractionMode>("default");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(defaults.runtimeMode);
-  const [contextVisible, setContextVisible] = useState(false);
-  const [modelVisible, setModelVisible] = useState(false);
+  const [workspacePickerVisible, setWorkspacePickerVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState<NewTaskAttempt | null>(null);
   const [failure, setFailure] = useState<{
@@ -132,7 +147,8 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const placeholderColor = useThemeColor("--color-placeholder");
   const textColor = useThemeColor("--color-foreground");
-  const serverConfig = useAtomValue(serverConfigAtom);
+  const serverConfigs = useEnvironmentServerConfigs();
+  const serverConfig = environmentId ? serverConfigs.get(environmentId) : null;
 
   useEffect(() => {
     if (initialized.current || !defaults.environment) return;
@@ -169,12 +185,22 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
         )
       : null;
   const modelOptions = buildModelOptions(serverConfig, modelSelection);
-  const modelLabel =
-    modelOptions.find(
-      (option) =>
-        option.selection.instanceId === modelSelection.instanceId &&
-        option.selection.model === modelSelection.model,
-    )?.label ?? modelSelection.model;
+  const selectedModelOption = modelOptions.find(
+    (option) =>
+      option.selection.instanceId === modelSelection.instanceId &&
+      option.selection.model === modelSelection.model,
+  );
+  const modelLabel = selectedModelOption?.label ?? modelSelection.model;
+  const selectedProvider = serverConfig?.providers.find(
+    (provider) => provider.instanceId === modelSelection.instanceId,
+  );
+  const interactionModeSupported = selectedProvider?.showInteractionModeToggle ?? true;
+  const askModeSupported = selectedProvider?.supportsAskMode ?? false;
+  const interactionMode = interactionModeSupported
+    ? normalizeInteractionModeForProviderTarget(selectedInteractionMode, askModeSupported)
+    : "default";
+
+  const repository = useNewTaskRepository(environmentId, project?.cwd ?? null);
 
   let draftProjectTitle = newProjectTitle.trim() || "New project";
   try {
@@ -184,17 +210,22 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
   } catch {
     // Keep the neutral label until the user enters a complete node path.
   }
-  const worktreeTitle =
+  const locationLabel =
     worktreeSelection.kind === "existing"
-      ? worktree?.title?.trim() || worktree?.branch || "Choose worktree"
+      ? worktree
+        ? worktree.title?.trim() && worktree.title.trim() !== worktree.branch
+          ? worktree.title.trim()
+          : "Worktree"
+        : "Choose worktree"
       : worktreeSelection.kind === "new"
-        ? newBranch.trim() || "New worktree"
-        : "Local workspace";
-  const contextLabel = newTaskContextLabel({
-    environmentLabel: environment?.label ?? null,
-    projectTitle: project?.name ?? (projectId === null ? draftProjectTitle : null),
-    worktreeTitle,
-  });
+        ? "New worktree"
+        : "Project root";
+  const branchLabel =
+    worktreeSelection.kind === "existing"
+      ? (worktree?.branch ?? null)
+      : worktreeSelection.kind === "new"
+        ? baseBranch.trim() || repository?.refName || "current branch"
+        : (repository?.refName ?? null);
 
   const resetAttempt = () => {
     setAttempt(null);
@@ -224,18 +255,33 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
     setEnvironmentId(nextEnvironmentId);
     setProjectId(nextProject?.id ?? null);
     setWorktreeSelection({ kind: "local" });
+    setBaseBranch("");
+    setNewBranch("");
     resetAttempt();
   };
 
-  const selectProject = (nextProjectId: ProjectId | null) => {
-    const nextProject = projects.find(
-      (candidate) => candidate.environmentId === environmentId && candidate.id === nextProjectId,
-    );
+  const selectProject = (
+    target: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId } | null,
+  ) => {
+    const nextEnvironmentId = target?.environmentId ?? environmentId;
+    const nextProjectId = target?.projectId ?? null;
+    if (
+      !environments.some(
+        (candidate) =>
+          candidate.environmentId === nextEnvironmentId &&
+          candidate.connectionState === "connected",
+      )
+    )
+      return;
+    const nextProject = target
+      ? resolveNewTaskProjectChoice({ target, projects, environments })
+      : null;
+    if (target && !nextProject) return;
+    setEnvironmentId(nextEnvironmentId);
     setProjectId(nextProjectId);
     setWorktreeSelection({ kind: "local" });
-    if (nextProject?.defaultModelSelection) {
-      setModelSelection(nextProject.defaultModelSelection);
-    }
+    setBaseBranch("");
+    setNewBranch("");
     resetAttempt();
   };
 
@@ -268,7 +314,11 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
             worktreePath: worktree.worktreePath,
           }
         : worktreeSelection.kind === "new"
-          ? { kind: "new", branch: newBranch }
+          ? {
+              kind: "new",
+              branch: newBranch,
+              ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
+            }
           : { kind: "local" };
     return createNewTaskAttempt({
       environmentId: environment.environmentId,
@@ -278,7 +328,7 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
       worktree: worktreeContext,
       modelSelection,
       runtimeMode,
-      interactionMode: "default",
+      interactionMode,
       tokenMode: "balanced",
       createdAt: new Date().toISOString(),
       ids: {
@@ -303,12 +353,20 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
       const api = ensureEnvironmentApi(nextAttempt.environmentId);
       const result = await runNewTaskAttempt(nextAttempt, {
         dispatch: (command) => api.orchestration.dispatchCommand(command),
-        createWorktree: async ({ projectId: selectedProjectId, branch }) => {
+        createWorktree: async ({
+          projectId: selectedProjectId,
+          branch,
+          baseBranch: sourceBranch,
+        }) => {
           const createWorktree = api.git.createWorktreeForProject;
           if (!createWorktree) throw new Error("Worktree creation unavailable");
           const created = await createWorktree({
             projectId: selectedProjectId,
-            intent: { kind: "newBranch", branchName: branch },
+            intent: {
+              kind: "newBranch",
+              branchName: branch,
+              ...(sourceBranch ? { baseBranch: sourceBranch } : {}),
+            },
           });
           return { worktreeId: created.worktreeId, threadId: created.sessionId };
         },
@@ -397,127 +455,162 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
 
   return (
     <>
-      <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
-        keyboardShouldPersistTaps="handled"
-        className="flex-1 bg-screen"
-        contentContainerStyle={{ padding: 16, paddingBottom: 48 }}
-      >
-        {failure ? (
-          <View className="mb-4 gap-2">
-            <ErrorBanner message={failure.message} />
-            <View className="flex-row gap-2">
-              <Pressable
-                accessibilityRole="button"
-                disabled={busy}
-                onPress={() => void run(attempt)}
-                className="h-11 items-center justify-center rounded-full bg-primary px-5 disabled:opacity-40"
-              >
-                <Text className="text-sm font-ryco-bold text-primary-foreground">
-                  Retry {failure.step}
-                </Text>
-              </Pressable>
-              {attempt?.threadReady ? (
+      <KeyboardAvoidingView behavior="padding" automaticOffset style={{ flex: 1 }}>
+        <ScrollView
+          contentInsetAdjustmentBehavior="automatic"
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          className="flex-1 bg-screen"
+          contentContainerStyle={{
+            flexGrow: 1,
+            justifyContent: keyboardVisible ? "flex-end" : "flex-start",
+            padding: 16,
+            paddingTop: 12,
+            paddingBottom: 12,
+          }}
+        >
+          {failure ? (
+            <View className="mb-4 gap-2">
+              <ErrorBanner message={failure.message} />
+              <View className="flex-row gap-2">
                 <Pressable
                   accessibilityRole="button"
-                  onPress={() =>
-                    navigation.dispatch(
-                      StackActions.replace("Thread", {
-                        environmentId: attempt.environmentId,
-                        threadId: attempt.threadId,
-                      }),
-                    )
-                  }
-                  className="h-11 items-center justify-center rounded-full bg-subtle px-5"
+                  disabled={busy}
+                  onPress={() => void run(attempt)}
+                  className="h-11 items-center justify-center rounded-full bg-primary px-5 disabled:opacity-40"
                 >
-                  <Text className="text-sm font-ryco-bold text-foreground">Open task</Text>
+                  <Text className="text-sm font-ryco-bold text-primary-foreground">
+                    Retry {failure.step}
+                  </Text>
                 </Pressable>
-              ) : null}
+                {attempt?.threadReady ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() =>
+                      navigation.dispatch(
+                        StackActions.replace("Thread", {
+                          environmentId: attempt.environmentId,
+                          threadId: attempt.threadId,
+                        }),
+                      )
+                    }
+                    className="h-11 items-center justify-center rounded-full bg-subtle px-5"
+                  >
+                    <Text className="text-sm font-ryco-bold text-foreground">Open task</Text>
+                  </Pressable>
+                ) : null}
+              </View>
             </View>
-          </View>
-        ) : null}
-        {attachmentError ? (
-          <View className="mb-4">
-            <ErrorBanner message={attachmentError} />
-          </View>
-        ) : null}
-
-        {projectId === null ? (
-          <View className="mb-5 gap-3 rounded-[22px] border border-border bg-card p-4">
-            <View className="gap-1">
-              <Text className="text-base font-ryco-bold text-foreground">New project</Text>
-              <Text className="text-sm font-sans text-foreground-muted">
-                Enter the workspace path on {environment?.label ?? "the selected node"}.
-              </Text>
+          ) : null}
+          {attachmentError ? (
+            <View className="mb-4">
+              <ErrorBanner message={attachmentError} />
             </View>
-            <TextInput
-              value={newProjectPath}
-              onChangeText={(value) => {
-                setNewProjectPath(value);
-                resetAttempt();
-              }}
-              placeholder="/srv/code/project"
-              placeholderTextColor={placeholderColor as string}
-              autoCapitalize="none"
-              autoCorrect={false}
-              className="min-h-12 rounded-2xl border border-border bg-screen px-4 py-3 font-mono text-sm"
-              style={{ color: textColor as string }}
-            />
-            <TextInput
-              value={newProjectTitle}
-              onChangeText={(value) => {
-                setNewProjectTitle(value);
-                resetAttempt();
-              }}
-              placeholder={draftProjectTitle}
-              placeholderTextColor={placeholderColor as string}
-              className="min-h-12 rounded-2xl border border-border bg-screen px-4 py-3 font-sans text-base"
-              style={{ color: textColor as string }}
-            />
-          </View>
-        ) : null}
+          ) : null}
 
-        <NewTaskComposer
-          environmentId={environmentId}
-          prompt={prompt}
-          attachments={attachments}
-          contextLabel={contextLabel}
-          machineLabel={environment?.label ?? "No verified machine available"}
-          modelLabel={modelLabel}
-          runtimeMode={runtimeMode}
-          busy={busy}
-          canSend={canSend}
-          sendDisabledReason={sendDisabledReason}
-          onChangePrompt={(value) => {
-            setPrompt(value);
-            resetAttempt();
-          }}
-          onRemoveAttachment={(id) => {
-            setAttachments((current) => current.filter((attachment) => attachment.id !== id));
-            resetAttempt();
-          }}
-          onPickAttachments={() => void pickAttachments()}
-          onOpenContext={() => setContextVisible(true)}
-          onOpenModel={() => setModelVisible(true)}
-          onChangeRuntimeMode={(mode) => {
-            setRuntimeMode(mode);
-            resetAttempt();
-          }}
-          onSend={() => void run(null)}
-        />
-      </ScrollView>
+          {projectId === null ? (
+            <View className="mb-5 gap-3 rounded-[22px] border border-border bg-card p-4">
+              <View className="gap-1">
+                <Text className="text-base font-ryco-bold text-foreground">New project</Text>
+                <Text className="text-sm font-sans text-foreground-muted">
+                  Enter the workspace path on {environment?.label ?? "the selected node"}.
+                </Text>
+              </View>
+              <TextInput
+                value={newProjectPath}
+                onChangeText={(value) => {
+                  setNewProjectPath(value);
+                  resetAttempt();
+                }}
+                placeholder="/srv/code/project"
+                placeholderTextColor={placeholderColor as string}
+                autoCapitalize="none"
+                autoCorrect={false}
+                className="min-h-12 rounded-2xl border border-border bg-screen px-4 py-3 font-mono text-sm"
+                style={{ color: textColor as string }}
+              />
+              <TextInput
+                value={newProjectTitle}
+                onChangeText={(value) => {
+                  setNewProjectTitle(value);
+                  resetAttempt();
+                }}
+                placeholder={draftProjectTitle}
+                placeholderTextColor={placeholderColor as string}
+                className="min-h-12 rounded-2xl border border-border bg-screen px-4 py-3 font-sans text-base"
+                style={{ color: textColor as string }}
+              />
+            </View>
+          ) : null}
+
+          <NewTaskComposer
+            environmentId={environmentId}
+            prompt={prompt}
+            attachments={attachments}
+            environments={environments}
+            projects={projects}
+            onSelectProject={selectProject}
+            projectId={projectId}
+            projectTitle={project?.name ?? draftProjectTitle}
+            customAvatarContentHash={project?.customAvatarContentHash}
+            locationLabel={locationLabel}
+            branchLabel={branchLabel}
+            newWorktree={worktreeSelection.kind === "new"}
+            newBranchName={worktreeSelection.kind === "new" ? newBranch.trim() : null}
+            usesWorktree={worktreeSelection.kind !== "local"}
+            modelProviderDriver={selectedModelOption?.providerDriver ?? null}
+            machineLabel={environment?.label ?? "No verified machine available"}
+            modelLabel={modelLabel}
+            runtimeMode={runtimeMode}
+            interactionMode={interactionMode}
+            interactionModeSupported={interactionModeSupported}
+            askModeSupported={askModeSupported}
+            onChangeInteractionMode={(mode) => {
+              setInteractionMode(mode);
+              resetAttempt();
+            }}
+            busy={busy}
+            canSend={canSend}
+            sendDisabledReason={sendDisabledReason}
+            onChangePrompt={(value) => {
+              setPrompt(value);
+              resetAttempt();
+            }}
+            onRemoveAttachment={(id) => {
+              setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+              resetAttempt();
+            }}
+            onPickAttachments={() => void pickAttachments()}
+            onOpenWorkspace={() => setWorkspacePickerVisible(true)}
+            onSelectEnvironment={selectEnvironment}
+            modelOptions={modelOptions}
+            modelSelection={modelSelection}
+            onSelectModel={(selection) => {
+              setModelSelection(selection);
+              resetAttempt();
+            }}
+            onChangeRuntimeMode={(mode) => {
+              setRuntimeMode(mode);
+              resetAttempt();
+            }}
+            onSend={() => void run(null)}
+          />
+        </ScrollView>
+      </KeyboardAvoidingView>
 
       <NewTaskContextSheet
-        visible={contextVisible}
-        environments={environments}
-        projects={projects}
+        visible={workspacePickerVisible}
+        currentBranch={repository?.refName ?? null}
+        baseBranch={baseBranch}
+        onChangeBaseBranch={(branch) => {
+          setBaseBranch(branch);
+          resetAttempt();
+        }}
         worktrees={worktrees}
         environmentId={environmentId}
         projectId={projectId}
         worktree={worktreeSelection}
         newBranch={newBranch}
-        onSelectEnvironment={selectEnvironment}
-        onSelectProject={selectProject}
         onSelectWorktree={(selection) => {
           setWorktreeSelection(selection);
           resetAttempt();
@@ -526,57 +619,8 @@ export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
           setNewBranch(branch);
           resetAttempt();
         }}
-        onClose={() => setContextVisible(false)}
+        onClose={() => setWorkspacePickerVisible(false)}
       />
-
-      <Modal
-        visible={modelVisible}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setModelVisible(false)}
-      >
-        <ScrollView
-          contentInsetAdjustmentBehavior="automatic"
-          className="flex-1 bg-screen"
-          contentContainerStyle={{ padding: 20, gap: 12, paddingBottom: 44 }}
-        >
-          <View className="mb-2 flex-row items-center gap-3">
-            <Text className="flex-1 text-xl font-ryco-bold text-foreground">Model</Text>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setModelVisible(false)}
-              className="h-11 items-center justify-center rounded-full bg-primary px-5"
-            >
-              <Text className="text-sm font-ryco-bold text-primary-foreground">Done</Text>
-            </Pressable>
-          </View>
-          {modelOptions.map((option) => {
-            const selected =
-              option.selection.instanceId === modelSelection.instanceId &&
-              option.selection.model === modelSelection.model;
-            return (
-              <Pressable
-                key={option.key}
-                accessibilityRole="radio"
-                accessibilityState={{ checked: selected }}
-                onPress={() => {
-                  setModelSelection(option.selection);
-                  resetAttempt();
-                  setModelVisible(false);
-                }}
-                className={`min-h-14 rounded-2xl border px-4 py-3 ${
-                  selected ? "border-foreground bg-card-alt" : "border-border bg-card"
-                }`}
-              >
-                <Text className="text-base font-ryco-bold text-foreground">{option.label}</Text>
-                <Text className="mt-0.5 text-xs font-ryco-medium text-foreground-muted">
-                  {option.subtitle}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-      </Modal>
     </>
   );
 }

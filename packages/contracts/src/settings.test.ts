@@ -21,9 +21,9 @@ const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 
 describe("Inbox auto-settle settings", () => {
-  it("keeps historical clients opted out", () => {
-    expect(decodeClientSettings({}).sidebarAutoSettleAfterDays).toBeNull();
-    expect(DEFAULT_CLIENT_SETTINGS.sidebarAutoSettleAfterDays).toBeNull();
+  it("defaults new and missing preferences to seven days", () => {
+    expect(decodeClientSettings({}).sidebarAutoSettleAfterDays).toBe(7);
+    expect(DEFAULT_CLIENT_SETTINGS.sidebarAutoSettleAfterDays).toBe(7);
   });
 
   it("accepts Off and the supported day presets, but rejects arbitrary values", () => {

@@ -5,12 +5,7 @@ import {
   type MergedUsageSummary,
   type UsageEnvironmentResult,
 } from "@ryco/client-runtime/usage";
-import {
-  EnvironmentId,
-  USAGE_CONTRACT_VERSION,
-  type UsageCalendarDate,
-  type UsageSummaryRequest,
-} from "@ryco/contracts";
+import { EnvironmentId, USAGE_CONTRACT_VERSION } from "@ryco/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -20,36 +15,8 @@ import {
 
 import type { StatisticsRange } from "./statisticsSearch";
 
-const RANGE_DAYS: Readonly<Record<StatisticsRange, number | null>> = {
-  "7d": 7,
-  "30d": 30,
-  "90d": 90,
-  all: null,
-};
-
-function calendarDateInZone(timestampMs: number, timeZone: string): UsageCalendarDate {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestampMs)) as UsageCalendarDate;
-}
-
-export function usageRequestForRange(
-  range: StatisticsRange,
-  timeZone: string,
-  nowMs = Date.now(),
-): UsageSummaryRequest {
-  const endDate = calendarDateInZone(nowMs, timeZone);
-  const days = RANGE_DAYS[range];
-  if (days === null) {
-    return { endDate, timeZone, contractVersion: USAGE_CONTRACT_VERSION };
-  }
-  const endUtcMs = Date.parse(`${endDate}T12:00:00.000Z`);
-  const startDate = calendarDateInZone(endUtcMs - (days - 1) * 86_400_000, "UTC");
-  return { startDate, endDate, timeZone, contractVersion: USAGE_CONTRACT_VERSION };
-}
+export { usageRequestForRange } from "@ryco/client-runtime/usage";
+import { usageRequestForRange } from "@ryco/client-runtime/usage";
 
 function useConnectedEnvironments() {
   const [revision, setRevision] = useState(0);

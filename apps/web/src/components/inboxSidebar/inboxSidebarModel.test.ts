@@ -396,14 +396,15 @@ describe("buildInboxSidebarSections", () => {
     });
   });
 
-  it("moves an inactivity-eligible row into Settled only when enabled", () => {
+  it("settles inactive work by default and respects Off and custom intervals", () => {
     const inactive = thread("inactive", {
       latestUserMessageAt: "2026-08-10T10:00:00.000Z",
       updatedAt: "2026-08-25T09:59:00.000Z",
     });
     const nowMs = Date.parse("2026-08-25T10:00:00.000Z");
 
-    expect(build({ threads: [inactive], nowMs })[0]?.key).toBe("recent");
+    expect(build({ threads: [inactive], nowMs })[0]?.key).toBe("settled");
+    expect(build({ threads: [inactive], nowMs, autoSettleAfterDays: null })[0]?.key).toBe("recent");
     const enabled = build({
       threads: [inactive],
       autoSettleAfterDays: 14,

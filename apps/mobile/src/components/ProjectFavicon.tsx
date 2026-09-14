@@ -1,31 +1,64 @@
+import { readProjectIconSource } from "@ryco/client-runtime/connection";
+import { readEnvironmentApi } from "../connection/environmentApi";
+import { useEnvironmentServerConfigs } from "../state/environmentServerConfigs";
+import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { SymbolView } from "./AppSymbol";
 import { Image } from "expo-image";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { View } from "react-native";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { useThemeColor } from "../lib/useThemeColor";
 
-/* ─── Favicon cache (matches web pattern) ────────────────────────────── */
-const loadedFaviconUrls = new Set<string>();
-
-/* ─── Component ──────────────────────────────────────────────────────── */
 export function ProjectFavicon(props: {
   readonly environmentId: EnvironmentId;
+  readonly projectId?: ProjectId;
+  readonly customAvatarContentHash?: string | null;
   readonly open?: boolean;
   readonly size?: number;
   readonly projectTitle: string;
   readonly workspaceRoot?: string | null;
 }) {
   const size = props.size ?? 42;
-  // MVP renders the folder fallback: runtime A (`@ryco/client-runtime`) exposes
-  // no asset surface, and the plan's standing decision forbids porting upstream's
-  // atom-runtime `state/assets` layer. Favicons are cosmetic; the fallback is the
-  // ratified B2 behavior.
-  // TODO(b2-followup): resolve real project-favicon asset URLs once a
-  // `@ryco/client-runtime` asset surface (or a mobile resolver over the
-  // environment origin) provides the relative asset pathname the web
-  // `useAssetUrl` consumes.
-  const faviconUrl = null;
+  const configs = useEnvironmentServerConfigs();
+  const connection = useWsConnectionStatusForEnvironment(props.environmentId);
+  const api =
+    connection.phase === "connected" &&
+    configs.get(props.environmentId)?.environment.capabilities.projectIcons
+      ? readEnvironmentApi(props.environmentId)
+      : undefined;
+  const projectId = props.projectId;
+  const revision = props.customAvatarContentHash ?? null;
+  const requestKey = JSON.stringify([
+    props.environmentId,
+    projectId,
+    revision,
+    connection.connectedAt,
+  ]);
+  const [artwork, setArtwork] = useState<{
+    key: string;
+    api: typeof api;
+    connection: typeof connection;
+    source: string | null;
+  } | null>(null);
+  useEffect(() => {
+    let current = true;
+    if (api && projectId) {
+      void readProjectIconSource(api, projectId, revision, connection)
+        .then((source) => {
+          if (current) setArtwork({ key: requestKey, api, connection, source });
+        })
+        .catch(() => {
+          if (current) setArtwork({ key: requestKey, api, connection, source: null });
+        });
+    }
+    return () => {
+      current = false;
+    };
+  }, [api, projectId, revision, requestKey, connection]);
+  const faviconUrl =
+    api && artwork?.key === requestKey && artwork.api === api && artwork.connection === connection
+      ? artwork.source
+      : null;
 
   return (
     <ProjectFaviconImage
@@ -46,9 +79,7 @@ function ProjectFaviconImage(props: {
 }) {
   const iconMuted = useThemeColor("--color-icon-subtle");
 
-  const [status, setStatus] = useState<"loading" | "loaded" | "error">(() =>
-    props.faviconUrl && loadedFaviconUrls.has(props.faviconUrl) ? "loaded" : "loading",
-  );
+  const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
 
   const showImage = props.faviconUrl !== null && status === "loaded";
 
@@ -85,8 +116,8 @@ function ProjectFaviconImage(props: {
             ...(showImage ? {} : { position: "absolute" as const, opacity: 0 }),
           }}
           contentFit="contain"
+          cachePolicy="none"
           onLoad={() => {
-            if (props.faviconUrl) loadedFaviconUrls.add(props.faviconUrl);
             setStatus("loaded");
           }}
           onError={() => setStatus("error")}

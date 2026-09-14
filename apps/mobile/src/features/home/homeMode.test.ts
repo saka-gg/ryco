@@ -55,4 +55,23 @@ describe("Home mode state", () => {
     expect(unchanged).toBe(state);
     expect(normalized).toBe(state);
   });
+
+  it("starts changed search results at the top without moving the other mode", () => {
+    const state = {
+      ...createHomeModeState(),
+      scrollOffsetByMode: { inbox: 418, projects: 230 },
+    };
+    const searched = reduceHomeModeState(state, {
+      type: "set-query",
+      mode: "projects",
+      query: "node",
+    });
+    expect(searched.scrollOffsetByMode).toEqual({ inbox: 418, projects: 0 });
+    const scoped = reduceHomeModeState(state, {
+      type: "set-node-scope",
+      mode: "inbox",
+      environmentId: "node-a" as EnvironmentId,
+    });
+    expect(scoped.scrollOffsetByMode).toEqual({ inbox: 0, projects: 230 });
+  });
 });

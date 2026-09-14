@@ -269,14 +269,13 @@ export const makeWorktreeOperations = (deps: {
                 );
         if (existing !== null) {
           const existingWorktree = yield* loadWorktreeForGitWorkflow(operation, existing);
-          const project = yield* loadProjectForGitWorkflow(operation, input.projectId);
-          const modelSelection = project.defaultModelSelection;
-          if (modelSelection === null) {
-            return yield* failGitWorkflow(
-              operation,
-              `Project ${input.projectId} has no default model selection.`,
+          yield* loadProjectForGitWorkflow(operation, input.projectId);
+          const { textGenerationModelSelection: modelSelection } =
+            yield* serverSettings.getSettings.pipe(
+              Effect.mapError((cause) =>
+                toGitManagerError(operation, "Failed to load server settings.", cause),
+              ),
             );
-          }
           const now = new Date().toISOString();
           const threadId = ThreadId.make(`thread-${crypto.randomUUID()}`);
           yield* dispatchWorktreeCommand(
@@ -314,18 +313,12 @@ export const makeWorktreeOperations = (deps: {
       }
 
       const project = yield* loadProjectForGitWorkflow(operation, input.projectId);
-      const { worktreeBranchPrefix } = yield* serverSettings.getSettings.pipe(
-        Effect.mapError((cause) =>
-          toGitManagerError(operation, "Failed to load server settings.", cause),
-        ),
-      );
-      const modelSelection = project.defaultModelSelection;
-      if (modelSelection === null) {
-        return yield* failGitWorkflow(
-          operation,
-          `Project ${input.projectId} has no default model selection.`,
+      const { worktreeBranchPrefix, textGenerationModelSelection: modelSelection } =
+        yield* serverSettings.getSettings.pipe(
+          Effect.mapError((cause) =>
+            toGitManagerError(operation, "Failed to load server settings.", cause),
+          ),
         );
-      }
 
       const now = new Date().toISOString();
       const worktreeId = WorktreeId.make(`worktree-${crypto.randomUUID()}`);

@@ -1,6 +1,7 @@
 import type { ModelCapabilities, ModelSelection, ServerConfig } from "@ryco/contracts";
 import {
   buildProviderOptionSelectionsFromDescriptors,
+  getModelSelectionBooleanOptionValue,
   getProviderOptionDescriptors,
 } from "@ryco/shared/model";
 
@@ -110,7 +111,40 @@ export function buildModelOptions(
     }
   }
 
-  return [...options.values()];
+  const currentKey = fallbackModelSelection
+    ? `${fallbackModelSelection.instanceId}:${fallbackModelSelection.model}`
+    : null;
+  const fastMode = getModelSelectionBooleanOptionValue(
+    currentKey ? options.get(currentKey)?.selection : null,
+    "fastMode",
+  );
+
+  // Keep the user's Fast mode choice in both mobile model pickers, but only
+  // send it to models that declare support for that option.
+  return [...options.values()].map((option) => {
+    if (
+      option.key === currentKey ||
+      fastMode === undefined ||
+      !option.capabilities?.optionDescriptors?.some(
+        (descriptor) => descriptor.id === "fastMode" && descriptor.type === "boolean",
+      )
+    ) {
+      return option;
+    }
+    return {
+      ...option,
+      selection: normalizeSelectionOptions(
+        {
+          ...option.selection,
+          options: [
+            ...(option.selection.options ?? []).filter((value) => value.id !== "fastMode"),
+            { id: "fastMode", value: fastMode },
+          ],
+        },
+        option.capabilities,
+      ),
+    };
+  });
 }
 
 export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyArray<ProviderGroup> {

@@ -434,7 +434,7 @@ function MarkdownFileView(props: {
 /**
  * Raster preview.
  *
- * `cachePolicy="memory"` is load-bearing, not a performance knob: expo-image
+ * `cachePolicy="none"` is load-bearing, not a performance knob: expo-image
  * writes to a disk cache by default, and node-owned bytes must not outlive the
  * process. The decoder is also the last check on what the node sent — a failure
  * here is reported up so the screen can say so instead of showing a blank box.
@@ -463,7 +463,7 @@ function RasterImageView(props: {
           accessibilityLabel={props.basename}
           style={{ width: "100%", flex: 1, minHeight: 160 }}
           contentFit="contain"
-          cachePolicy="memory"
+          cachePolicy="none"
           onLoad={() => setLoaded(true)}
           onError={props.onRenderFailure}
         />

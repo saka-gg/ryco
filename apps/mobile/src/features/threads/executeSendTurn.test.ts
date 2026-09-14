@@ -43,7 +43,7 @@ function baseInput(overrides: Partial<ExecuteSendTurnInput> = {}): {
       selectedModel: "gpt-5",
       hasSelectedModel: true,
     },
-    project: { projectId: PROJECT_ID, projectCwd: "/repo", defaultModel: "gpt-5" },
+    project: { projectId: PROJECT_ID, projectCwd: "/repo" },
     settings: {
       runtimeMode: "default" as never,
       interactionMode: "code" as never,

@@ -19,11 +19,7 @@ import {
   builtInProviderDriverForInstanceId,
   providerDisplayLabel,
 } from "../../lib/providerDisplay";
-import {
-  NODE_TRUST_ACCOUNT_LABEL,
-  NODE_TRUST_UNVERIFIED_LABEL,
-  type NodeTrust,
-} from "../home/nodeTrustModel";
+import { type NodeTrust } from "../home/nodeTrustModel";
 
 export type InboxThreadState =
   | "needs-input"
@@ -76,6 +72,8 @@ export interface InboxThreadRow {
   readonly title: string;
   readonly nodeLabel: string;
   readonly projectLabel: string;
+  readonly project: Project | null;
+  readonly isWorktree: boolean;
   readonly worktreeLabel: string;
   readonly contextLabel: string;
   readonly state: InboxThreadState;
@@ -86,14 +84,6 @@ export interface InboxThreadRow {
    * — nothing refreshes it in the background. See changeRequestBadge.ts.
    */
   readonly changeRequest: ChangeRequestBadge | null;
-  /**
-   * Wave 4: the node this row lives on is one the owner has not verified, in
-   * client-runtime's own words. `null` means no claim — either the node is
-   * verified or this device holds no evidence either way. It never replaces
-   * {@link statusLabel}: staleness and trust are independent facts about the
-   * row and compose beside each other.
-   */
-  readonly trustLabel: string | null;
   /**
    * Wave 4: a quiet neutral marker, surfaced only for `viewer` — the one role
    * that changes what the user may do here. Owner and operator render nothing;
@@ -161,6 +151,7 @@ function threadState(
   ) {
     return "delivery-unknown";
   }
+  if (environment?.connectionState === "offline") return "offline";
   if (activity === "working") return "working";
   if (activity === "connecting") return "connecting";
   if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "error";
@@ -199,7 +190,12 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
   const environmentById = new Map(
     input.environments.map((environment) => [environment.environmentId, environment] as const),
   );
-  const deliveryUnknown = input.deliveryUnknownThreadIds ?? new Set<string>();
+  const deliveryUnknown = new Set(input.deliveryUnknownThreadIds);
+  for (const thread of input.threads) {
+    if (environmentById.get(thread.environmentId)?.deliveryUnknown) {
+      deliveryUnknown.add(scopedKey(thread.environmentId, thread.id));
+    }
+  }
   const inbox = buildThreadInbox({
     projects: input.projects,
     worktrees: input.worktrees,
@@ -217,7 +213,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     deliveryUnknownThreadKeys: deliveryUnknown,
     pinnedThreadKeys: input.pinnedThreadKeys,
     aiFocusEnabled: input.aiFocusEnabled ?? false,
-    autoSettleAfterDays: input.autoSettleAfterDays ?? null,
+    autoSettleAfterDays: input.autoSettleAfterDays,
     filters: {
       ...(input.nodeScope ? { environmentIds: [input.nodeScope] } : {}),
       text: input.query,
@@ -234,9 +230,12 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       entry.worktree?.title || entry.worktree?.branch || thread.branch || "Local workspace";
     const contextLabel = `${nodeLabel} · ${projectLabel} · ${worktreeLabel}`;
     const state =
-      entry.lifecycle.classification === "settled"
-        ? "settled"
-        : threadState(thread, environment, deliveryUnknown);
+      environment?.stale ||
+      (environment?.connectionState === "offline" && !deliveryUnknown.has(entry.key))
+        ? "offline"
+        : entry.lifecycle.classification === "settled"
+          ? "settled"
+          : threadState(thread, environment, deliveryUnknown);
     const providerDriver =
       thread.session?.provider ??
       thread.providerDriver ??
@@ -249,6 +248,8 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       title: entry.title || "Untitled task",
       nodeLabel,
       projectLabel,
+      project: entry.project,
+      isWorktree: Boolean(entry.worktree?.worktreePath ?? thread.worktreePath),
       worktreeLabel,
       contextLabel,
       state,
@@ -256,12 +257,6 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
         state === "offline" ? (environment?.staleDetail ?? "Offline") : statusLabel(state),
       updatedAt: entry.lifecycle.effectiveSettlementTimestamp ?? timestamp(thread),
       changeRequest: buildChangeRequestBadge(entry.worktree),
-      trustLabel:
-        environment?.trust === "unverified"
-          ? NODE_TRUST_UNVERIFIED_LABEL
-          : environment?.trust === "account-trusted"
-            ? NODE_TRUST_ACCOUNT_LABEL
-            : null,
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,
       providerDriver,
       providerLabel: providerDisplayLabel(providerDriver),

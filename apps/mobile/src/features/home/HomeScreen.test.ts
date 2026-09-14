@@ -31,9 +31,11 @@ vi.mock("zustand/react/shallow", () => ({ useShallow: (selector: unknown) => sel
 vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#ededed" }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../components/RycoWordmark", () => ({ RycoWordmark: "RycoWordmark" }));
-// The FAB reads useSafeAreaInsets, which the three-export react-native stub
-// cannot provide — it has to be mockable at the module boundary.
-vi.mock("../../components/NewTaskFab", () => ({ NewTaskFab: "NewTaskFab" }));
+// Keep native glass, menus, and safe-area hooks outside the Node test environment.
+vi.mock("../../components/HomeBottomToolbar", () => ({ HomeBottomToolbar: "HomeBottomToolbar" }));
+vi.mock("react-native-keyboard-controller", () => ({
+  KeyboardAvoidingView: "KeyboardAvoidingView",
+}));
 vi.mock("../../components/HomeModeControl", () => ({ HomeModeControl: "HomeModeControl" }));
 vi.mock("../../components/NodeScopeControl", () => ({ NodeScopeControl: "NodeScopeControl" }));
 vi.mock("../inbox/InboxScreen", () => ({ InboxScreen: "InboxScreen" }));
@@ -113,21 +115,14 @@ describe("C1 Home header", () => {
     expect(element.props.children.props.compact).toBe(true);
   });
 
-  it("gives Search and Settings separate 44-point targets", () => {
+  it("keeps only Settings in the header", () => {
     const element = renderHeaderOptions().headerRight?.() as ReactElement<{
       className: string;
-      children: ReadonlyArray<ReactElement<{ className: string; accessibilityLabel: string }>>;
+      accessibilityLabel: string;
     }>;
-
-    expect(element.props.className).toContain("gap-2");
-    expect(element.props.children.map((child) => child.props.accessibilityLabel)).toEqual([
-      "Search Inbox",
-      "Settings",
-    ]);
-    for (const action of element.props.children) {
-      expect(action.props.className).toContain("h-11");
-      expect(action.props.className).toContain("w-11");
-    }
+    expect(element.props.accessibilityLabel).toBe("Settings");
+    expect(element.props.className).toContain("h-11");
+    expect(element.props.className).toContain("w-11");
   });
 
   it("switches the R button to Inbox without opening another navigation layer", () => {
@@ -142,25 +137,37 @@ describe("C1 Home header", () => {
 
   it("opens Settings straight from the header", () => {
     const element = renderHeaderOptions().headerRight?.() as ReactElement<{
-      children: ReadonlyArray<ReactElement<{ onPress: () => void }>>;
+      onPress: () => void;
     }>;
-    element.props.children[1]?.props.onPress();
+    element.props.onPress();
 
     expect(navigationMock.navigate).toHaveBeenCalledWith("SettingsSheet");
   });
 
-  it("moves New Task out of the header and onto the floating button", () => {
-    const tree = HomeScreen() as ReactElement<{
-      children: ReadonlyArray<ReactElement<{ accessibilityLabel?: string }> | null | false>;
+  it("wires bottom search, machine filtering, and New Task into the current view", () => {
+    const root = HomeScreen() as ReactElement<{
+      children: ReactElement<{ children: ReadonlyArray<ReactElement | null> }>;
     }>;
-    const fab = tree.props.children.find(
-      (child) => child && typeof child === "object" && child.type === "NewTaskFab",
-    ) as ReactElement<{ accessibilityLabel: string; onPress: () => void }> | undefined;
-
-    expect(fab).toBeDefined();
-    expect(fab?.props.accessibilityLabel).toBe("New Task");
-
-    fab?.props.onPress();
+    const toolbar = root.props.children.props.children.find(
+      (child) => child?.type === "HomeBottomToolbar",
+    ) as ReactElement<{
+      query: string;
+      searchLabel: string;
+      onQueryChange: (query: string) => void;
+      onSelectMachine: (environmentId: string | null) => void;
+      onNewTask: () => void;
+    }>;
+    expect(toolbar.props.searchLabel).toBe("Search Inbox");
+    expect(toolbar.props.query).toBe("");
+    toolbar.props.onQueryChange("fix");
+    expect(dispatchMock).toHaveBeenCalledWith({ type: "set-query", mode: "inbox", query: "fix" });
+    toolbar.props.onSelectMachine("machine-a");
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "set-node-scope",
+      mode: "inbox",
+      environmentId: "machine-a",
+    });
+    toolbar.props.onNewTask();
     expect(navigationMock.navigate).toHaveBeenCalledWith("NewTask", { environmentId: undefined });
   });
 });

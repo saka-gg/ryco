@@ -80,6 +80,16 @@ describe("MVP route config", () => {
     expect("Thread" in MVP_SETTINGS_SHEET_ROUTES).toBe(false);
   });
 
+  it("presents New Task as an expandable iOS sheet with an explicit close action", () => {
+    expect(MVP_ROOT_ROUTES.NewTask.ios).toEqual({
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.62, 0.94],
+      sheetGrabberVisible: true,
+    });
+    expect(MVP_ROOT_ROUTES.NewTask.headerAction).toBe("close");
+    expect(WORKSPACE_OVERLAY_ROUTE_NAMES).toContain("NewTask");
+  });
+
   it("presents the review-comment sheet with detents on iOS and fullScreenModal on Android", () => {
     const route = MVP_ROOT_ROUTES.ThreadReviewComment;
     expect(route.ios.presentation).toBe("formSheet");
@@ -98,6 +108,7 @@ describe("MVP route config", () => {
       "ConnectionsNew",
       "AddProject",
       "ThreadReviewComment",
+      "NewTask",
       "SettingsSheet",
     ] as const) {
       expect(overlays.has(overlay)).toBe(true);
@@ -106,7 +117,6 @@ describe("MVP route config", () => {
     for (const workspace of [
       "Access",
       "Home",
-      "NewTask",
       "Project",
       "ProjectSourceControl",
       "Thread",
@@ -119,10 +129,12 @@ describe("MVP route config", () => {
     }
   });
 
-  it("presents Settings full-screen on iOS without exposing workspace controls", () => {
+  it("presents Settings as a compact expandable iOS sheet", () => {
     expect(MVP_ROOT_ROUTES.SettingsSheet.overlay).toBe(true);
     expect(MVP_ROOT_ROUTES.SettingsSheet.ios).toEqual({
-      presentation: "fullScreenModal",
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.78, 0.94],
+      sheetGrabberVisible: true,
     });
     // Android keeps the card: a nested stack inside an Android form sheet is
     // unverified and there is no Android QA yet.
@@ -150,6 +162,7 @@ describe("MVP route config", () => {
         "SettingsClientStorage",
         "SettingsHub",
         "SettingsInbox",
+        "SettingsStatistics",
         "SettingsNodeSecurity",
         "SettingsNodeVerification",
         "SettingsWorkspace",

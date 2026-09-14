@@ -69,7 +69,7 @@ export function deriveNewTaskDefaults(input: {
     environment,
     project,
     worktree: launchedWorktree ?? null,
-    modelSelection: project?.defaultModelSelection ?? {
+    modelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: DEFAULT_MODEL,
     },
@@ -99,4 +99,26 @@ export function inferTaskTitle(prompt: string): string {
     .find((line) => line.trim());
   const title = firstLine?.trim() ?? "New task";
   return title.length <= 72 ? title : `${title.slice(0, 69).trimEnd()}…`;
+}
+
+/** Project ids are scoped to their machine; choosing a row must retain both. */
+export function resolveNewTaskProjectChoice(input: {
+  readonly target: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId };
+  readonly projects: ReadonlyArray<Project>;
+  readonly environments: ReadonlyArray<ProjectEnvironment>;
+}): Project | null {
+  if (
+    !input.environments.some(
+      (environment) =>
+        environment.environmentId === input.target.environmentId && mutationReady(environment),
+    )
+  )
+    return null;
+  return (
+    input.projects.find(
+      (project) =>
+        project.environmentId === input.target.environmentId &&
+        project.id === input.target.projectId,
+    ) ?? null
+  );
 }

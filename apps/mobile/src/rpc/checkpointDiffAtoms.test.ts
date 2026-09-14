@@ -27,6 +27,8 @@ import {
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
   checkpointDiffCacheKey,
+  checkpointDiffCacheBytes,
+  clearCheckpointDiffCacheForEnvironment,
   checkpointDiffStateAtom,
   invalidateCheckpointDiff,
   resetCheckpointDiffStateForTests,
@@ -113,4 +115,26 @@ describe("checkpointDiffAtoms cache", () => {
     );
     release();
   });
+});
+
+it("clears unused diffs by device and preserves an actively viewed diff", async () => {
+  const other = "env-b" as EnvironmentId;
+  for (const id of [ENV, other])
+    __setEnvironmentApiOverrideForTests(id, {
+      orchestration: { getFullThreadDiff: async () => ({ files: [{ id: "f1" }] }) },
+    } as unknown as EnvironmentApi);
+  const a = input(),
+    b = input({ environmentId: other });
+  const releaseA = watchCheckpointDiff(a),
+    releaseB = watchCheckpointDiff(b);
+  await vi.waitFor(() => expect(readState(a).data).not.toBeNull());
+  await vi.waitFor(() => expect(readState(b).data).not.toBeNull());
+  clearCheckpointDiffCacheForEnvironment(ENV);
+  expect(readState(a).data).not.toBeNull();
+  releaseA();
+  releaseB();
+  expect(checkpointDiffCacheBytes(ENV)).toBeGreaterThan(0);
+  clearCheckpointDiffCacheForEnvironment(ENV);
+  expect(readState(a).data).toBeNull();
+  expect(readState(b).data).not.toBeNull();
 });

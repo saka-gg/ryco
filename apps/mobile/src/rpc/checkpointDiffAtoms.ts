@@ -13,6 +13,7 @@ import {
 import { Option, Schema } from "effect";
 import { Atom } from "effect/unstable/reactivity";
 
+import { cachedPayloadBytes } from "../persistence/cacheSize";
 import { ensureEnvironmentApi } from "../connection/environmentApi";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 
@@ -279,6 +280,7 @@ export function watchCheckpointDiff(input: CheckpointDiffInput): () => void {
   }
 
   const key = checkpointDiffCacheKey(input);
+  knownCheckpointDiffKeys.add(key);
   let entry = checkpointDiffEntries.get(key);
   if (!entry) {
     entry = {
@@ -351,3 +353,31 @@ export function clearCheckpointDiffState(): void {
 }
 
 export const resetCheckpointDiffStateForTests = clearCheckpointDiffState;
+
+export function checkpointDiffCacheBytes(environmentId: EnvironmentId): number {
+  let bytes = 0;
+  for (const key of knownCheckpointDiffKeys) {
+    if (
+      JSON.parse(key)[0] === environmentId &&
+      (checkpointDiffEntries.get(key)?.refCount ?? 0) === 0
+    )
+      bytes += cachedPayloadBytes(getCheckpointDiffState(key).data);
+  }
+  return bytes;
+}
+export function clearCheckpointDiffCacheForEnvironment(environmentId: EnvironmentId): void {
+  for (const key of knownCheckpointDiffKeys) {
+    if (JSON.parse(key)[0] !== environmentId) continue;
+    const entry = checkpointDiffEntries.get(key);
+    if (entry && entry.refCount > 0) continue;
+    if (entry) {
+      entry.generation += 1;
+      checkpointDiffEntries.delete(key);
+      const threadKeys = checkpointDiffKeysByThread.get(entry.threadId);
+      threadKeys?.delete(key);
+      if (threadKeys?.size === 0) checkpointDiffKeysByThread.delete(entry.threadId);
+    }
+    setCheckpointDiffState(key, LOADING_CHECKPOINT_DIFF_STATE);
+    knownCheckpointDiffKeys.delete(key);
+  }
+}

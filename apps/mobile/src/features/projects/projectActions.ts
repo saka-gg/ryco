@@ -1,6 +1,4 @@
 import {
-  DEFAULT_MODEL,
-  ProviderInstanceId,
   type ClientOrchestrationCommand,
   type CommandId,
   type EnvironmentId,
@@ -131,10 +129,6 @@ export function buildProjectCreateCommand(input: {
     workspaceRoot,
     projectMetadataDir: ".ryco",
     createWorkspaceRootIfMissing: true,
-    defaultModelSelection: {
-      instanceId: ProviderInstanceId.make("codex"),
-      model: DEFAULT_MODEL,
-    },
     createdAt: input.createdAt,
   };
 }

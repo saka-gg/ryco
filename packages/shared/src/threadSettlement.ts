@@ -1,3 +1,4 @@
+import { DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS } from "@ryco/contracts/settings";
 import type {
   OrchestrationLatestTurnState,
   OrchestrationSessionStatus,
@@ -5,6 +6,13 @@ import type {
   SidebarAutoSettleAfterDays,
   ThreadSettlementOverride,
 } from "@ryco/contracts";
+
+/** Missing preferences use the shared default; null is an explicit opt-out. */
+export function resolveAutoSettleAfterDays(
+  value: SidebarAutoSettleAfterDays | undefined,
+): SidebarAutoSettleAfterDays {
+  return value === undefined ? DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS : value;
+}
 
 export const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 export const THREAD_AUTO_SETTLE_DAY_MS = 24 * 60 * 60 * 1_000;
@@ -93,7 +101,8 @@ export function canSettleThread(input: ThreadSettlementInput): CanSettleThreadRe
   if (input.hasPendingApprovals) return blocked("pending-approval");
   if (input.hasPendingUserInput) return blocked("pending-user-input");
   if (input.sessionStatus === "starting") return blocked("session-starting");
-  if (input.sessionStatus === "running") return blocked("session-running");
+  if (input.sessionStatus === "running" || input.latestTurnState === "running")
+    return blocked("session-running");
   if (input.hasLocalQueuedMessage) return blocked("local-queue");
   if (input.deliveryUnknown) return blocked("delivery-unknown");
   if (hasQueuedTurnStart(input)) return blocked("queued-turn");

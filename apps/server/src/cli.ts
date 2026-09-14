@@ -84,7 +84,6 @@ import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
-import { getAutoBootstrapDefaultModelSelection } from "./serverRuntimeStartup.ts";
 import {
   clearPersistedServerRuntimeState,
   readPersistedServerRuntimeState,
@@ -2831,7 +2830,6 @@ const projectAddCommand = Command.make("add", {
           projectId,
           title,
           workspaceRoot,
-          defaultModelSelection: getAutoBootstrapDefaultModelSelection(),
           createdAt: new Date().toISOString(),
         });
         return `Added project ${projectId} (${title}) at ${workspaceRoot}.`;

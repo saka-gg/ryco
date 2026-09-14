@@ -387,26 +387,22 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
         serverConfig.cwd,
       );
       let nextProjectId: ProjectId;
-      let nextProjectDefaultModelSelection: ModelSelection;
+      const initialThreadModelSelection = getAutoBootstrapDefaultModelSelection();
 
       if (Option.isNone(existingProject)) {
         const createdAt = new Date().toISOString();
         nextProjectId = ProjectId.make(crypto.randomUUID());
         const bootstrapProjectTitle = path.basename(serverConfig.cwd) || "project";
-        nextProjectDefaultModelSelection = getAutoBootstrapDefaultModelSelection();
         yield* orchestrationEngine.dispatch({
           type: "project.create",
           commandId: CommandId.make(crypto.randomUUID()),
           projectId: nextProjectId,
           title: bootstrapProjectTitle,
           workspaceRoot: serverConfig.cwd,
-          defaultModelSelection: nextProjectDefaultModelSelection,
           createdAt,
         });
       } else {
         nextProjectId = existingProject.value.id;
-        nextProjectDefaultModelSelection =
-          existingProject.value.defaultModelSelection ?? getAutoBootstrapDefaultModelSelection();
       }
 
       const existingThreadId =
@@ -420,7 +416,7 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
           threadId: createdThreadId,
           projectId: nextProjectId,
           title: "New thread",
-          modelSelection: nextProjectDefaultModelSelection,
+          modelSelection: initialThreadModelSelection,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "full-access",
           branch: null,

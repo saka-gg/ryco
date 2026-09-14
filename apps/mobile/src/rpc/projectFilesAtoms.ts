@@ -29,6 +29,7 @@ import {
   WORKSPACE_FILE_SEARCH_LIMIT,
 } from "@ryco/client-runtime/state/files";
 
+import { cachedPayloadBytes } from "../persistence/cacheSize";
 import { ensureEnvironmentApi } from "../connection/environmentApi";
 
 // Listings and search results tolerate a short window of staleness (the provider
@@ -435,6 +436,36 @@ export function clearProjectFilesStateForEnvironment(environmentId: EnvironmentI
   for (const compositeKey of trackedKeys) {
     if (compositeKey.split(KEY_SEP)[1] !== environmentId) continue;
     dropCachedKey(compositeKey);
+  }
+  for (const tracker of retainedKeyTrackers) tracker.forgetEnvironment(environmentId);
+}
+
+/** Retained file/listing payloads, split from raster previews for Storage settings. */
+export function projectFilesCacheStats(environmentId: EnvironmentId): {
+  files: number;
+  images: number;
+} {
+  let files = 0,
+    images = 0;
+  for (const key of trackedKeys) {
+    const [label, environment] = key.split(KEY_SEP);
+    if (environment !== environmentId) continue;
+    if ((projectFilesRegistry.controllers.get(key)?.subscriberCount ?? 0) > 0) continue;
+    const bytes = cachedPayloadBytes(projectFilesRegistry.getQueryState(key).data);
+    if (label === "readFileBinary") images += bytes;
+    else files += bytes;
+  }
+  return { files, images };
+}
+
+/** Cache-only eviction: does not invoke the registry-wide environment teardown. */
+export function clearProjectFileCache(environmentId: EnvironmentId): void {
+  for (const key of trackedKeys) {
+    if (
+      key.split(KEY_SEP)[1] === environmentId &&
+      (projectFilesRegistry.controllers.get(key)?.subscriberCount ?? 0) === 0
+    )
+      dropCachedKey(key);
   }
   for (const tracker of retainedKeyTrackers) tracker.forgetEnvironment(environmentId);
 }

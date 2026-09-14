@@ -1150,6 +1150,7 @@ export const ProjectCreateCommand = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROJECT_METADATA_DIR)),
   ),
   createWorkspaceRootIfMissing: Schema.optional(Schema.Boolean),
+  /** @deprecated Accepted for old clients; project model defaults are ignored. */
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   customSystemPrompt: Schema.optional(Schema.NullOr(ProjectCustomSystemPrompt)),
   createdAt: IsoDateTime,
@@ -1164,6 +1165,7 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   projectMetadataDir: Schema.optional(ProjectMetadataDir),
+  /** @deprecated Accepted for old clients; project model defaults are ignored. */
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   customSystemPrompt: Schema.optional(Schema.NullOr(ProjectCustomSystemPrompt)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),

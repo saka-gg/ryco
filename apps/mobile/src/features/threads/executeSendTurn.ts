@@ -50,7 +50,6 @@ export interface ExecuteSendTurnInput {
   readonly project: {
     readonly projectId: ProjectId;
     readonly projectCwd: string;
-    readonly defaultModel: string | null;
   };
   readonly settings: {
     readonly runtimeMode: RuntimeMode;
@@ -123,7 +122,6 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
     const threadCreateModelSelection = resolveThreadCreateModelSelection({
       selectedModelSelection: input.composer.selectedModelSelection,
       selectedModel: input.composer.selectedModel,
-      defaultModel: input.project.defaultModel,
     });
 
     const bootstrap = buildSendTurnBootstrap({
