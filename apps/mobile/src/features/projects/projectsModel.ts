@@ -11,11 +11,7 @@ import {
   deriveProjectGroupLabel,
   type ProjectGroupingMode,
 } from "../../lib/logicalProject";
-import {
-  NODE_TRUST_ACCOUNT_LABEL,
-  NODE_TRUST_UNVERIFIED_LABEL,
-  type NodeTrust,
-} from "../home/nodeTrustModel";
+import type { NodeTrust } from "../home/nodeTrustModel";
 
 export interface ProjectEnvironment {
   readonly environmentId: EnvironmentId;
@@ -36,7 +32,7 @@ export interface ProjectEnvironment {
  * One machine a project row lives on. A row carries one entry per contributing
  * machine — the machine is an attribute of the row now, never a mode the list is
  * in — so the provenance (which machine, how reachable, at what authority, with
- * what channel trust) travels with the project instead of with a section header.
+ * what role) travels with the project instead of with a section header.
  */
 export interface ProjectRowMachine {
   readonly environmentId: EnvironmentId;
@@ -46,16 +42,16 @@ export interface ProjectRowMachine {
   readonly stale?: boolean;
   readonly staleDetail?: string;
   readonly role?: "viewer" | "operator" | "owner" | "client";
-  readonly trust?: NodeTrust;
 }
 
 export interface ProjectListRow {
   readonly key: string;
   readonly title: string;
+  readonly customAvatarContentHash: string | null;
   readonly path: string;
   readonly machines: ReadonlyArray<ProjectRowMachine>;
   readonly worktreeCount: number;
-  readonly activeThreadCount: number;
+  readonly threadCount: number;
   readonly updatedAt: string | null;
   /** Navigation target: the representative member, the one row taps open. */
   readonly open: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId };
@@ -144,7 +140,7 @@ interface ProjectMember {
   readonly physicalKey: string;
   readonly machine: ProjectRowMachine;
   readonly worktreeCount: number;
-  readonly activeThreadCount: number;
+  readonly threadCount: number;
   readonly updatedAt: string | null;
 }
 
@@ -186,7 +182,6 @@ function buildMachine(
       ? { staleDetail: environment.staleDetail }
       : {}),
     ...(environment.role ? { role: environment.role } : {}),
-    ...(environment.trust ? { trust: environment.trust } : {}),
   };
 }
 
@@ -284,7 +279,7 @@ export function buildProjectRows(input: {
       physicalKey: derivePhysicalProjectKey(project),
       machine: buildMachine(project, environmentsById),
       worktreeCount: worktreeCountByProject.get(key) ?? 0,
-      activeThreadCount: threads.length,
+      threadCount: threads.length,
       updatedAt:
         threads
           .map((thread) => thread.updatedAt ?? thread.createdAt)
@@ -316,10 +311,11 @@ export function buildProjectRows(input: {
             scopedKey(member.project.environmentId, member.project.id),
           ),
           title: member.project.name || "Untitled project",
+          customAvatarContentHash: member.project.customAvatarContentHash ?? null,
           path: member.project.cwd,
           machines: [member.machine],
           worktreeCount: member.worktreeCount,
-          activeThreadCount: member.activeThreadCount,
+          threadCount: member.threadCount,
           updatedAt: member.updatedAt,
           open: { environmentId: member.project.environmentId, projectId: member.project.id },
         });
@@ -341,6 +337,7 @@ export function buildProjectRows(input: {
         scopedKey(representative.project.environmentId, representative.project.id),
       ),
       title: label || "Untitled project",
+      customAvatarContentHash: representative.project.customAvatarContentHash ?? null,
       path: representative.project.cwd,
       machines: [
         representative.machine,
@@ -350,7 +347,7 @@ export function buildProjectRows(input: {
           .toSorted((left, right) => left.label.localeCompare(right.label)),
       ],
       worktreeCount: members.reduce((total, member) => total + member.worktreeCount, 0),
-      activeThreadCount: members.reduce((total, member) => total + member.activeThreadCount, 0),
+      threadCount: members.reduce((total, member) => total + member.threadCount, 0),
       updatedAt:
         members
           .map((member) => member.updatedAt)
@@ -391,24 +388,24 @@ export function projectMachineStatusLabel(machine: ProjectRowMachine): string {
   );
 }
 
-/**
- * The spoken row summary. Machines are named so a merged row never hides that it
- * spans two checkouts, and the two attention labels a machine can carry (viewer
- * authority, unverified channel) are spoken once for the row.
- */
+/** Machines and access restrictions remain part of the spoken row summary. */
 export function projectRowAccessibilityLabel(row: ProjectListRow): string {
   const parts = [
-    `${row.title}, ${row.worktreeCount} worktrees, ${row.activeThreadCount} active tasks`,
+    `${row.title}, ${row.worktreeCount} worktree${row.worktreeCount === 1 ? "" : "s"}, ${row.threadCount} task${row.threadCount === 1 ? "" : "s"}`,
   ];
   if (row.machines.length > 0) {
-    parts.push(`on ${row.machines.map((machine) => machine.label).join(", ")}`);
+    parts.push(
+      `on ${row.machines
+        .map((machine) => {
+          const status =
+            machine.connectionState !== "connected" || machine.stale
+              ? `, ${projectMachineStatusLabel(machine)}`
+              : "";
+          return `${machine.label}${status}`;
+        })
+        .join(", ")}`,
+    );
   }
   if (row.machines.some((machine) => machine.role === "viewer")) parts.push("Viewer");
-  if (row.machines.some((machine) => machine.trust === "unverified")) {
-    parts.push(NODE_TRUST_UNVERIFIED_LABEL);
-  }
-  if (row.machines.some((machine) => machine.trust === "account-trusted")) {
-    parts.push(NODE_TRUST_ACCOUNT_LABEL);
-  }
   return parts.join(", ");
 }

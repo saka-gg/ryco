@@ -36,6 +36,7 @@ import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppea
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
 import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsClientStorageRouteScreen";
 import { SettingsHubRouteScreen } from "./features/settings/SettingsHubRouteScreen";
+import { SettingsStatisticsRouteScreen } from "./features/settings/SettingsStatisticsRouteScreen";
 import { SettingsInboxRouteScreen } from "./features/settings/SettingsInboxRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsWorkspaceRouteScreen } from "./features/settings/SettingsWorkspaceRouteScreen";
@@ -137,13 +138,13 @@ function settingsRouteOptions(
   return options;
 }
 
-// Full-screen Settings stack. Routine node switching and pairing live in the
+// Expandable Settings sheet stack. Routine node switching and pairing live in the
 // Nodes Home mode; Settings owns account, defaults, appearance, storage, and
 // About without duplicating the connection browser.
 const SettingsSheetStack = createNativeStackNavigator({
   initialRouteName: "Settings",
   screenOptions: ({ navigation, route }) => ({
-    ...GLASS_HEADER_OPTIONS,
+    ...SHEET_SOLID_HEADER_OPTIONS,
     unstable_navigationItemStyle: undefined,
     headerLeft:
       MVP_SETTINGS_SHEET_ROUTES[route.name as keyof typeof MVP_SETTINGS_SHEET_ROUTES]
@@ -177,6 +178,11 @@ const SettingsSheetStack = createNativeStackNavigator({
       screen: SettingsWorkspaceRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsWorkspace.linking,
       options: settingsRouteOptions("SettingsWorkspace", "Workspace defaults"),
+    }),
+    SettingsStatistics: createNativeStackScreen({
+      screen: SettingsStatisticsRouteScreen,
+      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsStatistics.linking,
+      options: settingsRouteOptions("SettingsStatistics", "Statistics"),
     }),
     SettingsInbox: createNativeStackScreen({
       screen: SettingsInboxRouteScreen,

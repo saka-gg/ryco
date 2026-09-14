@@ -1,3 +1,4 @@
+import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { useNavigation } from "@react-navigation/native";
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, View } from "react-native";
@@ -287,7 +288,21 @@ export function ProjectDetailScreen(props: {
         <View className="rounded-[22px] bg-card p-5">
           <View className="flex-row items-start gap-3">
             <View className="min-w-0 flex-1 gap-1">
-              <Text className="text-xl font-ryco-bold text-foreground">{detail.project.name}</Text>
+              <View className="flex-row items-center gap-2">
+                <ProjectFavicon
+                  environmentId={detail.project.environmentId}
+                  projectId={detail.project.id}
+                  customAvatarContentHash={detail.project.customAvatarContentHash}
+                  projectTitle={detail.project.name}
+                  size={24}
+                />
+                <Text
+                  className="min-w-0 flex-1 text-xl font-ryco-medium text-foreground"
+                  numberOfLines={2}
+                >
+                  {detail.project.name}
+                </Text>
+              </View>
               <Text className="font-mono text-xs leading-normal text-foreground-muted">
                 {detail.project.cwd}
               </Text>

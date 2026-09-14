@@ -13,6 +13,7 @@ import type { SidebarWorktreeSummary } from "@ryco/client-runtime/state/threads"
 export type ChangeRequestTone = "open" | "draft" | "merged" | "closed" | "neutral";
 
 export interface ChangeRequestBadge {
+  readonly kind: "pull-request" | "issue" | "work-item";
   /** Short form for the row: `#42`, or a Jira key like `RYC-8`. */
   readonly label: string;
   readonly tone: ChangeRequestTone;
@@ -89,6 +90,7 @@ export function buildChangeRequestBadge(
   if (worktree.prNumber !== null) {
     const tone = pullRequestTone(worktree.prState, worktree.prIsDraft);
     return {
+      kind: "pull-request",
       label: `#${worktree.prNumber}`,
       tone,
       accessibilityLabel: `Pull request ${worktree.prNumber}, ${pullRequestStateWord(
@@ -102,6 +104,7 @@ export function buildChangeRequestBadge(
     const stateWord =
       worktree.workItemStateName?.trim() || worktree.workItemState || "state unknown";
     return {
+      kind: "work-item",
       label: worktree.workItemKey,
       tone: workItemTone(worktree.workItemState),
       accessibilityLabel: `Work item ${worktree.workItemKey}, ${stateWord}. ${LAST_KNOWN}`,
@@ -110,6 +113,7 @@ export function buildChangeRequestBadge(
 
   if (worktree.issueNumber !== null) {
     return {
+      kind: "issue",
       label: `#${worktree.issueNumber}`,
       tone:
         worktree.issueState === "closed"

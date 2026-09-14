@@ -37,6 +37,8 @@ import {
 } from "../connection/environmentApi";
 import {
   clearProjectFilesStateForEnvironment,
+  clearProjectFileCache,
+  projectFilesCacheStats,
   invalidateProjectFilesState,
   PROJECT_LIST_ENTRIES_RETAINED_KEY_LIMIT,
   PROJECT_READ_FILE_BINARY_RETAINED_KEY_LIMIT,
@@ -577,5 +579,27 @@ describe("projectFilesAtoms retained-key budget", () => {
 
     expect(listedPath(revisitedKey)).toBe("/work/revisited/a.ts");
     releaseRevisited();
+  });
+});
+
+describe("storage cache controls", () => {
+  it("measures and clears unused files for one device while retaining active views and other devices", async () => {
+    setProjectsApi(ENV, { listEntries: vi.fn(async () => listResult("a.ts")) });
+    setProjectsApi(OTHER_ENV, { listEntries: vi.fn(async () => listResult("b.ts")) });
+    const a = { environmentId: ENV, cwd: CWD };
+    const b = { environmentId: OTHER_ENV, cwd: CWD };
+    const releaseA = projectListEntriesQuery.watch(a);
+    const releaseB = projectListEntriesQuery.watch(b);
+    await vi.waitFor(() => expect(listedPath(projectListEntriesQuery.keyOf(a))).toBe("a.ts"));
+    await vi.waitFor(() => expect(listedPath(projectListEntriesQuery.keyOf(b))).toBe("b.ts"));
+    expect(projectFilesCacheStats(ENV).files).toBe(0);
+    clearProjectFileCache(ENV);
+    expect(listedPath(projectListEntriesQuery.keyOf(a))).toBe("a.ts");
+    releaseA();
+    releaseB();
+    expect(projectFilesCacheStats(ENV).files).toBeGreaterThan(0);
+    clearProjectFileCache(ENV);
+    expect(projectFilesCacheStats(ENV).files).toBe(0);
+    expect(listedPath(projectListEntriesQuery.keyOf(b))).toBe("b.ts");
   });
 });

@@ -116,17 +116,18 @@ export const IMAGE_ONLY_BOOTSTRAP_PROMPT = ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
 /**
  * Resolves the model selection recorded on a freshly created thread's
  * bootstrap: the composer's selection with its slug backfilled from the
- * project default (then the global default) when the composer has no explicit
- * model. Pure — the UI supplies the raw selections.
+ * global default when the composer has no explicit model.
+ * Pure — the UI supplies the raw selections.
  */
 export function resolveThreadCreateModelSelection(input: {
   readonly selectedModelSelection: ModelSelection;
   readonly selectedModel: string;
-  readonly defaultModel: string | null;
+  /** @deprecated Project defaults are ignored. */
+  readonly defaultModel?: string | null;
 }): ModelSelection {
   return createModelSelection(
     input.selectedModelSelection.instanceId,
-    input.selectedModel || input.defaultModel || DEFAULT_MODEL,
+    input.selectedModel || DEFAULT_MODEL,
     input.selectedModelSelection.options,
   );
 }

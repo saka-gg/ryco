@@ -237,10 +237,6 @@ it.effect(
           const update = yield* plans.prepareUpdate({
             projectId: ProjectId.make("project-1"),
             expectedUpdatedAt: NOW,
-            defaultModelSelection: {
-              instanceId: ProviderInstanceId.make("codex"),
-              model: "test-model",
-            },
             customSystemPrompt: "Keep changes focused.",
             scripts: [
               {
@@ -253,8 +249,7 @@ it.effect(
             ],
             preferredRemoteName: "origin",
           });
-          assert.strictEqual(update.before.defaultModelSelection, null);
-          assert.strictEqual(update.after.defaultModelSelection?.model, "test-model");
+          assert.strictEqual("defaultModelSelection" in update.after, false);
           assert.strictEqual(update.after.scripts?.[0]?.command, "bun run test");
           yield* plans.revalidate(update);
           snapshot.projects = [{ ...project(root), updatedAt: "2026-08-18T00:01:00.000Z" }];

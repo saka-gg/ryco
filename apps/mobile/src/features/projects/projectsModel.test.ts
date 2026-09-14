@@ -26,6 +26,7 @@ function project(input: {
   readonly cwd: string;
   readonly canonicalKey?: string;
   readonly updatedAt?: string;
+  readonly customAvatarContentHash?: string;
 }): Project {
   return {
     environmentId: input.environmentId,
@@ -49,6 +50,9 @@ function project(input: {
         }
       : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.customAvatarContentHash
+      ? { customAvatarContentHash: input.customAvatarContentHash }
+      : {}),
   };
 }
 
@@ -88,7 +92,7 @@ const THREAD = thread(NODE_A, "thread-a", "project-a");
 const EMPTY = { worktrees: [], threads: [] } as const;
 
 describe("Projects rows", () => {
-  it("counts worktrees and active tasks on a single-machine row", () => {
+  it("counts worktrees and tasks on a single-machine row", () => {
     const rows = buildProjectRows({
       projects: [PROJECT],
       worktrees: [WORKTREE],
@@ -102,10 +106,27 @@ describe("Projects rows", () => {
       title: "Ryco",
       path: "/code/ryco",
       worktreeCount: 1,
-      activeThreadCount: 1,
+      threadCount: 1,
       open: { environmentId: NODE_A, projectId: "project-a" },
     });
     expect(rows[0]?.machines.map((machine) => machine.label)).toEqual(["Mac Studio"]);
+  });
+
+  it("retains custom artwork and counts settled tasks as part of the project total", () => {
+    const rows = buildProjectRows({
+      projects: [{ ...PROJECT, customAvatarContentHash: "avatar" }],
+      worktrees: [],
+      threads: [{ ...THREAD, settledOverride: "settled", settledAt: "2026-07-26T12:00:00.000Z" }],
+      environments: [{ ...MAC, trust: "account-trusted" }],
+      groupingMode: "repository",
+    });
+    expect(rows[0]).toMatchObject({
+      customAvatarContentHash: "avatar",
+      threadCount: 1,
+      open: { environmentId: NODE_A, projectId: PROJECT.id },
+    });
+    expect(rows[0]?.machines[0]).not.toHaveProperty("trust");
+    expect(projectRowAccessibilityLabel(rows[0]!)).toBe("Ryco, 0 worktrees, 1 task, on Mac Studio");
   });
 
   it("ignores archived worktrees and threads", () => {
@@ -119,7 +140,7 @@ describe("Projects rows", () => {
       groupingMode: "repository",
     });
 
-    expect(rows[0]).toMatchObject({ worktreeCount: 0, activeThreadCount: 0 });
+    expect(rows[0]).toMatchObject({ worktreeCount: 0, threadCount: 0 });
   });
 
   it("merges one repository checked out on two machines into a single row", () => {
@@ -141,6 +162,7 @@ describe("Projects rows", () => {
           // Later than machine A's most recent task, so B is the representative.
           canonicalKey: CANONICAL_KEY,
           updatedAt: "2026-07-28T10:00:00.000Z",
+          customAvatarContentHash: "linux-avatar",
         }),
       ],
       worktrees: [
@@ -160,8 +182,9 @@ describe("Projects rows", () => {
       title: "Ryco",
       // Representative (most recently updated) member owns path and open target.
       path: "/srv/ryco",
+      customAvatarContentHash: "linux-avatar",
       worktreeCount: 3,
-      activeThreadCount: 1,
+      threadCount: 1,
       open: { environmentId: NODE_B, projectId: "project-b" },
     });
     expect(rows[0]?.machines.map((machine) => machine.label)).toEqual(["Linux box", "Mac Studio"]);
@@ -319,7 +342,7 @@ describe("Projects rows", () => {
     expect(rows[0]?.machines.map((machine) => machine.label)).toEqual(["Mac Studio"]);
   });
 
-  it("carries stale, role, and trust provenance onto each machine entry", () => {
+  it("keeps machine availability and access restrictions without trust metadata", () => {
     const rows = buildProjectRows({
       projects: [
         project({
@@ -347,7 +370,6 @@ describe("Projects rows", () => {
           stale: true,
           staleDetail: "Offline · last seen 12m ago",
           role: "owner",
-          trust: "verified",
         },
         { ...LINUX, connectionState: "read-only", role: "viewer", trust: "unverified" },
       ],
@@ -359,20 +381,18 @@ describe("Projects rows", () => {
       label: "Linux box",
       connectionState: "read-only",
       role: "viewer",
-      trust: "unverified",
     });
     expect(linux?.stale).toBeUndefined();
     expect(mac).toMatchObject({
       stale: true,
       staleDetail: "Offline · last seen 12m ago",
       role: "owner",
-      trust: "verified",
     });
     // Wave 2 vocabulary wins over the live-state word for cached rows.
     expect(projectMachineStatusLabel(mac!)).toBe("Offline · last seen 12m ago");
     expect(projectMachineStatusLabel(linux!)).toBe("Read-only");
     expect(projectRowAccessibilityLabel(rows[0]!)).toBe(
-      "Ryco, 0 worktrees, 0 active tasks, on Linux box, Mac Studio, Viewer, Not verified",
+      "Ryco, 0 worktrees, 0 tasks, on Linux box, Read-only, Mac Studio, Offline · last seen 12m ago, Viewer",
     );
   });
 
@@ -572,7 +592,7 @@ describe("Projects rows", () => {
     // Neither member has a timestamp, so the first member (Mac Studio) is the
     // representative and leads the machine list.
     expect(projectRowAccessibilityLabel(rows[0]!)).toBe(
-      "Ryco, 0 worktrees, 0 active tasks, on Mac Studio, Linux box",
+      "Ryco, 0 worktrees, 0 tasks, on Mac Studio, Linux box",
     );
   });
 });

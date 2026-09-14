@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ModelSelection } from "@ryco/contracts";
 import { newCommandId } from "../../../lib/utils";
 import { isHostedHubMode } from "../../../env";
 import { readEnvironmentApi } from "../../../environmentApi";
@@ -40,8 +39,6 @@ export function useSidebarProjectSettingsDialog() {
   const [projectSettingsPreferredRemoteName, setProjectSettingsPreferredRemoteName] = useState<
     string | null
   >(null);
-  const [projectSettingsDefaultModelSelection, setProjectSettingsDefaultModelSelection] =
-    useState<ModelSelection | null>(null);
 
   const openProjectSettingsDialog = useCallback(
     (member: SidebarProjectGroupMember) => {
@@ -54,7 +51,6 @@ export function useSidebarProjectSettingsDialog() {
       setProjectSettingsSaving(false);
       setProjectSettingsCustomAvatarContentHash(member.customAvatarContentHash ?? null);
       setProjectSettingsPreferredRemoteName(member.preferredRemoteName ?? null);
-      setProjectSettingsDefaultModelSelection(member.defaultModelSelection ?? null);
       projectSettingsOpenFrameRef.current = window.requestAnimationFrame(() => {
         projectSettingsOpenFrameRef.current = null;
         setProjectSettingsOpen(true);
@@ -81,7 +77,6 @@ export function useSidebarProjectSettingsDialog() {
       setProjectSettingsSaving(false);
       setProjectSettingsCustomAvatarContentHash(null);
       setProjectSettingsPreferredRemoteName(null);
-      setProjectSettingsDefaultModelSelection(null);
     }, 340);
   }, []);
 
@@ -132,18 +127,11 @@ export function useSidebarProjectSettingsDialog() {
     const customSystemPromptChanged = customSystemPrompt !== currentCustomSystemPrompt;
     const preferredRemoteNameChanged =
       projectSettingsPreferredRemoteName !== (projectSettingsTarget.preferredRemoteName ?? null);
-    const currentDefaultModelSelection = projectSettingsTarget.defaultModelSelection ?? null;
-    const defaultModelSelectionChanged =
-      (projectSettingsDefaultModelSelection?.instanceId ?? null) !==
-        (currentDefaultModelSelection?.instanceId ?? null) ||
-      (projectSettingsDefaultModelSelection?.model ?? null) !==
-        (currentDefaultModelSelection?.model ?? null);
     if (
       !titleChanged &&
       !workspaceRootChanged &&
       !customSystemPromptChanged &&
-      !preferredRemoteNameChanged &&
-      !defaultModelSelectionChanged
+      !preferredRemoteNameChanged
     ) {
       closeProjectSettingsDialog();
       return;
@@ -175,9 +163,6 @@ export function useSidebarProjectSettingsDialog() {
         ...(preferredRemoteNameChanged
           ? { preferredRemoteName: projectSettingsPreferredRemoteName }
           : {}),
-        ...(defaultModelSelectionChanged
-          ? { defaultModelSelection: projectSettingsDefaultModelSelection }
-          : {}),
       });
       closeProjectSettingsDialog();
     } catch (error) {
@@ -194,7 +179,6 @@ export function useSidebarProjectSettingsDialog() {
     closeProjectSettingsDialog,
     projectSettingsSaving,
     projectSettingsCustomSystemPrompt,
-    projectSettingsDefaultModelSelection,
     projectSettingsPreferredRemoteName,
     projectSettingsTarget,
     projectSettingsTitle,
@@ -312,7 +296,6 @@ export function useSidebarProjectSettingsDialog() {
     projectSettingsSaving,
     projectSettingsCustomAvatarContentHash,
     projectSettingsPreferredRemoteName,
-    projectSettingsDefaultModelSelection,
     projectAvatarUploadUnavailableReason: isHostedHubMode()
       ? "Project image upload is unavailable in hosted mode because node HTTP routes are not relayed."
       : null,
@@ -320,7 +303,6 @@ export function useSidebarProjectSettingsDialog() {
     setProjectSettingsWorkspaceRoot,
     setProjectSettingsCustomSystemPrompt,
     setProjectSettingsPreferredRemoteName,
-    setProjectSettingsDefaultModelSelection,
     openProjectSettingsDialog,
     closeProjectSettingsDialog,
     pickProjectSettingsWorkspaceRoot,

@@ -1,8 +1,10 @@
-import type { ModelSelection, ServerConfig } from "@ryco/contracts";
+import type { ModelSelection, ServerConfig, ModelCapabilities } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildModelPickerModel,
+  buildModelOptionControls,
+  applyModelOption,
   resolveModelPickerSelection,
   shortChoiceLabel,
 } from "./modelPickerModel";
@@ -291,5 +293,57 @@ describe("composer chip summary", () => {
       expect(model.pillAccessibilityLabel).not.toContain(model.pillReasoningLabel + ".");
     }
     expect(model.pillAccessibilityLabel).toContain("Model:");
+  });
+});
+
+describe("capability-driven reasoning and Fast mode", () => {
+  const capabilities = {
+    optionDescriptors: [
+      {
+        id: "reasoning",
+        label: "Reasoning",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "high", label: "High", isDefault: true },
+        ],
+      },
+      { id: "fast", label: "Fast Mode", type: "boolean", currentValue: false },
+    ],
+  } as ModelCapabilities;
+
+  it("shows declared choices and selects the provider default", () => {
+    const controls = buildModelOptionControls(selection("codex-1", "gpt-5.6"), capabilities);
+    expect(
+      controls[0]?.choices.filter((choice) => choice.selected).map((choice) => choice.id),
+    ).toEqual(["high"]);
+    expect(controls[1]).toMatchObject({ id: "fast", enabled: false });
+    expect(buildModelOptionControls(selection("codex-1", "gpt-5.6"), null)).toEqual([]);
+    expect(
+      buildModelOptionControls(selection("codex-1", "gpt-5.6"), {
+        optionDescriptors: [],
+      } as unknown as ModelCapabilities),
+    ).toEqual([]);
+  });
+
+  it("updates reasoning and Fast mode independently without changing the selected model", () => {
+    let current = selection("codex-1", "gpt-5.6");
+    current = applyModelOption(current, capabilities, "fast", true);
+    current = applyModelOption(current, capabilities, "reasoning", "low");
+    expect(current).toEqual({
+      instanceId: "codex-1",
+      model: "gpt-5.6",
+      options: [
+        { id: "reasoning", value: "low" },
+        { id: "fast", value: true },
+      ],
+    });
+    expect(applyModelOption(current, capabilities, "reasoning", "unsupported")).toBe(current);
+    expect(applyModelOption(current, capabilities, "fast", "true")).toBe(current);
+    expect(applyModelOption(current, capabilities, "missing", true)).toBe(current);
+    expect(applyModelOption(current, capabilities, "fast", false).options).toEqual([
+      { id: "reasoning", value: "low" },
+      { id: "fast", value: false },
+    ]);
   });
 });

@@ -157,7 +157,7 @@ export type NewTaskWorktreeContext =
       readonly branch: string;
       readonly worktreePath: string | null;
     }
-  | { readonly kind: "new"; readonly branch: string };
+  | { readonly kind: "new"; readonly branch: string; readonly baseBranch?: string };
 
 export interface NewTaskStableIds {
   readonly projectId: ProjectId;
@@ -210,6 +210,7 @@ export interface NewTaskControllerDeps {
   readonly createWorktree: (input: {
     readonly projectId: ProjectId;
     readonly branch: string;
+    readonly baseBranch?: string;
   }) => Promise<{
     readonly worktreeId: WorktreeId;
     readonly threadId: ThreadId;
@@ -313,7 +314,6 @@ export async function runNewTaskAttempt(
           workspaceRoot,
           projectMetadataDir: ".ryco",
           createWorkspaceRootIfMissing: true,
-          defaultModelSelection: next.modelSelection,
           createdAt: next.createdAt,
         });
         next = { ...next, projectCommandAccepted: true };
@@ -335,6 +335,9 @@ export async function runNewTaskAttempt(
         const created = await deps.createWorktree({
           projectId: next.projectId,
           branch,
+          ...(next.worktree.baseBranch?.trim()
+            ? { baseBranch: next.worktree.baseBranch.trim() }
+            : {}),
         });
         worktreeId = created.worktreeId;
         threadId = created.threadId;

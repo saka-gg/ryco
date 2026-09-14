@@ -49,6 +49,7 @@ const EMPTY_COPY: Readonly<
 };
 
 export function InboxScreen(props: {
+  readonly filterKey?: string;
   readonly sections: ReadonlyArray<InboxSection>;
   readonly emptyState: InboxEmptyState;
   readonly initialScrollOffset?: number;
@@ -122,11 +123,46 @@ export function InboxScreen(props: {
           title: preset.label,
           attributes: { disabled: !row.canSnooze },
         }));
+    actions.unshift({
+      id: row.attentionState === "settled" ? "unsettle" : "settle",
+      title: row.attentionState === "settled" ? "Move to Active" : "Settle task",
+      attributes: { disabled: !row.mutationEnabled || !row.canSettle },
+    });
     return (
       <MenuView
         shouldOpenOnLongPress
         actions={actions}
         onPressAction={({ nativeEvent }) => {
+          if (nativeEvent.event === "settle" || nativeEvent.event === "unsettle") {
+            if (!row.mutationEnabled || !row.canSettle) return;
+            const type = nativeEvent.event;
+            void (async () => {
+              try {
+                const command =
+                  type === "settle"
+                    ? {
+                        type: "thread.settle" as const,
+                        threadId: row.threadId,
+                        commandId: newCommandId(),
+                      }
+                    : {
+                        type: "thread.unsettle" as const,
+                        threadId: row.threadId,
+                        commandId: newCommandId(),
+                        reason: "user" as const,
+                      };
+                await ensureEnvironmentApi(row.environmentId).orchestration.dispatchCommand(
+                  command,
+                );
+              } catch (error) {
+                Alert.alert(
+                  "Could not update task",
+                  error instanceof Error ? error.message : "The request failed.",
+                );
+              }
+            })();
+            return;
+          }
           const until =
             nativeEvent.event === "unsnooze"
               ? null
@@ -161,6 +197,7 @@ export function InboxScreen(props: {
 
   return (
     <LegendList
+      key={props.filterKey}
       data={data}
       renderItem={renderItem}
       keyExtractor={(item) => item.key}
@@ -169,6 +206,8 @@ export function InboxScreen(props: {
       initialScrollOffset={props.initialScrollOffset}
       onScroll={(event) => props.onScrollOffset?.(event.nativeEvent.contentOffset.y)}
       scrollEventThrottle={32}
+      keyboardDismissMode="on-drag"
+      keyboardShouldPersistTaps="handled"
       contentInsetAdjustmentBehavior="never"
       contentContainerStyle={{ paddingBottom: HOME_LIST_PADDING_BOTTOM }}
       ListHeaderComponent={<WorkspaceConnectionStatus />}

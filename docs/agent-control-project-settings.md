@@ -11,7 +11,7 @@ write a projection, or touch workspace contents.
   project id, display name, canonical workspace root, metadata directory, and
   repository identity. Execution dispatches `project.create` with directory
   creation disabled.
-- `updateProject` changes the display name, canonical workspace root, default model selection, custom system prompt,
+- `updateProject` changes the display name, canonical workspace root, custom system prompt,
   scripts, and/or preferred remote.
   The plan records exact before/after values, repository identities, and the
   expected `updatedAt` revision.
@@ -28,7 +28,7 @@ repository identity, thread set, and target availability.
 
 ## Routine preferences and approval
 
-Private-session project title, default model and preferred remote updates execute automatically.
+Private-session project title and preferred remote updates execute automatically.
 Workspace changes, script edits and custom system prompt edits still require approval. The immutable
 plan includes before/after preferences, and the project revision guard rejects stale updates.
 Previously persisted plans without preference fields remain readable and do not reset preferences.

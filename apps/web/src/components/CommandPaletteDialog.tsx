@@ -10,14 +10,12 @@ import { useHostedHubStore } from "../hostedHub/state";
 
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
-  DEFAULT_MODEL,
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
   type EnvironmentApi,
   type EnvironmentId,
   type FilesystemBrowseResult,
   type ProjectId,
-  ProviderInstanceId,
   type SourceControlDiscoveryResult,
   type SourceControlProviderKind,
   type SourceControlRepositoryInfo,
@@ -1392,10 +1390,6 @@ function OpenCommandPaletteDialog() {
           workspaceRoot: cwd,
           projectMetadataDir: ".ryco",
           createWorkspaceRootIfMissing: true,
-          defaultModelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: DEFAULT_MODEL,
-          },
           createdAt: new Date().toISOString(),
         });
         await handleNewThread(scopeProjectRef(environmentId, projectId), {

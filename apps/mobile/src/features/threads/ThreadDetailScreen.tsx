@@ -111,14 +111,8 @@ import {
   useComposerFileUploadMaxBytes,
   useComposerFileUploadRecords,
 } from "../../state/composerFileUpload";
-import {
-  applyModelOption,
-  buildModelPickerModel,
-  resolveModelPickerSelection,
-} from "./modelPickerModel";
-import { ModelPickerSheet } from "./ModelPickerSheet";
+import { buildModelPickerModel } from "./modelPickerModel";
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
-import { SessionPolicySheet } from "./SessionPolicySheet";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
 import { ThreadComposer } from "./ThreadComposer";
 import { SideChatCard } from "./SideChatCard";
@@ -256,10 +250,7 @@ export function ThreadDetailScreen(props: {
   const [actionsVisible, setActionsVisible] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [policyVisible, setPolicyVisible] = useState(false);
   const [policyBusy, setPolicyBusy] = useState(false);
-  const [modelVisible, setModelVisible] = useState(false);
-  const [modelQuery, setModelQuery] = useState("");
   const [stagedModelSelection, setStagedModelSelection] = useState<ModelSelection | null>(null);
   const [sendBusy, setSendBusy] = useState(false);
   const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerAttachment>>([]);
@@ -403,7 +394,7 @@ export function ThreadDetailScreen(props: {
         },
       ],
       localQueuedThreadKeys: getQueuedThreadKeys(queuesByThreadKey),
-      autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays ?? null,
+      autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
       nowMs: Math.max(settlementNowMs, Date.now()),
     });
   }, [
@@ -487,7 +478,7 @@ export function ThreadDetailScreen(props: {
   // Memoized: `?? []` would allocate a fresh array every render and defeat both
   // memos below, recomputing the policy model on every keystroke in the composer.
   const providers = useMemo(() => serverConfig?.providers ?? [], [serverConfig]);
-  const canonicalModelSelection = thread?.modelSelection ?? project?.defaultModelSelection ?? null;
+  const canonicalModelSelection = thread?.modelSelection ?? null;
   const selectedModelSelection = stagedModelSelection ?? canonicalModelSelection;
   const sideChatReady = !cachedView.actionsDisabled && connectionUiState === "connected";
   useEffect(() => {
@@ -591,12 +582,10 @@ export function ThreadDetailScreen(props: {
               providerSelectionPolicy.mode === "continuation-only"
                 ? (canonicalModelSelection?.instanceId ?? null)
                 : null,
-            query: modelQuery,
           })
         : null,
     [
       canonicalModelSelection?.instanceId,
-      modelQuery,
       providerSelectionPolicy.mode,
       selectedModelSelection,
       serverConfig,
@@ -618,7 +607,7 @@ export function ThreadDetailScreen(props: {
 
   const getSteerEligibility = useCallback(
     (message: QueuedThreadMessage) => {
-      const activeSelection = thread?.modelSelection ?? project?.defaultModelSelection;
+      const activeSelection = thread?.modelSelection;
       const providerInstanceId = thread?.session?.providerInstanceId ?? activeSelection?.instanceId;
       const provider = providers.find((entry) => entry.instanceId === providerInstanceId);
       return resolveQueuedMessageSteerEligibility({
@@ -639,7 +628,7 @@ export function ThreadDetailScreen(props: {
         activeTokenMode: thread?.tokenMode ?? "balanced",
       });
     },
-    [connectionUiState, hydratedFromCacheAt, project?.defaultModelSelection, providers, thread],
+    [connectionUiState, hydratedFromCacheAt, providers, thread],
   );
 
   const getSteerUnavailableReason = useCallback(
@@ -950,8 +939,7 @@ export function ThreadDetailScreen(props: {
       state,
       scopeProjectRef(environmentId, currentThread.projectId),
     );
-    const canonicalSelection =
-      currentThread.modelSelection ?? currentProject?.defaultModelSelection ?? null;
+    const canonicalSelection = currentThread.modelSelection ?? null;
     const modelSelection = stagedModelSelection ?? canonicalSelection;
     if (!modelSelection) {
       setSendError("No model is configured for this project.");
@@ -1028,7 +1016,6 @@ export function ThreadDetailScreen(props: {
               project: {
                 projectId: currentThread.projectId,
                 projectCwd: currentProject?.cwd ?? "",
-                defaultModel: currentProject?.defaultModelSelection?.model ?? modelSelection.model,
               },
               settings: {
                 runtimeMode: currentThread.runtimeMode,
@@ -1260,80 +1247,39 @@ export function ThreadDetailScreen(props: {
         sendBlock={sendBlock}
         fileUploadRecords={fileUploadRecords}
         disabled={cachedView.composerDisabled}
-        policyLabel={policyModel?.pillLabel}
-        policyIcon={policyModel?.pillIcon}
-        policyCaution={policyModel?.pillTone === "caution"}
-        policyAccessibilityLabel={policyModel?.pillAccessibilityLabel}
-        // `policyDisabled` gates both rail pills. The labels stay readable —
-        // they are the thread's own configuration — but neither sheet can be
-        // opened, because every write behind them goes through
-        // ensureEnvironmentApi, which THROWS when the environment has no
-        // connection. Disabling the pressables is the fix; catching the throw
-        // would only turn a crash into an internal error string.
+        policyModel={policyModel}
         policyDisabled={policyBusy || cachedView.actionsDisabled}
-        onOpenPolicy={policyModel ? () => setPolicyVisible(true) : undefined}
-        modelLabel={modelPicker?.pillLabel}
-        modelProviderDriver={modelPicker?.pillProviderDriver}
-        modelAccessibilityLabel={modelPicker?.pillAccessibilityLabel}
-        modelReasoningLabel={modelPicker?.pillReasoningLabel}
-        modelFastEnabled={modelPicker?.pillFastEnabled}
-        onOpenModel={modelPicker ? () => setModelVisible(true) : undefined}
-        pendingContextHandoff={pendingContextHandoff}
-      />
-
-      {modelPicker ? (
-        <ModelPickerSheet
-          visible={modelVisible}
-          model={modelPicker}
-          query={modelQuery}
-          onChangeQuery={setModelQuery}
-          onClose={() => {
-            setModelVisible(false);
-            setModelQuery("");
-          }}
-          onSelectOption={(optionId, value) => {
-            // Options ride on the ModelSelection, so changing reasoning or fast
-            // mode is the same write as changing the model itself.
-            const current = selectedModelSelection;
-            if (!current) return;
-            const capabilities =
-              modelPicker.groups.flatMap((group) => group.entries).find((entry) => entry.selected)
-                ?.capabilities ?? null;
-            const next = applyModelOption(current, capabilities, optionId, value);
-            stageModelSelection(next);
-          }}
-          onSelect={(key) => {
-            const next = resolveModelPickerSelection(modelPicker, key);
-            if (!next) return;
-            setModelVisible(false);
-            setModelQuery("");
-            stageModelSelection(next);
-          }}
-        />
-      ) : null}
-
-      {policyModel ? (
-        <SessionPolicySheet
-          visible={policyVisible}
-          model={policyModel}
-          onClose={() => setPolicyVisible(false)}
-          onSelectRuntimeMode={(value) => {
-            const next = resolveSessionPolicySelection(policyModel.access, value);
-            if (!next) return;
+        modelPicker={modelPicker}
+        modelSelection={selectedModelSelection}
+        onSelectModel={(selection) => {
+          if (policyBusy || cachedView.actionsDisabled) return;
+          const entry = modelPicker?.groups
+            .flatMap((group) => group.entries)
+            .find(
+              (candidate) =>
+                candidate.selection.instanceId === selection.instanceId &&
+                candidate.selection.model === selection.model,
+            );
+          if (entry && !entry.disabled) stageModelSelection(selection);
+        }}
+        onSelectRuntimeMode={(value) => {
+          if (!policyModel || policyBusy || cachedView.actionsDisabled) return;
+          const next = resolveSessionPolicySelection(policyModel.access, value);
+          if (next)
             void applyPolicy(() =>
               setThreadRuntimeMode(ensureEnvironmentApi(environmentId), threadId, next),
             );
-          }}
-          onSelectInteractionMode={(value) => {
-            if (!policyModel.mode) return;
-            const next = resolveSessionPolicySelection(policyModel.mode, value);
-            if (!next) return;
+        }}
+        onSelectInteractionMode={(value) => {
+          if (!policyModel?.mode || policyBusy || cachedView.actionsDisabled) return;
+          const next = resolveSessionPolicySelection(policyModel.mode, value);
+          if (next)
             void applyPolicy(() =>
               setThreadInteractionMode(ensureEnvironmentApi(environmentId), threadId, next),
             );
-          }}
-        />
-      ) : null}
+        }}
+        pendingContextHandoff={pendingContextHandoff}
+      />
 
       {headerModel ? (
         <ThreadActionsSheet

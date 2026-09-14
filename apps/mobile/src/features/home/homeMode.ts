@@ -41,6 +41,7 @@ export function reduceHomeModeState(state: HomeModeState, action: HomeModeAction
       return {
         ...state,
         queryByMode: { ...state.queryByMode, [action.mode]: query },
+        scrollOffsetByMode: { ...state.scrollOffsetByMode, [action.mode]: 0 },
       };
     }
     case "set-node-scope": {
@@ -51,6 +52,7 @@ export function reduceHomeModeState(state: HomeModeState, action: HomeModeAction
           ...state.nodeScopeByMode,
           [action.mode]: action.environmentId,
         },
+        scrollOffsetByMode: { ...state.scrollOffsetByMode, [action.mode]: 0 },
       };
     }
     case "set-scroll-offset": {

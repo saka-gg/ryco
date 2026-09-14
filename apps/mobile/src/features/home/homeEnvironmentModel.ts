@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import type { NodeTrust } from "./nodeTrustModel";
@@ -112,6 +112,8 @@ export function cachedHubNodeStaleDetail(
 }
 
 export function buildHomeEnvironments(input: {
+  /** Live node capabilities supersede the Hub directory descriptor. */
+  readonly serverConfigs?: ReadonlyMap<EnvironmentId, ServerConfig>;
   readonly direct: ReadonlyArray<DirectHomeEnvironmentInput>;
   readonly hosted: ReadonlyArray<HostedHomeEnvironmentInput>;
   readonly cachedHubNodes?: ReadonlyArray<CachedHubNodeHomeEnvironmentInput>;
@@ -158,8 +160,14 @@ export function buildHomeEnvironments(input: {
       environmentId: direct.environmentId,
       label: direct.label,
       connectionState: directState(direct),
-      threadSettlementSupported: direct.threadSettlementSupported ?? false,
-      threadSnoozeSupported: direct.threadSnoozeSupported ?? false,
+      threadSettlementSupported:
+        input.serverConfigs?.get(direct.environmentId)?.environment.capabilities.threadSettlement ??
+        direct.threadSettlementSupported ??
+        false,
+      threadSnoozeSupported:
+        input.serverConfigs?.get(direct.environmentId)?.environment.capabilities.threadSnooze ??
+        direct.threadSnoozeSupported ??
+        false,
       mutationReady: direct.connectionState === "connected" && (direct.apiAvailable ?? false),
       shellCurrent: direct.shellCurrent ?? false,
       ...roleFields(direct.role),
@@ -192,8 +200,14 @@ export function buildHomeEnvironments(input: {
       environmentId: hosted.environmentId,
       label: hosted.label,
       connectionState: hostedState(hosted),
-      threadSettlementSupported: hosted.threadSettlementSupported ?? false,
-      threadSnoozeSupported: hosted.threadSnoozeSupported ?? false,
+      threadSettlementSupported:
+        input.serverConfigs?.get(hosted.environmentId)?.environment.capabilities.threadSettlement ??
+        hosted.threadSettlementSupported ??
+        false,
+      threadSnoozeSupported:
+        input.serverConfigs?.get(hosted.environmentId)?.environment.capabilities.threadSnooze ??
+        hosted.threadSnoozeSupported ??
+        false,
       mutationReady:
         hostedState(hosted) === "connected" &&
         hosted.role !== "viewer" &&

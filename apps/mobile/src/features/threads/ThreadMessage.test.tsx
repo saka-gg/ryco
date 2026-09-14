@@ -35,6 +35,7 @@ vi.mock("expo-video", () => ({
   VideoView: "VideoView",
 }));
 vi.mock("../../components/AppText", () => ({ AppText: "AppText" }));
+vi.mock("../../components/CopyTextButton", () => ({ CopyTextButton: "CopyTextButton" }));
 vi.mock("../../lib/appearancePreferences", () => ({
   resolveNativeMarkdownTypography: () => ({
     fontSize: 16,
@@ -115,6 +116,54 @@ function renderMessage(attachments: ChatAttachment[]): ReactElement {
 }
 
 describe("ThreadMessage attachment rows", () => {
+  it("shows the sent timestamp and copies the original user text", () => {
+    const text = "  Keep this text\nexactly as sent.  ";
+    const createdAt = "2026-09-12T15:00:00.000Z";
+    const tree = ThreadMessage({
+      message: {
+        role: "user",
+        text,
+        createdAt,
+        updatedAt: "2026-09-13T18:00:00.000Z",
+      } as unknown as ChatMessage,
+    });
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy).toHaveLength(1);
+    expect(copy[0]?.props).toMatchObject({ text, accessibilityLabel: "Copy message" });
+    const sentLabel = new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(createdAt));
+    expect(
+      collectElements(
+        tree,
+        (element) =>
+          (element.props as { accessibilityLabel?: string }).accessibilityLabel ===
+          `Sent ${sentLabel}`,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not add user-message controls to assistant messages", () => {
+    const tree = ThreadMessage({
+      message: {
+        role: "assistant",
+        text: "Reply",
+        createdAt: "2026-09-12T15:00:00.000Z",
+      } as unknown as ChatMessage,
+    });
+    expect(collectElements(tree, (element) => element.type === "CopyTextButton")).toHaveLength(0);
+    expect(
+      collectElements(
+        tree,
+        (element) =>
+          (element.props as { accessibilityLabel?: string }).accessibilityLabel?.startsWith(
+            "Sent ",
+          ) === true,
+      ),
+    ).toHaveLength(0);
+  });
+
   beforeEach(() => {
     hoisted.share.mockClear();
   });

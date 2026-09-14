@@ -370,7 +370,6 @@ export const AgentControlThreadPreferences = Schema.Struct({
 });
 
 export const AgentControlProjectPreferences = Schema.Struct({
-  defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   customSystemPrompt: Schema.optional(Schema.NullOr(ProjectCustomSystemPrompt)),
   scripts: Schema.optional(Schema.Array(ProjectScript).check(Schema.isMaxLength(100))),
   preferredRemoteName: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),

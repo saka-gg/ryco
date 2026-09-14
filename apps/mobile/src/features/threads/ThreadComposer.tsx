@@ -1,5 +1,10 @@
-import type { ComponentProps } from "react";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useKeyboardState } from "react-native-keyboard-controller";
+import type { ModelSelection, RuntimeMode, ProviderInteractionMode } from "@ryco/contracts";
+import type { ModelPickerModel } from "./modelPickerModel";
+import type { SessionPolicyModel } from "./sessionPolicyModel";
+import { ComposerModelMenu } from "./ComposerModelMenu";
+import { ComposerAccessMenu } from "./ComposerAccessMenu";
 import { Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -12,7 +17,7 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import type { DraftComposerAttachment } from "../../lib/composerFiles";
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { ComposerEditor } from "../../native/ComposerEditor";
+import { ComposerEditor, type ComposerEditorHandle } from "../../native/ComposerEditor";
 import type { PendingContextHandoffPresentation } from "./contextHandoffModel";
 import { PendingContextHandoffChip } from "./PendingContextHandoffChip";
 
@@ -38,37 +43,30 @@ export function ThreadComposer(props: {
   readonly sendBlock?: string | null;
   readonly fileUploadRecords?: ReadonlyMap<string, ChatFileUploadRecord>;
   readonly disabled?: boolean;
-  /**
-   * Session-policy rail. Omitted on surfaces that have no thread to configure,
-   * in which case no rail renders at all — the composer keeps its old shape.
-   *
-   * `policyDisabled` gates only the rail. It is deliberately separate from
-   * `disabled`, which gates attach/send: a thread can be un-sendable while its
-   * policy is still readable, and vice versa.
-   */
-  readonly policyLabel?: string;
-  readonly policyIcon?: ComponentProps<typeof SymbolView>["name"];
-  readonly policyCaution?: boolean;
-  readonly policyAccessibilityLabel?: string;
+  readonly policyModel?: SessionPolicyModel | null;
   readonly policyDisabled?: boolean;
-  readonly onOpenPolicy?: () => void;
-  /** Provider+model pill. Rendered left of the policy pill when supplied. */
-  readonly modelLabel?: string;
-  readonly modelProviderDriver?: string | null;
-  readonly modelAccessibilityLabel?: string;
-  /** Selected reasoning level, short form. Quieter than the model name. */
-  readonly modelReasoningLabel?: string | null;
-  readonly modelFastEnabled?: boolean;
-  readonly onOpenModel?: () => void;
+  readonly onSelectRuntimeMode: (mode: RuntimeMode) => void;
+  readonly onSelectInteractionMode: (mode: ProviderInteractionMode) => void;
+  readonly modelPicker?: ModelPickerModel | null;
+  readonly modelSelection?: ModelSelection | null;
+  readonly onSelectModel: (selection: ModelSelection) => void;
   readonly onOpenSideChat?: () => void;
   readonly pendingContextHandoff?: PendingContextHandoffPresentation | null;
 }) {
+  const policyModel = props.policyModel;
+  const modelPicker = props.modelPicker;
+  const editorRef = useRef<ComposerEditorHandle>(null);
+  const keyboardVisible = useKeyboardState((state) => state.isVisible);
+  const restoreFocus = () => {
+    if (keyboardVisible) editorRef.current?.focus();
+  };
   const safeAreaInsets = useSafeAreaInsets();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const primaryFg = useThemeColor("--color-primary-foreground");
   const iconSubtle = useThemeColor("--color-icon-subtle");
   const iconColor = useThemeColor("--color-icon");
+  const accessColor = useThemeColor("--color-access-caution");
   const warningColor = useThemeColor("--color-warning");
 
   const visibleAttachmentError = props.attachmentError ?? props.sendBlock;
@@ -113,20 +111,34 @@ export function ThreadComposer(props: {
         style={{ paddingHorizontal: 6, paddingVertical: 6 }}
       >
         <View className="gap-1">
-          {props.onOpenPolicy && props.policyLabel ? (
+          {policyModel ? (
             <ComposerToolbarRow paddingTop={2} paddingBottom={2} paddingHorizontal={2}>
-              {props.onOpenModel && props.modelLabel ? (
-                <ComposerToolbarButton
-                  iconNode={<ProviderIcon provider={props.modelProviderDriver} size={14} />}
-                  label={props.modelLabel}
-                  suffixLabel={props.modelReasoningLabel ?? undefined}
-                  suffixIcon={props.modelFastEnabled ? "bolt.fill" : undefined}
-                  suffixIconColor={warningColor as string}
-                  accessibilityLabel={props.modelAccessibilityLabel ?? props.modelLabel}
-                  disabled={props.policyDisabled}
-                  onPress={props.onOpenModel}
-                  className="max-w-full flex-1"
-                />
+              {modelPicker && props.modelSelection ? (
+                <ComposerModelMenu
+                  model={modelPicker}
+                  selection={props.modelSelection}
+                  disabled={props.policyDisabled ?? false}
+                  onSelect={props.onSelectModel}
+                  onClose={restoreFocus}
+                >
+                  {(open) => (
+                    <ComposerToolbarButton
+                      iconNode={
+                        <ProviderIcon provider={modelPicker.pillProviderDriver} size={14} />
+                      }
+                      label={modelPicker.pillLabel}
+                      suffixLabel={modelPicker.pillReasoningLabel ?? undefined}
+                      suffixIcon={modelPicker.pillFastEnabled ? "bolt.fill" : undefined}
+                      suffixIconColor={warningColor as string}
+                      accessibilityLabel={
+                        modelPicker.pillAccessibilityLabel ?? modelPicker.pillLabel
+                      }
+                      disabled={props.policyDisabled}
+                      onPress={open}
+                      className="max-w-full flex-1"
+                    />
+                  )}
+                </ComposerModelMenu>
               ) : null}
               {props.onOpenSideChat ? (
                 <ComposerToolbarButton
@@ -136,27 +148,33 @@ export function ThreadComposer(props: {
                   onPress={props.onOpenSideChat}
                 />
               ) : null}
-              {/* Icon only. The glyph alone says which access mode the task is
-                  in — open padlock for full access, closed for supervised,
-                  pencil for auto-accept — and dropping the word gives the model
-                  name the width it actually needs. The full mode name still
-                  reaches screen readers through accessibilityLabel, and the
-                  caution mode keeps its amber tint so it is not silent. */}
-              <ComposerToolbarButton
-                iconNode={
-                  <SymbolView
-                    name={props.policyIcon ?? "lock"}
-                    size={16}
-                    tintColor={(props.policyCaution ? warningColor : iconColor) as string}
-                    type="monochrome"
+              <ComposerAccessMenu
+                model={policyModel}
+                disabled={props.policyDisabled ?? false}
+                onSelectRuntimeMode={props.onSelectRuntimeMode}
+                onSelectInteractionMode={props.onSelectInteractionMode}
+                onClose={restoreFocus}
+              >
+                {(open) => (
+                  <ComposerToolbarButton
+                    iconNode={
+                      <SymbolView
+                        name={policyModel.pillIcon ?? "lock"}
+                        size={16}
+                        tintColor={
+                          (policyModel.pillTone === "caution" ? accessColor : iconColor) as string
+                        }
+                        type="monochrome"
+                      />
+                    }
+                    accessibilityLabel={policyModel.pillAccessibilityLabel}
+                    active={policyModel.pillTone === "caution"}
+                    disabled={props.policyDisabled}
+                    showChevron={false}
+                    onPress={open}
                   />
-                }
-                accessibilityLabel={props.policyAccessibilityLabel ?? props.policyLabel}
-                active={props.policyCaution}
-                disabled={props.policyDisabled}
-                showChevron={false}
-                onPress={props.onOpenPolicy}
-              />
+                )}
+              </ComposerAccessMenu>
             </ComposerToolbarRow>
           ) : null}
           <View className="px-2">
@@ -186,6 +204,7 @@ export function ThreadComposer(props: {
               />
             </Pressable>
             <ComposerEditor
+              ref={editorRef}
               value={text}
               onChangeText={setText}
               placeholder="Message"

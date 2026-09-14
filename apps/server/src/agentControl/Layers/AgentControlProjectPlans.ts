@@ -65,7 +65,6 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
     workspaceRoot: project.workspaceRoot,
     repositoryIdentityKey: project.repositoryIdentity?.canonicalKey ?? null,
     updatedAt: project.updatedAt,
-    defaultModelSelection: project.defaultModelSelection,
     customSystemPrompt: project.customSystemPrompt,
     scripts: project.scripts,
     preferredRemoteName: project.preferredRemoteName,
@@ -143,7 +142,6 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
         [
           input.title,
           input.workspaceRoot,
-          input.defaultModelSelection,
           input.customSystemPrompt,
           input.scripts,
           input.preferredRemoteName,
@@ -166,10 +164,6 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
       });
       const title = input.title ?? project.title;
       const preferences = {
-        defaultModelSelection:
-          input.defaultModelSelection === undefined
-            ? project.defaultModelSelection
-            : input.defaultModelSelection,
         customSystemPrompt:
           input.customSystemPrompt === undefined
             ? project.customSystemPrompt

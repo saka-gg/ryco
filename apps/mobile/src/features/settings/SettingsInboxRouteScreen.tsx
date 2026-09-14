@@ -1,3 +1,4 @@
+import { resolveAutoSettleAfterDays } from "@ryco/shared/threadSettlement";
 import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId, ProviderOptionSelectionValue } from "@ryco/contracts";
 import {
@@ -126,6 +127,7 @@ export function SettingsInboxRouteScreen() {
     setRefreshing(false);
   };
 
+  const autoSettleAfterDays = resolveAutoSettleAfterDays(preferences.sidebarAutoSettleAfterDays);
   const intervalMs = preferences.aiFocusRefreshIntervalMs ?? 600_000;
 
   return (
@@ -140,14 +142,14 @@ export function SettingsInboxRouteScreen() {
             first
             label="Off"
             detail="Uses the last message or turn. Running work, queued messages, pending input, open pull requests, and tasks kept active are protected."
-            value={preferences.sidebarAutoSettleAfterDays == null ? "Selected" : undefined}
+            value={autoSettleAfterDays === null ? "Selected" : undefined}
             onPress={() => updatePreferences({ sidebarAutoSettleAfterDays: null })}
           />
           {SIDEBAR_AUTO_SETTLE_DAY_OPTIONS.map((days) => (
             <SettingsRow
               key={days}
               label={`After ${days} ${days === 1 ? "day" : "days"}`}
-              value={preferences.sidebarAutoSettleAfterDays === days ? "Selected" : undefined}
+              value={autoSettleAfterDays === days ? "Selected" : undefined}
               onPress={() => updatePreferences({ sidebarAutoSettleAfterDays: days })}
             />
           ))}

@@ -270,7 +270,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           title: command.title,
           workspaceRoot: command.workspaceRoot,
           projectMetadataDir: command.projectMetadataDir,
-          defaultModelSelection: command.defaultModelSelection ?? null,
+          defaultModelSelection: null,
           customSystemPrompt: command.customSystemPrompt ?? null,
           scripts: [],
           createdAt: command.createdAt,
@@ -309,9 +309,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.workspaceRoot !== undefined ? { workspaceRoot: command.workspaceRoot } : {}),
           ...(command.projectMetadataDir !== undefined
             ? { projectMetadataDir: command.projectMetadataDir }
-            : {}),
-          ...(command.defaultModelSelection !== undefined
-            ? { defaultModelSelection: command.defaultModelSelection }
             : {}),
           ...(command.customSystemPrompt !== undefined
             ? { customSystemPrompt: command.customSystemPrompt }

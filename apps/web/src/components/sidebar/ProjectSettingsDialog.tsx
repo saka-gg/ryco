@@ -14,24 +14,12 @@ import {
 } from "~/rpc/useAtlassian";
 import { invalidateWorkItems } from "~/rpc/useWorkItems";
 import {
-  DEFAULT_MODEL,
-  DEFAULT_MODEL_BY_PROVIDER,
   PROJECT_CUSTOM_SYSTEM_PROMPT_MAX_CHARS,
   type AtlassianConnectionId,
   type AtlassianConnectionSummary,
-  type ModelSelection,
   type RepositoryIdentity,
 } from "@ryco/contracts";
-import { createModelSelection } from "@ryco/shared/model";
 import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
-import {
-  deriveProviderInstanceEntries,
-  type ProviderInstanceEntry,
-  sortProviderInstanceEntries,
-} from "../../providerInstances";
-import { usePrimaryEnvironmentId } from "../../environments/primary";
-import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
-import { useServerConfig } from "~/rpc/serverState";
 import { buildJiraProjectUnlinkInput } from "../../lib/atlassianProjectLinks";
 import { readEnvironmentConnection } from "../../environments/runtime";
 import { cn } from "../../lib/utils";
@@ -106,14 +94,12 @@ export interface ProjectSettingsDialogProps {
   workspaceRoot: string;
   // AI section
   customSystemPrompt: string;
-  defaultModelSelection: ModelSelection | null;
   // Handlers
   onClose: () => void;
   onSave: () => void;
   onTitleChange: (value: string) => void;
   onWorkspaceRootChange: (value: string) => void;
   onCustomSystemPromptChange: (value: string) => void;
-  onDefaultModelSelectionChange: (value: ModelSelection | null) => void;
   onPreferredRemoteChange: (value: string | null) => void;
   onPickWorkspaceRoot: () => void;
   onOpenRemote: (member: SidebarProjectGroupMember, remoteName: string) => void;
@@ -397,133 +383,10 @@ function ProjectSettingsLocationSection(props: {
 // AI section
 // ---------------------------------------------------------------------------
 
-const NO_DEFAULT_PROVIDER_VALUE = "__none__";
-
-function defaultModelForInstance(entry: ProviderInstanceEntry): string {
-  return (
-    entry.models.find((model) => !model.isCustom)?.slug ??
-    entry.models[0]?.slug ??
-    DEFAULT_MODEL_BY_PROVIDER[entry.driverKind] ??
-    DEFAULT_MODEL
-  );
-}
-
-function ProjectSettingsDefaultModelControl(props: {
-  target: SidebarProjectGroupMember;
-  defaultModelSelection: ModelSelection | null;
-  onDefaultModelSelectionChange: (value: ModelSelection | null) => void;
-}) {
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const primaryServerConfig = useServerConfig();
-  const targetEnvRuntimeState = useSavedEnvironmentRuntimeStore((state) =>
-    props.target.environmentId ? state.byId[props.target.environmentId] : null,
-  );
-  // Use the server config for the project's environment; for the primary
-  // environment fall back to the global atom (same resolution as ChatView).
-  const serverConfig =
-    primaryEnvironmentId && props.target.environmentId === primaryEnvironmentId
-      ? primaryServerConfig
-      : (targetEnvRuntimeState?.serverConfig ?? primaryServerConfig);
-  const instanceEntries = useMemo(
-    () =>
-      sortProviderInstanceEntries(
-        deriveProviderInstanceEntries(serverConfig?.providers ?? []),
-      ).filter((entry) => entry.enabled && entry.isAvailable),
-    [serverConfig?.providers],
-  );
-
-  const selection = props.defaultModelSelection;
-  const selectedEntry = selection
-    ? instanceEntries.find((entry) => entry.instanceId === selection.instanceId)
-    : undefined;
-  const modelOptions = useMemo(() => {
-    if (!selectedEntry) return [];
-    const options = selectedEntry.models.map((model) => ({
-      slug: model.slug,
-      label: model.name,
-    }));
-    // Keep a stored model that the server no longer reports selectable.
-    if (selection && !options.some((option) => option.slug === selection.model)) {
-      options.push({ slug: selection.model, label: selection.model });
-    }
-    return options;
-  }, [selectedEntry, selection]);
-
-  return (
-    <div className="grid gap-4">
-      <ProjectSettingsField label="Default agent">
-        <Select
-          value={selection?.instanceId ?? NO_DEFAULT_PROVIDER_VALUE}
-          onValueChange={(value) => {
-            if (!value || value === NO_DEFAULT_PROVIDER_VALUE) {
-              props.onDefaultModelSelectionChange(null);
-              return;
-            }
-            if (value === selection?.instanceId) return;
-            const entry = instanceEntries.find((candidate) => candidate.instanceId === value);
-            if (!entry) return;
-            props.onDefaultModelSelectionChange(
-              createModelSelection(entry.instanceId, defaultModelForInstance(entry)),
-            );
-          }}
-        >
-          <SelectTrigger aria-label="Default agent" className="w-full">
-            <SelectValue>
-              {selectedEntry?.displayName ??
-                (selection ? selection.instanceId : "No project default")}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectPopup>
-            <SelectItem value={NO_DEFAULT_PROVIDER_VALUE}>No project default</SelectItem>
-            {instanceEntries.map((entry) => (
-              <SelectItem key={entry.instanceId} value={entry.instanceId}>
-                {entry.displayName}
-              </SelectItem>
-            ))}
-          </SelectPopup>
-        </Select>
-      </ProjectSettingsField>
-      {selection ? (
-        <ProjectSettingsField label="Default model">
-          <Select
-            value={selection.model}
-            onValueChange={(value) => {
-              if (!value || value === selection.model) return;
-              props.onDefaultModelSelectionChange(
-                createModelSelection(selection.instanceId, value),
-              );
-            }}
-          >
-            <SelectTrigger aria-label="Default model" className="w-full">
-              <SelectValue>
-                {modelOptions.find((option) => option.slug === selection.model)?.label ??
-                  selection.model}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {modelOptions.map((option) => (
-                <SelectItem key={option.slug} value={option.slug}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-        </ProjectSettingsField>
-      ) : null}
-      <p className="text-[11px] text-muted-foreground">
-        New threads on this project start with this agent and model. Existing threads and per-thread
-        selections are not affected.
-      </p>
-    </div>
-  );
-}
-
 function ProjectSettingsAiSection(props: {
   target: SidebarProjectGroupMember;
   customSystemPrompt: string;
-  defaultModelSelection: ModelSelection | null;
   onCustomSystemPromptChange: (value: string) => void;
-  onDefaultModelSelectionChange: (value: ModelSelection | null) => void;
 }) {
   const length = props.customSystemPrompt.length;
   const limit = PROJECT_CUSTOM_SYSTEM_PROMPT_MAX_CHARS;
@@ -536,11 +399,6 @@ function ProjectSettingsAiSection(props: {
         : "text-muted-foreground";
   return (
     <div className="space-y-6">
-      <ProjectSettingsDefaultModelControl
-        target={props.target}
-        defaultModelSelection={props.defaultModelSelection}
-        onDefaultModelSelectionChange={props.onDefaultModelSelectionChange}
-      />
       <div className="space-y-2">
         <label
           htmlFor="project-custom-system-prompt"
@@ -1151,9 +1009,7 @@ export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
                 <ProjectSettingsAiSection
                   target={target}
                   customSystemPrompt={props.customSystemPrompt}
-                  defaultModelSelection={props.defaultModelSelection}
                   onCustomSystemPromptChange={props.onCustomSystemPromptChange}
-                  onDefaultModelSelectionChange={props.onDefaultModelSelectionChange}
                 />
               )}
             </div>

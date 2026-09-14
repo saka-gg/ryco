@@ -62,7 +62,6 @@ describe("project actions", () => {
       workspaceRoot: "/srv/code/ryco",
       projectMetadataDir: ".ryco",
       createWorkspaceRootIfMissing: true,
-      defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-terra" },
       createdAt: now,
     });
     expect(

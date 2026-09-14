@@ -1,3 +1,4 @@
+import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useMemo, useSyncExternalStore } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -30,6 +31,7 @@ export function useHomeEnvironments() {
   const cacheProvenanceEnvironmentIds = useStore(useShallow(selectCacheHydratedEnvironmentIds));
   const environmentStateById = useStore((state) => state.environmentStateById);
   const primaryDescriptor = usePrimaryEnvironmentDescriptor();
+  const serverConfigs = useEnvironmentServerConfigs();
   // Wave 4: trust is keyed by the roster's Hub-minted node id, which is why the
   // roster records go in whole rather than the environment ids alone. The store
   // snapshot is a stable reference between commits, so this does not re-derive
@@ -62,6 +64,7 @@ export function useHomeEnvironments() {
   return useMemo(
     () =>
       buildHomeEnvironments({
+        serverConfigs,
         direct: directRows.map((row) => ({
           environmentId: row.record.environmentId,
           label: row.record.label,
@@ -116,6 +119,7 @@ export function useHomeEnvironments() {
       environmentStateById,
       hosted,
       primaryDescriptor,
+      serverConfigs,
       rosterNodes,
       trustByEnvironmentId,
     ],

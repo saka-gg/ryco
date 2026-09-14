@@ -66,7 +66,6 @@ export function useEffectiveComposerModelState(input: {
    */
   selectedInstanceId?: ProviderInstanceId | null | undefined;
   threadModelSelection: ModelSelection | null | undefined;
-  projectModelSelection: ModelSelection | null | undefined;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
   const draft = useComposerDraftModelState(input.threadRef ?? input.draftId ?? DraftId.make(""));
@@ -79,14 +78,12 @@ export function useEffectiveComposerModelState(input: {
         selectedProvider: input.selectedProvider,
         selectedInstanceId: input.selectedInstanceId,
         threadModelSelection: input.threadModelSelection,
-        projectModelSelection: input.projectModelSelection,
         settings: input.settings,
       }),
     [
       draft,
       input.providers,
       input.settings,
-      input.projectModelSelection,
       input.selectedInstanceId,
       input.selectedProvider,
       input.threadModelSelection,

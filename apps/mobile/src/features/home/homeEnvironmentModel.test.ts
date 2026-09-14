@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import { buildHomeEnvironments } from "./homeEnvironmentModel";
@@ -392,5 +392,37 @@ describe("Home environment provenance (wave 4)", () => {
       },
       { environmentId: HOSTED, label: "Studio", connectionState: "connected" },
     ]);
+  });
+});
+
+it("uses live node capabilities over stale Hub directory defaults without granting mutation readiness", () => {
+  const environmentId = "hosted" as EnvironmentId;
+  const hosted = [
+    {
+      environmentId,
+      label: "Mac",
+      transportStatus: "online" as const,
+      sessionStatus: "ready" as const,
+      role: "viewer" as const,
+      threadSettlementSupported: false,
+      threadSnoozeSupported: false,
+      shellCurrent: true,
+      apiAvailable: true,
+    },
+  ];
+  const serverConfigs = new Map([
+    [
+      environmentId,
+      {
+        environment: { capabilities: { threadSettlement: true, threadSnooze: true } },
+      } as ServerConfig,
+    ],
+  ]);
+  expect(buildHomeEnvironments({ direct: [], hosted })[0]?.threadSettlementSupported).toBe(false);
+  expect(buildHomeEnvironments({ direct: [], hosted, serverConfigs })[0]).toMatchObject({
+    threadSettlementSupported: true,
+    threadSnoozeSupported: true,
+    mutationReady: false,
+    connectionState: "read-only",
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  resolveAutoSettleAfterDays,
   compareActiveInboxEntries,
   compareSettledInboxEntries,
   canSettleThread,
@@ -299,5 +300,23 @@ describe("effective settlement timestamp and sorting", () => {
       "a:2",
       "b:2",
     ]);
+  });
+});
+
+describe("default inactivity policy", () => {
+  it("defaults to seven days without overriding explicit Off or custom intervals", () => {
+    expect(resolveAutoSettleAfterDays(undefined)).toBe(7);
+    expect(resolveAutoSettleAfterDays(null)).toBeNull();
+    expect(resolveAutoSettleAfterDays(14)).toBe(14);
+  });
+  it("protects a running turn before session state catches up", () => {
+    const running = input({
+      sessionStatus: null,
+      latestTurnState: "running",
+      autoSettleAfterDays: 7,
+      nowMs: NOW + 30 * 86400000,
+    });
+    expect(canSettleThread(running)).toEqual({ canSettle: false, blocker: "session-running" });
+    expect(classifyThreadSettlement(running)).toBe("active");
   });
 });

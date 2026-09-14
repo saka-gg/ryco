@@ -1,62 +1,67 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
 import { View } from "react-native";
 
-// Minimal in-tree portal for Android overlays. AndroidAnchoredMenu projects
-// its dropdown here instead of into an RN Modal: a Modal is a separate native
-// window, so presenting one moves window focus and closes the soft keyboard —
-// which matters for menus anchored to the keyboard-sticky composer pills.
 type Entries = ReadonlyMap<number, ReactNode>;
 type Listener = (entries: Entries) => void;
-
+function createPortalStore() {
+  const entries = new Map<number, ReactNode>();
+  const listeners = new Set<Listener>();
+  return {
+    entries,
+    listeners,
+    emit() {
+      const snapshot = new Map(entries);
+      for (const listener of listeners) listener(snapshot);
+    },
+  };
+}
+const rootStore = createPortalStore();
+const PortalContext = createContext(rootStore);
 let nextKey = 0;
-const entries = new Map<number, ReactNode>();
-const listeners = new Set<Listener>();
 
-function emit() {
-  const snapshot = new Map(entries);
-  for (const listener of listeners) {
-    listener(snapshot);
-  }
+/** Native sheets need a local host: their native position is outside Fabric's layout tree. */
+export function OverlayPortalScope({ children }: { readonly children: ReactNode }) {
+  const [store] = useState(createPortalStore);
+  return (
+    <PortalContext.Provider value={store}>
+      <View style={{ flex: 1 }}>
+        {children}
+        <OverlayPortalHost />
+      </View>
+    </PortalContext.Provider>
+  );
 }
 
-/** Projects children into the app-root OverlayPortalHost. */
+/** Projects into the nearest sheet host, or the app root for regular screens. */
 export function OverlayPortal(props: { readonly children: ReactNode }) {
-  const keyRef = useRef<number | null>(null);
-  keyRef.current ??= nextKey++;
-  const key = keyRef.current;
-
-  // No dependency array: re-project after every render so the host always
-  // shows the current content (menus re-render while open — drill-in, theme).
+  const store = useContext(PortalContext);
+  const [key] = useState(() => nextKey++);
   useEffect(() => {
-    entries.set(key, props.children);
-    emit();
+    store.entries.set(key, props.children);
+    store.emit();
   });
-
   useEffect(
     () => () => {
-      entries.delete(key);
-      emit();
+      store.entries.delete(key);
+      store.emit();
     },
-    [key],
+    [key, store],
   );
-
   return null;
 }
 
-/** Mounted once at the app root, above the navigation container. */
 export function OverlayPortalHost() {
-  const [current, setCurrent] = useState<Entries>(() => new Map());
-
+  const store = useContext(PortalContext);
+  const [current, setCurrent] = useState<Entries>(() => new Map(store.entries));
   useEffect(() => {
-    listeners.add(setCurrent);
+    store.listeners.add(setCurrent);
+    // Child portals may have registered before this host's effect ran.
+    store.emit();
     return () => {
-      listeners.delete(setCurrent);
+      store.listeners.delete(setCurrent);
     };
-  }, []);
-
-  if (current.size === 0) {
-    return null;
-  }
+  }, [store]);
+  if (current.size === 0) return null;
   return (
     <View pointerEvents="box-none" className="absolute inset-0">
       {[...current.entries()].map(([key, node]) => (

@@ -205,6 +205,42 @@ describe("environment snapshot persistence", () => {
     runtime.dispose();
   });
 
+  it("clears after an in-flight write and cancels a pending debounced capture", async () => {
+    const { db, snapshots } = createFakeSnapshotDb();
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const save = db.saveEnvironmentSnapshot;
+    const started = vi.fn();
+    const runtime = createSnapshotPersistenceRuntime({
+      db: {
+        ...db,
+        saveEnvironmentSnapshot: async (input) => {
+          started();
+          await barrier;
+          await save(input);
+        },
+      },
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+    });
+    const id = env("clear-during-write");
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("live"), id);
+    const capture = runtime.capture(id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(started).toHaveBeenCalledOnce();
+    runtime.markDirty(id);
+    const clearing = runtime.purgeEnvironment(id);
+    release();
+    await Promise.all([capture, clearing]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(snapshots.has(id)).toBe(false);
+    expect(useStore.getState().environmentStateById[id]?.bootstrapComplete).toBe(true);
+    runtime.dispose();
+  });
+
   it("never captures an unsettled or cache-provenance environment", async () => {
     const { db, snapshots } = createFakeSnapshotDb();
     const runtime = createSnapshotPersistenceRuntime({

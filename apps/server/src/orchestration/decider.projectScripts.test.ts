@@ -113,7 +113,29 @@ describe("decider project scripts", () => {
     ).rejects.toThrow("changed after the command was authorized");
   });
 
-  it("propagates defaultModelSelection in project.meta.update payload and read model", async () => {
+  it("does not persist model defaults sent by legacy project creation clients", async () => {
+    const now = new Date().toISOString();
+    const result = await Effect.runPromise(
+      decideOrchestrationCommand({
+        command: {
+          type: "project.create",
+          commandId: CommandId.make("legacy-project-create"),
+          projectId: asProjectId("legacy-project"),
+          title: "Legacy client project",
+          workspaceRoot: "/tmp/legacy-project",
+          projectMetadataDir: ".ryco",
+          defaultModelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.5"),
+          createdAt: now,
+        },
+        readModel: createEmptyReadModel(now),
+      }),
+    );
+    const event = Array.isArray(result) ? result[0] : result;
+    expect(event.type).toBe("project.created");
+    expect((event.payload as { defaultModelSelection: unknown }).defaultModelSelection).toBeNull();
+  });
+
+  it("ignores legacy project default model updates", async () => {
     const now = new Date().toISOString();
     const initial = createEmptyReadModel(now);
     const readModel = await Effect.runPromise(
@@ -158,9 +180,7 @@ describe("decider project scripts", () => {
 
     const event = Array.isArray(result) ? result[0] : result;
     expect(event.type).toBe("project.meta-updated");
-    expect((event.payload as { defaultModelSelection?: unknown }).defaultModelSelection).toEqual(
-      defaultModelSelection,
-    );
+    expect("defaultModelSelection" in event.payload).toBe(false);
 
     const updated = await Effect.runPromise(
       projectEvent(readModel, {
@@ -180,7 +200,7 @@ describe("decider project scripts", () => {
     expect(
       updated.projects.find((project) => project.id === asProjectId("project-default-model"))
         ?.defaultModelSelection,
-    ).toEqual(defaultModelSelection);
+    ).toBeNull();
   });
 
   it("emits user message and turn-start-requested events for thread.turn.start", async () => {

@@ -689,12 +689,6 @@ export default function ChatView(props: ChatViewProps) {
     [mountedTerminalThreadKeys],
   );
 
-  const fallbackDraftProjectRef = draftThread
-    ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
-    : null;
-  const fallbackDraftProject = useStore(
-    useMemo(() => createProjectSelectorByRef(fallbackDraftProjectRef), [fallbackDraftProjectRef]),
-  );
   const localDraftError =
     routeKind === "server" && serverThread
       ? null
@@ -705,14 +699,14 @@ export default function ChatView(props: ChatViewProps) {
         ? buildLocalDraftThread(
             threadId,
             draftThread,
-            fallbackDraftProject?.defaultModelSelection ?? {
+            {
               instanceId: ProviderInstanceId.make("codex"),
               model: DEFAULT_MODEL,
             },
             localDraftError,
           )
         : undefined,
-    [draftThread, fallbackDraftProject?.defaultModelSelection, localDraftError, threadId],
+    [draftThread, localDraftError, threadId],
   );
   const isServerThread = routeKind === "server" && serverThread !== undefined;
   const activeThread = isServerThread ? serverThread : localDraftThread;
@@ -1302,10 +1296,7 @@ export default function ChatView(props: ChatViewProps) {
   ]);
 
   const selectedProviderByThreadId = composerActiveProvider ?? null;
-  const threadProvider =
-    activeThread?.modelSelection.instanceId ??
-    activeProject?.defaultModelSelection?.instanceId ??
-    null;
+  const threadProvider = activeThread?.modelSelection.instanceId ?? null;
   const primaryServerConfig = useServerConfig();
   const activeEnvRuntimeState = useSavedEnvironmentRuntimeStore((s) =>
     activeThread?.environmentId ? s.byId[activeThread.environmentId] : null,
@@ -1980,10 +1971,7 @@ export default function ChatView(props: ChatViewProps) {
   // than the default Codex's. Falls back to first-match-by-kind when no
   // saved instance id is available or the instance no longer exists.
   const activeProviderInstanceId =
-    activeThread?.session?.providerInstanceId ??
-    activeThread?.modelSelection.instanceId ??
-    activeProject?.defaultModelSelection?.instanceId ??
-    null;
+    activeThread?.session?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null;
   const activeProviderStatus = useMemo(() => {
     if (activeProviderInstanceId) {
       return (
@@ -3254,7 +3242,6 @@ export default function ChatView(props: ChatViewProps) {
       project: {
         projectId: activeProject.id,
         projectCwd: activeProject.cwd,
-        defaultModelSelection: activeProject.defaultModelSelection ?? null,
       },
       ...(pendingWorktreeSource ? { prepareForDispatch: prepareWorktreeSourceForDispatch } : {}),
       scroll: {
@@ -4661,7 +4648,6 @@ export default function ChatView(props: ChatViewProps) {
                   tokenMode={tokenMode}
                   lockedProvider={lockedProvider}
                   providerStatuses={composerProviderStatuses}
-                  activeProjectDefaultModelSelection={activeProject?.defaultModelSelection}
                   activeThreadModelSelection={activeThread?.modelSelection}
                   activeThreadActivities={threadActivities}
                   phoneThreadDock={phoneThreadDock}
