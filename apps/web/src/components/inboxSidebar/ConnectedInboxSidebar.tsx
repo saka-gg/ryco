@@ -1,6 +1,9 @@
-import { useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { scopedProjectKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import type { ScopedProjectRef } from "@ryco/contracts";
+import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
+import { useSidebarProjectDialogs } from "../sidebar/SidebarProjectDialogOwner";
 import type { useThreadActions } from "../../hooks/useThreadActions";
 import { useSettings } from "../../hooks/useSettings";
 import { useUiStateStore } from "../../uiStateStore";
@@ -12,10 +15,26 @@ import { Input } from "../ui/input";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
 export function ConnectedInboxSidebar(
-  props: InboxSidebarProps &
-    Pick<ReturnType<typeof useThreadActions>, "archiveThread" | "deleteThread">,
+  props: InboxSidebarProps & { projectGroups: readonly SidebarProjectSnapshot[] } & Pick<
+      ReturnType<typeof useThreadActions>,
+      "archiveThread" | "deleteThread"
+    >,
 ) {
   const router = useRouter();
+  const projectDialogs = useSidebarProjectDialogs();
+  const openProjectSettings = useCallback(
+    (projectRef: ScopedProjectRef) => {
+      const member = props.projectGroups
+        .flatMap((group) => group.memberProjects)
+        .find(
+          (project) =>
+            project.environmentId === projectRef.environmentId &&
+            project.id === projectRef.projectId,
+        );
+      if (member) projectDialogs.openSettings(member);
+    },
+    [props.projectGroups, projectDialogs],
+  );
   const { deleteThread, archiveThread } = props;
   const clipboard = useThreadClipboardActions();
   const appSettingsConfirmThreadDelete = useSettings((s) => s.confirmThreadDelete);
@@ -56,6 +75,7 @@ export function ConnectedInboxSidebar(
     sidebarThreadByKeyRef,
     memberProjectByScopedKey,
     projectCwd: null,
+    openProjectSettings,
   });
   const renaming = actions.renamingThreadKey
     ? sidebarThreadByKeyRef.current.get(actions.renamingThreadKey)
