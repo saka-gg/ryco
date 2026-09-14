@@ -44,6 +44,7 @@ runs:
       run: sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
 
     - name: Setup Vite+
+      if: ${{ runner.os != 'Windows' }}
       uses: voidzero-dev/setup-vp@v1
       with:
         version: ${{ inputs['vite-plus-version'] }}
@@ -52,6 +53,15 @@ runs:
         cache-dependency-path: bun.lock
         registry-url: ${{ inputs['registry-url'] }}
         run-install: false
+
+    # The upstream PowerShell installer currently evaluates a byte-array response
+    # as script text. Windows can use the lockfile-pinned local Vite+ CLI instead.
+    - name: Setup Node on Windows
+      if: ${{ runner.os == 'Windows' }}
+      uses: actions/setup-node@v6
+      with:
+        node-version-file: package.json
+        registry-url: ${{ inputs['registry-url'] }}
 
     - name: Setup Bun
       uses: oven-sh/setup-bun@v2
@@ -115,4 +125,14 @@ runs:
     - name: Install dependencies
       if: ${{ inputs['install-dependencies'] == 'true' }}
       shell: bash
-      run: vp install --frozen-lockfile
+      run: |
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          bun install --frozen-lockfile
+        else
+          vp install --frozen-lockfile
+        fi
+
+    - name: Expose local Vite+ CLI on Windows
+      if: ${{ runner.os == 'Windows' }}
+      shell: pwsh
+      run: Join-Path $env:GITHUB_WORKSPACE 'node_modules/.bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
