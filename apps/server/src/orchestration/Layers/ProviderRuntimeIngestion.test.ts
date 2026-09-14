@@ -13,6 +13,7 @@ import {
 } from "@ryco/contracts";
 import {
   ApprovalRequestId,
+  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -679,6 +680,34 @@ describe("ProviderRuntimeIngestion", () => {
       });
       await harness.drain();
       const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId)!;
+      expect(thread.session?.status).toBe("ready");
+      if (type === "turn.completed") {
+        // CheckpointReactor owns turn finalization and is not part of this harness.
+        // A ready session alone must not allow settlement before its diff finishes.
+        await expect(
+          Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.settle",
+              commandId: CommandId.make("settle-before-checkpoint"),
+              threadId,
+            }),
+          ),
+        ).rejects.toThrow("provider session is running");
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.diff.complete",
+            commandId: CommandId.make("complete-pending-checkpoint"),
+            threadId,
+            turnId,
+            completedAt: "2026-01-01T00:00:03.000Z",
+            checkpointRef: CheckpointRef.make("refs/ryco/checkpoints/pending/1"),
+            status: "ready",
+            files: [],
+            checkpointTurnCount: 1,
+            createdAt: "2026-01-01T00:00:03.000Z",
+          }),
+        );
+      }
       expect(derivePendingThreadRequestState(thread.activities)).toMatchObject({
         hasPendingApprovals: false,
         hasPendingUserInput: false,
