@@ -1332,15 +1332,15 @@ export default function Sidebar() {
         onClick={startNewThreadFromSidebar}
       />
 
-      <div
-        aria-hidden={sidebarMode !== "projects"}
-        className={sidebarMode === "projects" ? "contents" : "hidden"}
-        inert={sidebarMode !== "projects"}
+      <SidebarProjectDialogProvider
+        projectGroupingSettings={projectGroupingSettings}
+        updateSettings={updateSettings}
+        navigateToThread={navigateToThread}
       >
-        <SidebarProjectDialogProvider
-          projectGroupingSettings={projectGroupingSettings}
-          updateSettings={updateSettings}
-          navigateToThread={navigateToThread}
+        <div
+          aria-hidden={sidebarMode !== "projects"}
+          className={sidebarMode === "projects" ? "contents" : "hidden"}
+          inert={sidebarMode !== "projects"}
         >
           <SidebarProjectsContent
             showArm64IntelBuildWarning={showArm64IntelBuildWarning}
@@ -1386,30 +1386,30 @@ export default function Sidebar() {
               />
             )}
           />
-        </SidebarProjectDialogProvider>
-      </div>
-      <div
-        aria-hidden={sidebarMode !== "inbox"}
-        className={sidebarMode === "inbox" ? "contents" : "hidden"}
-        inert={sidebarMode !== "inbox"}
-      >
-        <ConnectedInboxSidebar
-          archiveThread={archiveThread}
-          deleteThread={deleteThread}
-          activeThreadKey={activeRouteThreadKey}
-          aiFocusEnabled={aiFocusEnabled}
-          autoSettleAfterDays={sidebarAutoSettleAfterDays}
-          deliveryUnknownThreadKeys={deliveryUnknownThreadKeys}
-          environments={inboxEnvironments}
-          localQueuedThreadKeys={localQueuedThreadKeys}
-          pinnedThreadKeys={pinnedThreadKeys}
-          onOpenThread={navigateToThread}
-          projects={projects}
-          threads={sidebarThreads}
-          worktrees={sidebarWorktrees}
-        />
-      </div>
-
+        </div>
+        <div
+          aria-hidden={sidebarMode !== "inbox"}
+          className={sidebarMode === "inbox" ? "contents" : "hidden"}
+          inert={sidebarMode !== "inbox"}
+        >
+          <ConnectedInboxSidebar
+            archiveThread={archiveThread}
+            deleteThread={deleteThread}
+            activeThreadKey={activeRouteThreadKey}
+            aiFocusEnabled={aiFocusEnabled}
+            autoSettleAfterDays={sidebarAutoSettleAfterDays}
+            deliveryUnknownThreadKeys={deliveryUnknownThreadKeys}
+            environments={inboxEnvironments}
+            localQueuedThreadKeys={localQueuedThreadKeys}
+            pinnedThreadKeys={pinnedThreadKeys}
+            onOpenThread={navigateToThread}
+            projects={projects}
+            projectGroups={sidebarProjects}
+            threads={sidebarThreads}
+            worktrees={sidebarWorktrees}
+          />
+        </div>
+      </SidebarProjectDialogProvider>
       <SidebarSeparator />
       <SidebarChromeFooter />
     </>

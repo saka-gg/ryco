@@ -5,7 +5,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
-import { type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
+import { type ScopedProjectRef, type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
 import { newCommandId } from "../../../lib/utils";
 import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
@@ -29,6 +29,9 @@ export type ThreadMenuActionId =
   | "unpin"
   | "rename"
   | "mark-unread"
+  | "project-settings"
+  | "copy-project-path"
+  | "copy-worktree-path"
   | "copy-path"
   | "copy-thread-id"
   | "archive"
@@ -53,6 +56,7 @@ export function useThreadMenuActions(params: {
   sidebarThreadByKeyRef: React.RefObject<ReadonlyMap<string, SidebarThreadSummary>>;
   memberProjectByScopedKey: ReadonlyMap<string, Pick<SidebarProjectGroupMember, "cwd">>;
   projectCwd: string | null | undefined;
+  openProjectSettings?: (projectRef: ScopedProjectRef) => void;
 }) {
   const {
     router,
@@ -67,6 +71,7 @@ export function useThreadMenuActions(params: {
     sidebarThreadByKeyRef,
     memberProjectByScopedKey,
     projectCwd,
+    openProjectSettings,
   } = params;
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
@@ -223,7 +228,23 @@ export function useThreadMenuActions(params: {
         { id: isPinned ? "unpin" : "pin", label: isPinned ? "Unpin thread" : "Pin thread" },
         { id: "rename", label: "Rename thread" },
         { id: "mark-unread", label: "Mark unread" },
-        { id: "copy-path", label: "Copy Path" },
+        ...(openProjectSettings
+          ? [
+              ...(memberProjectByScopedKey.has(
+                scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
+              )
+                ? ([
+                    { id: "project-settings", label: "Project settings" },
+                    { id: "copy-project-path", label: "Copy Project Path" },
+                  ] satisfies ThreadMenuActionItem[])
+                : []),
+              ...(thread.worktreePath
+                ? ([
+                    { id: "copy-worktree-path", label: "Copy Worktree Path" },
+                  ] satisfies ThreadMenuActionItem[])
+                : []),
+            ]
+          : ([{ id: "copy-path", label: "Copy Path" }] satisfies ThreadMenuActionItem[])),
         { id: "copy-thread-id", label: "Copy Thread ID" },
         ...(archiveAvailable
           ? [{ id: "archive", label: "Archive session" } satisfies ThreadMenuActionItem]
@@ -235,7 +256,7 @@ export function useThreadMenuActions(params: {
         },
       ];
     },
-    [sidebarThreadByKeyRef],
+    [sidebarThreadByKeyRef, memberProjectByScopedKey, openProjectSettings],
   );
 
   const performThreadMenuAction = useCallback(
@@ -249,6 +270,17 @@ export function useThreadMenuActions(params: {
         scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
       );
       const threadWorkspacePath = thread.worktreePath ?? threadProject?.cwd ?? projectCwd ?? null;
+
+      if (actionId === "project-settings") {
+        if (threadProject)
+          openProjectSettings?.(scopeProjectRef(thread.environmentId, thread.projectId));
+        return;
+      }
+      if (actionId === "copy-project-path" || actionId === "copy-worktree-path") {
+        const path = actionId === "copy-project-path" ? threadProject?.cwd : thread.worktreePath;
+        if (path) copyPathToClipboard(path, { path });
+        return;
+      }
 
       if (actionId === "rename") {
         startThreadRename(threadKey, thread.title);
@@ -319,6 +351,7 @@ export function useThreadMenuActions(params: {
       copyThreadIdToClipboard,
       markThreadUnread,
       memberProjectByScopedKey,
+      openProjectSettings,
       projectCwd,
       sidebarThreadByKeyRef,
       startThreadRename,
