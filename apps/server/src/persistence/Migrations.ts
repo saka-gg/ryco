@@ -1,4 +1,5 @@
 import Migration0055 from "./Migrations/055_ApprovalResponseClaims.ts";
+import Migration0056 from "./Migrations/056_UserInputResponseClaims.ts";
 /**
  * MigrationsLive - Migration runner with inline loader
  *
@@ -13,6 +14,8 @@ import * as Migrator from "effect/unstable/sql/Migrator";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
+
+import Migration0057 from "./Migrations/057_AutomationCentre.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -136,6 +139,8 @@ export const migrationEntries = [
   [53, "ThreadPriorityRankings", Migration0053],
   [54, "ProjectionThreadsSnoozed", Migration0054],
   [55, "ApprovalResponseClaims", Migration0055],
+  [56, "UserInputResponseClaims", Migration0056],
+  [57, "AutomationCentre", Migration0057],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -334,7 +339,19 @@ export const repairProjectionThreadSummaryState = Effect.gen(function* () {
       )
     `;
       if (completed.length > 0 && objects.length === 3) return;
-      yield* Migration0044;
+      const columns = yield* sql<{
+        name: string;
+      }>`PRAGMA table_info(projection_thread_user_input_requests)`;
+      if (columns.some((column) => column.name === "identity_json")) {
+        // Migration 056 owns modern callback state. The legacy backfill has a
+        // different key and must never overwrite durable response claims.
+        yield* sql`CREATE INDEX IF NOT EXISTS idx_projection_thread_user_input_requests_thread_pending
+          ON projection_thread_user_input_requests(thread_id, is_pending)`;
+        yield* sql`CREATE INDEX IF NOT EXISTS idx_projection_thread_proposed_plans_thread_turn_updated
+          ON projection_thread_proposed_plans(thread_id, turn_id, updated_at DESC, plan_id DESC)`;
+      } else {
+        yield* Migration0044;
+      }
       yield* sql`
       INSERT OR IGNORE INTO ryco_compatibility_repairs (repair_key)
       VALUES ('projection-thread-summary-v1')

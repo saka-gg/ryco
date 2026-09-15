@@ -889,6 +889,7 @@ interface ComposerPromptEditorProps {
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
   placeholder: string;
+  ariaLabel?: string;
   /**
    * Phone-tier collapsed presentation. The editor stays mounted and focusable
    * while collapsed so the activating tap lands on it directly; only its
@@ -1409,6 +1410,7 @@ function ComposerPromptEditorInner({
   skills,
   disabled,
   placeholder,
+  ariaLabel,
   collapsed,
   className,
   onRemoveTerminalContext,
@@ -1664,7 +1666,7 @@ function ComposerPromptEditorInner({
               data-testid="composer-editor"
               // `aria-placeholder` is not an accessible name, and the collapsed
               // state no longer has a labelled pill in front of it.
-              aria-label={collapsed ? placeholder : undefined}
+              aria-label={ariaLabel ?? (collapsed ? placeholder : undefined)}
               aria-placeholder={placeholder}
               placeholder={<span />}
               onPaste={onPaste}
@@ -1707,6 +1709,7 @@ export const ComposerPromptEditor = forwardRef<
     skills,
     disabled,
     placeholder,
+    ariaLabel,
     collapsed,
     className,
     onRemoveTerminalContext,
@@ -1747,6 +1750,7 @@ export const ComposerPromptEditor = forwardRef<
         skills={skills}
         disabled={disabled}
         placeholder={placeholder}
+        {...(ariaLabel ? { ariaLabel } : {})}
         collapsed={collapsed}
         onRemoveTerminalContext={onRemoveTerminalContext}
         onChange={onChange}

@@ -50,3 +50,4 @@ export * from "./acpRegistry.ts";
 
 export * from "./speech.ts";
 export * from "./approvalResponses.ts";
+export * from "./automationCentre.ts";

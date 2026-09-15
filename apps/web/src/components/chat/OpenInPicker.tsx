@@ -1,5 +1,6 @@
+import { usePaneEffect } from "./PaneFocus";
 import { EditorId, type ResolvedKeybindingsConfig } from "@ryco/contracts";
-import { memo, useCallback, useEffect, useMemo } from "react";
+import { memo, useCallback, useMemo } from "react";
 import {
   isOpenFavoriteEditorShortcut,
   shouldIgnoreGlobalNavigationShortcut,
@@ -56,7 +57,7 @@ export const OpenInPicker = memo(function OpenInPicker({
     [keybindings],
   );
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const handler = (e: globalThis.KeyboardEvent) => {
       const api = readLocalApi();
       if (shouldIgnoreGlobalNavigationShortcut(e)) return;

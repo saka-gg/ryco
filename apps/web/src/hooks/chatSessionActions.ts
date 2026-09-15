@@ -1,4 +1,7 @@
-import { submitApprovalResponse } from "@ryco/client-runtime/state/session";
+import {
+  submitApprovalResponse,
+  submitUserInputResponse,
+} from "@ryco/client-runtime/state/session";
 import type { ApprovalResponseIdentity } from "@ryco/contracts";
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
@@ -45,14 +48,20 @@ export async function respondToThreadUserInput(input: {
   threadId: ThreadId;
   requestId: ApprovalRequestId;
   answers: Record<string, unknown>;
+  userInputIdentity?: ApprovalResponseIdentity | undefined;
 }): Promise<void> {
-  await input.api.orchestration.dispatchCommand({
-    type: "thread.user-input.respond",
-    commandId: newCommandId(),
-    threadId: input.threadId,
-    requestId: input.requestId,
-    answers: input.answers,
-    createdAt: new Date().toISOString(),
+  await submitUserInputResponse({
+    ...input,
+    submit: () =>
+      input.api.orchestration.dispatchCommand({
+        type: "thread.user-input.respond",
+        commandId: newCommandId(),
+        threadId: input.threadId,
+        requestId: input.requestId,
+        answers: input.answers,
+        ...(input.userInputIdentity ? { userInputIdentity: input.userInputIdentity } : {}),
+        createdAt: new Date().toISOString(),
+      }),
   });
 }
 

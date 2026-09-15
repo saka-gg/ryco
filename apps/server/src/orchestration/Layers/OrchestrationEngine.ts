@@ -1,5 +1,12 @@
+import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
+import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import { ApprovalRequestId } from "@ryco/contracts";
-import { requireApprovalClaim, requireApprovalSource } from "../approvalResponses.ts";
+import {
+  requireApprovalClaim,
+  requireApprovalSource,
+  requireUserInputClaim,
+  questionAsCallback,
+} from "../approvalResponses.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import type {
@@ -126,6 +133,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
 const makeOrchestrationEngine = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const approvals = yield* ProjectionPendingApprovalRepository;
+  const questions = yield* ProjectionThreadUserInputRequestRepository;
   const eventStore = yield* OrchestrationEventStore;
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
@@ -201,32 +209,47 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
         if (
           envelope.command.type === "thread.activity.append" &&
-          ["approval.requested", "approval.resolved", "provider.approval.respond.failed"].includes(
-            envelope.command.activity.kind,
-          )
+          [
+            "approval.requested",
+            "approval.resolved",
+            "provider.approval.respond.failed",
+            "user-input.requested",
+            "user-input.resolved",
+            "provider.user-input.respond.failed",
+          ].includes(envelope.command.activity.kind)
         ) {
           const command = envelope.command;
           const payload = command.activity.payload as Record<string, unknown> | null;
+          const isQuestion = command.activity.kind.includes("user-input");
           const row =
             typeof payload?.requestId === "string"
-              ? yield* approvals.getByRequestId({
-                  threadId: command.threadId,
-                  requestId: ApprovalRequestId.make(payload.requestId),
-                })
+              ? isQuestion
+                ? yield* questions
+                    .getByRequestId({
+                      threadId: command.threadId,
+                      requestId: ApprovalRequestId.make(payload.requestId),
+                    })
+                    .pipe(Effect.map(Option.map(questionAsCallback)))
+                : yield* approvals.getByRequestId({
+                    threadId: command.threadId,
+                    requestId: ApprovalRequestId.make(payload.requestId),
+                  })
               : Option.none();
-          const seen =
-            command.activity.kind === "approval.requested"
-              ? yield* sql`SELECT activity_id FROM projection_thread_activities WHERE activity_id = ${command.activity.id} AND thread_id = ${command.threadId} LIMIT 1`.pipe(
-                  Effect.mapError(toPersistenceSqlError("approval.request.identity")),
-                )
-              : [];
-          yield* requireApprovalSource({
-            command,
-            row,
-            seenRequest: seen.length > 0,
-            session: commandReadModel.threads.find((thread) => thread.id === command.threadId)
-              ?.session,
-          });
+          const seen = command.activity.kind.endsWith(".requested")
+            ? yield* sql`SELECT activity_id FROM projection_thread_activities WHERE activity_id = ${command.activity.id} AND thread_id = ${command.threadId} LIMIT 1`.pipe(
+                Effect.mapError(toPersistenceSqlError("approval.request.identity")),
+              )
+            : [];
+          yield* requireApprovalSource(
+            {
+              command,
+              row,
+              seenRequest: seen.length > 0,
+              session: commandReadModel.threads.find((thread) => thread.id === command.threadId)
+                ?.session,
+            },
+            isQuestion ? "user-input" : "approval",
+          );
         }
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
@@ -241,6 +264,18 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 yield* requireApprovalClaim({
                   command,
                   row: yield* approvals.getByRequestId({
+                    threadId: command.threadId,
+                    requestId: command.requestId,
+                  }),
+                  session: commandReadModel.threads.find((thread) => thread.id === command.threadId)
+                    ?.session,
+                });
+              }
+              if (envelope.command.type === "thread.user-input.respond") {
+                const command = envelope.command;
+                yield* requireUserInputClaim({
+                  command,
+                  row: yield* questions.getByRequestId({
                     threadId: command.threadId,
                     requestId: command.requestId,
                   }),
@@ -440,4 +475,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 export const OrchestrationEngineLive = Layer.effect(
   OrchestrationEngineService,
   makeOrchestrationEngine,
-).pipe(Layer.provide(ProjectionPendingApprovalRepositoryLive));
+).pipe(
+  Layer.provide(ProjectionPendingApprovalRepositoryLive),
+  Layer.provide(ProjectionThreadUserInputRequestRepositoryLive),
+);

@@ -20,6 +20,7 @@ import { AgentControlPlanValidationError } from "../Errors.ts";
 import {
   AgentControlAutomationService,
   type AgentControlAutomationShape,
+  type AgentControlAutomationServiceError,
 } from "../Services/AgentControlAutomation.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
@@ -386,6 +387,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
           if (next === null) return;
           const current = yield* repository.getRun(proposal.plan.runId);
           if (Option.isNone(current) || current.value.proposalId !== proposal.proposalId) return;
+          if (current.value.status === next.status) return;
           const now = new Date().toISOString();
           yield* repository.transitionRun({
             runId: current.value.runId,
@@ -510,16 +512,27 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
           yield* syncRun(submitted.proposal);
         });
 
+      const isolateCorruptRun =
+        (run: AgentControlAutomationRun) =>
+        (
+          error: AgentControlAutomationServiceError,
+        ): Effect.Effect<void, AgentControlAutomationServiceError> =>
+          error._tag === "PersistenceDecodeError"
+            ? repository.quarantineRecord({ kind: "run", id: run.runId, projectId: run.projectId })
+            : Effect.fail(error);
+
       const recover = Effect.gen(function* () {
         const runs = yield* repository.listRecoverableRuns({ limit: RECOVERY_BATCH_LIMIT });
         for (const run of runs) {
-          if (run.status === "materializing") {
-            yield* materialize(run);
-            continue;
-          }
-          if (run.proposalId === null) continue;
-          const proposal = yield* proposals.getById(run.proposalId);
-          if (Option.isSome(proposal)) yield* syncRun(proposal.value);
+          yield* Effect.gen(function* () {
+            if (run.status === "materializing") {
+              yield* materialize(run);
+              return;
+            }
+            if (run.proposalId === null) return;
+            const proposal = yield* proposals.getById(run.proposalId);
+            if (Option.isSome(proposal)) yield* syncRun(proposal.value);
+          }).pipe(Effect.catch(isolateCorruptRun(run)));
         }
       });
 
@@ -531,7 +544,8 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             now: new Date().toISOString(),
             limit: SCHEDULER_BATCH_LIMIT,
           });
-          for (const item of claimed) yield* materialize(item.run);
+          for (const item of claimed)
+            yield* materialize(item.run).pipe(Effect.catch(isolateCorruptRun(item.run)));
           return claimed.length;
         },
       );

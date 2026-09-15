@@ -1,3 +1,4 @@
+import { usePaneEffect } from "./PaneFocus";
 import { type ApprovalRequestId } from "@ryco/contracts";
 import { memo, useEffect, useEffectEvent, useRef } from "react";
 import { type PendingUserInput } from "../../session-logic";
@@ -32,9 +33,13 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
 
   return (
     <ComposerPendingUserInputCard
-      key={activePrompt.requestId}
+      key={activePrompt.userInputIdentity?.requestEventId ?? activePrompt.requestId}
       prompt={activePrompt}
-      isResponding={respondingRequestIds.includes(activePrompt.requestId)}
+      isResponding={
+        respondingRequestIds.includes(activePrompt.requestId) ||
+        activePrompt.responseState === "submitting" ||
+        activePrompt.responseState === "uncertain"
+      }
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
@@ -93,7 +98,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   // Keyboard shortcut: number keys 1-9 select corresponding options when focus is
   // outside editable fields. Multi-select prompts toggle options in place; single-
   // select prompts keep the existing auto-advance behavior.
-  useEffect(() => {
+  usePaneEffect(() => {
     if (!activeQuestion || isResponding) return;
     const handler = (event: globalThis.KeyboardEvent) => {
       if (shouldIgnoreGlobalNavigationShortcut(event)) return;
@@ -139,6 +144,12 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           </span>
         </div>
       </div>
+      {prompt.responseState === "uncertain" ? (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          Answer delivery is unconfirmed. Await provider confirmation or restart the turn; resending
+          could duplicate it.
+        </p>
+      ) : null}
       <p className="mt-1.5 text-sm text-foreground/90">{activeQuestion.question}</p>
       {activeQuestion.multiSelect ? (
         <p className="mt-1 text-xs text-muted-foreground/65">Select one or more options.</p>

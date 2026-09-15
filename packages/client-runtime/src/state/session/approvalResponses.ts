@@ -10,12 +10,12 @@ import type {
 const inFlight = new WeakMap<EnvironmentApi, Map<string, Promise<void>>>();
 
 /** UI reentrancy guard only. Durable claim/retry/settlement authority stays on the server. */
-export function submitApprovalResponse(input: {
+function submitCallbackResponse(input: {
   api: EnvironmentApi;
   threadId: ThreadId;
   requestId: ApprovalRequestId;
-  approvalIdentity?: ApprovalResponseIdentity | undefined;
-  decision: ProviderApprovalDecision;
+  identity?: ApprovalResponseIdentity | undefined;
+  kind: "approval" | "user-input";
   submit: () => Promise<unknown>;
 }): Promise<void> {
   let requests = inFlight.get(input.api);
@@ -24,10 +24,11 @@ export function submitApprovalResponse(input: {
     inFlight.set(input.api, requests);
   }
   const key = JSON.stringify([
+    input.kind,
     input.threadId,
     input.requestId,
-    input.approvalIdentity?.requestEventId,
-    input.approvalIdentity?.runtimeSessionId,
+    input.identity?.requestEventId,
+    input.identity?.runtimeSessionId,
   ]);
   const existing = requests.get(key);
   if (existing) return existing;
@@ -40,4 +41,29 @@ export function submitApprovalResponse(input: {
     });
   requests.set(key, pending);
   return pending;
+}
+
+export function submitApprovalResponse(input: {
+  api: EnvironmentApi;
+  threadId: ThreadId;
+  requestId: ApprovalRequestId;
+  approvalIdentity?: ApprovalResponseIdentity | undefined;
+  decision: ProviderApprovalDecision;
+  submit: () => Promise<unknown>;
+}): Promise<void> {
+  return submitCallbackResponse({ ...input, identity: input.approvalIdentity, kind: "approval" });
+}
+
+export function submitUserInputResponse(input: {
+  api: EnvironmentApi;
+  threadId: ThreadId;
+  requestId: ApprovalRequestId;
+  userInputIdentity?: ApprovalResponseIdentity | undefined;
+  submit: () => Promise<unknown>;
+}): Promise<void> {
+  return submitCallbackResponse({
+    ...input,
+    identity: input.userInputIdentity,
+    kind: "user-input",
+  });
 }

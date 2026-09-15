@@ -502,7 +502,7 @@ describe("ProviderRuntimeIngestion", () => {
           id: asEventId("recovery-pending-input"),
           kind: "user-input.requested",
           turnId,
-          payload: { requestId: "abandoned-question" },
+          payload: { requestId: "abandoned-question", runtimeSessionId },
           tone: "info",
           summary: "Question",
           createdAt: at,
@@ -570,7 +570,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("expires previous-turn requests on turn start while retaining current requests", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const threadId = asThreadId("thread-1");
     for (const [requestId, turnId] of [
       ["old-input", "old-turn"],
@@ -585,7 +585,7 @@ describe("ProviderRuntimeIngestion", () => {
             id: asEventId(`seed-${requestId}`),
             kind: "user-input.requested",
             turnId: asTurnId(turnId!),
-            payload: { requestId },
+            payload: { requestId, runtimeSessionId: "test-runtime" },
             tone: "info",
             summary: "Question",
             createdAt: "2026-01-01T00:00:00.000Z",
@@ -605,14 +605,16 @@ describe("ProviderRuntimeIngestion", () => {
     await harness.drain();
     const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId)!;
     const resolutions = thread.activities.filter(
-      (activity) => activity.kind === "user-input.resolved",
+      (activity) => activity.kind === "provider.user-input.respond.failed",
     );
-    expect(resolutions.map((activity) => activity.payload)).toEqual([{ requestId: "old-input" }]);
+    expect(resolutions.map((activity) => activity.payload)).toMatchObject([
+      { requestId: "old-input", responseState: "invalidated" },
+    ]);
     expect(derivePendingThreadRequestState(thread.activities).pendingUserInputCount).toBe(1);
   });
 
   it("maps turn started/completed events into thread session updates", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -705,6 +707,20 @@ describe("ProviderRuntimeIngestion", () => {
           createdAt: "2026-01-01T00:00:02.500Z",
         }),
       );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("pending-question-attempt"),
+          threadId,
+          requestId: ApprovalRequestId.make("request-user-input"),
+          answers: { answer: "Yes" },
+          userInputIdentity: {
+            requestEventId: asEventId("pending-user-input"),
+            runtimeSessionId: RuntimeSessionId.make("test-runtime"),
+          },
+          createdAt: "2026-01-01T00:00:02.500Z",
+        }),
+      );
       harness.emit({
         type,
         eventId: asEventId("pending-complete"),
@@ -727,6 +743,21 @@ describe("ProviderRuntimeIngestion", () => {
         responseState: "invalidated",
         approvalIdentity: { requestEventId: "pending-approval", runtimeSessionId: "test-runtime" },
         responseAttemptId: "pending-approval-attempt",
+      });
+      expect(thread.activities.some((activity) => activity.kind === "user-input.resolved")).toBe(
+        false,
+      );
+      expect(
+        thread.activities.find((activity) => activity.kind === "provider.user-input.respond.failed")
+          ?.payload,
+      ).toMatchObject({
+        requestId: "request-user-input",
+        responseState: "invalidated",
+        userInputIdentity: {
+          requestEventId: "pending-user-input",
+          runtimeSessionId: "test-runtime",
+        },
+        responseAttemptId: "pending-question-attempt",
       });
       expect(thread.session?.status).toBe("ready");
       if (type === "turn.completed") {
@@ -851,7 +882,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("fences late A1 lifecycle events after A1 -> B -> A2", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const threadId = asThreadId("thread-1");
     const codexInstanceId = ProviderInstanceId.make("codex");
     const runtimeA1 = RuntimeSessionId.make("runtime-a1");
@@ -2832,7 +2863,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("flushes and completes buffered assistant text when user input is requested", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -4417,7 +4448,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("projects structured user input request and resolution as thread activities", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();
 
     harness.emit({

@@ -1,6 +1,7 @@
 import { createSpeechConnection } from "../speech/connection.ts";
 import { SpeechService } from "../speech/service.ts";
 import { SpeechError } from "@ryco/contracts";
+import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
@@ -39,6 +40,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
               ),
         ),
       ...makeAgentControlHandlers(ctx),
+      ...makeAutomationCentreHandlers(ctx),
       ...makeOrchestrationHandlers(ctx),
       ...makeContextHandoffHandlers(ctx),
       ...makeProviderHandlers(ctx),

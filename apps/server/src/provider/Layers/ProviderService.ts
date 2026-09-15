@@ -1338,11 +1338,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (!routed.isActive) {
       return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
     }
+    if (input.expected && input.expected.runtimeSessionId !== routed.session?.runtimeSessionId) {
+      return yield* new ProviderValidationError({
+        operation: "ProviderService.stopBackgroundTask",
+        issue: "The displayed background task belongs to a replaced runtime session.",
+      });
+    }
     const stop = routed.adapter.stopBackgroundTask;
     if (stop === undefined) {
       return yield* new ProviderUnsupportedError({ provider: routed.adapter.provider });
     }
-    yield* stop(routed.threadId, input.taskId);
+    yield* stop(routed.threadId, input.taskId, input.expected);
     yield* analytics.record("provider.background_task.stopped", {
       provider: routed.adapter.provider,
     });
@@ -1406,8 +1412,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const routed = yield* resolveRoutableSession({
         threadId: input.threadId,
         operation: "ProviderService.respondToUserInput",
-        allowRecovery: true,
+        allowRecovery: false,
       });
+      // Questions own process-local callbacks. Resuming a conversation cannot restore one.
+      if (
+        !routed.isActive ||
+        (input.expectedRuntimeSessionId !== undefined &&
+          routed.session?.runtimeSessionId !== input.expectedRuntimeSessionId)
+      ) {
+        return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
+      }
       metricProvider = routed.adapter.provider;
       yield* Effect.annotateCurrentSpan({
         "provider.operation": "respond-to-user-input",

@@ -1,3 +1,4 @@
+import { usePaneEffect, usePaneFocus, usePaneFocusRef } from "../components/chat/PaneFocus";
 import { useAtomValue } from "@effect/atom-react";
 import {
   getWsConnectionStatusForEnvironment,
@@ -21,6 +22,8 @@ export function VoiceInput(props: {
   onInsert(text: string): void;
 }) {
   const { environmentId, draftKey } = props;
+  const paneFocused = usePaneFocus();
+  const paneFocusedRef = usePaneFocusRef();
   const leaseGeneration = isHostedHubMode() ? readHostedNodeMutationLease(environmentId) : null;
   const status = useAtomValue(wsConnectionStatusForEnvironmentAtom(props.environmentId));
   const capability = useHostedRpcCapability("speech.request");
@@ -66,6 +69,7 @@ export function VoiceInput(props: {
         return {
           canCancel: authority,
           isCurrent: () =>
+            paneFocusedRef.current &&
             !latest.current.disabled &&
             latest.current.draftKey === draftKey &&
             latest.current.environmentId === environmentId &&
@@ -76,9 +80,9 @@ export function VoiceInput(props: {
       id: () => crypto.randomUUID(),
       insert: (text) => latest.current.onInsert(text),
     });
-  }, [environmentId, draftKey]);
+  }, [environmentId, draftKey, paneFocusedRef]);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
-  useEffect(() => {
+  usePaneEffect(() => {
     const stop = () => controller.cancel();
     const visibility = () => {
       if (document.hidden) stop();
@@ -110,6 +114,7 @@ export function VoiceInput(props: {
           size="sm"
           variant="ghost"
           disabled={
+            !paneFocused ||
             props.disabled ||
             !capability.allowed ||
             ["checking", "transcribing", "installing"].includes(state.phase)

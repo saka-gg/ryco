@@ -1,3 +1,4 @@
+import { usePaneEffect, usePaneFocus } from "./PaneFocus";
 import type { PromptStashEntry } from "@ryco/client-runtime/state/composer";
 import { BookmarkIcon, Trash2Icon } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
@@ -41,13 +42,14 @@ export const ComposerStashPicker = memo(function ComposerStashPicker(props: {
   onDelete: (id: string) => void;
   onClose: () => void;
 }) {
+  const paneFocused = usePaneFocus();
   const { entries, onRestore, onDelete, onClose } = props;
   const [selectedId, setSelectedId] = useState<string | null>(entries[0]?.id ?? null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const selectedEntry = entries.find((entry) => entry.id === selectedId) ?? entries[0] ?? null;
 
-  useEffect(() => {
+  usePaneEffect(() => {
     pickerRef.current?.focus();
   }, []);
 
@@ -68,7 +70,7 @@ export const ComposerStashPicker = memo(function ComposerStashPicker(props: {
       ?.scrollIntoView({ block: "nearest" });
   }, [selectedId]);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -112,6 +114,8 @@ export const ComposerStashPicker = memo(function ComposerStashPicker(props: {
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
   }, [entries, onClose, onDelete, onRestore, selectedEntry, selectedId]);
+
+  if (!paneFocused) return null;
 
   return (
     <div

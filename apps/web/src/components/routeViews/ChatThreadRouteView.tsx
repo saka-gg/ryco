@@ -1,3 +1,6 @@
+import { useChatPanesStore } from "../../chatPanesStore";
+import { paneContains } from "../../chatPanes.logic";
+import { ChatPanes, PaneThreadAvailability } from "../chat/ChatPanes";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import { useNavigate } from "@tanstack/react-router";
@@ -57,6 +60,7 @@ export function ChatThreadRouteView({
 }) {
   usePerfMark("ChatThreadRouteView");
   const navigate = useNavigate();
+  const presentationTier = usePresentationTier();
   const currentThreadKey = threadRef ? `${threadRef.environmentId}:${threadRef.threadId}` : null;
   const routeEnvironmentId = threadRef?.environmentId ?? null;
   const routeThreadId = threadRef?.threadId ?? null;
@@ -101,6 +105,9 @@ export function ChatThreadRouteView({
   const draftThreadExists = useDraftThreadExistsByRef(threadRef);
   const draftThread = useDraftThreadByRef(threadRef);
   const environmentHasDraftThreads = useEnvironmentHasDraftThreads(threadRef?.environmentId);
+  const paneRoot = useChatPanesStore((s) => s.root);
+  const routeInPanes =
+    presentationTier !== "phone" && !!threadRef && !!paneRoot && paneContains(paneRoot, threadRef);
   const routeThreadExists = threadExists || draftThreadExists;
   const serverThreadStarted = threadHasStarted(serverThread);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
@@ -112,7 +119,8 @@ export function ChatThreadRouteView({
   // `bootstrapComplete` produced a blank ~3s route on every cross-node switch
   // even when the full thread was still available in memory.
   const canRenderRouteThread =
-    routeThreadExists && (bootstrapComplete || serverThread !== undefined);
+    routeInPanes ||
+    (routeThreadExists && (draftThreadExists || bootstrapComplete || serverThread !== undefined));
   const diffOpen = threadSearch.diff === "1";
   const previewOpen = threadSearch.preview === "1";
   const rightPanelMode: RightPanelMode | null = getRightPanelMode(threadSearch);
@@ -122,7 +130,6 @@ export function ChatThreadRouteView({
       ? threadSearch.workspaceAgentKey
       : null;
   const shouldUseDiffSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
-  const presentationTier = usePresentationTier();
   const pendingDeviceOpenRequest = useDeviceStateStore((state) =>
     currentThreadKey ? state.pendingOpenByThreadKey[currentThreadKey] : undefined,
   );
@@ -578,7 +585,7 @@ export function ChatThreadRouteView({
       return;
     }
 
-    if (!routeThreadExists && environmentHasAnyThreads) {
+    if (!routeInPanes && !routeThreadExists && environmentHasAnyThreads) {
       if (fallbackThreadRef) {
         void navigate({
           to: "/$environmentId/$threadId",
@@ -595,6 +602,7 @@ export function ChatThreadRouteView({
     fallbackThreadRef,
     navigate,
     routeThreadExists,
+    routeInPanes,
     threadRef,
   ]);
 
@@ -648,17 +656,23 @@ export function ChatThreadRouteView({
     return (
       <>
         <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
-          <ChatView
-            environmentId={threadRef.environmentId}
-            threadId={threadRef.threadId}
-            onDiffPanelOpen={() => markRightPanelOpened("review")}
-            onPreviewPanelOpen={() => markRightPanelOpened("files")}
-            onTerminalPanelOpen={() => markRightPanelOpened("terminal")}
-            onAgentPanelOpen={() => markRightPanelOpened("agent")}
-            workspacePanelOpen={rightPanelOpen}
-            onToggleWorkspacePanel={toggleRightPanel}
-            routeKind="server"
-          />
+          <ChatPanes threadRef={threadRef} enabled={false}>
+            {() => (
+              <PaneThreadAvailability threadRef={threadRef}>
+                <ChatView
+                  environmentId={threadRef.environmentId}
+                  threadId={threadRef.threadId}
+                  onDiffPanelOpen={() => markRightPanelOpened("review")}
+                  onPreviewPanelOpen={() => markRightPanelOpened("files")}
+                  onTerminalPanelOpen={() => markRightPanelOpened("terminal")}
+                  onAgentPanelOpen={() => markRightPanelOpened("agent")}
+                  workspacePanelOpen={rightPanelOpen}
+                  onToggleWorkspacePanel={toggleRightPanel}
+                  routeKind="server"
+                />
+              </PaneThreadAvailability>
+            )}
+          </ChatPanes>
         </SidebarInset>
         <PhoneWorkSurfaceSheet label="Workspace" open={rightPanelOpen} onClose={closeRightPanel}>
           {shouldRenderPhoneRightPanelContent ? (
@@ -688,17 +702,26 @@ export function ChatThreadRouteView({
           )}
           inert={rightPanelMaximized ? true : undefined}
         >
-          <ChatView
-            environmentId={threadRef.environmentId}
-            threadId={threadRef.threadId}
-            onDiffPanelOpen={() => markRightPanelOpened("review")}
-            onPreviewPanelOpen={() => markRightPanelOpened("files")}
-            onTerminalPanelOpen={() => markRightPanelOpened("terminal")}
-            onAgentPanelOpen={() => markRightPanelOpened("agent")}
-            workspacePanelOpen={rightPanelOpen}
-            onToggleWorkspacePanel={toggleRightPanel}
-            routeKind="server"
-          />
+          <ChatPanes threadRef={threadRef}>
+            {(paneRef, focused) => (
+              <PaneThreadAvailability threadRef={paneRef}>
+                <ChatView
+                  environmentId={paneRef.environmentId}
+                  threadId={paneRef.threadId}
+                  onDiffPanelOpen={() => markRightPanelOpened("review")}
+                  onPreviewPanelOpen={() => markRightPanelOpened("files")}
+                  onTerminalPanelOpen={() => markRightPanelOpened("terminal")}
+                  onAgentPanelOpen={() => markRightPanelOpened("agent")}
+                  workspacePanelOpen={focused && rightPanelOpen}
+                  onToggleWorkspacePanel={() => {
+                    if (focused) toggleRightPanel();
+                  }}
+                  routeKind="server"
+                  reserveTitleBarControlInset={focused}
+                />
+              </PaneThreadAvailability>
+            )}
+          </ChatPanes>
         </SidebarInset>
         <RightPanelInlineSidebar
           open={rightPanelOpen}
@@ -720,17 +743,26 @@ export function ChatThreadRouteView({
   return (
     <>
       <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
-        <ChatView
-          environmentId={threadRef.environmentId}
-          threadId={threadRef.threadId}
-          onDiffPanelOpen={() => markRightPanelOpened("review")}
-          onPreviewPanelOpen={() => markRightPanelOpened("files")}
-          onTerminalPanelOpen={() => markRightPanelOpened("terminal")}
-          onAgentPanelOpen={() => markRightPanelOpened("agent")}
-          workspacePanelOpen={rightPanelOpen}
-          onToggleWorkspacePanel={toggleRightPanel}
-          routeKind="server"
-        />
+        <ChatPanes threadRef={threadRef}>
+          {(paneRef, focused) => (
+            <PaneThreadAvailability threadRef={paneRef}>
+              <ChatView
+                environmentId={paneRef.environmentId}
+                threadId={paneRef.threadId}
+                onDiffPanelOpen={() => markRightPanelOpened("review")}
+                onPreviewPanelOpen={() => markRightPanelOpened("files")}
+                onTerminalPanelOpen={() => markRightPanelOpened("terminal")}
+                onAgentPanelOpen={() => markRightPanelOpened("agent")}
+                workspacePanelOpen={focused && rightPanelOpen}
+                onToggleWorkspacePanel={() => {
+                  if (focused) toggleRightPanel();
+                }}
+                routeKind="server"
+                reserveTitleBarControlInset={focused}
+              />
+            </PaneThreadAvailability>
+          )}
+        </ChatPanes>
       </SidebarInset>
       <RightPanelSheet open={rightPanelOpen} onClose={closeRightPanel}>
         {shouldRenderRightPanelContent ? (

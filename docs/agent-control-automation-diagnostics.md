@@ -56,3 +56,36 @@ for the same reason.
 
 Automation templates still contain no browser, device, shell, command, RPC, URL, webhook, script,
 or callback field. Browser/CDP/web-page control remains out of scope.
+
+## Automation centre
+
+On desktop/web, open **Project settings → Automations** to review schedules and recent runs.
+The editor uses the existing once/fixed-interval schedule language and an explicit provider
+instance, model and supported options. Saving and cancelling create owner-authored immutable
+proposals; the normal approval executor applies them. Every occurrence still needs separate
+approval. The `automation-owner` principal is constructed only behind owner-authorized RPC and
+may authorize automation plans only. Private-session and external-integration MCP authority is
+unchanged.
+
+Run identity, original execution selection and thread links come from durable runs and their
+immutable proposals. **Dispatched** means the thread-start operation completed, not that the
+provider task finished or succeeded. Open the linked thread to review progress or interrupt work.
+The existing scheduler's active-occurrence constraint covers approval and dispatch, not the
+entire lifetime of provider work. No result-based completion or quiet-monitor policy is inferred
+from absent output, prose or file-change counts.
+
+Read/unread state is persisted against the run's last update. Refresh or refocus the centre to
+see changes made on another client; proposal events also refresh the view. The centre shows up
+to 50 recent project runs, with at most 50 outcomes retained per schedule. Marking a result unread
+does not exempt it from retention.
+
+Manual retry requests retain their identity and create a fresh occurrence through the same
+scheduler/recovery path. Rejected/expired occurrences and cancellations before a proposal exists
+can be retried while the definition revision is unchanged and no occurrence is active. Failed
+dispatches and cancellations that may have executed require inspection; missing thread IDs do
+not prove nondelivery. Schedule cancellation never interrupts already accepted work.
+
+Damaged definitions, runs and active proposals are decoded individually and quarantined from
+bounded centre/scheduler batches. Original rows remain intact for repair; the centre reports
+unavailable records without returning raw decode errors. A quarantined active run keeps its
+schedule's reservation, preventing accidental replacement work. Other schedules remain usable.

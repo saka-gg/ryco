@@ -79,6 +79,35 @@ function nextOccurrence(
 const makeAgentControlAutomationRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
+  const quarantine = (row: unknown, kind: "automation" | "run") => {
+    const data = row as Record<string, unknown>;
+    const id = kind === "automation" ? data.automationId : data.runId;
+    return typeof id === "string" && typeof data.projectId === "string"
+      ? sql`INSERT OR IGNORE INTO agent_control_automation_quarantine (kind, id, project_id)
+          VALUES (${kind}, ${id}, ${data.projectId})`.pipe(Effect.asVoid)
+      : Effect.void;
+  };
+  const decodeAutomations = (rows: ReadonlyArray<unknown>) =>
+    Effect.gen(function* () {
+      const valid: Array<typeof AutomationDbRow.Type> = [];
+      for (const row of rows) {
+        const parsed = Schema.decodeUnknownOption(AutomationDbRow)(row);
+        if (Option.isSome(parsed)) valid.push(parsed.value);
+        else yield* quarantine(row, "automation");
+      }
+      return valid;
+    });
+  const decodeRuns = (rows: ReadonlyArray<unknown>) =>
+    Effect.gen(function* () {
+      const valid: AgentControlAutomationRun[] = [];
+      for (const row of rows) {
+        const parsed = Schema.decodeUnknownOption(AutomationRunDbRow)(row);
+        if (Option.isSome(parsed)) valid.push(parsed.value);
+        else yield* quarantine(row, "run");
+      }
+      return valid;
+    });
+
   const getAutomationRow = SqlSchema.findOneOption({
     Request: Schema.Struct({ automationId: AgentControlAutomationId }),
     Result: AutomationDbRow,
@@ -99,7 +128,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       includeDisabled: Schema.Int,
       limit: Schema.Int,
     }),
-    Result: AutomationDbRow,
+    Result: Schema.Unknown,
     execute: ({ projectId, providerInstanceId, includeDisabled, limit }) => sql`
       SELECT automation_id AS "automationId", principal_json AS "principal",
         project_id AS "projectId", provider_instance_id AS "providerInstanceId",
@@ -109,6 +138,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       FROM agent_control_automations
       WHERE project_id = ${projectId}
         AND (${providerInstanceId} IS NULL OR provider_instance_id = ${providerInstanceId})
+        AND NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'automation' AND q.id = agent_control_automations.automation_id)
         AND (${includeDisabled} = 1 OR (enabled = 1 AND cancelled = 0))
       ORDER BY updated_at DESC, automation_id ASC
       LIMIT ${limit}
@@ -117,7 +147,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
 
   const dueAutomationRows = SqlSchema.findAll({
     Request: Schema.Struct({ now: AgentControlAutomation.fields.updatedAt, limit: Schema.Int }),
-    Result: AutomationDbRow,
+    Result: Schema.Unknown,
     execute: ({ now, limit }) => sql`
       SELECT automation_id AS "automationId", principal_json AS "principal",
         project_id AS "projectId", provider_instance_id AS "providerInstanceId",
@@ -125,7 +155,8 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
         cancelled_at AS "cancelledAt", next_run_at AS "nextRunAt",
         created_at AS "createdAt", updated_at AS "updatedAt"
       FROM agent_control_automations AS automation
-      WHERE enabled = 1 AND cancelled = 0 AND next_run_at IS NOT NULL AND next_run_at <= ${now}
+      WHERE NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'automation' AND q.id = automation.automation_id)
+        AND enabled = 1 AND cancelled = 0 AND next_run_at IS NOT NULL AND next_run_at <= ${now}
         AND NOT EXISTS (
           SELECT 1 FROM agent_control_automation_runs AS run
           WHERE run.automation_id = automation.automation_id
@@ -166,7 +197,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
 
   const listRunRows = SqlSchema.findAll({
     Request: Schema.Struct({ automationId: AgentControlAutomationId, limit: Schema.Int }),
-    Result: AutomationRunDbRow,
+    Result: Schema.Unknown,
     execute: ({ automationId, limit }) => sql`
       SELECT run_id AS "runId", automation_id AS "automationId",
         automation_revision AS "automationRevision", project_id AS "projectId",
@@ -175,13 +206,33 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
         proposal_id AS "proposalId", safe_failure_detail AS "safeFailureDetail",
         created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt"
       FROM agent_control_automation_runs WHERE automation_id = ${automationId}
+      AND NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'run' AND q.id = agent_control_automation_runs.run_id)
+      ORDER BY created_at DESC, run_id DESC LIMIT ${limit}
+    `,
+  });
+
+  const listProjectRunRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      projectId: AgentControlAutomation.fields.projectId,
+      limit: Schema.Int,
+    }),
+    Result: Schema.Unknown,
+    execute: ({ projectId, limit }) => sql`
+      SELECT run_id AS "runId", automation_id AS "automationId",
+        automation_revision AS "automationRevision", project_id AS "projectId",
+        provider_instance_id AS "providerInstanceId", scheduled_for AS "scheduledFor",
+        coalesced_occurrences AS "coalescedOccurrences", status,
+        proposal_id AS "proposalId", safe_failure_detail AS "safeFailureDetail",
+        created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt"
+      FROM agent_control_automation_runs WHERE project_id = ${projectId}
+      AND NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'run' AND q.id = agent_control_automation_runs.run_id)
       ORDER BY created_at DESC, run_id DESC LIMIT ${limit}
     `,
   });
 
   const recoverableRunRows = SqlSchema.findAll({
     Request: Schema.Struct({ limit: Schema.Int }),
-    Result: AutomationRunDbRow,
+    Result: Schema.Unknown,
     execute: ({ limit }) => sql`
       SELECT run_id AS "runId", automation_id AS "automationId",
         automation_revision AS "automationRevision", project_id AS "projectId",
@@ -190,7 +241,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
         proposal_id AS "proposalId", safe_failure_detail AS "safeFailureDetail",
         created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt"
       FROM agent_control_automation_runs
-      WHERE status IN ('materializing', 'pending-approval', 'approved', 'executing')
+      WHERE NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'run' AND q.id = agent_control_automation_runs.run_id) AND status IN ('materializing', 'pending-approval', 'approved', 'executing')
       ORDER BY updated_at ASC, run_id ASC LIMIT ${limit}
     `,
   });
@@ -237,6 +288,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       includeDisabled: input.includeDisabled ? 1 : 0,
       limit: Math.max(1, Math.floor(input.limit)),
     }).pipe(
+      Effect.flatMap(decodeAutomations),
       Effect.map((rows) => rows.map(toAutomation)),
       Effect.mapError(
         toError(
@@ -295,7 +347,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
           const rows = yield* dueAutomationRows({
             now: input.now,
             limit: Math.max(1, input.limit),
-          });
+          }).pipe(Effect.flatMap(decodeAutomations));
           const claimed: ClaimedAgentControlAutomationRun[] = [];
           for (const row of rows) {
             const automation = toAutomation(row);
@@ -389,6 +441,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
 
   const listRuns: AgentControlAutomationRepositoryShape["listRuns"] = (input) =>
     listRunRows({ automationId: input.automationId, limit: Math.max(1, input.limit) }).pipe(
+      Effect.flatMap(decodeRuns),
       Effect.mapError(
         toError(
           "AgentControlAutomationRepository.listRuns:query",
@@ -401,6 +454,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
     input,
   ) =>
     recoverableRunRows({ limit: Math.max(1, input.limit) }).pipe(
+      Effect.flatMap(decodeRuns),
       Effect.mapError(
         toError(
           "AgentControlAutomationRepository.listRecoverableRuns:query",
@@ -415,7 +469,9 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
         const rows = yield* sql<{ readonly runId: string }>`
           UPDATE agent_control_automation_runs SET
             status = ${input.status}, proposal_id = ${input.proposalId},
-            safe_failure_detail = ${input.safeFailureDetail}, updated_at = ${input.updatedAt},
+            safe_failure_detail = ${input.safeFailureDetail},
+            updated_at = CASE WHEN updated_at >= ${input.updatedAt}
+              THEN strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+0.001 seconds') ELSE ${input.updatedAt} END,
             completed_at = ${input.completedAt}
           WHERE run_id = ${input.runId} AND status = ${expectedStatus}
           RETURNING run_id AS "runId"
@@ -438,11 +494,98 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
           ORDER BY created_at DESC, run_id DESC LIMIT ${Math.max(1, input.keepNewest)}
         )
     `.pipe(
+      Effect.flatMap(
+        () =>
+          sql`DELETE FROM agent_control_automation_read_state WHERE run_id NOT IN (SELECT run_id FROM agent_control_automation_runs)`,
+      ),
       Effect.asVoid,
       Effect.mapError(toPersistenceSqlError("AgentControlAutomationRepository.pruneRuns")),
     );
 
+  const centreMetadata: AgentControlAutomationRepositoryShape["centreMetadata"] = (projectId) =>
+    Effect.gen(function* () {
+      const counts = yield* sql<{
+        count: number;
+      }>`SELECT COUNT(*) AS count FROM agent_control_automation_quarantine WHERE project_id = ${projectId}`;
+      const runs = yield* sql<{
+        runId: string;
+        readUpdatedAt: string | null;
+        retryOfRunId: string | null;
+      }>`
+      SELECT r.run_id AS "runId", s.read_updated_at AS "readUpdatedAt", r.retry_of_run_id AS "retryOfRunId"
+      FROM agent_control_automation_runs r LEFT JOIN agent_control_automation_read_state s ON s.run_id = r.run_id
+      WHERE r.project_id = ${projectId} ORDER BY r.created_at DESC, r.run_id DESC LIMIT 2500`;
+      return { unavailableRecords: counts[0]?.count ?? 0, runs };
+    }).pipe(Effect.mapError(toPersistenceSqlError("AutomationCentre.metadata")));
+
+  const markRead: AgentControlAutomationRepositoryShape["markRead"] = (input) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const rows =
+            yield* sql`SELECT run_id FROM agent_control_automation_runs WHERE run_id = ${input.runId} AND updated_at = ${input.expectedUpdatedAt}`;
+          if (rows.length !== 1) return false;
+          if (input.unread)
+            yield* sql`DELETE FROM agent_control_automation_read_state WHERE run_id = ${input.runId}`;
+          else
+            yield* sql`INSERT INTO agent_control_automation_read_state (run_id, read_updated_at) VALUES (${input.runId}, ${input.expectedUpdatedAt})
+      ON CONFLICT(run_id) DO UPDATE SET read_updated_at = excluded.read_updated_at`;
+          return true;
+        }),
+      )
+      .pipe(Effect.mapError(toPersistenceSqlError("AutomationCentre.markRead")));
+
+  const retryRun: AgentControlAutomationRepositoryShape["retryRun"] = (input) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const existing = yield* sql<{
+            retryOfRunId: string | null;
+          }>`SELECT retry_of_run_id AS "retryOfRunId" FROM agent_control_automation_runs WHERE run_id = ${input.runId}`;
+          if (existing.length) return existing[0]?.retryOfRunId === input.source.runId;
+          const rows = yield* sql`INSERT INTO agent_control_automation_runs (
+      run_id, automation_id, automation_revision, project_id, provider_instance_id, scheduled_for,
+      coalesced_occurrences, status, created_at, updated_at, retry_of_run_id
+    ) SELECT ${input.runId}, automation_id, automation_revision, project_id, provider_instance_id,
+      ${input.now}, 0, 'materializing', ${input.now}, ${input.now}, run_id
+      FROM agent_control_automation_runs WHERE run_id = ${input.source.runId}
+      AND (status IN ('expired', 'rejected') OR (status = 'cancelled' AND proposal_id IS NULL))
+      AND EXISTS (SELECT 1 FROM agent_control_automations a WHERE a.automation_id = agent_control_automation_runs.automation_id
+        AND a.cancelled = 0 AND a.revision = ${input.source.automationRevision})
+      ON CONFLICT DO NOTHING RETURNING run_id`;
+          return rows.length === 1;
+        }),
+      )
+      .pipe(Effect.mapError(toPersistenceSqlError("AutomationCentre.retryRun")));
+
+  const activeProposalIds: AgentControlAutomationRepositoryShape["activeProposalIds"] = () =>
+    sql<{ proposalId: string }>`
+    SELECT proposal_id AS "proposalId" FROM agent_control_proposals p
+    WHERE status IN ('pending-user-approval', 'approved', 'executing')
+      AND NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'proposal' AND q.id = p.proposal_id)
+    ORDER BY created_at ASC, proposal_id ASC LIMIT 100`.pipe(
+      Effect.map((rows) => rows.map((r) => AgentControlProposalId.make(r.proposalId))),
+      Effect.mapError(toPersistenceSqlError("AutomationCentre.activeProposalIds")),
+    );
+  const quarantineRecord: AgentControlAutomationRepositoryShape["quarantineRecord"] = (input) =>
+    sql`INSERT OR IGNORE INTO agent_control_automation_quarantine (kind, id, project_id) VALUES (${input.kind}, ${input.id}, ${input.projectId})`.pipe(
+      Effect.asVoid,
+      Effect.mapError(toPersistenceSqlError("AutomationCentre.quarantineRecord")),
+    );
+
+  const listProjectRuns: AgentControlAutomationRepositoryShape["listProjectRuns"] = (projectId) =>
+    listProjectRunRows({ projectId, limit: 50 }).pipe(
+      Effect.flatMap(decodeRuns),
+      Effect.mapError(toPersistenceSqlError("AutomationCentre.listRuns")),
+    );
+
   return {
+    listProjectRuns,
+    activeProposalIds,
+    quarantineRecord,
+    centreMetadata,
+    markRead,
+    retryRun,
     insertAutomation,
     getAutomation,
     listAutomations,

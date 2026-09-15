@@ -1,5 +1,5 @@
 import { derivePendingApprovals } from "./session-logic.ts";
-import { approvalActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
+import { pendingRequestActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
 import type { OrchestrationThreadActivity } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { ApprovalRequestId, EventId, ThreadId, type EnvironmentApi } from "@ryco/contracts";
@@ -62,7 +62,7 @@ it("derives durable attempt state in orchestration order, ignoring older callbac
     kind: string,
     payload: Record<string, unknown>,
   ): OrchestrationThreadActivity =>
-    approvalActivityInOrchestrationOrder(
+    pendingRequestActivityInOrchestrationOrder(
       {
         id: EventId.make(`activity-${sequence}`),
         kind,

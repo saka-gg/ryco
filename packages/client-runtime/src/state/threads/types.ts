@@ -280,6 +280,7 @@ export interface SidebarWorktreeSummary {
 }
 
 export interface ThreadSession {
+  runtimeSessionId?: string | undefined;
   provider: ProviderDriverKind;
   providerInstanceId?: ProviderInstanceId | undefined;
   status: SessionPhase | "error" | "closed";
