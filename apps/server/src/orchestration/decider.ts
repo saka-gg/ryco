@@ -1,3 +1,7 @@
+import {
+  hasRetiredProjectMemory,
+  REMOVED_PROJECT_MEMORY_MESSAGE,
+} from "@ryco/shared/retiredFeatures";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
 import type {
   AgentTokenMode,
@@ -961,6 +965,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.start": {
+      if (hasRetiredProjectMemory(command)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: REMOVED_PROJECT_MEMORY_MESSAGE,
+        });
+      }
       const targetThread = yield* requireThread({
         readModel,
         command,
@@ -1081,12 +1091,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                   handoffId,
                   mode: "full-context-fresh-session",
                   status: "requested",
-                  ...(command.projectMemory
-                    ? {
-                        projectMemory: command.projectMemory,
-                        projectMemoryCommandId: command.commandId,
-                      }
-                    : {}),
                   targetMessageId: command.message.messageId,
                   sourceSelection: targetThread.modelSelection,
                   targetSelection: requestedSelection,
@@ -1112,7 +1116,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
-          ...(command.projectMemory ? { projectMemory: command.projectMemory } : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),

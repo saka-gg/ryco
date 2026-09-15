@@ -1,0 +1,2701 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A source-linked audit of T3 Code, Poracode, and Synara pull requests and releases, mapped to Ryco."
+    />
+    <title>Ryco competitive PR opportunity report — 14 September 2026</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --canvas: #f7f6f3;
+        --surface: #ffffff;
+        --surface-soft: #fbfbfa;
+        --ink: #191917;
+        --ink-soft: #4f4e49;
+        --muted: #787774;
+        --line: #e7e5df;
+        --line-strong: #d8d5cd;
+        --blue-bg: #e7f2f8;
+        --blue-ink: #245f80;
+        --green-bg: #edf3ec;
+        --green-ink: #346538;
+        --yellow-bg: #fbf3db;
+        --yellow-ink: #7b5a12;
+        --red-bg: #fdebec;
+        --red-ink: #923b39;
+        --lavender-bg: #f0edf8;
+        --lavender-ink: #5e4f81;
+        --max: 1240px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background: var(--canvas);
+        color: var(--ink);
+        font-family: "SF Pro Display", "Geist Sans", "Helvetica Neue", Arial, sans-serif;
+        font-size: 16px;
+        line-height: 1.62;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-color: #a9a59d;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 3px;
+      }
+
+      a:hover {
+        text-decoration-color: var(--ink);
+      }
+
+      code,
+      kbd,
+      .mono {
+        font-family: "SF Mono", "Geist Mono", "JetBrains Mono", monospace;
+      }
+
+      code {
+        border-radius: 4px;
+        background: #f0efeb;
+        padding: 0.12em 0.34em;
+        font-size: 0.88em;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 1px solid rgba(25, 25, 23, 0.08);
+        background: rgba(247, 246, 243, 0.92);
+        backdrop-filter: blur(14px);
+      }
+
+      .topbar-inner {
+        width: min(var(--max), calc(100% - 36px));
+        min-height: 58px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .wordmark {
+        font-weight: 740;
+        letter-spacing: -0.025em;
+      }
+
+      .topnav {
+        display: flex;
+        gap: 18px;
+        overflow-x: auto;
+        white-space: nowrap;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .topnav a {
+        text-decoration: none;
+      }
+
+      .topnav a:hover {
+        color: var(--ink);
+      }
+
+      main {
+        width: min(var(--max), calc(100% - 36px));
+        margin: 0 auto;
+      }
+
+      .hero {
+        padding: 112px 0 88px;
+        display: grid;
+        grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
+        gap: 72px;
+        align-items: end;
+      }
+
+      .eyebrow,
+      .section-kicker {
+        margin: 0 0 18px;
+        color: var(--muted);
+        font-family: "SF Mono", "Geist Mono", monospace;
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 900px;
+        margin-bottom: 28px;
+        font-family: "Newsreader", "Lyon Text", Georgia, serif;
+        font-size: clamp(50px, 7.5vw, 102px);
+        font-weight: 480;
+        letter-spacing: -0.045em;
+        line-height: 0.94;
+      }
+
+      .dek {
+        max-width: 760px;
+        margin-bottom: 0;
+        color: var(--ink-soft);
+        font-size: clamp(18px, 2.1vw, 25px);
+        line-height: 1.48;
+      }
+
+      .hero-meta {
+        border-top: 1px solid var(--line-strong);
+        padding-top: 18px;
+      }
+
+      .meta-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        border-bottom: 1px solid var(--line);
+        padding: 11px 0;
+        font-size: 13px;
+      }
+
+      .meta-row span:first-child {
+        color: var(--muted);
+      }
+
+      .section {
+        padding: 84px 0;
+        border-top: 1px solid var(--line-strong);
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: minmax(220px, 0.42fr) minmax(0, 1fr);
+        gap: 52px;
+        margin-bottom: 44px;
+      }
+
+      h2 {
+        margin-bottom: 0;
+        font-family: "Newsreader", "Lyon Text", Georgia, serif;
+        font-size: clamp(38px, 5vw, 66px);
+        font-weight: 480;
+        letter-spacing: -0.035em;
+        line-height: 1.02;
+      }
+
+      .section-intro {
+        max-width: 760px;
+        margin: 4px 0 0;
+        color: var(--ink-soft);
+        font-size: 18px;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+
+      .stat {
+        min-height: 150px;
+        padding: 26px;
+        border-right: 1px solid var(--line);
+      }
+
+      .stat:last-child {
+        border-right: 0;
+      }
+
+      .stat-value {
+        display: block;
+        margin-bottom: 20px;
+        font-family: "Newsreader", Georgia, serif;
+        font-size: 46px;
+        line-height: 1;
+        letter-spacing: -0.04em;
+      }
+
+      .stat-label {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .callout-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 28px;
+      }
+
+      .callout {
+        min-height: 250px;
+        padding: 32px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+
+      .callout.featured {
+        grid-column: span 2;
+        display: grid;
+        grid-template-columns: 0.75fr 1.25fr;
+        gap: 54px;
+        background: var(--surface-soft);
+      }
+
+      .rank {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 34px;
+        margin-bottom: 26px;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        font-family: "SF Mono", monospace;
+        font-size: 12px;
+      }
+
+      .callout h3,
+      .deep-card h3 {
+        margin-bottom: 14px;
+        font-size: 25px;
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+      }
+
+      .callout p {
+        margin-bottom: 0;
+        color: var(--ink-soft);
+      }
+
+      .tag-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        margin-top: 24px;
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        border-radius: 999px;
+        padding: 4px 9px;
+        background: #efeee9;
+        color: #565550;
+        font-size: 10px;
+        font-weight: 720;
+        letter-spacing: 0.055em;
+        line-height: 1;
+        text-transform: uppercase;
+      }
+
+      .tag.green {
+        background: var(--green-bg);
+        color: var(--green-ink);
+      }
+
+      .tag.blue {
+        background: var(--blue-bg);
+        color: var(--blue-ink);
+      }
+
+      .tag.yellow {
+        background: var(--yellow-bg);
+        color: var(--yellow-ink);
+      }
+
+      .tag.red {
+        background: var(--red-bg);
+        color: var(--red-ink);
+      }
+
+      .tag.lavender {
+        background: var(--lavender-bg);
+        color: var(--lavender-ink);
+      }
+
+      #current-status th {
+        position: static;
+      }
+      #current-status .section-head {
+        display: block;
+      }
+      #current-status .section-head > div {
+        max-width: 900px;
+      }
+      #current-status [role="group"] {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 16px;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        padding: 15px 16px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        position: sticky;
+        top: 58px;
+        z-index: 2;
+        background: #f4f3ef;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 760;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      tbody tr:hover {
+        background: #faf9f6;
+      }
+
+      .priority {
+        font-family: "SF Mono", monospace;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .deep-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .deep-card {
+        padding: 30px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+
+      .deep-card.wide {
+        grid-column: span 2;
+      }
+
+      .deep-card ul,
+      .release-card ul,
+      .stack-card ul,
+      .roadmap-step ul {
+        margin: 18px 0 0;
+        padding-left: 20px;
+      }
+
+      li + li {
+        margin-top: 8px;
+      }
+
+      .label {
+        margin: 24px 0 5px;
+        color: var(--muted);
+        font-family: "SF Mono", monospace;
+        font-size: 10px;
+        font-weight: 760;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 20px;
+      }
+
+      .filter-button,
+      .search-input {
+        min-height: 38px;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        background: var(--surface);
+        color: var(--ink-soft);
+        font: inherit;
+        font-size: 13px;
+      }
+
+      .filter-button {
+        padding: 8px 12px;
+        cursor: pointer;
+      }
+
+      .filter-button[aria-pressed="true"] {
+        border-color: var(--ink);
+        background: var(--ink);
+        color: white;
+      }
+
+      .filter-button:active {
+        transform: scale(0.98);
+      }
+
+      .search-input {
+        min-width: 260px;
+        margin-left: auto;
+        padding: 8px 12px;
+        outline: none;
+      }
+
+      .search-input:focus {
+        border-color: var(--ink);
+      }
+
+      .pr-list {
+        border-top: 1px solid var(--line-strong);
+      }
+
+      .pr-row {
+        display: grid;
+        grid-template-columns: 128px minmax(0, 1fr) 180px;
+        gap: 22px;
+        padding: 24px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .pr-row[hidden] {
+        display: none;
+      }
+
+      .pr-repo {
+        color: var(--muted);
+        font-family: "SF Mono", monospace;
+        font-size: 11px;
+      }
+
+      .pr-title {
+        display: inline-block;
+        margin-bottom: 8px;
+        font-weight: 710;
+        letter-spacing: -0.01em;
+      }
+
+      .pr-note {
+        margin: 0;
+        color: var(--ink-soft);
+        font-size: 14px;
+      }
+
+      .activity {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px 12px;
+        align-content: start;
+        color: var(--muted);
+        font-family: "SF Mono", monospace;
+        font-size: 10px;
+      }
+
+      .activity strong {
+        color: var(--ink);
+        font-size: 12px;
+      }
+
+      .stack-card,
+      .release-card {
+        padding: 30px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+
+      .stack-card + .stack-card,
+      .release-card + .release-card {
+        margin-top: 16px;
+      }
+
+      .stack-flow {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 24px;
+        align-items: center;
+      }
+
+      .stack-node {
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        padding: 8px 10px;
+        background: var(--surface-soft);
+        font-family: "SF Mono", monospace;
+        font-size: 11px;
+      }
+
+      .stack-arrow {
+        color: var(--muted);
+      }
+
+      .release-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .release-card + .release-card {
+        margin-top: 0;
+      }
+
+      .release-card h3,
+      .stack-card h3 {
+        margin-bottom: 8px;
+        font-size: 22px;
+        letter-spacing: -0.02em;
+      }
+
+      .release-meta {
+        color: var(--muted);
+        font-family: "SF Mono", monospace;
+        font-size: 11px;
+      }
+
+      .parity-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--line);
+      }
+
+      .parity-item {
+        min-height: 190px;
+        padding: 26px;
+        background: var(--surface);
+      }
+
+      .parity-item h3 {
+        margin-bottom: 10px;
+        font-size: 18px;
+      }
+
+      .parity-item p {
+        margin: 0;
+        color: var(--ink-soft);
+        font-size: 14px;
+      }
+
+      .roadmap {
+        counter-reset: wave;
+      }
+
+      .roadmap-step {
+        counter-increment: wave;
+        display: grid;
+        grid-template-columns: 84px minmax(0, 1fr) 230px;
+        gap: 28px;
+        padding: 30px 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .roadmap-step:first-child {
+        border-top: 0;
+      }
+
+      .roadmap-number::before {
+        content: "0" counter(wave);
+        font-family: "Newsreader", Georgia, serif;
+        font-size: 42px;
+        letter-spacing: -0.04em;
+      }
+
+      .roadmap-step h3 {
+        margin-bottom: 8px;
+        font-size: 22px;
+      }
+
+      .roadmap-meta {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .method-grid {
+        display: grid;
+        grid-template-columns: 0.8fr 1.2fr;
+        gap: 48px;
+      }
+
+      .method-note {
+        border-left: 2px solid var(--ink);
+        padding-left: 22px;
+        color: var(--ink-soft);
+      }
+
+      .source-list {
+        columns: 2;
+        column-gap: 36px;
+        margin: 0;
+        padding-left: 20px;
+      }
+
+      footer {
+        padding: 54px 0 76px;
+        border-top: 1px solid var(--line-strong);
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .reveal {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        .reveal {
+          opacity: 1;
+          transform: none;
+          transition: none;
+        }
+      }
+
+      @media (max-width: 900px) {
+        .hero,
+        .section-head,
+        .callout.featured,
+        .method-grid {
+          grid-template-columns: 1fr;
+          gap: 30px;
+        }
+
+        .stats,
+        .release-grid,
+        .parity-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .stat:nth-child(2) {
+          border-right: 0;
+        }
+
+        .stat:nth-child(-n + 2) {
+          border-bottom: 1px solid var(--line);
+        }
+
+        .deep-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .deep-card.wide,
+        .callout.featured {
+          grid-column: auto;
+        }
+
+        .pr-row {
+          grid-template-columns: 110px minmax(0, 1fr);
+        }
+
+        .activity {
+          grid-column: 2;
+          grid-template-columns: repeat(4, max-content);
+        }
+
+        .roadmap-step {
+          grid-template-columns: 60px minmax(0, 1fr);
+        }
+
+        .roadmap-meta {
+          grid-column: 2;
+        }
+      }
+
+      @media (max-width: 620px) {
+        main,
+        .topbar-inner {
+          width: min(100% - 24px, var(--max));
+        }
+
+        .topnav {
+          display: none;
+        }
+
+        .hero {
+          padding: 74px 0 58px;
+        }
+
+        .section {
+          padding: 62px 0;
+        }
+
+        .stats,
+        .callout-grid,
+        .release-grid,
+        .parity-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .callout.featured {
+          grid-column: auto;
+        }
+
+        .stat {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .stat:last-child {
+          border-bottom: 0;
+        }
+
+        .filters {
+          align-items: stretch;
+        }
+
+        .search-input {
+          order: -1;
+          width: 100%;
+          min-width: 0;
+          margin-left: 0;
+        }
+
+        .pr-row {
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+
+        .activity {
+          grid-column: auto;
+        }
+
+        .source-list {
+          columns: 1;
+        }
+      }
+
+      @media print {
+        body {
+          background: white;
+          font-size: 11pt;
+        }
+
+        body::before,
+        .topbar,
+        .filters {
+          display: none;
+        }
+
+        main {
+          width: 100%;
+        }
+
+        .hero,
+        .section {
+          padding: 30px 0;
+        }
+
+        .reveal {
+          opacity: 1;
+          transform: none;
+        }
+
+        .deep-card,
+        .callout,
+        .release-card,
+        .stack-card,
+        .table-wrap {
+          break-inside: avoid;
+        }
+
+        a {
+          text-decoration: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="wordmark">Ryco / PR intelligence</div>
+        <nav class="topnav" aria-label="Report sections">
+          <a href="#verdict">Verdict</a>
+          <a href="#backlog">Backlog</a>
+          <a href="#deep-dives">Deep dives</a>
+          <a href="#watchlist">Open PRs</a>
+          <a href="#stacks">Stacks</a>
+          <a href="#releases">Releases</a>
+          <a href="#roadmap">Roadmap</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="section" id="current-status" aria-labelledby="current-status-title">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Current disposition · September 15, 2026</p>
+            <h2 id="current-status-title">19 retained landed tasks</h2>
+            <p>
+              2 intentionally removed features · 1 deferred item: voice. The original September 14
+              audit below is historical material, not the current backlog.
+            </p>
+          </div>
+        </div>
+        <div role="group" aria-label="Filter current task status">
+          <button class="filter-button" data-disposition="all" aria-pressed="true">All</button>
+          <button class="filter-button" data-disposition="retained" aria-pressed="false">
+            Retained landed
+          </button>
+          <button class="filter-button" data-disposition="removed" aria-pressed="false">
+            Intentionally removed
+          </button>
+          <button class="filter-button" data-disposition="deferred" aria-pressed="false">
+            Deferred
+          </button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tasks</th>
+                <th>Current status</th>
+                <th>Evidence and scope</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-current-status="retained">
+                <td>1–16, 18–19, 21</td>
+                <td>19 retained landed tasks</td>
+                <td>Existing implementations retained.</td>
+              </tr>
+              <tr data-current-status="removed">
+                <td>17 · Opt-in project memory</td>
+                <td>Intentionally removed</td>
+                <td>
+                  Historically landed in <code>4b72c57e3</code>. Active curation, recall, services
+                  and clients removed. Migration 058 and saved data preserved; migration 059 retires
+                  triggers. Legacy recall requests fail safely.
+                </td>
+              </tr>
+              <tr data-current-status="removed">
+                <td>22 · Thread image gallery</td>
+                <td>Intentionally removed</td>
+                <td>
+                  Historically landed in <code>b0c209a95</code>. Gallery controls, modal and
+                  indexing removed. Attachments, inline previews, single-image expansion and
+                  downloads retained.
+                </td>
+              </tr>
+              <tr data-current-status="deferred">
+                <td>20 · Voice</td>
+                <td>Deferred</td>
+                <td>One deferred item.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <aside class="callout">
+        <strong>Historical audit follows.</strong> Its recommendations describe the original
+        assessment. Memory and gallery recommendations are superseded by the intentional removals
+        above; they are not follow-up work.
+      </aside>
+
+      <section class="hero reveal">
+        <div>
+          <p class="eyebrow">Competitive engineering audit / 14 September 2026</p>
+          <h1>What Ryco should borrow next.</h1>
+          <p class="dek">
+            A source-linked scan of open, active, stacked, nightly, and recently merged work in T3
+            Code, Poracode, and Synara—filtered through Ryco’s current code rather than treated as a
+            generic feature wish list.
+          </p>
+        </div>
+        <aside class="hero-meta" aria-label="Report scope">
+          <div class="meta-row"><span>Repositories</span><strong>3</strong></div>
+          <div class="meta-row"><span>Open PR pool</span><strong>1,356</strong></div>
+          <div class="meta-row"><span>Merged PR pool</span><strong>4,535</strong></div>
+          <div class="meta-row"><span>Release delta sampled</span><strong>396 commits</strong></div>
+          <div class="meta-row"><span>Ryco baseline</span><strong>current workspace</strong></div>
+        </aside>
+      </section>
+
+      <section class="section reveal" id="verdict">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Executive verdict</p>
+            <h2>Five moves have the best fit.</h2>
+          </div>
+          <p class="section-intro">
+            These are high-value because Ryco already owns most of their prerequisite architecture.
+            They improve a workflow users touch repeatedly without introducing a second runtime or
+            weakening hosted lifecycle ownership.
+          </p>
+        </div>
+
+        <div class="stats">
+          <div class="stat">
+            <span class="stat-value">3</span>
+            <span class="stat-label"
+              >small-to-medium candidates suitable for the next focused batch</span
+            >
+          </div>
+          <div class="stat">
+            <span class="stat-value">6</span>
+            <span class="stat-label"
+              >larger product bets worth planning after focused prototypes</span
+            >
+          </div>
+          <div class="stat">
+            <span class="stat-value">9</span>
+            <span class="stat-label"
+              >reliability patterns worth auditing against Ryco’s implementation</span
+            >
+          </div>
+          <div class="stat">
+            <span class="stat-value">8</span>
+            <span class="stat-label"
+              >headline competitor features Ryco already matches or exceeds</span
+            >
+          </div>
+        </div>
+
+        <div class="callout-grid">
+          <article class="callout featured">
+            <div>
+              <span class="rank">01</span>
+              <div class="tag-row">
+                <span class="tag green">Build now</span>
+                <span class="tag">Small</span>
+                <span class="tag blue">High confidence</span>
+              </div>
+            </div>
+            <div>
+              <h3>Ship Markdown thread export from Ryco’s existing plan.</h3>
+              <p>
+                T3 Code’s active
+                <a href="https://github.com/pingdotgg/t3code/pull/11726">PR #11726</a>
+                validates the interaction: an action in the thread menu, a deterministic serializer,
+                safe filenames, and a local download. Ryco already has a precise unimplemented spec
+                in
+                <code>docs/prompts/features/27-thread-export-markdown.md</code>. Add condensed tool
+                summaries and provider/model metadata—two useful details missing from the T3
+                proposal.
+              </p>
+            </div>
+          </article>
+
+          <article class="callout">
+            <span class="rank">02</span>
+            <h3>Add autosave to the in-app file editor.</h3>
+            <p>
+              Ryco already has versioned, conflict-aware manual saves. Synara’s merged
+              <a href="https://github.com/Emanuele-web04/synara/pull/1186">PR #1186</a> supplies the
+              missing product contract: a short idle delay, writes drained before navigation/send,
+              retained drafts on failure, and distinct Reload versus Overwrite recovery.
+            </p>
+            <div class="tag-row">
+              <span class="tag green">Build next</span><span class="tag">Medium</span>
+              <span class="tag blue">Merged evidence</span>
+            </div>
+          </article>
+
+          <article class="callout">
+            <span class="rank">03</span>
+            <h3>Turn Review into a real investigation surface.</h3>
+            <p>
+              Port the best subset of Synara
+              <a href="https://github.com/Emanuele-web04/synara/pull/561">#561</a>: per-file cache
+              identity, compare-to-branch/commit, line blame, next/previous change navigation, and
+              word-level highlights. Avoid duplicating what Ryco already has: occurrence search,
+              line-to-editor, in-app editing, and GitHub viewed state.
+            </p>
+            <div class="tag-row">
+              <span class="tag green">Plan now</span><span class="tag">Large</span>
+              <span class="tag blue">High impact</span>
+            </div>
+          </article>
+
+          <article class="callout">
+            <span class="rank">04</span>
+            <h3>Let environments and projects choose a worktree root.</h3>
+            <p>
+              T3 Code <a href="https://github.com/pingdotgg/t3code/pull/11747">#11747</a> is a
+              compact, active implementation with environment defaults, project overrides,
+              inheritance, and unchanged existing worktrees. Ryco has app-managed versus
+              project-metadata placement, but no arbitrary base path exposed in settings.
+            </p>
+            <div class="tag-row">
+              <span class="tag green">Build next</span><span class="tag">Medium</span>
+              <span class="tag yellow">Security review</span>
+            </div>
+          </article>
+
+          <article class="callout">
+            <span class="rank">05</span>
+            <h3>Make provider refresh invalidate skill discovery safely.</h3>
+            <p>
+              Use T3 Code <a href="https://github.com/pingdotgg/t3code/pull/11682">#11682</a> as a
+              regression checklist: refresh must invalidate provider/workspace skill snapshots, and
+              a pre-invalidation probe must not republish stale results. First add a focused Ryco
+              test; implement only if the current registry/cache path fails it.
+            </p>
+            <div class="tag-row">
+              <span class="tag green">Audit now</span><span class="tag">Small</span>
+              <span class="tag blue">Reliability</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section reveal" id="backlog">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Prioritized backlog</p>
+            <h2>Recommendations, not a shopping list.</h2>
+          </div>
+          <p class="section-intro">
+            Priority combines user value, architectural fit, implementation risk, external evidence,
+            and how much of the substrate Ryco already has. “Audit” means write a regression test or
+            measurement before assuming the bug exists locally.
+          </p>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Priority</th>
+                <th>Opportunity</th>
+                <th>Why it fits Ryco</th>
+                <th>Effort</th>
+                <th>Evidence</th>
+                <th>Recommended action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="priority">P0</td>
+                <td><strong>Thread export to Markdown</strong></td>
+                <td>Already specified; full history is subscribed; no provider call needed.</td>
+                <td>Small</td>
+                <td>
+                  <a href="https://github.com/pingdotgg/t3code/pull/11726">T3 #11726</a>, active
+                </td>
+                <td>
+                  Implement serializer, menu action, browser download, desktop save dialog, tests.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P0</td>
+                <td><strong>Conflict-safe editor autosave</strong></td>
+                <td>
+                  Version/conflict model and editor already exist; autosave is the missing layer.
+                </td>
+                <td>Medium</td>
+                <td>
+                  <a href="https://github.com/Emanuele-web04/synara/pull/1186">Synara #1186</a>,
+                  merged
+                </td>
+                <td>
+                  Debounced save, drain on navigation/send, sticky failure recovery, explicit
+                  overwrite.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P0</td>
+                <td><strong>Skill snapshot invalidation audit</strong></td>
+                <td>
+                  Ryco has provider status caches and workspace skill search; stale generations are
+                  plausible.
+                </td>
+                <td>Small</td>
+                <td>
+                  <a href="https://github.com/pingdotgg/t3code/pull/11682">T3 #11682</a>, active
+                </td>
+                <td>
+                  Add refresh/in-flight race tests; patch only if the test exposes stale
+                  publication.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P1</td>
+                <td><strong>Git review investigation pack</strong></td>
+                <td>
+                  Extends Ryco’s mature diff surface without replacing Pierre or current review
+                  state.
+                </td>
+                <td>Large</td>
+                <td>
+                  <a href="https://github.com/Emanuele-web04/synara/pull/561">Synara #561</a>,
+                  merged
+                </td>
+                <td>
+                  Land per-file cache identity first, then compare ref, blame, navigation, word
+                  diff.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P1</td>
+                <td><strong>Configurable worktree roots</strong></td>
+                <td>
+                  Natural extension of existing environment/project scoping and checkout policy.
+                </td>
+                <td>Medium</td>
+                <td>
+                  <a href="https://github.com/pingdotgg/t3code/pull/11747">T3 #11747</a>, active
+                </td>
+                <td>
+                  Environment default plus project override; canonicalize and enforce access-root
+                  policy.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P1</td>
+                <td><strong>Selection to chat / side chat</strong></td>
+                <td>Complements existing context chips, side chats, and new-thread setup.</td>
+                <td>Medium</td>
+                <td>
+                  <a href="https://github.com/Emanuele-web04/synara/pull/1130">Synara #1130</a>,
+                  merged
+                </td>
+                <td>
+                  Add text-selection toolbar with quoted context and failure-safe mini composer.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P1</td>
+                <td><strong>Desktop/web first-run onboarding</strong></td>
+                <td>
+                  Ryco has many providers and connection modes but no product-wide first-run guide.
+                </td>
+                <td>Large</td>
+                <td>
+                  <a href="https://github.com/Emanuele-web04/synara/pull/1031">Synara #1031</a>,
+                  merged
+                </td>
+                <td>
+                  Provider discovery/sign-in, project creation, concise tour; keep trust onboarding
+                  separate.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P1</td>
+                <td><strong>Terminal backpressure and deep replay benchmark</strong></td>
+                <td>
+                  Ryco already bounds history/output; the question is slow-client behavior and
+                  incremental replay.
+                </td>
+                <td>Medium</td>
+                <td>
+                  <a href="https://github.com/pingdotgg/t3code/pull/9027">T3 #9027</a>, heavily
+                  reviewed
+                </td>
+                <td>
+                  Measure first; add pause/resume and ranged replay only where current queues fail.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P1</td>
+                <td><strong>Persistent multi-thread split panes</strong></td>
+                <td>
+                  High-value for parallel agents; can reuse existing ChatView and sidebar drag data.
+                </td>
+                <td>Large</td>
+                <td>
+                  <a href="https://github.com/pingdotgg/t3code/pull/10783">T3 #10783</a>, 104 review
+                  comments
+                </td>
+                <td>
+                  Prototype a binary pane tree; cap at 2×2; mount only focused global listeners.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P2</td>
+                <td><strong>Automation center</strong></td>
+                <td>
+                  Ryco has Agent Control automations, but not user-facing cron/heartbeat scheduling
+                  and triage.
+                </td>
+                <td>XL</td>
+                <td>
+                  <a href="https://github.com/Porabuild/Poracode/pull/583">Poracode #583</a> draft;
+                  Synara shipped scheduling
+                </td>
+                <td>
+                  Design durable runs, unread/failed triage, retry/cancel, provider selection,
+                  completion policy.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P2</td>
+                <td><strong>Project memory with curation</strong></td>
+                <td>
+                  Could make long-running projects meaningfully better; requires strong provenance
+                  and privacy.
+                </td>
+                <td>XL</td>
+                <td>
+                  <a href="https://github.com/Emanuele-web04/synara/pull/1148">Synara #1148</a>,
+                  clean and active
+                </td>
+                <td>
+                  Prototype opt-in typed memory with bounded recall, decay, provenance, pin/forget,
+                  poison-row isolation.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P2</td>
+                <td><strong>Mermaid rendering in Markdown</strong></td>
+                <td>Useful in plans and architecture discussions; isolated behind lazy loading.</td>
+                <td>Medium</td>
+                <td>
+                  <a href="https://github.com/pingdotgg/t3code/pull/9621">T3 #9621</a>, active
+                </td>
+                <td>
+                  Strict security mode, directive blocklist, serialized rendering, theme/source
+                  cache, code fallback.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P2</td>
+                <td><strong>Background task rail</strong></td>
+                <td>
+                  Ryco surfaces agents and liveness; detached shell/provider work can still look
+                  idle.
+                </td>
+                <td>Medium</td>
+                <td>
+                  <a href="https://github.com/Emanuele-web04/synara/pull/1082">Synara #1082</a>;
+                  <a href="https://github.com/Porabuild/Poracode/pull/675">Poracode #675</a>
+                </td>
+                <td>
+                  Model provider-neutral background-work state with stop controls and bounded
+                  snapshot retention.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P2</td>
+                <td><strong>Environment-local voice transcription</strong></td>
+                <td>
+                  Good remote workflow, but native packaging and model distribution are substantial.
+                </td>
+                <td>XL</td>
+                <td>
+                  <a href="https://github.com/pingdotgg/t3code/pull/8928">T3 #8928</a>, 107 review
+                  comments
+                </td>
+                <td>
+                  Wait for upstream stabilization; if pursued, keep capture platform-local and
+                  inference environment-owned.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P3</td>
+                <td><strong>Usage reserve/deficit pace</strong></td>
+                <td>
+                  Small enhancement to existing usage windows, but less important than accounting
+                  correctness.
+                </td>
+                <td>Small</td>
+                <td>
+                  <a href="https://github.com/pingdotgg/t3code/pull/11095">T3 #11095</a>, active
+                </td>
+                <td>
+                  Add only after multi-account dedupe and provider-specific usage accuracy are
+                  locked down.
+                </td>
+              </tr>
+              <tr>
+                <td class="priority">P3</td>
+                <td><strong>Thread image gallery</strong></td>
+                <td>Useful for visual workflows; Ryco already previews and expands media.</td>
+                <td>Medium</td>
+                <td>
+                  <a href="https://github.com/Porabuild/Poracode/pull/683">Poracode #683</a>, merged
+                </td>
+                <td>Consider a lightweight gallery index before adding another permanent dock.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section reveal" id="deep-dives">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Detailed notes</p>
+            <h2>How the best ideas should land.</h2>
+          </div>
+          <p class="section-intro">
+            The transferable value is usually a behavioral contract and a failure model—not the
+            exact component tree or storage format used by a competitor.
+          </p>
+        </div>
+
+        <div class="deep-grid">
+          <article class="deep-card">
+            <div class="tag-row">
+              <span class="tag green">P0</span><span class="tag">Export</span>
+            </div>
+            <h3>Deterministic thread export</h3>
+            <p class="label">Borrow</p>
+            <ul>
+              <li>Thread action in header/sidebar; no provider API call.</li>
+              <li>Metadata header, role-labeled messages, safe filename, local save.</li>
+              <li>Pure serializer with snapshot/unit coverage.</li>
+            </ul>
+            <p class="label">Improve for Ryco</p>
+            <ul>
+              <li>
+                Include provider instance, model, timestamps, worktree/branch, and linked work
+                items.
+              </li>
+              <li>Condense tool calls and approvals rather than dumping raw event payloads.</li>
+              <li>Make output stable across live replay and paginated history.</li>
+            </ul>
+            <p class="label">Evidence</p>
+            <p>
+              <a href="https://github.com/pingdotgg/t3code/pull/11726">T3 #11726</a>; Ryco feature
+              spec already present.
+            </p>
+          </article>
+
+          <article class="deep-card">
+            <div class="tag-row">
+              <span class="tag green">P0</span><span class="tag">Editor</span>
+            </div>
+            <h3>Autosave without losing trust</h3>
+            <p class="label">Borrow</p>
+            <ul>
+              <li>
+                Save after roughly 400 ms idle; share one draft across preview/full/diff editors.
+              </li>
+              <li>Drain in-flight writes before file/page navigation and prompt submission.</li>
+              <li>Pause automatic retry after conflicts; keep the user’s draft intact.</li>
+            </ul>
+            <p class="label">Ryco substrate</p>
+            <p>
+              <code>PreviewFileEditSession.ts</code> already tracks saved contents, file version,
+              encoding, line endings, saving/error/conflict states, reload, and discard. That makes
+              this an extension rather than a rewrite.
+            </p>
+            <p class="label">Guardrails</p>
+            <p>
+              Separate Reload, Discard, and Overwrite; never silently overwrite after a disk version
+              mismatch.
+            </p>
+          </article>
+
+          <article class="deep-card wide">
+            <div class="tag-row">
+              <span class="tag blue">P1</span><span class="tag">Review</span>
+            </div>
+            <h3>Review should answer “what changed, why, and against what?”</h3>
+            <p>
+              Synara’s merged #561 and T3’s active #11256 converge on a richer review workspace. The
+              right Ryco cut is smaller than either combined PR.
+            </p>
+            <div class="callout-grid">
+              <div>
+                <p class="label">Phase A: performance and navigation</p>
+                <ul>
+                  <li>
+                    Key parsed files by their own patch segment so an edit in one file does not
+                    remount all files.
+                  </li>
+                  <li>
+                    Add next/previous changed-file commands, visible-file synchronization, and
+                    gutter markers.
+                  </li>
+                  <li>Enable word-level intra-line highlights where Pierre supports them.</li>
+                </ul>
+              </div>
+              <div>
+                <p class="label">Phase B: investigation</p>
+                <ul>
+                  <li>
+                    Compare working tree with an arbitrary branch or commit, using merge-base for
+                    branch comparisons.
+                  </li>
+                  <li>Click a supported diff line to request blame against the displayed base.</li>
+                  <li>Remember comparison scope per repository, not globally.</li>
+                </ul>
+              </div>
+              <div>
+                <p class="label">Phase C: staging</p>
+                <ul>
+                  <li>Review Staged and Unstaged independently.</li>
+                  <li>Stage files or hunks only after stale index/HEAD/branch checks.</li>
+                  <li>Keep later agent edits visible against the index.</li>
+                </ul>
+              </div>
+              <div>
+                <p class="label">Do not duplicate</p>
+                <ul>
+                  <li>GitHub viewed-state is already shipped across Ryco web/mobile/server.</li>
+                  <li>Occurrence search and click-to-editor already exist.</li>
+                  <li>Basic in-app editing and version conflicts already exist.</li>
+                </ul>
+              </div>
+            </div>
+          </article>
+
+          <article class="deep-card">
+            <div class="tag-row">
+              <span class="tag blue">P1</span><span class="tag">Worktrees</span>
+            </div>
+            <h3>Configurable roots must remain policy-bound.</h3>
+            <ul>
+              <li>Environment default; optional project override; reset means inherit.</li>
+              <li>Expand <code>~/</code> server-side and canonicalize before validation.</li>
+              <li>Existing worktrees stay registered after a preference change.</li>
+              <li>Explicit checkout paths continue to win for imported/adopted worktrees.</li>
+              <li>
+                In restricted mode, reject paths outside <code>workspaceAccessRoot</code>; never let
+                a setting bypass hosted mutation ownership.
+              </li>
+            </ul>
+            <p class="label">Local delta</p>
+            <p>
+              Ryco currently exposes app-managed or project-metadata worktree placement, not a
+              user-selected base directory.
+            </p>
+          </article>
+
+          <article class="deep-card">
+            <div class="tag-row">
+              <span class="tag blue">P1</span><span class="tag">Terminal</span>
+            </div>
+            <h3>Benchmark the terminal before changing it.</h3>
+            <p>
+              Ryco already has byte/line-bounded scrollback, a 2 MiB history ceiling, persisted
+              terminal logs, and bounded pending process output. T3 #9027 is still valuable as a
+              test matrix.
+            </p>
+            <ul>
+              <li>Slow WebSocket/client cannot grow an unbounded queue.</li>
+              <li>PTY pauses and resumes without losing exit ordering.</li>
+              <li>Extended history is requested incrementally rather than sent on every attach.</li>
+              <li>Replay plus new live bytes remain ordered across resets and reconnects.</li>
+              <li>Alternate-screen/DEC modes restore after compaction and server restart.</li>
+            </ul>
+          </article>
+
+          <article class="deep-card">
+            <div class="tag-row">
+              <span class="tag yellow">P2</span><span class="tag">Memory</span>
+            </div>
+            <h3>Project memory needs explicit curation.</h3>
+            <p>
+              Synara #1148 is the strongest active product bet: 60 commits, clean merge state, and a
+              bounded service design. The attractive parts are typed memory, decay, provenance,
+              pin/affirm/forget, FTS, idempotent receipts, and poison-row isolation.
+            </p>
+            <p class="label">Ryco conditions</p>
+            <ul>
+              <li>Opt-in per project and provider-neutral.</li>
+              <li>
+                Never ingest credentials, raw tool outputs, hidden instructions, or private Hub
+                metadata.
+              </li>
+              <li>Show exactly what was recalled into a turn.</li>
+              <li>Bound write size, row count, recall count, and maintenance work.</li>
+              <li>Support export and complete deletion before automatic memory is enabled.</li>
+            </ul>
+          </article>
+
+          <article class="deep-card">
+            <div class="tag-row">
+              <span class="tag yellow">P2</span><span class="tag">Scheduling</span>
+            </div>
+            <h3>Automations are an orchestration feature, not a timer UI.</h3>
+            <p>
+              Poracode #583 proposes cron, heartbeat, completion policies, persisted results,
+              MCP/IPC/ remote/mobile control, and unread/archive/retry triage. Synara has already
+              shipped exact provider/model selection for agent-authored automations.
+            </p>
+            <ul>
+              <li>Persist logical run identity and receipts before dispatch.</li>
+              <li>
+                Revalidate provider availability, model options, workspace, and mutation lease at
+                run time.
+              </li>
+              <li>Separate recurring heartbeat follow-up from standalone scheduled work.</li>
+              <li>Skip/quarantine corrupt rows instead of stopping the scheduler.</li>
+              <li>
+                Surface only actionable changes by default; unchanged monitors should stay quiet.
+              </li>
+            </ul>
+          </article>
+
+          <article class="deep-card">
+            <div class="tag-row">
+              <span class="tag blue">P1</span><span class="tag">Onboarding</span>
+            </div>
+            <h3>Guide first use without conflating trust setup.</h3>
+            <p>
+              Synara #1031 covers provider discovery, inline sign-in, theme, project creation, and a
+              feature tour. Ryco should keep its security-critical Hub/native trust flows
+              authoritative and separate, while adding a short product onboarding for desktop/local
+              web.
+            </p>
+            <ul>
+              <li>Detect installed providers and show live auth/version status.</li>
+              <li>Offer project creation/drop before landing in an empty shell.</li>
+              <li>Allow replay from Settings.</li>
+              <li>
+                Persist completion locally first; do not let a server reset unexpectedly reopen it.
+              </li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="section reveal" id="watchlist">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Open PR watchlist</p>
+            <h2>Active signals worth following.</h2>
+          </div>
+          <p class="section-intro">
+            “Activity” below is a snapshot of issue-thread comments, inline review comments, and
+            commits reported by GitHub on 14 September 2026. A large cumulative stacked diff can
+            inflate size; merge state can change after this report.
+          </p>
+        </div>
+
+        <div class="filters" role="group" aria-label="Filter pull requests">
+          <button class="filter-button" data-filter="all" aria-pressed="true">All</button>
+          <button class="filter-button" data-filter="t3" aria-pressed="false">T3 Code</button>
+          <button class="filter-button" data-filter="poracode" aria-pressed="false">
+            Poracode
+          </button>
+          <button class="filter-button" data-filter="synara" aria-pressed="false">Synara</button>
+          <button class="filter-button" data-filter="heavy" aria-pressed="false">
+            Heavy activity
+          </button>
+          <button class="filter-button" data-filter="stacked" aria-pressed="false">Stacked</button>
+          <input
+            class="search-input"
+            id="pr-search"
+            type="search"
+            placeholder="Search title or note"
+            aria-label="Search pull requests"
+          />
+        </div>
+
+        <div class="pr-list" id="pr-list">
+          <article class="pr-row" data-repo="t3" data-flags="heavy stacked">
+            <div class="pr-repo">T3 Code<br />#2829</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/2829"
+                >New orchestrator</a
+              >
+              <p class="pr-note">
+                Foundation branch for many dependent PRs. Extremely active, but currently
+                conflicting and too broad to port. Use it as architecture/replay test evidence.
+              </p>
+              <div class="tag-row">
+                <span class="tag red">Conflicting</span><span class="tag lavender">Stack root</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>51</strong><br />comments</span
+              ><span><strong>963</strong><br />review</span
+              ><span><strong>442</strong><br />commits</span
+              ><span><strong>1,242</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="heavy">
+            <div class="pr-repo">T3 Code<br />#11256</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/11256"
+                >Edit code and stage reviewed changes</a
+              >
+              <p class="pr-note">
+                The most relevant active review PR: PR/local editing, staged/unstaged separation,
+                hunks, stale index/HEAD checks, comments, and commit/push.
+              </p>
+              <div class="tag-row">
+                <span class="tag red">Conflicting</span
+                ><span class="tag blue">High product value</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>34</strong><br />comments</span
+              ><span><strong>101</strong><br />review</span
+              ><span><strong>37</strong><br />commits</span
+              ><span><strong>86</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="heavy">
+            <div class="pr-repo">T3 Code<br />#10783</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/10783"
+                >Drag-and-drop split thread panes</a
+              >
+              <p class="pr-note">
+                Persistent binary pane tree, 2×2 depth cap, per-window layouts, CSS-variable
+                resizing, and background panes with global listeners disabled.
+              </p>
+              <div class="tag-row">
+                <span class="tag red">Conflicting</span><span class="tag">Large</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>9</strong><br />comments</span
+              ><span><strong>104</strong><br />review</span
+              ><span><strong>23</strong><br />commits</span
+              ><span><strong>32</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="heavy">
+            <div class="pr-repo">T3 Code<br />#9027</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/9027"
+                >Stream terminal output and history</a
+              >
+              <p class="pr-note">
+                Bounded PTY batches, pause/resume, durable append history, deeper incremental
+                scrollback, ordered reset/live replay. Clean merge state.
+              </p>
+              <div class="tag-row">
+                <span class="tag green">Clean</span><span class="tag blue">Reliability</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>11</strong><br />comments</span
+              ><span><strong>98</strong><br />review</span
+              ><span><strong>11</strong><br />commits</span
+              ><span><strong>41</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="heavy">
+            <div class="pr-repo">T3 Code<br />#8928</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/8928"
+                >Environment-local voice transcription</a
+              >
+              <p class="pr-note">
+                Moves transcription inference to the environment server while clients retain
+                microphone capture; web and desktop share one path.
+              </p>
+              <div class="tag-row">
+                <span class="tag green">Clean</span><span class="tag yellow">WIP label</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>8</strong><br />comments</span
+              ><span><strong>107</strong><br />review</span
+              ><span><strong>55</strong><br />commits</span
+              ><span><strong>57</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="heavy">
+            <div class="pr-repo">T3 Code<br />#7353</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/7353"
+                >Persistent design canvas</a
+              >
+              <p class="pr-note">
+                Ambitious desktop-only visual editing and annotation surface. Interesting
+                differentiator, but broad and conflicting; a later-stage bet for Ryco.
+              </p>
+              <div class="tag-row">
+                <span class="tag red">Conflicting</span
+                ><span class="tag yellow">Strategic bet</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>21</strong><br />comments</span
+              ><span><strong>109</strong><br />review</span
+              ><span><strong>35</strong><br />commits</span
+              ><span><strong>50</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="heavy">
+            <div class="pr-repo">T3 Code<br />#7721</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/7721"
+                >Mark pull-request files viewed</a
+              >
+              <p class="pr-note">
+                Very active cross-provider design. Ryco already ships the GitHub version—including
+                changed-since-viewed and hide-viewed—so this is parity evidence, not backlog.
+              </p>
+              <div class="tag-row">
+                <span class="tag green">Ryco already</span><span class="tag">Clean</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>14</strong><br />comments</span
+              ><span><strong>202</strong><br />review</span
+              ><span><strong>82</strong><br />commits</span
+              ><span><strong>65</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="">
+            <div class="pr-repo">T3 Code<br />#11747</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/11747"
+                >Customize worktree locations</a
+              >
+              <p class="pr-note">
+                Environment default plus project override, absolute and home-relative paths,
+                existing worktrees preserved. Recent and review-active.
+              </p>
+              <div class="tag-row">
+                <span class="tag yellow">Blocked by review</span
+                ><span class="tag green">Recommended</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>4</strong><br />comments</span
+              ><span><strong>18</strong><br />review</span
+              ><span><strong>4</strong><br />commits</span
+              ><span><strong>13</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="">
+            <div class="pr-repo">T3 Code<br />#9621</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/9621"
+                >Render Mermaid diagrams</a
+              >
+              <p class="pr-note">
+                Strict mode, directive blocklist, serialized global config, theme/source cache, lazy
+                chunks, and highlighted-source fallback.
+              </p>
+              <div class="tag-row">
+                <span class="tag yellow">Blocked by review</span><span class="tag">Medium</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>10</strong><br />comments</span
+              ><span><strong>2</strong><br />review</span
+              ><span><strong>17</strong><br />commits</span
+              ><span><strong>9</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="t3" data-flags="stacked">
+            <div class="pr-repo">T3 Code<br />#11585</div>
+            <div>
+              <a class="pr-title" href="https://github.com/pingdotgg/t3code/pull/11585"
+                >Skip corrupt scheduled-task rows</a
+              >
+              <p class="pr-note">
+                Small reliability layer stacked on the orchestration v2 branch. Useful if Ryco adds
+                durable scheduling: poison rows must not stop the scheduler.
+              </p>
+              <div class="tag-row">
+                <span class="tag lavender">Stacked</span><span class="tag green">Clean</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>2</strong><br />comments</span
+              ><span><strong>0</strong><br />review</span
+              ><span><strong>2</strong><br />commits</span
+              ><span><strong>2</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="poracode" data-flags="heavy">
+            <div class="pr-repo">Poracode<br />#725</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Porabuild/Poracode/pull/725"
+                >Poracode v2 architecture</a
+              >
+              <p class="pr-note">
+                Backend host, headless server, adaptive renderer, native apps, protocol v9, interest
+                subscriptions, and IPC/PTY backpressure. Huge draft; borrow patterns only.
+              </p>
+              <div class="tag-row">
+                <span class="tag yellow">Draft</span><span class="tag red">670k additions</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>1</strong><br />comment</span><span><strong>0</strong><br />review</span
+              ><span><strong>267</strong><br />commits</span
+              ><span><strong>3,717</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="poracode" data-flags="">
+            <div class="pr-repo">Poracode<br />#764</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Porabuild/Poracode/pull/764"
+                >Prevent duplicate project folders</a
+              >
+              <p class="pr-note">
+                Canonical folder identity plus a data-preserving duplicate repair migration. Ryco is
+                symlink-aware already; audit project-create concurrency and migration behavior.
+              </p>
+              <div class="tag-row">
+                <span class="tag yellow">Blocked by review</span
+                ><span class="tag blue">Reliability</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>1</strong><br />comment</span><span><strong>8</strong><br />review</span
+              ><span><strong>5</strong><br />commits</span
+              ><span><strong>61</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="poracode" data-flags="">
+            <div class="pr-repo">Poracode<br />#583</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Porabuild/Poracode/pull/583"
+                >Automation triage and completion policies</a
+              >
+              <p class="pr-note">
+                Broad scheduling proposal covering cron, heartbeats, persisted results, AI-evaluated
+                completion, unread/archive/retry, and every client bridge.
+              </p>
+              <div class="tag-row">
+                <span class="tag yellow">Draft</span><span class="tag red">Stale/conflicting</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>1</strong><br />comment</span><span><strong>0</strong><br />review</span
+              ><span><strong>1</strong><br />commit</span
+              ><span><strong>80</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="poracode" data-flags="">
+            <div class="pr-repo">Poracode<br />#584</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Porabuild/Poracode/pull/584"
+                >Unified command palette and project search</a
+              >
+              <p class="pr-note">
+                Combines commands, settings, files, and project content. Ryco has separate
+                command/settings/context search; consolidation is plausible after indexing and
+                keyboard behavior are measured.
+              </p>
+              <div class="tag-row">
+                <span class="tag yellow">Draft</span><span class="tag red">Stale/conflicting</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>1</strong><br />comment</span><span><strong>0</strong><br />review</span
+              ><span><strong>1</strong><br />commit</span
+              ><span><strong>52</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="poracode" data-flags="">
+            <div class="pr-repo">Poracode<br />#564</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Porabuild/Poracode/pull/564"
+                >Interrupt stale delegated agents after restart</a
+              >
+              <p class="pr-note">
+                Persist terminal interruption, prefer authoritative terminal remote snapshots, and
+                clear runtime-only events on stream reset/thread switch. Good restart audit
+                material.
+              </p>
+              <div class="tag-row">
+                <span class="tag yellow">Draft</span><span class="tag blue">Audit pattern</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>0</strong><br />comments</span
+              ><span><strong>0</strong><br />review</span><span><strong>1</strong><br />commit</span
+              ><span><strong>29</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="synara" data-flags="heavy">
+            <div class="pr-repo">Synara<br />#254</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Emanuele-web04/synara/pull/254"
+                >Multiple provider account instances</a
+              >
+              <p class="pr-note">
+                The most-discussed Synara PR. Ryco already has named provider instances with
+                independent homes/env/auth/model preferences; use only its security tests as
+                comparison.
+              </p>
+              <div class="tag-row">
+                <span class="tag red">Conflicting</span><span class="tag green">Ryco already</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>103</strong><br />comments</span
+              ><span><strong>208</strong><br />review</span
+              ><span><strong>136</strong><br />commits</span
+              ><span><strong>290</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="synara" data-flags="heavy">
+            <div class="pr-repo">Synara<br />#1150</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Emanuele-web04/synara/pull/1150"
+                >Attention-first Kanban and agent tools</a
+              >
+              <p class="pr-note">
+                Clean consolidated board: attention states, eight guarded MCP tools, send-as-goal,
+                input caps, and serialized board/chat races. Interesting, but Ryco should validate
+                demand before building a second work organizer.
+              </p>
+              <div class="tag-row">
+                <span class="tag green">Clean</span><span class="tag yellow">Product bet</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>7</strong><br />comments</span
+              ><span><strong>0</strong><br />review</span
+              ><span><strong>42</strong><br />commits</span
+              ><span><strong>48</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="synara" data-flags="heavy">
+            <div class="pr-repo">Synara<br />#1148</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Emanuele-web04/synara/pull/1148"
+                >Mind project memory</a
+              >
+              <p class="pr-note">
+                Clean and substantial: typed/decaying memory, FTS, provenance, revisions, bounded
+                recall, receipts, profile controls, and poison-row isolation.
+              </p>
+              <div class="tag-row">
+                <span class="tag green">Clean</span><span class="tag yellow">Strategic bet</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>7</strong><br />comments</span
+              ><span><strong>0</strong><br />review</span
+              ><span><strong>60</strong><br />commits</span
+              ><span><strong>47</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="synara" data-flags="heavy">
+            <div class="pr-repo">Synara<br />#1082</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Emanuele-web04/synara/pull/1082"
+                >Keep background commands visible</a
+              >
+              <p class="pr-note">
+                Tracks detached work across foreground completion and later turns, with elapsed
+                time, lifecycle snapshots, and stop controls.
+              </p>
+              <div class="tag-row">
+                <span class="tag red">Conflicting</span
+                ><span class="tag blue">Workflow clarity</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>9</strong><br />comments</span
+              ><span><strong>9</strong><br />review</span
+              ><span><strong>12</strong><br />commits</span
+              ><span><strong>30</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="synara" data-flags="stacked heavy">
+            <div class="pr-repo">Synara<br />#820–824, #780</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Emanuele-web04/synara/pull/820"
+                >Six-part Linux computer-control stack</a
+              >
+              <p class="pr-note">
+                Shared transport, approvals, leases, core runtime, KWin, nested KWin, then Hyprland.
+                Ryco already has computer use; mine this stack for Linux threat-model and
+                provisioning tests.
+              </p>
+              <div class="tag-row">
+                <span class="tag lavender">Explicit stack</span
+                ><span class="tag red">Cumulative diffs</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>44</strong><br />comments</span
+              ><span><strong>146</strong><br />review</span
+              ><span><strong>69</strong><br />commits</span><span><strong>6</strong><br />PRs</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="synara" data-flags="">
+            <div class="pr-repo">Synara<br />#816</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Emanuele-web04/synara/pull/816"
+                >Runtime trust and Electron hardening</a
+              >
+              <p class="pr-note">
+                Credential minimization for child processes, authenticated loopback ownership, Git
+                hook/fsmonitor suppression, and renderer navigation authority.
+              </p>
+              <div class="tag-row">
+                <span class="tag yellow">Draft</span><span class="tag blue">Security audit</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>3</strong><br />comments</span
+              ><span><strong>12</strong><br />review</span
+              ><span><strong>5</strong><br />commits</span
+              ><span><strong>31</strong><br />files</span>
+            </div>
+          </article>
+
+          <article class="pr-row" data-repo="synara" data-flags="">
+            <div class="pr-repo">Synara<br />#1163</div>
+            <div>
+              <a class="pr-title" href="https://github.com/Emanuele-web04/synara/pull/1163"
+                >Classify socket failures and recover RPC transport</a
+              >
+              <p class="pr-note">
+                Useful failure taxonomy and storm suppression. Do not transplant generic recovery
+                into Ryco’s hosted path: the hosted lifecycle owner must remain authoritative.
+              </p>
+              <div class="tag-row">
+                <span class="tag red">Conflicting</span
+                ><span class="tag yellow">Boundary caution</span>
+              </div>
+            </div>
+            <div class="activity">
+              <span><strong>6</strong><br />comments</span
+              ><span><strong>0</strong><br />review</span
+              ><span><strong>7</strong><br />commits</span
+              ><span><strong>7</strong><br />files</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section reveal" id="stacks">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Stacked PRs</p>
+            <h2>Review the layers, not cumulative diffs.</h2>
+          </div>
+          <p class="section-intro">
+            The most explicit stack is Synara’s Linux computer-control series. T3 also has a large
+            orchestrator root with dependent branches, plus feature stacks that intentionally target
+            <code>main</code> with cumulative diffs.
+          </p>
+        </div>
+
+        <article class="stack-card">
+          <h3>Synara Linux computer control</h3>
+          <p>
+            The authors state the merge order directly. Each PR targets <code>main</code>, so
+            GitHub’s ordinary diff includes its unmerged prerequisites; use the linked compare range
+            in each PR body to isolate the layer.
+          </p>
+          <div class="stack-flow" aria-label="Synara Linux computer control merge order">
+            <a class="stack-node" href="https://github.com/Emanuele-web04/synara/pull/820"
+              >#820 transport</a
+            >
+            <span class="stack-arrow">→</span>
+            <a class="stack-node" href="https://github.com/Emanuele-web04/synara/pull/821"
+              >#821 approvals</a
+            >
+            <span class="stack-arrow">→</span>
+            <a class="stack-node" href="https://github.com/Emanuele-web04/synara/pull/822"
+              >#822 core/leases</a
+            >
+            <span class="stack-arrow">→</span>
+            <a class="stack-node" href="https://github.com/Emanuele-web04/synara/pull/823"
+              >#823 KWin</a
+            >
+            <span class="stack-arrow">→</span>
+            <a class="stack-node" href="https://github.com/Emanuele-web04/synara/pull/824"
+              >#824 nested KWin</a
+            >
+            <span class="stack-arrow">→</span>
+            <a class="stack-node" href="https://github.com/Emanuele-web04/synara/pull/780"
+              >#780 Hyprland</a
+            >
+          </div>
+          <ul>
+            <li>
+              Best Ryco value: compositor discovery, exact prebuild matching, exclusive ownership,
+              per-session tokens, human-input guards, provision locks, cancellation, and
+              stale-credential rejection.
+            </li>
+            <li>
+              Do not copy the architecture wholesale: Ryco already has a native helper, leases,
+              approval UX, browser bridge, cursor, and emergency stop.
+            </li>
+            <li>
+              Optional macOS branch
+              <a href="https://github.com/Emanuele-web04/synara/pull/1010">#1010</a> branches after
+              the shared core and can be reviewed independently of the Linux backends.
+            </li>
+          </ul>
+        </article>
+
+        <article class="stack-card">
+          <h3>T3 orchestration v2 and dependent work</h3>
+          <p>
+            <a href="https://github.com/pingdotgg/t3code/pull/2829">#2829</a> is the 1,242-file
+            root. Active children target feature branches—for example scheduled-row quarantine
+            <a href="https://github.com/pingdotgg/t3code/pull/11585">#11585</a> targets
+            <code>t3code/codex-turn-mapping</code>, and several Swift parity PRs target the Swift
+            rebuild branch.
+          </p>
+          <ul>
+            <li>
+              Relevant patterns: provider-neutral event ingestion, receipts/replay, startup
+              settlement, bounded projections, and ownership held until cleanup finishes.
+            </li>
+            <li>
+              Not a direct Ryco port: Ryco already has an Effect-based orchestration engine and
+              provider runtime ingestion boundary.
+            </li>
+            <li>
+              Use individual leaf PRs as adversarial tests against Ryco rather than treating the
+              root diff as an implementation guide.
+            </li>
+          </ul>
+        </article>
+
+        <article class="stack-card">
+          <h3>T3 review and presentation stacks</h3>
+          <p>
+            T3 <a href="https://github.com/pingdotgg/t3code/pull/11256">#11256</a> is itself an
+            integration PR for a native GitHub stack. Earlier inline-context work explicitly listed
+            a review order before the merged
+            <a href="https://github.com/pingdotgg/t3code/pull/11265">#11265</a> umbrella.
+          </p>
+          <ul>
+            <li>
+              Take the review feature in separable slices: cache/navigation, compare/blame, then
+              staging/commit.
+            </li>
+            <li>
+              Keep structured context canonical across draft, queue, attachment upload, handoff, and
+              older-server fallback.
+            </li>
+            <li>
+              Do not accept a giant cumulative diff just because the final behavior is attractive.
+            </li>
+          </ul>
+        </article>
+      </section>
+
+      <section class="section reveal" id="releases">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Nightly and release scan</p>
+            <h2>What recently shipped.</h2>
+          </div>
+          <p class="section-intro">
+            This is the best evidence that a feature survived maintainer review and release
+            integration. It is also where packaging, replay, and migration failures become visible.
+          </p>
+        </div>
+
+        <div class="release-grid">
+          <article class="release-card">
+            <h3>T3 Code nightly 0.0.41</h3>
+            <p class="release-meta">260 commits ahead of stable 0.0.40</p>
+            <ul>
+              <li>
+                <strong>Review/workflow:</strong> multiple linked PRs, stack
+                navigation/merge/rebase, PR merge defaults, file drops into sidebar threads.
+              </li>
+              <li>
+                <strong>Streaming/performance:</strong> incremental Markdown and code highlighting,
+                stable completed-line DOM, huge-thread switch fixes, fewer terminal round trips.
+              </li>
+              <li>
+                <strong>Composer:</strong> queue during compaction, large pastes folded into
+                attachments, response streaming modes, question-answer attachments.
+              </li>
+              <li>
+                <strong>Worktrees:</strong> setup step progress/cancel and fallback when new
+                worktrees are unavailable.
+              </li>
+              <li>
+                <strong>Accessibility:</strong> each message exposed as a screen-reader heading.
+              </li>
+              <li>
+                <strong>Release reliability:</strong> self-contained CLI archives, cross-arch
+                parallel builds, WSL archive runtime, service-update compatibility fixes.
+              </li>
+            </ul>
+            <p>
+              <a
+                href="https://github.com/pingdotgg/t3code/compare/v0.0.40...v0.0.41-nightly.20260914.1707"
+                >Open complete comparison</a
+              >
+            </p>
+          </article>
+
+          <article class="release-card">
+            <h3>Poracode nightly 1.8.1</h3>
+            <p class="release-meta">25 commits ahead of stable 1.8.0</p>
+            <ul>
+              <li>Provider handoff transcript budget scales to the destination context window.</li>
+              <li>
+                Claude steering preserves turn lifecycle; cross-agent routing fallbacks persist.
+              </li>
+              <li>Follow-up queue is offered alongside steering.</li>
+              <li>Terminal instances survive thread/Home/Schedules/split-pane navigation.</li>
+              <li>Session-local MCP delivery and explicit native provider setup.</li>
+              <li>
+                OpenCode 2 structured runtime with recovery, forms, permissions, plugins, and
+                subagents.
+              </li>
+              <li>Packaging validation catches omitted runtime externals before release.</li>
+            </ul>
+            <p>
+              <a
+                href="https://github.com/Porabuild/Poracode/releases/tag/v1.8.1-nightly.202609131626"
+                >Open release notes</a
+              >
+            </p>
+          </article>
+
+          <article class="release-card">
+            <h3>Synara 0.8.4</h3>
+            <p class="release-meta">111 commits ahead of 0.8.3</p>
+            <ul>
+              <li>
+                Workspace/diff editing with conflict-safe autosave, blame, compare-ref, navigation,
+                and live refresh.
+              </li>
+              <li>
+                BetterWright browser automation, saved sessions/logins, embedded popups, and AppSnap
+                window capture.
+              </li>
+              <li>First-run setup and selection-to-chat/side/new-chat mini composer.</li>
+              <li>
+                Duplicate approval response reconciliation and pending Claude question recovery
+                across restart.
+              </li>
+              <li>
+                Lower streaming write amplification and memory, responsive dispatch under slow
+                subscribers.
+              </li>
+              <li>Exact provider/model options for agent-authored automations.</li>
+            </ul>
+            <p>
+              <a href="https://github.com/Emanuele-web04/synara/releases/tag/v0.8.4"
+                >Open release notes</a
+              >
+            </p>
+          </article>
+        </div>
+
+        <article class="stack-card" style="margin-top: 16px">
+          <h3>Reliability audits extracted from merged work</h3>
+          <div class="callout-grid">
+            <div>
+              <p class="label">Provider and interaction lifecycle</p>
+              <ul>
+                <li>
+                  Duplicate approval clicks/keys converge on one durable decision; an
+                  already-answered server race triggers refresh, not a raw invariant.
+                </li>
+                <li>
+                  Pending user questions become explicitly recoverable or expired after provider
+                  restart; dead callbacks must not remain answerable.
+                </li>
+                <li>Stopped OpenCode contexts must report inactive so session recovery can run.</li>
+                <li>
+                  Provider handoff preserves target provider settings and bounds imported history to
+                  its context window.
+                </li>
+              </ul>
+            </div>
+            <div>
+              <p class="label">Packaging and updates</p>
+              <ul>
+                <li>
+                  Build the production bundles, enumerate emitted runtime externals, and validate
+                  the clean installer stage in ordinary CI.
+                </li>
+                <li>
+                  Do not let package managers prune native dependencies shipped inside platform
+                  packages.
+                </li>
+                <li>Preserve legacy launcher entry points across self-update transitions.</li>
+                <li>Filter preview-only releases out of nightly changelog presentation.</li>
+              </ul>
+            </div>
+            <div>
+              <p class="label">Cross-platform details</p>
+              <ul>
+                <li>Parse version output with optional <code>v</code> prefixes.</li>
+                <li>Discover version-manager Node paths before WSL provider launch.</li>
+                <li>Avoid JS methods absent from the shipped Hermes runtime.</li>
+                <li>
+                  Do not expose a whole single pane as disabled through a drag library’s ARIA
+                  activator fallback.
+                </li>
+              </ul>
+            </div>
+            <div>
+              <p class="label">Ryco-specific caution</p>
+              <ul>
+                <li>Generic reconnect helpers must never race hosted lifecycle revalidation.</li>
+                <li>
+                  Provider/client recovery must not publish readiness from a stale environment,
+                  selection, or generation.
+                </li>
+                <li>
+                  Computer-use/browser credentials and captured documents stay outside ordinary
+                  transcript and diagnostic persistence.
+                </li>
+              </ul>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="section reveal" id="parity">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Already covered</p>
+            <h2>Do not rebuild what Ryco has.</h2>
+          </div>
+          <p class="section-intro">
+            Several competitor PRs are useful confirmation that Ryco’s direction is right, not proof
+            of a gap. The local code and documentation show these capabilities are already present.
+          </p>
+        </div>
+
+        <div class="parity-grid">
+          <article class="parity-item">
+            <h3>PR files marked viewed</h3>
+            <p>
+              GitHub-backed viewed state, hide-viewed, changed-since-viewed, separate state RPCs,
+              and native review controls already ship.
+            </p>
+          </article>
+          <article class="parity-item">
+            <h3>Named provider instances</h3>
+            <p>
+              Independent config, environment, auth identity, models, colors, hot reload, and
+              provider-scoped homes already exceed the core multiple-account proposals.
+            </p>
+          </article>
+          <article class="parity-item">
+            <h3>Queued messages and steering</h3>
+            <p>
+              Shared client-runtime queue state, reordering, delivery states, compatibility checks,
+              and steering are implemented.
+            </p>
+          </article>
+          <article class="parity-item">
+            <h3>Context handoff</h3>
+            <p>
+              Ryco has durable provider-neutral context handoff, inspection/export, idempotent
+              coordination, timeline markers, and failure/retry semantics.
+            </p>
+          </article>
+          <article class="parity-item">
+            <h3>Computer use</h3>
+            <p>
+              Native helper, background app/browser control, permission UI, app denial, cursor,
+              takeover, and emergency stop are designed and implemented.
+            </p>
+          </article>
+          <article class="parity-item">
+            <h3>Subagents and peer work</h3>
+            <p>
+              Provider-neutral subagent events, Agents panel, persistent thread coordination,
+              liveness, and restart/settlement tests are already substantial.
+            </p>
+          </article>
+          <article class="parity-item">
+            <h3>In-app editing</h3>
+            <p>
+              Pierre-based file editing, versioned writes, encoding/line-ending preservation,
+              conflict states, reload, discard, and save already exist. Autosave is the gap.
+            </p>
+          </article>
+          <article class="parity-item">
+            <h3>Source-control context</h3>
+            <p>
+              GitHub, GitLab, Forgejo, Bitbucket, Azure DevOps, and Jira items attach as structured
+              context with metadata and comments.
+            </p>
+          </article>
+          <article class="parity-item">
+            <h3>Remote and hosted lifecycle</h3>
+            <p>
+              Cross-node workspace, relay, E2EE, passkeys, node selection, and mutation-readiness
+              rules are more security-sensitive than generic reconnect patterns elsewhere.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section reveal" id="roadmap">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Suggested sequencing</p>
+            <h2>A practical four-wave roadmap.</h2>
+          </div>
+          <p class="section-intro">
+            Each wave creates user-visible value while preserving the option to stop. The first wave
+            is intentionally small and validates the report against real Ryco behavior.
+          </p>
+        </div>
+
+        <div class="roadmap">
+          <article class="roadmap-step">
+            <div class="roadmap-number"></div>
+            <div>
+              <h3>Focused wins and audits</h3>
+              <ul>
+                <li>Thread export to Markdown.</li>
+                <li>Provider skill-refresh invalidation regression.</li>
+                <li>Approval duplicate-response and pending-question recovery audit.</li>
+                <li>Release-stage runtime dependency validator audit.</li>
+              </ul>
+            </div>
+            <div class="roadmap-meta">Small changes<br />Low coupling<br />Immediate proof</div>
+          </article>
+
+          <article class="roadmap-step">
+            <div class="roadmap-number"></div>
+            <div>
+              <h3>Editing and worktree ergonomics</h3>
+              <ul>
+                <li>Conflict-safe editor autosave and write draining.</li>
+                <li>Environment/project worktree-root settings.</li>
+                <li>Selection-to-chat mini composer.</li>
+                <li>Optional Mermaid rendering behind a lazy boundary.</li>
+              </ul>
+            </div>
+            <div class="roadmap-meta">
+              Medium changes<br />Existing substrate<br />Cross-client review
+            </div>
+          </article>
+
+          <article class="roadmap-step">
+            <div class="roadmap-number"></div>
+            <div>
+              <h3>Review and terminal depth</h3>
+              <ul>
+                <li>Per-file diff identity and change navigation.</li>
+                <li>Compare-to-ref and line blame.</li>
+                <li>Staged/unstaged review and guarded hunk staging.</li>
+                <li>
+                  Terminal slow-client/backpressure measurements and only the fixes they justify.
+                </li>
+              </ul>
+            </div>
+            <div class="roadmap-meta">
+              Large surface<br />Performance-sensitive<br />Browser coverage
+            </div>
+          </article>
+
+          <article class="roadmap-step">
+            <div class="roadmap-number"></div>
+            <div>
+              <h3>Validate strategic bets</h3>
+              <ul>
+                <li>Persistent split panes.</li>
+                <li>Automation center.</li>
+                <li>Opt-in project memory.</li>
+                <li>Environment voice transcription and visual design workflows.</li>
+              </ul>
+            </div>
+            <div class="roadmap-meta">
+              Prototype first<br />Demand validation<br />New policy surfaces
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section reveal" id="method">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Method and sources</p>
+            <h2>How this report was built.</h2>
+          </div>
+          <p class="section-intro">
+            GitHub’s authenticated API/CLI supplied current PR and release metadata. The Ryco
+            workspace supplied the implementation baseline. Recommendations are original synthesis,
+            not copied code.
+          </p>
+        </div>
+
+        <div class="method-grid">
+          <div class="method-note">
+            <p>
+              The three repositories move quickly. Counts, mergeability, branches, and release heads
+              are a point-in-time snapshot from <strong>14 September 2026, Europe/Berlin</strong>.
+              “Heavy activity” is a signal, not a quality guarantee. Draft/conflicting PRs are
+              treated as research material until they merge and ship.
+            </p>
+            <p>
+              T3 Code had 1,183 open PRs, so the audit combined recently updated PRs, most-discussed
+              PRs, release comparisons, and targeted feature searches rather than pretending every
+              open diff received equal manual depth.
+            </p>
+          </div>
+          <div>
+            <p class="label">Primary sources</p>
+            <ul class="source-list">
+              <li><a href="https://github.com/pingdotgg/t3code">pingdotgg/t3code</a></li>
+              <li><a href="https://github.com/pingdotgg/t3code/pulls">T3 Code pull requests</a></li>
+              <li>
+                <a href="https://github.com/pingdotgg/t3code/releases/tag/v0.0.40"
+                  >T3 stable 0.0.40</a
+                >
+              </li>
+              <li>
+                <a
+                  href="https://github.com/pingdotgg/t3code/releases/tag/v0.0.41-nightly.20260914.1707"
+                  >T3 nightly 0.0.41 build 1707</a
+                >
+              </li>
+              <li><a href="https://github.com/Porabuild/Poracode">Porabuild/Poracode</a></li>
+              <li>
+                <a href="https://github.com/Porabuild/Poracode/pulls">Poracode pull requests</a>
+              </li>
+              <li>
+                <a href="https://github.com/Porabuild/Poracode/releases/tag/v1.8.0"
+                  >Poracode stable 1.8.0</a
+                >
+              </li>
+              <li>
+                <a
+                  href="https://github.com/Porabuild/Poracode/releases/tag/v1.8.1-nightly.202609131626"
+                  >Poracode nightly 1.8.1</a
+                >
+              </li>
+              <li><a href="https://github.com/Emanuele-web04/synara">Emanuele-web04/synara</a></li>
+              <li>
+                <a href="https://github.com/Emanuele-web04/synara/pulls">Synara pull requests</a>
+              </li>
+              <li>
+                <a href="https://github.com/Emanuele-web04/synara/releases/tag/v0.8.4"
+                  >Synara 0.8.4</a
+                >
+              </li>
+              <li>
+                <a href="https://github.com/Emanuele-web04/synara/compare/v0.8.3...v0.8.4"
+                  >Synara 0.8.3–0.8.4 comparison</a
+                >
+              </li>
+            </ul>
+            <p class="label">Local Ryco evidence sampled</p>
+            <p>
+              README and package roles; provider registry/adapters; orchestration ingestion and
+              decider; message queue and handoff state; file editor session; GitHub viewed-state
+              RPCs; terminal manager/history buffer; source-control docs; computer-use design;
+              worktree contracts and checkout policy; existing feature prompts and TODOs.
+            </p>
+            <p class="label">License note</p>
+            <p>
+              T3 Code and Synara report MIT licenses; Poracode reports Apache-2.0. This report
+              recommends reimplementing behavioral ideas in Ryco’s architecture. If code is copied,
+              preserve the applicable notices and attribution requirements.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        <p>
+          Prepared for Ryco from GitHub and local repository evidence. The HTML is self-contained,
+          printable, responsive, and does not load third-party scripts or fonts.
+        </p>
+      </footer>
+    </main>
+
+    <script>
+      const buttons = Array.from(document.querySelectorAll("[data-filter]"));
+      const rows = Array.from(document.querySelectorAll(".pr-row"));
+      const search = document.querySelector("#pr-search");
+      let activeFilter = "all";
+
+      function applyFilters() {
+        const query = (search?.value || "").trim().toLowerCase();
+        for (const row of rows) {
+          const repo = row.getAttribute("data-repo") || "";
+          const flags = row.getAttribute("data-flags") || "";
+          const categoryMatch =
+            activeFilter === "all" ||
+            repo === activeFilter ||
+            flags.split(/\s+/).includes(activeFilter);
+          const searchMatch = !query || (row.textContent || "").toLowerCase().includes(query);
+          row.hidden = !(categoryMatch && searchMatch);
+        }
+      }
+
+      for (const button of buttons) {
+        button.addEventListener("click", () => {
+          activeFilter = button.getAttribute("data-filter") || "all";
+          for (const candidate of buttons) {
+            candidate.setAttribute("aria-pressed", String(candidate === button));
+          }
+          applyFilters();
+        });
+      }
+
+      search?.addEventListener("input", applyFilters);
+
+      document.querySelectorAll("[data-disposition]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const selected = button.dataset.disposition;
+          document
+            .querySelectorAll("[data-disposition]")
+            .forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
+          document.querySelectorAll("[data-current-status]").forEach((row) => {
+            row.hidden = selected !== "all" && row.dataset.currentStatus !== selected;
+          });
+        });
+      });
+    </script>
+  </body>
+</html>

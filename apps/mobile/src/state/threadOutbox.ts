@@ -1,3 +1,4 @@
+import { hasRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import { mobileKV } from "../platform/kv";
 import type { DraftComposerFileAttachment } from "../lib/composerFiles";
 import { useMessageQueueStore } from "./messageQueueStore";
@@ -171,6 +172,10 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
   const grouped = groupQueuedThreadMessages(messages);
   for (const queue of Object.values(grouped)) {
     for (const message of queue) {
+      if (hasRetiredProjectMemory(message)) {
+        // Keep the original request available; do not retry it or erase its context.
+        break;
+      }
       const action = resolveThreadOutboxDeliveryAction(deps.readThreadDeliveryState(message));
       if (action === "wait") break; // preserve ordering within a thread
       if (action === "remove") {

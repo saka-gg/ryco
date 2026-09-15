@@ -1,8 +1,3 @@
-import { submitWithProjectMemory } from "../../projectMemory/dispatch.ts";
-import { registerMemoryDispatchAuthorization } from "../../projectMemory/dispatchAuthorization.ts";
-import type { ProjectMemoryServiceShape } from "../../projectMemory/ProjectMemoryService.ts";
-import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectId } from "@ryco/contracts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -941,74 +936,12 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
-  for (const path of ["ordinary", "handoff"] as const) {
-    it.effect(
-      `rejects ${path} recall when runtime is replaced after authorization before send`,
-      () =>
-        Effect.gen(function* () {
-          const provider = yield* ProviderService;
-          const threadId = asThreadId(`memory-${path}`);
-          const projectId = ProjectId.make(`memory-${path}`);
-          const original = yield* provider.startSession(threadId, {
-            threadId,
-            provider: CODEX_DRIVER,
-            providerInstanceId: codexInstanceId,
-            runtimeSessionId: RuntimeSessionId.make(`original-${path}`),
-            runtimeMode: "full-access",
-          });
-          const commandId = `memory-race-${path}`;
-          yield* registerMemoryDispatchAuthorization(commandId, {
-            scope: {},
-            threadId,
-            projectId,
-            authorize: Effect.void,
-          });
-          const memory = {
-            submitRecall: (claim, authorize, submit) =>
-              Effect.gen(function* () {
-                yield* authorize;
-                assert.equal(claim.runtime.runtimeSessionId, original.runtimeSessionId);
-                yield* provider
-                  .startFreshSession(threadId, {
-                    threadId,
-                    provider: CODEX_DRIVER,
-                    providerInstanceId: codexInstanceId,
-                    runtimeSessionId: RuntimeSessionId.make(`replacement-${path}`),
-                    runtimeMode: "full-access",
-                  })
-                  .pipe(Effect.orDie);
-                return yield* submit("synthetic recalled text");
-              }),
-          } satisfies Pick<ProjectMemoryServiceShape, "submitRecall">;
-          routing.codex.sendTurn.mockClear();
-          const result = yield* Effect.exit(
-            submitWithProjectMemory({
-              memory: Option.some(memory as ProjectMemoryServiceShape),
-              providers: provider,
-              engine: { dispatch: () => Effect.void } as unknown as OrchestrationEngineShape,
-              threadId,
-              commandId,
-              messageId: `message-${path}`,
-              recall: { projectId, references: [{ id: "entry", revision: 2 }] },
-              submit: (envelope, expectedRuntime) =>
-                provider.sendTurn({ threadId, input: envelope }, expectedRuntime),
-            }),
-          );
-          assert.isTrue(Exit.isFailure(result));
-          assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
-          assert.equal(
-            Option.getOrThrow(yield* provider.getSession(threadId)).runtimeSessionId,
-            `replacement-${path}`,
-          );
-        }),
-    );
-  }
   it.effect(
     "runtime replacement waits for guarded submission acceptance and cancellation releases the lock",
     () =>
       Effect.gen(function* () {
         const provider = yield* ProviderService;
-        const threadId = asThreadId("memory-serialized");
+        const threadId = asThreadId("guarded-serialized");
         const original = yield* provider.startSession(threadId, {
           threadId,
           provider: CODEX_DRIVER,
@@ -1027,7 +960,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         );
         const sending = yield* provider
           .sendTurn(
-            { threadId, input: "synthetic memory" },
+            { threadId, input: "guarded input" },
             {
               provider: original.provider,
               providerInstanceId: codexInstanceId,
@@ -1072,7 +1005,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
   it.effect("guarded sends never recover a missing runtime", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
-      const threadId = asThreadId("memory-no-recovery");
+      const threadId = asThreadId("guarded-no-recovery");
       const original = yield* provider.startSession(threadId, {
         threadId,
         provider: CODEX_DRIVER,
@@ -1084,7 +1017,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       routing.codex.sendTurn.mockClear();
       const result = yield* Effect.exit(
         provider.sendTurn(
-          { threadId, input: "synthetic memory" },
+          { threadId, input: "guarded input" },
           {
             provider: original.provider,
             providerInstanceId: codexInstanceId,

@@ -1,5 +1,3 @@
-import { ProjectMemoryError } from "@ryco/contracts";
-import { registerMemoryDispatchAuthorization } from "../projectMemory/dispatchAuthorization.ts";
 import { Effect, Option, Schema, Stream } from "effect";
 import { readAttachmentChunk } from "../attachmentRead.ts";
 import { clamp } from "effect/Number";
@@ -224,39 +222,12 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
         ORCHESTRATION_WS_METHODS.dispatchCommand,
         ownerEffect(
           ORCHESTRATION_WS_METHODS.dispatchCommand,
-          Effect.gen(function* () {
-            if (command.type === "thread.turn.start" && command.projectMemory) {
-              yield* registerMemoryDispatchAuthorization(command.commandId, {
-                scope: ctx.memoryDispatchScope,
-                threadId: command.threadId,
-                projectId: command.projectMemory.projectId,
-                authorize: Effect.suspend(() =>
-                  ctx.isMemoryDispatchScopeActive()
-                    ? ownerEffect(ORCHESTRATION_WS_METHODS.dispatchCommand, Effect.void).pipe(
-                        Effect.mapError(
-                          () =>
-                            new ProjectMemoryError({
-                              reason: "unavailable",
-                              message: "Memory recall is no longer authorized.",
-                            }),
-                        ),
-                      )
-                    : Effect.fail(
-                        new ProjectMemoryError({
-                          reason: "unavailable",
-                          message: "Memory recall connection expired. Review and send again.",
-                        }),
-                      ),
-                ),
-              });
-            }
-            return yield* applyOrchestrationCommand({
-              command,
-              normalize: normalizeDispatchCommand,
-              dispatch: dispatchNormalizedCommand,
-              projections: projectionSnapshotQuery,
-              terminals: terminalManager,
-            });
+          applyOrchestrationCommand({
+            command,
+            normalize: normalizeDispatchCommand,
+            dispatch: dispatchNormalizedCommand,
+            projections: projectionSnapshotQuery,
+            terminals: terminalManager,
           }).pipe(
             Effect.mapError((cause) =>
               Schema.is(OrchestrationDispatchCommandError)(cause)

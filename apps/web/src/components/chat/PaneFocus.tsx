@@ -8,12 +8,12 @@ import {
   type EffectCallback,
 } from "react";
 
-/** Shared input boundary for chat, selection, voice and gallery surfaces (including portals).
+/** Shared input boundary for chat, selection and voice surfaces (including portals).
  * Outside a split the ordinary thread view remains the input owner. This is presentation
  * ownership only; it must never grant RPC or mutation authority.
  */
 export const PaneFocusContext = createContext(true);
-/** Null outside the pane shell. Additive scope for gallery/memory/composer actions. */
+/** Null outside the pane shell. Additive scope for composer actions. */
 export const PaneThreadContext = createContext<ScopedThreadRef | null>(null);
 export function usePaneThreadRef() {
   return useContext(PaneThreadContext);

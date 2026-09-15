@@ -1,8 +1,7 @@
-import { useProjectMemory } from "../projectMemory/useProjectMemory";
 import {
-  ProjectMemoryScreen,
-  ProjectMemoryNativeRecallPreview,
-} from "../projectMemory/ProjectMemoryScreen";
+  hasRetiredProjectMemory,
+  REMOVED_PROJECT_MEMORY_MESSAGE,
+} from "@ryco/shared/retiredFeatures";
 import { useStore as useZustandStore } from "zustand";
 import { useAtomValue } from "@effect/atom-react";
 import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
@@ -17,7 +16,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { Modal, Pressable, ScrollView, View } from "react-native";
+import { Pressable, ScrollView, View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 
 import { serverConfigAtom } from "@ryco/client-runtime/rpc";
@@ -253,7 +252,6 @@ export function ThreadDetailScreen(props: {
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
   const [sendError, setSendError] = useState<string | null>(null);
   const [actionsVisible, setActionsVisible] = useState(false);
-  const [memoryVisible, setMemoryVisible] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [policyBusy, setPolicyBusy] = useState(false);
@@ -383,13 +381,6 @@ export function ThreadDetailScreen(props: {
   const environmentRow =
     environments.find((environment) => environment.environmentId === environmentId) ?? null;
   const nodeLabel = environmentRow?.label ?? null;
-  const projectMemory = useProjectMemory(
-    environmentId,
-    thread?.projectId ?? null,
-    environmentRow?.mutationReady === true && environmentRow?.shellCurrent === true,
-    String(threadId),
-  );
-
   const settlementModel = useMemo(() => {
     if (!sidebarThread || !environmentRow) return null;
     return buildThreadInbox({
@@ -620,12 +611,8 @@ export function ThreadDetailScreen(props: {
 
   const getSteerEligibility = useCallback(
     (message: QueuedThreadMessage) => {
-      if (message.projectMemory)
-        return {
-          allowed: false as const,
-          reason:
-            "Selected memory must be sent as a new turn after review; it cannot steer an active turn.",
-        };
+      if (hasRetiredProjectMemory(message))
+        return { allowed: false as const, reason: REMOVED_PROJECT_MEMORY_MESSAGE };
       const activeSelection = thread?.modelSelection;
       const providerInstanceId = thread?.session?.providerInstanceId ?? activeSelection?.instanceId;
       const provider = providers.find((entry) => entry.instanceId === providerInstanceId);
@@ -987,11 +974,6 @@ export function ThreadDetailScreen(props: {
       return false;
     }
 
-    const recall = projectMemory?.reviewedRecall();
-    if (projectMemory?.getSnapshot().references.length && !recall) {
-      setSendError("Review selected project memories before sending.");
-      return false;
-    }
     const tokenMode = currentThread.tokenMode ?? "balanced";
     const threadBusy = currentThread.latestTurn?.state === "running";
     // Wave 3a: the socket opens one RTT before the live shell snapshot lands,
@@ -1007,7 +989,6 @@ export function ThreadDetailScreen(props: {
     try {
       const sent = await sendThreadTurn(
         {
-          ...(recall ? { projectMemory: recall } : {}),
           environmentId,
           threadId,
           text,
@@ -1026,7 +1007,6 @@ export function ThreadDetailScreen(props: {
           enqueue: enqueueThreadOutboxMessage,
           dispatch: () =>
             executeSendTurn({
-              ...(recall ? { projectMemory: recall } : {}),
               api: ensureEnvironmentApi(environmentId),
               thread: {
                 threadId,
@@ -1063,7 +1043,6 @@ export function ThreadDetailScreen(props: {
       // The composer clears its own text on success; the attachment rows live
       // here, so a delivered turn (dispatch or safe enqueue) clears them too.
       if (sent !== false) {
-        projectMemory?.invalidate();
         setAttachments([]);
         setAttachmentError(null);
       }
@@ -1268,40 +1247,6 @@ export function ThreadDetailScreen(props: {
         />
       ) : null}
 
-      {projectMemory ? (
-        <View className="px-3">
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Project memory"
-            className="min-h-11 justify-center"
-            onPress={() => setMemoryVisible(true)}
-          >
-            <Text className="text-foreground-secondary">Project memory</Text>
-          </Pressable>
-          <ProjectMemoryNativeRecallPreview controller={projectMemory} />
-          <Modal
-            visible={memoryVisible}
-            animationType="slide"
-            presentationStyle="pageSheet"
-            onRequestClose={() => setMemoryVisible(false)}
-          >
-            <View className="flex-1 bg-screen">
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Done with project memory"
-                className="min-h-11 justify-center px-4"
-                onPress={() => setMemoryVisible(false)}
-              >
-                <Text className="text-foreground">Done</Text>
-              </Pressable>
-              <ProjectMemoryScreen
-                key={`${environmentId}:${threadId}`}
-                controller={projectMemory}
-              />
-            </View>
-          </Modal>
-        </View>
-      ) : null}
       <ThreadComposer
         onOpenSideChat={
           selectedModelSelection

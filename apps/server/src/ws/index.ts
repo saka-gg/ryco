@@ -1,4 +1,3 @@
-import { makeProjectMemoryHandlers } from "./projectMemoryRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option } from "effect";
@@ -28,7 +27,6 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeAgentControlHandlers(ctx),
       ...makeAutomationCentreHandlers(ctx),
       ...makeOrchestrationHandlers(ctx),
-      ...makeProjectMemoryHandlers(ctx),
       ...makeContextHandoffHandlers(ctx),
       ...makeProviderHandlers(ctx),
       ...makeSideQuestionHandlers(ctx),

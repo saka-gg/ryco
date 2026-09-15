@@ -51,15 +51,13 @@ worker, authentication or hosted lifecycle change.
 - `usePaneCloseGuard(guard)`: retain presentation drafts while preventing an
   unsafe pane unmount. This does not grant mutation authority.
 
-Gallery, explicit memory selection and voice integrations should consume this
+Pane-scoped integrations should consume this
 same boundary. Mount a modal within its pane's React subtree (portals retain
 context); use `open={paneFocused && requestedOpen}` and the existing accessible
 dialog primitive for focus trapping and Escape arbitration. Do not register a
 second global handler in a hidden/inactive modal. Existing dialog checks remain
 responsible for suppressing chat shortcuts while a modal owns input. Deferred
 focus restoration must check the current owner; never refocus an inactive pane.
-`ChatHeader.onOpenThreadImages` is an optional action only; gallery code is not
-imported here. Memory/voice feature state and dispatch semantics are unchanged.
 
 `previewNavigation.ts` supplies an additive rejection receipt from the existing
 file navigation guard. TanStack's navigation promise can remain pending when

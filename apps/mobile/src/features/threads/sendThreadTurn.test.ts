@@ -1,4 +1,4 @@
-import type { EnvironmentId, ModelSelection, ProjectId, ThreadId } from "@ryco/contracts";
+import type { EnvironmentId, ModelSelection, ThreadId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -78,15 +78,4 @@ describe("sendThreadTurn", () => {
     expect(d.enqueue).not.toHaveBeenCalled();
     expect(result).toBe(false);
   });
-});
-
-it("queues content-free memory references for later server revalidation", async () => {
-  const d = deps();
-  const projectMemory = {
-    projectId: "project-a" as ProjectId,
-    references: [{ id: "entry", revision: 7 }],
-  };
-  expect(await sendThreadTurn(context({ threadBusy: true, projectMemory }), d.seams)).toBe(true);
-  expect(d.enqueue.mock.calls[0]?.[0].projectMemory).toEqual(projectMemory);
-  expect(d.dispatch).not.toHaveBeenCalled();
 });
