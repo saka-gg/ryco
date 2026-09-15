@@ -2705,6 +2705,11 @@ const make = Effect.gen(function* () {
           const payload = yield* pendingCallbackInvalidation({
             threadId: thread.id,
             ...request,
+            source: {
+              runtimeSessionId: event.runtimeSessionId,
+              activities: detailedThread?.activities ?? [],
+              turnId: request.turnId,
+            },
             detail: "the provider turn ended or was superseded",
           });
           if (!payload) continue;

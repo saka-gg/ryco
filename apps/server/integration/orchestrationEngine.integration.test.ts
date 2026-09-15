@@ -1374,6 +1374,7 @@ it.live("forwards claudeAgent approval responses to the provider session", () =>
         yield* seedProjectAndThread(harness);
 
         yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+          // The provider must keep its turn open until this callback is answered.
           completeTurn: false,
           events: [
             {

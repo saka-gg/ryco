@@ -8,6 +8,8 @@ import type {
   ApprovalResponseIdentity,
   OrchestrationCommand,
   OrchestrationSession,
+  OrchestrationThreadActivity,
+  RuntimeSessionId,
 } from "@ryco/contracts";
 import { Effect, Layer, Option, Schema } from "effect";
 import type { ProjectionThreadUserInputRequest } from "../persistence/Services/ProjectionThreadUserInputRequests.ts";
@@ -226,6 +228,11 @@ export const pendingCallbackInvalidation = Effect.fn("pendingCallbackInvalidatio
     requestId: string;
     kind: "approval" | "user-input";
     detail: string;
+    source?: {
+      runtimeSessionId?: RuntimeSessionId | undefined;
+      activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "id" | "turnId">>;
+      turnId: string | null;
+    };
   }) {
     const lookup = { threadId: input.threadId, requestId: ApprovalRequestId.make(input.requestId) };
     const row =
@@ -235,6 +242,21 @@ export const pendingCallbackInvalidation = Effect.fn("pendingCallbackInvalidatio
             .getByRequestId(lookup)
             .pipe(Effect.map(Option.map(questionAsCallback)));
     if (Option.isNone(row) || row.value.status !== "pending") return null;
+    if (input.source) {
+      const identity = row.value.approvalIdentity;
+      // A lifecycle snapshot cannot redirect cleanup to a newer callback that
+      // reused the provider ID while ingestion was awaiting the durable row.
+      if (
+        !identity ||
+        identity.runtimeSessionId !== input.source.runtimeSessionId ||
+        (input.kind === "approval" && row.value.turnId !== input.source.turnId) ||
+        !input.source.activities.some(
+          (activity) =>
+            activity.id === identity.requestEventId && activity.turnId === input.source?.turnId,
+        )
+      )
+        return null;
+    }
     return {
       requestId: input.requestId,
       ...(row.value.approvalIdentity
