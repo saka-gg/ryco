@@ -1,4 +1,4 @@
-import type { ServerProviderRateLimitWindow } from "@ryco/contracts";
+import type { ServerProvider, ServerProviderRateLimitWindow } from "@ryco/contracts";
 const SHORT_WINDOW_MAX_MINUTES = 360;
 const WEEK_MINUTES = 7 * 24 * 60;
 const MONTH_MINUTES = 30 * 24 * 60;
@@ -15,15 +15,16 @@ const MONTH_TOLERANCE_MINUTES = 2 * 24 * 60;
  * wire — a future protocol revision could legitimately overshoot 100 and
  * the bar would render past its track without this guard.
  */
-export function clampUsedPercent(usedPercent: number): number {
-  if (!Number.isFinite(usedPercent)) return 0;
+export function clampUsedPercent(usedPercent: number): number | null {
+  if (!Number.isFinite(usedPercent)) return null;
   if (usedPercent < 0) return 0;
   if (usedPercent > 100) return 100;
   return usedPercent;
 }
 
-export function availablePercent(usedPercent: number): number {
-  return 100 - clampUsedPercent(usedPercent);
+export function availablePercent(usedPercent: number): number | null {
+  const used = clampUsedPercent(usedPercent);
+  return used === null ? null : 100 - used;
 }
 
 /**
@@ -60,4 +61,72 @@ export function describeRateLimitWindow(window: ServerProviderRateLimitWindow): 
   }
   const hours = Math.max(1, Math.round(minutes / 60));
   return { label: `${hours}h`, bucket: "other" };
+}
+
+/** A comparison of one reported allowance at its snapshot time; never a forecast. */
+export type RateLimitPace =
+  | { readonly status: "unavailable" }
+  | { readonly status: "quiet" }
+  | {
+      readonly status: "reserve" | "deficit";
+      readonly points: number;
+      readonly expectedUsedPercent: number;
+    };
+
+export function rateLimitPace(
+  window: ServerProviderRateLimitWindow,
+  checkedAt: string | undefined,
+  now: number,
+  available: boolean,
+): RateLimitPace {
+  const checked = checkedAt === undefined ? NaN : Date.parse(checkedAt);
+  const reset = (window.resetsAt ?? NaN) * 1000;
+  const duration = (window.windowDurationMins ?? NaN) * 60_000;
+  const used = window.usedPercent;
+  if (
+    !available ||
+    !Number.isFinite(now) ||
+    !Number.isFinite(checked) ||
+    checked <= 0 ||
+    checked > now ||
+    !Number.isFinite(reset) ||
+    reset <= now ||
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    !Number.isFinite(used) ||
+    used < 0 ||
+    used > 100
+  )
+    return { status: "unavailable" };
+  const elapsed = (duration - (reset - checked)) / duration;
+  if (elapsed < 0 || elapsed >= 1) return { status: "unavailable" };
+  const expectedUsedPercent = elapsed * 100;
+  const gap = used - expectedUsedPercent;
+  if (elapsed < 0.03 || Math.abs(gap) <= 2) return { status: "quiet" };
+  return {
+    status: gap < 0 ? "reserve" : "deficit",
+    points: Math.round(Math.abs(gap)),
+    expectedUsedPercent,
+  };
+}
+
+export function describeRateLimitPace(pace: RateLimitPace): string | null {
+  if (pace.status === "unavailable") return "Pace unavailable";
+  if (pace.status === "quiet") return null;
+  return `${pace.points} percentage points ${pace.status === "reserve" ? "below" : "above"} even pace · at last check`;
+}
+
+/** Shared qualification for retained snapshots, independent of transport implementation. */
+export function isRateLimitSnapshotAvailable(
+  provider: Pick<ServerProvider, "enabled" | "status" | "availability" | "auth"> | null | undefined,
+  connected: boolean,
+): boolean {
+  return (
+    connected &&
+    provider != null &&
+    provider.enabled &&
+    provider.status === "ready" &&
+    provider.availability !== "unavailable" &&
+    provider.auth.status === "authenticated"
+  );
 }
