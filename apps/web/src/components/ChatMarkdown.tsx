@@ -277,6 +277,19 @@ function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNo
   );
 }
 
+// Keep tier subscriptions below the stable Markdown component map. Replacing
+// that map on resize remounts every code block and discards copy/focus state.
+function MermaidFencePresentation({
+  children,
+  phoneFallback,
+}: {
+  children: ReactNode;
+  phoneFallback: ReactNode;
+}) {
+  const isPhoneTier = usePresentationTier() === "phone";
+  return isPhoneTier ? phoneFallback : children;
+}
+
 interface SuspenseShikiCodeBlockProps {
   className: string | undefined;
   code: string;
@@ -653,7 +666,6 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   searchHighlight,
 }: ChatMarkdownProps) {
   usePerfMark("ChatMarkdown");
-  const isPhoneTier = usePresentationTier() === "phone";
   const completedText = isStreaming ? "" : text;
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
@@ -862,7 +874,18 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
           );
         }
 
-        if (!isPhoneTier && isMermaidLanguage(extractFenceLanguage(codeBlock.className))) {
+        const highlightedCode = (
+          <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
+            <Suspense fallback={<pre {...props}>{children}</pre>}>
+              <SuspenseShikiCodeBlock
+                className={codeBlock.className}
+                code={codeBlock.code}
+                themeName={diffThemeName}
+              />
+            </Suspense>
+          </CodeHighlightErrorBoundary>
+        );
+        if (isMermaidLanguage(extractFenceLanguage(codeBlock.className))) {
           const fallback = (
             <PlainCodeBlock
               className={codeBlock.className}
@@ -872,37 +895,27 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
           );
           return (
             <MarkdownCodeBlock code={codeBlock.code}>
-              {isClosedMermaidFence(
-                completedText,
-                node?.position?.start.offset,
-                node?.position?.end.offset,
-              ) && isSupportedMermaidSource(codeBlock.code) ? (
-                <MermaidDiagram
-                  key={JSON.stringify([resolvedTheme, codeBlock.code])}
-                  source={codeBlock.code}
-                  theme={resolvedTheme}
-                  fallback={fallback}
-                />
-              ) : (
-                fallback
-              )}
+              <MermaidFencePresentation phoneFallback={highlightedCode}>
+                {isClosedMermaidFence(
+                  completedText,
+                  node?.position?.start.offset,
+                  node?.position?.end.offset,
+                ) && isSupportedMermaidSource(codeBlock.code) ? (
+                  <MermaidDiagram
+                    key={JSON.stringify([resolvedTheme, codeBlock.code])}
+                    source={codeBlock.code}
+                    theme={resolvedTheme}
+                    fallback={fallback}
+                  />
+                ) : (
+                  fallback
+                )}
+              </MermaidFencePresentation>
             </MarkdownCodeBlock>
           );
         }
 
-        return (
-          <MarkdownCodeBlock code={codeBlock.code}>
-            <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
-              <Suspense fallback={<pre {...props}>{children}</pre>}>
-                <SuspenseShikiCodeBlock
-                  className={codeBlock.className}
-                  code={codeBlock.code}
-                  themeName={diffThemeName}
-                />
-              </Suspense>
-            </CodeHighlightErrorBoundary>
-          </MarkdownCodeBlock>
-        );
+        return <MarkdownCodeBlock code={codeBlock.code}>{highlightedCode}</MarkdownCodeBlock>;
       },
     }),
     [
@@ -911,7 +924,6 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       environmentId,
       fileLinkParentSuffixByPath,
       isStreaming,
-      isPhoneTier,
       completedText,
       markdownFileLinkMetaByHref,
       resolvedTheme,

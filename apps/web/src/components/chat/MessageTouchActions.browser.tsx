@@ -390,26 +390,66 @@ describe("message touch actions", () => {
     expect(detailBlock.textContent).toBe(longDetail);
   });
 
-  it("keeps the code-block copy button always visible on phone and hover-revealed on desktop", async () => {
-    mounted = await render(<ChatMarkdown text={"```ts\nconst value = 1;\n```"} cwd={undefined} />);
+  it.each([
+    { language: "ts", source: "const value = 1;" },
+    { language: "mermaid", source: "flowchart LR\nA-->B" },
+  ])(
+    "keeps the $language code-block copy button always visible on phone and hover-revealed on desktop",
+    async ({ language, source }) => {
+      mounted = await render(
+        <ChatMarkdown text={`\`\`\`${language}\n${source}\n\`\`\``} cwd={undefined} />,
+      );
 
-    const copyButton = await vi.waitFor(() => {
-      const button = document.querySelector<HTMLButtonElement>(".chat-markdown-copy-button");
-      expect(button).not.toBeNull();
-      return button!;
-    });
-    expect(getComputedStyle(copyButton).opacity).toBe("1");
-    expect(getComputedStyle(copyButton).pointerEvents).toBe("auto");
+      const copyButton = await vi.waitFor(() => {
+        const button = document.querySelector<HTMLButtonElement>(".chat-markdown-copy-button");
+        expect(button).not.toBeNull();
+        return button!;
+      });
+      expect(getComputedStyle(copyButton).opacity).toBe("1");
+      expect(getComputedStyle(copyButton).pointerEvents).toBe("auto");
+      expect(document.querySelector(".chat-markdown-mermaid img")).toBeNull();
 
-    await page.viewport(1_280, 720);
-    await vi.waitFor(() => {
-      expect(getPresentationTier()).toBe("desktop");
-    });
-    await parkPointer(4, 4);
-    await vi.waitFor(() => {
-      expect(getComputedStyle(copyButton).opacity).toBe("0");
-    });
-  });
+      await page.viewport(1_280, 720);
+      await vi.waitFor(() => {
+        expect(getPresentationTier()).toBe("desktop");
+      });
+      await parkPointer(4, 4);
+      await vi.waitFor(() => {
+        // A resize must preserve the actual control, not leave us inspecting a
+        // detached node whose computed opacity is the empty string.
+        expect(copyButton.isConnected).toBe(true);
+        expect(document.querySelector(".chat-markdown-copy-button")).toBe(copyButton);
+        expect(getComputedStyle(copyButton).opacity).toBe("0");
+        expect(getComputedStyle(copyButton).pointerEvents).toBe("none");
+      });
+      if (language === "mermaid") {
+        await expect.element(page.getByRole("img")).toBeVisible();
+      }
+      const block = copyButton.closest<HTMLElement>(".chat-markdown-codeblock")!;
+      const rect = block.getBoundingClientRect();
+      await parkPointer(rect.left + 10, rect.top + 10);
+      await vi.waitFor(() => {
+        expect(getComputedStyle(copyButton).opacity).toBe("1");
+        expect(getComputedStyle(copyButton).pointerEvents).toBe("auto");
+      });
+      copyButton.focus();
+      await parkPointer(4, 4);
+      expect(document.activeElement).toBe(copyButton);
+      expect(getComputedStyle(copyButton).opacity).toBe("1");
+      await page.getByRole("button", { name: "Copy code", exact: true }).click();
+      expect(clipboardWriteText).toHaveBeenCalledWith(`${source}\n`);
+
+      await page.viewport(390, 844);
+      await vi.waitFor(() => {
+        expect(getPresentationTier()).toBe("phone");
+        expect(document.querySelector(".chat-markdown-mermaid img")).toBeNull();
+        expect(copyButton.isConnected).toBe(true);
+        expect(document.activeElement).toBe(copyButton);
+        expect(getComputedStyle(copyButton).opacity).toBe("1");
+        expect(getComputedStyle(copyButton).pointerEvents).toBe("auto");
+      });
+    },
+  );
 
   it("fires only the innermost recognizer on a nested long-press and keeps right-click working", async () => {
     mounted = await render(
