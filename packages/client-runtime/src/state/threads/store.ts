@@ -1,3 +1,4 @@
+import { pendingRequestActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
 import type {
   EnvironmentId,
   MessageId,
@@ -194,6 +195,7 @@ function mapSession(session: OrchestrationSession): ThreadSession {
   return {
     provider: toLegacyProvider(session.providerName),
     providerInstanceId: session.providerInstanceId ?? undefined,
+    runtimeSessionId: session.runtimeSessionId ?? undefined,
     status: toLegacySessionStatus(session.status),
     orchestrationStatus: session.status,
     activeTurnId: session.activeTurnId ?? undefined,
@@ -536,6 +538,7 @@ function threadSessionsEqual(
     left.provider === right.provider &&
     left.status === right.status &&
     left.orchestrationStatus === right.orchestrationStatus &&
+    left.runtimeSessionId === right.runtimeSessionId &&
     left.activeTurnId === right.activeTurnId &&
     left.createdAt === right.createdAt &&
     left.updatedAt === right.updatedAt &&
@@ -1687,7 +1690,10 @@ function applyThreadActivityAppendedEvent(
     return state;
   }
 
-  const activity = { ...event.payload.activity };
+  const activity = pendingRequestActivityInOrchestrationOrder(
+    event.payload.activity,
+    event.sequence,
+  );
   const currentIds = state.activityIdsByThreadId[threadId] ?? EMPTY_ACTIVITY_IDS;
   const currentById = state.activityByThreadId[threadId] ?? {};
   const existingActivity = currentById[activity.id];

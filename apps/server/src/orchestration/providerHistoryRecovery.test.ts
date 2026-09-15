@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
-import { MessageId, ThreadId, TurnId, type OrchestrationMessage } from "@ryco/contracts";
-import { historyMessagesToRestore } from "./providerHistoryRecovery.ts";
+import {
+  EventId,
+  MessageId,
+  ThreadId,
+  TurnId,
+  type OrchestrationMessage,
+  type OrchestrationThreadActivity,
+} from "@ryco/contracts";
+import { historyMessagesToRestore, missingHistoryActivities } from "./providerHistoryRecovery.ts";
 import type { ProviderThreadHistory } from "../provider/Services/ProviderAdapter.ts";
 
 const at = "2026-09-05T10:00:00.000Z";
@@ -154,4 +161,27 @@ describe("provider history message recovery", () => {
       ),
     ).toEqual([]);
   });
+});
+
+it("never restores question callbacks or settlements from provider history", () => {
+  const recovered: OrchestrationThreadActivity[] = [
+    "user-input.requested",
+    "user-input.resolved",
+    "user-input.response.submitted",
+    "provider.user-input.respond.failed",
+    "approval.requested",
+    "approval.resolved",
+    "tool.completed",
+  ].map((kind) => ({
+    id: EventId.make(kind),
+    kind,
+    summary: kind,
+    tone: "info",
+    turnId,
+    createdAt: at,
+    payload: { requestId: "reused-id" },
+  }));
+  expect(missingHistoryActivities([], recovered).map((activity) => activity.kind)).toEqual([
+    "tool.completed",
+  ]);
 });

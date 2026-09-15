@@ -2,6 +2,8 @@ import { BotIcon } from "lucide-react";
 import { memo } from "react";
 
 import { cn } from "~/lib/utils";
+import type { BackgroundTask, BackgroundWork } from "@ryco/shared/backgroundWork";
+import { BackgroundWorkDisclosure } from "./BackgroundWorkDisclosure";
 
 /**
  * Compact status chip for native background work that outlives the turn
@@ -11,6 +13,10 @@ import { cn } from "~/lib/utils";
  * live background task before interrupting, so no active turn is needed.
  */
 export const BackgroundLivenessChip = memo(function BackgroundLivenessChip(props: {
+  work?: BackgroundWork;
+  connected?: boolean;
+  mutationReady?: boolean;
+  onStopTask?: (task: BackgroundTask) => Promise<void>;
   liveness: "working" | "monitoring";
   liveCount: number;
   waitingCount?: number;
@@ -18,6 +24,25 @@ export const BackgroundLivenessChip = memo(function BackgroundLivenessChip(props
   stopping: boolean;
   onStop: () => void;
 }) {
+  if (
+    props.work &&
+    (props.work.tasks.length > 0 || props.work.detailsOmitted) &&
+    props.onStopTask
+  ) {
+    return (
+      <BackgroundWorkDisclosure
+        work={props.work}
+        connected={props.connected === true}
+        mutationReady={props.mutationReady === true}
+        onStopTask={props.onStopTask}
+        agentCount={props.liveCount}
+        waitingCount={props.waitingCount}
+        onOpenAgents={props.onOpenAgents}
+        onStopAll={props.onStop}
+        stoppingAll={props.stopping}
+      />
+    );
+  }
   const working = props.liveness === "working";
   const label = working
     ? props.liveCount > 0
@@ -48,7 +73,7 @@ export const BackgroundLivenessChip = memo(function BackgroundLivenessChip(props
       <button
         type="button"
         onClick={props.onStop}
-        disabled={props.stopping}
+        disabled={props.stopping || props.mutationReady === false}
         className="shrink-0 font-medium text-foreground/85 transition-colors hover:text-foreground disabled:cursor-default disabled:text-muted-foreground/60"
       >
         {props.stopping ? "Stopping…" : "Stop"}

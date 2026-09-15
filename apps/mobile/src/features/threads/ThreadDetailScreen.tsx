@@ -1181,7 +1181,7 @@ export function ThreadDetailScreen(props: {
           ))}
           {pendingUserInputs.map((userInput) => (
             <PendingUserInputCard
-              key={userInput.requestId}
+              key={userInput.userInputIdentity?.requestEventId ?? userInput.requestId}
               environmentId={environmentId}
               threadId={threadId}
               userInput={userInput}

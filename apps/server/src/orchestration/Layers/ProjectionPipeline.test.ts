@@ -8,6 +8,7 @@ import {
   ThreadId,
   TurnId,
   ProviderInstanceId,
+  RuntimeSessionId,
 } from "@ryco/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -2838,6 +2839,22 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
         createdAt,
       });
       yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-incarnation-session-1"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeSessionId: RuntimeSessionId.make("incarnation-runtime-1"),
+          runtimeMode: "full-access",
+          activeTurnId: TurnId.make("turn-incarnation-1"),
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
+      yield* engine.dispatch({
         type: "thread.activity.append",
         commandId: CommandId.make("cmd-incarnation-approval-1"),
         threadId,
@@ -2846,7 +2863,10 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           tone: "info",
           kind: "approval.requested",
           summary: "approval requested",
-          payload: { requestId: "request-incarnation-approval-1" },
+          payload: {
+            requestId: "request-incarnation-approval-1",
+            runtimeSessionId: "incarnation-runtime-1",
+          },
           turnId: null,
           createdAt,
         },
@@ -2861,7 +2881,10 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           tone: "info",
           kind: "user-input.requested",
           summary: "input requested",
-          payload: { requestId: "request-incarnation-user-input-1" },
+          payload: {
+            requestId: "request-incarnation-user-input-1",
+            runtimeSessionId: "incarnation-runtime-1",
+          },
           turnId: null,
           createdAt,
         },
@@ -2878,21 +2901,6 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           implementedAt: null,
           implementationThreadId: null,
           createdAt,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      });
-      yield* engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-incarnation-session-1"),
-        threadId,
-        session: {
-          threadId,
-          status: "running",
-          providerName: "codex",
-          runtimeMode: "full-access",
-          activeTurnId: TurnId.make("turn-incarnation-1"),
-          lastError: null,
           updatedAt: createdAt,
         },
         createdAt,
