@@ -462,6 +462,8 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
     }),
   };
   for (const key of [
+    "isBackgrounded",
+    "canStop",
     "taskType",
     "agentId",
     "title",
@@ -502,6 +504,31 @@ export function runtimeEventToActivities(
       : {};
   })();
   switch (event.type) {
+    case "session.started":
+    case "session.exited":
+    case "session.state.changed": {
+      if (
+        event.type === "session.state.changed" &&
+        event.payload.state !== "stopped" &&
+        event.payload.state !== "error"
+      )
+        return [];
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "background-work.session-boundary",
+          summary: "Background work session changed",
+          payload: {
+            runtimeSessionId: event.runtimeSessionId,
+            state: event.type === "session.started" ? "started" : "stopped",
+          },
+          turnId: null,
+          ...maybeSequence,
+        },
+      ];
+    }
     case "request.opened": {
       if (event.payload.requestType === "tool_user_input") {
         return [];
@@ -687,6 +714,7 @@ export function runtimeEventToActivities(
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
             ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -696,11 +724,14 @@ export function runtimeEventToActivities(
 
     case "task.progress": {
       const description = event.payload.description.trim();
-      const linkage = taskLinkageActivityFields(event.payload as Record<string, unknown>);
+      const linkage = {
+        ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+        ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
+      };
       // Usage and activity are independent latest-state streams. Separate
       // stable ids keep a command/reasoning update from replacing token usage
       // and keep a pure usage tick from blanking meaningful activity.
-      const identityLinkage = { ...linkage };
+      const identityLinkage: Record<string, unknown> = { ...linkage };
       delete identityLinkage.typedUsage;
       delete identityLinkage.status;
       delete identityLinkage.error;
@@ -789,6 +820,7 @@ export function runtimeEventToActivities(
               ? { isBackgrounded: event.payload.isBackgrounded }
               : {}),
             ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -857,6 +889,7 @@ export function runtimeEventToActivities(
               : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
             ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

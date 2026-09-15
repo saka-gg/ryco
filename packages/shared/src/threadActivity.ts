@@ -4,6 +4,7 @@ import {
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
 import { Schema } from "effect";
+import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
 
 export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";
 
@@ -52,12 +53,16 @@ export function capThreadActivitiesPreservingMilestones<
   }
 
   const recent = activities.slice(-limit);
+  // A newer snapshot checkpoint already covers the older page being merged.
+  const checkpoint = recent.some((activity) => activity.kind === BACKGROUND_WORK_CHECKPOINT)
+    ? undefined
+    : backgroundWorkCheckpoint(activities.slice(0, -limit));
   const recentIds = new Set(recent.map((activity) => activity.id));
   const preserved = activities.filter(
     (activity) => isThreadActivityMilestone(activity) && !recentIds.has(activity.id),
   );
 
-  return preserved.length === 0 ? [...recent] : [...preserved, ...recent];
+  return [...preserved, ...(checkpoint ? [checkpoint] : []), ...recent];
 }
 
 interface PendingThreadRequestActivity {

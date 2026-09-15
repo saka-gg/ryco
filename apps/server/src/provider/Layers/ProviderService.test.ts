@@ -2299,3 +2299,39 @@ it.effect("goal operations distinguish unsupported providers from inactive sessi
     }).pipe(Effect.provide(makeStandaloneProviderServiceLayer([codex])));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect(
+  "rejects stale background stop identity before routing and forwards the displayed attempt",
+  () => {
+    const fake = makeFakeCodexAdapter();
+    const stop = vi.fn((_threadId: ThreadId, _taskId: string, _expected?: unknown) => Effect.void);
+    const providerLayer = makeStandaloneProviderServiceLayer([
+      { ...fake, adapter: { ...fake.adapter, stopBackgroundTask: stop } },
+    ]);
+    return Effect.gen(function* () {
+      const service = yield* ProviderService;
+      const threadId = asThreadId("background-stop-identity");
+      const session = yield* service.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const stale = yield* service
+        .stopBackgroundTask({
+          threadId,
+          taskId: "reused-task",
+          expected: { runtimeSessionId: RuntimeSessionId.make("replaced-runtime"), attempt: 0 },
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(stale));
+      assert.lengthOf(stop.mock.calls, 0);
+      const expected = { runtimeSessionId: session.runtimeSessionId!, attempt: 3 };
+      yield* service.stopBackgroundTask({ threadId, taskId: "reused-task", expected });
+      assert.deepEqual(stop.mock.calls, [[threadId, "reused-task", expected]]);
+      // Existing API clients retain their previous behavior.
+      yield* service.stopBackgroundTask({ threadId, taskId: "legacy-task" });
+      assert.equal(stop.mock.calls[1]?.[1], "legacy-task");
+    }).pipe(Effect.provide(providerLayer.pipe(Layer.provideMerge(NodeServices.layer))));
+  },
+);
