@@ -63,6 +63,7 @@ export function TranscriptSelectionActions(props: Props) {
   const surface = useRef<HTMLDivElement>(null);
   const editor = useRef<ComposerPromptEditorHandle>(null);
   const submitting = useRef(false);
+  const keyboardFocusPending = useRef(false);
   const latest = useRef(props);
   useLayoutEffect(() => {
     latest.current = props;
@@ -76,6 +77,7 @@ export function TranscriptSelectionActions(props: Props) {
   };
   const dismiss = useCallback(() => {
     if (submitting.current) return;
+    keyboardFocusPending.current = false;
     setSelection(null);
     setExpanded(false);
     if (surface.current?.contains(document.activeElement)) focusBefore.current?.focus();
@@ -86,7 +88,12 @@ export function TranscriptSelectionActions(props: Props) {
     const capture = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-        if (surface.current?.contains(document.activeElement) || submitting.current) return;
+        if (
+          keyboardFocusPending.current ||
+          surface.current?.contains(document.activeElement) ||
+          submitting.current
+        )
+          return;
         const container = latest.current.containerRef.current;
         if (container) setSelection(readTranscriptSelection(container, latest.current.source));
       });
@@ -116,10 +123,9 @@ export function TranscriptSelectionActions(props: Props) {
           container?.querySelector<HTMLElement>(
             `[data-selection-message-id="${CSS.escape(selected.quote.messageId)}"]`,
           ) ?? null;
+        cancelAnimationFrame(frame);
+        keyboardFocusPending.current = true;
         setSelection(selected);
-        requestAnimationFrame(() =>
-          surface.current?.querySelector<HTMLButtonElement>("button")?.focus(),
-        );
       }
     };
     const shortcut = (event: KeyboardEvent) => {
@@ -140,6 +146,15 @@ export function TranscriptSelectionActions(props: Props) {
     };
   }, [dismiss]);
 
+  useLayoutEffect(() => {
+    // Commit keyboard focus before a queued transcript scroll can dismiss the
+    // toolbar. A later animation frame leaves a gap on slower renderers.
+    if (selection && keyboardFocusPending.current) {
+      surface.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+      keyboardFocusPending.current = false;
+    }
+  }, [selection]);
+
   const anchor = expanded && draft ? draft.selection : selection;
   useLayoutEffect(() => {
     const node = surface.current;
@@ -158,7 +173,12 @@ export function TranscriptSelectionActions(props: Props) {
     observer.observe(node);
     window.addEventListener("resize", position);
     const scroll = () => {
-      if (!expanded && !surface.current?.contains(document.activeElement)) setSelection(null);
+      if (
+        !expanded &&
+        !keyboardFocusPending.current &&
+        !surface.current?.contains(document.activeElement)
+      )
+        setSelection(null);
     };
     window.addEventListener("scroll", scroll, true);
     return () => {
