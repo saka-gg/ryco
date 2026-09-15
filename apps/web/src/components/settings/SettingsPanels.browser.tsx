@@ -35,6 +35,9 @@ import { ConnectionsSettings } from "./ConnectionsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import { ProvidersSettingsPanel } from "./ProvidersSettingsPanel";
 import { SourceControlPreferences } from "./SourceControlPreferences";
+import { useState } from "react";
+import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
+import { WorktreeRootEditor } from "./WorktreeRootSettings";
 import { GeneralSettingsPanel } from "./SettingsPanels";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 
@@ -589,6 +592,97 @@ describe("GeneralSettingsPanel observability", () => {
     await __resetLocalApiForTests();
     authAccessHarness.reset();
     useTierOverrideStore.setState({ override: null });
+  });
+
+  function WorktreeSettingsHarness({ disabled = false }: { disabled?: boolean }) {
+    const [config, setConfig] = useState<ServerConfig>(() => ({
+      ...createBaseServerConfig(),
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        worktreeRoot: "/volumes/default",
+        projectWorktreeRoots: { projectA: "/volumes/project-a" },
+      },
+    }));
+    mockUpdateEnvironmentServerSettings.mockImplementation(async (_environmentId, patch) => {
+      if (patch.worktreeRoot === "relative/path")
+        throw new Error(
+          "Worktree root must be an absolute directory on this node or start with ~/.",
+        );
+      setConfig((current) => ({
+        ...current,
+        settings: applyServerSettingsPatch(current.settings, patch),
+      }));
+    });
+    return (
+      <AppAtomRegistryProvider>
+        <SettingsTargetProvider
+          value={{
+            environmentId: config.environment.environmentId,
+            nodeLabel: "Remote test node",
+            serverConfig: config,
+            primary: false,
+            connected: true,
+            canManage: !disabled,
+          }}
+        >
+          <WorktreeRootEditor
+            projects={[
+              { id: "projectA", title: "Project A" },
+              { id: "projectB", title: "Project B" },
+            ]}
+            disabled={disabled}
+          />
+        </SettingsTargetProvider>
+      </AppAtomRegistryProvider>
+    );
+  }
+
+  it("saves worktree roots to the selected environment and resets project inheritance", async () => {
+    mockUpdateEnvironmentServerSettings.mockClear();
+    await page.viewport(1280, 800);
+    mounted = await render(<WorktreeSettingsHarness />);
+    const directory = page.getByRole("textbox", { name: "Worktree root directory" });
+    await directory.fill("/volumes/new-default");
+    await userEvent.keyboard("{Enter}");
+    await expect
+      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
+      .toEqual(["environment-local", { worktreeRoot: "/volumes/new-default" }]);
+    await page.getByRole("combobox", { name: "Worktree root scope" }).click();
+    await page.getByRole("option", { name: "Project A", exact: true }).click();
+    await expect.element(directory).toHaveValue("/volumes/project-a");
+    await page.getByRole("button", { name: "Use environment default" }).click();
+    await expect
+      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
+      .toEqual(["environment-local", { projectWorktreeRoots: { projectA: null } }]);
+    await expect.element(page.getByText("Inherited: /volumes/new-default")).toBeVisible();
+    await directory.fill("/volumes/new-project");
+    await userEvent.keyboard("{Enter}");
+    await expect.element(page.getByText("Effective: /volumes/new-project")).toBeVisible();
+    await page.getByRole("combobox", { name: "Worktree root scope" }).click();
+    await page.getByRole("option", { name: "Environment default", exact: true }).click();
+    await page.getByRole("button", { name: "Reset worktree root" }).click();
+    await expect.element(page.getByText("Effective: Ryco-managed directory")).toBeVisible();
+  });
+
+  it("shows root validation errors without changing the saved effective root", async () => {
+    await page.viewport(1280, 800);
+    mounted = await render(<WorktreeSettingsHarness />);
+    await page.getByRole("textbox", { name: "Worktree root directory" }).fill("relative/path");
+    await userEvent.keyboard("{Enter}");
+    await expect.element(page.getByRole("alert")).toHaveTextContent("absolute directory");
+    await expect.element(page.getByText("Effective: /volumes/default")).toBeVisible();
+  });
+
+  it("disables worktree root editing without node mutation permission", async () => {
+    mockUpdateEnvironmentServerSettings.mockClear();
+    mounted = await render(<WorktreeSettingsHarness disabled />);
+    await expect
+      .element(page.getByRole("textbox", { name: "Worktree root directory" }))
+      .toBeDisabled();
+    await expect
+      .element(page.getByRole("combobox", { name: "Worktree root scope" }))
+      .toBeDisabled();
+    expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
   });
 
   it("hides owner pairing tools in browser-served loopback builds without remote exposure", async () => {
