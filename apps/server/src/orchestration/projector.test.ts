@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_AGENT_TOKEN_MODE,
   EventId,
   ProjectId,
   ProviderDriverKind,
@@ -82,7 +83,7 @@ describe("orchestration projector", () => {
           model: "gpt-5-codex",
         },
         runtimeMode: "full-access",
-        tokenMode: "balanced",
+        tokenMode: DEFAULT_AGENT_TOKEN_MODE,
         interactionMode: "default",
         branch: null,
         worktreePath: null,
