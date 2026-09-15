@@ -1338,11 +1338,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (!routed.isActive) {
       return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
     }
+    if (input.expected && input.expected.runtimeSessionId !== routed.session?.runtimeSessionId) {
+      return yield* new ProviderValidationError({
+        operation: "ProviderService.stopBackgroundTask",
+        issue: "The displayed background task belongs to a replaced runtime session.",
+      });
+    }
     const stop = routed.adapter.stopBackgroundTask;
     if (stop === undefined) {
       return yield* new ProviderUnsupportedError({ provider: routed.adapter.provider });
     }
-    yield* stop(routed.threadId, input.taskId);
+    yield* stop(routed.threadId, input.taskId, input.expected);
     yield* analytics.record("provider.background_task.stopped", {
       provider: routed.adapter.provider,
     });
