@@ -70,6 +70,7 @@ function originPresentation(proposal: AgentControlProposal): {
   readonly threadId: ThreadId | null;
 } {
   const principal = proposal.principal;
+  if (principal.kind === "automation-owner") return { label: "You · Automations", threadId: null };
   if (principal.kind === "provider-session") {
     return {
       label: `Agent in thread ${shortId(principal.threadId)} (${principal.providerInstanceId})`,

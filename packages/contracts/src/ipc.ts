@@ -1,3 +1,4 @@
+import type { AutomationCentreApi } from "./automationCentre.ts";
 import type {
   ProjectMemoryListInput,
   ProjectMemoryPage,
@@ -1112,6 +1113,7 @@ export interface EnvironmentApi {
    * Agent Control approval surface. Optional as a whole so clients can
    * feature-detect against environments predating Agent Control.
    */
+  automationCentre?: AutomationCentreApi;
   agentControl?: {
     listProposals: (input: AgentControlListProposalsInput) => Promise<AgentControlProposalQueue>;
     getProposal: (input: AgentControlGetProposalInput) => Promise<AgentControlGetProposalResult>;

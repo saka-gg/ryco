@@ -23,6 +23,8 @@ export const RPC_ACCESS_POLICY = {
   [PROJECT_MEMORY_WS_METHODS.preview]: "operator",
   [PROJECT_MEMORY_WS_METHODS.export]: "operator",
   [PROJECT_MEMORY_WS_METHODS.mutate]: "operator",
+  [AGENT_CONTROL_WS_METHODS.automationCentre]: "owner",
+  [AGENT_CONTROL_WS_METHODS.automationCommand]: "owner",
   [DEVICE_WS_METHODS.read]: "viewer",
   [DEVICE_WS_METHODS.subscribeEvents]: "viewer",
   [DEVICE_WS_METHODS.lifecycle]: "owner",

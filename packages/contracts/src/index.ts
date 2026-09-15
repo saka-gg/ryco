@@ -51,3 +51,4 @@ export * from "./acpRegistry.ts";
 export * from "./approvalResponses.ts";
 
 export * from "./projectMemory.ts";
+export * from "./automationCentre.ts";
