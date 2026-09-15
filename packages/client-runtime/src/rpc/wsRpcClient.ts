@@ -15,7 +15,7 @@ import {
   WS_METHODS,
 } from "@ryco/contracts";
 import { applyGitStatusStreamEvent } from "@ryco/shared/git";
-import { Effect, Stream } from "effect";
+import { Duration, Effect, Option, Stream } from "effect";
 
 import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
@@ -60,6 +60,7 @@ interface GitRunStackedActionOptions {
 }
 
 export interface WsRpcClient {
+  readonly speech?: { request: RpcUnaryMethod<"speech.request"> };
   readonly dispose: () => Promise<void>;
   readonly reconnect: () => Promise<void>;
   readonly isHeartbeatFresh: () => boolean;
@@ -369,6 +370,12 @@ export interface WsRpcClient {
 
 export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClient): WsRpcClient {
   return {
+    speech: {
+      request: (input) =>
+        transport.request((client) => client["speech.request"](input), {
+          timeout: Option.some(Duration.seconds(180)),
+        }),
+    },
     dispose: async () => {
       await Promise.all([transport.dispose(), device?.dispose()]);
     },

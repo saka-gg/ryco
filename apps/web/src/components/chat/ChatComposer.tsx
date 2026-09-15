@@ -1,3 +1,4 @@
+import { VoiceInput } from "../../voice/VoiceInput";
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
 import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
 import type {
@@ -2661,6 +2662,29 @@ export const ChatComposer = memo(
               </div>
             ) : null}
 
+            {!isMobileViewport && (
+              <VoiceInput
+                draftKey={
+                  typeof composerDraftTarget === "string"
+                    ? composerDraftTarget
+                    : `${composerDraftTarget.environmentId}:${composerDraftTarget.threadId}`
+                }
+                key={
+                  typeof composerDraftTarget === "string"
+                    ? composerDraftTarget
+                    : `${composerDraftTarget.environmentId}:${composerDraftTarget.threadId}`
+                }
+                environmentId={environmentId}
+                destination={
+                  props.executionTargets.find((target) => target.environmentId === environmentId)
+                    ?.label ?? "selected environment"
+                }
+                disabled={isConnecting || !!environmentUnavailable || isComposerApprovalState}
+                onInsert={(text) =>
+                  setPromptFromTraits(`${promptRef.current}${promptRef.current ? "\n" : ""}${text}`)
+                }
+              />
+            )}
             <ComposerPromptShell
               editorRef={composerEditorRef}
               isComposerCollapsedMobile={isComposerCollapsedMobile}

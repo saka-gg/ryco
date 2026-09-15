@@ -40,6 +40,7 @@
     "@ryco/mobile-device-key": "workspace:*",
     "@ryco/mobile-markdown-text": "workspace:*",
     "@ryco/mobile-review-diff-native": "workspace:*",
+    "@ryco/mobile-voice": "workspace:*",
     "@ryco/shared": "workspace:*",
     "@shikijs/core": "4.4.3",
     "@shikijs/engine-javascript": "4.4.3",

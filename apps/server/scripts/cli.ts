@@ -31,6 +31,7 @@ interface PackageJson {
   engines: Record<string, string>;
   files: string[];
   dependencies: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
   overrides: DependencyOverrides;
 }
 
@@ -250,6 +251,7 @@ const publishCmd = Command.make(
             version,
             engines: serverPackageJson.engines,
             files: serverPackageJson.files,
+            optionalDependencies: serverPackageJson.optionalDependencies,
             dependencies: resolveCatalogDependencies(
               serverPackageJson.dependencies,
               rootPackageJson.workspaces.catalog,

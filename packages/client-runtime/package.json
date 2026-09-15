@@ -105,6 +105,10 @@
       "types": "./src/state/pull-request-review/index.ts",
       "import": "./src/state/pull-request-review/index.ts"
     },
+    "./voice": {
+      "types": "./src/voice/index.ts",
+      "import": "./src/voice/index.ts"
+    },
     "./state/project-memory": {
       "types": "./src/state/project-memory/index.ts",
       "import": "./src/state/project-memory/index.ts"

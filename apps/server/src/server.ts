@@ -1,3 +1,4 @@
+import { SpeechServiceLive } from "./speech/service.ts";
 import { ProjectMemoryServiceLive } from "./projectMemory/ProjectMemoryService.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Effect, Layer } from "effect";
@@ -487,6 +488,7 @@ const RuntimeServicesLive = Layer.mergeAll(
   // One process-scoped manager is shared by control RPC, frame streaming,
   // provider tools, idle cleanup, and crash-recovery ownership.
   Layer.provideMerge(DeviceServiceLive),
+  Layer.provideMerge(SpeechServiceLive),
 );
 
 const authRoutesLayer = Layer.mergeAll(

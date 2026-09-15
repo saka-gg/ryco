@@ -1,3 +1,4 @@
+import { SpeechRequest, SpeechResponse, SpeechError } from "./speech.ts";
 import {
   PROJECT_MEMORY_WS_METHODS,
   ProjectMemoryListInput,
@@ -314,6 +315,7 @@ import {
 } from "./worktree.ts";
 
 export const WS_METHODS = {
+  speechRequest: "speech.request",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -1894,8 +1896,15 @@ export const WsAgentControlDisconnectMcpInstallationRpc = Rpc.make(
   },
 );
 
+export const WsSpeechRequestRpc = Rpc.make("speech.request", {
+  payload: SpeechRequest,
+  success: SpeechResponse,
+  error: Schema.Union([SpeechError, AuthRpcError]),
+});
+
 /** Keep declaration emit bounded as shared settings and RPC schemas grow. */
 export const WsRpcGroup: RpcGroup.RpcGroup<
+  | typeof WsSpeechRequestRpc
   | typeof WsServerGetConfigRpc
   | typeof WsServerGetAdvertisedEndpointsRpc
   | typeof WsServerGetDiagnosticsMetricsRpc
@@ -2061,6 +2070,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsContextHandoffReadRawPayloadChunkRpc
   | typeof WsContextHandoffReadExportChunkRpc
 > = RpcGroup.make(
+  WsSpeechRequestRpc,
   WsServerGetConfigRpc,
   WsServerGetAdvertisedEndpointsRpc,
   WsServerGetDiagnosticsMetricsRpc,

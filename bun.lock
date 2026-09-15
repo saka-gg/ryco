@@ -17,7 +17,7 @@
     },
     "apps/desktop": {
       "name": "@ryco/desktop",
-      "version": "0.1.25",
+      "version": "0.1.26",
       "dependencies": {
         "@effect/platform-node": "catalog:",
         "effect": "catalog:",
@@ -62,6 +62,7 @@
         "@ryco/mobile-device-key": "workspace:*",
         "@ryco/mobile-markdown-text": "workspace:*",
         "@ryco/mobile-review-diff-native": "workspace:*",
+        "@ryco/mobile-voice": "workspace:*",
         "@ryco/shared": "workspace:*",
         "@shikijs/core": "4.4.3",
         "@shikijs/engine-javascript": "4.4.3",
@@ -161,9 +162,19 @@
       "name": "@ryco/mobile-review-diff-native",
       "version": "0.0.0",
     },
+    "apps/mobile/modules/ryco-voice": {
+      "name": "@ryco/mobile-voice",
+      "version": "0.0.0",
+      "devDependencies": {
+        "expo-modules-core": "~57.0.17",
+      },
+      "peerDependencies": {
+        "expo": "*",
+      },
+    },
     "apps/server": {
       "name": "ryco-cli",
-      "version": "0.1.25",
+      "version": "0.1.26",
       "bin": {
         "ryco": "dist/bin.mjs",
         "ryco-cli": "dist/bin.mjs",
@@ -201,10 +212,13 @@
         "vite-plus": "catalog:",
         "vitest": "catalog:",
       },
+      "optionalDependencies": {
+        "transcribe-cpp": "0.2.1",
+      },
     },
     "apps/web": {
       "name": "@ryco/web",
-      "version": "0.1.25",
+      "version": "0.1.26",
       "dependencies": {
         "@base-ui/react": "^1.8.0",
         "@dnd-kit/core": "^6.3.1",
@@ -290,7 +304,7 @@
     },
     "packages/contracts": {
       "name": "@ryco/contracts",
-      "version": "0.1.25",
+      "version": "0.1.26",
       "dependencies": {
         "effect": "catalog:",
       },
@@ -1341,6 +1355,8 @@
 
     "@ryco/mobile-review-diff-native": ["@ryco/mobile-review-diff-native@workspace:apps/mobile/modules/ryco-review-diff"],
 
+    "@ryco/mobile-voice": ["@ryco/mobile-voice@workspace:apps/mobile/modules/ryco-voice"],
+
     "@ryco/scripts": ["@ryco/scripts@workspace:scripts"],
 
     "@ryco/shared": ["@ryco/shared@workspace:packages/shared"],
@@ -1444,6 +1460,16 @@
     "@testing-library/dom": ["@testing-library/dom@10.4.1", "", { "dependencies": { "@babel/code-frame": "^7.10.4", "@babel/runtime": "^7.12.5", "@types/aria-query": "^5.0.1", "aria-query": "5.3.0", "dom-accessibility-api": "^0.5.9", "lz-string": "^1.5.0", "picocolors": "1.1.1", "pretty-format": "^27.0.2" } }, "sha512-o4PXJQidqJl82ckFaXUeoAW+XysPLauYI43Abki5hABd853iMhitooc6znOnczgbTYmEP6U6/y1ZyKAIsvMKGg=="],
 
     "@testing-library/user-event": ["@testing-library/user-event@14.6.7", "", { "peerDependencies": { "@testing-library/dom": ">=7.21.4" } }, "sha512-MPCpX8bxe8zS+JmmTwLp8jd0dy1rAm60Te/SL8JrQM3qvQJcBOs1d7IefJMyZzqM3EWBrDn/LWDt1BCGu4ASfg=="],
+
+    "@transcribe-cpp/darwin-arm64-metal": ["@transcribe-cpp/darwin-arm64-metal@0.2.1", "", { "os": "darwin", "cpu": "arm64" }, "sha512-StvvbrSGNDwMN8UC03muvZkECdchyW8CRjtpj3eP1Wi9JGfxQcUE8PRCH1raDMdAorp0L9lmXMnNKt/aMIo+mA=="],
+
+    "@transcribe-cpp/darwin-x64-cpu": ["@transcribe-cpp/darwin-x64-cpu@0.2.1", "", { "os": "darwin", "cpu": "x64" }, "sha512-dk+snKC7ENo4nQfSwjkWW9Ptv2aSmJA02LRDX26FERc+K6bL9R7eiQst+JET/JfT1sVn8UESnrBOF1oBKyxUJQ=="],
+
+    "@transcribe-cpp/linux-arm64-cpu-vulkan": ["@transcribe-cpp/linux-arm64-cpu-vulkan@0.2.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-c/wSkZfbQmsjqHnu2AXZT81uUpHPJW1Hxu35xp8hZiHpVbUw94zds0xbBtY8c66Nw5dFU2Y+XwhgEDil28cXqA=="],
+
+    "@transcribe-cpp/linux-x64-cpu-vulkan": ["@transcribe-cpp/linux-x64-cpu-vulkan@0.2.1", "", { "os": "linux", "cpu": "x64" }, "sha512-0sCMolWceToa9QYN5AizAn0cCserEPM7hRf1zETHKY4UQgVZzeRaFJETLrz6YLhgEiIRpr9d7osV8mp7O4e/Ww=="],
+
+    "@transcribe-cpp/win32-x64-cpu-vulkan": ["@transcribe-cpp/win32-x64-cpu-vulkan@0.2.1", "", { "os": "win32", "cpu": "x64" }, "sha512-wHaKJY2XRjL/J2p6YNvLE1Oy+b0MejdyHmx1PvksRQssIivkWSITdHMpd6VseokJsYO+pKj+OwqVrIycJas0yw=="],
 
     "@turbo/darwin-64": ["@turbo/darwin-64@2.10.12", "", { "os": "darwin", "cpu": "x64" }, "sha512-9nKgKoF6ZOUsM+or0OtNf+TTJSfGvDNP7ZFv/ZGWVwOSCkumyctQiTeHwB4UNljHTnC41AqylgbunLDHoccNrA=="],
 
@@ -3340,6 +3366,8 @@
     "tough-cookie": ["tough-cookie@6.0.2", "", { "dependencies": { "tldts": "^7.0.5" } }, "sha512-exgYmnmL/sJpR3upZfXG5PoatXQii55xAiXGXzY+sROLZ/Y+SLcp9PgJNI9Vz37HpQ74WvDcLT8eqm+kV3FzrA=="],
 
     "tr46": ["tr46@0.0.3", "", {}, "sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw=="],
+
+    "transcribe-cpp": ["transcribe-cpp@0.2.1", "", { "dependencies": { "koffi": "^3.0.2" }, "optionalDependencies": { "@transcribe-cpp/darwin-arm64-metal": "0.2.1", "@transcribe-cpp/darwin-x64-cpu": "0.2.1", "@transcribe-cpp/linux-arm64-cpu-vulkan": "0.2.1", "@transcribe-cpp/linux-x64-cpu-vulkan": "0.2.1", "@transcribe-cpp/win32-x64-cpu-vulkan": "0.2.1" } }, "sha512-Vr5saZu2fI9L8pch2WujCZbmz25OjXp96CbAxwXd6DJUgxqSZmnCaDlNB5MtYCd6AgstocoZWayYQxXumks3Gg=="],
 
     "tree-kill": ["tree-kill@1.2.2", "", { "bin": { "tree-kill": "cli.js" } }, "sha512-L0Orpi8qGpRG//Nd+H90vFB+3iHnue1zSSGmNOOCh1GLJ7rUKVwV2HvijphGQS2UmhUZewS9VgvxYIdgr+fG1A=="],
 

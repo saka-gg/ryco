@@ -1,0 +1,4 @@
+{
+  "platforms": ["apple"],
+  "apple": { "modules": ["RycoVoiceModule"], "podspecPath": "RycoVoice.podspec" }
+}
