@@ -326,6 +326,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
                 .stopBackgroundTask({
                   threadId: input.threadId,
                   taskId: input.taskId,
+                  ...(input.expected ? { expected: input.expected } : {}),
                 })
                 .pipe(
                   Effect.tapError((cause) =>
