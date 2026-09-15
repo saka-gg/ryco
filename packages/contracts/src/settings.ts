@@ -448,6 +448,9 @@ export const WorktreeBranchPrefix = TrimmedString.check(
   ),
 );
 
+/** Server-local filesystem input; platform and filesystem validation belongs to the server. */
+export const WorktreeRoot = TrimmedString.check(Schema.isMaxLength(4096));
+
 export const ServerSettings = Schema.Struct({
   environmentIcon: EnvironmentMachineHint.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   // Legacy token-by-token assistant output. This is deliberately a fresh key
@@ -460,6 +463,11 @@ export const ServerSettings = Schema.Struct({
   // entirely (no npm registry contact) instead of merely hiding the update
   // notification — for users who install providers via Nix/nixpkgs/etc.
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  worktreeRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  // Null entries inherit. Patch entries independently so concurrent project edits do not collide.
+  projectWorktreeRoots: Schema.Record(Schema.String, Schema.NullOr(WorktreeRoot)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   worktreeBranchPrefix: WorktreeBranchPrefix.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKTREE_BRANCH_PREFIX)),
   ),
@@ -589,6 +597,10 @@ export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  worktreeRoot: Schema.optionalKey(WorktreeRoot),
+  projectWorktreeRoots: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(WorktreeRoot)),
+  ),
   worktreeBranchPrefix: Schema.optionalKey(WorktreeBranchPrefix),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   defaultAgentTokenMode: Schema.optionalKey(AgentTokenMode),

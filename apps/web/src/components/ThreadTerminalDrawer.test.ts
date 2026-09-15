@@ -79,6 +79,28 @@ describe("createTerminalOutputBatcher", () => {
 });
 
 describe("resolveTerminalSelectionActionPosition", () => {
+  it("retains output emitted after a snapshot in the same millisecond", () => {
+    const timestamp = "2026-09-15T00:00:00.000Z";
+    expect(
+      selectTerminalEventEntriesAfterSnapshot(
+        [
+          {
+            id: 1,
+            event: {
+              threadId: "thread-1",
+              terminalId: "default",
+              type: "output",
+              data: "fresh",
+              createdAt: timestamp,
+              cursor: { generation: "server-1", sequence: 2 },
+            },
+          },
+        ],
+        timestamp,
+        { generation: "server-1", sequence: 1 },
+      ).map((entry) => entry.event),
+    ).toHaveLength(1);
+  });
   it("prefers the selection rect over the last pointer position", () => {
     expect(
       resolveTerminalSelectionActionPosition({

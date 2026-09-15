@@ -157,14 +157,14 @@ function createProviderServiceHarness() {
   };
 
   const emit = (event: LegacyProviderRuntimeEvent): void => {
+    // Model the provider emitter's source runtime; explicit stale/missing identities
+    // supplied by a test remain authoritative and are never overwritten.
+    const session = runtimeSessions.find((entry) => entry.threadId === event.threadId);
     Effect.runSync(
       PubSub.publish(
         runtimeEventPubSub,
         normalizeLegacyEvent({
-          ...{
-            runtimeSessionId: runtimeSessions.find((session) => session.threadId === event.threadId)
-              ?.runtimeSessionId,
-          },
+          ...(session?.runtimeSessionId ? { runtimeSessionId: session.runtimeSessionId } : {}),
           ...event,
         }),
       ),
@@ -693,6 +693,34 @@ describe("ProviderRuntimeIngestion", () => {
           }),
         );
       }
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.approval.respond",
+          commandId: CommandId.make("pending-approval-attempt"),
+          threadId,
+          requestId: ApprovalRequestId.make("request-approval"),
+          decision: "accept",
+          approvalIdentity: {
+            requestEventId: asEventId("pending-approval"),
+            runtimeSessionId: RuntimeSessionId.make("test-runtime"),
+          },
+          createdAt: "2026-01-01T00:00:02.500Z",
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("pending-question-attempt"),
+          threadId,
+          requestId: ApprovalRequestId.make("request-user-input"),
+          answers: { answer: "Yes" },
+          userInputIdentity: {
+            requestEventId: asEventId("pending-user-input"),
+            runtimeSessionId: RuntimeSessionId.make("test-runtime"),
+          },
+          createdAt: "2026-01-01T00:00:02.500Z",
+        }),
+      );
       harness.emit({
         type,
         eventId: asEventId("pending-complete"),
@@ -704,6 +732,33 @@ describe("ProviderRuntimeIngestion", () => {
       });
       await harness.drain();
       const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId)!;
+      expect(thread.activities.some((activity) => activity.kind === "approval.resolved")).toBe(
+        false,
+      );
+      expect(
+        thread.activities.find((activity) => activity.kind === "provider.approval.respond.failed")
+          ?.payload,
+      ).toMatchObject({
+        requestId: "request-approval",
+        responseState: "invalidated",
+        approvalIdentity: { requestEventId: "pending-approval", runtimeSessionId: "test-runtime" },
+        responseAttemptId: "pending-approval-attempt",
+      });
+      expect(thread.activities.some((activity) => activity.kind === "user-input.resolved")).toBe(
+        false,
+      );
+      expect(
+        thread.activities.find((activity) => activity.kind === "provider.user-input.respond.failed")
+          ?.payload,
+      ).toMatchObject({
+        requestId: "request-user-input",
+        responseState: "invalidated",
+        userInputIdentity: {
+          requestEventId: "pending-user-input",
+          runtimeSessionId: "test-runtime",
+        },
+        responseAttemptId: "pending-question-attempt",
+      });
       expect(thread.session?.status).toBe("ready");
       if (type === "turn.completed") {
         // CheckpointReactor owns turn finalization and is not part of this harness.
@@ -3067,7 +3122,10 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("starts a new streaming assistant message segment after approval", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({
+      callbackRuntime: true,
+      serverSettings: { enableLegacyTokenStreaming: true },
+    });
     const startedAt = "2026-03-28T07:00:00.000Z";
     const pausedAt = "2026-03-28T07:00:01.000Z";
     const resumedAt = "2026-03-28T07:00:02.000Z";
@@ -3741,6 +3799,11 @@ describe("ProviderRuntimeIngestion", () => {
       requested?.payload && typeof requested.payload === "object"
         ? (requested.payload as Record<string, unknown>)
         : undefined;
+    expect(requestedPayload?.runtimeSessionId).toBe("test-runtime");
+    expect(requestedPayload?.approvalIdentity).toEqual({
+      requestEventId: "evt-request-opened",
+      runtimeSessionId: "test-runtime",
+    });
     expect(requestedPayload?.requestKind).toBe("command");
     expect(requestedPayload?.requestType).toBe("command_execution_approval");
 
@@ -3751,6 +3814,7 @@ describe("ProviderRuntimeIngestion", () => {
       resolved?.payload && typeof resolved.payload === "object"
         ? (resolved.payload as Record<string, unknown>)
         : undefined;
+    expect(resolvedPayload?.runtimeSessionId).toBe("test-runtime");
     expect(resolvedPayload?.requestKind).toBe("command");
     expect(resolvedPayload?.requestType).toBe("command_execution_approval");
   });
