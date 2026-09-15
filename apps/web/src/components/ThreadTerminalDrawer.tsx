@@ -1,3 +1,4 @@
+import { usePaneEffect } from "./chat/PaneFocus";
 import "@xterm/xterm/css/xterm.css";
 import {
   createTerminalEventReconciler,
@@ -420,7 +421,7 @@ export function TerminalViewport({
     keybindingsRef.current = keybindings;
   }, [keybindings]);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const mount = containerRef.current;
     if (!mount) return;
 

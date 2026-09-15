@@ -207,6 +207,15 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
   getDraftThread: (threadRef: ComposerThreadTarget) => DraftThreadState | null;
   listDraftThreadKeys: () => string[];
   hasDraftThreadsInEnvironment: (environmentId: EnvironmentId) => boolean;
+  /** Creates a separately routed draft without replacing the project's existing draft. */
+  createDetachedDraftSession: (
+    logicalProjectKey: string,
+    projectRef: ScopedProjectRef,
+    draftId: DraftId,
+    options: NonNullable<
+      Parameters<ComposerDraftStoreState<TImage>["setLogicalProjectDraftThreadId"]>[3]
+    >,
+  ) => void;
   /** Creates or updates the draft session tracked for a logical project. */
   setLogicalProjectDraftThreadId: (
     logicalProjectKey: string,
@@ -964,6 +973,23 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
             Object.values(get().draftThreadsByThreadKey).some(
               (draftThread) => draftThread.environmentId === environmentId,
             ),
+          createDetachedDraftSession: (logicalProjectKey, projectRef, draftId, options) => {
+            set((state) => {
+              if (state.draftThreadsByThreadKey[draftId]) return state;
+              return {
+                draftThreadsByThreadKey: {
+                  ...state.draftThreadsByThreadKey,
+                  [draftId]: createDraftThreadState(
+                    projectRef,
+                    options.threadId ?? ThreadId.make(draftId),
+                    logicalProjectDraftKey(logicalProjectKey),
+                    undefined,
+                    options,
+                  ),
+                },
+              };
+            });
+          },
           setLogicalProjectDraftThreadId: (logicalProjectKey, projectRef, draftId, options) => {
             const normalizedLogicalProjectKey = logicalProjectDraftKey(logicalProjectKey);
             if (normalizedLogicalProjectKey.length === 0 || draftId.length === 0) {

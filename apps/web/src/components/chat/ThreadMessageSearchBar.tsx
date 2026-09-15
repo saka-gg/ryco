@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { usePaneEffect } from "./PaneFocus";
+import { useRef } from "react";
 import { ChevronDownIcon, ChevronUpIcon, SearchIcon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -34,7 +35,7 @@ export function ThreadMessageSearchBar({
         ? `${selectedIndex + 1} / ${matchCount}`
         : "No results";
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const frameId = window.requestAnimationFrame(() => {
       inputRef.current?.focus();
       inputRef.current?.select();

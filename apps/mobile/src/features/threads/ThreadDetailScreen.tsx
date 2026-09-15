@@ -917,6 +917,11 @@ export function ThreadDetailScreen(props: {
         setSendError("No model is configured for this project.");
         return false;
       }
+      if (sideQuestion && sideChat?.failedQuestion) {
+        setSendError("Restore or discard the unsent side question before asking again.");
+        sideChatStore.getState().open(sideChatKey, selectedModelSelection);
+        return false;
+      }
       if (sideQuestion && (!sideChatReady || sideChat?.pending)) {
         setSendError(
           sideChat?.pending
@@ -1223,6 +1228,12 @@ export function ThreadDetailScreen(props: {
           onOpen={() => sideChatStore.getState().open(sideChatKey, sideChat.modelSelection)}
           onClose={() => sideChatStore.getState().close(sideChatKey)}
           onDraftChange={(text) => sideChatStore.getState().setDraft(sideChatKey, text)}
+          onRestoreFailedQuestion={() =>
+            sideChatStore.getState().restoreFailedQuestion(sideChatKey)
+          }
+          onDiscardFailedQuestion={() =>
+            sideChatStore.getState().discardFailedQuestion(sideChatKey)
+          }
           onModelChange={(selection) => sideChatStore.getState().setModel(sideChatKey, selection)}
           onSend={sendSideQuestion}
           onCancel={() => sideChatStore.getState().cancel(sideChatKey)}

@@ -104,3 +104,43 @@ describe("ephemeral side conversations", () => {
     await pending;
   });
 });
+
+it("retains the failed quote alongside a newer draft and restores both explicitly", async () => {
+  const { store, next, ask, chat } = setup();
+  store.getState().setDraft("environment/thread", "Explain\n> selected code");
+  const pending = ask();
+  store.getState().setDraft("environment/thread", "Newer draft");
+  next.reject(new Error("Failed"));
+  await pending;
+  expect(chat().draft).toBe("Newer draft");
+  expect(chat().failedQuestion).toBe("Explain\n> selected code");
+  store.getState().restoreFailedQuestion("environment/thread");
+  expect(chat().draft).toBe("Newer draft\n\nExplain\n> selected code");
+  expect(chat().failedQuestion).toBeNull();
+});
+
+it.each(["failure", "cancel", "disconnect"])(
+  "requires resolving retained input before another ask after %s",
+  async (mode) => {
+    const { store, next, api, ask, chat } = setup();
+    const pending = ask();
+    store.getState().setDraft("environment/thread", "B");
+    if (mode === "failure") next.reject(new Error("A failed"));
+    else {
+      if (mode === "cancel") store.getState().cancel("environment/thread");
+      else store.getState().disconnect("environment/thread");
+      next.resolve({ requestId: "request", answer: "Late" });
+    }
+    await pending;
+    await ask();
+    store.getState().setDraft("environment/thread", "C");
+    store.getState().cancel("environment/thread");
+    store.getState().disconnect("environment/thread");
+    expect(api.askSideQuestion).toHaveBeenCalledOnce();
+    expect(chat().draft).toBe("C");
+    expect(chat().failedQuestion).toBe("Why?");
+    store.getState().discardFailedQuestion("environment/thread");
+    await ask();
+    expect(api.askSideQuestion).toHaveBeenCalledTimes(2);
+  },
+);
