@@ -4,13 +4,18 @@ import {
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_RUNTIME_MODE,
   type ScopedProjectRef,
+  type ModelSelection,
+  type RuntimeMode,
+  type AgentTokenMode,
+  type ThreadId,
 } from "@ryco/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
   type DraftThreadEnvMode,
   type DraftThreadState,
+  type DraftId,
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { newDraftId, newThreadId } from "../lib/utils";
@@ -36,7 +41,32 @@ import { adoptRoutedHostedNode } from "../hostedHub/nodeRoutes";
 import { useHostedHubStore } from "../hostedHub/state";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 
+export interface NewThreadOptions {
+  branch?: string | null;
+  worktreePath?: string | null;
+  envMode?: DraftThreadEnvMode;
+  /** The caller owns this stable identity across failed navigation attempts. */
+  freshDraft?: {
+    draftId: DraftId;
+    threadId: ThreadId;
+    prompt: string;
+    modelSelection: ModelSelection;
+    runtimeMode: RuntimeMode;
+    tokenMode: AgentTokenMode;
+    isCurrent: () => boolean;
+  };
+}
+
 function useNewThreadState() {
+  const seededDrafts = useRef(
+    new Map<
+      DraftId,
+      {
+        composer: ReturnType<ReturnType<typeof useComposerDraftStore.getState>["getComposerDraft"]>;
+        session: DraftThreadState | undefined;
+      }
+    >(),
+  );
   const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
   const projectGroupingSettings = useSettings((settings) => ({
     sidebarProjectGroupingMode: settings.sidebarProjectGroupingMode,
@@ -55,26 +85,19 @@ function useNewThreadState() {
 
   const handleNewThread: (
     projectRef: ScopedProjectRef,
-    options?: {
-      branch?: string | null;
-      worktreePath?: string | null;
-      envMode?: DraftThreadEnvMode;
-    },
+    options?: NewThreadOptions,
   ) => Promise<void> = useCallback(
-    (
-      projectRef: ScopedProjectRef,
-      options?: {
-        branch?: string | null;
-        worktreePath?: string | null;
-        envMode?: DraftThreadEnvMode;
-      },
-    ): Promise<void> => {
+    (projectRef: ScopedProjectRef, options?: NewThreadOptions): Promise<void> => {
       const hostedNodeId = nodeIdForHostedEnvironment(projectRef.environmentId);
       if (hostedNodeId !== null) {
         adoptHostedTarget(projectRef.environmentId);
         if (readHostedNodeMutationLease(projectRef.environmentId) === null) {
           return waitForHostedNodeMutationLease(projectRef.environmentId).then((lease) => {
-            if (lease === null) return;
+            if (lease === null) {
+              if (options?.freshDraft)
+                throw new Error("The workspace is unavailable. Your selection draft is preserved.");
+              return;
+            }
             return handleNewThread(projectRef, options);
           });
         }
@@ -96,6 +119,70 @@ function useNewThreadState() {
       const logicalProjectKey = project
         ? deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings)
         : scopedProjectKey(projectRef);
+      if (options?.freshDraft) {
+        const fresh = options.freshDraft;
+        if (!fresh.isCurrent())
+          throw new Error("The source chat changed. Your selection draft was not sent.");
+        const drafts = useComposerDraftStore.getState();
+        const assertOwnership = () => {
+          const state = useComposerDraftStore.getState();
+          const previous = seededDrafts.current.get(fresh.draftId);
+          if (
+            state.draftThreadsByThreadKey[fresh.draftId] &&
+            (!previous ||
+              state.getComposerDraft(fresh.draftId) !== previous.composer ||
+              state.draftThreadsByThreadKey[fresh.draftId] !== previous.session)
+          ) {
+            throw new Error(
+              "The destination draft changed elsewhere. Both drafts are preserved; open the destination to continue.",
+            );
+          }
+        };
+        assertOwnership();
+        drafts.createDetachedDraftSession(logicalProjectKey, projectRef, fresh.draftId, {
+          threadId: fresh.threadId,
+          branch: options.branch ?? null,
+          worktreePath: options.worktreePath ?? null,
+          envMode: options.envMode ?? "local",
+          runtimeMode: fresh.runtimeMode,
+          tokenMode: fresh.tokenMode,
+        });
+        drafts.setPrompt(fresh.draftId, fresh.prompt);
+        drafts.setModelSelection(fresh.draftId, fresh.modelSelection);
+        drafts.setRuntimeMode(fresh.draftId, fresh.runtimeMode);
+        drafts.setTokenMode(fresh.draftId, fresh.tokenMode);
+        drafts.setDraftThreadContext(fresh.draftId, {
+          branch: options.branch ?? null,
+          envMode: options.envMode ?? "local",
+        });
+        seededDrafts.current.clear();
+        seededDrafts.current.set(fresh.draftId, {
+          composer: drafts.getComposerDraft(fresh.draftId),
+          session: useComposerDraftStore.getState().draftThreadsByThreadKey[fresh.draftId],
+        });
+        return (async () => {
+          await router.navigate({ to: "/draft/$draftId", params: { draftId: fresh.draftId } });
+          // The destination composer may initialize non-content defaults on mount.
+          // Only user content changes cancel the already-authorized handoff here;
+          // retries above still require ownership of the complete draft state.
+          const current = useComposerDraftStore.getState().getComposerDraft(fresh.draftId);
+          const seeded = seededDrafts.current.get(fresh.draftId)?.composer;
+          if (
+            current?.prompt !== fresh.prompt ||
+            current?.images !== seeded?.images ||
+            current?.terminalContexts !== seeded?.terminalContexts ||
+            current?.sourceControlContexts !== seeded?.sourceControlContexts
+          ) {
+            throw new Error(
+              "The destination draft changed. Send from the full composer to keep your edits.",
+            );
+          }
+          const target = getCurrentRouteTarget();
+          if (target?.kind !== "draft" || target.draftId !== fresh.draftId) {
+            throw new Error("Navigation was cancelled. Your selection draft is preserved.");
+          }
+        })();
+      }
       const hasBranchOption = options?.branch !== undefined;
       const hasWorktreePathOption = options?.worktreePath !== undefined;
       const hasEnvModeOption = options?.envMode !== undefined;

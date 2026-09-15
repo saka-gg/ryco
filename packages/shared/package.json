@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./backgroundWork": {
+      "types": "./src/backgroundWork.ts",
+      "import": "./src/backgroundWork.ts"
+    },
     "./lruCache": {
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"

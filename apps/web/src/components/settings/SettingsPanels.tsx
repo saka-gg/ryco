@@ -1,6 +1,7 @@
 import { useAppPreferencesLabel } from "../../deviceName";
 import { settingsRestorePlan } from "./settingsRestore";
 import { selectArchivedSettingsGroups } from "./archivedSettings";
+import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { WorktreeRootSettings } from "./WorktreeRootSettings";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
@@ -534,6 +535,7 @@ export function GeneralSettingsPanel({
   return (
     <SettingsPageContainer>
       <SettingsSection title="Behavior" owner="client">
+        <OnboardingReplaySetting />
         <SettingsRow
           title="Time format"
           description="System default follows your browser or OS clock preference."

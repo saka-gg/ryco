@@ -4427,6 +4427,43 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("denies an already-aborted question without publishing a pending callback", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("question-pre-abort"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const canUseTool = harness.getLastCreateQueryInput()!.options.canUseTool!;
+      const controller = new AbortController();
+      controller.abort();
+      const result = yield* Effect.promise(() =>
+        canUseTool(
+          "AskUserQuestion",
+          {
+            questions: [{ question: "Continue?", header: "Continue", options: [] }],
+          },
+          {
+            signal: controller.signal,
+            requestId: "already-aborted",
+            toolUseID: "already-aborted-tool",
+          },
+        ),
+      );
+      assert.deepEqual(result, { behavior: "deny", message: "User cancelled tool execution." });
+      const response = yield* Effect.result(
+        adapter.respondToUserInput(THREAD_ID, ApprovalRequestId.make("already-aborted"), {
+          "Continue?": "Yes",
+        }),
+      );
+      assert.equal(response._tag, "Failure");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("denies AskUserQuestion when the waiting turn is aborted", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -4485,6 +4522,11 @@ describe("ClaudeAdapterLive", () => {
         return;
       }
       assert.deepEqual(resolvedEvent.value.payload.answers, {});
+      assert.equal(resolvedEvent.value.payload.cancelled, true);
+      assert.deepEqual(resolvedEvent.value.payload.userInputIdentity, {
+        requestEventId: requestedEvent.value.eventId,
+        runtimeSessionId: session.runtimeSessionId,
+      });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
       assert.deepEqual(permissionResult, {
@@ -4551,6 +4593,11 @@ describe("ClaudeAdapterLive", () => {
         return;
       }
       assert.deepEqual(resolvedEvent.value.payload.answers, {});
+      assert.equal(resolvedEvent.value.payload.cancelled, true);
+      assert.deepEqual(resolvedEvent.value.payload.userInputIdentity, {
+        requestEventId: requestedEvent.value.eventId,
+        runtimeSessionId: session.runtimeSessionId,
+      });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
       assert.deepEqual(permissionResult, {
@@ -5168,4 +5215,166 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+  it.effect(
+    "normalizes detached task evidence and uses individual stop without stopping its peers",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started" || event.type === "task.updated"),
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("background-test"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "foreground",
+          task_type: "local_bash",
+          description: "Foreground command",
+          session_id: "sdk",
+          uuid: "bg-foreground",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: [
+            { task_id: "foreground", task_type: "local_bash", description: "Now detached" },
+            { task_id: "watch", task_type: "local_bash", description: "Watch CI" },
+          ],
+          session_id: "sdk",
+          uuid: "bg-set",
+        } as unknown as SDKMessage);
+        const observed = yield* Fiber.join(events);
+        assert.equal(observed[0]?.type, "task.started");
+        if (observed[0]?.type === "task.started")
+          assert.isUndefined(observed[0].payload.isBackgrounded);
+        for (const event of observed.slice(1)) {
+          if (event.type === "task.started" || event.type === "task.updated") {
+            assert.isTrue(event.payload.isBackgrounded);
+            assert.isTrue(event.payload.canStop);
+            assert.equal(event.runtimeSessionId, "background-test");
+          }
+        }
+        yield* adapter.stopBackgroundTask!(THREAD_ID, "watch");
+        assert.deepEqual(harness.query.stopTaskCalls, ["watch"]);
+        assert.lengthOf(harness.query.interruptCalls, 0);
+        // Acceptance does not remove the task; another request is safe until
+        // the provider's lifecycle stream confirms settlement.
+        yield* adapter.stopBackgroundTask!(THREAD_ID, "watch");
+        assert.deepEqual(harness.query.stopTaskCalls, ["watch", "watch"]);
+        const completion = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: [{ task_id: "foreground", task_type: "local_bash" }],
+          session_id: "sdk",
+          uuid: "bg-drained",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(completion);
+        yield* adapter.stopBackgroundTask!(THREAD_ID, "watch");
+        assert.deepEqual(harness.query.stopTaskCalls, ["watch", "watch"]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+  it.effect(
+    "rejects a retained background stop after runtime replacement and task ID reuse",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const started = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("new-runtime"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "reused-task",
+          task_type: "local_bash",
+          is_backgrounded: true,
+          description: "New task",
+          session_id: "sdk",
+          uuid: "reused-start",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(started);
+        const result = yield* adapter.stopBackgroundTask!(THREAD_ID, "reused-task", {
+          runtimeSessionId: RuntimeSessionId.make("old-runtime"),
+          attempt: 0,
+        }).pipe(Effect.exit);
+        assert.equal(result._tag, "Failure");
+        assert.lengthOf(harness.query.stopTaskCalls, 0);
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "reused-task",
+          status: "completed",
+          session_id: "sdk",
+          uuid: "reused-completed",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(completed);
+        const restarted = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "reused-task",
+          task_type: "local_bash",
+          is_backgrounded: true,
+          description: "Second activation",
+          session_id: "sdk",
+          uuid: "reused-again",
+        } as unknown as SDKMessage);
+        const events = yield* Fiber.join(restarted);
+        if (events[0]?.type === "task.started") assert.equal(events[0].payload.attempt, 1);
+        const oldAttempt = yield* adapter.stopBackgroundTask!(THREAD_ID, "reused-task", {
+          runtimeSessionId: RuntimeSessionId.make("new-runtime"),
+          attempt: 0,
+        }).pipe(Effect.exit);
+        assert.equal(oldAttempt._tag, "Failure");
+        assert.lengthOf(harness.query.stopTaskCalls, 0);
+        yield* adapter.stopBackgroundTask!(THREAD_ID, "reused-task", {
+          runtimeSessionId: RuntimeSessionId.make("new-runtime"),
+          attempt: 1,
+        });
+        assert.deepEqual(harness.query.stopTaskCalls, ["reused-task"]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 });

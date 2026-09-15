@@ -748,3 +748,36 @@ it.effect("binds external automation proposals to project, provider, and current
     assert.strictEqual(revoked.reason, "caller-stale");
   }),
 );
+
+it.effect("owner automation authority cannot authorize ordinary thread or settings mutations", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* Ref.make(makeSnapshot());
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const validator = makeValidator(snapshot, providers);
+    const forged: AgentControlProposal = {
+      proposalId: AgentControlProposalId.make("owner-non-automation"),
+      requestId: AgentControlRequestId.make("owner-non-automation"),
+      principal: {
+        kind: "automation-owner",
+        projectId,
+        runtimeMode: "full-access",
+        envMode: "local",
+      },
+      planVersion: 1,
+      planDigest: "a".repeat(64),
+      riskTags: [],
+      promptSummary: null,
+      status: "approved",
+      createdAt: now,
+      updatedAt: now,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      decidedAt: now,
+      result: null,
+      plan: { kind: "sendMessage", threadId: targetThreadId, text: "forged", delivery: "queue" },
+    };
+    assert.strictEqual(
+      (yield* Effect.flip(validator.revalidateExecution(forged))).reason,
+      "privilege-escalation",
+    );
+  }),
+);

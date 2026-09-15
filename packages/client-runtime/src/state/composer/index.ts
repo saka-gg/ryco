@@ -15,3 +15,4 @@ export * from "./providerState.ts";
 export * from "./promptStash.ts";
 export * from "./sendEngine.ts";
 export * from "./terminalContext.ts";
+export * from "./selectionQuote.ts";

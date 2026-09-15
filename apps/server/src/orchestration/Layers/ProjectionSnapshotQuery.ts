@@ -37,6 +37,7 @@ import {
   WorktreeId,
 } from "@ryco/contracts";
 import { Effect, Layer, Option, Schema, Struct } from "effect";
+import { backgroundWorkCheckpoint } from "@ryco/shared/backgroundWork";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
@@ -797,6 +798,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           'approval.resolved',
           'provider.approval.respond.failed',
           'user-input.requested',
+          'user-input.response.submitted',
+          'approval.response.submitted',
           'user-input.resolved',
           'provider.user-input.respond.failed',
           'context-handoff'
@@ -1140,6 +1143,99 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           created_at ASC,
           activity_id ASC
       `,
+  });
+
+  // Recover bounded lifecycle evidence independently of the paginated transcript.
+  // Only the current runtime epoch participates. Rank each independent field:
+  // sparse progress must not erase a prior pause or foreground transition.
+  const listBackgroundTaskEvidence = SqlSchema.findAll({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId }) => sql`
+      WITH sampled AS MATERIALIZED (
+        -- Index range scan, bounded BEFORE any JSON parsing or window ranking.
+        -- At most 1025 index entries and 4 KiB per payload (4 MiB + sentinel).
+        SELECT activity_id, thread_id, turn_id, tone, kind, substr(summary, 1, 180) AS summary,
+          CASE WHEN length(CAST(payload_json AS BLOB)) <= 4096 THEN payload_json ELSE '{}' END AS payload_json,
+          length(CAST(payload_json AS BLOB)) > 4096 AS oversized, sequence, created_at
+        FROM projection_thread_activities INDEXED BY idx_projection_thread_activities_thread_sequence_created_id
+        WHERE thread_id = ${threadId}
+        ORDER BY sequence DESC, created_at DESC, activity_id DESC LIMIT 1025
+      ), bounded AS MATERIALIZED (
+        SELECT * FROM sampled ORDER BY sequence DESC, created_at DESC, activity_id DESC LIMIT 1024
+      ), scoped AS (
+        SELECT a.*, json_extract(a.payload_json, '$.taskId') AS task_id,
+          ROW_NUMBER() OVER (ORDER BY a.sequence DESC, a.created_at DESC, a.activity_id DESC) AS rank
+        FROM bounded a
+        JOIN projection_thread_sessions s ON s.thread_id = a.thread_id
+        WHERE a.kind IN ('task.started', 'task.updated', 'task.progress', 'task.completed')
+          AND json_extract(a.payload_json, '$.runtimeSessionId') = s.runtime_session_id
+      ), fields AS (
+        SELECT *,
+          ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY
+            CASE WHEN kind = 'task.started' THEN 0 ELSE 1 END, rank) AS start_rank,
+          ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY
+            CASE WHEN json_type(payload_json, '$.status') = 'text' THEN 0 ELSE 1 END, rank) AS status_rank,
+          ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY
+            CASE WHEN json_type(payload_json, '$.isBackgrounded') IN ('true', 'false') THEN 0 ELSE 1 END, rank) AS background_rank,
+          ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY
+            CASE WHEN json_type(payload_json, '$.detail') = 'text' THEN 0 ELSE 1 END, rank) AS detail_rank
+        FROM scoped WHERE task_id IS NOT NULL
+      ), candidates AS (
+        SELECT bg.task_id FROM fields bg
+        JOIN fields status ON status.task_id = bg.task_id AND status.status_rank = 1
+        JOIN fields started ON started.task_id = bg.task_id AND started.start_rank = 1
+        WHERE bg.background_rank = 1
+          AND json_extract(bg.payload_json, '$.isBackgrounded') = 1
+          AND COALESCE(json_extract(bg.payload_json, '$.agentKind'), '') != 'agent'
+          AND COALESCE(trim(json_extract(bg.payload_json, '$.agentId')), '') = ''
+          AND COALESCE(json_extract(bg.payload_json, '$.taskType'), '') NOT IN ('plan', 'dream')
+          AND (started.kind = 'task.started' OR json_extract(status.payload_json, '$.status') IN ('pending', 'running', 'waiting', 'idle'))
+          AND (COALESCE(json_extract(status.payload_json, '$.status'), '') NOT IN
+            ('completed', 'failed', 'stopped', 'cancelled', 'interrupted')
+            OR COALESCE(json_extract(started.payload_json, '$.attempt'), 0) >
+               COALESCE(json_extract(status.payload_json, '$.attempt'), 0))
+        ORDER BY started.rank DESC LIMIT 101
+      ), evidence AS (
+      SELECT activity_id AS "activityId", thread_id AS "threadId", turn_id AS "turnId",
+        tone, kind, substr(summary, 1, 180) AS summary,
+        json_object('taskId', task_id,
+          'runtimeSessionId', json_extract(payload_json, '$.runtimeSessionId'),
+          'agentKind', json_extract(payload_json, '$.agentKind'),
+          'agentId', json_extract(payload_json, '$.agentId'),
+          'taskType', json_extract(payload_json, '$.taskType'),
+          'attempt', json_extract(payload_json, '$.attempt'),
+          'isBackgrounded', json(CASE json_extract(payload_json, '$.isBackgrounded') WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE 'null' END),
+          'canStop', json(CASE json_extract(payload_json, '$.canStop') WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE 'null' END),
+          'status', json_extract(payload_json, '$.status'),
+          'detail', substr(COALESCE(json_extract(payload_json, '$.detail'), json_extract(payload_json, '$.title')), 1, 180)
+        ) AS payload,
+        sequence, created_at AS "createdAt", rank AS evidence_rank
+      FROM fields WHERE (task_id IN (SELECT task_id FROM candidates)
+        AND (start_rank = 1 OR status_rank = 1 OR background_rank = 1 OR detail_rank = 1))
+        OR rank IN (
+          -- Bounded terminal evidence also protects a recent delayed start
+          -- whose completion was just outside the transcript page.
+          SELECT rank FROM fields WHERE status_rank = 1
+            AND json_extract(payload_json, '$.status') IN ('completed', 'failed', 'stopped', 'cancelled', 'interrupted')
+            AND json_extract(payload_json, '$.agentKind') = 'background'
+          ORDER BY rank LIMIT 100
+        )
+      UNION ALL
+      SELECT 'background-work:evidence-omitted', ${threadId}, NULL, 'info', 'background-work.omitted',
+        'Older background task details unavailable',
+        json_object('runtimeSessionId', s.runtime_session_id),
+        (SELECT sequence FROM sampled ORDER BY sequence DESC, created_at DESC, activity_id DESC LIMIT 1),
+        (SELECT created_at FROM sampled ORDER BY sequence DESC, created_at DESC, activity_id DESC LIMIT 1), 0
+      FROM projection_thread_sessions s WHERE s.thread_id = ${threadId} AND (
+        EXISTS (SELECT 1 FROM bounded WHERE oversized = 1 AND kind LIKE 'task.%') OR (
+          (SELECT count(*) FROM sampled) > 1024 AND NOT EXISTS (
+            SELECT 1 FROM bounded WHERE kind = 'background-work.session-boundary'
+              AND json_extract(payload_json, '$.runtimeSessionId') = s.runtime_session_id
+          )
+        )
+      )) SELECT * FROM evidence ORDER BY evidence_rank DESC
+    `,
   });
 
   // Payload-only projection for task rows: the linkage bundle (runHandles,
@@ -2877,6 +2973,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         rawMessageRows,
         rawProposedPlanRows,
         rawActivityRows,
+        backgroundEvidenceRows,
         rawCheckpointRows,
         latestTurnRow,
         sessionRow,
@@ -2922,6 +3019,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 toPersistenceSqlOrDecodeError(
                   "ProjectionSnapshotQuery.getThreadWindow:listActivities:query",
                   "ProjectionSnapshotQuery.getThreadWindow:listActivities:decodeRows",
+                ),
+              ),
+            ),
+            listBackgroundTaskEvidence({ threadId: input.threadId }).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError(
+                  "ProjectionSnapshotQuery.getThreadWindow:backgroundEvidence:query",
+                  "ProjectionSnapshotQuery.getThreadWindow:backgroundEvidence:decodeRows",
                 ),
               ),
             ),
@@ -2996,9 +3101,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
 
+      const evidence = new Map(
+        backgroundEvidenceRows.map((row) => [row.activityId, mapActivityRow(row)]),
+      );
+      for (const activity of thread.activities) evidence.set(activity.id, activity);
+      const orderedEvidence = [...evidence.values()].toSorted(
+        (a, b) =>
+          (a.sequence ?? -1) - (b.sequence ?? -1) ||
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.id.localeCompare(b.id),
+      );
+      const checkpoint = backgroundWorkCheckpoint(orderedEvidence);
       return {
         snapshotSequence: computeSnapshotSequence(stateRows),
-        thread,
+        thread: checkpoint ? { ...thread, activities: [...thread.activities, checkpoint] } : thread,
         history: {
           messages: createdAtHistoryPageInfo({
             threadId: input.threadId,

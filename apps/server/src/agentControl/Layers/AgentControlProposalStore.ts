@@ -166,7 +166,9 @@ const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlA
             : { originProjectId: proposal.principal.originProjectId }),
         }
       : {
-          integrationId: proposal.principal.integrationId,
+          ...(proposal.principal.kind === "external-integration"
+            ? { integrationId: proposal.principal.integrationId }
+            : {}),
           ...(proposal.principal.projectId === undefined
             ? {}
             : { originProjectId: proposal.principal.projectId }),

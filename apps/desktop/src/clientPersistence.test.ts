@@ -90,6 +90,17 @@ const savedRegistryRecord: PersistedSavedEnvironmentRecord = {
 };
 
 describe("clientPersistence", () => {
+  it("retains local onboarding completion independently of the backend URL", () => {
+    const settingsPath = makeTempPath("client-settings.json");
+    const completed = {
+      ...clientSettings,
+      localOnboardingCompletedEnvironmentIds: [EnvironmentId.make("desktop-local")],
+    };
+    writeClientSettings(settingsPath, completed);
+    expect(readClientSettings(settingsPath)?.localOnboardingCompletedEnvironmentIds).toEqual([
+      "desktop-local",
+    ]);
+  });
   it("persists and reloads client settings", () => {
     const settingsPath = makeTempPath("client-settings.json");
 

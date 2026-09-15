@@ -33,6 +33,7 @@ export function PendingApprovalCard(props: {
         threadId: props.threadId,
         requestId: props.approval.requestId,
         decision,
+        approvalIdentity: props.approval.approvalIdentity,
       });
     } catch {
       // `ensureEnvironmentApi` throws synchronously without a connection, and
@@ -58,17 +59,33 @@ export function PendingApprovalCard(props: {
           {props.approval.detail}
         </Text>
       ) : null}
+      {props.approval.responseState === "submitting" ||
+      props.approval.responseState === "uncertain" ? (
+        <Text className="mt-2 text-sm text-foreground-muted">
+          Decision submitted. Waiting for provider settlement.
+        </Text>
+      ) : null}
       {error ? <Text className="mt-2 font-sans text-sm text-danger">{error}</Text> : null}
       <View className="mt-3 flex-row flex-wrap gap-2">
         <Pressable
-          disabled={pending !== null || props.disabled === true}
+          disabled={
+            pending !== null ||
+            props.disabled === true ||
+            (props.approval.responseState !== undefined &&
+              props.approval.responseState !== "retryable")
+          }
           onPress={() => void respond("accept")}
           className="h-11 min-w-28 flex-1 items-center justify-center rounded-full bg-primary px-4 active:opacity-70 disabled:opacity-50"
         >
           <Text className="text-sm font-ryco-bold text-primary-foreground">Allow</Text>
         </Pressable>
         <Pressable
-          disabled={pending !== null || props.disabled === true}
+          disabled={
+            pending !== null ||
+            props.disabled === true ||
+            (props.approval.responseState !== undefined &&
+              props.approval.responseState !== "retryable")
+          }
           onPress={() => void respond("decline")}
           className="h-11 min-w-28 flex-1 items-center justify-center rounded-full border border-border px-4 active:opacity-70 disabled:opacity-50"
         >

@@ -37,6 +37,7 @@ import {
 
 import { type SettingsSectionId, useSettingsDialogStore } from "../../settingsDialogStore";
 import { cn } from "../../lib/utils";
+import { isLocalOnboardingClient } from "../onboarding/localOnboarding";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
 import {
   hostedSettingsRoleFresh,
@@ -429,6 +430,7 @@ export function SettingsDialog() {
           (entry) =>
             visibleSectionIds.has(entry.section) &&
             entry.owner === editingScope &&
+            (!entry.localOnboardingOnly || isLocalOnboardingClient()) &&
             (!entry.desktopCapability ||
               Boolean(window.desktopBridge?.[entry.desktopCapability])) &&
             `${entry.title} ${entry.description} ${entry.keywords ?? ""}`

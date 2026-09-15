@@ -1,3 +1,10 @@
+import { usePaneEffect, usePaneFocus, usePaneFocusRef, usePaneThreadRef } from "./chat/PaneFocus";
+import { startSelectionChat } from "../lib/selectionChat";
+import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
+import { appendSelectionQuote } from "@ryco/client-runtime/state/composer";
+import { useNewThreadHandler } from "../hooks/useHandleNewThread";
+import type { BackgroundTask } from "@ryco/shared/backgroundWork";
+import { deriveThreadBackgroundWork } from "@ryco/client-runtime/state/session";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { readEnvironmentConnection } from "../environments/runtime";
@@ -24,6 +31,7 @@ import {
   ProviderInteractionMode,
   ProviderDriverKind,
   RuntimeMode,
+  RuntimeSessionId,
   AgentTokenMode,
   type ThreadGoalStatus,
   type ThreadGoalUpdate,
@@ -454,6 +462,9 @@ function shouldIgnoreThreadMessageSearchShortcut(
 
 export default function ChatView(props: ChatViewProps) {
   usePerfMark("ChatView");
+  const paneFocused = usePaneFocus();
+  const paneThreadRef = usePaneThreadRef();
+  const paneFocusedRef = usePaneFocusRef();
   const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
   const terminalCapability = useHostedRpcCapability(WS_METHODS.terminalOpen);
   const sideChatCapability = useHostedRpcCapability(WS_METHODS.textGenerationAskSideQuestion);
@@ -498,12 +509,18 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timestampFormat = settings.timestampFormat;
   const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
-  const navigate = useNavigate();
+  const routerNavigate = useNavigate();
+  const navigate = useCallback<typeof routerNavigate>(
+    (options) => (paneFocusedRef.current ? routerNavigate(options) : Promise.resolve()),
+    [paneFocusedRef, routerNavigate],
+  );
+  const { handleNewThread } = useNewThreadHandler();
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
-  const rawSearch = useSearch({
+  const routeSearch = useSearch({
     strict: false,
     select: (params) => parseRightPanelRouteSearch(params),
   });
+  const rawSearch = paneFocused ? routeSearch : {};
   const { resolvedTheme } = useTheme();
   // Granular store selectors — avoid subscribing to prompt changes.
   const composerRuntimeMode = useComposerDraftStore(
@@ -579,7 +596,8 @@ export default function ChatView(props: ChatViewProps) {
   // empty-thread suppression below yields to an explicit request.
   const [overviewOpenedOnEmptyThread, setOverviewOpenedOnEmptyThread] = useState(false);
   const [overviewFloatingOpen, setOverviewFloatingOpen] = useState(false);
-  const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const viewportNeedsPlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const shouldUsePlanSidebarSheet = viewportNeedsPlanSidebarSheet || paneThreadRef !== null;
   const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
   const presentationTier = usePresentationTier();
   // With the thread sidebar collapsed this header owns the workspace's
@@ -590,6 +608,10 @@ export default function ChatView(props: ChatViewProps) {
   // tier flips (rotation preserves route, draft, and panel state).
   const presentationTierRef = useRef(presentationTier);
   presentationTierRef.current = presentationTier;
+  // Entering a split must not open one full-window overview for every chat.
+  useEffect(() => {
+    if (paneThreadRef) setPlanSidebarOpen(false);
+  }, [paneThreadRef]);
   const shouldUsePlanSidebarSheetRef = useRef(shouldUsePlanSidebarSheet);
   shouldUsePlanSidebarSheetRef.current = shouldUsePlanSidebarSheet;
   const [inspectedContextHandoff, setInspectedContextHandoff] = useState<{
@@ -685,10 +707,11 @@ export default function ChatView(props: ChatViewProps) {
   const mountedTerminalThreadRefs = useMemo(
     () =>
       mountedTerminalThreadKeys.flatMap((mountedThreadKey) => {
+        if (paneThreadRef && mountedThreadKey !== scopedThreadKey(paneThreadRef)) return [];
         const mountedThreadRef = parseScopedThreadKey(mountedThreadKey);
         return mountedThreadRef ? [{ key: mountedThreadKey, threadRef: mountedThreadRef }] : [];
       }),
-    [mountedTerminalThreadKeys],
+    [mountedTerminalThreadKeys, paneThreadRef],
   );
 
   const localDraftError =
@@ -1276,7 +1299,7 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   useEffect(() => {
-    if (!serverThread?.id) return;
+    if (!paneFocused || !serverThread?.id) return;
     if (!latestTurnSettled) return;
     if (!activeLatestTurn?.completedAt) return;
     const turnCompletedAt = Date.parse(activeLatestTurn.completedAt);
@@ -1291,6 +1314,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     activeLatestTurn?.completedAt,
     activeThreadLastVisitedAt,
+    paneFocused,
     latestTurnSettled,
     markThreadVisited,
     serverThread?.environmentId,
@@ -1464,7 +1488,7 @@ export default function ChatView(props: ChatViewProps) {
       seenRunningTurnIdsRef.current.add(turnId);
       return;
     }
-    if (!serverThread?.id) return;
+    if (!paneFocused || !serverThread?.id) return;
     if (!latestTurnSettled) return;
     if (!activeLatestTurn?.completedAt) return;
     if (!seenRunningTurnIdsRef.current.has(turnId)) return;
@@ -1496,6 +1520,10 @@ export default function ChatView(props: ChatViewProps) {
   ]);
 
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  const backgroundWork = useMemo(
+    () => deriveThreadBackgroundWork(threadActivities, activeThread?.session ?? null),
+    [threadActivities, activeThread?.session],
+  );
   const threadActivityViewModel = useMemo(
     () => deriveThreadActivityViewModel(threadActivities, activeLatestTurn?.turnId),
     [activeLatestTurn?.turnId, threadActivities],
@@ -1695,6 +1723,36 @@ export default function ChatView(props: ChatViewProps) {
       }
     })();
   }, [activeThreadId, onInterrupt, setThreadError]);
+  const handleStopBackgroundTask = useCallback(
+    async (task: BackgroundTask) => {
+      if (
+        !activeThreadId ||
+        !task.runtimeSessionId ||
+        !dispatchCapability.allowed ||
+        activeEnvironmentUnavailable ||
+        sideChatConnection.phase !== "connected"
+      ) {
+        throw new Error("This connection is not ready to stop tasks.");
+      }
+      const stop = readEnvironmentApi(environmentId)?.orchestration.stopBackgroundTask;
+      if (!stop) throw new Error("This environment cannot stop individual tasks.");
+      await stop({
+        threadId: activeThreadId,
+        taskId: task.id,
+        expected: {
+          runtimeSessionId: RuntimeSessionId.make(task.runtimeSessionId),
+          attempt: task.attempt,
+        },
+      });
+    },
+    [
+      activeThreadId,
+      dispatchCapability.allowed,
+      activeEnvironmentUnavailable,
+      environmentId,
+      sideChatConnection.phase,
+    ],
+  );
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -1789,13 +1847,15 @@ export default function ChatView(props: ChatViewProps) {
   // no chat messages. A thread can already carry work-log rows, a proposed plan,
   // or setup-script activity from worktree creation while `messages` is still
   // empty; showing the hero then would hide real progress — and real failures.
-  const showNewThreadSurface = shouldShowNewThreadSurface({
-    hasThread: activeThread !== undefined,
-    messageCount: activeThread?.messages.length ?? 0,
-    optimisticMessageCount: optimisticUserMessages.length,
-    timelineEntryCount: timelineEntries.length,
-    presentationTier,
-  });
+  const showNewThreadSurface =
+    paneThreadRef === null &&
+    shouldShowNewThreadSurface({
+      hasThread: activeThread !== undefined,
+      messageCount: activeThread?.messages.length ?? 0,
+      optimisticMessageCount: optimisticUserMessages.length,
+      timelineEntryCount: timelineEntries.length,
+      presentationTier,
+    });
 
   const loadedThreadMessageSearchOccurrences = useMemo(
     () =>
@@ -2122,9 +2182,9 @@ export default function ChatView(props: ChatViewProps) {
   // (ComposerPromptEditor's own focusAt*, driven by composer gestures) is a
   // different concern and is unaffected.
   const focusComposer = useCallback(() => {
-    if (presentationTierRef.current === "phone") return;
+    if (!paneFocusedRef.current || presentationTierRef.current === "phone") return;
     readComposer()?.focusAtEnd();
-  }, [readComposer]);
+  }, [paneFocusedRef, readComposer]);
   const scheduleComposerFocus = useCallback(() => {
     window.requestAnimationFrame(() => {
       focusComposer();
@@ -2822,7 +2882,7 @@ export default function ChatView(props: ChatViewProps) {
     terminalOpenByThreadRef.current[activeThreadKey] = current;
   }, [activeThreadKey, focusComposer, terminalState.terminalOpen]);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
       if (!activeThreadId || event.defaultPrevented) return;
       const command = resolveShortcutCommand(event, keybindings, {
@@ -2848,7 +2908,7 @@ export default function ChatView(props: ChatViewProps) {
     terminalState.terminalOpen,
   ]);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (shouldIgnoreGlobalNavigationShortcut(event) && !projectExplorerOpenRef.current) return;
@@ -3467,6 +3527,18 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const key = scopedThreadKey(activeThreadRef);
+      const side = useSideChatStore.getState().chatsByThreadKey[key];
+      if (sideQuestion && (side?.pending || side?.failedQuestion)) {
+        useSideChatStore.getState().open(key, activeThread.modelSelection);
+        toastManager.add({
+          type: "info",
+          title: side.pending
+            ? "Wait for the side answer or stop it first"
+            : "Restore or discard the unsent side question first",
+          description: "Your composer draft is preserved.",
+        });
+        return;
+      }
       useSideChatStore.getState().open(key, activeThread.modelSelection, sideQuestion || undefined);
       const sideApi = readEnvironmentConnection(activeThreadRef.environmentId)?.client
         .textGeneration;
@@ -4331,6 +4403,86 @@ export default function ChatView(props: ChatViewProps) {
       className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
     >
       {!isPhoneTier && activeThreadRef ? (
+        <TranscriptSelectionActions
+          key={activeThreadKey}
+          containerRef={chatShellRef}
+          source={activeThreadRef}
+          canUseSide={isServerThread && sideChatCapability.allowed}
+          canCreate={
+            dispatchCapability.allowed &&
+            !isConnecting &&
+            !activeEnvironmentUnavailable &&
+            !!activeProject
+          }
+          canUseWorktree={isGitRepo && !!activeThreadBranch}
+          onCurrent={(quote) => {
+            const nextPrompt = appendSelectionQuote(
+              readComposer()?.getSendContext().prompt ?? promptRef.current,
+              quote,
+            );
+            promptRef.current = nextPrompt;
+            setComposerDraftPrompt(composerDraftTarget, nextPrompt);
+            readComposer()?.resetCursorState({
+              prompt: nextPrompt,
+              cursor: nextPrompt.length,
+              detectTrigger: false,
+            });
+            scheduleComposerFocus();
+          }}
+          onSide={(quote) => {
+            if (!isServerThread || !sideChatCapability.allowed) return;
+            const key = scopedThreadKey(activeThreadRef);
+            const side = useSideChatStore.getState();
+            side.open(key, activeThread.modelSelection);
+            side.setDraft(
+              key,
+              appendSelectionQuote(
+                useSideChatStore.getState().chatsByThreadKey[key]?.draft ?? "",
+                quote,
+              ),
+            );
+            requestAnimationFrame(
+              () =>
+                paneFocusedRef.current &&
+                chatShellRef.current
+                  ?.querySelector<HTMLTextAreaElement>('[aria-label="Side question"]')
+                  ?.focus(),
+            );
+          }}
+          onNew={async ({ quote, prompt, envMode, intent, requestKey }) => {
+            const context = readComposer()?.getSendContext();
+            if (
+              !context ||
+              !activeProject ||
+              !dispatchCapability.allowed ||
+              isConnecting ||
+              activeEnvironmentUnavailable
+            ) {
+              throw new Error("The workspace is unavailable. Your selection draft is preserved.");
+            }
+            await startSelectionChat({
+              quote,
+              prompt,
+              envMode,
+              intent,
+              requestKey,
+              projectRef: scopeProjectRef(environmentId, activeProject.id),
+              branch: activeThreadBranch,
+              canUseWorktree: isGitRepo,
+              composer: context,
+              settings: { runtimeMode, interactionMode: "default", tokenMode },
+              prepare: prepareEditorSend,
+              isCurrent: () =>
+                paneFocusedRef.current &&
+                editorSendTargetRef.current.allowed &&
+                editorSendTargetRef.current.environmentId === environmentId &&
+                editorSendTargetRef.current.threadId === activeThread.id,
+              createThread: handleNewThread,
+            });
+          }}
+        />
+      ) : null}
+      {!isPhoneTier && activeThreadRef ? (
         <SideChatPanel
           threadRef={activeThreadRef}
           providers={providerStatuses}
@@ -4426,7 +4578,7 @@ export default function ChatView(props: ChatViewProps) {
         )}
       </header>
       <LinkedWorktreeItemDialog
-        open={headerLinkedItem !== null}
+        open={paneFocused && headerLinkedItem !== null}
         item={headerLinkedItem}
         environmentId={activeProject?.environmentId ?? activeThread.environmentId}
         projectId={activeProject?.id ?? activeThread.projectId}
@@ -4662,10 +4814,24 @@ export default function ChatView(props: ChatViewProps) {
             <div className={cn("relative isolate", composerOverlayActive && "pointer-events-auto")}>
               {/* Background-liveness stays off the frozen phone tier along
                   with the rest of the Agents surface (AGENTS.md). */}
-              {activeBackgroundLiveness !== null && presentationTier !== "phone" ? (
+              {(activeBackgroundLiveness !== null ||
+                backgroundWork.tasks.length > 0 ||
+                backgroundWork.detailsOmitted) &&
+              presentationTier !== "phone" ? (
                 <div className="mx-auto mb-2 flex w-full min-w-0 max-w-208 items-center px-4">
                   <BackgroundLivenessChip
-                    liveness={activeBackgroundLiveness}
+                    key={activeThreadKey}
+                    work={backgroundWork}
+                    connected={
+                      !activeEnvironmentUnavailable && sideChatConnection.phase === "connected"
+                    }
+                    mutationReady={
+                      dispatchCapability.allowed &&
+                      !activeEnvironmentUnavailable &&
+                      sideChatConnection.phase === "connected"
+                    }
+                    onStopTask={handleStopBackgroundTask}
+                    liveness={activeBackgroundLiveness ?? "monitoring"}
                     liveCount={agentPanelModel.liveCount}
                     waitingCount={agentPanelModel.waitingCount}
                     onOpenAgents={onOpenAgentsPanel}
@@ -4850,7 +5016,7 @@ export default function ChatView(props: ChatViewProps) {
             />
           ) : null}
           <NewWorktreeDialog
-            open={projectExplorerOpen}
+            open={paneFocused && projectExplorerOpen}
             environmentId={activeThread.environmentId}
             projectId={activeProject?.id ?? null}
             cwd={activeProject?.cwd ?? null}
@@ -4919,6 +5085,7 @@ export default function ChatView(props: ChatViewProps) {
           threadRef={mountedThreadRef}
           threadId={mountedThreadRef.threadId}
           visible={
+            paneFocused &&
             mountedThreadKey === activeThreadKey &&
             terminalState.terminalOpen &&
             terminalCapability.allowed
@@ -4934,7 +5101,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddTerminalContext={addTerminalContextToDraft}
         />
       ))}
-      {!isPhoneTier && shouldUsePlanSidebarSheet && inspectedContextHandoff ? (
+      {paneFocused && !isPhoneTier && shouldUsePlanSidebarSheet && inspectedContextHandoff ? (
         <RightPanelSheet open onClose={closeContextHandoffInspection}>
           <ContextHandoffInspectionPanel
             environmentId={activeThread.environmentId}
@@ -4950,7 +5117,7 @@ export default function ChatView(props: ChatViewProps) {
         // (the audited right overlay had no close affordance at all).
         <PhoneWorkSurfaceSheet
           label={planSidebarLabel}
-          open={showOverviewSidebarSheet}
+          open={paneFocused && showOverviewSidebarSheet}
           onClose={closePlanSidebar}
         >
           <PhoneSurfaceScaffold
@@ -4987,7 +5154,7 @@ export default function ChatView(props: ChatViewProps) {
           </PhoneSurfaceScaffold>
         </PhoneWorkSurfaceSheet>
       ) : shouldUsePlanSidebarSheet ? (
-        <RightPanelSheet open={showOverviewSidebarSheet} onClose={closePlanSidebar}>
+        <RightPanelSheet open={paneFocused && showOverviewSidebarSheet} onClose={closePlanSidebar}>
           <ChatOverviewPanel
             environmentId={environmentId}
             gitCwd={gitCwd}
