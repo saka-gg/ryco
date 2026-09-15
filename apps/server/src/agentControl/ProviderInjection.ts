@@ -143,6 +143,7 @@ const grantedCapabilities = [
   AGENT_CONTROL_CAPABILITIES.createProject,
   AGENT_CONTROL_CAPABILITIES.updateProject,
   AGENT_CONTROL_CAPABILITIES.removeProject,
+  AGENT_CONTROL_CAPABILITIES.manageWorkspaces,
   AGENT_CONTROL_CAPABILITIES.readSettings,
   AGENT_CONTROL_CAPABILITIES.changeSettings,
   AGENT_CONTROL_CAPABILITIES.readAutomations,

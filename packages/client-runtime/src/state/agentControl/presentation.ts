@@ -258,6 +258,32 @@ function planPresentation(proposal: AgentControlProposal): {
           },
         ],
       };
+    case "workspaceLifecycle":
+      return {
+        actionLabel: `${plan.action} workspace`,
+        targetLabel: plan.expected.workspaceId,
+        runtimeLabel: null,
+        detailSections: [
+          {
+            heading: "Exact workspace lifecycle plan",
+            lines: [
+              `Project: ${plan.projectId}`,
+              `Workspace record: ${plan.expected.worktreeId}`,
+              `Path: ${plan.expected.path}`,
+              `Checkout action: ${plan.checkoutMode}`,
+              `Branch: ${plan.expected.branch} (${plan.deleteBranch ? "delete" : "retain"})`,
+              `Expected branch commit: ${plan.expected.branchHead ?? "missing"}`,
+              `Merged into project HEAD: ${plan.expected.unmerged === false ? "yes" : "unverified"}`,
+              `Expected revision: ${plan.expected.updatedAt}`,
+              `Sessions: ${plan.sessions === "delete" ? "permanently delete history" : plan.action === "delete" ? "preserve history and move to main workspace" : "preserve"}`,
+              ...plan.expected.sessions.map(
+                (session) => `${session.threadId}${session.archived ? " (archived)" : ""}`,
+              ),
+              "Execution rechecks this plan. Interrupted filesystem steps are never replayed automatically.",
+            ],
+          },
+        ],
+      };
     case "removeProject":
       return {
         actionLabel: "Unlink project",
@@ -556,7 +582,9 @@ export function buildAgentControlProposalCardModel(
     targetLabel: plan.targetLabel,
     runtimeLabel: plan.runtimeLabel,
     riskLabels: proposal.riskTags.map((tag) => riskLabelFromTag(String(tag))),
-    isDestructive: proposal.plan.kind === "removeProject",
+    isDestructive:
+      proposal.plan.kind === "removeProject" ||
+      (proposal.plan.kind === "workspaceLifecycle" && proposal.plan.action !== "restore"),
     warningLabel:
       proposal.plan.kind === "deviceOpenUrl"
         ? "High risk · opens an external URL or deep link"

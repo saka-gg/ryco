@@ -67,6 +67,12 @@ const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlA
           projectId: proposal.plan.projectId,
           expectedUpdatedAt: proposal.plan.before.updatedAt,
         };
+      case "workspaceLifecycle":
+        return {
+          projectId: proposal.plan.projectId,
+          expectedUpdatedAt: proposal.plan.expected.updatedAt,
+          expectedThreadCount: String(proposal.plan.expected.sessions.length),
+        };
       case "removeProject":
         return {
           projectId: proposal.plan.projectId,
@@ -549,6 +555,8 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
   return {
     submit,
     getById,
+    findByRequest: (principal, requestId) =>
+      proposals.findByRequest({ principalScope: agentControlPrincipalScope(principal), requestId }),
     listPending,
     listActive,
     listRecent,

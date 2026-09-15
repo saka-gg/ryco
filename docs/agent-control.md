@@ -90,3 +90,64 @@ the displayed pairing command and copy the generated MCP entry yourself. Pairing
 short-lived; do not place them or the resulting credential in provider configuration.
 
 Provider-specific MCP behavior is documented in [Provider MCP management](./providers/mcp.md).
+
+## Governed workspace lifecycle
+
+Private Ryco sessions expose these project-scoped tools:
+
+- `ryco_list_workspaces({ projectId, after?, limit? })`: pages of up to 50 workspace
+  records and synthetic session groups, including archived and missing checkouts. Pass
+  `nextCursor` as `after`. IDs are stable within the project. `origin: "manual"` does
+  not imply a synthetic group: check `registration` and `worktreeId`.
+- `ryco_read_workspace({ projectId, workspaceId })`: bounded session membership,
+  archive/current/main protection, checkout existence, Git registration, commit IDs,
+  dirty/unmerged state, and inspection blockers. No file contents or Git stderr are returned.
+- `ryco_plan_workspace_lifecycle({ projectId, workspaceId, action, checkoutMode,
+sessions, deleteBranch })`: read-only preflight returning `{ plan, planDigest, blockers }`.
+- `ryco_propose_workspace_lifecycle({ requestId, plan })`: submit the exact returned plan.
+  Requires the `workspaces.manage` grant and exact active-turn authority. Every lifecycle
+  action requires human approval, including in Full Access. Do not approve your own request.
+
+Supported combinations:
+
+| Action    | Checkout mode                      | Sessions                        | Branch                                                          |
+| --------- | ---------------------------------- | ------------------------------- | --------------------------------------------------------------- |
+| `archive` | `remove-checkout` or `record-only` | `preserve`                      | Retain by default; explicit deletion only with checkout removal |
+| `delete`  | `remove-checkout` or `record-only` | Explicit `preserve` or `delete` | Same                                                            |
+| `restore` | `restore-checkout`                 | `preserve`                      | Must still exist; `deleteBranch: false`                         |
+
+`record-only` requires both the exact path and its Git registration to be absent. It
+never removes files, prunes Git registrations, or deletes a branch. This is the supported
+cleanup for a retained registered **Manual** entry after external Git worktree removal.
+Archiving a thread alone does not remove this workspace record. Synthetic groups have
+no record to archive/delete; the tool reports that limitation without deleting history.
+
+Checkout removal never uses force. It requires a registered checkout with no tracked,
+untracked, or ignored changes and a branch merged into the project's current HEAD.
+Branch deletion uses the approved commit as an atomic compare-and-delete guard. Main,
+current, overlapping, locked, active, or unverifiable workspaces are blocked. Restore
+requires an archived record, an absent checkout/registration, and a retained branch.
+
+Deleting with `sessions: "preserve"` atomically moves the exact associated sessions to
+an existing registered main workspace and clears their removed checkout paths; history
+and archive state survive. `sessions: "delete"` explicitly authorizes deletion of the
+listed session histories. The authoritative orchestration command checks workspace and
+project revisions, path, branch and session membership again before changing records.
+No batch cleanup, rename, broad reconciliation, force option, or arbitrary command tool
+is exposed by this workflow.
+
+The normal immutable plan digest, request ID, approval and durable receipt protocol applies.
+Retry an identical request ID/plan to recover its original receipt. A changed plan needs a
+new request ID and approval. Read/wait for the receipt's terminal result. On failure,
+`execution.workspaceLifecycle.completedSteps` records intent and completion checkpoints:
+a `*-started` step without its `*-completed` counterpart has an **unknown outcome**.
+Filesystem and record changes cannot share a transaction. A later failure can therefore
+leave the checkout removed while its Ryco record remains. Recovery never repeats deletion
+or recreates user files; inspect current state and prepare a new approved plan for any
+remaining work. A failed receipt is not a claim that nothing changed.
+
+Standalone integrations retain their existing task-oriented grants and catalog; they do
+not advertise or accept workspace lifecycle tools. This does not expand their authority to
+other Ryco sessions or workspace histories. The private catalog is shared across supported
+provider injection paths. No hosted, mobile authorization, or service-worker policy changes
+are involved.

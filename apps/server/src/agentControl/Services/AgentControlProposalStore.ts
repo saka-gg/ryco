@@ -105,6 +105,11 @@ export type AgentControlProposalStoreError =
  * AgentControlProposalStoreShape - Service API for the proposal lifecycle.
  */
 export interface AgentControlProposalStoreShape {
+  readonly findByRequest?: (
+    principal: AgentControlPrincipal,
+    requestId: AgentControlRequestId,
+  ) => Effect.Effect<Option.Option<AgentControlProposal>, AgentControlProposalStoreError>;
+
   /** Create a proposal in `pending-user-approval`, idempotently per request id. */
   readonly submit: (
     input: SubmitAgentControlProposalInput,

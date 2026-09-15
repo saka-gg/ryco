@@ -1,3 +1,4 @@
+import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import type {
   AgentControlActionPlan,
   AgentControlDeviceActionPlan,
@@ -431,6 +432,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
     import("@ryco/contracts").AgentControlExternalIntegration,
     AgentControlExternalIntegrationServiceError
   >;
+  readonly workspaces?: typeof AgentControlWorkspaces.Service;
   readonly projectPlans?: AgentControlProjectPlansShape;
   readonly automations?: AgentControlAutomationShape;
   readonly deviceService?: DeviceServiceShape;
@@ -545,6 +547,10 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         });
       } else if (input.plan.kind === "changeSettings") {
         // Closed schema: only non-secret boolean preferences are supported.
+      } else if (input.plan.kind === "workspaceLifecycle") {
+        if (!deps.workspaces || input.plan.projectId !== caller.projectId)
+          return yield* fail("project-scope", "Workspace control unavailable in caller scope.");
+        yield* deps.workspaces.revalidate(input.plan, caller.id);
       } else if (isProjectPlan(input.plan)) {
         if (deps.projectPlans === undefined) {
           return yield* fail("project-unavailable", "Project proposal validation is unavailable.");
@@ -852,6 +858,16 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         });
         return;
       }
+      if (proposal.plan.kind === "workspaceLifecycle") {
+        if (
+          principal.kind !== "provider-session" ||
+          !deps.workspaces ||
+          proposal.plan.projectId !== originProjectId
+        )
+          return yield* fail("project-scope", "Workspace control unavailable in caller scope.");
+        yield* deps.workspaces.revalidate(proposal.plan, principal.threadId);
+        return;
+      }
       if (isProjectPlan(proposal.plan)) {
         if (principal.kind !== "provider-session") {
           return yield* fail("project-scope", "External integrations cannot manage projects.");
@@ -913,6 +929,7 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
   const git = yield* GitWorkflowService;
   const externalIntegrations = yield* Effect.serviceOption(AgentControlExternalIntegrationService);
   const projectPlans = yield* AgentControlProjectPlans;
+  const workspaces = yield* Effect.serviceOption(AgentControlWorkspaces);
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
   const deviceService = yield* Effect.serviceOption(DeviceService);
   return makeAgentControlActionValidatorFromDeps({
@@ -920,6 +937,7 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
     getProviders: providerRegistry.getProviders,
     listRefs: git.listRefs,
     projectPlans,
+    ...(Option.isSome(workspaces) ? { workspaces: workspaces.value } : {}),
     ...(Option.isSome(deviceService) ? { deviceService: deviceService.value } : {}),
     ...(Option.isSome(automations) ? { automations: automations.value } : {}),
     ...(Option.isSome(externalIntegrations)

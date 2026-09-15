@@ -357,6 +357,7 @@ describe("forward compatibility (additive extension)", () => {
       "updateAutomation",
       "updateProject",
       "updateThread",
+      "workspaceLifecycle",
     ]);
   });
 });
@@ -405,6 +406,10 @@ describe("Agent Control MCP contracts", () => {
         "ryco_capabilities",
         "ryco_list_projects",
         "ryco_list_threads",
+        "ryco_list_workspaces",
+        "ryco_read_workspace",
+        "ryco_plan_workspace_lifecycle",
+        "ryco_propose_workspace_lifecycle",
         "ryco_read_thread",
         "ryco_read_control_request",
         "ryco_wait_for_control_request",
@@ -442,7 +447,7 @@ describe("Agent Control MCP contracts", () => {
         "ryco_propose_device_shutdown",
       ].toSorted(),
     );
-    expect(Object.values(AGENT_CONTROL_MCP_TOOLS)).toHaveLength(39);
+    expect(Object.values(AGENT_CONTROL_MCP_TOOLS)).toHaveLength(43);
     for (const name of AGENT_CONTROL_MCP_TOOL_NAMES) {
       expect(name.startsWith("ryco_")).toBe(true);
     }

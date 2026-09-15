@@ -1,3 +1,5 @@
+import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
+import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
@@ -361,7 +363,7 @@ it.effect("advertises capability-scoped reads and all proposal-only writes with 
   Effect.gen(function* () {
     const tools = makeAgentControlMcpTools(makeDeps());
     const readDescriptors = yield* tools.descriptorsFor(session);
-    assert.strictEqual(readDescriptors.length, 7);
+    assert.strictEqual(readDescriptors.length, 10);
     const serialized = JSON.stringify(readDescriptors).toLowerCase();
     for (const mutation of ["create_thread", "send_message", "interrupt", "update_thread"]) {
       assert.notInclude(serialized, mutation);
@@ -380,7 +382,7 @@ it.effect("advertises capability-scoped reads and all proposal-only writes with 
     );
     assert.strictEqual(
       writeDescriptors.filter((tool) => writeTools.isWriteTool(tool.name)).length,
-      20,
+      21,
     );
     assert.isTrue(tools.hasTool("ryco_create_threads"));
   }),
@@ -916,6 +918,9 @@ it.effect("ryco_capabilities uses provider instances and bounds model lists", ()
         AGENT_CONTROL_MCP_TOOLS.context,
         AGENT_CONTROL_MCP_TOOLS.capabilities,
         AGENT_CONTROL_MCP_TOOLS.listProjects,
+        AGENT_CONTROL_MCP_TOOLS.listWorkspaces,
+        AGENT_CONTROL_MCP_TOOLS.readWorkspace,
+        AGENT_CONTROL_MCP_TOOLS.planWorkspace,
         AGENT_CONTROL_MCP_TOOLS.listThreads,
         AGENT_CONTROL_MCP_TOOLS.readThread,
         AGENT_CONTROL_MCP_TOOLS.readControlRequest,
@@ -1595,4 +1600,55 @@ it.effect("rejects malformed tool arguments with a bounded error", () =>
       assert.strictEqual(result.content[0]?.text, "Invalid tool arguments.");
     }
   }),
+);
+
+it.effect(
+  "workspace mutation requires its grant and exact authority, and recovers identical receipts after target removal",
+  () =>
+    Effect.gen(function* () {
+      const existing = {
+        ...proposalOwn,
+        plan: workspacePlan,
+        planDigest: computeAgentControlPlanDigest(workspacePlan),
+        status: "completed" as const,
+      };
+      const deps = makeDeps({
+        getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)),
+        workspaces: {
+          read: () => Effect.die("deleted workspace must not be reread on receipt replay"),
+          revalidate: () => Effect.die("replay must not mutate"),
+          list: () => Effect.die("unused"),
+        },
+        proposals: {
+          getProposal: () => Effect.succeed(Option.some(existing)),
+          findByRequest: (principal, requestId) => {
+            assert.strictEqual(principal.kind, "provider-session");
+            assert.strictEqual(requestId, existing.requestId);
+            return Effect.succeed(Option.some(existing));
+          },
+        },
+      });
+      const tools = makeAgentControlMcpTools(deps);
+      const args = { requestId: existing.requestId, plan: workspacePlan };
+      const denied = yield* tools.callTool(session, AGENT_CONTROL_MCP_TOOLS.proposeWorkspace, args);
+      assert.isTrue(denied.isError);
+      const replay = yield* tools.callTool(
+        writeSession,
+        AGENT_CONTROL_MCP_TOOLS.proposeWorkspace,
+        args,
+      );
+      assert.isUndefined(replay.isError);
+      assert.isTrue((replay.structuredContent as { replayed: boolean }).replayed);
+      const conflict = yield* tools.callTool(
+        writeSession,
+        AGENT_CONTROL_MCP_TOOLS.proposeWorkspace,
+        { ...args, plan: { ...workspacePlan, sessions: "delete" } },
+      );
+      assert.isTrue(conflict.isError);
+      assert.include(conflict.content[0]!.text, "different plan");
+      const schema = (yield* tools.descriptorsFor(writeSession)).find(
+        (d) => d.name === AGENT_CONTROL_MCP_TOOLS.proposeWorkspace,
+      )!.inputSchema;
+      assert.notInclude(JSON.stringify(schema), '"$ref"');
+    }),
 );

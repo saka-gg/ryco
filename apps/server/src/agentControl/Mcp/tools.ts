@@ -1,3 +1,12 @@
+import { AgentControlWorkspaces, workspacePlanBlockers } from "../workspaceLifecycle.ts";
+import { computeAgentControlPlanDigest } from "../planDigest.ts";
+import {
+  AgentControlListWorkspacesInput,
+  AgentControlReadWorkspaceInput,
+  AgentControlPlanWorkspaceInput,
+  AgentControlProposeWorkspaceInput,
+  type AgentControlWorkspaceLifecyclePlan,
+} from "@ryco/contracts";
 /**
  * Read and proposal-backed mutation catalog for the internal Agent Control MCP endpoint.
  *
@@ -150,11 +159,12 @@ export interface AgentControlMcpToolResult {
 export interface AgentControlMcpToolDeps {
   readonly policy: AgentControlPolicyShape;
   readonly proposals: Pick<AgentControlProposalServiceShape, "getProposal"> &
-    Partial<Pick<AgentControlProposalServiceShape, "submit">>;
+    Partial<Pick<AgentControlProposalServiceShape, "submit" | "findByRequest">>;
   readonly proposalEvents: Pick<AgentControlProposalEventsShape, "subscribe">;
   readonly projections: ProjectionSnapshotQueryShape;
   readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
   readonly validator?: AgentControlActionValidatorShape;
+  readonly workspaces?: typeof AgentControlWorkspaces.Service;
   readonly projectPlans?: AgentControlProjectPlansShape;
   readonly automations?: AgentControlAutomationShape;
   readonly diagnostics?: AgentControlDiagnosticsShape;
@@ -465,6 +475,34 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
       "List the currently authorized Agent Control tool catalog and configured Ryco provider instances with exact model availability.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
+  ...(
+    [
+      [
+        AGENT_CONTROL_MCP_TOOLS.listWorkspaces,
+        "List a bounded page of registered workspaces and synthetic session groups in the caller's project, including archived and missing checkouts.",
+        AgentControlListWorkspacesInput,
+      ],
+      [
+        AGENT_CONTROL_MCP_TOOLS.readWorkspace,
+        "Inspect one stable workspace ID, its sessions, protection and safe Git lifecycle status.",
+        AgentControlReadWorkspaceInput,
+      ],
+      [
+        AGENT_CONTROL_MCP_TOOLS.planWorkspace,
+        "Read-only preflight. Returns an exact immutable lifecycle plan, digest and blockers. No approval or mutation occurs.",
+        AgentControlPlanWorkspaceInput,
+      ],
+      [
+        AGENT_CONTROL_MCP_TOOLS.proposeWorkspace,
+        "Request user approval for an exact workspace lifecycle plan. Record-only cleanup never removes files or branches. Session deletion must be explicit. Reuse requestId for retries; inspect receipt after partial failure.",
+        AgentControlProposeWorkspaceInput,
+      ],
+    ] as const
+  ).map(([name, description, schema]) => ({
+    name,
+    description,
+    inputSchema: Schema.toJsonSchemaDocument(schema).schema,
+  })),
   {
     name: AGENT_CONTROL_MCP_TOOLS.listProjects,
     description: "List Ryco projects (bounded page; cursor-based).",
@@ -874,6 +912,7 @@ const WRITE_TOOL_NAMES = new Set<string>([
   AGENT_CONTROL_MCP_TOOLS.sendMessage,
   AGENT_CONTROL_MCP_TOOLS.interruptThread,
   AGENT_CONTROL_MCP_TOOLS.updateThread,
+  AGENT_CONTROL_MCP_TOOLS.proposeWorkspace,
   AGENT_CONTROL_MCP_TOOLS.proposeProjectCreate,
   AGENT_CONTROL_MCP_TOOLS.proposeProjectUpdate,
   AGENT_CONTROL_MCP_TOOLS.proposeProjectRemove,
@@ -918,6 +957,8 @@ const writeCapabilityForTool = (name: string): AgentControlCapability | null => 
       return AGENT_CONTROL_CAPABILITIES.interruptThread;
     case AGENT_CONTROL_MCP_TOOLS.updateThread:
       return AGENT_CONTROL_CAPABILITIES.updateThread;
+    case AGENT_CONTROL_MCP_TOOLS.proposeWorkspace:
+      return AGENT_CONTROL_CAPABILITIES.manageWorkspaces;
     case AGENT_CONTROL_MCP_TOOLS.proposeProjectCreate:
       return AGENT_CONTROL_CAPABILITIES.createProject;
     case AGENT_CONTROL_MCP_TOOLS.proposeProjectUpdate:
@@ -1342,6 +1383,8 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         return [AGENT_CONTROL_RISK_TAGS.interruptsThread];
       case "updateThread":
         return [AGENT_CONTROL_RISK_TAGS.modifiesThreadMetadata];
+      case "workspaceLifecycle":
+        return [AGENT_CONTROL_RISK_TAGS.workspaceLifecycle];
       case "createProject":
         return [AGENT_CONTROL_RISK_TAGS.createsProject];
       case "updateProject":
@@ -1393,6 +1436,8 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         return `Interrupt thread ${plan.threadId}`;
       case "updateThread":
         return `Update thread ${plan.threadId}`;
+      case "workspaceLifecycle":
+        return `${plan.action} workspace ${plan.expected.workspaceId}; ${plan.checkoutMode}; ${plan.sessions} sessions; ${plan.deleteBranch ? "delete" : "retain"} branch`;
       case "createProject":
         return `Create project ${plan.title}`;
       case "updateProject":
@@ -1550,6 +1595,85 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         },
       });
     });
+
+  const workspaceTool = (
+    session: AgentControlSessionRecord,
+    name: string,
+    args: unknown,
+    authority: AgentControlTurnAuthority | null,
+  ) =>
+    Effect.gen(function* () {
+      const workspaces = deps.workspaces;
+      if (!workspaces) return yield* failTool("Workspace lifecycle service unavailable.");
+      if (name === AGENT_CONTROL_MCP_TOOLS.listWorkspaces) {
+        const input = yield* decodeArgs(AgentControlListWorkspacesInput, args);
+        return yield* workspaces.list(input.projectId, session.threadId, input.after, input.limit);
+      }
+      if (name === AGENT_CONTROL_MCP_TOOLS.readWorkspace) {
+        const input = yield* decodeArgs(AgentControlReadWorkspaceInput, args);
+        return yield* workspaces.read(input.projectId, input.workspaceId, session.threadId);
+      }
+      if (name === AGENT_CONTROL_MCP_TOOLS.planWorkspace) {
+        const input = yield* decodeArgs(AgentControlPlanWorkspaceInput, args);
+        const expected = yield* workspaces.read(
+          input.projectId,
+          input.workspaceId,
+          session.threadId,
+        );
+        const plan: AgentControlWorkspaceLifecyclePlan = {
+          kind: "workspaceLifecycle",
+          projectId: input.projectId,
+          expected,
+          action: input.action,
+          checkoutMode: input.checkoutMode,
+          sessions: input.sessions,
+          deleteBranch: input.deleteBranch,
+        };
+        return {
+          plan,
+          planDigest: computeAgentControlPlanDigest(plan),
+          blockers: workspacePlanBlockers(plan),
+        };
+      }
+      if (!authority) return yield* failTool("Exact active-turn authority required.");
+      const input = yield* decodeArgs(AgentControlProposeWorkspaceInput, args);
+      if (deps.proposals.findByRequest) {
+        const existing = yield* deps.proposals
+          .findByRequest(
+            {
+              kind: "provider-session",
+              threadId: session.threadId,
+              providerInstanceId: session.providerInstanceId,
+            },
+            input.requestId,
+          )
+          .pipe(Effect.mapError(() => new ToolFailure("Control request lookup failed.")));
+        if (Option.isSome(existing)) {
+          if (existing.value.planDigest !== computeAgentControlPlanDigest(input.plan))
+            return yield* failTool("Request ID was already used with a different plan.");
+          return Schema.encodeSync(AgentControlMcpMutationResult)({
+            receipt: toAgentControlProposalReceipt(existing.value),
+            replayed: true,
+          });
+        }
+      }
+      return yield* submitMutation({
+        session,
+        authority,
+        requestId: input.requestId,
+        plan: input.plan,
+      });
+    }).pipe(
+      Effect.mapError((error) =>
+        error instanceof ToolFailure
+          ? error
+          : new ToolFailure(
+              "detail" in error
+                ? String(error.detail).slice(0, 500)
+                : "Workspace lifecycle request failed validation.",
+            ),
+      ),
+    );
 
   const prepareProjectPlan = <A>(
     prepare: (
@@ -2438,6 +2562,11 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           return readDeviceScreenshot(session, args);
         case AGENT_CONTROL_MCP_TOOLS.describeDeviceUi:
           return describeDeviceUi(session, args);
+        case AGENT_CONTROL_MCP_TOOLS.listWorkspaces:
+        case AGENT_CONTROL_MCP_TOOLS.readWorkspace:
+        case AGENT_CONTROL_MCP_TOOLS.planWorkspace:
+        case AGENT_CONTROL_MCP_TOOLS.proposeWorkspace:
+          return workspaceTool(session, name, args, authority);
         case AGENT_CONTROL_MCP_TOOLS.listProjects:
           return listProjects(session, args);
         case AGENT_CONTROL_MCP_TOOLS.listThreads:
