@@ -115,3 +115,60 @@ resolved absolute worktree root before any ref or object read. An allowed child
 directory cannot authorize reading its ancestor repository. Subsequent commands
 run at the authorized canonical root. Returned comparison metadata remains an
 identity, never an authorization token. Both RPCs retain operator access guards.
+
+## Staged and unstaged review
+
+**Staged changes** compares HEAD with the Git index. **Unstaged changes** compares
+the index with working files, including untracked files. A file can appear in both:
+after staging an edit, subsequent agent edits remain unstaged relative to that
+reviewed version. Refresh local changes to read edits made by another process.
+Foreground/resume, reconnect, and Git invalidation use the existing repository-read
+lifecycle adapter. These views do not change checkpoint or committed comparison semantics.
+
+The existing diff renderer, file navigation, search, and editor opens remain shared.
+File headers offer **Stage file** or **Unstage file** and, for regular modified text
+files, a numbered hunk selector and **Stage hunk** / **Unstage hunk**. Unstaging
+changes only the index; it never restores or deletes working files. Local review
+always includes whitespace so the displayed patch matches the action. Blame stays
+limited to immutable committed comparisons.
+
+Creation/deletion and binary patches support whole-file actions. Renames are explicit
+addition/deletion pairs, consistent with committed comparisons; review each side.
+Symlinks and submodules have no staging actions, and conflicted indexes fail with an
+explicit message. Partial creation/deletion and mode changes cannot be staged as
+individual hunks. Unsupported rendering retains the existing raw-patch fallback.
+
+Staging does not commit. Existing Ryco commit actions retain their selected-file/all-file
+staging behavior; they do not preserve partial-hunk selection. To commit precisely the
+reviewed index, use Git's staged-only commit workflow outside those actions.
+
+### Guarded index mutation
+
+`vcs.readLocalChanges` authorizes cwd and the resolved worktree through
+`GitReadWorkspace.ts` before reading refs or index data. It returns both exact patches,
+server-generated file identities, and a revision binding the canonical worktree,
+branch, HEAD, index bytes, and both unfiltered patches. These identities confer no
+additional authorization. Patches and action state remain in memory.
+
+`vcs.applyIndexPatch` accepts only a revision, source, server-generated file identity,
+and optional hunk number. It reauthorizes access, acquires Git's index, HEAD, and
+current-branch lock files without waiting, and regenerates the review. A mismatch
+fails before modifying the real index. The selected server patch applies to a
+private index; the review is checked again before the completed index is flushed
+and atomically renamed into place. Lock contention fails without deleting another
+process's lock. Scope cleanup removes only locks owned by the operation and its
+private temporary index. Working files are never written.
+
+Review reads also use a disposable index because some Git diff paths refresh index
+stat data. The real index remains byte-for-byte unchanged. Split indexes are made
+self-contained before publication. Sparse indexes may expand their metadata, but
+excluded working files stay excluded. Linked worktrees use their own index and HEAD
+paths, with the branch ref lock resolved through Git.
+
+Limits: 15 seconds per command, 2 MB total patch data, 32 MB index data, and 200
+untracked paths. Oversized or failed reads publish no actionable partial snapshot.
+An agent write can occur after the final patch check: the operation still stages
+only the reviewed bytes, and the later write remains in the working copy. Programs
+that bypass Git's lock protocol are outside its concurrency guarantee. Failure or
+uncertain delivery requires refresh; mutations are never automatically replayed.
+Existing operator and hosted transport readiness checks remain authoritative.

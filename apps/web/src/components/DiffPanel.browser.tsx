@@ -1,3 +1,14 @@
+// Local staging is covered by DiffPanel.staging.browser; keep this suite's transport isolated.
+vi.mock("../rpc/useLocalChanges", () => ({
+  useLocalChanges: () => ({
+    data: null,
+    isLoading: false,
+    isApplying: false,
+    error: null,
+    refresh: vi.fn(),
+    apply: vi.fn(),
+  }),
+}));
 // Blame is not mounted for checkpoint review; avoid initializing its RPC dependency.
 vi.mock("../environmentApi", () => ({ ensureEnvironmentApi: vi.fn() }));
 // This suite exercises checkpoint review; repository comparison has its own browser coverage.

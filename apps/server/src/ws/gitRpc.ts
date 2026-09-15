@@ -282,6 +282,24 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         ownerEffect(WS_METHODS.vcsReadLineBlame, gitWorkflow.readLineBlame(input)),
         { "rpc.aggregate": "vcs" },
       ),
+    [WS_METHODS.vcsReadLocalChanges]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.vcsReadLocalChanges,
+        ownerEffect(WS_METHODS.vcsReadLocalChanges, gitWorkflow.readLocalChanges(input)),
+        { "rpc.aggregate": "git" },
+      ),
+    [WS_METHODS.vcsApplyIndexPatch]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.vcsApplyIndexPatch,
+        ownerEffect(
+          WS_METHODS.vcsApplyIndexPatch,
+          gitWorkflow.applyIndexPatch(input).pipe(
+            Effect.tap(() => refreshGitStatus(input.cwd).pipe(Effect.ignore({ log: true }))),
+            Effect.as({}),
+          ),
+        ),
+        { "rpc.aggregate": "git" },
+      ),
     [WS_METHODS.vcsReadComparison]: (input) =>
       observeRpcEffect(
         WS_METHODS.vcsReadComparison,

@@ -3,6 +3,7 @@ import { useState } from "react";
 
 export function DiffComparisonControls(props: {
   selection: GitComparisonSelection | null;
+  turnSelected?: boolean;
   data: GitReadComparisonResult | null;
   isLoading: boolean;
   error: string | null;
@@ -29,7 +30,7 @@ export function DiffComparisonControls(props: {
         <button
           type="button"
           className="rounded border px-2 py-1"
-          aria-pressed={!props.selection}
+          aria-pressed={props.turnSelected ?? !props.selection}
           onClick={() => props.onSelect(null)}
         >
           Turn review

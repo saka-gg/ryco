@@ -1,3 +1,4 @@
+import { readGitLocalChanges, applyGitIndexPatch } from "../vcs/GitIndexReview.ts";
 import { authorizeGitReadCwd } from "../vcs/GitReadWorkspace.ts";
 import type { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { readGitLineBlame } from "../vcs/GitLineBlame.ts";
@@ -5,6 +6,9 @@ import { readGitComparison } from "../vcs/GitComparison.ts";
 import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
+  GitLocalChangesInput,
+  GitLocalChangesResult,
+  GitApplyIndexPatchInput,
   GitReadComparisonInput,
   GitReadComparisonResult,
 } from "@ryco/contracts";
@@ -45,6 +49,12 @@ export interface GitWorkflowServiceShape {
   readonly readLineBlame: (
     input: GitReadLineBlameInput,
   ) => Effect.Effect<GitReadLineBlameResult, GitCommandError, WorkspaceAccessPolicy>;
+  readonly readLocalChanges: (
+    input: GitLocalChangesInput,
+  ) => Effect.Effect<GitLocalChangesResult, GitCommandError, WorkspaceAccessPolicy>;
+  readonly applyIndexPatch: (
+    input: GitApplyIndexPatchInput,
+  ) => Effect.Effect<void, GitCommandError, WorkspaceAccessPolicy>;
   readonly readComparison: (
     input: GitReadComparisonInput,
   ) => Effect.Effect<GitReadComparisonResult, GitCommandError, WorkspaceAccessPolicy>;
@@ -331,6 +341,8 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
           ),
         ),
       ),
+    readLocalChanges: (input) => readGitLocalChanges(git.execute, input),
+    applyIndexPatch: (input) => applyGitIndexPatch(git.execute, input),
     readComparison: (input) =>
       authorizeGitReadCwd(input.cwd, "readComparison").pipe(
         Effect.flatMap((cwd) =>

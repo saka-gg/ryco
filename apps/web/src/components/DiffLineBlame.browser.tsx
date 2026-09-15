@@ -1,3 +1,14 @@
+// Local staging is covered by DiffPanel.staging.browser; keep this suite's transport isolated.
+vi.mock("../rpc/useLocalChanges", () => ({
+  useLocalChanges: () => ({
+    data: null,
+    isLoading: false,
+    isApplying: false,
+    error: null,
+    refresh: vi.fn(),
+    apply: vi.fn(),
+  }),
+}));
 import "../index.css";
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { StrictMode } from "react";

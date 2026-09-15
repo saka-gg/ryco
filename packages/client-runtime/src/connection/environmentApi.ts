@@ -66,6 +66,10 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       onStatus: (input, callback, options) => rpcClient.vcs.onStatus(input, callback, options),
       listRefs: rpcClient.vcs.listRefs,
       readLineBlame: rpcClient.vcs.readLineBlame,
+      readLocalChanges: rpcClient.vcs.readLocalChanges,
+      applyIndexPatch: async (input) => {
+        await rpcClient.vcs.applyIndexPatch(input);
+      },
       readComparison: rpcClient.vcs.readComparison,
       createWorktree: rpcClient.vcs.createWorktree,
       removeWorktree: rpcClient.vcs.removeWorktree,

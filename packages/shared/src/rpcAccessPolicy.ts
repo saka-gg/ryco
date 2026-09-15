@@ -172,6 +172,8 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.vcsInit]: "operator",
   [WS_METHODS.vcsListRefs]: "operator",
   [WS_METHODS.vcsReadLineBlame]: "operator",
+  [WS_METHODS.vcsReadLocalChanges]: "operator",
+  [WS_METHODS.vcsApplyIndexPatch]: "operator",
   [WS_METHODS.vcsReadComparison]: "operator",
   [WS_METHODS.vcsPull]: "operator",
   [WS_METHODS.vcsRefreshStatus]: "operator",

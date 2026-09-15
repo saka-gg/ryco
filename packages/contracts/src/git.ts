@@ -512,3 +512,37 @@ export const GitReadLineBlameResult = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("unavailable"), reason: Schema.String }),
 ]);
 export type GitReadLineBlameResult = typeof GitReadLineBlameResult.Type;
+
+export const GitLocalChangesInput = Schema.Struct({ cwd: TrimmedNonEmptyStringSchema });
+export type GitLocalChangesInput = typeof GitLocalChangesInput.Type;
+export const GitLocalChangesScope = Schema.Literals(["staged", "unstaged"]);
+export type GitLocalChangesScope = typeof GitLocalChangesScope.Type;
+const GitLocalPatch = Schema.Struct({
+  patch: Schema.String,
+  files: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      hunkCount: NonNegativeInt,
+      fileAction: Schema.Boolean,
+      hunkAction: Schema.Boolean,
+    }),
+  ),
+});
+export const GitLocalChangesResult = Schema.Struct({
+  worktreePath: Schema.String,
+  headOid: Schema.NullOr(Schema.String),
+  branch: Schema.NullOr(Schema.String),
+  indexIdentity: Schema.String,
+  revision: Schema.String,
+  staged: GitLocalPatch,
+  unstaged: GitLocalPatch,
+});
+export type GitLocalChangesResult = typeof GitLocalChangesResult.Type;
+export const GitApplyIndexPatchInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  scope: GitLocalChangesScope,
+  expectedRevision: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  fileId: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  hunkIndex: Schema.optional(NonNegativeInt),
+});
+export type GitApplyIndexPatchInput = typeof GitApplyIndexPatchInput.Type;
