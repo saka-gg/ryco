@@ -95,6 +95,7 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
 }
 
 contextBridge.exposeInMainWorld("desktopBridge", {
+  saveThreadExport: (input) => ipcRenderer.invoke("desktop:save-thread-export", input),
   browser: {
     getState: () => ipcRenderer.invoke("desktop:browser:state"),
     open: (input) => ipcRenderer.invoke("desktop:browser:open", input),

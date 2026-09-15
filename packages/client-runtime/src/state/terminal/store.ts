@@ -1,3 +1,4 @@
+import { reconcileTerminalEvent, type TerminalReconciliationState } from "./reconciliation.ts";
 /**
  * Single Zustand store for terminal UI state keyed by scoped thread identity.
  *
@@ -593,6 +594,7 @@ export interface TerminalStateStoreState {
   terminalStateByThreadKey: Record<string, ThreadTerminalState>;
   terminalLaunchContextByThreadKey: Record<string, ThreadTerminalLaunchContext>;
   terminalEventEntriesByKey: Record<string, ReadonlyArray<TerminalEventEntry>>;
+  terminalEventReconciliationByKey: Record<string, TerminalReconciliationState>;
   nextTerminalEventId: number;
   setTerminalOpen: (threadRef: ScopedThreadRef, open: boolean) => void;
   setTerminalHeight: (threadRef: ScopedThreadRef, height: number) => void;
@@ -655,6 +657,7 @@ export function createTerminalStateStore(options?: {
           terminalLaunchContextByThreadKey: {},
           terminalEventEntriesByKey: {},
           nextTerminalEventId: 1,
+          terminalEventReconciliationByKey: {},
           setTerminalOpen: (threadRef, open) =>
             updateTerminal(threadRef, (state) => setThreadTerminalOpen(state, open)),
           setTerminalHeight: (threadRef, height) =>
@@ -732,6 +735,12 @@ export function createTerminalStateStore(options?: {
             const startedAt = perfEnabled ? observability.now() : 0;
             set((state) => {
               const threadKey = terminalThreadKey(threadRef);
+              const eventKey = terminalEventBufferKey(threadRef, event.terminalId);
+              const reconciliation = reconcileTerminalEvent(
+                state.terminalEventReconciliationByKey[eventKey] ?? {},
+                event,
+              );
+              if (!reconciliation) return state;
               let nextTerminalStateByThreadKey = state.terminalStateByThreadKey;
               let nextTerminalLaunchContextByThreadKey = state.terminalLaunchContextByThreadKey;
 
@@ -776,6 +785,10 @@ export function createTerminalStateStore(options?: {
                 terminalStateByThreadKey: nextTerminalStateByThreadKey,
                 terminalLaunchContextByThreadKey: nextTerminalLaunchContextByThreadKey,
                 ...nextEventState,
+                terminalEventReconciliationByKey: {
+                  ...state.terminalEventReconciliationByKey,
+                  [eventKey]: reconciliation,
+                },
               };
             });
             if (perfEnabled) {
@@ -799,10 +812,12 @@ export function createTerminalStateStore(options?: {
               const { [threadKey]: _removed, ...remainingLaunchContexts } =
                 state.terminalLaunchContextByThreadKey;
               const nextTerminalEventEntriesByKey = { ...state.terminalEventEntriesByKey };
+              const nextReconciliation = { ...state.terminalEventReconciliationByKey };
               let removedEventEntries = false;
               for (const key of Object.keys(nextTerminalEventEntriesByKey)) {
                 if (key.startsWith(`${threadKey}\u0000`)) {
                   delete nextTerminalEventEntriesByKey[key];
+                  delete nextReconciliation[key];
                   removedEventEntries = true;
                 }
               }
@@ -817,6 +832,7 @@ export function createTerminalStateStore(options?: {
                 terminalStateByThreadKey: nextTerminalStateByThreadKey,
                 terminalLaunchContextByThreadKey: remainingLaunchContexts,
                 terminalEventEntriesByKey: nextTerminalEventEntriesByKey,
+                terminalEventReconciliationByKey: nextReconciliation,
               };
             }),
           removeTerminalState: (threadRef) =>
@@ -826,10 +842,12 @@ export function createTerminalStateStore(options?: {
               const hadLaunchContext =
                 state.terminalLaunchContextByThreadKey[threadKey] !== undefined;
               const nextTerminalEventEntriesByKey = { ...state.terminalEventEntriesByKey };
+              const nextReconciliation = { ...state.terminalEventReconciliationByKey };
               let removedEventEntries = false;
               for (const key of Object.keys(nextTerminalEventEntriesByKey)) {
                 if (key.startsWith(`${threadKey}\u0000`)) {
                   delete nextTerminalEventEntriesByKey[key];
+                  delete nextReconciliation[key];
                   removedEventEntries = true;
                 }
               }
@@ -844,6 +862,7 @@ export function createTerminalStateStore(options?: {
                 terminalStateByThreadKey: nextTerminalStateByThreadKey,
                 terminalLaunchContextByThreadKey: nextLaunchContexts,
                 terminalEventEntriesByKey: nextTerminalEventEntriesByKey,
+                terminalEventReconciliationByKey: nextReconciliation,
               };
             }),
           removeOrphanedTerminalStates: (activeThreadKeys) =>
@@ -855,11 +874,13 @@ export function createTerminalStateStore(options?: {
                 state.terminalLaunchContextByThreadKey,
               ).filter((key) => !activeThreadKeys.has(key));
               const nextTerminalEventEntriesByKey = { ...state.terminalEventEntriesByKey };
+              const nextReconciliation = { ...state.terminalEventReconciliationByKey };
               let removedEventEntries = false;
               for (const key of Object.keys(nextTerminalEventEntriesByKey)) {
                 const [threadKey] = key.split("\u0000");
                 if (threadKey && !activeThreadKeys.has(threadKey)) {
                   delete nextTerminalEventEntriesByKey[key];
+                  delete nextReconciliation[key];
                   removedEventEntries = true;
                 }
               }
@@ -882,6 +903,7 @@ export function createTerminalStateStore(options?: {
                 terminalStateByThreadKey: next,
                 terminalLaunchContextByThreadKey: nextLaunchContexts,
                 terminalEventEntriesByKey: nextTerminalEventEntriesByKey,
+                terminalEventReconciliationByKey: nextReconciliation,
               };
             }),
         };

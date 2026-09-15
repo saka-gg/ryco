@@ -1,3 +1,4 @@
+import { approvalActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
 import type {
   EnvironmentId,
   MessageId,
@@ -1689,7 +1690,7 @@ function applyThreadActivityAppendedEvent(
     return state;
   }
 
-  const activity = { ...event.payload.activity };
+  const activity = approvalActivityInOrchestrationOrder(event.payload.activity, event.sequence);
   const currentIds = state.activityIdsByThreadId[threadId] ?? EMPTY_ACTIVITY_IDS;
   const currentById = state.activityByThreadId[threadId] ?? {};
   const existingActivity = currentById[activity.id];

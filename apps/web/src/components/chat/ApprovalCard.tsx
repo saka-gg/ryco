@@ -58,7 +58,11 @@ export const ApprovalCard = memo(function ApprovalCard({
   const actions = (
     <ComposerPendingApprovalActions
       requestId={approval.requestId}
-      isResponding={isResponding}
+      approvalIdentity={approval.approvalIdentity}
+      isResponding={
+        isResponding ||
+        (approval.responseState !== undefined && approval.responseState !== "retryable")
+      }
       onRespondToApproval={onRespondToApproval}
     />
   );

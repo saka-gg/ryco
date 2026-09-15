@@ -1,3 +1,4 @@
+import type { ThreadId } from "@ryco/contracts";
 import { execFileSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -203,6 +204,7 @@ export interface OrchestrationIntegrationHarness {
     timeoutMs?: number,
   ) => Effect.Effect<ReadonlyArray<OrchestrationEvent>, never>;
   readonly waitForPendingApproval: (
+    threadId: ThreadId,
     requestId: string,
     predicate: (row: {
       readonly status: "pending" | "resolved";
@@ -492,13 +494,14 @@ export const makeOrchestrationIntegrationHarness = (
       );
 
     const waitForPendingApproval: OrchestrationIntegrationHarness["waitForPendingApproval"] = (
+      threadId,
       requestId,
       predicate,
       timeoutMs,
     ) =>
       waitFor(
         pendingApprovalRepository
-          .getByRequestId({ requestId: ApprovalRequestId.make(requestId) })
+          .getByRequestId({ threadId, requestId: ApprovalRequestId.make(requestId) })
           .pipe(
             Effect.map((row) =>
               Option.match(row, {

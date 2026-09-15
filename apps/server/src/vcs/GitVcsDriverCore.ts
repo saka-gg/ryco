@@ -32,7 +32,10 @@ import {
   parseRemoteNamesInGitOrder,
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
-import { ServerConfig } from "../config.ts";
+import { ServerConfig, resolveManagedWorktreesRoot } from "../config.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
+import { validateWorktreeRoot } from "../project/worktreeRoot.ts";
+import { makeWorkspaceAccessPolicy } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -732,7 +735,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 }) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const { worktreesDir } = yield* ServerConfig;
+  const config = yield* ServerConfig;
+  const worktreePolicy = yield* makeWorkspaceAccessPolicy(config.workspaceAccessRoot);
+  const settingsService = yield* Effect.serviceOption(ServerSettingsService);
 
   let executeRaw: GitVcsDriver.GitVcsDriverShape["execute"];
 
@@ -2160,7 +2165,38 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const targetBranch = input.newRefName ?? baseRef;
     const sanitizedBranch = targetBranch.replace(/\//g, "-");
     const repoName = path.basename(input.cwd);
-    const worktreePath = input.path ?? path.join(worktreesDir, repoName, sanitizedBranch);
+    const worktreePath = yield* Effect.gen(function* () {
+      const settings =
+        input.path == null && Option.isSome(settingsService)
+          ? yield* settingsService.value.getSettings
+          : null;
+      const candidate =
+        input.path ??
+        path.join(
+          settings?.worktreeRoot || resolveManagedWorktreesRoot(config),
+          repoName,
+          sanitizedBranch,
+        );
+      const canonical = yield* validateWorktreeRoot(candidate, worktreePolicy);
+      if (yield* fileSystem.exists(canonical)) {
+        return yield* Effect.fail(
+          new Error("Worktree destination already exists. Choose a different branch or root."),
+        );
+      }
+      return canonical;
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new GitCommandError({
+            operation: "GitVcsDriver.createWorktree",
+            command: "git worktree add",
+            cwd: input.cwd,
+            detail: cause.message,
+            cause,
+          }),
+      ),
+    );
+
     const args = input.newRefName
       ? ["worktree", "add", "-b", input.newRefName, worktreePath, baseRef]
       : ["worktree", "add", worktreePath, baseRef];
@@ -2169,6 +2205,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       fallbackErrorMessage: "git worktree add failed",
     });
 
+    yield* worktreePolicy
+      .assertExistingPath({ path: worktreePath, operation: "GitVcsDriver.createWorktree" })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new GitCommandError({
+              operation: "GitVcsDriver.createWorktree",
+              command: "git worktree add",
+              cwd: input.cwd,
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      );
     const gitmodulesPath = path.join(worktreePath, ".gitmodules");
     const hasGitmodules = yield* fileSystem.exists(gitmodulesPath).pipe(
       Effect.mapError(

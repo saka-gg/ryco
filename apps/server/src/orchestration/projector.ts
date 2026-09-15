@@ -1,3 +1,4 @@
+import { approvalActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
 import type {
   OrchestrationEvent,
   OrchestrationReadModel,
@@ -950,7 +951,7 @@ export function projectEvent(
 
           const activities = [
             ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
-            payload.activity,
+            approvalActivityInOrchestrationOrder(payload.activity, event.sequence),
           ].toSorted(compareThreadActivities);
           const cappedActivities = capThreadActivitiesPreservingMilestones(
             activities,

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import * as NodeFS from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import type { ClaudeSettings, ServerProviderRateLimits } from "@ryco/contracts";
@@ -99,12 +100,21 @@ async function writeCredentialsFile(
   }
 }
 
-async function readClaudeCredentials(credentialsPath: string): Promise<ClaudeCredentials | null> {
-  const keychainCredentials = await keychainRead();
-  if (keychainCredentials?.claudeAiOauth?.accessToken) {
-    return keychainCredentials;
+async function readClaudeCredentials(
+  credentialsPath: string,
+  useKeychain: boolean,
+): Promise<{
+  readonly credentials: ClaudeCredentials;
+  readonly fromKeychain: boolean;
+} | null> {
+  // The global Keychain entry belongs only to the default home. A separate
+  // home must never fall back to another account, even when its file is absent.
+  if (useKeychain) {
+    const credentials = await keychainRead();
+    if (credentials?.claudeAiOauth?.accessToken) return { credentials, fromKeychain: true };
   }
-  return readCredentialsFile(credentialsPath);
+  const credentials = await readCredentialsFile(credentialsPath);
+  return credentials ? { credentials, fromKeychain: false } : null;
 }
 
 function parseExpiresAtMs(value: string | number | undefined): number | undefined {
@@ -133,6 +143,7 @@ function parseResetEpochSeconds(value: unknown): number | undefined {
 async function refreshAndPersistToken(input: {
   readonly credentials: ClaudeCredentials;
   readonly credentialsPath: string;
+  readonly fromKeychain: boolean;
 }): Promise<string | null> {
   const refreshToken = input.credentials.claudeAiOauth?.refreshToken;
   if (!refreshToken) {
@@ -170,10 +181,9 @@ async function refreshAndPersistToken(input: {
       },
     };
 
-    await Promise.all([
-      keychainWrite(updated),
-      writeCredentialsFile(input.credentialsPath, updated),
-    ]);
+    // Persist only to the store that supplied this account.
+    if (input.fromKeychain) await keychainWrite(updated);
+    else await writeCredentialsFile(input.credentialsPath, updated);
     return data.access_token;
   } catch {
     return null;
@@ -258,28 +268,33 @@ export function parseClaudeUsageRateLimits(
 
 async function fetchClaudeUsageRateLimits(input: {
   readonly credentialsPath: string;
+  readonly useKeychain: boolean;
   readonly version?: string | null;
 }): Promise<ServerProviderRateLimits | undefined> {
-  const credentials = await readClaudeCredentials(input.credentialsPath);
-  if (!credentials?.claudeAiOauth?.accessToken) {
-    return undefined;
-  }
+  const selected = await readClaudeCredentials(input.credentialsPath, input.useKeychain);
+  if (!selected) return undefined;
+  const { credentials, fromKeychain } = selected;
+  const oauth = credentials.claudeAiOauth;
+  if (!oauth?.accessToken) return undefined;
 
-  let accessToken = credentials.claudeAiOauth.accessToken;
-  const plan =
-    credentials.claudeAiOauth.subscriptionType ?? credentials.claudeAiOauth.rateLimitTier ?? null;
-  const expiresAt = parseExpiresAtMs(credentials.claudeAiOauth.expiresAt);
+  let accessToken = oauth.accessToken;
+  const plan = oauth.subscriptionType ?? oauth.rateLimitTier ?? null;
+  const expiresAt = parseExpiresAtMs(oauth.expiresAt);
   if (expiresAt !== undefined && Date.now() > expiresAt - TOKEN_REFRESH_SKEW_MS) {
     accessToken =
-      (await refreshAndPersistToken({ credentials, credentialsPath: input.credentialsPath })) ??
-      accessToken;
+      (await refreshAndPersistToken({
+        credentials,
+        credentialsPath: input.credentialsPath,
+        fromKeychain,
+      })) ?? accessToken;
   }
 
   let response = await callUsageApi(accessToken, input.version);
-  if (response.status === 429 && credentials.claudeAiOauth.refreshToken) {
+  if (response.status === 429 && oauth.refreshToken) {
     const refreshedAccessToken = await refreshAndPersistToken({
       credentials,
       credentialsPath: input.credentialsPath,
+      fromKeychain,
     });
     if (refreshedAccessToken) {
       accessToken = refreshedAccessToken;
@@ -306,6 +321,7 @@ export const probeClaudeUsageRateLimits = Effect.fn("probeClaudeUsageRateLimits"
     try: () =>
       fetchClaudeUsageRateLimits({
         credentialsPath,
+        useKeychain: claudeHome === NodePath.resolve(NodeOS.homedir()),
         ...(version !== undefined ? { version } : {}),
       }),
     catch: () => undefined,

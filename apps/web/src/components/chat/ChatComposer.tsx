@@ -1,4 +1,5 @@
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
+import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
 import type {
   ApprovalRequestId,
   ComposerSourceControlContext,
@@ -2763,6 +2764,14 @@ export const ChatComposer = memo(
                 onTokenModeChange={handleTokenModeChange}
                 contextWindowUsage={contextWindowUsage}
                 contextWindowRateLimits={contextWindowRateLimits}
+                contextWindowRateLimitsCheckedAt={
+                  isRateLimitSnapshotAvailable(
+                    selectedProviderStatus,
+                    environmentUnavailable === null,
+                  )
+                    ? selectedProviderStatus?.checkedAt
+                    : undefined
+                }
                 pendingAction={pendingPrimaryAction}
                 isRunning={phase === "running"}
                 showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

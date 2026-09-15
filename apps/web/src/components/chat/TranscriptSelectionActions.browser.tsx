@@ -45,7 +45,7 @@ afterEach(async () => {
   vi.clearAllMocks();
   create.mockResolvedValue(undefined);
 });
-async function select() {
+async function select({ waitForPointerToolbar = false } = {}) {
   const node = document.querySelector<HTMLElement>('[data-selection-message-id="assistant"]')!;
   node.focus();
   const range = document.createRange();
@@ -53,6 +53,9 @@ async function select() {
   window.getSelection()!.removeAllRanges();
   window.getSelection()!.addRange(range);
   document.dispatchEvent(new Event("selectionchange"));
+  if (waitForPointerToolbar) {
+    await expect.element(page.getByRole("toolbar", { name: "Selection actions" })).toBeVisible();
+  }
   // The keyboard path must work while browser focus remains in the transcript.
   await userEvent.keyboard("{Alt>}{Enter}{/Alt}");
   await expect.element(page.getByRole("toolbar", { name: "Selection actions" })).toBeVisible();
@@ -82,6 +85,37 @@ describe("TranscriptSelectionActions", () => {
     window.getSelection()!.removeAllRanges();
     window.getSelection()!.addRange(range);
     expect(readTranscriptSelection(document.body, source)).toBeNull();
+  });
+  it("keeps keyboard actions open when a scroll arrives before toolbar focus", async () => {
+    mounted = await render(<Harness />);
+    // A transcript/composer scroll may already be queued when Alt+Enter opens
+    // the toolbar. Deliver it in the same event, before React commits focus.
+    const scrollBeforeFocus = (event: KeyboardEvent) => {
+      if (event.altKey && event.key === "Enter") window.dispatchEvent(new Event("scroll"));
+    };
+    document.addEventListener("keydown", scrollBeforeFocus, true);
+    try {
+      await select({ waitForPointerToolbar: true });
+      await expect
+        .element(page.getByRole("button", { name: "Add to chat", exact: true }))
+        .toHaveFocus();
+      await userEvent.keyboard("{Enter}");
+      expect(current).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+      await select({ waitForPointerToolbar: true });
+      await expect
+        .element(page.getByRole("button", { name: "Add to chat", exact: true }))
+        .toHaveFocus();
+      await userEvent.keyboard("{Tab}{Enter}");
+      expect(side).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+      expect(create).not.toHaveBeenCalled();
+      await select({ waitForPointerToolbar: true });
+      await userEvent.keyboard("{Escape}");
+      await expect
+        .element(page.getByRole("toolbar", { name: "Selection actions" }))
+        .not.toBeInTheDocument();
+    } finally {
+      document.removeEventListener("keydown", scrollBeforeFocus, true);
+    }
   });
   it("retains quote, prompt and location on failure, dismissal and explicit retry", async () => {
     create.mockRejectedValueOnce(new Error("File save failed"));
