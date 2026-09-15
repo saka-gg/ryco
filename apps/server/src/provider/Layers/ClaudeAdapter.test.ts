@@ -4427,6 +4427,43 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("denies an already-aborted question without publishing a pending callback", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("question-pre-abort"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const canUseTool = harness.getLastCreateQueryInput()!.options.canUseTool!;
+      const controller = new AbortController();
+      controller.abort();
+      const result = yield* Effect.promise(() =>
+        canUseTool(
+          "AskUserQuestion",
+          {
+            questions: [{ question: "Continue?", header: "Continue", options: [] }],
+          },
+          {
+            signal: controller.signal,
+            requestId: "already-aborted",
+            toolUseID: "already-aborted-tool",
+          },
+        ),
+      );
+      assert.deepEqual(result, { behavior: "deny", message: "User cancelled tool execution." });
+      const response = yield* Effect.result(
+        adapter.respondToUserInput(THREAD_ID, ApprovalRequestId.make("already-aborted"), {
+          "Continue?": "Yes",
+        }),
+      );
+      assert.equal(response._tag, "Failure");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("denies AskUserQuestion when the waiting turn is aborted", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -4485,6 +4522,11 @@ describe("ClaudeAdapterLive", () => {
         return;
       }
       assert.deepEqual(resolvedEvent.value.payload.answers, {});
+      assert.equal(resolvedEvent.value.payload.cancelled, true);
+      assert.deepEqual(resolvedEvent.value.payload.userInputIdentity, {
+        requestEventId: requestedEvent.value.eventId,
+        runtimeSessionId: session.runtimeSessionId,
+      });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
       assert.deepEqual(permissionResult, {
@@ -4551,6 +4593,11 @@ describe("ClaudeAdapterLive", () => {
         return;
       }
       assert.deepEqual(resolvedEvent.value.payload.answers, {});
+      assert.equal(resolvedEvent.value.payload.cancelled, true);
+      assert.deepEqual(resolvedEvent.value.payload.userInputIdentity, {
+        requestEventId: requestedEvent.value.eventId,
+        runtimeSessionId: session.runtimeSessionId,
+      });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
       assert.deepEqual(permissionResult, {

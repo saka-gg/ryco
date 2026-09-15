@@ -798,6 +798,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           'approval.resolved',
           'provider.approval.respond.failed',
           'user-input.requested',
+          'user-input.response.submitted',
+          'approval.response.submitted',
           'user-input.resolved',
           'provider.user-input.respond.failed',
           'context-handoff'

@@ -1,5 +1,5 @@
 import { type MutableRefObject, useCallback, useMemo, useState } from "react";
-import type { ApprovalRequestId } from "@ryco/contracts";
+import type { ApprovalRequestId, ApprovalResponseIdentity } from "@ryco/contracts";
 import type { PendingUserInput } from "../../session-logic";
 import {
   buildPendingUserInputAnswers,
@@ -21,6 +21,7 @@ export interface UseChatPendingUserInputInput {
   onRespondToUserInput: (
     requestId: ApprovalRequestId,
     answers: Record<string, string | string[]>,
+    userInputIdentity?: ApprovalResponseIdentity,
   ) => void | Promise<void>;
 }
 
@@ -63,13 +64,17 @@ export function useChatPendingUserInput(
   const activePendingDraftAnswers = useMemo(
     () =>
       activePendingUserInput
-        ? (pendingUserInputAnswersByRequestId[activePendingUserInput.requestId] ??
-          EMPTY_PENDING_USER_INPUT_ANSWERS)
+        ? (pendingUserInputAnswersByRequestId[
+            activePendingUserInput.userInputIdentity?.requestEventId ??
+              activePendingUserInput.requestId
+          ] ?? EMPTY_PENDING_USER_INPUT_ANSWERS)
         : EMPTY_PENDING_USER_INPUT_ANSWERS,
     [activePendingUserInput, pendingUserInputAnswersByRequestId],
   );
   const activePendingQuestionIndex = activePendingUserInput
-    ? (pendingUserInputQuestionIndexByRequestId[activePendingUserInput.requestId] ?? 0)
+    ? (pendingUserInputQuestionIndexByRequestId[
+        activePendingUserInput.userInputIdentity?.requestEventId ?? activePendingUserInput.requestId
+      ] ?? 0)
     : 0;
   const activePendingProgress = useMemo(
     () =>
@@ -90,7 +95,9 @@ export function useChatPendingUserInput(
     [activePendingDraftAnswers, activePendingUserInput],
   );
   const activePendingIsResponding = activePendingUserInput
-    ? respondingUserInputRequestIds.includes(activePendingUserInput.requestId)
+    ? respondingUserInputRequestIds.includes(activePendingUserInput.requestId) ||
+      activePendingUserInput.responseState === "submitting" ||
+      activePendingUserInput.responseState === "uncertain"
     : false;
 
   const setActivePendingUserInputQuestionIndex = useCallback(
@@ -100,7 +107,8 @@ export function useChatPendingUserInput(
       }
       setPendingUserInputQuestionIndexByRequestId((existing) => ({
         ...existing,
-        [activePendingUserInput.requestId]: nextQuestionIndex,
+        [activePendingUserInput.userInputIdentity?.requestEventId ??
+        activePendingUserInput.requestId]: nextQuestionIndex,
       }));
     },
     [activePendingUserInput],
@@ -123,11 +131,18 @@ export function useChatPendingUserInput(
 
         return {
           ...existing,
-          [activePendingUserInput.requestId]: {
-            ...existing[activePendingUserInput.requestId],
+          [activePendingUserInput.userInputIdentity?.requestEventId ??
+          activePendingUserInput.requestId]: {
+            ...existing[
+              activePendingUserInput.userInputIdentity?.requestEventId ??
+                activePendingUserInput.requestId
+            ],
             [questionId]: togglePendingUserInputOptionSelection(
               question,
-              existing[activePendingUserInput.requestId]?.[questionId],
+              existing[
+                activePendingUserInput.userInputIdentity?.requestEventId ??
+                  activePendingUserInput.requestId
+              ]?.[questionId],
               optionLabel,
             ),
           },
@@ -153,10 +168,17 @@ export function useChatPendingUserInput(
       promptRef.current = value;
       setPendingUserInputAnswersByRequestId((existing) => ({
         ...existing,
-        [activePendingUserInput.requestId]: {
-          ...existing[activePendingUserInput.requestId],
+        [activePendingUserInput.userInputIdentity?.requestEventId ??
+        activePendingUserInput.requestId]: {
+          ...existing[
+            activePendingUserInput.userInputIdentity?.requestEventId ??
+              activePendingUserInput.requestId
+          ],
           [questionId]: setPendingUserInputCustomAnswer(
-            existing[activePendingUserInput.requestId]?.[questionId],
+            existing[
+              activePendingUserInput.userInputIdentity?.requestEventId ??
+                activePendingUserInput.requestId
+            ]?.[questionId],
             value,
           ),
         },
@@ -178,14 +200,19 @@ export function useChatPendingUserInput(
       return;
     }
     if (activePendingProgress.isLastQuestion) {
-      if (activePendingResolvedAnswers) {
-        void onRespondToUserInput(activePendingUserInput.requestId, activePendingResolvedAnswers);
+      if (activePendingResolvedAnswers && !activePendingIsResponding) {
+        void onRespondToUserInput(
+          activePendingUserInput.requestId,
+          activePendingResolvedAnswers,
+          activePendingUserInput.userInputIdentity,
+        );
       }
       return;
     }
     setActivePendingUserInputQuestionIndex(activePendingProgress.questionIndex + 1);
   }, [
     activePendingProgress,
+    activePendingIsResponding,
     activePendingResolvedAnswers,
     activePendingUserInput,
     onRespondToUserInput,

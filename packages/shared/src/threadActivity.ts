@@ -188,15 +188,17 @@ export function derivePendingThreadRequestState(
   };
 }
 
-/** Approval attempts and provider callbacks share the durable orchestration order.
+/** Response attempts and provider callbacks share the durable orchestration order.
  * Provider-local sequence numbers cannot be compared to local response attempts.
  */
-export function approvalActivityInOrchestrationOrder(
+export function pendingRequestActivityInOrchestrationOrder(
   activity: OrchestrationThreadActivity,
   sequence: number,
 ): OrchestrationThreadActivity {
   return activity.kind.startsWith("approval.") ||
-    activity.kind === "provider.approval.respond.failed"
+    activity.kind === "provider.approval.respond.failed" ||
+    activity.kind.startsWith("user-input.") ||
+    activity.kind === "provider.user-input.respond.failed"
     ? { ...activity, sequence }
     : activity;
 }

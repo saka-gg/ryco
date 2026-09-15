@@ -1412,8 +1412,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const routed = yield* resolveRoutableSession({
         threadId: input.threadId,
         operation: "ProviderService.respondToUserInput",
-        allowRecovery: true,
+        allowRecovery: false,
       });
+      // Questions own process-local callbacks. Resuming a conversation cannot restore one.
+      if (
+        !routed.isActive ||
+        (input.expectedRuntimeSessionId !== undefined &&
+          routed.session?.runtimeSessionId !== input.expectedRuntimeSessionId)
+      ) {
+        return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
+      }
       metricProvider = routed.adapter.provider;
       yield* Effect.annotateCurrentSpan({
         "provider.operation": "respond-to-user-input",

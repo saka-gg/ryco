@@ -1,3 +1,4 @@
+import { callbackRepositories, pendingCallbackInvalidation } from "../approvalResponses.ts";
 import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
 import { ServerConfig } from "../../config.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
@@ -670,6 +671,7 @@ export function runtimeEventToActivities(
           kind: "user-input.requested",
           summary: "User input requested",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
           },
@@ -686,10 +688,17 @@ export function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "user-input.resolved",
-          summary: "User input submitted",
+          summary: event.payload.cancelled ? "Question cancelled" : "User input submitted",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             ...(event.requestId ? { requestId: event.requestId } : {}),
             answers: event.payload.answers,
+            ...(event.payload.cancelled !== undefined
+              ? { cancelled: event.payload.cancelled }
+              : {}),
+            ...(event.payload.userInputIdentity
+              ? { userInputIdentity: event.payload.userInputIdentity }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -2693,6 +2702,12 @@ const make = Effect.gen(function* () {
             (finishedTurnId === undefined || request.turnId !== finishedTurnId)
           )
             continue;
+          const payload = yield* pendingCallbackInvalidation({
+            threadId: thread.id,
+            ...request,
+            detail: "the provider turn ended or was superseded",
+          });
+          if (!payload) continue;
           yield* orchestrationEngine.dispatch({
             type: "thread.activity.append",
             commandId: providerCommandId(
@@ -2704,10 +2719,10 @@ const make = Effect.gen(function* () {
               id: EventId.make(
                 `${event.eventId}:request-resolved:${request.kind}:${request.requestId}`,
               ),
-              kind: `${request.kind}.resolved`,
+              kind: `provider.${request.kind}.respond.failed`,
               tone: "info",
               summary: "Pending request cleared because its provider turn ended or was superseded",
-              payload: { requestId: request.requestId },
+              payload,
               turnId: request.turnId === null ? null : TurnId.make(request.turnId),
               createdAt: now,
             },
@@ -2941,12 +2956,18 @@ const make = Effect.gen(function* () {
           !input.history.completedTurnIds.includes(TurnId.make(request.turnId))
         )
           continue;
+        const payload = yield* pendingCallbackInvalidation({
+          threadId: thread.id,
+          ...request,
+          detail: "provider history confirms that the turn ended",
+        });
+        if (!payload) continue;
         activities.push({
           id: EventId.make(`history:${thread.id}:resolved:${request.kind}:${request.requestId}`),
-          kind: `${request.kind}.resolved`,
+          kind: `provider.${request.kind}.respond.failed`,
           tone: "info",
           summary: "Pending request cleared because its provider turn ended",
-          payload: { requestId: request.requestId },
+          payload,
           turnId: TurnId.make(request.turnId),
           createdAt: now,
         });
@@ -3109,4 +3130,4 @@ const make = Effect.gen(function* () {
 export const ProviderRuntimeIngestionLive = Layer.effect(
   ProviderRuntimeIngestionService,
   make,
-).pipe(Layer.provide(ProjectionTurnRepositoryLive));
+).pipe(Layer.provide(ProjectionTurnRepositoryLive), Layer.provide(callbackRepositories));

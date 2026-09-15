@@ -1251,7 +1251,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      return {
+      const response: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -1266,9 +1266,39 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           requestId: command.requestId,
           answers: command.answers,
+          ...(command.userInputIdentity ? { userInputIdentity: command.userInputIdentity } : {}),
           createdAt: command.createdAt,
         },
       };
+      return [
+        response,
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: command.threadId,
+            activity: {
+              id: EventId.make(`question-response:${command.commandId}`),
+              kind: "user-input.response.submitted",
+              tone: "info",
+              summary: "Question response submitted",
+              payload: {
+                requestId: command.requestId,
+                userInputIdentity: command.userInputIdentity,
+                responseAttemptId: command.commandId,
+                responseState: "submitting",
+              },
+              turnId: null,
+              createdAt: command.createdAt,
+            },
+          },
+        },
+      ];
     }
 
     case "thread.checkpoint.revert": {
@@ -1795,7 +1825,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               .requestId as OrchestrationEvent["metadata"]["requestId"])
           : undefined;
       const activity =
-        command.activity.kind === "approval.requested"
+        command.activity.kind === "approval.requested" ||
+        command.activity.kind === "user-input.requested"
           ? {
               ...command.activity,
               payload: {
@@ -1803,7 +1834,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 command.activity.payload !== null
                   ? command.activity.payload
                   : {}),
-                approvalIdentity: {
+                [command.activity.kind === "approval.requested"
+                  ? "approvalIdentity"
+                  : "userInputIdentity"]: {
                   requestEventId: command.activity.id,
                   ...(typeof command.activity.payload === "object" &&
                   command.activity.payload !== null &&

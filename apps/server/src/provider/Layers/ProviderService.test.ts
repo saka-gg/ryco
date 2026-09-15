@@ -1339,6 +1339,54 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("does not recover a lost runtime to answer a pending question", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(asThreadId("question-lost-runtime"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("question-lost-runtime"),
+        runtimeMode: "full-access",
+      });
+      yield* routing.codex.stopAll();
+      routing.codex.startSession.mockClear();
+      routing.codex.respondToUserInput.mockClear();
+      const result = yield* Effect.result(
+        provider.respondToUserInput({
+          threadId: session.threadId,
+          requestId: asRequestId("expired-question"),
+          answers: { answer: "Yes" },
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.respondToUserInput.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("rejects an old question identity while a replacement runtime is active", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(asThreadId("question-replacement"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("question-replacement"),
+        runtimeMode: "full-access",
+      });
+      routing.codex.respondToUserInput.mockClear();
+      const result = yield* Effect.result(
+        provider.respondToUserInput({
+          threadId: session.threadId,
+          requestId: asRequestId("reused-question"),
+          expectedRuntimeSessionId: RuntimeSessionId.make("old-runtime"),
+          answers: { answer: "Old" },
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.equal(routing.codex.respondToUserInput.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("lists no sessions after adapter runtime clears", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

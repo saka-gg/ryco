@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect";
+import { ApprovalResponseIdentity } from "./approvalResponses.ts";
 import {
   EventId,
   IsoDateTime,
@@ -492,6 +493,8 @@ export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
 
 const UserInputResolvedPayload = Schema.Struct({
   answers: UnknownRecordSchema,
+  cancelled: Schema.optional(Schema.Boolean),
+  userInputIdentity: Schema.optional(ApprovalResponseIdentity),
 });
 export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
 

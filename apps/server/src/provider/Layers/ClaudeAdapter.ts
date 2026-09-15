@@ -4014,6 +4014,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           readonly toolUseID?: string;
         },
       ) {
+        if (callbackOptions.signal.aborted || context.stopped) {
+          return {
+            behavior: "deny",
+            message: "User cancelled tool execution.",
+          } satisfies PermissionResult;
+        }
         const requestId = ApprovalRequestId.make(callbackOptions.requestId);
 
         // Parse questions from the SDK's AskUserQuestion input.
@@ -4040,7 +4046,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const answersDeferred = yield* Deferred.make<ProviderUserInputAnswers>();
         let aborted = false;
         const settleAsAborted = Effect.suspend(() => {
-          if (!pendingUserInputs.has(requestId)) {
+          if (pendingUserInputs.get(requestId) !== pendingInput) {
             return Effect.void;
           }
           aborted = true;
@@ -4055,8 +4061,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           cancel: settleAsAborted,
         };
 
-        // Emit user-input.requested so the UI can present the questions.
         const requestedStamp = yield* makeEventStamp();
+        // Own the callback before publication can yield to a response or shutdown.
+        if (pendingUserInputs.has(requestId)) {
+          return {
+            behavior: "deny",
+            message: "A question with this request ID is already pending.",
+          } satisfies PermissionResult;
+        }
+        pendingUserInputs.set(requestId, pendingInput);
         yield* offerRuntimeEventForContext(context, {
           type: "user-input.requested",
           eventId: requestedStamp.eventId,
@@ -4083,8 +4096,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
 
-        pendingUserInputs.set(requestId, pendingInput);
-
         // Handle abort (e.g. turn interrupted while waiting for user input).
         const onAbort = () => {
           runFork(settleAsAborted);
@@ -4093,9 +4104,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           once: true,
         });
 
-        // Block until the user provides answers.
-        const answers = yield* Deferred.await(answersDeferred);
-        pendingUserInputs.delete(requestId);
+        // Abort can happen while the request is being published, before the listener exists.
+        if (callbackOptions.signal.aborted || context.stopped) yield* settleAsAborted;
+
+        // Release the listener on answers, cancellation, and interrupted waits alike.
+        const answers = yield* Deferred.await(answersDeferred).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              callbackOptions.signal.removeEventListener("abort", onAbort);
+              if (pendingUserInputs.get(requestId) === pendingInput)
+                pendingUserInputs.delete(requestId);
+            }),
+          ),
+        );
 
         // Emit user-input.resolved so the UI knows the interaction completed.
         const resolvedStamp = yield* makeEventStamp();
@@ -4111,7 +4132,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }
             : {}),
           requestId: asRuntimeRequestId(requestId),
-          payload: { answers },
+          payload: {
+            answers,
+            cancelled: aborted,
+            userInputIdentity: {
+              requestEventId: requestedStamp.eventId,
+              ...(context.session.runtimeSessionId
+                ? { runtimeSessionId: context.session.runtimeSessionId }
+                : {}),
+            },
+          },
           providerRefs: nativeProviderRefs(context, {
             providerItemId: callbackOptions.toolUseID,
           }),

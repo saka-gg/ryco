@@ -1,3 +1,5 @@
+import { ProjectionPendingApprovalRepository } from "./persistence/Services/ProjectionPendingApprovals.ts";
+import { ProjectionThreadUserInputRequestRepository } from "./persistence/Services/ProjectionThreadUserInputRequests.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EventId,
@@ -9,6 +11,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  RuntimeSessionId,
   ThreadId,
   TurnId,
   WorktreeId,
@@ -132,6 +135,45 @@ const runOrphanedSessionReconciliation = (input: {
   readonly dispatch: OrchestrationEngineShape["dispatch"];
 }) =>
   reconcileOrphanedProviderSessions.pipe(
+    Effect.provideService(ProjectionPendingApprovalRepository, {
+      upsert: () => Effect.void,
+      listByThreadId: () => Effect.succeed([]),
+      deleteByRequestId: () => Effect.void,
+      deleteByThreadId: () => Effect.void,
+      getByRequestId: ({ threadId, requestId }) =>
+        Effect.succeed(
+          Option.some({
+            threadId,
+            requestId,
+            status: "pending",
+            approvalIdentity: {
+              requestEventId: EventId.make("callback"),
+              runtimeSessionId: RuntimeSessionId.make("test-live-runtime"),
+            },
+            decision: null,
+            turnId: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            resolvedAt: null,
+          }),
+        ),
+    } as ProjectionPendingApprovalRepository["Service"]),
+    Effect.provideService(ProjectionThreadUserInputRequestRepository, {
+      upsert: () => Effect.void,
+      deleteByThreadId: () => Effect.void,
+      getByRequestId: ({ threadId, requestId }) =>
+        Effect.succeed(
+          Option.some({
+            threadId,
+            requestId,
+            isPending: true,
+            userInputIdentity: {
+              requestEventId: EventId.make("callback"),
+              runtimeSessionId: RuntimeSessionId.make("test-live-runtime"),
+            },
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        ),
+    } as ProjectionThreadUserInputRequestRepository["Service"]),
     Effect.provideService(ProjectionSnapshotQuery, {
       getCommandReadModel: () =>
         Effect.succeed({ threads: input.threads } as unknown as OrchestrationReadModel),
@@ -141,7 +183,12 @@ const runOrphanedSessionReconciliation = (input: {
     } as unknown as ProviderSessionDirectoryShape),
     Effect.provideService(ProviderService, {
       listSessions: () =>
-        Effect.succeed((input.liveThreadIds ?? []).map((threadId) => ({ threadId }) as never)),
+        Effect.succeed(
+          (input.liveThreadIds ?? []).map(
+            (threadId) =>
+              ({ threadId, runtimeSessionId: RuntimeSessionId.make("test-live-runtime") }) as never,
+          ),
+        ),
       stopSessionBinding: input.stopSessionBinding ?? (() => Effect.succeed("not-found" as const)),
     } as unknown as ProviderServiceShape),
     Effect.provideService(OrchestrationEngineService, {
@@ -723,7 +770,7 @@ it.effect("clears orphaned requests in inactive sessions but preserves live call
           commands.map((command) =>
             command.type === "thread.activity.append" ? command.activity.kind : command.type,
           ),
-          ["approval.resolved", "user-input.resolved"],
+          ["provider.approval.respond.failed", "provider.user-input.respond.failed"],
         );
       }),
     ),

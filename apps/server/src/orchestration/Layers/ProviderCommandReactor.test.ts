@@ -1,3 +1,5 @@
+import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
+import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import type { ApprovalResponseIdentity } from "@ryco/contracts";
@@ -30,7 +32,10 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@ryco/contracts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderSessionNotFoundError,
+} from "../../provider/Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -94,6 +99,7 @@ describe("ProviderCommandReactor", () => {
     | OrchestrationEngineService
     | ProviderCommandReactor
     | ProjectionSnapshotQuery
+    | ProjectionThreadUserInputRequestRepository
     | ProjectionPendingApprovalRepository,
     unknown
   > | null = null;
@@ -389,6 +395,9 @@ describe("ProviderCommandReactor", () => {
     );
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(
+        ProjectionThreadUserInputRequestRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
+      ),
+      Layer.provideMerge(
         ProjectionPendingApprovalRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
       ),
       Layer.provide(SqlitePersistenceMemory),
@@ -487,6 +496,15 @@ describe("ProviderCommandReactor", () => {
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
+      readQuestion: (requestId: string) =>
+        runtime!.runPromise(
+          Effect.flatMap(ProjectionThreadUserInputRequestRepository, (repo) =>
+            repo.getByRequestId({
+              threadId: ThreadId.make("thread-1"),
+              requestId: ApprovalRequestId.make(requestId),
+            }),
+          ),
+        ),
       readApproval: (requestId: string) =>
         Effect.runPromise(
           approvals.getByRequestId({
@@ -2530,6 +2548,197 @@ describe("ProviderCommandReactor", () => {
     return { ...harness, respond, activity, identity };
   }
 
+  async function prepareQuestion() {
+    const harness = await createHarness();
+    const createdAt = new Date().toISOString();
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("question-safety-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeSessionId: RuntimeSessionId.make("question-runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("question-safety-request"),
+        threadId,
+        activity: {
+          id: EventId.make("question-safety-request"),
+          tone: "approval",
+          kind: "user-input.requested",
+          summary: "Command approval requested",
+          payload: {
+            requestId: "question-safety",
+            requestKind: "command",
+            runtimeSessionId: "question-runtime-1",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      }),
+    );
+    const identity: ApprovalResponseIdentity = {
+      requestEventId: EventId.make("question-safety-request"),
+      runtimeSessionId: RuntimeSessionId.make("question-runtime-1"),
+    };
+    const respond = (id: string, answer = "Yes", userInputIdentity = identity) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make(id),
+          threadId,
+          requestId: asApprovalRequestId("question-safety"),
+          userInputIdentity,
+          answers: { answer },
+          createdAt,
+        }),
+      );
+    const activity = (id: string, kind: string, payload: Record<string, unknown>) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`command:${id}`),
+          threadId,
+          activity: {
+            id: EventId.make(id),
+            kind,
+            tone: "info",
+            summary: kind,
+            payload: {
+              requestId: "question-safety",
+              runtimeSessionId: "question-runtime-1",
+              ...payload,
+            },
+            turnId: null,
+            createdAt: new Date().toISOString(),
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    return { ...harness, respond, activity, identity };
+  }
+
+  it("question safety: duplicate commands claim one response and never replay an unknown outcome", async () => {
+    const harness = await prepareQuestion();
+    harness.respondToUserInput.mockImplementation(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "respondToUserInput",
+          detail: "Connection dropped after write",
+        }),
+      ),
+    );
+    const results = await Promise.allSettled([
+      harness.respond("question-first"),
+      harness.respond("question-second"),
+    ]);
+    await harness.drain();
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
+    expect(harness.respondToUserInput).toHaveBeenCalledTimes(1);
+    expect(Option.getOrUndefined(await harness.readQuestion("question-safety"))).toMatchObject({
+      isPending: true,
+      responseState: "uncertain",
+    });
+    await harness.respond("question-first");
+    await expect(harness.respond("question-retry")).rejects.toThrow("already submitted");
+    await harness.drain();
+    expect(harness.respondToUserInput).toHaveBeenCalledTimes(1);
+    expect(
+      (await harness.readModel()).threads[0]?.activities.some(
+        (activity) => activity.kind === "user-input.resolved",
+      ),
+    ).toBe(false);
+  });
+
+  it.each(["settled", "expired"])(
+    "question safety: %s callback rejects late answers and source replay",
+    async (state) => {
+      const harness = await prepareQuestion();
+      await harness.activity(
+        "question-terminal",
+        state === "settled" ? "user-input.resolved" : "provider.user-input.respond.failed",
+        {
+          userInputIdentity: harness.identity,
+          ...(state === "expired"
+            ? { responseState: "invalidated", detail: "Stale pending user-input request" }
+            : { answers: { answer: "Yes" } }),
+        },
+      );
+      await expect(harness.respond("late-answer")).rejects.toThrow("no longer pending");
+      await expect(
+        harness.activity("question-safety-request", "user-input.requested", {}),
+      ).rejects.toThrow("already observed");
+      await harness.drain();
+      expect(harness.respondToUserInput).not.toHaveBeenCalled();
+      expect((await harness.readShell()).threads[0]?.hasPendingUserInput).toBe(false);
+    },
+  );
+
+  it("question safety: old displayed answers cannot reach a replacement runtime reusing the provider id", async () => {
+    const harness = await prepareQuestion();
+    const threadId = ThreadId.make("thread-1");
+    const now = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("replacement-runtime"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          runtimeSessionId: RuntimeSessionId.make("question-runtime-2"),
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.activity("replacement-question", "user-input.requested", {
+      runtimeSessionId: "question-runtime-2",
+    });
+    await expect(harness.respond("old-screen-answer")).rejects.toThrow("identity");
+    await expect(
+      harness.activity("old-settlement", "user-input.resolved", {
+        userInputIdentity: harness.identity,
+      }),
+    ).rejects.toThrow("runtime identity");
+    await harness.respond("new-screen-answer", "New answer", {
+      requestEventId: EventId.make("replacement-question"),
+      runtimeSessionId: RuntimeSessionId.make("question-runtime-2"),
+    });
+    await harness.drain();
+    expect(harness.respondToUserInput.mock.calls.map(([input]) => input)).toEqual([
+      {
+        threadId,
+        requestId: "question-safety",
+        answers: { answer: "New answer" },
+        expectedRuntimeSessionId: "question-runtime-2",
+      },
+    ]);
+    expect(Option.getOrUndefined(await harness.readQuestion("question-safety"))).toMatchObject({
+      isPending: false,
+      responseState: "settled",
+    });
+  });
+
   it("approval safety: distinct simultaneous commands forward only the winning decision", async () => {
     const harness = await prepareApproval();
     const results = await Promise.allSettled([
@@ -2879,50 +3088,122 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("reacts to thread.user-input.respond by forwarding structured user input answers", async () => {
-    const harness = await createHarness();
-    const now = new Date().toISOString();
+  it.each(["pending", "resolved", "expired"])(
+    "only forwards answers for a pending question: %s",
+    async (state) => {
+      const harness = await createHarness();
+      const now = new Date().toISOString();
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-for-user-input"),
-        threadId: ThreadId.make("thread-1"),
-        session: {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-for-user-input"),
           threadId: ThreadId.make("thread-1"),
-          status: "running",
-          providerName: "codex",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: now,
-        },
-        createdAt: now,
-      }),
-    );
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
+            runtimeSessionId: RuntimeSessionId.make("question-test-runtime"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.user-input.respond",
-        commandId: CommandId.make("cmd-user-input-respond"),
-        threadId: ThreadId.make("thread-1"),
-        requestId: asApprovalRequestId("user-input-request-1"),
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("question-open"),
+          threadId: ThreadId.make("thread-1"),
+          activity: {
+            id: EventId.make("question-open"),
+            kind: "user-input.requested",
+            tone: "info",
+            summary: "Question",
+            payload: {
+              requestId: "user-input-request-1",
+              runtimeSessionId: "question-test-runtime",
+            },
+            turnId: null,
+            createdAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      if (state !== "pending") {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make("question-close"),
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make("question-close"),
+              kind:
+                state === "resolved" ? "user-input.resolved" : "provider.user-input.respond.failed",
+              tone: "info",
+              summary: "Question closed",
+              payload: {
+                requestId: "user-input-request-1",
+                runtimeSessionId: "question-test-runtime",
+                userInputIdentity: {
+                  requestEventId: "question-open",
+                  runtimeSessionId: "question-test-runtime",
+                },
+                detail: "Stale pending user-input request",
+              },
+              turnId: null,
+              createdAt: now,
+            },
+            createdAt: now,
+          }),
+        );
+        await expect(
+          Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.user-input.respond",
+              commandId: CommandId.make("stale-answer"),
+              threadId: ThreadId.make("thread-1"),
+              requestId: asApprovalRequestId("user-input-request-1"),
+              answers: { sandbox_mode: "workspace-write" },
+              createdAt: now,
+            }),
+          ),
+        ).rejects.toThrow("no longer pending");
+        expect(harness.respondToUserInput).not.toHaveBeenCalled();
+        return;
+      }
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("cmd-user-input-respond"),
+          threadId: ThreadId.make("thread-1"),
+          requestId: asApprovalRequestId("user-input-request-1"),
+          userInputIdentity: {
+            requestEventId: EventId.make("question-open"),
+            runtimeSessionId: RuntimeSessionId.make("question-test-runtime"),
+          },
+          answers: {
+            sandbox_mode: "workspace-write",
+          },
+          createdAt: now,
+        }),
+      );
+
+      await waitFor(() => harness.respondToUserInput.mock.calls.length === 1);
+      expect(harness.respondToUserInput.mock.calls[0]?.[0]).toEqual({
+        threadId: "thread-1",
+        requestId: "user-input-request-1",
+        expectedRuntimeSessionId: "question-test-runtime",
         answers: {
           sandbox_mode: "workspace-write",
         },
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.respondToUserInput.mock.calls.length === 1);
-    expect(harness.respondToUserInput.mock.calls[0]?.[0]).toEqual({
-      threadId: "thread-1",
-      requestId: "user-input-request-1",
-      answers: {
-        sandbox_mode: "workspace-write",
-      },
-    });
-  });
+      });
+    },
+  );
 
   it("normalizes stale Codex approval callbacks without faking approval resolution", async () => {
     const harness = await createHarness();
@@ -3030,114 +3311,125 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("surfaces stale provider user-input failures without faking user-input resolution", async () => {
-    const harness = await createHarness();
-    const now = new Date().toISOString();
-    harness.respondToUserInput.mockImplementation(() =>
-      Effect.fail(
-        new ProviderAdapterRequestError({
-          provider: ProviderDriverKind.make("claudeAgent"),
-          method: "item/tool/respondToUserInput",
-          detail: "Unknown pending user-input request: user-input-request-1",
-        }),
-      ),
-    );
+  it.each(["missing-callback", "lost-runtime"])(
+    "expires %s user-input failures without faking a submitted answer",
+    async (reason) => {
+      const harness = await createHarness();
+      const now = new Date().toISOString();
+      harness.respondToUserInput.mockImplementation(() =>
+        Effect.fail(
+          reason === "lost-runtime"
+            ? new ProviderSessionNotFoundError({ threadId: ThreadId.make("thread-1") })
+            : new ProviderAdapterRequestError({
+                provider: ProviderDriverKind.make("claudeAgent"),
+                method: "item/tool/respondToUserInput",
+                detail: "Unknown pending user-input request: user-input-request-1",
+              }),
+        ),
+      );
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-for-user-input-error"),
-        threadId: ThreadId.make("thread-1"),
-        session: {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-for-user-input-error"),
           threadId: ThreadId.make("thread-1"),
-          status: "running",
-          providerName: "claudeAgent",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: now,
-        },
-        createdAt: now,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.activity.append",
-        commandId: CommandId.make("cmd-user-input-requested"),
-        threadId: ThreadId.make("thread-1"),
-        activity: {
-          id: EventId.make("activity-user-input-requested"),
-          tone: "info",
-          kind: "user-input.requested",
-          summary: "User input requested",
-          payload: {
-            requestId: "user-input-request-1",
-            questions: [
-              {
-                id: "sandbox_mode",
-                header: "Sandbox",
-                question: "Which mode should be used?",
-                options: [
-                  {
-                    label: "workspace-write",
-                    description: "Allow workspace writes only",
-                  },
-                ],
-              },
-            ],
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "claudeAgent",
+            runtimeSessionId: RuntimeSessionId.make("question-test-runtime"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
           },
-          turnId: null,
           createdAt: now,
-        },
-        createdAt: now,
-      }),
-    );
+        }),
+      );
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.user-input.respond",
-        commandId: CommandId.make("cmd-user-input-respond-stale"),
-        threadId: ThreadId.make("thread-1"),
-        requestId: asApprovalRequestId("user-input-request-1"),
-        answers: {
-          sandbox_mode: "workspace-write",
-        },
-        createdAt: now,
-      }),
-    );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("cmd-user-input-requested"),
+          threadId: ThreadId.make("thread-1"),
+          activity: {
+            id: EventId.make("activity-user-input-requested"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: {
+              requestId: "user-input-request-1",
+              runtimeSessionId: "question-test-runtime",
+              questions: [
+                {
+                  id: "sandbox_mode",
+                  header: "Sandbox",
+                  question: "Which mode should be used?",
+                  options: [
+                    {
+                      label: "workspace-write",
+                      description: "Allow workspace writes only",
+                    },
+                  ],
+                },
+              ],
+            },
+            turnId: null,
+            createdAt: now,
+          },
+          createdAt: now,
+        }),
+      );
 
-    await waitFor(async () => {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("cmd-user-input-respond-stale"),
+          threadId: ThreadId.make("thread-1"),
+          requestId: asApprovalRequestId("user-input-request-1"),
+          userInputIdentity: {
+            requestEventId: EventId.make("activity-user-input-requested"),
+            runtimeSessionId: RuntimeSessionId.make("question-test-runtime"),
+          },
+          answers: {
+            sandbox_mode: "workspace-write",
+          },
+          createdAt: now,
+        }),
+      );
+
+      await waitFor(async () => {
+        const readModel = await harness.readModel();
+        const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+        if (!thread) return false;
+        return thread.activities.some(
+          (activity) => activity.kind === "provider.user-input.respond.failed",
+        );
+      });
+
       const readModel = await harness.readModel();
       const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-      if (!thread) return false;
-      return thread.activities.some(
+      expect(thread).toBeDefined();
+
+      const failureActivity = thread?.activities.find(
         (activity) => activity.kind === "provider.user-input.respond.failed",
       );
-    });
+      expect(failureActivity).toBeDefined();
+      expect(failureActivity?.payload).toMatchObject({
+        requestId: "user-input-request-1",
+        detail: expect.stringContaining("Stale pending user-input request: user-input-request-1"),
+      });
 
-    const readModel = await harness.readModel();
-    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread).toBeDefined();
-
-    const failureActivity = thread?.activities.find(
-      (activity) => activity.kind === "provider.user-input.respond.failed",
-    );
-    expect(failureActivity).toBeDefined();
-    expect(failureActivity?.payload).toMatchObject({
-      requestId: "user-input-request-1",
-      detail: expect.stringContaining("Stale pending user-input request: user-input-request-1"),
-    });
-
-    const resolvedActivity = thread?.activities.find(
-      (activity) =>
-        activity.kind === "user-input.resolved" &&
-        typeof activity.payload === "object" &&
-        activity.payload !== null &&
-        (activity.payload as Record<string, unknown>).requestId === "user-input-request-1",
-    );
-    expect(resolvedActivity).toBeUndefined();
-  });
+      const resolvedActivity = thread?.activities.find(
+        (activity) =>
+          activity.kind === "user-input.resolved" &&
+          typeof activity.payload === "object" &&
+          activity.payload !== null &&
+          (activity.payload as Record<string, unknown>).requestId === "user-input-request-1",
+      );
+      expect(resolvedActivity).toBeUndefined();
+    },
+  );
 
   it("reacts to thread.session.stop by stopping provider session and clearing thread session state", async () => {
     const harness = await createHarness();
