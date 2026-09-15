@@ -1,3 +1,17 @@
+import { readGitLocalChanges, applyGitIndexPatch } from "../vcs/GitIndexReview.ts";
+import { authorizeGitReadCwd } from "../vcs/GitReadWorkspace.ts";
+import type { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
+import { readGitLineBlame } from "../vcs/GitLineBlame.ts";
+import { readGitComparison } from "../vcs/GitComparison.ts";
+import type {
+  GitReadLineBlameInput,
+  GitReadLineBlameResult,
+  GitLocalChangesInput,
+  GitLocalChangesResult,
+  GitApplyIndexPatchInput,
+  GitReadComparisonInput,
+  GitReadComparisonResult,
+} from "@ryco/contracts";
 import { existsSync } from "node:fs";
 import { Context, Effect, Layer } from "effect";
 
@@ -32,6 +46,18 @@ import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsDriverRegistry } from "../vcs/VcsDriverRegistry.ts";
 
 export interface GitWorkflowServiceShape {
+  readonly readLineBlame: (
+    input: GitReadLineBlameInput,
+  ) => Effect.Effect<GitReadLineBlameResult, GitCommandError, WorkspaceAccessPolicy>;
+  readonly readLocalChanges: (
+    input: GitLocalChangesInput,
+  ) => Effect.Effect<GitLocalChangesResult, GitCommandError, WorkspaceAccessPolicy>;
+  readonly applyIndexPatch: (
+    input: GitApplyIndexPatchInput,
+  ) => Effect.Effect<void, GitCommandError, WorkspaceAccessPolicy>;
+  readonly readComparison: (
+    input: GitReadComparisonInput,
+  ) => Effect.Effect<GitReadComparisonResult, GitCommandError, WorkspaceAccessPolicy>;
   readonly status: (
     input: VcsStatusInput,
   ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
@@ -306,6 +332,25 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
       "GitWorkflowService.preparePullRequestThread",
       gitManager.preparePullRequestThread,
     ),
+    // Authorize before repository-kind discovery; readers also validate Git's resolved root.
+    readLineBlame: (input) =>
+      authorizeGitReadCwd(input.cwd, "readLineBlame").pipe(
+        Effect.flatMap((cwd) =>
+          ensureGitCommand("GitWorkflowService.readLineBlame", cwd).pipe(
+            Effect.andThen(readGitLineBlame(git.execute, { ...input, cwd })),
+          ),
+        ),
+      ),
+    readLocalChanges: (input) => readGitLocalChanges(git.execute, input),
+    applyIndexPatch: (input) => applyGitIndexPatch(git.execute, input),
+    readComparison: (input) =>
+      authorizeGitReadCwd(input.cwd, "readComparison").pipe(
+        Effect.flatMap((cwd) =>
+          ensureGitCommand("GitWorkflowService.readComparison", cwd).pipe(
+            Effect.andThen(readGitComparison(git.execute, { ...input, cwd })),
+          ),
+        ),
+      ),
     listRefs: (input) =>
       detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd).pipe(
         Effect.flatMap((isGitRepository) =>

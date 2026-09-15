@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useState } from "react";
 import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { hasNoShortcutModifiers } from "../../keybindings";
 import { Button } from "../ui/button";
+import { ExpandedImageContent } from "./ExpandedImageContent";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 
 interface ExpandedImageDialogProps {
@@ -98,15 +99,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         >
           <XIcon />
         </Button>
-        <img
-          src={item.src}
-          alt={item.name}
-          {...(item.width !== undefined && item.height !== undefined
-            ? { width: item.width, height: item.height }
-            : {})}
-          className="h-auto w-auto max-h-[86vh] max-w-[92vw] select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl"
-          draggable={false}
-        />
+        <ExpandedImageContent image={item} />
         <p className="mt-2 max-w-[92vw] truncate text-center text-xs text-muted-foreground/80">
           {item.name}
           {preview.images.length > 1 ? ` (${preview.index + 1}/${preview.images.length})` : ""}

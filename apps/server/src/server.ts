@@ -1,4 +1,5 @@
 import { SpeechServiceLive } from "./speech/service.ts";
+import { ProjectMemoryServiceLive } from "./projectMemory/ProjectMemoryService.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Effect, Layer } from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
@@ -203,6 +204,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(ContextHandoffCoordinatorLive),
   Layer.provideMerge(ContextHandoffServiceLive),
+  Layer.provideMerge(ProjectMemoryServiceLive),
   Layer.provideMerge(ContextHandoffRepositoryLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),

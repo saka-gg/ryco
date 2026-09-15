@@ -1,5 +1,26 @@
 import { SpeechRequest, SpeechResponse, SpeechError } from "./speech.ts";
 import {
+  PROJECT_MEMORY_WS_METHODS,
+  ProjectMemoryListInput,
+  ProjectMemoryPage,
+  ProjectMemoryMutateInput,
+  ProjectMemoryMutationResult,
+  ProjectMemoryRecallInput,
+  ProjectMemoryRecallPreview,
+  ProjectMemoryScope,
+  ProjectMemoryExport,
+  ProjectMemoryError,
+} from "./projectMemory.ts";
+import {
+  GitReadLineBlameInput,
+  GitReadLineBlameResult,
+  GitLocalChangesInput,
+  GitLocalChangesResult,
+  GitApplyIndexPatchInput,
+  GitReadComparisonInput,
+  GitReadComparisonResult,
+} from "./git.ts";
+import {
   AutomationCentreInput,
   AutomationCentreCommand,
   AutomationCentreSnapshot,
@@ -321,6 +342,10 @@ export const WS_METHODS = {
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
   vcsListRefs: "vcs.listRefs",
+  vcsReadLineBlame: "vcs.readLineBlame",
+  vcsReadLocalChanges: "vcs.readLocalChanges",
+  vcsApplyIndexPatch: "vcs.applyIndexPatch",
+  vcsReadComparison: "vcs.readComparison",
   vcsCreateWorktree: "vcs.createWorktree",
   vcsRemoveWorktree: "vcs.removeWorktree",
   vcsCreateRef: "vcs.createRef",
@@ -1429,6 +1454,29 @@ export const WsProjectsInitializeGitRpc = Rpc.make(WS_METHODS.projectsInitialize
   error: Schema.Union([GitManagerServiceError, AuthRpcError]),
 });
 
+export const WsVcsReadLineBlameRpc = Rpc.make(WS_METHODS.vcsReadLineBlame, {
+  payload: GitReadLineBlameInput,
+  success: GitReadLineBlameResult,
+  error: Schema.Union([GitCommandError, AuthRpcError]),
+});
+
+export const WsVcsReadLocalChangesRpc = Rpc.make(WS_METHODS.vcsReadLocalChanges, {
+  payload: GitLocalChangesInput,
+  success: GitLocalChangesResult,
+  error: Schema.Union([GitCommandError, AuthRpcError]),
+});
+export const WsVcsApplyIndexPatchRpc = Rpc.make(WS_METHODS.vcsApplyIndexPatch, {
+  payload: GitApplyIndexPatchInput,
+  success: EmptyRpcResult,
+  error: Schema.Union([GitCommandError, AuthRpcError]),
+});
+
+export const WsVcsReadComparisonRpc = Rpc.make(WS_METHODS.vcsReadComparison, {
+  payload: GitReadComparisonInput,
+  success: GitReadComparisonResult,
+  error: Schema.Union([GitCommandError, AuthRpcError]),
+});
+
 export const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
   payload: VcsListRefsInput,
   success: VcsListRefsResult,
@@ -1611,6 +1659,30 @@ export const WsOrchestrationSubscribeThreadWindowRpc = Rpc.make(
     stream: true,
   },
 );
+
+export const WsProjectMemoryListRpc = Rpc.make(PROJECT_MEMORY_WS_METHODS.list, {
+  payload: ProjectMemoryListInput,
+  success: ProjectMemoryPage,
+  error: Schema.Union([ProjectMemoryError, AuthRpcError]),
+});
+
+export const WsProjectMemoryMutateRpc = Rpc.make(PROJECT_MEMORY_WS_METHODS.mutate, {
+  payload: ProjectMemoryMutateInput,
+  success: ProjectMemoryMutationResult,
+  error: Schema.Union([ProjectMemoryError, AuthRpcError]),
+});
+
+export const WsProjectMemoryPreviewRpc = Rpc.make(PROJECT_MEMORY_WS_METHODS.preview, {
+  payload: ProjectMemoryRecallInput,
+  success: ProjectMemoryRecallPreview,
+  error: Schema.Union([ProjectMemoryError, AuthRpcError]),
+});
+
+export const WsProjectMemoryExportRpc = Rpc.make(PROJECT_MEMORY_WS_METHODS.export, {
+  payload: ProjectMemoryScope,
+  success: ProjectMemoryExport,
+  error: Schema.Union([ProjectMemoryError, AuthRpcError]),
+});
 
 export const WsContextHandoffGetInspectionSummaryRpc = Rpc.make(
   CONTEXT_HANDOFF_WS_METHODS.getInspectionSummary,
@@ -1938,6 +2010,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsThreadPriorityEnsureCurrentRpc
   | typeof WsWorktreesSetManualPositionRpc
   | typeof WsProjectsInitializeGitRpc
+  | typeof WsVcsReadLineBlameRpc
+  | typeof WsVcsReadLocalChangesRpc
+  | typeof WsVcsApplyIndexPatchRpc
+  | typeof WsVcsReadComparisonRpc
   | typeof WsVcsListRefsRpc
   | typeof WsVcsCreateWorktreeRpc
   | typeof WsVcsRemoveWorktreeRpc
@@ -1985,6 +2061,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationSubscribeShellRpc
   | typeof WsOrchestrationSubscribeThreadRpc
   | typeof WsOrchestrationSubscribeThreadWindowRpc
+  | typeof WsProjectMemoryListRpc
+  | typeof WsProjectMemoryMutateRpc
+  | typeof WsProjectMemoryPreviewRpc
+  | typeof WsProjectMemoryExportRpc
   | typeof WsContextHandoffGetInspectionSummaryRpc
   | typeof WsContextHandoffListInspectionEntriesRpc
   | typeof WsContextHandoffReadRawPayloadChunkRpc
@@ -2096,6 +2176,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsThreadPriorityEnsureCurrentRpc,
   WsWorktreesSetManualPositionRpc,
   WsProjectsInitializeGitRpc,
+  WsVcsReadLineBlameRpc,
+  WsVcsReadLocalChangesRpc,
+  WsVcsApplyIndexPatchRpc,
+  WsVcsReadComparisonRpc,
   WsVcsListRefsRpc,
   WsVcsCreateWorktreeRpc,
   WsVcsRemoveWorktreeRpc,
@@ -2143,6 +2227,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
   WsOrchestrationSubscribeThreadWindowRpc,
+  WsProjectMemoryListRpc,
+  WsProjectMemoryMutateRpc,
+  WsProjectMemoryPreviewRpc,
+  WsProjectMemoryExportRpc,
   WsContextHandoffGetInspectionSummaryRpc,
   WsContextHandoffListInspectionEntriesRpc,
   WsContextHandoffReadRawPayloadChunkRpc,

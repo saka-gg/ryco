@@ -1,3 +1,5 @@
+import { ProjectMemoryService } from "../../projectMemory/ProjectMemoryService.ts";
+import { submitWithProjectMemory } from "../../projectMemory/dispatch.ts";
 import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import {
@@ -219,6 +221,7 @@ const make = Effect.gen(function* () {
   const questions = yield* ProjectionThreadUserInputRequestRepository;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectMemory = yield* Effect.serviceOption(ProjectMemoryService);
   const providerService = yield* ProviderService;
   const contextHandoffCoordinator = yield* ContextHandoffCoordinator;
   const gitWorkflow = yield* GitWorkflowService;
@@ -1165,7 +1168,23 @@ const make = Effect.gen(function* () {
           })
         : Effect.void;
 
-    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+    yield* submitWithProjectMemory({
+      memory: projectMemory,
+      engine: orchestrationEngine,
+      providers: providerService,
+      ...(event.payload.projectMemory ? { recall: event.payload.projectMemory } : {}),
+      threadId: thread.id,
+      commandId: event.commandId ?? event.eventId,
+      messageId: event.payload.messageId,
+      submit: (envelope, expectedRuntime) =>
+        providerService.sendTurn(
+          {
+            ...sendTurnRequest.value,
+            ...(envelope ? { input: envelope + (sendTurnRequest.value.input ?? "") } : {}),
+          },
+          expectedRuntime,
+        ),
+    }).pipe(
       Effect.tap(() => commitAcceptedModelSelection),
       Effect.catchCause(recoverTurnStartFailure),
       Effect.forkScoped,

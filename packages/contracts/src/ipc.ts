@@ -1,4 +1,22 @@
+import type {
+  GitReadLineBlameInput,
+  GitReadLineBlameResult,
+  GitLocalChangesInput,
+  GitLocalChangesResult,
+  GitApplyIndexPatchInput,
+  GitReadComparisonInput,
+  GitReadComparisonResult,
+} from "./git.ts";
 import type { AutomationCentreApi } from "./automationCentre.ts";
+import type {
+  ProjectMemoryListInput,
+  ProjectMemoryPage,
+  ProjectMemoryMutateInput,
+  ProjectMemoryRecallInput,
+  ProjectMemoryRecallPreview,
+  ProjectMemoryExport,
+  ProjectMemoryScope,
+} from "./projectMemory.ts";
 import type {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
@@ -869,7 +887,15 @@ export interface LocalApi {
  * its own instance of this surface, and callers should resolve it by
  * `environmentId` rather than reaching through the local desktop bridge.
  */
+export interface ProjectMemoryApi {
+  list: (input: typeof ProjectMemoryListInput.Type) => Promise<ProjectMemoryPage>;
+  mutate: (input: ProjectMemoryMutateInput) => Promise<{ revision: number }>;
+  preview: (input: ProjectMemoryRecallInput) => Promise<ProjectMemoryRecallPreview>;
+  export: (input: typeof ProjectMemoryScope.Type) => Promise<ProjectMemoryExport>;
+}
+
 export interface EnvironmentApi {
+  projectMemory?: ProjectMemoryApi;
   attachments?: {
     readChunk: (input: ChatAttachmentReadChunkInput) => Promise<ChatAttachmentReadChunkResult>;
   };
@@ -976,6 +1002,10 @@ export interface EnvironmentApi {
     ) => Promise<SourceControlPublishRepositoryResult>;
   };
   vcs: {
+    readLineBlame: (input: GitReadLineBlameInput) => Promise<GitReadLineBlameResult>;
+    readLocalChanges: (input: GitLocalChangesInput) => Promise<GitLocalChangesResult>;
+    applyIndexPatch: (input: GitApplyIndexPatchInput) => Promise<void>;
+    readComparison: (input: GitReadComparisonInput) => Promise<GitReadComparisonResult>;
     listRefs: (input: VcsListRefsInput) => Promise<VcsListRefsResult>;
     createWorktree: (input: VcsCreateWorktreeInput) => Promise<VcsCreateWorktreeResult>;
     removeWorktree: (input: VcsRemoveWorktreeInput) => Promise<void>;

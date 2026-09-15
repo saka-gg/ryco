@@ -1,7 +1,5 @@
-import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import type { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
-import { readAttachmentBytes } from "@ryco/client-runtime/rpc";
-import { readEnvironmentApi } from "../../environmentApi";
+import { memo, useState, type ReactNode } from "react";
+import { useAttachmentSource, type AttachmentContext } from "./useAttachmentSource";
 import { isChatFileAttachment, isChatImageAttachment, type ChatAttachment } from "../../types";
 import {
   attachmentDownloadUrl,
@@ -36,30 +34,19 @@ const AttachmentAudio = memo(function AttachmentAudio({
   );
 });
 
-interface AttachmentContext {
-  environmentId?: EnvironmentId | undefined;
-  threadId?: ThreadId | undefined;
-  messageId?: MessageId | undefined;
-}
-
 const LoadableAttachment = memo(function LoadableAttachment(
   props: AttachmentContext & {
     attachment: ChatAttachment;
     children: (attachment: ChatAttachment, loaded: boolean) => ReactNode;
   },
 ) {
-  const [source, setSource] = useState<string>();
-  const [loading, setLoading] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const resources = useRef<{ controller?: AbortController; url?: string }>({});
-  useEffect(
-    () => () => {
-      resources.current.controller?.abort();
-      if (resources.current.url) URL.revokeObjectURL(resources.current.url);
-    },
-    [],
-  );
   const attachment = props.attachment;
+  const { source, loading, failed, load } = useAttachmentSource({
+    ...props,
+    attachmentId: attachment.id,
+    sizeBytes: attachment.sizeBytes,
+    mimeType: attachment.mimeType,
+  });
   if (
     attachment.previewUrl ||
     source ||
@@ -74,38 +61,6 @@ const LoadableAttachment = memo(function LoadableAttachment(
       Boolean(source),
     );
   }
-  const load = async () => {
-    if (resources.current.controller && !resources.current.controller.signal.aborted) return;
-    const controller = new AbortController();
-    resources.current.controller = controller;
-    setLoading(true);
-    setFailed(false);
-    try {
-      const bytes = await readAttachmentBytes({
-        reference: {
-          threadId: props.threadId!,
-          messageId: props.messageId!,
-          attachmentId: attachment.id!,
-        },
-        sizeBytes: attachment.sizeBytes,
-        signal: controller.signal,
-        readChunk: (input) => {
-          const api = readEnvironmentApi(props.environmentId!)?.attachments;
-          if (!api) throw new Error("Attachment connection unavailable.");
-          return api.readChunk(input);
-        },
-      });
-      if (controller.signal.aborted) return;
-      const url = URL.createObjectURL(new Blob([bytes], { type: attachment.mimeType }));
-      resources.current.url = url;
-      setSource(url);
-    } catch {
-      if (!controller.signal.aborted) setFailed(true);
-    } finally {
-      if (!controller.signal.aborted) setLoading(false);
-      controller.abort();
-    }
-  };
   return (
     <button
       type="button"

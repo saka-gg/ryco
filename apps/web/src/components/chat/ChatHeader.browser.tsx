@@ -1,3 +1,4 @@
+import { PaneFocusContext } from "./PaneFocus";
 import "../../index.css";
 
 import { EnvironmentId, type ResolvedKeybindingsConfig } from "@ryco/contracts";
@@ -25,6 +26,53 @@ describe("ChatHeader", () => {
     }
     mounted = null;
     document.body.innerHTML = "";
+  });
+
+  it("keeps memory and gallery actions scoped to the focused pane", async () => {
+    const memory = vi.fn();
+    const gallery = vi.fn();
+    const header = (
+      <ChatHeader
+        activeThreadEnvironmentId={EnvironmentId.make("memory-node")}
+        activeThreadTitle="Memory fixture"
+        activeProjectName="Fixture"
+        isGitRepo={false}
+        openInCwd={null}
+        activeProjectScripts={undefined}
+        preferredScriptId={null}
+        keybindings={{} as ResolvedKeybindingsConfig}
+        availableEditors={[]}
+        workspacePanelOpen={false}
+        liveAgentCount={0}
+        onToggleWorkspacePanel={vi.fn()}
+        overviewSidebarOpen={false}
+        onToggleOverviewSidebar={vi.fn()}
+        onRunProjectScript={vi.fn()}
+        onAddProjectScript={vi.fn()}
+        onUpdateProjectScript={vi.fn()}
+        onDeleteProjectScript={vi.fn()}
+        onOpenProjectMemory={memory}
+        onOpenThreadImages={gallery}
+      />
+    );
+    mounted = await render(
+      <SidebarProvider>
+        <PaneFocusContext value={false}>{header}</PaneFocusContext>
+      </SidebarProvider>,
+    );
+    await page.getByRole("button", { name: "Project memory", exact: true }).click();
+    await page.getByRole("button", { name: "Thread images", exact: true }).click();
+    expect(memory).not.toHaveBeenCalled();
+    expect(gallery).not.toHaveBeenCalled();
+    await mounted.rerender(
+      <SidebarProvider>
+        <PaneFocusContext value={true}>{header}</PaneFocusContext>
+      </SidebarProvider>,
+    );
+    await page.getByRole("button", { name: "Project memory", exact: true }).click();
+    await page.getByRole("button", { name: "Thread images", exact: true }).click();
+    expect(memory).toHaveBeenCalledTimes(1);
+    expect(gallery).toHaveBeenCalledTimes(1);
   });
 
   it("renders overview and workspace toggles as borderless highlighted header controls", async () => {

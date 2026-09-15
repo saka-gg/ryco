@@ -662,7 +662,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   });
 
   const stopSessionBinding: ProviderServiceShape["stopSessionBinding"] = (binding) =>
-    stopExactBinding(binding, true);
+    withSessionStartLock(binding.threadId, stopExactBinding(binding, true));
 
   const listStaleSessionBindings: ProviderServiceShape["listStaleSessionBindings"] = () =>
     Ref.get(staleSessionBindings).pipe(Effect.map((bindings) => [...bindings.values()]));
@@ -805,7 +805,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
-  const resolveRoutableSession = Effect.fn("resolveRoutableSession")(function* (input: {
+  const resolveRoutableSessionUnlocked = Effect.fn("resolveRoutableSession")(function* (input: {
     readonly threadId: ThreadId;
     readonly operation: string;
     readonly allowRecovery: boolean;
@@ -858,6 +858,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     } as const;
   });
 
+  // Recovery and guarded submission share the session-start exclusion boundary.
+  const resolveRoutableSession = (input: Parameters<typeof resolveRoutableSessionUnlocked>[0]) =>
+    input.allowRecovery
+      ? withSessionStartLock(input.threadId, resolveRoutableSessionUnlocked(input))
+      : resolveRoutableSessionUnlocked(input);
+
   const getSession: ProviderServiceShape["getSession"] = Effect.fn("getSession")(
     function* (threadId) {
       const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
@@ -873,14 +879,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const restoreSessionBinding: ProviderServiceShape["restoreSessionBinding"] = Effect.fn(
     "restoreSessionBinding",
-  )(function* (binding) {
-    const exact = yield* findExactAdapterSession(binding);
-    if (!exact.session) {
-      return false;
-    }
-    yield* directory.upsert(binding);
-    return true;
-  });
+  )((binding) =>
+    withSessionStartLock(
+      binding.threadId,
+      Effect.gen(function* () {
+        const exact = yield* findExactAdapterSession(binding);
+        if (!exact.session) {
+          return false;
+        }
+        yield* directory.upsert(binding);
+        return true;
+      }),
+    ),
+  );
 
   const retireSessionBinding: ProviderServiceShape["retireSessionBinding"] = Effect.fn(
     "retireSessionBinding",
@@ -1081,86 +1092,107 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     };
   });
 
-  const sendTurn: ProviderServiceShape["sendTurn"] = Effect.fn("sendTurn")(function* (rawInput) {
-    const parsed = yield* decodeInputOrValidationError({
-      operation: "ProviderService.sendTurn",
-      schema: ProviderSendTurnInput,
-      payload: rawInput,
-    });
-
-    const input = {
-      ...parsed,
-      attachments: parsed.attachments ?? [],
-    };
-    if (!input.input && input.attachments.length === 0) {
-      return yield* toValidationError(
-        "ProviderService.sendTurn",
-        "Either input text or at least one attachment is required",
-      );
-    }
-    yield* Effect.annotateCurrentSpan({
-      "provider.operation": "send-turn",
-      "provider.thread_id": input.threadId,
-      "provider.interaction_mode": input.interactionMode,
-      "provider.attachment_count": input.attachments.length,
-    });
-    let metricProvider = "unknown";
-    let metricModel = input.modelSelection?.model;
-    return yield* Effect.gen(function* () {
-      const routed = yield* resolveRoutableSession({
-        threadId: input.threadId,
+  const sendTurn: ProviderServiceShape["sendTurn"] = Effect.fn("sendTurn")(
+    function* (rawInput, expectedRuntime) {
+      const parsed = yield* decodeInputOrValidationError({
         operation: "ProviderService.sendTurn",
-        allowRecovery: true,
+        schema: ProviderSendTurnInput,
+        payload: rawInput,
       });
-      metricProvider = routed.adapter.provider;
-      metricModel = input.modelSelection?.model;
+
+      const input = {
+        ...parsed,
+        attachments: parsed.attachments ?? [],
+      };
+      if (!input.input && input.attachments.length === 0) {
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Either input text or at least one attachment is required",
+        );
+      }
       yield* Effect.annotateCurrentSpan({
-        "provider.kind": routed.adapter.provider,
-        ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
+        "provider.operation": "send-turn",
+        "provider.thread_id": input.threadId,
+        "provider.interaction_mode": input.interactionMode,
+        "provider.attachment_count": input.attachments.length,
       });
-      const turn = yield* routed.adapter.sendTurn({
-        ...input,
-        input: `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\n${input.input ?? ""}`,
-      });
-      yield* directory.upsert({
-        threadId: input.threadId,
-        provider: routed.adapter.provider,
-        providerInstanceId: routed.instanceId,
-        ...(routed.session?.runtimeSessionId
-          ? { runtimeSessionId: routed.session.runtimeSessionId }
-          : {}),
-        status: "running",
-        ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
-        runtimePayload: {
-          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-          activeTurnId: turn.turnId,
-          lastRuntimeEvent: "provider.sendTurn",
-          lastRuntimeEventAt: new Date().toISOString(),
-        },
-      });
-      yield* analytics.record("provider.turn.sent", {
-        provider: routed.adapter.provider,
-        model: input.modelSelection?.model,
-        interactionMode: input.interactionMode,
-        attachmentCount: input.attachments.length,
-        hasInput: typeof input.input === "string" && input.input.trim().length > 0,
-      });
-      return turn;
-    }).pipe(
-      withMetrics({
-        counter: providerTurnsTotal,
-        timer: providerTurnDuration,
-        attributes: () =>
-          providerTurnMetricAttributes({
-            provider: metricProvider,
-            model: metricModel,
-            extra: {
-              operation: "send",
-            },
-          }),
-      }),
-    );
-  });
+      let metricProvider = "unknown";
+      let metricModel = input.modelSelection?.model;
+      const submission = Effect.gen(function* () {
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.sendTurn",
+          allowRecovery: expectedRuntime === undefined,
+        });
+        if (
+          expectedRuntime &&
+          (!routed.isActive ||
+            !expectedRuntime.runtimeSessionId ||
+            !expectedRuntime.providerInstanceId ||
+            routed.session?.runtimeSessionId !== expectedRuntime.runtimeSessionId ||
+            routed.instanceId !== expectedRuntime.providerInstanceId ||
+            routed.adapter.provider !== expectedRuntime.provider)
+        ) {
+          return yield* toValidationError(
+            "ProviderService.sendTurn",
+            "Expected provider runtime is no longer current.",
+          );
+        }
+        metricProvider = routed.adapter.provider;
+        metricModel = input.modelSelection?.model;
+        yield* Effect.annotateCurrentSpan({
+          "provider.kind": routed.adapter.provider,
+          ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
+        });
+        // Recheck caller authority after waiting for the runtime exclusion permit.
+        if (expectedRuntime?.beforeSubmit) yield* expectedRuntime.beforeSubmit;
+        const turn = yield* routed.adapter.sendTurn({
+          ...input,
+          input: `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\n${input.input ?? ""}`,
+        });
+        yield* directory.upsert({
+          threadId: input.threadId,
+          provider: routed.adapter.provider,
+          providerInstanceId: routed.instanceId,
+          ...(routed.session?.runtimeSessionId
+            ? { runtimeSessionId: routed.session.runtimeSessionId }
+            : {}),
+          status: "running",
+          ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+          runtimePayload: {
+            ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+            activeTurnId: turn.turnId,
+            lastRuntimeEvent: "provider.sendTurn",
+            lastRuntimeEventAt: new Date().toISOString(),
+          },
+        });
+        yield* analytics.record("provider.turn.sent", {
+          provider: routed.adapter.provider,
+          model: input.modelSelection?.model,
+          interactionMode: input.interactionMode,
+          attachmentCount: input.attachments.length,
+          hasInput: typeof input.input === "string" && input.input.trim().length > 0,
+        });
+        return turn;
+      }).pipe(
+        withMetrics({
+          counter: providerTurnsTotal,
+          timer: providerTurnDuration,
+          attributes: () =>
+            providerTurnMetricAttributes({
+              provider: metricProvider,
+              model: metricModel,
+              extra: {
+                operation: "send",
+              },
+            }),
+        }),
+      );
+      // Hold only through submission acceptance, never the generated turn. Cancellation
+      // retains the permit until the adapter effect actually finalizes.
+      return yield* expectedRuntime ? withSessionStartLock(input.threadId, submission) : submission;
+    },
+  );
 
   const setThreadGoal: NonNullable<ProviderServiceShape["setThreadGoal"]> = Effect.fn(
     "setThreadGoal",

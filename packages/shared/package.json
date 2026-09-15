@@ -261,6 +261,7 @@
       "import": "./src/macLocalSigning.ts"
     },
     "./voice": "./src/voice.ts",
+    "./projectMemory": "./src/projectMemory.ts",
     "./threadExport": {
       "types": "./src/threadExport.ts",
       "import": "./src/threadExport.ts"

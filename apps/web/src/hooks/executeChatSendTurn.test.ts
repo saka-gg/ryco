@@ -864,3 +864,17 @@ describe("worktree branch defaults", () => {
     expect(dispatchCommand).not.toHaveBeenCalled();
   });
 });
+
+it("forwards only explicit memory references into the canonical turn command", async () => {
+  const { input, dispatchCommand } = makeSendInput();
+  const projectMemory = {
+    projectId: input.thread.projectId,
+    references: [{ id: "entry", revision: 7 }],
+  };
+  input.composer.projectMemory = projectMemory;
+  expect(await executeChatSendTurn(input)).toBe(true);
+  expect(dispatchCommand).toHaveBeenCalledWith(
+    expect.objectContaining({ type: "thread.turn.start", projectMemory }),
+  );
+  expect(projectMemory.references).toEqual([{ id: "entry", revision: 7 }]);
+});

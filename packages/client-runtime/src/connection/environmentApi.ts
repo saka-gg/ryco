@@ -65,6 +65,12 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       refreshStatus: rpcClient.vcs.refreshStatus,
       onStatus: (input, callback, options) => rpcClient.vcs.onStatus(input, callback, options),
       listRefs: rpcClient.vcs.listRefs,
+      readLineBlame: rpcClient.vcs.readLineBlame,
+      readLocalChanges: rpcClient.vcs.readLocalChanges,
+      applyIndexPatch: async (input) => {
+        await rpcClient.vcs.applyIndexPatch(input);
+      },
+      readComparison: rpcClient.vcs.readComparison,
       createWorktree: rpcClient.vcs.createWorktree,
       removeWorktree: rpcClient.vcs.removeWorktree,
       createRef: rpcClient.vcs.createRef,
@@ -121,6 +127,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
           }
         : {}),
     },
+    projectMemory: rpcClient.projectMemory,
     contextHandoff: {
       getInspectionSummary: rpcClient.contextHandoff.getInspectionSummary,
       listInspectionEntries: rpcClient.contextHandoff.listInspectionEntries,

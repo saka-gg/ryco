@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/comparison/lineBlame": "./src/state/comparison/lineBlame.ts",
+    "./state/comparison": {
+      "types": "./src/state/comparison/index.ts",
+      "import": "./src/state/comparison/index.ts"
+    },
     "./scoped": {
       "types": "./src/scoped.ts",
       "import": "./src/scoped.ts"
@@ -103,6 +108,10 @@
     "./voice": {
       "types": "./src/voice/index.ts",
       "import": "./src/voice/index.ts"
+    },
+    "./state/project-memory": {
+      "types": "./src/state/project-memory/index.ts",
+      "import": "./src/state/project-memory/index.ts"
     }
   },
   "scripts": {

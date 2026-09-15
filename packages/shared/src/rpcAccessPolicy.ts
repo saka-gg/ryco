@@ -1,4 +1,5 @@
 import {
+  PROJECT_MEMORY_WS_METHODS,
   AGENT_CONTROL_WS_METHODS,
   CONTEXT_HANDOFF_WS_METHODS,
   DEVICE_WS_METHODS,
@@ -8,6 +9,7 @@ import {
 } from "@ryco/contracts";
 
 export type RpcMethod =
+  | (typeof PROJECT_MEMORY_WS_METHODS)[keyof typeof PROJECT_MEMORY_WS_METHODS]
   | (typeof WS_METHODS)[keyof typeof WS_METHODS]
   | (typeof ORCHESTRATION_WS_METHODS)[keyof typeof ORCHESTRATION_WS_METHODS]
   | (typeof CONTEXT_HANDOFF_WS_METHODS)[keyof typeof CONTEXT_HANDOFF_WS_METHODS]
@@ -18,6 +20,10 @@ export type RpcAccess = RelayEffectiveRole | "authenticated" | "direct_owner";
 
 export const RPC_ACCESS_POLICY = {
   [WS_METHODS.speechRequest]: "owner",
+  [PROJECT_MEMORY_WS_METHODS.list]: "operator",
+  [PROJECT_MEMORY_WS_METHODS.preview]: "operator",
+  [PROJECT_MEMORY_WS_METHODS.export]: "operator",
+  [PROJECT_MEMORY_WS_METHODS.mutate]: "operator",
   [AGENT_CONTROL_WS_METHODS.automationCentre]: "owner",
   [AGENT_CONTROL_WS_METHODS.automationCommand]: "owner",
   [DEVICE_WS_METHODS.read]: "viewer",
@@ -174,6 +180,10 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.vcsCreateWorktree]: "operator",
   [WS_METHODS.vcsInit]: "operator",
   [WS_METHODS.vcsListRefs]: "operator",
+  [WS_METHODS.vcsReadLineBlame]: "operator",
+  [WS_METHODS.vcsReadLocalChanges]: "operator",
+  [WS_METHODS.vcsApplyIndexPatch]: "operator",
+  [WS_METHODS.vcsReadComparison]: "operator",
   [WS_METHODS.vcsPull]: "operator",
   [WS_METHODS.vcsRefreshStatus]: "operator",
   [WS_METHODS.vcsRemoveWorktree]: "operator",

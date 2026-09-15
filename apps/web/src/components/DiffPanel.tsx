@@ -1,3 +1,9 @@
+import { useLocalChanges } from "../rpc/useLocalChanges";
+import { DiffStagingActions } from "./DiffStagingActions";
+import type { GitLocalChangesScope } from "@ryco/contracts";
+import { DiffLineBlame } from "./DiffLineBlame";
+import { DiffComparisonControls } from "./DiffComparisonControls";
+import { useComparison } from "../rpc/useComparison";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -455,6 +461,33 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     cwd: activeCwd ?? null,
   });
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
+  const [localScope, setLocalScope] = useState<GitLocalChangesScope | null>(null);
+  const reviewingLocal =
+    localScope !== null && !isPhonePresentation && diffSearch.diffTurnId == null;
+  const localChanges = useLocalChanges(
+    activeThread?.environmentId ?? null,
+    activeCwd ?? null,
+    diffOpen && isGitRepo && reviewingLocal,
+  );
+  const comparison = useComparison({
+    environmentId: activeThread?.environmentId ?? null,
+    repositoryPath: activeProject?.cwd ?? null,
+    cwd: activeCwd ?? null,
+    ignoreWhitespace: diffIgnoreWhitespace,
+    enabled:
+      diffOpen &&
+      isGitRepo &&
+      !isPhonePresentation &&
+      diffSearch.diffTurnId == null &&
+      !reviewingLocal,
+  });
+  // Explicit checkpoint links continue to open the requested turn, even with a saved comparison.
+  const comparing =
+    !reviewingLocal &&
+    !isPhonePresentation &&
+    diffSearch.diffTurnId == null &&
+    comparison.selection !== null;
+
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
     useTurnDiffSummaries(activeThread);
   const orderedTurnDiffSummaries = useMemo(
@@ -531,7 +564,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     toTurnCount: activeCheckpointRange?.toTurnCount ?? null,
     ignoreWhitespace: diffIgnoreWhitespace,
     cacheScope: selectedTurn ? `turn:${selectedTurn.turnId}` : conversationCacheScope,
-    enabled: isGitRepo,
+    enabled: isGitRepo && !comparing && !reviewingLocal,
   });
   const selectedTurnCheckpointDiff = selectedTurn
     ? activeCheckpointDiffQuery.data?.diff
@@ -539,15 +572,45 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const conversationCheckpointDiff = selectedTurn
     ? undefined
     : activeCheckpointDiffQuery.data?.diff;
-  const isLoadingCheckpointDiff = activeCheckpointDiffQuery.isLoading;
-  const checkpointDiffError =
-    activeCheckpointDiffQuery.error instanceof Error
-      ? activeCheckpointDiffQuery.error.message
-      : activeCheckpointDiffQuery.error
-        ? "Failed to load checkpoint diff."
-        : null;
+  const isLoadingCheckpointDiff = reviewingLocal
+    ? localChanges.isLoading
+    : comparing
+      ? comparison.isLoading
+      : activeCheckpointDiffQuery.isLoading;
+  const checkpointDiffError = reviewingLocal
+    ? localChanges.error
+    : comparing
+      ? comparison.error
+      : activeCheckpointDiffQuery.error instanceof Error
+        ? activeCheckpointDiffQuery.error.message
+        : activeCheckpointDiffQuery.error
+          ? "Failed to load checkpoint diff."
+          : null;
 
-  const selectedPatch = selectedTurn ? selectedTurnCheckpointDiff : conversationCheckpointDiff;
+  const selectedPatch =
+    reviewingLocal && localScope
+      ? localChanges.data?.[localScope].patch
+      : comparing
+        ? comparison.data?.patch
+        : selectedTurn
+          ? selectedTurnCheckpointDiff
+          : conversationCheckpointDiff;
+  const [blameSelection, setBlameSelection] = useState<{
+    source: NonNullable<typeof comparison.data>["source"];
+    file: FileDiffMetadata;
+    side: "base" | "head";
+    line: number;
+  } | null>(null);
+  // Reset selection with its source; a later reconnect must not resurrect an old dialog.
+  if (blameSelection && (!comparing || blameSelection.source !== comparison.data?.source)) {
+    setBlameSelection(null);
+  }
+  const comparisonRevision =
+    reviewingLocal && localChanges.data
+      ? JSON.stringify([activeThread?.environmentId, localScope, localChanges.data.revision])
+      : comparison.data
+        ? JSON.stringify([activeThread?.environmentId, comparison.data.source.revision])
+        : null;
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const renderableContent = useMemo<ParsedDiffContent>(() => {
@@ -557,9 +620,12 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       activeDiffParser.parse("", parseScope);
       return { patch: null, files: [] };
     }
-    const turnScope = selectedTurn
-      ? `turn:${selectedTurn.turnId}`
-      : (conversationCacheScope ?? "conversation");
+    const turnScope =
+      comparing || reviewingLocal
+        ? `comparison:${comparisonRevision ?? "pending"}`
+        : selectedTurn
+          ? `turn:${selectedTurn.turnId}`
+          : (conversationCacheScope ?? "conversation");
     const cacheKey = {
       turnId: turnScope,
       filePath: parseScope,
@@ -576,7 +642,16 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       renderablePatchCache.set(cacheKey, content);
     }
     return content;
-  }, [activeDiffParser, conversationCacheScope, resolvedTheme, selectedPatch, selectedTurn]);
+  }, [
+    activeDiffParser,
+    comparing,
+    reviewingLocal,
+    comparisonRevision,
+    conversationCacheScope,
+    resolvedTheme,
+    selectedPatch,
+    selectedTurn,
+  ]);
   const renderablePatch = renderableContent.patch;
   const renderableFiles = renderableContent.files;
 
@@ -973,8 +1048,14 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
           <button
             type="button"
             className={cn("shrink-0 rounded-md", isPhonePresentation && "min-h-[44px]")}
-            onClick={selectWholeConversation}
-            data-turn-chip-selected={selectedTurnId === null}
+            onClick={() => {
+              if (!isPhonePresentation) {
+                comparison.setSelection(null);
+                setLocalScope(null);
+              }
+              selectWholeConversation();
+            }}
+            data-turn-chip-selected={!comparing && !reviewingLocal && selectedTurnId === null}
           >
             <div
               className={cn(
@@ -984,7 +1065,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                 // strip is `overflow-x: auto`, which forces the block axis to
                 // `auto` too and clips anything escaping the chip's border box.
                 isPhonePresentation && "flex min-h-[44px] items-center",
-                selectedTurnId === null
+                !comparing && !reviewingLocal && selectedTurnId === null
                   ? "border-border bg-accent text-accent-foreground"
                   : "border-border/70 bg-background/70 text-muted-foreground/80 hover:border-border hover:text-foreground/80",
               )}
@@ -1098,12 +1179,25 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
           <TextWrapIcon className="size-3" />
         </Toggle>
         <Toggle
-          aria-label={diffIgnoreWhitespace ? "Show whitespace changes" : "Hide whitespace changes"}
-          title={diffIgnoreWhitespace ? "Show whitespace changes" : "Hide whitespace changes"}
+          aria-label={
+            reviewingLocal
+              ? "Whitespace is included for staging"
+              : diffIgnoreWhitespace
+                ? "Show whitespace changes"
+                : "Hide whitespace changes"
+          }
+          title={
+            reviewingLocal
+              ? "Staging always shows the exact patch, including whitespace."
+              : diffIgnoreWhitespace
+                ? "Show whitespace changes"
+                : "Hide whitespace changes"
+          }
+          disabled={reviewingLocal}
           variant="outline"
           size="xs"
           className={cn(isPhonePresentation && "min-h-[44px] min-w-[44px]")}
-          pressed={diffIgnoreWhitespace}
+          pressed={!reviewingLocal && diffIgnoreWhitespace}
           onPressedChange={(pressed) => {
             setDiffIgnoreWhitespace(Boolean(pressed));
           }}
@@ -1116,6 +1210,95 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
 
   return (
     <DiffPanelShell mode={mode} header={headerRow}>
+      {comparing &&
+        comparison.data &&
+        activeThread &&
+        blameSelection?.source === comparison.data.source && (
+          <DiffLineBlame
+            key={`${activeThread.environmentId}:${comparison.data.source.revision}:${blameSelection.file.name}:${blameSelection.side}:${blameSelection.line}`}
+            environmentId={activeThread.environmentId}
+            source={comparison.data.source}
+            file={blameSelection.file}
+            initialSide={blameSelection.side}
+            initialLine={blameSelection.line}
+            onClose={() => setBlameSelection(null)}
+          />
+        )}
+
+      {!isPhonePresentation && activeThread && isGitRepo && (
+        <DiffComparisonControls
+          key={`${activeThread.environmentId}:${activeProject?.cwd}:${comparison.selection?.mode}:${comparison.selection?.ref}`}
+          selection={comparing ? comparison.selection : null}
+          data={comparing ? comparison.data : null}
+          turnSelected={!reviewingLocal && !comparing}
+          isLoading={comparing && comparison.isLoading}
+          error={comparing ? comparison.error : null}
+          refMoved={comparing && comparison.refMoved}
+          onSelect={(selection) => {
+            setLocalScope(null);
+            comparison.setSelection(selection);
+            selectWholeConversation();
+          }}
+          onRefresh={() => {
+            void comparison.refresh();
+          }}
+        />
+      )}
+      {!isPhonePresentation && isGitRepo && activeThread && (
+        <section
+          aria-label="Local change review"
+          className="shrink-0 border-b border-border px-3 py-2 text-xs"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            {(["unstaged", "staged"] as const).map((scope) => (
+              <button
+                key={scope}
+                type="button"
+                className={cn(
+                  "rounded border px-2 py-1",
+                  reviewingLocal &&
+                    localScope === scope &&
+                    "border-foreground/30 bg-foreground/10 font-medium",
+                )}
+                aria-pressed={reviewingLocal && localScope === scope}
+                onClick={() => {
+                  setLocalScope(scope);
+                  void navigate({
+                    to: ".",
+                    search: (previous) => ({
+                      ...previous,
+                      diffTurnId: undefined,
+                      diffFilePath: undefined,
+                    }),
+                  });
+                }}
+              >
+                {scope === "staged" ? "Staged changes" : "Unstaged changes"}
+              </button>
+            ))}
+            {reviewingLocal && (
+              <button
+                type="button"
+                className="rounded border px-2 py-1"
+                disabled={localChanges.isLoading || localChanges.isApplying}
+                onClick={() => void localChanges.refresh()}
+              >
+                Refresh local changes
+              </button>
+            )}
+          </div>
+          {reviewingLocal && (
+            <p className="mt-2 text-muted-foreground">
+              {localScope === "staged"
+                ? "HEAD → index. Unstage keeps your working files."
+                : "Index → working files. Later agent edits appear here; refresh to read external changes."}{" "}
+              Staging does not commit. Existing commit actions stage their selected files.
+              {localChanges.isApplying && <span role="status"> Updating index…</span>}
+              {localChanges.isLoading && <span role="status"> Refreshing local changes…</span>}
+            </p>
+          )}
+        </section>
+      )}
       {!activeThread ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Select a thread to inspect turn diffs.
@@ -1124,7 +1307,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Turn diffs are unavailable because this project is not a git repository.
         </div>
-      ) : orderedTurnDiffSummaries.length === 0 ? (
+      ) : !comparing && !reviewingLocal && orderedTurnDiffSummaries.length === 0 ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           No completed turns yet.
         </div>
@@ -1136,12 +1319,22 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
           >
             {checkpointDiffError && !renderablePatch && (
               <div className="px-3">
-                <p className="mb-2 text-[11px] text-red-500/80">{checkpointDiffError}</p>
+                <p role="alert" className="mb-2 text-[11px] text-red-500/80">
+                  {checkpointDiffError}
+                </p>
               </div>
             )}
             {!renderablePatch ? (
               isLoadingCheckpointDiff ? (
-                <DiffPanelLoadingState label="Loading checkpoint diff..." />
+                <DiffPanelLoadingState
+                  label={
+                    reviewingLocal
+                      ? "Loading local changes..."
+                      : comparing
+                        ? "Loading comparison..."
+                        : "Loading checkpoint diff..."
+                  }
+                />
               ) : (
                 <div className="flex flex-1 items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
                   <p>
@@ -1257,6 +1450,16 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                   >
                     {filteredFileEntries.map(({ fileDiff, fileIndex }) => {
                       const filePath = resolveFileDiffPath(fileDiff);
+                      const localFile =
+                        reviewingLocal &&
+                        localScope &&
+                        renderablePatch?.kind === "files" &&
+                        renderablePatch.files.length ===
+                          localChanges.data?.[localScope].files.length
+                          ? localChanges.data[localScope].files[
+                              renderablePatch.files.indexOf(fileDiff)
+                            ]
+                          : undefined;
                       const fileKey = buildFileDiffRenderKey(fileDiff);
                       const themedFileKey = `${fileKey}:${resolvedTheme}`;
                       const collapsed = collapsedDiffFileKeys.has(fileKey);
@@ -1286,6 +1489,42 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                         >
                           <FileDiff
                             fileDiff={fileDiff}
+                            renderHeaderMetadata={() =>
+                              reviewingLocal && localScope && localFile ? (
+                                <DiffStagingActions
+                                  key={`${localChanges.data?.revision}:${localFile.id}`}
+                                  scope={localScope}
+                                  file={localFile}
+                                  name={filePath}
+                                  disabled={
+                                    localChanges.isLoading ||
+                                    localChanges.isApplying ||
+                                    !!localChanges.error
+                                  }
+                                  onApply={(input) => {
+                                    void localChanges.apply(input);
+                                  }}
+                                />
+                              ) : comparing && comparison.data ? (
+                                <button
+                                  type="button"
+                                  className="rounded px-2 py-1 text-xs hover:bg-foreground/10"
+                                  aria-label={`Blame line in ${fileDiff.name}`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    if (comparison.data)
+                                      setBlameSelection({
+                                        source: comparison.data.source,
+                                        file: fileDiff,
+                                        side: "base",
+                                        line: fileDiff.hunks[0]?.deletionStart || 1,
+                                      });
+                                  }}
+                                >
+                                  Line blame
+                                </button>
+                              ) : null
+                            }
                             renderHeaderPrefix={() => (
                               <button
                                 type="button"
@@ -1330,6 +1569,22 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                                 ? DIFF_PANEL_PHONE_UNSAFE_CSS
                                 : DIFF_PANEL_UNSAFE_CSS,
                               lineHoverHighlight: "number",
+                              ...(comparing && comparison.data
+                                ? {
+                                    onLineClick: (line) => {
+                                      if (line.numberColumn || !window.getSelection()?.isCollapsed)
+                                        return;
+                                      if (comparison.data)
+                                        setBlameSelection({
+                                          source: comparison.data.source,
+                                          file: fileDiff,
+                                          side:
+                                            line.annotationSide === "deletions" ? "base" : "head",
+                                          line: line.lineNumber,
+                                        });
+                                    },
+                                  }
+                                : {}),
                               // Line-number editor-open taps are suppressed on
                               // the phone surface (same RPC constraint as the
                               // title click above).

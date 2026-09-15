@@ -1,3 +1,4 @@
+import { PROJECT_MEMORY_WS_METHODS } from "@ryco/contracts";
 import {
   type GitActionProgressEvent,
   type GitRunStackedActionInput,
@@ -172,6 +173,10 @@ export interface WsRpcClient {
     }) => ReturnType<LocalApi["shell"]["openInEditor"]>;
   };
   readonly vcs: {
+    readonly readLineBlame: RpcUnaryMethod<typeof WS_METHODS.vcsReadLineBlame>;
+    readonly readLocalChanges: RpcUnaryMethod<typeof WS_METHODS.vcsReadLocalChanges>;
+    readonly applyIndexPatch: RpcUnaryMethod<typeof WS_METHODS.vcsApplyIndexPatch>;
+    readonly readComparison: RpcUnaryMethod<typeof WS_METHODS.vcsReadComparison>;
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.vcsPull>;
     readonly refreshStatus: RpcUnaryMethod<typeof WS_METHODS.vcsRefreshStatus>;
     readonly onStatus: (
@@ -307,6 +312,12 @@ export interface WsRpcClient {
   };
   readonly threadPriority: {
     readonly ensureCurrent: RpcUnaryMethod<typeof WS_METHODS.threadPriorityEnsureCurrent>;
+  };
+  readonly projectMemory: {
+    readonly list: RpcUnaryMethod<typeof PROJECT_MEMORY_WS_METHODS.list>;
+    readonly mutate: RpcUnaryMethod<typeof PROJECT_MEMORY_WS_METHODS.mutate>;
+    readonly preview: RpcUnaryMethod<typeof PROJECT_MEMORY_WS_METHODS.preview>;
+    readonly export: RpcUnaryMethod<typeof PROJECT_MEMORY_WS_METHODS.export>;
   };
   readonly contextHandoff: {
     readonly getInspectionSummary: RpcUnaryMethod<
@@ -542,6 +553,14 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           { ...options, tag: WS_METHODS.subscribeVcsStatus },
         );
       },
+      readLineBlame: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadLineBlame](input)),
+      readLocalChanges: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadLocalChanges](input)),
+      applyIndexPatch: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsApplyIndexPatch](input)),
+      readComparison: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadComparison](input)),
       listRefs: (input) => transport.request((client) => client[WS_METHODS.vcsListRefs](input)),
       createWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.vcsCreateWorktree](input)),
@@ -719,6 +738,15 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
     threadPriority: {
       ensureCurrent: (input) =>
         transport.request((client) => client[WS_METHODS.threadPriorityEnsureCurrent](input)),
+    },
+    projectMemory: {
+      list: (input) => transport.request((client) => client[PROJECT_MEMORY_WS_METHODS.list](input)),
+      mutate: (input) =>
+        transport.request((client) => client[PROJECT_MEMORY_WS_METHODS.mutate](input)),
+      preview: (input) =>
+        transport.request((client) => client[PROJECT_MEMORY_WS_METHODS.preview](input)),
+      export: (input) =>
+        transport.request((client) => client[PROJECT_MEMORY_WS_METHODS.export](input)),
     },
     contextHandoff: {
       getInspectionSummary: (input) =>
