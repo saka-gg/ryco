@@ -1,3 +1,12 @@
+import type {
+  GitReadLineBlameInput,
+  GitReadLineBlameResult,
+  GitLocalChangesInput,
+  GitLocalChangesResult,
+  GitApplyIndexPatchInput,
+  GitReadComparisonInput,
+  GitReadComparisonResult,
+} from "./git.ts";
 import type { AutomationCentreApi } from "./automationCentre.ts";
 import type {
   ProjectMemoryListInput,
@@ -993,6 +1002,10 @@ export interface EnvironmentApi {
     ) => Promise<SourceControlPublishRepositoryResult>;
   };
   vcs: {
+    readLineBlame: (input: GitReadLineBlameInput) => Promise<GitReadLineBlameResult>;
+    readLocalChanges: (input: GitLocalChangesInput) => Promise<GitLocalChangesResult>;
+    applyIndexPatch: (input: GitApplyIndexPatchInput) => Promise<void>;
+    readComparison: (input: GitReadComparisonInput) => Promise<GitReadComparisonResult>;
     listRefs: (input: VcsListRefsInput) => Promise<VcsListRefsResult>;
     createWorktree: (input: VcsCreateWorktreeInput) => Promise<VcsCreateWorktreeResult>;
     removeWorktree: (input: VcsRemoveWorktreeInput) => Promise<void>;
