@@ -1,3 +1,4 @@
+import { usePaneEffect, usePaneFocus } from "./PaneFocus";
 import { memo, useCallback, useEffect, useState } from "react";
 import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { hasNoShortcutModifiers } from "../../keybindings";
@@ -13,6 +14,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   preview: initialPreview,
   onClose,
 }: ExpandedImageDialogProps) {
+  const paneFocused = usePaneFocus();
   const [preview, setPreview] = useState(initialPreview);
 
   // Sync when the parent hands us a new preview reference.
@@ -30,7 +32,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     });
   }, []);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (!hasNoShortcutModifiers(event)) return;
       if (event.key === "Escape") {
@@ -57,6 +59,8 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
 
   const item = preview.images[preview.index];
   if (!item) return null;
+
+  if (!paneFocused) return null;
 
   return (
     <div

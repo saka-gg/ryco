@@ -1,3 +1,4 @@
+import { reportPreviewNavigationBlocked } from "../previewNavigation";
 import { parsePreviewRouteSearch } from "../previewRouteSearch";
 import { useEffect } from "react";
 import { useBlocker } from "@tanstack/react-router";
@@ -27,13 +28,15 @@ export function PreviewFileNavigationGuard() {
         return false;
       if (!hasUnsavedPreviewFiles()) return false;
       const saved = await flushPreviewFiles();
-      if (!saved)
+      if (!saved) {
+        reportPreviewNavigationBlocked(next.pathname);
         toastManager.add({
           type: "error",
           title: "Editor changes could not be saved",
           description:
             "Your draft is preserved. Resolve the save error in File Preview before leaving.",
         });
+      }
       return !saved;
     },
     enableBeforeUnload: false,

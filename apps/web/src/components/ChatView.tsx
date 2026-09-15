@@ -1,3 +1,4 @@
+import { usePaneEffect, usePaneFocus, usePaneFocusRef, usePaneThreadRef } from "./chat/PaneFocus";
 import { startSelectionChat } from "../lib/selectionChat";
 import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
 import { appendSelectionQuote } from "@ryco/client-runtime/state/composer";
@@ -461,6 +462,9 @@ function shouldIgnoreThreadMessageSearchShortcut(
 
 export default function ChatView(props: ChatViewProps) {
   usePerfMark("ChatView");
+  const paneFocused = usePaneFocus();
+  const paneThreadRef = usePaneThreadRef();
+  const paneFocusedRef = usePaneFocusRef();
   const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
   const terminalCapability = useHostedRpcCapability(WS_METHODS.terminalOpen);
   const sideChatCapability = useHostedRpcCapability(WS_METHODS.textGenerationAskSideQuestion);
@@ -505,13 +509,18 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timestampFormat = settings.timestampFormat;
   const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
-  const navigate = useNavigate();
+  const routerNavigate = useNavigate();
+  const navigate = useCallback<typeof routerNavigate>(
+    (options) => (paneFocusedRef.current ? routerNavigate(options) : Promise.resolve()),
+    [paneFocusedRef, routerNavigate],
+  );
   const { handleNewThread } = useNewThreadHandler();
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
-  const rawSearch = useSearch({
+  const routeSearch = useSearch({
     strict: false,
     select: (params) => parseRightPanelRouteSearch(params),
   });
+  const rawSearch = paneFocused ? routeSearch : {};
   const { resolvedTheme } = useTheme();
   // Granular store selectors — avoid subscribing to prompt changes.
   const composerRuntimeMode = useComposerDraftStore(
@@ -587,7 +596,8 @@ export default function ChatView(props: ChatViewProps) {
   // empty-thread suppression below yields to an explicit request.
   const [overviewOpenedOnEmptyThread, setOverviewOpenedOnEmptyThread] = useState(false);
   const [overviewFloatingOpen, setOverviewFloatingOpen] = useState(false);
-  const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const viewportNeedsPlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const shouldUsePlanSidebarSheet = viewportNeedsPlanSidebarSheet || paneThreadRef !== null;
   const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
   const presentationTier = usePresentationTier();
   // With the thread sidebar collapsed this header owns the workspace's
@@ -598,6 +608,10 @@ export default function ChatView(props: ChatViewProps) {
   // tier flips (rotation preserves route, draft, and panel state).
   const presentationTierRef = useRef(presentationTier);
   presentationTierRef.current = presentationTier;
+  // Entering a split must not open one full-window overview for every chat.
+  useEffect(() => {
+    if (paneThreadRef) setPlanSidebarOpen(false);
+  }, [paneThreadRef]);
   const shouldUsePlanSidebarSheetRef = useRef(shouldUsePlanSidebarSheet);
   shouldUsePlanSidebarSheetRef.current = shouldUsePlanSidebarSheet;
   const [inspectedContextHandoff, setInspectedContextHandoff] = useState<{
@@ -693,10 +707,11 @@ export default function ChatView(props: ChatViewProps) {
   const mountedTerminalThreadRefs = useMemo(
     () =>
       mountedTerminalThreadKeys.flatMap((mountedThreadKey) => {
+        if (paneThreadRef && mountedThreadKey !== scopedThreadKey(paneThreadRef)) return [];
         const mountedThreadRef = parseScopedThreadKey(mountedThreadKey);
         return mountedThreadRef ? [{ key: mountedThreadKey, threadRef: mountedThreadRef }] : [];
       }),
-    [mountedTerminalThreadKeys],
+    [mountedTerminalThreadKeys, paneThreadRef],
   );
 
   const localDraftError =
@@ -1284,7 +1299,7 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   useEffect(() => {
-    if (!serverThread?.id) return;
+    if (!paneFocused || !serverThread?.id) return;
     if (!latestTurnSettled) return;
     if (!activeLatestTurn?.completedAt) return;
     const turnCompletedAt = Date.parse(activeLatestTurn.completedAt);
@@ -1299,6 +1314,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     activeLatestTurn?.completedAt,
     activeThreadLastVisitedAt,
+    paneFocused,
     latestTurnSettled,
     markThreadVisited,
     serverThread?.environmentId,
@@ -1472,7 +1488,7 @@ export default function ChatView(props: ChatViewProps) {
       seenRunningTurnIdsRef.current.add(turnId);
       return;
     }
-    if (!serverThread?.id) return;
+    if (!paneFocused || !serverThread?.id) return;
     if (!latestTurnSettled) return;
     if (!activeLatestTurn?.completedAt) return;
     if (!seenRunningTurnIdsRef.current.has(turnId)) return;
@@ -1831,13 +1847,15 @@ export default function ChatView(props: ChatViewProps) {
   // no chat messages. A thread can already carry work-log rows, a proposed plan,
   // or setup-script activity from worktree creation while `messages` is still
   // empty; showing the hero then would hide real progress — and real failures.
-  const showNewThreadSurface = shouldShowNewThreadSurface({
-    hasThread: activeThread !== undefined,
-    messageCount: activeThread?.messages.length ?? 0,
-    optimisticMessageCount: optimisticUserMessages.length,
-    timelineEntryCount: timelineEntries.length,
-    presentationTier,
-  });
+  const showNewThreadSurface =
+    paneThreadRef === null &&
+    shouldShowNewThreadSurface({
+      hasThread: activeThread !== undefined,
+      messageCount: activeThread?.messages.length ?? 0,
+      optimisticMessageCount: optimisticUserMessages.length,
+      timelineEntryCount: timelineEntries.length,
+      presentationTier,
+    });
 
   const loadedThreadMessageSearchOccurrences = useMemo(
     () =>
@@ -2164,9 +2182,9 @@ export default function ChatView(props: ChatViewProps) {
   // (ComposerPromptEditor's own focusAt*, driven by composer gestures) is a
   // different concern and is unaffected.
   const focusComposer = useCallback(() => {
-    if (presentationTierRef.current === "phone") return;
+    if (!paneFocusedRef.current || presentationTierRef.current === "phone") return;
     readComposer()?.focusAtEnd();
-  }, [readComposer]);
+  }, [paneFocusedRef, readComposer]);
   const scheduleComposerFocus = useCallback(() => {
     window.requestAnimationFrame(() => {
       focusComposer();
@@ -2864,7 +2882,7 @@ export default function ChatView(props: ChatViewProps) {
     terminalOpenByThreadRef.current[activeThreadKey] = current;
   }, [activeThreadKey, focusComposer, terminalState.terminalOpen]);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
       if (!activeThreadId || event.defaultPrevented) return;
       const command = resolveShortcutCommand(event, keybindings, {
@@ -2890,7 +2908,7 @@ export default function ChatView(props: ChatViewProps) {
     terminalState.terminalOpen,
   ]);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (shouldIgnoreGlobalNavigationShortcut(event) && !projectExplorerOpenRef.current) return;
@@ -4423,10 +4441,12 @@ export default function ChatView(props: ChatViewProps) {
                 quote,
               ),
             );
-            requestAnimationFrame(() =>
-              chatShellRef.current
-                ?.querySelector<HTMLTextAreaElement>('[aria-label="Side question"]')
-                ?.focus(),
+            requestAnimationFrame(
+              () =>
+                paneFocusedRef.current &&
+                chatShellRef.current
+                  ?.querySelector<HTMLTextAreaElement>('[aria-label="Side question"]')
+                  ?.focus(),
             );
           }}
           onNew={async ({ quote, prompt, envMode, intent, requestKey }) => {
@@ -4453,6 +4473,7 @@ export default function ChatView(props: ChatViewProps) {
               settings: { runtimeMode, interactionMode: "default", tokenMode },
               prepare: prepareEditorSend,
               isCurrent: () =>
+                paneFocusedRef.current &&
                 editorSendTargetRef.current.allowed &&
                 editorSendTargetRef.current.environmentId === environmentId &&
                 editorSendTargetRef.current.threadId === activeThread.id,
@@ -4557,7 +4578,7 @@ export default function ChatView(props: ChatViewProps) {
         )}
       </header>
       <LinkedWorktreeItemDialog
-        open={headerLinkedItem !== null}
+        open={paneFocused && headerLinkedItem !== null}
         item={headerLinkedItem}
         environmentId={activeProject?.environmentId ?? activeThread.environmentId}
         projectId={activeProject?.id ?? activeThread.projectId}
@@ -4995,7 +5016,7 @@ export default function ChatView(props: ChatViewProps) {
             />
           ) : null}
           <NewWorktreeDialog
-            open={projectExplorerOpen}
+            open={paneFocused && projectExplorerOpen}
             environmentId={activeThread.environmentId}
             projectId={activeProject?.id ?? null}
             cwd={activeProject?.cwd ?? null}
@@ -5064,6 +5085,7 @@ export default function ChatView(props: ChatViewProps) {
           threadRef={mountedThreadRef}
           threadId={mountedThreadRef.threadId}
           visible={
+            paneFocused &&
             mountedThreadKey === activeThreadKey &&
             terminalState.terminalOpen &&
             terminalCapability.allowed
@@ -5079,7 +5101,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddTerminalContext={addTerminalContextToDraft}
         />
       ))}
-      {!isPhoneTier && shouldUsePlanSidebarSheet && inspectedContextHandoff ? (
+      {paneFocused && !isPhoneTier && shouldUsePlanSidebarSheet && inspectedContextHandoff ? (
         <RightPanelSheet open onClose={closeContextHandoffInspection}>
           <ContextHandoffInspectionPanel
             environmentId={activeThread.environmentId}
@@ -5095,7 +5117,7 @@ export default function ChatView(props: ChatViewProps) {
         // (the audited right overlay had no close affordance at all).
         <PhoneWorkSurfaceSheet
           label={planSidebarLabel}
-          open={showOverviewSidebarSheet}
+          open={paneFocused && showOverviewSidebarSheet}
           onClose={closePlanSidebar}
         >
           <PhoneSurfaceScaffold
@@ -5132,7 +5154,7 @@ export default function ChatView(props: ChatViewProps) {
           </PhoneSurfaceScaffold>
         </PhoneWorkSurfaceSheet>
       ) : shouldUsePlanSidebarSheet ? (
-        <RightPanelSheet open={showOverviewSidebarSheet} onClose={closePlanSidebar}>
+        <RightPanelSheet open={paneFocused && showOverviewSidebarSheet} onClose={closePlanSidebar}>
           <ChatOverviewPanel
             environmentId={environmentId}
             gitCwd={gitCwd}

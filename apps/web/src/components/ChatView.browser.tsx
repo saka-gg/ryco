@@ -1,3 +1,5 @@
+import { useChatPanesStore } from "../chatPanesStore";
+import { paneLeaves } from "../chatPanes.logic";
 import { useSideChatStore } from "../sideChatStore";
 import { getPreviewFileSession, resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import { createPreviewFileDocument } from "./PreviewFileEditSession";
@@ -2566,6 +2568,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     await parkPointer(4, 4);
     await setViewport(DEFAULT_VIEWPORT);
     localStorage.clear();
+    useChatPanesStore.setState({ root: null, activeRef: null });
     usePromptStashStore.setState({ entries: [] });
     document.body.innerHTML = "";
     wsRequests.length = 0;
@@ -2619,6 +2622,138 @@ describe("ChatView timeline estimator parity (full app)", () => {
   afterEach(() => {
     customWsRpcResolver = null;
     document.body.innerHTML = "";
+  });
+
+  it("pane focus isolates real thread search and preserves neighboring composer drafts", async () => {
+    const other = "pane-other-thread" as ThreadId;
+    const mounted = await mountChatView({
+      viewport: { ...DEFAULT_VIEWPORT, width: 1600, height: 1000 },
+      snapshot: addThreadToSnapshot(selectionSnapshot(), other),
+      configureFixture: (fixture) => {
+        fixture.serverConfig = {
+          ...fixture.serverConfig,
+          keybindings: [
+            {
+              ...COMPOSER_STASH_KEYBINDING,
+              command: "thread.find",
+              shortcut: { ...COMPOSER_STASH_KEYBINDING.shortcut, key: "f" },
+            },
+          ],
+        };
+      },
+    });
+    try {
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "First pane draft");
+      useComposerDraftStore.getState().setPrompt(threadRefFor(other), "Second pane draft");
+      useChatPanesStore.getState().open(threadRefFor(other), "right", THREAD_REF);
+      await vi.waitFor(() =>
+        expect(
+          document.querySelectorAll('[data-pane-thread] [data-testid="composer-editor"]').length,
+        ).toBe(2),
+      );
+      const pane = document.querySelector<HTMLElement>(
+        `[data-pane-thread="${threadKeyFor(other)}"]`,
+      )!;
+      pane.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+      await vi.waitFor(() => expect(pane.dataset.paneFocused).toBe("true"));
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "f",
+          code: "KeyF",
+          metaKey: isMacPlatform(navigator.platform),
+          ctrlKey: !isMacPlatform(navigator.platform),
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(pane.querySelector('[data-thread-message-search="true"]')).not.toBeNull(),
+      );
+      expect(document.querySelectorAll('[data-thread-message-search="true"]')).toHaveLength(1);
+      expect(composerDraftFor(THREAD_KEY)?.prompt).toBe("First pane draft");
+      expect(composerDraftFor(threadKeyFor(other))?.prompt).toBe("Second pane draft");
+      await page.screenshot({ path: "../../../../output/task12/two-panes.png" });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("pane grid remains usable at four views and narrows without losing drafts", async () => {
+    const ids = ["pane-b", "pane-c", "pane-d"] as ThreadId[];
+    const snapshot = ids.reduce<OrchestrationReadModel>(
+      (snapshot, id) => addThreadToSnapshot(snapshot, id),
+      selectionSnapshot(),
+    );
+    const mounted = await mountChatView({
+      viewport: { ...DEFAULT_VIEWPORT, width: 1600, height: 1000 },
+      snapshot,
+    });
+    try {
+      const panes = useChatPanesStore.getState();
+      panes.open(threadRefFor(ids[0]!), "right", THREAD_REF);
+      panes.open(threadRefFor(ids[1]!), "bottom", THREAD_REF);
+      panes.open(threadRefFor(ids[2]!), "bottom", threadRefFor(ids[0]!));
+      await vi.waitFor(() =>
+        expect(
+          document.querySelectorAll('[data-pane-thread] [data-testid="composer-editor"]').length,
+        ).toBe(4),
+      );
+      await waitForLayout();
+      await page.screenshot({ path: "../../../../output/task12/four-panes.png" });
+      await mounted.setViewport({ ...DEFAULT_VIEWPORT, width: 1000, height: 800 });
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("[data-pane-thread]:not([hidden])")).toHaveLength(1),
+      );
+      await page.screenshot({ path: "../../../../output/task12/narrow-panes.png" });
+      expect(paneLeaves(useChatPanesStore.getState().root!)).toHaveLength(4);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("pane layout retains a detached local draft and an omitted server thread across snapshots", async () => {
+    const mounted = await mountChatView({
+      viewport: { ...DEFAULT_VIEWPORT, width: 1600, height: 1000 },
+      snapshot: selectionSnapshot(),
+    });
+    try {
+      const drafts = useComposerDraftStore.getState();
+      const draftId = DraftId.make("pane-detached-draft");
+      drafts.setLogicalProjectDraftThreadId(
+        PROJECT_LOGICAL_KEY,
+        { environmentId: LOCAL_ENVIRONMENT_ID, projectId: PROJECT_ID },
+        draftId,
+      );
+      drafts.setPrompt(draftId, "Unsent detached work");
+      const session = drafts.getDraftSession(draftId)!;
+      const draftRef = threadRefFor(session.threadId);
+      useChatPanesStore.getState().open(draftRef, "right", THREAD_REF);
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("[data-pane-thread]")).toHaveLength(2),
+      );
+      // A replacing shell omits a thread; omission must not retire its pane.
+      useStore.getState().removeThread(THREAD_REF);
+      await waitForLayout();
+      expect(paneLeaves(useChatPanesStore.getState().root!)).toEqual([THREAD_REF, draftRef]);
+      expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+        "Unsent detached work",
+      );
+      const pane = document.querySelector<HTMLElement>(
+        `[data-pane-thread="${threadKeyFor(session.threadId)}"]`,
+      )!;
+      pane.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+      await vi.waitFor(() => expect(pane.dataset.paneFocused).toBe("true"));
+      expect(pane.textContent).not.toContain("Thread unavailable");
+      expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+        "Unsent detached work",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
   });
 
   async function selectTranscriptQuote() {

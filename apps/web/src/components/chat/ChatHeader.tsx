@@ -1,3 +1,5 @@
+import { usePaneFocus } from "./PaneFocus";
+import { Button } from "../ui/button";
 import {
   type EnvironmentId,
   type EditorId,
@@ -5,7 +7,7 @@ import {
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
 import { memo } from "react";
-import { ListChecksIcon, PanelRightIcon } from "lucide-react";
+import { ListChecksIcon, PanelRightIcon, ImagesIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
 import { Toggle } from "../ui/toggle";
@@ -20,6 +22,8 @@ import { usePerfMark, useDevPropDiff } from "../../perf/tabSwitchInstrumentation
 import { formatLiveAgentCount, LiveAgentCountBadge } from "../LiveAgentCountBadge";
 
 interface ChatHeaderProps {
+  /** Optional pane-scoped gallery action; gallery implementation is supplied separately. */
+  onOpenThreadImages?: () => void;
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadTitle: string;
   activeProjectName: string | undefined;
@@ -73,6 +77,7 @@ export function shouldShowOpenInPicker(input: {
 
 export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
   usePerfMark("ChatHeader");
+  const paneFocused = usePaneFocus();
   useDevPropDiff(props as unknown as Record<string, unknown>, "ChatHeader");
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const showOpenInPicker = shouldShowOpenInPicker({
@@ -87,6 +92,25 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
           workspace header so it can never overlap the other header controls.
           Renders nothing outside hosted-hub sessions. */}
       <HostedNodeMenu />
+      {props.onOpenThreadImages ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Thread images"
+                onClick={() => {
+                  if (paneFocused) props.onOpenThreadImages?.();
+                }}
+              >
+                <ImagesIcon className="size-4" />
+              </Button>
+            }
+          />
+          <TooltipPopup side="bottom">Thread images</TooltipPopup>
+        </Tooltip>
+      ) : null}
       <Tooltip>
         <TooltipTrigger
           render={
