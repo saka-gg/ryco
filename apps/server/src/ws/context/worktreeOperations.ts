@@ -28,6 +28,10 @@ import {
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveProjectWorktreesDir } from "../../project/projectMetadataPaths.ts";
 import type { ProjectSetupScriptRunnerShape } from "../../project/Services/ProjectSetupScriptRunner.ts";
+import {
+  resolveConfiguredWorktreeRoot,
+  selectConfiguredWorktreeRoot,
+} from "../../project/worktreeRoot.ts";
 import { resolveWorktreeCheckoutPath } from "../../project/worktreeCheckoutPaths.ts";
 import type { ProjectionWorktreeRepositoryShape } from "../../persistence/Services/ProjectionWorktrees.ts";
 import { refreshWorktreeSourceControlState } from "../../sourceControl/refreshWorktreeSourceControlState.ts";
@@ -95,7 +99,6 @@ export const makeWorktreeOperations = (deps: {
     refreshGitStatus,
     appendSetupScriptActivity,
   } = deps;
-  const appWorktreesRoot = resolveManagedWorktreesRoot(config);
 
   const authorizeWorktreePath = (operation: string, candidate: string, existing: boolean) =>
     (existing
@@ -313,13 +316,22 @@ export const makeWorktreeOperations = (deps: {
       }
 
       const project = yield* loadProjectForGitWorkflow(operation, input.projectId);
-      const { worktreeBranchPrefix, textGenerationModelSelection: modelSelection } =
-        yield* serverSettings.getSettings.pipe(
-          Effect.mapError((cause) =>
-            toGitManagerError(operation, "Failed to load server settings.", cause),
-          ),
-        );
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError((cause) =>
+          toGitManagerError(operation, "Failed to load server settings.", cause),
+        ),
+      );
 
+      const { worktreeBranchPrefix, textGenerationModelSelection: modelSelection } = settings;
+      // Resolve lazily: reusing an existing registered PR checkout must not depend on
+      // the availability of the root configured for future checkouts.
+      const resolveRoot = () =>
+        resolveConfiguredWorktreeRoot({
+          settings,
+          projectId: input.projectId,
+          config,
+          policy: workspaceAccessPolicy,
+        }).pipe(Effect.mapError((cause) => toGitManagerError(operation, cause.message, cause)));
       const now = new Date().toISOString();
       const worktreeId = WorktreeId.make(`worktree-${crypto.randomUUID()}`);
       const threadId = ThreadId.make(`thread-${crypto.randomUUID()}`);
@@ -377,7 +389,10 @@ export const makeWorktreeOperations = (deps: {
             worktreesDir:
               input.worktreeLocation === "projectMetadata"
                 ? resolveProjectWorktreesDir(project.workspaceRoot, project.projectMetadataDir)
-                : path.join(appWorktreesRoot, input.projectId),
+                : path.join(
+                    selectConfiguredWorktreeRoot({ settings, projectId: input.projectId, config }),
+                    input.projectId,
+                  ),
           });
           if (prepared.worktreePath === null) {
             return yield* failGitWorkflow(
@@ -496,7 +511,10 @@ export const makeWorktreeOperations = (deps: {
       } else {
         const targetPath = resolveWorktreeCheckoutPath({
           location: input.worktreeLocation,
-          appWorktreesRoot,
+          appWorktreesRoot:
+            input.worktreeLocation === "projectMetadata"
+              ? resolveManagedWorktreesRoot(config)
+              : yield* resolveRoot(),
           projectId: input.projectId,
           workspaceRoot: project.workspaceRoot,
           projectMetadataDir: project.projectMetadataDir,
