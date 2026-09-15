@@ -1,3 +1,5 @@
+// Blame is not mounted for checkpoint review; avoid initializing its RPC dependency.
+vi.mock("../environmentApi", () => ({ ensureEnvironmentApi: vi.fn() }));
 // This suite exercises checkpoint review; repository comparison has its own browser coverage.
 vi.mock("../rpc/useComparison", () => ({
   useComparison: () => ({

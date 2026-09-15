@@ -1,3 +1,4 @@
+import { DiffLineBlame } from "./DiffLineBlame";
 import { DiffComparisonControls } from "./DiffComparisonControls";
 import { useComparison } from "../rpc/useComparison";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
@@ -567,6 +568,16 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     : selectedTurn
       ? selectedTurnCheckpointDiff
       : conversationCheckpointDiff;
+  const [blameSelection, setBlameSelection] = useState<{
+    source: NonNullable<typeof comparison.data>["source"];
+    file: FileDiffMetadata;
+    side: "base" | "head";
+    line: number;
+  } | null>(null);
+  // Reset selection with its source; a later reconnect must not resurrect an old dialog.
+  if (blameSelection && (!comparing || blameSelection.source !== comparison.data?.source)) {
+    setBlameSelection(null);
+  }
   const comparisonRevision = comparison.data
     ? JSON.stringify([activeThread?.environmentId, comparison.data.source.revision])
     : null;
@@ -1151,6 +1162,21 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
 
   return (
     <DiffPanelShell mode={mode} header={headerRow}>
+      {comparing &&
+        comparison.data &&
+        activeThread &&
+        blameSelection?.source === comparison.data.source && (
+          <DiffLineBlame
+            key={`${activeThread.environmentId}:${comparison.data.source.revision}:${blameSelection.file.name}:${blameSelection.side}:${blameSelection.line}`}
+            environmentId={activeThread.environmentId}
+            source={comparison.data.source}
+            file={blameSelection.file}
+            initialSide={blameSelection.side}
+            initialLine={blameSelection.line}
+            onClose={() => setBlameSelection(null)}
+          />
+        )}
+
       {!isPhonePresentation && activeThread && isGitRepo && (
         <DiffComparisonControls
           key={`${activeThread.environmentId}:${activeProject?.cwd}:${comparison.selection?.mode}:${comparison.selection?.ref}`}
@@ -1340,6 +1366,27 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                         >
                           <FileDiff
                             fileDiff={fileDiff}
+                            renderHeaderMetadata={() =>
+                              comparing && comparison.data ? (
+                                <button
+                                  type="button"
+                                  className="rounded px-2 py-1 text-xs hover:bg-foreground/10"
+                                  aria-label={`Blame line in ${fileDiff.name}`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    if (comparison.data)
+                                      setBlameSelection({
+                                        source: comparison.data.source,
+                                        file: fileDiff,
+                                        side: "base",
+                                        line: fileDiff.hunks[0]?.deletionStart || 1,
+                                      });
+                                  }}
+                                >
+                                  Line blame
+                                </button>
+                              ) : null
+                            }
                             renderHeaderPrefix={() => (
                               <button
                                 type="button"
@@ -1384,6 +1431,22 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                                 ? DIFF_PANEL_PHONE_UNSAFE_CSS
                                 : DIFF_PANEL_UNSAFE_CSS,
                               lineHoverHighlight: "number",
+                              ...(comparing && comparison.data
+                                ? {
+                                    onLineClick: (line) => {
+                                      if (line.numberColumn || !window.getSelection()?.isCollapsed)
+                                        return;
+                                      if (comparison.data)
+                                        setBlameSelection({
+                                          source: comparison.data.source,
+                                          file: fileDiff,
+                                          side:
+                                            line.annotationSide === "deletions" ? "base" : "head",
+                                          line: line.lineNumber,
+                                        });
+                                    },
+                                  }
+                                : {}),
                               // Line-number editor-open taps are suppressed on
                               // the phone surface (same RPC constraint as the
                               // title click above).

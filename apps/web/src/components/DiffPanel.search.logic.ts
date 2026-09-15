@@ -61,11 +61,8 @@ export interface DiffRenderedLineIndexes {
 }
 
 export function resolveDiffFilePath(fileDiff: Pick<DiffSearchFile, "name" | "prevName">): string {
-  const raw = fileDiff.name ?? fileDiff.prevName ?? "";
-  if (raw.startsWith("a/") || raw.startsWith("b/")) {
-    return raw.slice(2);
-  }
-  return raw;
+  // Renderer metadata already uses repository-relative paths, including real a/ and b/ directories.
+  return fileDiff.name ?? fileDiff.prevName ?? "";
 }
 
 export function normalizeDiffSearchQuery(query: string, caseSensitive = false): string {

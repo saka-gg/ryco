@@ -484,3 +484,31 @@ export const GitReadComparisonResult = Schema.Struct({
   patch: Schema.String,
 });
 export type GitReadComparisonResult = typeof GitReadComparisonResult.Type;
+
+/** One immutable committed-file line. No symbolic refs or working-tree fallback. */
+export const GitReadLineBlameInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  oid: Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)),
+  filePath: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(4096),
+    Schema.isPattern(
+      // Reject control characters in RPC paths; never pass them through to Git.
+      // eslint-disable-next-line no-control-regex
+      /^(?![/\\])(?![A-Za-z]:)(?!.*(?:^|\/)\.\.?(?:\/|$))(?!.*[\\\x00-\x1f\x7f]).+$/,
+    ),
+  ),
+  line: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(10_000_000)),
+});
+export type GitReadLineBlameInput = typeof GitReadLineBlameInput.Type;
+export const GitReadLineBlameResult = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("committed"),
+    oid: Schema.String,
+    author: Schema.String,
+    summary: Schema.String,
+    authorTime: Schema.NullOr(Schema.String),
+  }),
+  Schema.Struct({ kind: Schema.Literal("unavailable"), reason: Schema.String }),
+]);
+export type GitReadLineBlameResult = typeof GitReadLineBlameResult.Type;

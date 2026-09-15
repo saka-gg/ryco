@@ -276,6 +276,12 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         ownerEffect(WS_METHODS.projectsInitializeGit, initializeGitForProject(input.projectId)),
         { "rpc.aggregate": "git" },
       ),
+    [WS_METHODS.vcsReadLineBlame]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.vcsReadLineBlame,
+        ownerEffect(WS_METHODS.vcsReadLineBlame, gitWorkflow.readLineBlame(input)),
+        { "rpc.aggregate": "vcs" },
+      ),
     [WS_METHODS.vcsReadComparison]: (input) =>
       observeRpcEffect(
         WS_METHODS.vcsReadComparison,

@@ -1,3 +1,4 @@
+import { gitDiffPaths } from "./gitDiffPaths";
 import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
 
 export const DIFF_THEME_NAMES = {
@@ -98,9 +99,16 @@ export function getRenderablePatch(
       if (cached && previousSources.get(identity) === source) return cached;
       // Normalize the patch line terminator, not the represented file newline.
       // Pierre honors explicit "No newline at end of file" markers itself.
+      const paths = gitDiffPaths(source);
+      if (!paths) throw new Error("Unsupported or ambiguous Git file paths.");
       return parsePatchFiles(`${source}\n`, identity)
         .flatMap((patch) => patch.files)
         .map((file, index) => {
+          // Pierre strips transport prefixes but retains C escapes and trims names.
+          // Resolve paths from the raw Git headers exactly once for every consumer.
+          file.name = paths.name;
+          if (paths.prevName !== undefined) file.prevName = paths.prevName;
+          else delete file.prevName;
           file.cacheKey = `${identity}:${index}`;
           return file;
         });

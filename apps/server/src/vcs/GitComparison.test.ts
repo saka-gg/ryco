@@ -1,3 +1,8 @@
+import {
+  WorkspaceAccessPolicyLayer,
+  makeWorkspaceAccessPolicy,
+} from "../workspace/Layers/WorkspaceAccessPolicy.ts";
+import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option } from "effect";
@@ -8,6 +13,7 @@ import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
 
 const testLayer = Driver.layer.pipe(
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "comparison-test-" })),
+  Layer.provideMerge(WorkspaceAccessPolicyLayer(undefined)),
   Layer.provideMerge(NodeServices.layer),
 );
 const fixture = Effect.gen(function* () {
@@ -35,6 +41,37 @@ const fixture = Effect.gen(function* () {
 });
 
 describe("Git comparison", () => {
+  it.effect("denies an authorized subdirectory whose repository root is outside policy", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      const allowed = `${f.cwd}/allowed`;
+      yield* fs.makeDirectory(allowed);
+      const policy = yield* makeWorkspaceAccessPolicy(allowed);
+      const commands: (readonly string[])[] = [];
+      const execute: Driver.GitVcsDriverShape["execute"] = (input) => {
+        commands.push(input.args);
+        return f.driver.execute(input);
+      };
+      const input = {
+        cwd: allowed,
+        selection: { ref: "main", mode: "direct" as const },
+        ignoreWhitespace: false,
+      };
+      const denied = yield* readGitComparison(execute, input).pipe(
+        Effect.provideService(WorkspaceAccessPolicy, policy),
+        Effect.flip,
+      );
+      expect(denied.detail).toContain("access is restricted");
+      expect(commands).toEqual([["rev-parse", "--show-toplevel"]]);
+      commands.length = 0;
+      yield* readGitComparison(execute, { ...input, cwd: f.cwd }).pipe(
+        Effect.provideService(WorkspaceAccessPolicy, policy),
+        Effect.flip,
+      );
+      expect(commands).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
   it.effect("distinguishes merge-base from direct endpoints and excludes all local changes", () =>
     Effect.gen(function* () {
       const f = yield* fixture;

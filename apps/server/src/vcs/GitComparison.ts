@@ -1,3 +1,5 @@
+import { authorizeGitReadWorkspace } from "./GitReadWorkspace.ts";
+import type { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { createHash } from "node:crypto";
 import { Effect, Option, Schema } from "effect";
 import {
@@ -11,7 +13,7 @@ import type { GitVcsDriverShape } from "./GitVcsDriver.ts";
 export const readGitComparison = Effect.fn("readGitComparison")(function* (
   execute: GitVcsDriverShape["execute"],
   input: GitReadComparisonInput,
-): Effect.fn.Return<GitReadComparisonResult, GitCommandError> {
+): Effect.fn.Return<GitReadComparisonResult, GitCommandError, WorkspaceAccessPolicy> {
   const fail = (detail: string) =>
     new GitCommandError({
       operation: "readComparison",
@@ -24,10 +26,11 @@ export const readGitComparison = Effect.fn("readGitComparison")(function* (
       "Enter a branch, tag, or commit ID; revision expressions and options are not supported.",
     );
   }
+  const worktreePath = yield* authorizeGitReadWorkspace(execute, input.cwd, "readComparison");
   const run = (args: readonly string[], maxOutputBytes = 4096) =>
     execute({
       operation: "readComparison",
-      cwd: input.cwd,
+      cwd: worktreePath,
       args,
       env: { GIT_OPTIONAL_LOCKS: "0" },
       timeoutMs: 15_000,
@@ -43,7 +46,6 @@ export const readGitComparison = Effect.fn("readGitComparison")(function* (
     );
   const refOid = yield* resolve(input.selection.ref);
   const headOid = yield* resolve("HEAD");
-  const worktreePath = (yield* run(["rev-parse", "--show-toplevel"])).stdout.trim();
   const repositoryPath = (yield* run([
     "rev-parse",
     "--path-format=absolute",

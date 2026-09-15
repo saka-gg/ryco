@@ -1,3 +1,5 @@
+// Blame is not mounted for checkpoint review; avoid initializing its RPC dependency.
+vi.mock("../environmentApi", () => ({ ensureEnvironmentApi: vi.fn() }));
 // This suite exercises checkpoint review; repository comparison has its own browser coverage.
 vi.mock("../rpc/useComparison", () => ({
   useComparison: () => ({
@@ -41,8 +43,8 @@ const openInPreferredEditor = vi.hoisted(() => vi.fn().mockResolvedValue(undefin
 const WIDE_LINE = vi.hoisted(() => "const veryLongIdentifierName = ".repeat(40));
 
 const diffFile = {
-  name: "b/src/app.ts",
-  prevName: "a/src/app.ts",
+  name: "src/app.ts",
+  prevName: "src/app.ts",
   cacheKey: "src/app.ts",
   type: "change",
   additionLines: ["const alpha = 1;", "const beta = 2;"],

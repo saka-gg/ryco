@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/comparison/lineBlame": "./src/state/comparison/lineBlame.ts",
     "./state/comparison": {
       "types": "./src/state/comparison/index.ts",
       "import": "./src/state/comparison/index.ts"

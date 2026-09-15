@@ -1,4 +1,9 @@
-import type { GitReadComparisonInput, GitReadComparisonResult } from "./git.ts";
+import type {
+  GitReadLineBlameInput,
+  GitReadLineBlameResult,
+  GitReadComparisonInput,
+  GitReadComparisonResult,
+} from "./git.ts";
 import type {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
@@ -968,6 +973,7 @@ export interface EnvironmentApi {
     ) => Promise<SourceControlPublishRepositoryResult>;
   };
   vcs: {
+    readLineBlame: (input: GitReadLineBlameInput) => Promise<GitReadLineBlameResult>;
     readComparison: (input: GitReadComparisonInput) => Promise<GitReadComparisonResult>;
     listRefs: (input: VcsListRefsInput) => Promise<VcsListRefsResult>;
     createWorktree: (input: VcsCreateWorktreeInput) => Promise<VcsCreateWorktreeResult>;
