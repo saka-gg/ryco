@@ -136,7 +136,13 @@ export function SettingsStatisticsRouteScreen() {
                   {node.environment.label}
                 </Text>
                 <MotionReveal>
-                  <ProviderLimits providers={node.providers} />
+                  <ProviderLimits
+                    providers={node.providers}
+                    connected={
+                      node.environment.connectionState === "connected" ||
+                      node.environment.connectionState === "read-only"
+                    }
+                  />
                 </MotionReveal>
               </View>
             ) : null,

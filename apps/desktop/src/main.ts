@@ -1,3 +1,4 @@
+import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import { Duplex } from "node:stream";
@@ -2662,6 +2663,23 @@ function registerIpcHandlers(): void {
     } as const;
   });
 
+  ipcMain.removeHandler("desktop:save-thread-export");
+  ipcMain.handle("desktop:save-thread-export", async (event, raw: unknown) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || event.senderFrame !== event.sender.mainFrame)
+      throw new Error("Invalid export sender.");
+    return saveThreadExport(raw, {
+      choose: async (filename) => {
+        const result = await dialog.showSaveDialog(owner, {
+          title: "Save retained conversation",
+          defaultPath: filename,
+          filters: [{ name: "Markdown", extensions: ["md"] }],
+        });
+        return result.canceled ? null : (result.filePath ?? null);
+      },
+      write: (path, contents) => FS.promises.writeFile(path, contents, "utf8"),
+    });
+  });
   ipcMain.removeHandler("desktop:quit-shortcut-get");
   ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
   ipcMain.removeHandler("desktop:quit-shortcut-set");

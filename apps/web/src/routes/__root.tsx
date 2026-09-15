@@ -1,3 +1,4 @@
+import { PreviewFileNavigationGuard } from "../components/PreviewFileNavigationGuard";
 import {
   Outlet,
   createRootRouteWithContext,
@@ -59,7 +60,12 @@ let pendingReadyRootContext: Promise<RootBeforeLoadContext> | null = null;
 
 export const Route = createRootRouteWithContext<Record<string, never>>()({
   beforeLoad: ({ location }) => resolveRootBeforeLoadContext(location.pathname),
-  component: RootRouteView,
+  component: () => (
+    <>
+      <PreviewFileNavigationGuard />
+      <RootRouteView />
+    </>
+  ),
   errorComponent: RootRouteErrorView,
   head: () => ({
     meta: [{ name: "title", content: APP_DISPLAY_NAME }],

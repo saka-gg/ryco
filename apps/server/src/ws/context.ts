@@ -22,7 +22,7 @@ import { ChatAttachmentUploads } from "../attachmentUpload.ts";
 import { AgentControlExternalIntegrationService } from "../agentControl/Services/AgentControlExternalIntegration.ts";
 import { AgentControlExternalInstallationService } from "../agentControl/Services/AgentControlExternalInstallation.ts";
 import { CheckpointDiffQuery } from "../checkpointing/Services/CheckpointDiffQuery.ts";
-import { resolveManagedWorktreesRoot, ServerConfig } from "../config.ts";
+import { ServerConfig } from "../config.ts";
 import { Diagnostics } from "../diagnostics/Services/Diagnostics.ts";
 import { Keybindings } from "../keybindings.ts";
 import { makeCodexMcpService } from "../mcp/CodexMcpService.ts";
@@ -59,6 +59,7 @@ import { ProjectFaviconResolver } from "../project/Services/ProjectFaviconResolv
 import { ProjectAvatarStore } from "../project/Services/ProjectAvatarStore.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
+import { resolveConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
@@ -532,7 +533,16 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               newRefName: bootstrap.prepareWorktree.branch,
               path: resolveWorktreeCheckoutPath({
                 location: undefined,
-                appWorktreesRoot: resolveManagedWorktreesRoot(config),
+                appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
+                  settings: yield* serverSettings.getSettings,
+                  projectId: targetProjectId ?? bootstrapProject?.id,
+                  config,
+                  policy: workspaceAccessPolicy,
+                }).pipe(
+                  Effect.mapError((cause) =>
+                    toGitManagerError("git.bootstrapPrepareWorktree", cause.message, cause),
+                  ),
+                ),
                 projectId:
                   targetProjectId ?? bootstrapProject?.id ?? ProjectId.make("project-unknown"),
                 workspaceRoot: bootstrap.prepareWorktree.projectCwd,

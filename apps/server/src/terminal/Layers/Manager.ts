@@ -1,9 +1,11 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import {
   DEFAULT_TERMINAL_ID,
   type DiagnosticsTerminalProcess,
   type TerminalEvent,
+  type TerminalCursor,
   type TerminalSessionSnapshot,
   type TerminalSessionStatus,
 } from "@ryco/contracts";
@@ -138,6 +140,7 @@ interface TerminalSessionState {
   exitCode: number | null;
   exitSignal: number | null;
   updatedAt: string;
+  cursor: TerminalCursor;
   cols: number;
   rows: number;
   process: PtyProcess | null;
@@ -162,12 +165,14 @@ type DrainProcessEventAction =
       type: "output";
       threadId: string;
       terminalId: string;
+      cursor: TerminalCursor;
       history: string | null;
       data: string;
     }
   | {
       type: "exit";
       process: PtyProcess | null;
+      cursor: TerminalCursor;
       threadId: string;
       terminalId: string;
       exitCode: number | null;
@@ -191,6 +196,7 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     exitCode: session.exitCode,
     exitSignal: session.exitSignal,
     updatedAt: session.updatedAt,
+    cursor: session.cursor,
   };
 }
 
@@ -954,6 +960,13 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const initialRunningSessionSignal = yield* Deferred.make<void>();
     const runningSessionSignalRef = yield* Ref.make(initialRunningSessionSignal);
+    const generation = randomUUID();
+    let sequence = 0;
+    const nextCursor = (): TerminalCursor => ({ generation, sequence: ++sequence });
+    const advanceCursor = (session: TerminalSessionState): TerminalCursor => {
+      session.cursor = nextCursor();
+      return session.cursor;
+    };
     const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
     const workerScope = yield* Scope.make("sequential");
     yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void));
@@ -1422,116 +1435,133 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       },
     );
 
+    // Caller owns the thread permit. Used by the live drain and by close after
+    // detaching PTY callbacks, so close can preserve its already-accepted tail.
+    const drainNextProcessEvent = Effect.fn("terminal.drainNextProcessEvent")(function* (
+      session: TerminalSessionState,
+      expectedPid: number,
+    ) {
+      const action: DrainProcessEventAction = yield* Effect.sync(() => {
+        // A drain from the replaced PTY must not clear the new PTY's queue.
+        if (session.pid !== expectedPid) return { type: "idle" } as const;
+        if (!session.process || session.status !== "running") {
+          clearPendingProcessEvents(session);
+          return { type: "idle" } as const;
+        }
+
+        const nextEvent = session.pendingProcessEvents[session.pendingProcessEventIndex];
+        if (!nextEvent) {
+          clearPendingProcessEvents(session);
+          return { type: "idle" } as const;
+        }
+
+        session.pendingProcessEventIndex += 1;
+        if (session.pendingProcessEventIndex >= session.pendingProcessEvents.length) {
+          session.pendingProcessEvents = [];
+          session.pendingProcessEventIndex = 0;
+        }
+
+        if (nextEvent.type === "output") {
+          session.pendingProcessOutputBytes = Math.max(
+            0,
+            session.pendingProcessOutputBytes - nextEvent.byteLength,
+          );
+          const sanitized = sanitizeTerminalHistoryChunk(
+            session.pendingHistoryControlSequence,
+            nextEvent.data,
+          );
+          session.pendingHistoryControlSequence = sanitized.pendingControlSequence;
+          if (sanitized.visibleText.length > 0) {
+            // Appending re-enforces both the byte and line budgets; only a
+            // budget overflow touches the retained history, so the
+            // steady-state cost of a chunk is proportional to the chunk.
+            session.historyState = appendTerminalHistoryChunk(
+              session.historyState,
+              sanitized.visibleText,
+              historyLimits,
+            );
+          }
+          session.updatedAt = new Date().toISOString();
+
+          return {
+            type: "output",
+            threadId: session.threadId,
+            terminalId: session.terminalId,
+            cursor: advanceCursor(session),
+            history: sanitized.visibleText.length > 0 ? session.historyState.history : null,
+            data: nextEvent.data,
+          } as const;
+        }
+
+        const process = session.process;
+        cleanupProcessHandles(session);
+        session.process = null;
+        session.pid = null;
+        session.hasRunningSubprocess = false;
+        session.status = "exited";
+        session.pendingHistoryControlSequence = "";
+        clearPendingProcessEvents(session);
+        session.exitCode = Number.isInteger(nextEvent.event.exitCode)
+          ? nextEvent.event.exitCode
+          : null;
+        session.exitSignal = Number.isInteger(nextEvent.event.signal)
+          ? nextEvent.event.signal
+          : null;
+        session.updatedAt = new Date().toISOString();
+
+        return {
+          type: "exit",
+          cursor: advanceCursor(session),
+          process,
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          exitCode: session.exitCode,
+          exitSignal: session.exitSignal,
+        } as const;
+      });
+
+      if (action.type === "idle") {
+        return false;
+      }
+
+      if (action.type === "output") {
+        if (action.history !== null) {
+          yield* queuePersist(action.threadId, action.terminalId, action.history);
+        }
+
+        yield* publishEvent({
+          type: "output",
+          threadId: action.threadId,
+          terminalId: action.terminalId,
+          createdAt: new Date().toISOString(),
+          data: action.data,
+          cursor: action.cursor,
+        });
+        return true;
+      }
+
+      yield* clearKillFiber(action.process);
+      yield* publishEvent({
+        type: "exited",
+        threadId: action.threadId,
+        terminalId: action.terminalId,
+        createdAt: new Date().toISOString(),
+        cursor: action.cursor,
+        exitCode: action.exitCode,
+        exitSignal: action.exitSignal,
+      });
+      yield* evictInactiveSessionsIfNeeded();
+      return false;
+    });
+
     const drainProcessEvents = Effect.fn("terminal.drainProcessEvents")(function* (
       session: TerminalSessionState,
       expectedPid: number,
     ) {
-      while (true) {
-        const action: DrainProcessEventAction = yield* Effect.sync(() => {
-          if (session.pid !== expectedPid || !session.process || session.status !== "running") {
-            clearPendingProcessEvents(session);
-            return { type: "idle" } as const;
-          }
-
-          const nextEvent = session.pendingProcessEvents[session.pendingProcessEventIndex];
-          if (!nextEvent) {
-            clearPendingProcessEvents(session);
-            return { type: "idle" } as const;
-          }
-
-          session.pendingProcessEventIndex += 1;
-          if (session.pendingProcessEventIndex >= session.pendingProcessEvents.length) {
-            session.pendingProcessEvents = [];
-            session.pendingProcessEventIndex = 0;
-          }
-
-          if (nextEvent.type === "output") {
-            session.pendingProcessOutputBytes = Math.max(
-              0,
-              session.pendingProcessOutputBytes - nextEvent.byteLength,
-            );
-            const sanitized = sanitizeTerminalHistoryChunk(
-              session.pendingHistoryControlSequence,
-              nextEvent.data,
-            );
-            session.pendingHistoryControlSequence = sanitized.pendingControlSequence;
-            if (sanitized.visibleText.length > 0) {
-              // Appending re-enforces both the byte and line budgets; only a
-              // budget overflow touches the retained history, so the
-              // steady-state cost of a chunk is proportional to the chunk.
-              session.historyState = appendTerminalHistoryChunk(
-                session.historyState,
-                sanitized.visibleText,
-                historyLimits,
-              );
-            }
-            session.updatedAt = new Date().toISOString();
-
-            return {
-              type: "output",
-              threadId: session.threadId,
-              terminalId: session.terminalId,
-              history: sanitized.visibleText.length > 0 ? session.historyState.history : null,
-              data: nextEvent.data,
-            } as const;
-          }
-
-          const process = session.process;
-          cleanupProcessHandles(session);
-          session.process = null;
-          session.pid = null;
-          session.hasRunningSubprocess = false;
-          session.status = "exited";
-          session.pendingHistoryControlSequence = "";
-          clearPendingProcessEvents(session);
-          session.exitCode = Number.isInteger(nextEvent.event.exitCode)
-            ? nextEvent.event.exitCode
-            : null;
-          session.exitSignal = Number.isInteger(nextEvent.event.signal)
-            ? nextEvent.event.signal
-            : null;
-          session.updatedAt = new Date().toISOString();
-
-          return {
-            type: "exit",
-            process,
-            threadId: session.threadId,
-            terminalId: session.terminalId,
-            exitCode: session.exitCode,
-            exitSignal: session.exitSignal,
-          } as const;
-        });
-
-        if (action.type === "idle") {
-          return;
-        }
-
-        if (action.type === "output") {
-          if (action.history !== null) {
-            yield* queuePersist(action.threadId, action.terminalId, action.history);
-          }
-
-          yield* publishEvent({
-            type: "output",
-            threadId: action.threadId,
-            terminalId: action.terminalId,
-            createdAt: new Date().toISOString(),
-            data: action.data,
-          });
-          continue;
-        }
-
-        yield* clearKillFiber(action.process);
-        yield* publishEvent({
-          type: "exited",
-          threadId: action.threadId,
-          terminalId: action.terminalId,
-          createdAt: new Date().toISOString(),
-          exitCode: action.exitCode,
-          exitSignal: action.exitSignal,
-        });
-        yield* evictInactiveSessionsIfNeeded();
-        return;
+      while (yield* withThreadLock(session.threadId, drainNextProcessEvent(session, expectedPid))) {
+        // Releasing a semaphore alone can let this fiber reacquire it before a
+        // waiting lifecycle command runs. Give that command a turn between chunks.
+        yield* Effect.yieldNow;
       }
     });
 
@@ -1691,6 +1721,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 session.process = ptyProcess;
                 session.pid = processPid;
                 session.status = "running";
+                advanceCursor(session);
                 session.updatedAt = new Date().toISOString();
                 session.unsubscribeData = unsubscribeData;
                 session.unsubscribeExit = unsubscribeExit;
@@ -1704,6 +1735,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 threadId: session.threadId,
                 terminalId: session.terminalId,
                 createdAt: new Date().toISOString(),
+                cursor: session.cursor,
                 snapshot: snapshot(session),
               });
             }),
@@ -1723,6 +1755,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
         yield* modifyManagerState((state) => {
           session.status = "error";
+          advanceCursor(session);
           session.pid = null;
           session.process = null;
           session.unsubscribeData = null;
@@ -1742,6 +1775,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           terminalId: session.terminalId,
           createdAt: new Date().toISOString(),
           message,
+          cursor: session.cursor,
         });
         yield* Effect.logError("failed to start terminal", {
           threadId: session.threadId,
@@ -1761,6 +1795,14 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       const session = yield* getSession(threadId, terminalId);
 
       if (Option.isSome(session)) {
+        const pid = session.value.pid;
+        cleanupProcessHandles(session.value);
+        // The detached producer cannot extend this bounded queue while closing.
+        if (pid !== null) {
+          while (yield* drainNextProcessEvent(session.value, pid)) {
+            /* drain accepted output */
+          }
+        }
         yield* stopProcess(session.value);
         yield* persistHistory(threadId, terminalId, session.value.historyState.history);
       }
@@ -1840,6 +1882,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               terminalId: liveSession.value.terminalId,
               createdAt: new Date().toISOString(),
               hasRunningSubprocess,
+              cursor: advanceCursor(liveSession.value),
             }),
             state,
           ] as const;
@@ -1922,6 +1965,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               exitCode: null,
               exitSignal: null,
               updatedAt: new Date().toISOString(),
+              cursor: nextCursor(),
               cols,
               rows,
               process: null,
@@ -2056,9 +2100,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           session.pendingHistoryControlSequence = "";
           clearPendingProcessEvents(session);
           session.updatedAt = new Date().toISOString();
+          const cursor = advanceCursor(session);
           yield* persistHistory(input.threadId, terminalId, session.historyState.history);
           yield* publishEvent({
             type: "cleared",
+            cursor,
             threadId: input.threadId,
             terminalId,
             createdAt: new Date().toISOString(),
@@ -2096,6 +2142,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               exitCode: null,
               exitSignal: null,
               updatedAt: new Date().toISOString(),
+              cursor: nextCursor(),
               cols,
               rows,
               process: null,
