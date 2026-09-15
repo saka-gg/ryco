@@ -5,6 +5,7 @@ import {
   DEFAULT_TERMINAL_ID,
   TerminalClearInput,
   TerminalCloseInput,
+  TerminalCursor,
   TerminalEvent,
   TerminalOpenInput,
   TerminalResizeInput,
@@ -12,6 +13,26 @@ import {
   TerminalThreadInput,
   TerminalWriteInput,
 } from "./terminal.ts";
+
+describe("TerminalCursor", () => {
+  it("accepts a generation with a nonnegative integer sequence", () => {
+    expect(decodes(TerminalCursor, { generation: "server-1", sequence: 0 })).toBe(true);
+    expect(decodes(TerminalCursor, { generation: "", sequence: 0 })).toBe(false);
+    expect(decodes(TerminalCursor, { generation: "server-1", sequence: -1 })).toBe(false);
+    expect(decodes(TerminalCursor, { generation: "server-1", sequence: 1.5 })).toBe(false);
+  });
+  it("preserves optional cursor fields on terminal events", () => {
+    const event = {
+      threadId: "t",
+      terminalId: "default",
+      type: "output",
+      data: "x",
+      createdAt: "2026-09-15T00:00:00.000Z",
+      cursor: { generation: "server-1", sequence: 2 },
+    };
+    expect(decodeSync(TerminalEvent, event)).toEqual(event);
+  });
+});
 
 function decodeSync<S extends Schema.Top>(schema: S, input: unknown): Schema.Schema.Type<S> {
   return Schema.decodeUnknownSync(schema as never)(input) as Schema.Schema.Type<S>;
