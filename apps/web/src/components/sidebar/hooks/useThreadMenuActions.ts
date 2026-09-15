@@ -1,3 +1,4 @@
+import { availablePaneSplit, useChatPanesStore } from "../../../chatPanesStore";
 import React, { useCallback, useRef, useState } from "react";
 import {
   scopedProjectKey,
@@ -25,6 +26,7 @@ import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping"
 import { requestThreadPinChange } from "../../../threadPinning";
 
 export type ThreadMenuActionId =
+  | "open-in-split"
   | "pin"
   | "unpin"
   | "rename"
@@ -224,7 +226,16 @@ export function useThreadMenuActions(params: {
       }
       const archiveAvailable = canArchiveSidebarThread(thread);
       const isPinned = useUiStateStore.getState().pinnedThreadKeys[threadKey] === true;
+      const panes = useChatPanesStore.getState();
+      const splitAvailable = availablePaneSplit(
+        panes.root,
+        panes.activeRef,
+        scopeThreadRef(thread.environmentId, thread.id),
+      );
       return [
+        ...(splitAvailable
+          ? [{ id: "open-in-split", label: "Open in split view" } satisfies ThreadMenuActionItem]
+          : []),
         { id: isPinned ? "unpin" : "pin", label: isPinned ? "Unpin thread" : "Pin thread" },
         { id: "rename", label: "Rename thread" },
         { id: "mark-unread", label: "Mark unread" },
@@ -279,6 +290,11 @@ export function useThreadMenuActions(params: {
       if (actionId === "copy-project-path" || actionId === "copy-worktree-path") {
         const path = actionId === "copy-project-path" ? threadProject?.cwd : thread.worktreePath;
         if (path) copyPathToClipboard(path, { path });
+        return;
+      }
+
+      if (actionId === "open-in-split") {
+        useChatPanesStore.getState().open(threadRef);
         return;
       }
 

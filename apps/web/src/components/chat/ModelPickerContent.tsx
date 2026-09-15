@@ -1,3 +1,4 @@
+import { usePaneEffect, usePaneFocus } from "./PaneFocus";
 import {
   type ProviderInstanceId,
   type ProviderDriverKind,
@@ -89,6 +90,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     onInstanceModelChange,
   } = props;
   const [searchQuery, setSearchQuery] = useState("");
+  const paneFocused = usePaneFocus();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRegionRef = useRef<HTMLDivElement>(null);
   const highlightedModelKeyRef = useRef<string | null>(null);
@@ -123,7 +125,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     [focusSearchInput],
   );
 
-  useLayoutEffect(() => {
+  usePaneEffect(() => {
     focusSearchInput();
     const frame = window.requestAnimationFrame(() => {
       focusSearchInput();
@@ -439,7 +441,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return mapping.size > 0 ? mapping : EMPTY_MODEL_JUMP_LABELS;
   }, [keybindings, modelJumpCommandByKey, modelJumpShortcutContext]);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || event.repeat) {
         return;
@@ -513,6 +515,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       window.clearTimeout(timeout);
     };
   }, [filteredModelKeys]);
+
+  if (!paneFocused) return null;
 
   return (
     <TooltipProvider delay={0}>

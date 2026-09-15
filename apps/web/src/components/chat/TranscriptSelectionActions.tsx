@@ -1,10 +1,11 @@
+import { usePaneEffect, usePaneFocus, usePaneCloseGuard } from "./PaneFocus";
 import type { SelectionChatRequest } from "../../lib/selectionChat";
 import { MessageId, type ScopedThreadRef } from "@ryco/contracts";
 import {
   MAX_SELECTION_QUOTE_LENGTH,
   type SelectionQuote,
 } from "@ryco/client-runtime/state/composer";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { Button } from "../ui/button";
@@ -49,6 +50,7 @@ interface Props {
 
 /** UI-only capture/placement. Drafts and sends belong to the existing client stores. */
 export function TranscriptSelectionActions(props: Props) {
+  const paneFocused = usePaneFocus();
   const [selection, setSelection] = useState<CapturedSelection | null>(null);
   const [draft, setDraft] = useState<{
     selection: CapturedSelection;
@@ -63,6 +65,7 @@ export function TranscriptSelectionActions(props: Props) {
   const surface = useRef<HTMLDivElement>(null);
   const editor = useRef<ComposerPromptEditorHandle>(null);
   const submitting = useRef(false);
+  usePaneCloseGuard(() => !draft && !submitting.current);
   const keyboardFocusPending = useRef(false);
   const latest = useRef(props);
   useLayoutEffect(() => {
@@ -83,7 +86,7 @@ export function TranscriptSelectionActions(props: Props) {
     if (surface.current?.contains(document.activeElement)) focusBefore.current?.focus();
   }, []);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     let frame = 0;
     const capture = () => {
       cancelAnimationFrame(frame);
@@ -146,7 +149,7 @@ export function TranscriptSelectionActions(props: Props) {
     };
   }, [dismiss]);
 
-  useLayoutEffect(() => {
+  usePaneEffect(() => {
     // Commit keyboard focus before a queued transcript scroll can dismiss the
     // toolbar. A later animation frame leaves a gap on slower renderers.
     if (selection && keyboardFocusPending.current) {
@@ -156,7 +159,7 @@ export function TranscriptSelectionActions(props: Props) {
   }, [selection]);
 
   const anchor = expanded && draft ? draft.selection : selection;
-  useLayoutEffect(() => {
+  usePaneEffect(() => {
     const node = surface.current;
     if (!node || !anchor) return;
     const position = () => {
@@ -188,7 +191,7 @@ export function TranscriptSelectionActions(props: Props) {
       window.removeEventListener("scroll", scroll, true);
     };
   }, [anchor, expanded]);
-  useEffect(() => {
+  usePaneEffect(() => {
     if (expanded && !busy) editor.current?.focus();
   }, [expanded, busy]);
 
@@ -211,6 +214,8 @@ export function TranscriptSelectionActions(props: Props) {
       setBusy(false);
     }
   };
+
+  if (!paneFocused) return null;
 
   if (!anchor)
     return draft ? (

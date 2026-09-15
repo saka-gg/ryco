@@ -1,3 +1,4 @@
+import { usePaneEffect } from "./PaneFocus";
 import { type ApprovalRequestId } from "@ryco/contracts";
 import { memo, useEffect, useEffectEvent, useRef } from "react";
 import { type PendingUserInput } from "../../session-logic";
@@ -97,7 +98,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   // Keyboard shortcut: number keys 1-9 select corresponding options when focus is
   // outside editable fields. Multi-select prompts toggle options in place; single-
   // select prompts keep the existing auto-advance behavior.
-  useEffect(() => {
+  usePaneEffect(() => {
     if (!activeQuestion || isResponding) return;
     const handler = (event: globalThis.KeyboardEvent) => {
       if (shouldIgnoreGlobalNavigationShortcut(event)) return;
