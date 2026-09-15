@@ -1,6 +1,19 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert, live } from "@effect/vitest";
-import { Deferred, Effect, Exit, Layer, PubSub, Ref, Schema, Scope, Sink, Stream } from "effect";
+import {
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  PubSub,
+  Ref,
+  Schema,
+  Scope,
+  Sink,
+  Stream,
+} from "effect";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import {
   ClaudeSettings,
@@ -42,6 +55,92 @@ import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+
+// A registry-only fixture keeps inventory races independent of provider subprocesses.
+const makeInventoryRegistry = Effect.fn("makeInventoryRegistry")(function* (
+  fileSystem?: FileSystem.FileSystem,
+) {
+  const driver = ProviderDriverKind.make("codex");
+  const inventories = ["codex", "codex-work", "claude"].map(
+    (id) =>
+      ({
+        instanceId: ProviderInstanceId.make(id),
+        driver: ProviderDriverKind.make(id === "claude" ? "claude" : "codex"),
+        enabled: true,
+        installed: true,
+        version: "1.0.0",
+        status: "ready" as const,
+        auth: { status: "authenticated" as const },
+        checkedAt: "2026-09-15T00:00:00.000Z",
+        models: [],
+        skills: [{ name: "old", path: "/skills/old/SKILL.md", enabled: true }],
+        slashCommands: [{ name: "old" }],
+      }) satisfies ServerProvider,
+  );
+  const controls = yield* Effect.forEach(inventories, (initial) =>
+    Effect.gen(function* () {
+      const next = yield* Ref.make<ServerProvider>(initial);
+      const calls = yield* Ref.make(0);
+      const booted = yield* Deferred.make<void>();
+      const changes = yield* PubSub.unbounded<ServerProvider>();
+      const instance: ProviderInstance = {
+        instanceId: initial.instanceId,
+        driverKind: initial.driver,
+        continuationIdentity: { driverKind: initial.driver, continuationKey: initial.instanceId },
+        displayName: undefined,
+        enabled: true,
+        snapshot: {
+          maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+            provider: initial.driver,
+            packageName: null,
+          }),
+          getSnapshot: Effect.succeed(initial),
+          revalidate: Ref.get(next),
+          refresh: Ref.update(calls, (count) => count + 1).pipe(
+            Effect.andThen(Ref.get(next)),
+            Effect.tap(() => Deferred.succeed(booted, undefined)),
+          ),
+          streamChanges: Stream.fromPubSub(changes),
+        },
+        adapter: {} as ProviderInstance["adapter"],
+        textGeneration: {} as ProviderInstance["textGeneration"],
+      };
+      return { initial, next, calls, changes, instance, booted };
+    }),
+  );
+  const instanceRegistry = Layer.succeed(ProviderInstanceRegistry, {
+    getInstance: (id) =>
+      Effect.succeed(controls.find((control) => control.initial.instanceId === id)?.instance),
+    listInstances: Effect.succeed(controls.map((control) => control.instance)),
+    listUnavailable: Effect.succeed([]),
+    streamChanges: Stream.empty,
+    subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+  });
+  const services = yield* Layer.build(
+    ProviderRegistryLive.pipe(
+      Layer.provideMerge(instanceRegistry),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-skill-refresh-" })),
+      Layer.provideMerge(
+        fileSystem ? Layer.succeed(FileSystem.FileSystem, fileSystem) : NodeServices.layer,
+      ),
+      Layer.provideMerge(NodeServices.layer),
+    ),
+  );
+  return yield* Effect.gen(function* () {
+    const registry = yield* ProviderRegistry;
+    const config = yield* ServerConfig;
+    // Wait for background sources to run before changing their inventories.
+    yield* Effect.forEach(controls, (control) => Deferred.await(control.booted));
+    yield* Effect.yieldNow;
+    yield* registry.refresh();
+    const cachePath = (instanceId: ProviderInstanceId) =>
+      resolveProviderStatusCachePath({
+        cacheDir: config.providerStatusCacheDir,
+        instanceId,
+      });
+    return { registry, controls, driver, cachePath };
+  }).pipe(Effect.provide(services));
+});
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
 const defaultCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({});
@@ -631,6 +730,150 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ]);
       });
 
+      it.effect(
+        "replaces skill inventories through instance, default-driver and global refresh",
+        () =>
+          Effect.gen(function* () {
+            const { registry, controls, driver, cachePath } = yield* makeInventoryRegistry();
+            const [personal, work, claude] = controls;
+            assert.ok(personal && work && claude);
+            const added = (initial: ServerProvider): ServerProvider => ({
+              ...initial,
+              skills: [{ name: "new", path: "/skills/new/SKILL.md", enabled: true }],
+              slashCommands: [{ name: "new" }],
+            });
+            for (const control of controls) yield* Ref.set(control.next, added(control.initial));
+            const counts = yield* Effect.forEach(controls, (control) => Ref.get(control.calls));
+            yield* registry.refreshInstance(work.initial.instanceId);
+            assert.deepStrictEqual(
+              yield* registry.getProviders,
+              [personal.initial, claude.initial, added(work.initial)].toSorted(
+                (a, b) =>
+                  a.driver.localeCompare(b.driver) || a.instanceId.localeCompare(b.instanceId),
+              ),
+            );
+            assert.deepStrictEqual(
+              yield* Effect.forEach(controls, (control) => Ref.get(control.calls)),
+              [counts[0], counts[1]! + 1, counts[2]],
+            );
+            yield* registry.refresh(driver);
+            assert.deepStrictEqual(
+              (yield* registry.getProviders).find(
+                (p) => p.instanceId === personal.initial.instanceId,
+              ),
+              added(personal.initial),
+            );
+            assert.strictEqual(yield* Ref.get(claude.calls), counts[2]);
+            yield* registry.refresh();
+            for (const control of controls) {
+              assert.deepStrictEqual(
+                yield* readProviderStatusCache(yield* cachePath(control.initial.instanceId)),
+                added(control.initial),
+              );
+              yield* Ref.set(control.next, { ...control.initial, skills: [], slashCommands: [] });
+            }
+            yield* registry.refresh();
+            for (const control of controls) {
+              const expected = { ...control.initial, skills: [], slashCommands: [] };
+              assert.deepStrictEqual(
+                (yield* registry.getProviders).find(
+                  (p) => p.instanceId === control.initial.instanceId,
+                ),
+                expected,
+              );
+              assert.deepStrictEqual(
+                yield* readProviderStatusCache(yield* cachePath(control.initial.instanceId)),
+                expected,
+              );
+            }
+          }),
+      );
+
+      for (const source of ["refresh", "stream"] as const) {
+        it.effect(
+          `keeps stream and disk inventory current when an older ${source} publication stalls during persistence`,
+          () =>
+            Effect.gen(function* () {
+              const fs = yield* FileSystem.FileSystem;
+              const oldWriteStarted = yield* Deferred.make<void>();
+              const releaseOldWrite = yield* Deferred.make<void>();
+              let pauseNextWrite = false;
+              const files = new Map<string, string>();
+              let tempDirectory = 0;
+              const memoryFs: FileSystem.FileSystem = {
+                ...fs,
+                exists: (path) => Effect.sync(() => files.has(path)),
+                makeDirectory: () => Effect.void,
+                makeTempDirectoryScoped: () => Effect.sync(() => `/cache-test/${++tempDirectory}`),
+                writeFileString: (path, contents) =>
+                  Effect.sync(() => {
+                    files.set(path, contents);
+                  }),
+                readFileString: (path) =>
+                  files.has(path) ? Effect.succeed(files.get(path)!) : fs.readFileString(path),
+                rename: (from, to) =>
+                  Effect.gen(function* () {
+                    if (pauseNextWrite) {
+                      pauseNextWrite = false;
+                      yield* Deferred.succeed(oldWriteStarted, undefined);
+                      yield* Deferred.await(releaseOldWrite);
+                    }
+                    files.set(to, files.get(from)!);
+                    files.delete(from);
+                  }),
+              };
+              const { registry, controls, cachePath } = yield* makeInventoryRegistry(memoryFs);
+              const control = controls[0]!;
+              const old = { ...control.initial, checkedAt: "2026-09-15T00:01:00.000Z" };
+              const current = {
+                ...control.initial,
+                checkedAt: "2026-09-15T00:02:00.000Z",
+                skills: [],
+                slashCommands: [],
+              };
+              const published = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+              yield* registry.streamChanges.pipe(
+                Stream.runForEach((providers) => Ref.set(published, providers)),
+                Effect.forkChild,
+              );
+              // The subscriber runs before the filesystem barrier is reached.
+              yield* Effect.yieldNow;
+              yield* Ref.set(control.next, old);
+              pauseNextWrite = true;
+              const older = yield* (
+                source === "refresh"
+                  ? registry.refreshInstance(control.initial.instanceId)
+                  : PubSub.publish(control.changes, old)
+              ).pipe(Effect.forkChild);
+              yield* Deferred.await(oldWriteStarted);
+              yield* Ref.set(control.next, current);
+              const newer = yield* registry
+                .refreshInstance(control.initial.instanceId)
+                .pipe(Effect.forkChild);
+              // Let the newer publication attempt run while the older atomic rename is paused.
+              yield* Effect.yieldNow;
+              yield* Deferred.succeed(releaseOldWrite, undefined);
+              yield* Fiber.join(older);
+              yield* Fiber.join(newer);
+              yield* Effect.yieldNow;
+              assert.deepStrictEqual(
+                {
+                  authoritative: (yield* registry.getProviders).find(
+                    (p) => p.instanceId === control.initial.instanceId,
+                  ),
+                  persisted: yield* readProviderStatusCache(
+                    yield* cachePath(control.initial.instanceId),
+                  ).pipe(Effect.provideService(FileSystem.FileSystem, memoryFs)),
+                  streamed: (yield* Ref.get(published)).find(
+                    (p) => p.instanceId === control.initial.instanceId,
+                  ),
+                },
+                { authoritative: current, persisted: current, streamed: current },
+              );
+            }),
+        );
+      }
+
       it.effect("persists the merged snapshot when a live update has empty models", () =>
         Effect.gen(function* () {
           const cursorDriver = ProviderDriverKind.make("cursor");
@@ -758,8 +1001,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             checkedAt: "2026-04-29T10:00:00.000Z",
             version: "1.0.0",
             models: [],
-            slashCommands: [],
-            skills: [],
+            slashCommands: [{ name: "retained" }],
+            skills: [{ name: "retained", path: "/skills/retained/SKILL.md", enabled: true }],
           } as const satisfies ServerProvider;
           const instance = {
             instanceId: codexInstanceId,

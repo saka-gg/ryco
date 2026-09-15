@@ -1,4 +1,5 @@
 import path from "node:path";
+import { writeFileSync } from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -22,6 +23,7 @@ import {
   Ref,
   Schedule,
   Scope,
+  Queue,
 } from "effect";
 import { TestClock } from "effect/testing";
 import { expect } from "vite-plus/test";
@@ -36,6 +38,10 @@ import {
   PtySpawnError,
 } from "../Services/PTY.ts";
 import { makeTerminalManagerWithOptions } from "./Manager.ts";
+import {
+  makeTerminalSubscriberOffer,
+  releaseTerminalSubscriberEvent,
+} from "../../ws/terminalRpc.ts";
 
 class FakePtyProcess implements PtyProcess {
   readonly writes: string[] = [];
@@ -285,6 +291,206 @@ const createManager = (
   );
 
 it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (it) => {
+  it.effect(
+    "orders restart behind in-flight output and rejects old PTY callbacks through exit",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager();
+        const initial = yield* manager.open(openInput());
+        const old = ptyAdapter.processes[0]!;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const remove = yield* manager.subscribe((event) =>
+          event.type === "output"
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(remove));
+        old.emitData("before");
+        yield* Deferred.await(entered);
+        old.emitData("pending before restart");
+        const restarting = yield* manager.restart(restartInput()).pipe(Effect.forkScoped);
+        yield* Effect.sleep("20 millis");
+        yield* Deferred.succeed(release, undefined);
+        const restarted = yield* Fiber.join(restarting);
+        expect(restarted.cursor?.generation).toBe(initial.cursor?.generation);
+        expect(restarted.cursor!.sequence).toBeGreaterThan(initial.cursor!.sequence);
+        old.emitData("stale");
+        old.emitExit({ exitCode: 99, signal: 0 });
+        const current = ptyAdapter.processes[1]!;
+        current.emitData("after🙂");
+        current.emitExit({ exitCode: 0, signal: 0 });
+        yield* waitFor(
+          Effect.map(getEvents, (events) => events.some((event) => event.type === "exited")),
+        );
+        const events = (yield* getEvents).filter((event) => event.type !== "activity");
+        expect(events.map((event) => event.type)).toEqual([
+          "started",
+          "output",
+          "restarted",
+          "output",
+          "exited",
+        ]);
+        expect(
+          events
+            .filter((event) => event.type === "output")
+            .map((event) => event.data)
+            .join(""),
+        ).toBe("beforeafter🙂");
+        const final = (yield* manager.listSessions)[0]!;
+        expect(final.history).toBe("after🙂");
+        expect(final.cursor).toEqual(events.at(-1)?.cursor);
+        const other = yield* createManager();
+        const fresh = yield* other.manager.open(openInput());
+        expect(fresh.cursor?.generation).not.toBe(initial.cursor?.generation);
+      }),
+  );
+  it.effect("does not let clear overtake output already being delivered", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const observed: string[] = [];
+      const removeBlocker = yield* manager.subscribe((event) =>
+        event.type === "output"
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+          : Effect.void,
+      );
+      const removeObserver = yield* manager.subscribe((event) =>
+        Effect.sync(() => {
+          observed.push(event.type);
+        }),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          removeBlocker();
+          removeObserver();
+        }),
+      );
+      ptyAdapter.processes[0]!.emitData("before clear");
+      yield* Deferred.await(entered);
+      for (let i = 0; i < 200; i++) ptyAdapter.processes[0]!.emitData("pending before clear");
+      const clearing = yield* manager.clear({ threadId: "thread-1" }).pipe(Effect.forkScoped);
+      yield* Effect.sleep("150 millis");
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(clearing);
+      yield* waitFor(Effect.sync(() => observed.includes("output")));
+      expect(observed).toEqual(["output", "cleared"]);
+    }),
+  );
+  if (process.env.RYCO_TERMINAL_BENCHMARK_OUTPUT) {
+    it.effect(
+      "measures normal, throttled and stalled subscribers with a healthy peer",
+      () =>
+        Effect.gen(function* () {
+          const samples: Array<Record<string, string | number | boolean>> = [];
+          for (const profile of ["normal", "throttled", "stalled"] as const) {
+            for (let iteration = 0; iteration < 7; iteration++) {
+              yield* Effect.scoped(
+                Effect.gen(function* () {
+                  const { manager, ptyAdapter } = yield* createManager(100_000);
+                  yield* manager.open(openInput());
+                  const pty = ptyAdapter.processes[0]!;
+                  const queue = yield* Queue.dropping<
+                    TerminalEvent,
+                    | import("@ryco/contracts").TerminalSubscriptionResyncError
+                    | import("effect").Cause.Done<void>
+                  >(256);
+                  const ledger = { bytes: 0 };
+                  const offer = makeTerminalSubscriberOffer(queue, 256, ledger);
+                  let highWaterBytes = 0;
+                  let healthyBytes = 0;
+                  let received = 0;
+                  let slowBytes = 0;
+                  let exited = false;
+                  const latencies: number[] = [];
+                  const sentAt: number[] = [];
+                  const chunks = Array.from(
+                    { length: 320 },
+                    (_, index) => `${String(index).padStart(4, "0")}:` + "x".repeat(8186) + "\n",
+                  );
+                  const healthy: string[] = [];
+                  const unsubscribe = yield* manager.subscribe((event) =>
+                    Effect.gen(function* () {
+                      yield* offer(event);
+                      highWaterBytes = Math.max(highWaterBytes, ledger.bytes);
+                      if (event.type === "output") {
+                        if (
+                          profile === "normal" ||
+                          (profile === "throttled" && received % 16 === 15)
+                        ) {
+                          const count = profile === "normal" ? 1 : 4;
+                          for (let n = 0; n < count; n++) {
+                            const next = yield* Queue.take(queue);
+                            yield* releaseTerminalSubscriberEvent(ledger, next);
+                            if (next.type === "output") slowBytes += next.data.length;
+                          }
+                        }
+                      }
+                    }).pipe(Effect.ignore),
+                  );
+                  yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+                  const unsubscribeHealthy = yield* manager.subscribe((event) =>
+                    Effect.sync(() => {
+                      if (event.type === "output") {
+                        latencies.push(performance.now() - sentAt[received]!);
+                        received++;
+                        healthyBytes += event.data.length;
+                        healthy.push(event.data);
+                      }
+                      if (event.type === "exited") exited = true;
+                    }),
+                  );
+                  yield* Effect.addFinalizer(() => Effect.sync(unsubscribeHealthy));
+                  const started = performance.now();
+                  for (const chunk of chunks) {
+                    sentAt.push(performance.now());
+                    pty.emitData(chunk);
+                    yield* Effect.sleep("1 millis");
+                  }
+                  pty.emitExit({ exitCode: 0, signal: 0 });
+                  yield* waitFor(
+                    Effect.sync(() => exited),
+                    "2 seconds",
+                  );
+                  expect(healthy.join("")).toBe(chunks.join(""));
+                  expect(highWaterBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+                  latencies.sort((a, b) => a - b);
+                  samples.push({
+                    profile,
+                    iteration: iteration + 1,
+                    healthyBytes,
+                    slowBytes,
+                    highWaterBytes,
+                    healthyP95Ms: latencies[Math.floor(latencies.length * 0.95)]!,
+                    elapsedMs: performance.now() - started,
+                    rssBytes: process.memoryUsage().rss,
+                    exactHealthyOutput: true,
+                    exitDelivered: exited,
+                  });
+                }),
+              );
+            }
+          }
+          writeFileSync(
+            process.env.RYCO_TERMINAL_BENCHMARK_OUTPUT!,
+            JSON.stringify(
+              {
+                workload:
+                  "320 x 8192-byte PTY callbacks, 1 ms producer cadence; throttled drains 4 per 16 outputs; stalled never drains",
+                boundary:
+                  "real TerminalManager and subscriber offer; fake PTY, no network or renderer",
+                samples,
+              },
+              null,
+              2,
+            ),
+          );
+        }),
+      { timeout: 60_000 },
+    );
+  }
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
