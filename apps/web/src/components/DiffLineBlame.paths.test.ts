@@ -1,5 +1,5 @@
 import { parsePatchFiles } from "@pierre/diffs";
-import { getRenderablePatch } from "../lib/diffRendering";
+import { getRenderablePatch } from "../lib/diffParsing";
 import { resolveDiffFilePath } from "./DiffPanel.search.logic";
 import { describe, expect, it } from "vitest";
 import { displayedBlameTarget } from "@ryco/client-runtime/state/comparison/lineBlame";

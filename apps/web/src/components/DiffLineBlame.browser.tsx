@@ -2,7 +2,7 @@ import "../index.css";
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { StrictMode } from "react";
 import { DiffLineBlame } from "./DiffLineBlame";
-import { getRenderablePatch } from "../lib/diffRendering";
+import { getRenderablePatch } from "../lib/diffParsing";
 import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";

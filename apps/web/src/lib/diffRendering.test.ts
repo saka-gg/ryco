@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  ActiveDiffParser,
-  buildPatchCacheKey,
-  getRenderablePatch,
-  splitPatchIntoFileSegments,
-} from "./diffRendering";
+import { ActiveDiffParser, getRenderablePatch, splitPatchIntoFileSegments } from "./diffParsing";
+import { buildPatchCacheKey } from "./diffRendering";
 import { parsePatchFiles } from "@pierre/diffs";
 
 describe("buildPatchCacheKey", () => {
