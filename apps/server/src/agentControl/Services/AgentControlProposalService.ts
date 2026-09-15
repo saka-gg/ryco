@@ -26,6 +26,8 @@
  */
 import type {
   AgentControlProposal,
+  AgentControlPrincipal,
+  AgentControlRequestId,
   AgentControlProposalId,
   AgentControlProposalQueue,
   AgentControlProposalReceipt,
@@ -79,6 +81,11 @@ export const toAgentControlProposalReceipt = (
  * AgentControlProposalServiceShape - Service API for the approval surface.
  */
 export interface AgentControlProposalServiceShape {
+  readonly findByRequest?: (
+    principal: AgentControlPrincipal,
+    requestId: AgentControlRequestId,
+  ) => Effect.Effect<Option.Option<AgentControlProposal>, AgentControlProposalStoreError>;
+
   /** Create a proposal (delegates to the store; future MCP ingress entry). */
   readonly submit: (
     input: SubmitAgentControlProposalInput,

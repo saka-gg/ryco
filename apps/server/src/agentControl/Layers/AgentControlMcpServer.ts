@@ -1,3 +1,4 @@
+import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { WorkspaceFileSystem } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
 import { withInspectionTools } from "../Mcp/inspectionTools.ts";
@@ -53,6 +54,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const proposals = yield* AgentControlProposalService;
   const proposalEvents = yield* AgentControlProposalEvents;
   const projections = yield* ProjectionSnapshotQuery;
+  const workspaces = yield* Effect.serviceOption(AgentControlWorkspaces);
   const projectPlans = yield* Effect.serviceOption(AgentControlProjectPlans);
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
   const diagnostics = yield* Effect.serviceOption(AgentControlDiagnosticsService);
@@ -71,6 +73,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     proposals,
     proposalEvents,
     projections,
+    ...(Option.isSome(workspaces) ? { workspaces: workspaces.value } : {}),
     ...(Option.isSome(deviceService) ? { deviceService: deviceService.value } : {}),
     ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
     ...(Option.isSome(automations) ? { automations: automations.value } : {}),

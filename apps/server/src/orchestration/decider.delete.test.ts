@@ -398,3 +398,116 @@ describe("decider deletion flows", () => {
     ]);
   });
 });
+
+for (const sessions of ["preserve", "delete"] as const) {
+  it(`governed workspace deletion atomically enforces ${sessions} sessions`, async () => {
+    const model = await seedReadModel();
+    const project = model.projects[0]!;
+    const targetId = asWorktreeId("governed-target");
+    const mainId = asWorktreeId("governed-main");
+    const base = {
+      projectId: project.id,
+      branch: "topic",
+      worktreePath: "/tmp/governed-target",
+      origin: "manual" as const,
+      prNumber: null,
+      issueNumber: null,
+      prTitle: null,
+      issueTitle: null,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+      archivedAt: null,
+      manualPosition: 0,
+    };
+    const readModel: OrchestrationReadModel = {
+      ...model,
+      worktrees: [
+        { ...base, worktreeId: targetId },
+        { ...base, worktreeId: mainId, worktreePath: null, origin: "main" },
+      ],
+      threads: model.threads.map((t) =>
+        Object.assign({}, t, {
+          worktreeId: targetId,
+          worktreePath: base.worktreePath,
+        }),
+      ),
+    };
+    const command = {
+      type: "worktree.delete" as const,
+      commandId: asCommandId("governed-delete"),
+      worktreeId: targetId,
+      sessions,
+      deletedAt: project.updatedAt,
+      deletedBranch: false,
+      lifecycleGuard: {
+        mainWorkspaceId: mainId,
+        projectId: project.id,
+        projectUpdatedAt: project.updatedAt,
+        workspaceRoot: project.workspaceRoot,
+        updatedAt: base.updatedAt,
+        worktreePath: base.worktreePath,
+        branch: base.branch,
+        sessions: readModel.threads
+          .map((t) => ({ threadId: t.id, updatedAt: t.updatedAt }))
+          .toSorted((a, b) => a.threadId.localeCompare(b.threadId)),
+      },
+    };
+    if (sessions === "preserve") {
+      await expect(
+        Effect.runPromise(
+          decideOrchestrationCommand({
+            readModel,
+            command: {
+              ...command,
+              lifecycleGuard: {
+                ...command.lifecycleGuard,
+                mainWorkspaceId: asWorktreeId("changed-main"),
+              },
+            },
+          }),
+        ),
+      ).rejects.toThrow("changed after approval");
+    }
+    const result = await Effect.runPromise(decideOrchestrationCommand({ readModel, command }));
+    const events = Array.isArray(result) ? result : [result];
+    expect(events.map((e) => e.type).filter((type) => type === "thread.deleted")).toHaveLength(
+      sessions === "delete" ? 2 : 0,
+    );
+    expect(events.at(-1)?.type).toBe("worktree.deleted");
+    let projected = readModel;
+    for (const event of events)
+      projected = await Effect.runPromise(
+        projectEvent(projected, { ...event, sequence: projected.snapshotSequence + 1 }),
+      );
+    if (sessions === "preserve") {
+      expect(
+        projected.threads.every(
+          (t) => t.deletedAt === null && t.worktreePath === null && t.worktreeId === mainId,
+        ),
+      ).toBe(true);
+    }
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          readModel: { ...readModel, threads: readModel.threads.slice(1) },
+          command,
+        }),
+      ),
+    ).rejects.toThrow("changed after approval");
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          readModel: {
+            ...readModel,
+            worktrees: readModel.worktrees?.map((w) =>
+              w.worktreeId === targetId
+                ? Object.assign({}, w, { worktreePath: "/tmp/changed" })
+                : w,
+            ),
+          },
+          command,
+        }),
+      ),
+    ).rejects.toThrow("changed after approval");
+  });
+}

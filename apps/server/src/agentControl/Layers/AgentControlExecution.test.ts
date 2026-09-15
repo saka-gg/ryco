@@ -1,3 +1,5 @@
+import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
+import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   AgentControlOperationId,
@@ -1130,4 +1132,227 @@ it.effect("uses the server worktree prefix for agent-created worktrees", () =>
     assert.lengthOf(createdBranches, 1);
     assert.match(createdBranches[0]!, /^team\/tasks\/agent-control-/);
   }).pipe(Effect.provide(ServerSettingsService.layerTest({ worktreeBranchPrefix: "team/tasks" }))),
+);
+
+for (const mode of ["record-only", "remove-checkout", "restore-checkout"] as const) {
+  it.effect(`executes approved workspace ${mode} once with explicit session/branch semantics`, () =>
+    Effect.gen(function* () {
+      const plan = {
+        ...workspacePlan,
+        checkoutMode: mode,
+        action: mode === "restore-checkout" ? ("restore" as const) : ("delete" as const),
+      };
+      const proposal = {
+        ...approvedProposal,
+        plan,
+        planDigest: computeAgentControlPlanDigest(plan),
+      };
+      const stores = yield* makeExecutionStores(proposal);
+      const commands: ClientOrchestrationCommand[] = [];
+      const effects: string[] = [];
+      const execution = yield* makeTestExecution({
+        proposalStore: stores.proposalStore,
+        operationStore: stores.operationStore,
+        projections: {},
+        commandApplication: {
+          apply: (command: ClientOrchestrationCommand) =>
+            Effect.sync(() => {
+              commands.push(command);
+              return { sequence: commands.length };
+            }),
+        },
+        git: {
+          removeWorktree: (input: { force?: boolean }) =>
+            Effect.sync(() => {
+              assert.strictEqual(input.force, false);
+              effects.push("remove");
+            }),
+          createWorktree: () =>
+            Effect.sync(() => {
+              effects.push("restore");
+              return {};
+            }),
+          invalidateStatus: () => Effect.void,
+        },
+      });
+      yield* execution.executeApproved(proposal.proposalId);
+      yield* execution.executeApproved(proposal.proposalId);
+      const settled = yield* Ref.get(stores.proposalRef);
+      assert.strictEqual(settled.status, "completed");
+      assert.strictEqual(commands.length, 1);
+      assert.deepStrictEqual(
+        effects,
+        mode === "record-only" ? [] : mode === "remove-checkout" ? ["remove"] : ["restore"],
+      );
+      const command = commands[0]!;
+      assert.isTrue(command.type === "worktree.delete" || command.type === "worktree.restore");
+      if (command.type === "worktree.delete") {
+        assert.strictEqual(command.sessions, "preserve");
+        assert.isFalse(command.deletedBranch);
+        assert.deepStrictEqual(command.lifecycleGuard?.sessions, [{ threadId, updatedAt: now }]);
+      }
+      assert.include(
+        settled.result?.execution?.workspaceLifecycle?.completedSteps ?? [],
+        "workspace-record-completed",
+      );
+    }),
+  );
+}
+
+it.effect("records partial workspace removal without retrying or deleting history", () =>
+  Effect.gen(function* () {
+    const plan = { ...workspacePlan, checkoutMode: "remove-checkout" as const };
+    const proposal = { ...approvedProposal, plan, planDigest: computeAgentControlPlanDigest(plan) };
+    const stores = yield* makeExecutionStores(proposal);
+    let removals = 0;
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      projections: {},
+      commandApplication: {
+        apply: () =>
+          Effect.fail(
+            new AgentControlPlanValidationError({
+              reason: "thread-stale",
+              detail: "Session set changed",
+            }),
+          ),
+      },
+      git: {
+        removeWorktree: () =>
+          Effect.sync(() => {
+            removals++;
+          }),
+        invalidateStatus: () => Effect.void,
+      },
+    });
+    yield* execution.executeApproved(proposal.proposalId);
+    yield* execution.executeApproved(proposal.proposalId);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    assert.strictEqual(removals, 1);
+    assert.include(
+      settled.result?.execution?.workspaceLifecycle?.completedSteps ?? [],
+      "workspace-checkout-completed",
+    );
+    assert.notInclude(
+      settled.result?.execution?.workspaceLifecycle?.completedSteps ?? [],
+      "workspace-record-completed",
+    );
+  }),
+);
+
+it.effect("never executes a rejected workspace lifecycle proposal", () =>
+  Effect.gen(function* () {
+    const proposal = {
+      ...approvedProposal,
+      status: "rejected" as const,
+      plan: workspacePlan,
+      planDigest: computeAgentControlPlanDigest(workspacePlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      projections: {},
+      commandApplication: { apply: () => Effect.die("must not dispatch") },
+      git: { removeWorktree: () => Effect.die("must not remove") },
+    });
+    yield* execution.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "rejected");
+  }),
+);
+
+it.effect("deletes only the approved branch commit and records explicit session cascade", () =>
+  Effect.gen(function* () {
+    const plan = {
+      ...workspacePlan,
+      checkoutMode: "remove-checkout" as const,
+      deleteBranch: true,
+      sessions: "delete" as const,
+    };
+    const proposal = { ...approvedProposal, plan, planDigest: computeAgentControlPlanDigest(plan) };
+    const stores = yield* makeExecutionStores(proposal);
+    const commands: ClientOrchestrationCommand[] = [];
+    const args: string[][] = [];
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      projections: {},
+      commandApplication: {
+        apply: (command: ClientOrchestrationCommand) =>
+          Effect.sync(() => {
+            commands.push(command);
+            return { sequence: 1 };
+          }),
+      },
+      git: { removeWorktree: () => Effect.void, invalidateStatus: () => Effect.void },
+    }).pipe(
+      Effect.provideService(GitVcsDriver, {
+        execute: (input: { args: readonly string[] }) =>
+          Effect.sync(() => {
+            args.push([...input.args]);
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            };
+          }),
+      } as never),
+    );
+    yield* execution.executeApproved(proposal.proposalId);
+    assert.deepStrictEqual(args, [["update-ref", "-d", "refs/heads/topic", "a".repeat(40)]]);
+    assert.strictEqual(commands[0]?.type, "worktree.delete");
+    if (commands[0]?.type === "worktree.delete") {
+      assert.isTrue(commands[0].deletedBranch);
+      assert.strictEqual(commands[0].sessions, "delete");
+    }
+  }),
+);
+
+it.effect("restart closes uncertain workspace steps without replay or compensation", () =>
+  Effect.gen(function* () {
+    const proposal = {
+      ...approvedProposal,
+      status: "executing" as const,
+      plan: workspacePlan,
+      planDigest: computeAgentControlPlanDigest(workspacePlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const inserted = yield* stores.operationStore.createForProposal();
+    yield* stores.operationStore.transition({
+      expectedStatus: "pending",
+      nextStatus: "running",
+      attempt: 1,
+      state: { ...inserted.operation.state, completedSteps: ["workspace-checkout-started"] },
+      result: null,
+    });
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: {
+        ...stores.operationStore,
+        listRecoverable: () =>
+          Ref.get(stores.operationRef).pipe(
+            Effect.map((o) => (Option.isSome(o) && o.value.status === "running" ? [o.value] : [])),
+          ),
+      },
+      projections: {},
+      commandApplication: { apply: () => Effect.die("must not replay records") },
+      git: { removeWorktree: () => Effect.die("must not replay checkout") },
+    });
+    yield* execution.recoverIncomplete;
+    yield* execution.recoverIncomplete;
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    if (settled.result?.outcome === "failed") {
+      assert.include(settled.result.error.message, "unknown outcome");
+      assert.isFalse(settled.result.error.retryable);
+    }
+    assert.deepStrictEqual(settled.result?.execution?.workspaceLifecycle?.completedSteps, [
+      "workspace-checkout-started",
+    ]);
+    assert.isUndefined(settled.result?.execution?.compensation);
+  }),
 );

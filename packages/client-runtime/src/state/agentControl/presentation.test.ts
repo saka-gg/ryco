@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnId,
+  WorktreeId,
   type AgentControlProposal,
 } from "@ryco/contracts";
 
@@ -306,4 +307,64 @@ describe("buildAgentControlProposalCardModel", () => {
     expect(failed.outcomeLabel).toBe("execution-failed: Worktree preflight failed");
     expect(failed.statusTone).toBe("danger");
   });
+});
+
+it("shows the exact workspace path, branch and session consequences before approval", () => {
+  const plan: Extract<AgentControlProposal["plan"], { kind: "workspaceLifecycle" }> = {
+    kind: "workspaceLifecycle",
+    projectId: ProjectId.make("p"),
+    action: "delete",
+    checkoutMode: "record-only",
+    sessions: "preserve",
+    deleteBranch: false,
+    expected: {
+      workspaceId: "workspace",
+      worktreeId: WorktreeId.make("workspace"),
+      projectId: ProjectId.make("p"),
+      registration: "registered",
+      mainWorkspaceId: WorktreeId.make("main"),
+      checkoutIdentity: null,
+      rootIdentity: "1:2",
+      repositoryIdentity: "1:3",
+      title: "Manual",
+      origin: "manual",
+      branch: "topic",
+      path: "/workspace/missing",
+      projectRoot: "/workspace/project",
+      projectUpdatedAt: "2026-09-15T00:00:00.000Z",
+      updatedAt: "2026-09-15T00:00:00.000Z",
+      archivedAt: null,
+      main: false,
+      current: false,
+      checkout: "missing",
+      gitRegistered: false,
+      repository: "/workspace/project/.git",
+      head: null,
+      branchHead: "a".repeat(40),
+      baseHead: "a".repeat(40),
+      dirty: null,
+      unmerged: false,
+      sessions: [
+        {
+          threadId: ThreadId.make("history"),
+          updatedAt: "2026-09-15T00:00:00.000Z",
+          archived: true,
+          active: false,
+        },
+      ],
+      blockers: [],
+    },
+  };
+  const preserved = buildAgentControlProposalCardModel(makeProposal({ plan }));
+  expect(preserved.isDestructive).toBe(true);
+  expect(preserved.detailSections[0]?.lines).toContain("Path: /workspace/missing");
+  expect(preserved.detailSections[0]?.lines).toContain("Branch: topic (retain)");
+  expect(preserved.detailSections[0]?.lines).toContain(
+    "Sessions: preserve history and move to main workspace",
+  );
+  expect(preserved.detailSections[0]?.lines).toContain("history (archived)");
+  const deleted = buildAgentControlProposalCardModel(
+    makeProposal({ plan: { ...plan, sessions: "delete" } }),
+  );
+  expect(deleted.detailSections[0]?.lines).toContain("Sessions: permanently delete history");
 });

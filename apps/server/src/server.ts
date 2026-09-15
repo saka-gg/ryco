@@ -1,3 +1,4 @@
+import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { ProjectMemoryServiceLive } from "./projectMemory/ProjectMemoryService.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Effect, Layer } from "effect";
@@ -458,21 +459,25 @@ const RuntimeServicesLive = Layer.mergeAll(
   AutomationCentreLive.pipe(
     Layer.provideMerge(AgentControlActionValidatorLive),
     Layer.provideMerge(AgentControlProjectPlansLive),
+    Layer.provideMerge(AgentControlWorkspacesLive),
   ),
   ServerRuntimeStartupLive,
   AgentControlMcpServerLive.pipe(
     Layer.provideMerge(AgentControlDiagnosticsServiceLive),
     Layer.provideMerge(AgentControlActionValidatorLive),
     Layer.provideMerge(AgentControlProjectPlansLive),
+    Layer.provideMerge(AgentControlWorkspacesLive),
   ),
   AgentControlExternalMcpServerLive.pipe(
     Layer.provideMerge(AgentControlDiagnosticsServiceLive),
     Layer.provideMerge(AgentControlActionValidatorLive),
     Layer.provideMerge(AgentControlProjectPlansLive),
+    Layer.provideMerge(AgentControlWorkspacesLive),
     Layer.provideMerge(
       AgentControlExternalTaskServiceLive.pipe(
         Layer.provideMerge(AgentControlActionValidatorLive),
         Layer.provideMerge(AgentControlProjectPlansLive),
+        Layer.provideMerge(AgentControlWorkspacesLive),
       ),
     ),
   ),
@@ -480,6 +485,7 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(AgentControlActionValidatorLive),
     Layer.provideMerge(AgentControlProjectPlansLive),
+    Layer.provideMerge(AgentControlWorkspacesLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
 ).pipe(

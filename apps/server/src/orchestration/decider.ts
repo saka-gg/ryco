@@ -250,6 +250,55 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
 }): Effect.fn.Return<DecideOrchestrationCommandResult, OrchestrationCommandInvariantError> {
+  if (
+    (command.type === "worktree.archive" ||
+      command.type === "worktree.restore" ||
+      command.type === "worktree.delete") &&
+    command.lifecycleGuard
+  ) {
+    const expected = command.lifecycleGuard;
+    const worktree = yield* requireWorktree({ readModel, command, worktreeId: command.worktreeId });
+    const project = yield* requireProject({ readModel, command, projectId: expected.projectId });
+    const sessions = listThreadsByWorktree(readModel, worktree).filter((t) => t.deletedAt === null);
+    const actual = sessions
+      .map((t) => ({ threadId: t.id, updatedAt: t.updatedAt }))
+      .toSorted((a, b) => a.threadId.localeCompare(b.threadId));
+    if (
+      (command.type === "worktree.delete" &&
+        command.sessions === "preserve" &&
+        sessions.length > 0 &&
+        !(readModel.worktrees ?? []).some(
+          (w) =>
+            w.worktreeId === expected.mainWorkspaceId &&
+            w.projectId === expected.projectId &&
+            w.origin === "main" &&
+            w.archivedAt === null &&
+            (w.worktreePath === null || w.worktreePath === project.workspaceRoot),
+        )) ||
+      worktree.projectId !== expected.projectId ||
+      worktree.origin === "main" ||
+      worktree.worktreePath === null ||
+      worktree.worktreePath === project.workspaceRoot ||
+      worktree.updatedAt !== expected.updatedAt ||
+      worktree.worktreePath !== expected.worktreePath ||
+      worktree.branch !== expected.branch ||
+      project.updatedAt !== expected.projectUpdatedAt ||
+      project.workspaceRoot !== expected.workspaceRoot ||
+      JSON.stringify(actual) !== JSON.stringify(expected.sessions) ||
+      sessions.some(
+        (t) =>
+          t.session?.activeTurnId != null ||
+          t.session?.status === "running" ||
+          t.session?.status === "starting" ||
+          t.latestTurn?.state === "running",
+      )
+    ) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Workspace lifecycle state or associated sessions changed after approval.",
+      });
+    }
+  }
   switch (command.type) {
     case "project.create": {
       yield* requireProjectAbsent({
@@ -1469,6 +1518,37 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       const activeThreads = listThreadsByWorktree(readModel, worktree).filter(
         (thread) => thread.deletedAt === null,
       );
+      if (activeThreads.length > 0 && command.sessions === "preserve") {
+        const main = (readModel.worktrees ?? []).find(
+          (w) => w.projectId === worktree.projectId && w.origin === "main" && w.archivedAt === null,
+        );
+        if (!main)
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "A registered main workspace is required to preserve sessions.",
+          });
+        return yield* decideCommandSequence({
+          readModel,
+          commands: [
+            ...activeThreads.flatMap((thread): OrchestrationCommand[] => [
+              {
+                type: "thread.attach-to-worktree",
+                commandId: command.commandId,
+                threadId: thread.id,
+                worktreeId: main.worktreeId,
+                attachedAt: command.deletedAt,
+              },
+              {
+                type: "thread.meta.update",
+                commandId: command.commandId,
+                threadId: thread.id,
+                worktreePath: null,
+              },
+            ]),
+            { ...command, lifecycleGuard: undefined },
+          ],
+        });
+      }
       if (activeThreads.length > 0) {
         return yield* decideCommandSequence({
           readModel,
@@ -1480,7 +1560,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 threadId: thread.id,
               }),
             ),
-            command,
+            { ...command, lifecycleGuard: undefined },
           ],
         });
       }

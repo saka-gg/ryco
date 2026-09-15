@@ -152,6 +152,7 @@ const makeAgentControlProposalService = (options?: AgentControlProposalServiceLi
 
     return {
       submit: store.submit,
+      ...(store.findByRequest ? { findByRequest: store.findByRequest } : {}),
       getQueue,
       getProposal,
       accept,

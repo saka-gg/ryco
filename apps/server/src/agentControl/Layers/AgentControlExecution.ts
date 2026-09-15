@@ -1,3 +1,4 @@
+import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -64,7 +65,8 @@ const unique = <T>(items: ReadonlyArray<T>): Array<T> => [...new Set(items)];
 const isProjectAction = (proposal: AgentControlProposal): boolean =>
   proposal.plan.kind === "createProject" ||
   proposal.plan.kind === "updateProject" ||
-  proposal.plan.kind === "removeProject";
+  proposal.plan.kind === "removeProject" ||
+  proposal.plan.kind === "workspaceLifecycle";
 
 class AgentControlDeviceExecutionError extends Error {
   readonly code: AgentControlErrorCode;
@@ -163,6 +165,15 @@ const appendStep = (state: AgentControlOperationState, step: string): AgentContr
 
 const executionReceipt = (operation: AgentControlOperation): AgentControlExecutionReceipt => ({
   operationId: operation.operationId,
+  ...(operation.state.completedSteps.some((step) => step.startsWith("workspace-"))
+    ? {
+        workspaceLifecycle: {
+          completedSteps: operation.state.completedSteps.filter((step) =>
+            step.startsWith("workspace-"),
+          ),
+        },
+      }
+    : {}),
   commands: operation.state.commandReceipts,
   affectedThreadIds: operation.state.resources.threadIds,
   affectedProjectIds: operation.state.resources.projectIds ?? [],
@@ -232,6 +243,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const engine = yield* OrchestrationEngineService;
     const projections = yield* ProjectionSnapshotQuery;
     const git = yield* GitWorkflowService;
+    const gitDriver = yield* Effect.serviceOption(GitVcsDriver);
     const workspaceAccess = yield* WorkspaceAccessPolicy;
     const deviceService = yield* Effect.serviceOption(DeviceService);
     const config = yield* ServerConfig;
@@ -642,6 +654,103 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                   ),
           });
           yield* checkpoint(appendStep(operation.state, "device-action-completed"));
+          return operation;
+        }
+
+        if (proposal.plan.kind === "workspaceLifecycle") {
+          const plan = proposal.plan;
+          const expected = plan.expected;
+          if (!expected.worktreeId || !expected.branch)
+            return yield* Effect.fail(new Error("Registered workspace required."));
+          yield* checkpoint({
+            ...operation.state,
+            resources: {
+              ...operation.state.resources,
+              projectIds: [plan.projectId],
+              worktreeIds: [expected.worktreeId],
+              threadIds: expected.sessions.map((s) => s.threadId),
+            },
+          });
+          if (plan.deleteBranch && Option.isNone(gitDriver))
+            return yield* Effect.fail(new Error("Branch deletion unavailable."));
+          yield* validator.revalidateExecution(proposal);
+          // These checkpoints are intent/completion evidence, never permission to replay
+          // a filesystem effect after an uncertain crash boundary.
+          yield* checkpoint(appendStep(operation.state, "workspace-preflight-verified"));
+          if (plan.checkoutMode !== "record-only") {
+            yield* checkpoint(appendStep(operation.state, "workspace-checkout-started"));
+            if (plan.checkoutMode === "remove-checkout") {
+              yield* git.removeWorktree({
+                cwd: expected.projectRoot,
+                path: expected.path,
+                force: false,
+              });
+            } else {
+              yield* git.createWorktree({
+                cwd: expected.projectRoot,
+                path: expected.path,
+                refName: expected.branch,
+              });
+            }
+            yield* checkpoint(appendStep(operation.state, "workspace-checkout-completed"));
+          }
+          if (plan.deleteBranch) {
+            if (Option.isNone(gitDriver) || expected.branchHead === null)
+              return yield* Effect.fail(new Error("Branch deletion unavailable."));
+            yield* checkpoint(appendStep(operation.state, "workspace-branch-started"));
+            // Immutable expected OID prevents deleting a branch moved since preflight.
+            yield* gitDriver.value.execute({
+              operation: "Agent Control workspace branch deletion",
+              cwd: expected.projectRoot,
+              args: ["update-ref", "-d", `refs/heads/${expected.branch}`, expected.branchHead],
+              timeoutMs: 10_000,
+              maxOutputBytes: 8192,
+            });
+            yield* checkpoint(appendStep(operation.state, "workspace-branch-completed"));
+          }
+          const lifecycleGuard = {
+            mainWorkspaceId: expected.mainWorkspaceId,
+            projectId: plan.projectId,
+            projectUpdatedAt: expected.projectUpdatedAt,
+            workspaceRoot: expected.projectRoot,
+            updatedAt: expected.updatedAt,
+            worktreePath: expected.path,
+            branch: expected.branch,
+            sessions: expected.sessions.map(({ threadId, updatedAt }) => ({ threadId, updatedAt })),
+          };
+          const now = new Date().toISOString();
+          yield* checkpoint(appendStep(operation.state, "workspace-record-started"));
+          yield* dispatch(
+            "workspace-record-completed",
+            plan.action === "delete"
+              ? {
+                  type: "worktree.delete",
+                  commandId: commandIdFor(operation.operationId, "workspace-record"),
+                  worktreeId: expected.worktreeId,
+                  lifecycleGuard,
+                  sessions: plan.sessions,
+                  deletedAt: now,
+                  deletedBranch: plan.deleteBranch,
+                }
+              : plan.action === "archive"
+                ? {
+                    type: "worktree.archive",
+                    commandId: commandIdFor(operation.operationId, "workspace-record"),
+                    worktreeId: expected.worktreeId,
+                    lifecycleGuard,
+                    archivedAt: now,
+                    deletedBranch: plan.deleteBranch,
+                  }
+                : {
+                    type: "worktree.restore",
+                    commandId: commandIdFor(operation.operationId, "workspace-record"),
+                    worktreeId: expected.worktreeId,
+                    lifecycleGuard,
+                    worktreePath: expected.path,
+                    restoredAt: now,
+                  },
+          );
+          yield* git.invalidateStatus(expected.projectRoot);
           return operation;
         }
 
@@ -1271,9 +1380,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           const durable = yield* operations
             .getByProposalId(executing.proposalId)
             .pipe(Effect.map(Option.getOrElse(() => operation)));
-          const compensated = yield* compensate(durable).pipe(
-            Effect.catch(() => Effect.succeed(durable)),
-          );
+          const compensated =
+            executing.plan.kind === "workspaceLifecycle"
+              ? durable
+              : yield* compensate(durable).pipe(Effect.catch(() => Effect.succeed(durable)));
           const deviceFailure = isAgentControlDevicePlan(executing.plan)
             ? Cause.squash(outcome.cause)
             : null;
@@ -1373,6 +1483,15 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               });
               continue;
             }
+          }
+          if (proposal.plan.kind === "workspaceLifecycle") {
+            yield* settleProposalFailure(proposal, operation, {
+              revalidation: false,
+              message:
+                "Workspace lifecycle execution was interrupted. No deletion was replayed. Inspect the workspace and completed steps; a started step without completion has an unknown outcome. Prepare a new approved plan for remaining work.",
+              retryable: false,
+            });
+            continue;
           }
           if (operation.status === "pending") {
             yield* settleProposalFailure(proposal, operation, {

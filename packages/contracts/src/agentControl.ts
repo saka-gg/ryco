@@ -207,6 +207,7 @@ export const AGENT_CONTROL_CAPABILITIES = {
   createProject: AgentControlCapability.make("projects.create"),
   updateProject: AgentControlCapability.make("projects.update"),
   removeProject: AgentControlCapability.make("projects.remove"),
+  manageWorkspaces: AgentControlCapability.make("workspaces.manage"),
   readSettings: AgentControlCapability.make("settings.read"),
   changeSettings: AgentControlCapability.make("settings.change"),
   readAutomations: AgentControlCapability.make("automations.read"),
@@ -239,6 +240,7 @@ export const AgentControlActionKind = Schema.Literals([
   "createProject",
   "updateProject",
   "removeProject",
+  "workspaceLifecycle",
   "changeSettings",
   "createAutomation",
   "updateAutomation",
@@ -287,6 +289,7 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   createProject: AGENT_CONTROL_CAPABILITIES.createProject,
   updateProject: AGENT_CONTROL_CAPABILITIES.updateProject,
   removeProject: AGENT_CONTROL_CAPABILITIES.removeProject,
+  workspaceLifecycle: AGENT_CONTROL_CAPABILITIES.manageWorkspaces,
   changeSettings: AGENT_CONTROL_CAPABILITIES.changeSettings,
   createAutomation: AGENT_CONTROL_CAPABILITIES.manageAutomations,
   updateAutomation: AGENT_CONTROL_CAPABILITIES.manageAutomations,
@@ -455,6 +458,78 @@ export const AgentControlRemoveProjectPlan = Schema.Struct({
   force: Schema.Boolean,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type AgentControlRemoveProjectPlan = typeof AgentControlRemoveProjectPlan.Type;
+
+/** Audit-safe workspace inventory and immutable lifecycle evidence. */
+export const AgentControlWorkspaceState = Schema.Struct({
+  workspaceId: TrimmedNonEmptyString,
+  projectId: ProjectId,
+  registration: Schema.Literals(["registered", "synthetic"]),
+  mainWorkspaceId: Schema.NullOr(WorktreeId),
+  checkoutIdentity: Schema.NullOr(Schema.String),
+  rootIdentity: Schema.NullOr(Schema.String),
+  worktreeId: Schema.NullOr(WorktreeId),
+  title: Schema.String,
+  origin: Schema.String,
+  branch: Schema.NullOr(Schema.String),
+  path: Schema.String,
+  projectRoot: Schema.String,
+  projectUpdatedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  archivedAt: Schema.NullOr(IsoDateTime),
+  main: Schema.Boolean,
+  current: Schema.Boolean,
+  checkout: Schema.Literals(["present", "missing", "unavailable"]),
+  gitRegistered: Schema.NullOr(Schema.Boolean),
+  repository: Schema.NullOr(Schema.String),
+  repositoryIdentity: Schema.NullOr(Schema.String),
+  head: Schema.NullOr(Schema.String),
+  branchHead: Schema.NullOr(Schema.String),
+  baseHead: Schema.NullOr(Schema.String),
+  dirty: Schema.NullOr(Schema.Boolean),
+  unmerged: Schema.NullOr(Schema.Boolean),
+  sessions: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      updatedAt: IsoDateTime,
+      archived: Schema.Boolean,
+      active: Schema.Boolean,
+    }),
+  ).check(Schema.isMaxLength(500)),
+  blockers: Schema.Array(Schema.String),
+});
+export type AgentControlWorkspaceState = typeof AgentControlWorkspaceState.Type;
+
+export const AgentControlWorkspaceLifecycleOptions = Schema.Struct({
+  action: Schema.Literals(["archive", "restore", "delete"]),
+  checkoutMode: Schema.Literals(["record-only", "remove-checkout", "restore-checkout"]),
+  sessions: Schema.Literals(["preserve", "delete"]),
+  deleteBranch: Schema.Boolean,
+});
+export const AgentControlWorkspaceLifecyclePlan = Schema.Struct({
+  kind: Schema.Literal("workspaceLifecycle"),
+  ...AgentControlWorkspaceLifecycleOptions.fields,
+  projectId: ProjectId,
+  expected: AgentControlWorkspaceState,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type AgentControlWorkspaceLifecyclePlan = typeof AgentControlWorkspaceLifecyclePlan.Type;
+
+export const AgentControlListWorkspacesInput = Schema.Struct({
+  projectId: ProjectId,
+  after: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  limit: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(50))),
+});
+export const AgentControlReadWorkspaceInput = Schema.Struct({
+  projectId: ProjectId,
+  workspaceId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+});
+export const AgentControlPlanWorkspaceInput = Schema.Struct({
+  ...AgentControlReadWorkspaceInput.fields,
+  ...AgentControlWorkspaceLifecycleOptions.fields,
+});
+export const AgentControlProposeWorkspaceInput = Schema.Struct({
+  requestId: AgentControlRequestId,
+  plan: AgentControlWorkspaceLifecyclePlan,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
 
 export const AgentControlLegacyTokenStreamingChange = Schema.Struct({
   kind: Schema.Literal("legacyTokenStreaming"),
@@ -727,6 +802,7 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlCreateProjectPlan,
   AgentControlUpdateProjectPlan,
   AgentControlRemoveProjectPlan,
+  AgentControlWorkspaceLifecyclePlan,
   AgentControlChangeSettingsPlan,
   AgentControlCreateAutomationPlan,
   AgentControlUpdateAutomationPlan,
@@ -756,6 +832,7 @@ export const AGENT_CONTROL_RISK_TAGS = {
   createsProject: AgentControlRiskTag.make("creates-project"),
   modifiesProjectMetadata: AgentControlRiskTag.make("modifies-project-metadata"),
   removesProject: AgentControlRiskTag.make("removes-project"),
+  workspaceLifecycle: AgentControlRiskTag.make("workspace-lifecycle"),
   removesThreads: AgentControlRiskTag.make("removes-threads"),
   changesSettings: AgentControlRiskTag.make("changes-settings"),
   sharedLocalCheckout: AgentControlRiskTag.make("shared-local-checkout"),
@@ -836,6 +913,11 @@ export const AgentControlDeviceExecutionMetadata = Schema.Struct({
 export type AgentControlDeviceExecutionMetadata = typeof AgentControlDeviceExecutionMetadata.Type;
 
 export const AgentControlExecutionReceipt = Schema.Struct({
+  workspaceLifecycle: Schema.optional(
+    Schema.Struct({
+      completedSteps: Schema.Array(Schema.String),
+    }),
+  ),
   operationId: AgentControlOperationId,
   commands: Schema.Array(AgentControlDispatchedCommandReceipt),
   affectedThreadIds: Schema.Array(ThreadId),
@@ -1288,6 +1370,10 @@ export const AGENT_CONTROL_MCP_TOOLS = {
   context: "ryco_context",
   capabilities: "ryco_capabilities",
   listProjects: "ryco_list_projects",
+  listWorkspaces: "ryco_list_workspaces",
+  readWorkspace: "ryco_read_workspace",
+  planWorkspace: "ryco_plan_workspace_lifecycle",
+  proposeWorkspace: "ryco_propose_workspace_lifecycle",
   listThreads: "ryco_list_threads",
   readThread: "ryco_read_thread",
   readControlRequest: "ryco_read_control_request",

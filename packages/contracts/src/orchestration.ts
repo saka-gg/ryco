@@ -1473,10 +1473,22 @@ const WorktreeCreateCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const WorktreeLifecycleGuard = Schema.Struct({
+  mainWorkspaceId: Schema.NullOr(WorktreeId),
+  projectId: ProjectId,
+  projectUpdatedAt: IsoDateTime,
+  workspaceRoot: TrimmedNonEmptyString,
+  updatedAt: IsoDateTime,
+  worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  branch: TrimmedNonEmptyString,
+  sessions: Schema.Array(Schema.Struct({ threadId: ThreadId, updatedAt: IsoDateTime })),
+});
+
 const WorktreeArchiveCommand = Schema.Struct({
   type: Schema.Literal("worktree.archive"),
   commandId: CommandId,
   worktreeId: WorktreeId,
+  lifecycleGuard: Schema.optional(WorktreeLifecycleGuard),
   archivedAt: IsoDateTime,
   deletedBranch: Schema.Boolean,
 });
@@ -1506,14 +1518,17 @@ const WorktreeRestoreCommand = Schema.Struct({
   type: Schema.Literal("worktree.restore"),
   commandId: CommandId,
   worktreeId: WorktreeId,
+  lifecycleGuard: Schema.optional(WorktreeLifecycleGuard),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   restoredAt: IsoDateTime,
 });
 
 const WorktreeDeleteCommand = Schema.Struct({
+  sessions: Schema.optional(Schema.Literals(["preserve", "delete"])),
   type: Schema.Literal("worktree.delete"),
   commandId: CommandId,
   worktreeId: WorktreeId,
+  lifecycleGuard: Schema.optional(WorktreeLifecycleGuard),
   deletedAt: IsoDateTime,
   deletedBranch: Schema.Boolean,
 });

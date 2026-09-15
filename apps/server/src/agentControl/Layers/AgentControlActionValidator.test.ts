@@ -1,3 +1,5 @@
+import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
+import type { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import {
   AGENT_CONTROL_CAPABILITIES,
   AgentControlAutomationId,
@@ -148,6 +150,7 @@ const makeValidator = (
   projectPlans?: AgentControlProjectPlansShape,
   automations?: AgentControlAutomationShape,
   deviceService?: DeviceServiceShape,
+  workspaces?: typeof AgentControlWorkspaces.Service,
 ) =>
   makeAgentControlActionValidatorFromDeps({
     projections: {
@@ -171,6 +174,7 @@ const makeValidator = (
     ...(projectPlans === undefined ? {} : { projectPlans }),
     ...(automations === undefined ? {} : { automations }),
     ...(deviceService === undefined ? {} : { deviceService }),
+    ...(workspaces === undefined ? {} : { workspaces }),
   });
 
 it.effect("binds device plans to exact thread, project, provider, attachment, and version", () =>
@@ -780,4 +784,57 @@ it.effect("owner automation authority cannot authorize ordinary thread or settin
       "privilege-escalation",
     );
   }),
+);
+
+it.effect(
+  "workspace submission and execution use authoritative preflight within the private project scope",
+  () =>
+    Effect.gen(function* () {
+      const snapshot = yield* Ref.make(makeSnapshot());
+      const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+      let validations = 0;
+      const workspaces: typeof AgentControlWorkspaces.Service = {
+        list: () => Effect.die("unused"),
+        read: () => Effect.die("unused"),
+        revalidate: (_plan, caller) =>
+          Effect.sync(() => {
+            assert.strictEqual(caller, callerThreadId);
+            validations++;
+          }),
+      };
+      const validator = makeValidator(
+        snapshot,
+        providers,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        workspaces,
+      );
+      const principal = yield* validator.validateSubmission({
+        session,
+        authority,
+        plan: workspacePlan,
+      });
+      assert.strictEqual(principal.kind, "provider-session");
+      assert.strictEqual(validations, 1);
+      const crossProject = yield* Effect.flip(
+        validator.validateSubmission({
+          session,
+          authority,
+          plan: { ...workspacePlan, projectId: ProjectId.make("other-project") },
+        }),
+      );
+      assert.strictEqual(crossProject.reason, "project-scope");
+      assert.strictEqual(validations, 1);
+      const unavailable = yield* Effect.flip(
+        makeValidator(snapshot, providers).validateSubmission({
+          session,
+          authority,
+          plan: workspacePlan,
+        }),
+      );
+      assert.strictEqual(unavailable.reason, "project-scope");
+    }),
 );
