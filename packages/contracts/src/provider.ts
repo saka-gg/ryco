@@ -11,6 +11,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import {
+  BackgroundTaskStopIdentity,
   ChatAttachment,
   ModelSelection,
   ProjectCustomSystemPrompt,
@@ -150,6 +151,7 @@ export const ProviderStopSessionInput = Schema.Struct({
 export type ProviderStopSessionInput = typeof ProviderStopSessionInput.Type;
 
 export const ProviderStopBackgroundTaskInput = Schema.Struct({
+  expected: Schema.optional(BackgroundTaskStopIdentity),
   threadId: ThreadId,
   /** Provider-runtime task id (task.* linkage fields). */
   taskId: TrimmedNonEmptyString,

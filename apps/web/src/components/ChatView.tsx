@@ -1,3 +1,5 @@
+import type { BackgroundTask } from "@ryco/shared/backgroundWork";
+import { deriveThreadBackgroundWork } from "@ryco/client-runtime/state/session";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { SideChatPanel } from "./SideChatPanel";
@@ -23,6 +25,7 @@ import {
   ProviderInteractionMode,
   ProviderDriverKind,
   RuntimeMode,
+  RuntimeSessionId,
   AgentTokenMode,
   type ThreadGoalStatus,
   type ThreadGoalUpdate,
@@ -1494,6 +1497,10 @@ export default function ChatView(props: ChatViewProps) {
   ]);
 
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  const backgroundWork = useMemo(
+    () => deriveThreadBackgroundWork(threadActivities, activeThread?.session ?? null),
+    [threadActivities, activeThread?.session],
+  );
   const threadActivityViewModel = useMemo(
     () => deriveThreadActivityViewModel(threadActivities, activeLatestTurn?.turnId),
     [activeLatestTurn?.turnId, threadActivities],
@@ -1693,6 +1700,36 @@ export default function ChatView(props: ChatViewProps) {
       }
     })();
   }, [activeThreadId, onInterrupt, setThreadError]);
+  const handleStopBackgroundTask = useCallback(
+    async (task: BackgroundTask) => {
+      if (
+        !activeThreadId ||
+        !task.runtimeSessionId ||
+        !dispatchCapability.allowed ||
+        activeEnvironmentUnavailable ||
+        sideChatConnection.phase !== "connected"
+      ) {
+        throw new Error("This connection is not ready to stop tasks.");
+      }
+      const stop = readEnvironmentApi(environmentId)?.orchestration.stopBackgroundTask;
+      if (!stop) throw new Error("This environment cannot stop individual tasks.");
+      await stop({
+        threadId: activeThreadId,
+        taskId: task.id,
+        expected: {
+          runtimeSessionId: RuntimeSessionId.make(task.runtimeSessionId),
+          attempt: task.attempt,
+        },
+      });
+    },
+    [
+      activeThreadId,
+      dispatchCapability.allowed,
+      activeEnvironmentUnavailable,
+      environmentId,
+      sideChatConnection.phase,
+    ],
+  );
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -4568,10 +4605,24 @@ export default function ChatView(props: ChatViewProps) {
             <div className={cn("relative isolate", composerOverlayActive && "pointer-events-auto")}>
               {/* Background-liveness stays off the frozen phone tier along
                   with the rest of the Agents surface (AGENTS.md). */}
-              {activeBackgroundLiveness !== null && presentationTier !== "phone" ? (
+              {(activeBackgroundLiveness !== null ||
+                backgroundWork.tasks.length > 0 ||
+                backgroundWork.detailsOmitted) &&
+              presentationTier !== "phone" ? (
                 <div className="mx-auto mb-2 flex w-full min-w-0 max-w-208 items-center px-4">
                   <BackgroundLivenessChip
-                    liveness={activeBackgroundLiveness}
+                    key={activeThreadKey}
+                    work={backgroundWork}
+                    connected={
+                      !activeEnvironmentUnavailable && sideChatConnection.phase === "connected"
+                    }
+                    mutationReady={
+                      dispatchCapability.allowed &&
+                      !activeEnvironmentUnavailable &&
+                      sideChatConnection.phase === "connected"
+                    }
+                    onStopTask={handleStopBackgroundTask}
+                    liveness={activeBackgroundLiveness ?? "monitoring"}
                     liveCount={agentPanelModel.liveCount}
                     waitingCount={agentPanelModel.waitingCount}
                     onOpenAgents={onOpenAgentsPanel}
