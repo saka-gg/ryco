@@ -1,12 +1,12 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { ThreadId } from "@ryco/contracts";
+import { EnvironmentId, ThreadId, type ServerConfig } from "@ryco/contracts";
 import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 const SHARED_THREAD_ID = ThreadId.make("thread-shared");
-const ENVIRONMENT_A = "environment-local" as never;
-const ENVIRONMENT_B = "environment-remote" as never;
+const ENVIRONMENT_A = EnvironmentId.make("environment-local");
+const ENVIRONMENT_B = EnvironmentId.make("environment-remote");
 const GIT_CWD = "/repo/project";
 const BRANCH_NAME = "feature/toast-scope";
 
@@ -25,6 +25,8 @@ function createDeferredPromise<T>() {
 const {
   activeRunStackedActionDeferredRef,
   activeDraftThreadRef,
+  primaryServerConfigRef,
+  liveBranchRef,
   hasServerThreadRef,
   refreshGitStatusSpy,
   runStackedActionMutateAsyncSpy,
@@ -37,6 +39,8 @@ const {
 } = vi.hoisted(() => ({
   activeRunStackedActionDeferredRef: { current: createDeferredPromise<never>() },
   activeDraftThreadRef: { current: null as unknown },
+  primaryServerConfigRef: { current: null as ServerConfig | null },
+  liveBranchRef: { current: "" },
   hasServerThreadRef: { current: true },
   refreshGitStatusSpy: vi.fn(() => Promise.resolve(null)),
   runStackedActionMutateAsyncSpy: vi.fn(() => activeRunStackedActionDeferredRef.current.promise),
@@ -46,6 +50,11 @@ const {
   toastCloseSpy: vi.fn(),
   toastPromiseSpy: vi.fn(),
   toastUpdateSpy: vi.fn(),
+}));
+
+vi.mock("~/rpc/serverState", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/rpc/serverState")>()),
+  useServerConfig: () => primaryServerConfigRef.current,
 }));
 
 vi.mock("~/components/ui/toast", () => ({
@@ -102,7 +111,7 @@ vi.mock("~/lib/gitStatusState", () => ({
       },
       hasPrimaryRemote: true,
       isDefaultRef: false,
-      refName: BRANCH_NAME,
+      refName: liveBranchRef.current,
       hasWorkingTreeChanges: false,
       workingTree: { files: [], insertions: 0, deletions: 0 },
       hasUpstream: true,
@@ -233,6 +242,26 @@ vi.mock("~/terminal-links", () => ({
   resolvePathLinkTarget: vi.fn(),
 }));
 
+import {
+  resetPrimaryEnvironmentDescriptorForTests,
+  writePrimaryEnvironmentDescriptor,
+} from "~/environments/primary";
+import {
+  resetSavedEnvironmentRuntimeStoreForTests,
+  useSavedEnvironmentRuntimeStore,
+} from "~/environments/runtime";
+
+function setEnvironmentConfig(environmentId: EnvironmentId, prefix: string | null) {
+  // Only the branch prefix is consumed by this component's configuration seam.
+  const serverConfig =
+    prefix === null ? null : ({ settings: { worktreeBranchPrefix: prefix } } as ServerConfig);
+  if (environmentId === ENVIRONMENT_A) {
+    primaryServerConfigRef.current = serverConfig;
+  } else {
+    useSavedEnvironmentRuntimeStore.getState().patch(environmentId, { serverConfig });
+  }
+}
+
 import GitActionsControl from "./GitActionsControl";
 
 function findButtonByText(text: string): HTMLButtonElement | null {
@@ -260,12 +289,33 @@ function Harness() {
 }
 
 describe("GitActionsControl thread-scoped progress toast", () => {
+  beforeEach(() => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: ENVIRONMENT_A,
+      label: "Local environment",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "0.0.0-test",
+      capabilities: {
+        repositoryIdentity: true,
+        threadSettlement: false,
+        threadPriorityRanking: false,
+      },
+    });
+    setEnvironmentConfig(ENVIRONMENT_A, "ryco");
+    setEnvironmentConfig(ENVIRONMENT_B, "team/saved");
+    liveBranchRef.current = BRANCH_NAME;
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
     activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
     activeDraftThreadRef.current = null;
     hasServerThreadRef.current = true;
+    primaryServerConfigRef.current = null;
+    resetPrimaryEnvironmentDescriptorForTests();
+    resetSavedEnvironmentRuntimeStoreForTests();
+    liveBranchRef.current = "";
     document.body.innerHTML = "";
   });
 
@@ -415,6 +465,78 @@ describe("GitActionsControl thread-scoped progress toast", () => {
       await screen.unmount();
       host.remove();
     }
+  });
+
+  describe.each([
+    { environment: "primary", environmentId: ENVIRONMENT_A },
+    { environment: "saved", environmentId: ENVIRONMENT_B },
+  ])("$environment environment draft", ({ environmentId }) => {
+    it.each(["ryco", "team/custom", ""])(
+      "waits for configuration, then syncs with prefix %j",
+      async (worktreeBranchPrefix) => {
+        hasServerThreadRef.current = false;
+        activeDraftThreadRef.current = {
+          threadId: SHARED_THREAD_ID,
+          environmentId,
+          branch: null,
+          worktreePath: null,
+        };
+        setEnvironmentConfig(environmentId, null);
+        const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
+        const screen = await render(
+          <GitActionsControl gitCwd={GIT_CWD} activeThreadRef={threadRef} />,
+        );
+
+        try {
+          expect(setDraftThreadContextSpy).not.toHaveBeenCalled();
+          expect(setThreadBranchSpy).not.toHaveBeenCalled();
+
+          setEnvironmentConfig(environmentId, worktreeBranchPrefix);
+          await screen.rerender(<GitActionsControl gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
+
+          expect(setDraftThreadContextSpy).toHaveBeenCalledExactlyOnceWith(threadRef, {
+            branch: BRANCH_NAME,
+            worktreePath: null,
+          });
+          expect(setThreadBranchSpy).not.toHaveBeenCalled();
+        } finally {
+          await screen.unmount();
+        }
+      },
+    );
+
+    it("preserves a semantic branch only for its own temporary namespace", async () => {
+      hasServerThreadRef.current = false;
+      activeDraftThreadRef.current = {
+        threadId: SHARED_THREAD_ID,
+        environmentId,
+        branch: "feature/meaningful-name",
+        worktreePath: null,
+      };
+      setEnvironmentConfig(ENVIRONMENT_A, "team/primary");
+      liveBranchRef.current =
+        environmentId === ENVIRONMENT_A ? "team/primary/deadbeef" : "team/saved/deadbeef";
+      const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
+      const screen = await render(
+        <GitActionsControl gitCwd={GIT_CWD} activeThreadRef={threadRef} />,
+      );
+
+      try {
+        expect(setDraftThreadContextSpy).not.toHaveBeenCalled();
+
+        liveBranchRef.current =
+          environmentId === ENVIRONMENT_A ? "team/saved/deadbeef" : "team/primary/deadbeef";
+        await screen.rerender(<GitActionsControl gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
+
+        expect(setDraftThreadContextSpy).toHaveBeenCalledExactlyOnceWith(threadRef, {
+          branch: liveBranchRef.current,
+          worktreePath: null,
+        });
+        expect(setThreadBranchSpy).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    });
   });
 
   it("does not overwrite a selected base branch while a new worktree draft is being configured", async () => {
