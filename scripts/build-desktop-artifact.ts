@@ -13,6 +13,10 @@ import {
 } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { resolveCatalogDependencies, resolveCatalogOverrides } from "./lib/resolve-catalog.ts";
+import {
+  validateStagedNativePayloads,
+  validateStagedRuntimeDependencies,
+} from "./lib/validate-runtime-dependencies.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1364,6 +1368,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     { label: "bun install --production", verbose: options.verbose },
   );
   yield* pruneExternalizedDesktopDependencies(stageAppDir);
+  const runtimeImportCount = yield* Effect.try({
+    try: () => validateStagedRuntimeDependencies(stageAppDir),
+    catch: (cause) =>
+      new BuildScriptError({ message: "Staged runtime dependency validation failed.", cause }),
+  });
+  yield* Effect.log(
+    `[desktop-artifact] Validated ${runtimeImportCount} staged runtime import references.`,
+  );
 
   const buildEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -1416,6 +1428,21 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   );
 
   const stageDistDir = path.join(stageAppDir, "dist");
+  // Native addons may only become available after electron-builder's rebuild step.
+  // Presence is distinct from loading them under the target Electron ABI.
+  yield* Effect.try({
+    try: () =>
+      validateStagedNativePayloads(
+        stageAppDir,
+        options.platform === "mac" ? "darwin" : options.platform === "win" ? "win32" : "linux",
+        options.arch,
+      ),
+    catch: (cause) =>
+      new BuildScriptError({ message: "Staged native payload validation failed.", cause }),
+  });
+  yield* Effect.log(
+    "[desktop-artifact] Staged native payload presence validated; target runtime loadability is not asserted.",
+  );
   if (!(yield* fs.exists(stageDistDir))) {
     return yield* new BuildScriptError({
       message: `Build completed but dist directory was not found at ${stageDistDir}`,
