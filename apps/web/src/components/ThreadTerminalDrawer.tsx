@@ -1,3 +1,4 @@
+import { usePaneEffect } from "./chat/PaneFocus";
 import "@xterm/xterm/css/xterm.css";
 
 import { FitAddon } from "@xterm/addon-fit";
@@ -410,7 +411,7 @@ export function TerminalViewport({
     keybindingsRef.current = keybindings;
   }, [keybindings]);
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const mount = containerRef.current;
     if (!mount) return;
 

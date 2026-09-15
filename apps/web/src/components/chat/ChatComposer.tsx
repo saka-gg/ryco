@@ -1,3 +1,4 @@
+import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
 import type {
   ApprovalRequestId,
   ComposerSourceControlContext,
@@ -476,6 +477,7 @@ export const ChatComposer = memo(
     // ------------------------------------------------------------------
     // Store subscriptions (prompt / images / terminal contexts)
     // ------------------------------------------------------------------
+    const paneFocusedRef = usePaneFocusRef();
     const composerDraft = useComposerThreadDraft(composerDraftTarget);
     const prompt = composerDraft.prompt;
     const composerImages = composerDraft.images;
@@ -1460,7 +1462,7 @@ export const ChatComposer = memo(
         setComposerTrigger(detectComposerTrigger(next.text, nextExpandedCursor));
         if (options?.focusEditorAfterReplace !== false) {
           window.requestAnimationFrame(() => {
-            composerEditorRef.current?.focusAt(nextCursor);
+            paneFocusedRef.current && composerEditorRef.current?.focusAt(nextCursor);
           });
         }
         return true;
@@ -2164,7 +2166,7 @@ export const ChatComposer = memo(
 
     stashCommandHandlerRef.current = stashCurrentPrompt;
 
-    useLayoutEffect(() => {
+    usePaneEffect(() => {
       const handler = (event: globalThis.KeyboardEvent) => {
         if (event.defaultPrevented || event.isComposing) {
           return;
@@ -2264,11 +2266,11 @@ export const ChatComposer = memo(
         },
         focusAtEnd: () => {
           setIsReadingChat(false);
-          composerEditorRef.current?.focusAtEnd();
+          if (paneFocusedRef.current) composerEditorRef.current?.focusAtEnd();
         },
         focusAt: (cursor: number) => {
           setIsReadingChat(false);
-          composerEditorRef.current?.focusAt(cursor);
+          paneFocusedRef.current && composerEditorRef.current?.focusAt(cursor);
         },
         openModelPicker: () => {
           setIsComposerModelPickerOpen(true);
@@ -2330,7 +2332,7 @@ export const ChatComposer = memo(
           setComposerCursor(nextCollapsedCursor);
           setComposerTrigger(detectComposerTrigger(insertion.prompt, insertion.cursor));
           window.requestAnimationFrame(() => {
-            composerEditorRef.current?.focusAt(nextCollapsedCursor);
+            paneFocusedRef.current && composerEditorRef.current?.focusAt(nextCollapsedCursor);
           });
         },
         insertTriggerAtCursor: (text: string) => {
@@ -2358,7 +2360,7 @@ export const ChatComposer = memo(
           setComposerCursor(nextCollapsedCursor);
           setComposerTrigger(detectComposerTrigger(nextPrompt, nextExpandedCursor));
           window.requestAnimationFrame(() => {
-            composerEditorRef.current?.focusAt(nextCollapsedCursor);
+            paneFocusedRef.current && composerEditorRef.current?.focusAt(nextCollapsedCursor);
           });
         },
         getSendContext: () => ({

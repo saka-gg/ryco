@@ -1,3 +1,8 @@
+import { useChatPanesStore } from "../chatPanesStore";
+import { paneLeaves } from "../chatPanes.logic";
+import { useSideChatStore } from "../sideChatStore";
+import { getPreviewFileSession, resetPreviewFileSessionsForTests } from "./previewFileSessions";
+import { createPreviewFileDocument } from "./PreviewFileEditSession";
 // Production CSS is part of the behavior under test because row height depends on it.
 import "../index.css";
 
@@ -2503,6 +2508,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   beforeEach(async () => {
+    resetPreviewFileSessionsForTests();
     await rpcHarness.reset({
       resolveUnary: resolveWsRpc,
       getInitialStreamValues: (request) => {
@@ -2562,6 +2568,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     await parkPointer(4, 4);
     await setViewport(DEFAULT_VIEWPORT);
     localStorage.clear();
+    useChatPanesStore.setState({ root: null, activeRef: null });
     usePromptStashStore.setState({ entries: [] });
     document.body.innerHTML = "";
     wsRequests.length = 0;
@@ -2616,6 +2623,850 @@ describe("ChatView timeline estimator parity (full app)", () => {
     customWsRpcResolver = null;
     document.body.innerHTML = "";
   });
+
+  function gallerySnapshot() {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "gallery-user" as MessageId,
+      targetText: "Gallery source",
+    });
+    return {
+      ...snapshot,
+      threads: snapshot.threads.map((thread) =>
+        Object.assign({}, thread, {
+          messages: thread.messages.map((message, index) =>
+            index === 0
+              ? {
+                  ...message,
+                  attachments: [
+                    {
+                      type: "image" as const,
+                      id: "gallery-image",
+                      name: "gallery.svg",
+                      mimeType: "image/svg+xml",
+                      sizeBytes: ATTACHMENT_SVG.length,
+                    },
+                  ],
+                }
+              : message,
+          ),
+        }),
+      ),
+    };
+  }
+
+  it("thread gallery real action opens images, loads older history explicitly and restores focus", async () => {
+    const historyRequests: NormalizedWsRpcRequestBody[] = [];
+    const older = createUserMessage({
+      id: "gallery-older" as MessageId,
+      text: "Older image",
+      offsetSeconds: 0,
+      attachments: [
+        {
+          type: "image",
+          id: "older-image",
+          name: "older.svg",
+          mimeType: "image/svg+xml",
+          sizeBytes: ATTACHMENT_SVG.length,
+        },
+      ],
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: gallerySnapshot(),
+      resolveRpc: (body) => {
+        if (body._tag !== ORCHESTRATION_WS_METHODS.getThreadHistoryPage) return undefined;
+        historyRequests.push(body);
+        return {
+          collection: "messages",
+          snapshotSequence: fixture.snapshot.snapshotSequence,
+          items: [older],
+          page: { oldestCursor: null, newestCursor: null, hasMoreBefore: false },
+        };
+      },
+    });
+    try {
+      await waitForComposerEditor();
+      useStore.setState((state) => {
+        const env = state.environmentStateById[THREAD_REF.environmentId]!;
+        const history = env.threadHistoryByThreadId![THREAD_ID]!;
+        return {
+          environmentStateById: {
+            ...state.environmentStateById,
+            [THREAD_REF.environmentId]: {
+              ...env,
+              threadHistoryByThreadId: {
+                ...env.threadHistoryByThreadId,
+                [THREAD_ID]: {
+                  ...history,
+                  messages: {
+                    ...history.messages,
+                    hasMoreBefore: true,
+                    oldestCursor: "gallery-cursor" as NonNullable<
+                      typeof history.messages.oldestCursor
+                    >,
+                  },
+                },
+              },
+            },
+          },
+        };
+      });
+      await page.getByRole("button", { name: "Thread images", exact: true }).click();
+      await expect.element(page.getByRole("dialog", { name: "Thread images" })).toBeVisible();
+      await expect
+        .element(page.getByText("Images in loaded history · Newest messages first"))
+        .toBeVisible();
+      expect(historyRequests).toHaveLength(0);
+      await page.getByRole("button", { name: "Load older messages", exact: true }).click();
+      await expect.element(page.getByRole("button", { name: "Preview older.svg" })).toBeVisible();
+      expect(historyRequests).toHaveLength(1);
+      expect(historyRequests[0]).toMatchObject({
+        threadId: THREAD_ID,
+        collection: "messages",
+        mode: { kind: "before", cursor: "gallery-cursor" },
+        limit: 150,
+      });
+      await page.getByRole("button", { name: "Preview gallery.svg" }).click();
+      await expect
+        .element(page.getByRole("img", { name: "gallery.svg", exact: true }).last())
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("link", { name: "Download gallery.svg" }).last())
+        .toHaveAttribute("download", "gallery.svg");
+      await page.screenshot({ path: "../../../../output/task22-app-gallery.png" });
+      await userEvent.keyboard("{Escape}");
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(page.getByRole("button", { name: "Thread images", exact: true }))
+        .toHaveFocus();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("thread gallery two-pane focus loss cancels RPC and never restores an inactive modal", async () => {
+    const other = "gallery-other-thread" as ThreadId;
+    const mounted = await mountChatView({
+      viewport: { ...DEFAULT_VIEWPORT, width: 1600, height: 1000 },
+      snapshot: addThreadToSnapshot(gallerySnapshot(), other),
+    });
+    try {
+      await waitForComposerEditor();
+      useChatPanesStore.getState().open(threadRefFor(other), "right", THREAD_REF);
+      await vi.waitFor(() =>
+        expect(
+          document.querySelectorAll('[data-pane-thread] [aria-label="Thread images"]'),
+        ).toHaveLength(2),
+      );
+      const api = readEnvironmentApi(THREAD_REF.environmentId)!;
+      let resolve!: (result: { offset: number; totalBytes: number; dataBase64: string }) => void;
+      const readChunk = vi.fn(
+        () =>
+          new Promise<{ offset: number; totalBytes: number; dataBase64: string }>((done) => {
+            resolve = done;
+          }),
+      );
+      __setEnvironmentApiOverrideForTests(THREAD_REF.environmentId, {
+        ...api,
+        attachments: { readChunk },
+      });
+      useStore.setState((state) => {
+        const env = state.environmentStateById[THREAD_REF.environmentId]!;
+        const messages = Object.fromEntries(
+          Object.entries(env.messageByThreadId[THREAD_ID]!).map(([id, message]) => [
+            id,
+            {
+              ...message,
+              attachments: message.attachments?.map(
+                ({ previewUrl: _url, ...attachment }) => attachment,
+              ),
+            },
+          ]),
+        );
+        return {
+          environmentStateById: {
+            ...state.environmentStateById,
+            [THREAD_REF.environmentId]: {
+              ...env,
+              messageByThreadId: { ...env.messageByThreadId, [THREAD_ID]: messages },
+            },
+          },
+        };
+      });
+      const sourcePane = document.querySelector<HTMLElement>(`[data-pane-thread="${THREAD_KEY}"]`)!;
+      const sourceAction = sourcePane.querySelector<HTMLButtonElement>(
+        '[aria-label="Thread images"]',
+      )!;
+      sourceAction.click();
+      await page.getByRole("button", { name: "Preview gallery.svg" }).click();
+      expect(readChunk).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: "Load image", exact: true }).click();
+      await vi.waitFor(() => expect(readChunk).toHaveBeenCalledOnce());
+      const create = vi.spyOn(URL, "createObjectURL");
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: threadRefFor(other),
+      });
+      await vi.waitFor(() => expect(sourcePane.dataset.paneFocused).toBe("false"));
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      resolve({ offset: 0, totalBytes: ATTACHMENT_SVG.length, dataBase64: btoa(ATTACHMENT_SVG) });
+      await waitForLayout();
+      expect(create).not.toHaveBeenCalled();
+      expect(sourcePane.contains(document.activeElement)).toBe(false);
+      sourceAction.click();
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      await mounted.router.navigate({ to: "/$environmentId/$threadId", params: THREAD_REF });
+      await vi.waitFor(() => expect(sourcePane.dataset.paneFocused).toBe("true"));
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      sourceAction.click();
+      await page.getByRole("button", { name: "Preview gallery.svg" }).click();
+      readChunk.mockResolvedValue({
+        offset: 0,
+        totalBytes: ATTACHMENT_SVG.length,
+        dataBase64: btoa(ATTACHMENT_SVG),
+      });
+      await page.getByRole("button", { name: "Load image", exact: true }).click();
+      await expect.element(page.getByRole("link", { name: "Download gallery.svg" })).toBeVisible();
+      const revoke = vi.spyOn(URL, "revokeObjectURL");
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: threadRefFor(other),
+      });
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      expect(revoke).toHaveBeenCalled();
+      create.mockRestore();
+      revoke.mockRestore();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("pane focus isolates real thread search and preserves neighboring composer drafts", async () => {
+    const other = "pane-other-thread" as ThreadId;
+    const mounted = await mountChatView({
+      viewport: { ...DEFAULT_VIEWPORT, width: 1600, height: 1000 },
+      snapshot: addThreadToSnapshot(selectionSnapshot(), other),
+      configureFixture: (fixture) => {
+        fixture.serverConfig = {
+          ...fixture.serverConfig,
+          keybindings: [
+            {
+              ...COMPOSER_STASH_KEYBINDING,
+              command: "thread.find",
+              shortcut: { ...COMPOSER_STASH_KEYBINDING.shortcut, key: "f" },
+            },
+          ],
+        };
+      },
+    });
+    try {
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "First pane draft");
+      useComposerDraftStore.getState().setPrompt(threadRefFor(other), "Second pane draft");
+      useChatPanesStore.getState().open(threadRefFor(other), "right", THREAD_REF);
+      await vi.waitFor(() =>
+        expect(
+          document.querySelectorAll('[data-pane-thread] [data-testid="composer-editor"]').length,
+        ).toBe(2),
+      );
+      const pane = document.querySelector<HTMLElement>(
+        `[data-pane-thread="${threadKeyFor(other)}"]`,
+      )!;
+      pane.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+      await vi.waitFor(() => expect(pane.dataset.paneFocused).toBe("true"));
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "f",
+          code: "KeyF",
+          metaKey: isMacPlatform(navigator.platform),
+          ctrlKey: !isMacPlatform(navigator.platform),
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(pane.querySelector('[data-thread-message-search="true"]')).not.toBeNull(),
+      );
+      expect(document.querySelectorAll('[data-thread-message-search="true"]')).toHaveLength(1);
+      expect(composerDraftFor(THREAD_KEY)?.prompt).toBe("First pane draft");
+      expect(composerDraftFor(threadKeyFor(other))?.prompt).toBe("Second pane draft");
+      await page.screenshot({ path: "../../../../output/task12/two-panes.png" });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("pane grid remains usable at four views and narrows without losing drafts", async () => {
+    const ids = ["pane-b", "pane-c", "pane-d"] as ThreadId[];
+    const snapshot = ids.reduce<OrchestrationReadModel>(
+      (snapshot, id) => addThreadToSnapshot(snapshot, id),
+      selectionSnapshot(),
+    );
+    const mounted = await mountChatView({
+      viewport: { ...DEFAULT_VIEWPORT, width: 1600, height: 1000 },
+      snapshot,
+    });
+    try {
+      const panes = useChatPanesStore.getState();
+      panes.open(threadRefFor(ids[0]!), "right", THREAD_REF);
+      panes.open(threadRefFor(ids[1]!), "bottom", THREAD_REF);
+      panes.open(threadRefFor(ids[2]!), "bottom", threadRefFor(ids[0]!));
+      await vi.waitFor(() =>
+        expect(
+          document.querySelectorAll('[data-pane-thread] [data-testid="composer-editor"]').length,
+        ).toBe(4),
+      );
+      await waitForLayout();
+      await page.screenshot({ path: "../../../../output/task12/four-panes.png" });
+      await mounted.setViewport({ ...DEFAULT_VIEWPORT, width: 1000, height: 800 });
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("[data-pane-thread]:not([hidden])")).toHaveLength(1),
+      );
+      await page.screenshot({ path: "../../../../output/task12/narrow-panes.png" });
+      expect(paneLeaves(useChatPanesStore.getState().root!)).toHaveLength(4);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("pane layout retains a detached local draft and an omitted server thread across snapshots", async () => {
+    const mounted = await mountChatView({
+      viewport: { ...DEFAULT_VIEWPORT, width: 1600, height: 1000 },
+      snapshot: selectionSnapshot(),
+    });
+    try {
+      const drafts = useComposerDraftStore.getState();
+      const draftId = DraftId.make("pane-detached-draft");
+      drafts.setLogicalProjectDraftThreadId(
+        PROJECT_LOGICAL_KEY,
+        { environmentId: LOCAL_ENVIRONMENT_ID, projectId: PROJECT_ID },
+        draftId,
+      );
+      drafts.setPrompt(draftId, "Unsent detached work");
+      const session = drafts.getDraftSession(draftId)!;
+      const draftRef = threadRefFor(session.threadId);
+      useChatPanesStore.getState().open(draftRef, "right", THREAD_REF);
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("[data-pane-thread]")).toHaveLength(2),
+      );
+      // A replacing shell omits a thread; omission must not retire its pane.
+      useStore.getState().removeThread(THREAD_REF);
+      await waitForLayout();
+      expect(paneLeaves(useChatPanesStore.getState().root!)).toEqual([THREAD_REF, draftRef]);
+      expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+        "Unsent detached work",
+      );
+      const pane = document.querySelector<HTMLElement>(
+        `[data-pane-thread="${threadKeyFor(session.threadId)}"]`,
+      )!;
+      pane.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+      await vi.waitFor(() => expect(pane.dataset.paneFocused).toBe("true"));
+      expect(pane.textContent).not.toContain("Thread unavailable");
+      expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+        "Unsent detached work",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  async function selectTranscriptQuote() {
+    const node = await waitForElement<HTMLElement>(
+      () => document.querySelector('[data-selection-message-id="msg-assistant-21"]'),
+      "Assistant selection target",
+    );
+    node.focus();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    await userEvent.keyboard("{Alt>}{Enter}{/Alt}");
+    await expect.element(page.getByRole("toolbar", { name: "Selection actions" })).toBeVisible();
+  }
+
+  function selectionSnapshot() {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "selection-user" as MessageId,
+      targetText: "Selection source",
+    });
+    return {
+      ...snapshot,
+      threads: snapshot.threads.map((thread) => ({
+        ...thread,
+        messages: thread.messages.slice(-2),
+      })),
+    };
+  }
+
+  it("selection actions preserve current and Side drafts without sending", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: selectionSnapshot(),
+    });
+    try {
+      await waitForComposerEditor();
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "My current draft");
+      useSideChatStore
+        .getState()
+        .open(
+          THREAD_KEY,
+          { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          "My side draft",
+        );
+      useSideChatStore.getState().close(THREAD_KEY);
+      await waitForLayout();
+      await selectTranscriptQuote();
+      await page
+        .getByRole("button", { name: "Add to chat", exact: true })
+        .click({ timeout: 4_000 });
+      await vi.waitFor(() =>
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toContain(
+          "My current draft\n\nQuoted assistant text",
+        ),
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toContain(
+        "> assistant filler 21",
+      );
+      await waitForLayout();
+      await selectTranscriptQuote();
+      await page
+        .getByRole("button", { name: "Add to Side", exact: true })
+        .click({ timeout: 4_000 });
+      await vi.waitFor(() =>
+        expect(useSideChatStore.getState().chatsByThreadKey[THREAD_KEY]?.draft).toContain(
+          "My side draft\n\nQuoted assistant text",
+        ),
+      );
+      await expect.element(page.getByLabelText("Side question")).toBeVisible();
+      expect(
+        wsRequests.some((request) => request._tag === WS_METHODS.textGenerationAskSideQuestion),
+      ).toBe(false);
+    } finally {
+      useSideChatStore.setState({ chatsByThreadKey: {} });
+      await mounted.cleanup();
+    }
+  });
+
+  it("selection mini composer preserves input on autosave failure and transfers a fresh draft after retry", async () => {
+    const snapshot = selectionSnapshot();
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    let unsubscribe = () => {};
+    try {
+      await waitForComposerEditor();
+      const drafts = useComposerDraftStore.getState();
+      const original = DraftId.make("existing-project-draft");
+      drafts.setLogicalProjectDraftThreadId(
+        PROJECT_LOGICAL_KEY,
+        { environmentId: LOCAL_ENVIRONMENT_ID, projectId: PROJECT_ID },
+        original,
+      );
+      drafts.setPrompt(original, "Keep existing project draft");
+      drafts.setPrompt(THREAD_REF, "Keep source draft");
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const file = {
+        relativePath: "selection.ts",
+        contents: "saved",
+        version: "v1",
+        encoding: "utf8" as const,
+        lineEnding: "lf" as const,
+      };
+      let fail = true;
+      let writes = 0;
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+        ...api,
+        projects: {
+          ...api.projects,
+          readFile: async () => file,
+          writeFile: async () => {
+            writes++;
+            if (fail) throw new Error("Disk full");
+            return { relativePath: file.relativePath, version: "v2" };
+          },
+        },
+      });
+      const scope = { environmentId: LOCAL_ENVIRONMENT_ID, cwd: "/repo/project" };
+      const owner = getPreviewFileSession(scope, createPreviewFileDocument(scope, file));
+      unsubscribe = owner.subscribe(() => {});
+      owner.change("Keep file draft");
+      await selectTranscriptQuote();
+      await page.getByRole("button", { name: "New chat", exact: true }).click();
+      await page
+        .getByRole("textbox", { name: "Message for new chat" })
+        .fill("Explain the selection");
+      await page.getByRole("button", { name: "Open in chat", exact: true }).click();
+      await expect
+        .element(page.getByRole("dialog", { name: "New chat from selection" }).getByRole("alert"))
+        .toHaveTextContent("Save the pending file changes");
+      await expect
+        .element(page.getByRole("textbox", { name: "Message for new chat" }))
+        .toHaveTextContent("Explain the selection");
+      await page.screenshot({ path: "../../../../output/task09/full-app-save-failure.png" });
+      expect(owner.getSnapshot().contents).toBe("Keep file draft");
+      expect(mounted.router.state.location.pathname).toBe(`/${LOCAL_ENVIRONMENT_ID}/${THREAD_ID}`);
+      expect(writes).toBe(1);
+      fail = false;
+      expect(await owner.flush(true)).toBe(true);
+      await page.getByRole("button", { name: "Open in chat", exact: true }).click();
+      await vi.waitFor(() =>
+        expect(mounted.router.state.location.pathname).toMatch(/^\/draft\/selection-/),
+      );
+      const fresh = DraftId.make(mounted.router.state.location.pathname.split("/").at(-1)!);
+      expect(drafts.getComposerDraft(fresh)?.prompt).toContain(
+        "Explain the selection\n\nQuoted assistant text",
+      );
+      expect(drafts.getComposerDraft(fresh)?.prompt).toContain("> assistant filler 21");
+      expect(drafts.getComposerDraft(original)?.prompt).toBe("Keep existing project draft");
+      expect(drafts.getComposerDraft(THREAD_REF)?.prompt).toBe("Keep source draft");
+      expect(drafts.getDraftSessionByLogicalProjectKey(PROJECT_LOGICAL_KEY)?.draftId).toBe(
+        original,
+      );
+    } finally {
+      unsubscribe();
+      await mounted.cleanup();
+    }
+  });
+
+  it("selection fresh-draft retry does not replace a concurrent destination edit", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: selectionSnapshot(),
+    });
+    let navigation: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await waitForComposerEditor();
+      navigation = vi.spyOn(mounted.router, "navigate").mockImplementationOnce(async (options) => {
+        const params = options.params as unknown as { draftId: string };
+        useComposerDraftStore
+          .getState()
+          .setPrompt(DraftId.make(params.draftId), "Concurrent destination edit");
+        throw new Error("Navigation interrupted");
+      });
+      await selectTranscriptQuote();
+      await page.getByRole("button", { name: "New chat", exact: true }).click();
+      await page.getByRole("textbox", { name: "Message for new chat" }).fill("Original mini draft");
+      await page.getByRole("button", { name: "Open in chat", exact: true }).click();
+      await expect
+        .element(page.getByRole("dialog", { name: "New chat from selection" }).getByRole("alert"))
+        .toHaveTextContent("Navigation interrupted");
+      await page.getByRole("button", { name: "Open in chat", exact: true }).click();
+      await expect
+        .element(page.getByRole("dialog", { name: "New chat from selection" }).getByRole("alert"))
+        .toHaveTextContent("destination draft changed elsewhere");
+      const destination = Object.entries(useComposerDraftStore.getState().draftsByThreadKey).find(
+        ([key]) => key.startsWith("selection-"),
+      );
+      expect(destination?.[1].prompt).toBe("Concurrent destination edit");
+      await expect
+        .element(page.getByRole("textbox", { name: "Message for new chat" }))
+        .toHaveTextContent("Original mini draft");
+      expect(navigation).toHaveBeenCalledOnce();
+    } finally {
+      navigation?.mockRestore();
+      await mounted.cleanup();
+    }
+  });
+
+  it("selection new-chat sends use the normal first-turn queue and retain failed snapshots", async () => {
+    const snapshot = selectionSnapshot();
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    try {
+      await waitForComposerEditor();
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      let attempts = 0;
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+        ...api,
+        orchestration: {
+          ...api.orchestration,
+          dispatchCommand: async (command) => {
+            if (command.type === "thread.turn.start") {
+              attempts++;
+              throw new Error("Provider unavailable");
+            }
+            return { sequence: snapshot.snapshotSequence + 1 };
+          },
+        },
+      });
+      await selectTranscriptQuote();
+      await page.getByRole("button", { name: "New chat", exact: true }).click();
+      await page.getByRole("textbox", { name: "Message for new chat" }).fill("Explain it");
+      await page
+        .getByRole("dialog", { name: "New chat from selection" })
+        .getByRole("button", { name: "Send", exact: true })
+        .click();
+      await vi.waitFor(() => expect(attempts).toBe(1), { timeout: 8_000 });
+      const queued = Object.values(useMessageQueueStore.getState().queuesByThreadKey).flat();
+      await vi.waitFor(() =>
+        expect(
+          Object.values(useMessageQueueStore.getState().queuesByThreadKey).flat()[0]
+            ?.deliveryStatus,
+        ).toBe("failed"),
+      );
+      expect(queued[0]?.composer.prompt).toContain("Explain it\n\nQuoted assistant text");
+      expect(queued[0]?.composer.prompt).toContain("> assistant filler 21");
+      await waitForLayout();
+      expect(attempts).toBe(1);
+      await expect
+        .element(page.getByRole("button", { name: /Retry queued message/ }))
+        .toBeVisible();
+    } finally {
+      useMessageQueueStore.setState({ queuesByThreadKey: {}, steeringIdsByThreadKey: {} });
+      await mounted.cleanup();
+    }
+  });
+
+  it.each([false, true])(
+    "drains editor saves before direct send and preserves drafts on failure=%s",
+    async (fail) => {
+      const snapshot = createSnapshotForTargetUser({
+        targetMessageId: "editor-send-existing" as MessageId,
+        targetText: "Existing turn",
+      });
+      const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+      let unsubscribe = () => {};
+      try {
+        await waitForComposerEditor();
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        let finish!: () => void;
+        let writes = 0;
+        let starts = 0;
+        const file = {
+          relativePath: "app.ts",
+          contents: "saved",
+          version: "v1",
+          encoding: "utf8" as const,
+          lineEnding: "lf" as const,
+        };
+        __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+          ...api,
+          projects: {
+            ...api.projects,
+            readFile: async () => file,
+            writeFile: () => {
+              writes++;
+              return new Promise((resolve, reject) => {
+                finish = () =>
+                  fail
+                    ? reject({ reason: "conflict", message: "External edit" })
+                    : resolve({ relativePath: "app.ts", version: "v2" });
+              });
+            },
+          },
+          orchestration: {
+            ...api.orchestration,
+            dispatchCommand: async (command) => {
+              if (command.type === "thread.turn.start") starts++;
+              return { sequence: snapshot.snapshotSequence + 1 };
+            },
+          },
+        });
+        const scope = { environmentId: LOCAL_ENVIRONMENT_ID, cwd: "/repo/project" };
+        const owner = getPreviewFileSession(scope, createPreviewFileDocument(scope, file));
+        unsubscribe = owner.subscribe(() => {});
+        owner.change("editor draft");
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use my edited file");
+        await waitForLayout();
+        (await waitForSendButton()).click();
+        await vi.waitFor(() => expect(writes).toBe(1));
+        expect(starts).toBe(0);
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Use my edited file",
+        );
+        finish();
+        if (fail) {
+          await vi.waitFor(() => expect(owner.getSnapshot().saveStatus).toBe("conflict"));
+          expect(starts).toBe(0);
+          expect(owner.getSnapshot().contents).toBe("editor draft");
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+            "Use my edited file",
+          );
+        } else {
+          await vi.waitFor(() => expect(starts).toBe(1));
+          expect(owner.dirty).toBe(false);
+        }
+      } finally {
+        unsubscribe();
+        resetPreviewFileSessionsForTests();
+        __resetEnvironmentApiOverridesForTests();
+        await mounted.cleanup();
+      }
+    },
+  );
+
+  it.each(["text", "attachment"] as const)(
+    "preserves later composer %s during the direct editor-save barrier",
+    async (editKind) => {
+      const snapshot = createSnapshotForTargetUser({
+        targetMessageId: "editor-send-existing" as MessageId,
+        targetText: "Existing turn",
+      });
+      const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+      let unsubscribe = () => {};
+      try {
+        await waitForComposerEditor();
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        let finish!: () => void;
+        let writes = 0;
+        let starts = 0;
+        const file = {
+          relativePath: "app.ts",
+          contents: "saved",
+          version: "v1",
+          encoding: "utf8" as const,
+          lineEnding: "lf" as const,
+        };
+        __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+          ...api,
+          projects: {
+            ...api.projects,
+            readFile: async () => file,
+            writeFile: () => {
+              writes++;
+              return new Promise((resolve) => {
+                finish = () => resolve({ relativePath: "app.ts", version: "v2" });
+              });
+            },
+          },
+          orchestration: {
+            ...api.orchestration,
+            dispatchCommand: async (command) => {
+              if (command.type === "thread.turn.start") starts++;
+              return { sequence: snapshot.snapshotSequence + 1 };
+            },
+          },
+        });
+        const scope = { environmentId: LOCAL_ENVIRONMENT_ID, cwd: "/repo/project" };
+        const owner = getPreviewFileSession(scope, createPreviewFileDocument(scope, file));
+        unsubscribe = owner.subscribe(() => {});
+        owner.change("editor draft");
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use my edited file");
+        await waitForLayout();
+        (await waitForSendButton()).click();
+        await vi.waitFor(() => expect(writes).toBe(1));
+        expect(starts).toBe(0);
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Use my edited file",
+        );
+        if (editKind === "text")
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Later typing");
+        else
+          useComposerDraftStore
+            .getState()
+            .addImage(THREAD_REF, createBrowserComposerImage({ id: "later-attachment" }));
+        await waitForLayout();
+        finish();
+        await vi.waitFor(() => expect(starts).toBe(1));
+        expect(owner.dirty).toBe(false);
+        const draft = useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+        expect(draft?.prompt).toBe(editKind === "text" ? "Later typing" : "Use my edited file");
+        expect(draft?.images.map((image) => image.id)).toEqual(
+          editKind === "attachment" ? ["later-attachment"] : [],
+        );
+      } finally {
+        unsubscribe();
+        resetPreviewFileSessionsForTests();
+        __resetEnvironmentApiOverridesForTests();
+        await mounted.cleanup();
+      }
+    },
+  );
+
+  it.each(["text", "attachment"] as const)(
+    "preserves later composer %s during the enqueue editor-save barrier",
+    async (editKind) => {
+      const snapshot = createSnapshotForTargetUser({
+        targetMessageId: "editor-send-existing" as MessageId,
+        targetText: "Existing turn",
+        sessionStatus: "running",
+      });
+      const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+      let unsubscribe = () => {};
+      try {
+        await waitForComposerEditor();
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        let finish!: () => void;
+        let writes = 0;
+        let starts = 0;
+        const file = {
+          relativePath: "app.ts",
+          contents: "saved",
+          version: "v1",
+          encoding: "utf8" as const,
+          lineEnding: "lf" as const,
+        };
+        __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+          ...api,
+          projects: {
+            ...api.projects,
+            readFile: async () => file,
+            writeFile: () => {
+              writes++;
+              return new Promise((resolve) => {
+                finish = () => resolve({ relativePath: "app.ts", version: "v2" });
+              });
+            },
+          },
+          orchestration: {
+            ...api.orchestration,
+            dispatchCommand: async (command) => {
+              if (command.type === "thread.turn.start") starts++;
+              return { sequence: snapshot.snapshotSequence + 1 };
+            },
+          },
+        });
+        const scope = { environmentId: LOCAL_ENVIRONMENT_ID, cwd: "/repo/project" };
+        const owner = getPreviewFileSession(scope, createPreviewFileDocument(scope, file));
+        unsubscribe = owner.subscribe(() => {});
+        owner.change("editor draft");
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use my edited file");
+        await waitForLayout();
+        (await waitForComposerEditor()).focus();
+        await userEvent.keyboard("{Enter}");
+        await vi.waitFor(() => expect(writes).toBe(1));
+        expect(starts).toBe(0);
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Use my edited file",
+        );
+        if (editKind === "text")
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Later typing");
+        else
+          useComposerDraftStore
+            .getState()
+            .addImage(THREAD_REF, createBrowserComposerImage({ id: "later-attachment" }));
+        await waitForLayout();
+        finish();
+        await vi.waitFor(() =>
+          expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1),
+        );
+        expect(starts).toBe(0);
+        expect(owner.dirty).toBe(false);
+        const draft = useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+        expect(draft?.prompt).toBe(editKind === "text" ? "Later typing" : "Use my edited file");
+        expect(draft?.images.map((image) => image.id)).toEqual(
+          editKind === "attachment" ? ["later-attachment"] : [],
+        );
+      } finally {
+        useMessageQueueStore.getState().clear(THREAD_KEY);
+        unsubscribe();
+        resetPreviewFileSessionsForTests();
+        __resetEnvironmentApiOverridesForTests();
+        await mounted.cleanup();
+      }
+    },
+  );
 
   it("retains a failed queued send and the next draft until explicit retry", async () => {
     const snapshot = createSnapshotForTargetUser({
@@ -2679,6 +3530,267 @@ describe("ChatView timeline estimator parity (full app)", () => {
       );
     } finally {
       useMessageQueueStore.getState().clear(THREAD_KEY);
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("blocks queued dispatch on editor failure and retains the next composer draft", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "existing-queue-test" as MessageId,
+      targetText: "Existing turn",
+    });
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    try {
+      await waitForComposerEditor();
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      let turnAttempts = 0;
+      let failWrite = true;
+      const file = {
+        relativePath: "queue.ts",
+        contents: "saved",
+        version: "v1",
+        encoding: "utf8" as const,
+        lineEnding: "lf" as const,
+      };
+      const dispatchCommand: EnvironmentApi["orchestration"]["dispatchCommand"] = async (
+        command,
+      ) => {
+        if (command.type === "thread.turn.start") {
+          turnAttempts++;
+        }
+        return { sequence: snapshot.snapshotSequence + 1 };
+      };
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+        ...api,
+        orchestration: { ...api.orchestration, dispatchCommand },
+        projects: {
+          ...api.projects,
+          readFile: async () => file,
+          writeFile: async () => {
+            if (failWrite) throw new Error("Temporary file write failure");
+            return { relativePath: "queue.ts", version: "v2" };
+          },
+        },
+      });
+      const scope = { environmentId: LOCAL_ENVIRONMENT_ID, cwd: "/repo/project" };
+      const owner = getPreviewFileSession(scope, createPreviewFileDocument(scope, file));
+      const unsubscribe = owner.subscribe(() => {});
+      owner.change("queued editor draft");
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep my next draft");
+      await waitForLayout();
+      const modelSelection = snapshot.threads[0]!.modelSelection;
+      useMessageQueueStore.getState().enqueue(THREAD_KEY, {
+        id: "queued-retry-browser",
+        composer: {
+          prompt: "Queued earlier",
+          trimmedPrompt: "Queued earlier",
+          images: [],
+          sendableTerminalContexts: [],
+          sourceControlContexts: [],
+          selectedProvider: ProviderDriverKind.make("codex"),
+          selectedModel: modelSelection.model,
+          selectedProviderModels: [],
+          selectedPromptEffort: null,
+          selectedModelSelection: modelSelection,
+          expiredTerminalContextCount: 0,
+        },
+        settings: { runtimeMode: "full-access", interactionMode: "default", tokenMode: "balanced" },
+      });
+      await vi.waitFor(() =>
+        expect(
+          useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]?.[0]?.deliveryStatus,
+        ).toBe("failed"),
+      );
+      expect(turnAttempts).toBe(0);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep my next draft",
+      );
+      failWrite = false;
+      expect(await owner.flush(true)).toBe(true);
+      unsubscribe();
+      await page.getByRole("button", { name: /Retry queued message/ }).click();
+      await vi.waitFor(() =>
+        expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(0),
+      );
+      expect(turnAttempts).toBe(1);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep my next draft",
+      );
+    } finally {
+      useMessageQueueStore.getState().clear(THREAD_KEY);
+      resetPreviewFileSessionsForTests();
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it.each([false, true])(
+    "blocks plan implementation on editor failure (new thread=%s)",
+    async (newThread) => {
+      useUiStateStore.getState().setAlwaysUseBuildMode(false);
+      const snapshot = createSnapshotWithPlanFollowUpPrompt();
+      const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+      let unsubscribe = () => {};
+      try {
+        await waitForComposerEditor();
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        const file = {
+          relativePath: "plan.ts",
+          contents: "saved",
+          version: "v1",
+          encoding: "utf8" as const,
+          lineEnding: "lf" as const,
+        };
+        let mutations = 0;
+        __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+          ...api,
+          projects: {
+            ...api.projects,
+            readFile: async () => file,
+            writeFile: async () => {
+              throw new Error("Disk unavailable");
+            },
+          },
+          orchestration: {
+            ...api.orchestration,
+            dispatchCommand: async () => {
+              mutations++;
+              return { sequence: snapshot.snapshotSequence + 1 };
+            },
+          },
+        });
+        const scope = { environmentId: LOCAL_ENVIRONMENT_ID, cwd: "/repo/project" };
+        const owner = getPreviewFileSession(scope, createPreviewFileDocument(scope, file));
+        unsubscribe = owner.subscribe(() => {});
+        owner.change("plan editor draft");
+        if (newThread) {
+          await page.getByRole("button", { name: "Implementation actions" }).click();
+          await page.getByRole("menuitem", { name: "Implement in a new thread" }).click();
+        } else {
+          (await waitForButtonByText("Implement")).click();
+        }
+        await vi.waitFor(() => expect(owner.getSnapshot().saveStatus).toBe("error"));
+        expect(mutations).toBe(0);
+        expect(owner.getSnapshot().contents).toBe("plan editor draft");
+      } finally {
+        unsubscribe();
+        resetPreviewFileSessionsForTests();
+        __resetEnvironmentApiOverridesForTests();
+        await mounted.cleanup();
+      }
+    },
+  );
+
+  it("blocks queued steering on editor failure and retains the message", async () => {
+    const base = createSnapshotForTargetUser({
+      targetMessageId: "steer-existing" as MessageId,
+      targetText: "Existing turn",
+      sessionStatus: "running",
+    });
+    const snapshot: OrchestrationReadModel = {
+      ...base,
+      threads: base.threads.map((thread) => ({
+        ...thread,
+        session: {
+          ...thread.session!,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          activeTurnId: "steer-turn" as TurnId,
+        },
+      })),
+    };
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot,
+      configureFixture: (value) => {
+        value.serverConfig = {
+          ...value.serverConfig,
+          providers: value.serverConfig.providers.map((provider) => ({
+            ...provider,
+            supportsTurnSteering: true,
+          })),
+        };
+      },
+    });
+    try {
+      await waitForComposerEditor();
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      let turnAttempts = 0;
+      let failWrite = true;
+      const file = {
+        relativePath: "queue.ts",
+        contents: "saved",
+        version: "v1",
+        encoding: "utf8" as const,
+        lineEnding: "lf" as const,
+      };
+      const dispatchCommand: EnvironmentApi["orchestration"]["dispatchCommand"] = async (
+        command,
+      ) => {
+        if (command.type === "thread.turn.steer") {
+          turnAttempts++;
+        }
+        return { sequence: snapshot.snapshotSequence + 1 };
+      };
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+        ...api,
+        orchestration: { ...api.orchestration, dispatchCommand },
+        projects: {
+          ...api.projects,
+          readFile: async () => file,
+          writeFile: async () => {
+            if (failWrite) throw new Error("Temporary file write failure");
+            return { relativePath: "queue.ts", version: "v2" };
+          },
+        },
+      });
+      const scope = { environmentId: LOCAL_ENVIRONMENT_ID, cwd: "/repo/project" };
+      const owner = getPreviewFileSession(scope, createPreviewFileDocument(scope, file));
+      const unsubscribe = owner.subscribe(() => {});
+      owner.change("queued editor draft");
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep my next draft");
+      await waitForLayout();
+      const modelSelection = snapshot.threads[0]!.modelSelection;
+      useMessageQueueStore.getState().enqueue(THREAD_KEY, {
+        id: "queued-retry-browser",
+        composer: {
+          prompt: "Queued earlier",
+          trimmedPrompt: "Queued earlier",
+          images: [],
+          sendableTerminalContexts: [],
+          sourceControlContexts: [],
+          selectedProvider: ProviderDriverKind.make("codex"),
+          selectedModel: modelSelection.model,
+          selectedProviderModels: [],
+          selectedPromptEffort: null,
+          selectedModelSelection: modelSelection,
+          expiredTerminalContextCount: 0,
+        },
+        settings: { runtimeMode: "full-access", interactionMode: "default", tokenMode: "balanced" },
+      });
+      const steer = page.getByRole("button", {
+        name: /Steer queued message.*into the active turn/,
+      });
+      await expect.element(steer).toBeEnabled();
+      await steer.click();
+      await vi.waitFor(() => expect(owner.getSnapshot().saveStatus).toBe("error"));
+      expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1);
+      expect(turnAttempts).toBe(0);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep my next draft",
+      );
+      failWrite = false;
+      expect(await owner.flush(true)).toBe(true);
+      unsubscribe();
+      await steer.click();
+      await vi.waitFor(() => expect(turnAttempts).toBe(1));
+      expect(turnAttempts).toBe(1);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep my next draft",
+      );
+    } finally {
+      useMessageQueueStore.getState().clear(THREAD_KEY);
+      resetPreviewFileSessionsForTests();
       __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();
     }
