@@ -754,6 +754,7 @@ function isAgentTaskLifecycleActivity(activity: OrchestrationThreadActivity): bo
 }
 
 function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean {
+  if (activity.kind.startsWith("background-work.")) return true;
   const payload =
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)

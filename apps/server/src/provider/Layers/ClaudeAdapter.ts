@@ -206,6 +206,7 @@ interface ToolInFlight {
  * start row aged out of activity retention.
  */
 interface ClaudeTaskAgentState {
+  backgroundAttempt?: number | undefined;
   readonly taskId: string;
   toolUseId: string | undefined;
   description: string | undefined;
@@ -718,6 +719,7 @@ function taskLinkageFor(
     return {};
   }
   return {
+    ...(agent.backgroundAttempt !== undefined ? { attempt: agent.backgroundAttempt } : {}),
     ...(agent.taskType ? { taskType: agent.taskType } : {}),
     ...(agent.owningAgentId ? { agentId: agent.owningAgentId } : {}),
     ...(agent.description ? { title: agent.description } : {}),
@@ -1619,6 +1621,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           `ClaudeAdapter emitted '${event.type}' without a runtime session for thread '${event.threadId}'.`,
         ),
       );
+    }
+    // Repeat positive background evidence on sparse lifecycle updates, so a
+    // retained activity can stand alone. Absence is not foreground evidence.
+    if (
+      event.type === "task.started" ||
+      event.type === "task.progress" ||
+      event.type === "task.updated" ||
+      event.type === "task.completed"
+    ) {
+      event = {
+        ...event,
+        payload: {
+          ...event.payload,
+          ...(!event.payload.taskType && context.taskAgents.get(event.payload.taskId)?.taskType
+            ? { taskType: context.taskAgents.get(event.payload.taskId)!.taskType }
+            : {}),
+          ...(context.taskAgents.get(event.payload.taskId)?.backgroundAttempt !== undefined
+            ? { attempt: context.taskAgents.get(event.payload.taskId)!.backgroundAttempt }
+            : {}),
+          ...(context.backgroundedTaskIds.has(event.payload.taskId)
+            ? { isBackgrounded: true }
+            : {}),
+          canStop: context.query.stopTask !== undefined,
+        },
+      } as ProviderRuntimeEvent;
     }
     const safeEvent = redactAgentControlSecrets(event) as ProviderRuntimeEvent;
     return Queue.offer(
@@ -3118,8 +3145,53 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
       }
 
-      for (const [taskId] of liveSet) {
+      for (const [taskId, info] of liveSet) {
+        // Reuse the existing linkage owner. A membership-only shell must keep
+        // its type on sparse progress/completion instead of becoming an agent.
+        const previous = context.taskAgents.get(taskId);
+        const descriptionChanged =
+          info.description !== undefined && info.description !== previous?.description;
+        const typeChanged = info.taskType !== undefined && info.taskType !== previous?.taskType;
+        context.taskAgents.set(taskId, {
+          taskId,
+          backgroundAttempt:
+            classifyTaskAgentKind({
+              taskType: info.taskType ?? previous?.taskType,
+              agentId: previous?.owningAgentId,
+            }) === "background"
+              ? previous?.backgroundAttempt === undefined
+                ? 0
+                : previous.backgroundAttempt + (context.liveTaskIds.has(taskId) ? 0 : 1)
+              : previous?.backgroundAttempt,
+          toolUseId: previous?.toolUseId,
+          description: info.description ?? previous?.description,
+          subagentType: previous?.subagentType,
+          taskType: info.taskType ?? previous?.taskType,
+          workflowName: previous?.workflowName,
+          skipTranscript: previous?.skipTranscript ?? false,
+          runHandles: previous?.runHandles,
+          owningAgentId: previous?.owningAgentId,
+          model: previous?.model,
+          effort: previous?.effort,
+        });
+        const newlyBackgrounded = !context.backgroundedTaskIds.has(taskId);
         context.backgroundedTaskIds.add(taskId);
+        if (
+          (newlyBackgrounded || descriptionChanged || typeChanged) &&
+          context.liveTaskIds.has(taskId)
+        ) {
+          const stamp = yield* makeEventStamp();
+          yield* offerRuntimeEventForContext(context, {
+            ...base,
+            ...stamp,
+            type: "task.updated",
+            payload: {
+              taskId: RuntimeTaskId.make(taskId),
+              isBackgrounded: true,
+              ...taskLinkageFor(context.taskAgents, taskId),
+            },
+          });
+        }
       }
 
       for (const taskId of context.liveTaskIds) {
@@ -3284,6 +3356,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           (message.tool_use_id
             ? context.subagentLaunchInputByToolUseId.get(message.tool_use_id)
             : undefined);
+        const backgroundFlag = (message as unknown as { is_backgrounded?: boolean })
+          .is_backgrounded;
+        if (
+          backgroundFlag === true ||
+          (backgroundFlag === undefined && launchInput?.run_in_background === true)
+        ) {
+          context.backgroundedTaskIds.add(message.task_id);
+        } else if (backgroundFlag === false) {
+          context.backgroundedTaskIds.delete(message.task_id);
+        }
         if (message.tool_use_id) {
           context.subagentLaunchInputByToolUseId.delete(message.tool_use_id);
         }
@@ -3302,12 +3384,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : context.currentEffort);
         // Remember the agent identity so every later task.* payload for this
         // taskId is self-describing (identity must survive activity retention).
+        const previousTask = context.taskAgents.get(message.task_id);
         context.taskAgents.set(message.task_id, {
           taskId: message.task_id,
+          ...(classifyTaskAgentKind({
+            taskType: message.task_type ?? previousTask?.taskType,
+            agentId: owningAgentId,
+          }) === "background"
+            ? {
+                backgroundAttempt:
+                  previousTask?.backgroundAttempt === undefined
+                    ? 0
+                    : previousTask.backgroundAttempt +
+                      (context.liveTaskIds.has(message.task_id) ? 0 : 1),
+              }
+            : {}),
           toolUseId: message.tool_use_id,
           description: message.description,
           subagentType: message.subagent_type,
-          taskType: message.task_type,
+          taskType: message.task_type ?? previousTask?.taskType,
           workflowName: message.workflow_name,
           skipTranscript: message.skip_transcript === true,
           runHandles: context.taskAgents.get(message.task_id)?.runHandles,
@@ -3321,6 +3416,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           type: "task.started",
           payload: {
             taskId: RuntimeTaskId.make(message.task_id),
+            ...(typeof backgroundFlag === "boolean" ? { isBackgrounded: backgroundFlag } : {}),
             description: message.description,
             ...(message.task_type ? { taskType: message.task_type } : {}),
             ...(owningAgentId ? { agentId: owningAgentId } : {}),
@@ -4707,8 +4803,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const stopBackgroundTask: NonNullable<ClaudeAdapterShape["stopBackgroundTask"]> = Effect.fn(
     "stopBackgroundTask",
-  )(function* (threadId, taskId) {
+  )(function* (threadId, taskId, expected) {
     const context = yield* requireSession(threadId);
+    const staleIdentity = () =>
+      expected !== undefined &&
+      (sessions.get(threadId) !== context ||
+        context.stopped ||
+        expected.runtimeSessionId !== context.session.runtimeSessionId ||
+        expected.attempt !== (context.taskAgents.get(taskId)?.backgroundAttempt ?? 0));
+    const staleError = () =>
+      new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "task/stop",
+        issue: "The displayed background task activation is no longer current.",
+      });
+    if (staleIdentity()) return yield* staleError();
     if (!context.query.stopTask) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
@@ -4725,7 +4834,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // may never settle, and a user-facing button must not hang forever.
     const outcome = yield* Effect.tryPromise({
       // Invoke through the query object: SDK methods rely on `this`.
-      try: () => context.query.stopTask!(taskId),
+      try: () => {
+        if (staleIdentity()) throw staleError();
+        if (!context.liveTaskIds.has(taskId)) return Promise.resolve();
+        return context.query.stopTask!(taskId);
+      },
       catch: (cause) => toRequestError(threadId, "task/stop", cause),
     }).pipe(Effect.timeoutOption("5 seconds"));
     if (Option.isNone(outcome)) {

@@ -2689,7 +2689,16 @@ export class OrchestrationGetTaskOutputError extends Schema.TaggedError<Orchestr
   }
 }
 
+/** Identity of the displayed task activation; prevents stale stop actions. */
+export const BackgroundTaskStopIdentity = Schema.Struct({
+  runtimeSessionId: RuntimeSessionId,
+  attempt: NonNegativeInt,
+});
+export type BackgroundTaskStopIdentity = typeof BackgroundTaskStopIdentity.Type;
+
 export const OrchestrationStopBackgroundTaskInput = Schema.Struct({
+  /** Optional for older callers; new background disclosures always supply it. */
+  expected: Schema.optional(BackgroundTaskStopIdentity),
   threadId: ThreadId,
   /** Provider-runtime task id from the task.* linkage fields. */
   taskId: TrimmedNonEmptyString,

@@ -2,6 +2,7 @@ import {
   EventId,
   ProviderDriverKind,
   RuntimeTaskId,
+  RuntimeSessionId,
   ThreadId,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
@@ -172,5 +173,62 @@ describe("runtimeEventToActivities tool streaming persistence", () => {
     expect(stdout).toContain("chars truncated");
     expect(stdout.trimEnd().endsWith("Capturing frame 1999/9028")).toBe(true);
     expect(cappedData.content[0]!.content.text).toContain("chars truncated");
+  });
+});
+
+describe("background work projection", () => {
+  it("preserves explicit background state, stop capability and runtime identity", () => {
+    const [row] = runtimeEventToActivities({
+      ...base,
+      type: "task.started",
+      eventId: EventId.make("background-start"),
+      runtimeSessionId: RuntimeSessionId.make("epoch"),
+      payload: {
+        taskId: RuntimeTaskId.make("bash"),
+        taskType: "local_bash",
+        isBackgrounded: true,
+        canStop: true,
+      },
+    });
+    expect(row?.payload).toMatchObject({
+      agentKind: "background",
+      isBackgrounded: true,
+      canStop: true,
+      runtimeSessionId: "epoch",
+    });
+    const [foreground] = runtimeEventToActivities({
+      ...base,
+      type: "task.updated",
+      eventId: EventId.make("foreground"),
+      payload: {
+        taskId: RuntimeTaskId.make("bash"),
+        taskType: "local_bash",
+        isBackgrounded: false,
+      },
+    });
+    expect(foreground?.payload).toMatchObject({ isBackgrounded: false });
+  });
+  it("persists real process boundaries without settling background work on ready or turn completion", () => {
+    for (const event of [
+      { type: "session.started", payload: { message: "Started" } },
+      { type: "session.exited", payload: { exitKind: "graceful" } },
+      { type: "session.state.changed", payload: { state: "stopped" } },
+    ] as const) {
+      expect(
+        runtimeEventToActivities({
+          ...base,
+          ...event,
+          eventId: EventId.make(event.type),
+        } satisfies ProviderRuntimeEvent)[0]?.kind,
+      ).toBe("background-work.session-boundary");
+    }
+    expect(
+      runtimeEventToActivities({
+        ...base,
+        type: "session.state.changed",
+        eventId: EventId.make("ready"),
+        payload: { state: "ready" },
+      }),
+    ).toEqual([]);
   });
 });
