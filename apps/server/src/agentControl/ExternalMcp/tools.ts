@@ -116,6 +116,7 @@ const descriptors: ReadonlyArray<ExternalMcpToolDescriptor> = [
         prompt: { type: "string", minLength: 1, maxLength: 120000 },
         environment: { type: "string", enum: ["worktree", "local"] },
         runtimeMode: { type: "string", enum: ["approval-required", "full-access"] },
+        tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
       },
       additionalProperties: false,
     },
@@ -245,6 +246,7 @@ const descriptors: ReadonlyArray<ExternalMcpToolDescriptor> = [
         model: { type: "string" },
         options: { type: "array" },
         runtimeMode: { type: "string" },
+        tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
         schedule: { type: "object" },
@@ -549,6 +551,7 @@ export const makeExternalMcpTools = (deps: {
                   options: input.options,
                 },
                 runtimeMode: input.runtimeMode,
+                ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
                 envMode: input.envMode,
                 ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
               },
@@ -595,6 +598,11 @@ export const makeExternalMcpTools = (deps: {
                   ...(nextOptions === undefined ? {} : { options: nextOptions }),
                 },
                 runtimeMode: input.runtimeMode ?? execution.runtimeMode,
+                ...(input.tokenMode !== undefined
+                  ? { tokenMode: input.tokenMode }
+                  : execution.tokenMode !== undefined
+                    ? { tokenMode: execution.tokenMode }
+                    : {}),
                 envMode: input.envMode ?? execution.envMode,
                 ...(nextBaseRef === undefined ? {} : { baseRef: nextBaseRef }),
               },

@@ -53,6 +53,7 @@ describe("buildAgentControlProposalCardModel", () => {
             prompt: `Prompt ${index}`,
             modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6" },
             runtimeMode: "full-access",
+            tokenMode: "balanced",
             envMode: "worktree",
             baseRef: "main",
           })),
@@ -65,6 +66,7 @@ describe("buildAgentControlProposalCardModel", () => {
     expect(model.detailSections).toHaveLength(2);
     expect(model.detailSections[0]?.heading).toBe("Thread 1: Task 1");
     expect(model.detailSections[0]?.lines).toContain("Base ref: main");
+    expect(model.detailSections[0]?.lines).toContain("Token mode: balanced");
     expect(model.detailSections[0]?.lines).toContain("Prompt: Prompt 1");
   });
 
@@ -168,6 +170,7 @@ describe("buildAgentControlProposalCardModel", () => {
       prompt: "Review current failures and summarize.",
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6" },
       runtimeMode: "approval-required" as const,
+      tokenMode: "aggressive" as const,
       envMode: "worktree" as const,
     };
     const schedule = {
@@ -192,6 +195,7 @@ describe("buildAgentControlProposalCardModel", () => {
     expect(definition.detailSections[0]?.lines).toContain(
       "Every due run creates a fresh exact proposal and waits for user approval.",
     );
+    expect(definition.detailSections[0]?.lines).toContain("Token mode: aggressive");
 
     const run = buildAgentControlProposalCardModel(
       makeProposal({
@@ -208,6 +212,7 @@ describe("buildAgentControlProposalCardModel", () => {
     );
     expect(run.actionLabel).toBe("Approve one scheduled run");
     expect(run.detailSections[0]?.lines).toContain("Missed intervals coalesced: 3");
+    expect(run.detailSections[0]?.lines).toContain("Token mode: aggressive");
     expect(run.detailSections[0]?.lines).toContain(
       "Approving the schedule did not approve this run; this exact proposal does.",
     );

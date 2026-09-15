@@ -1,7 +1,9 @@
 import type { Project, SidebarWorktreeSummary } from "@ryco/client-runtime/state/threads";
 import {
   DEFAULT_MODEL,
+  DEFAULT_AGENT_TOKEN_MODE,
   ProviderInstanceId,
+  type AgentTokenMode,
   type EnvironmentId,
   type ModelSelection,
   type ProjectId,
@@ -23,7 +25,7 @@ export interface NewTaskDefaults {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: "full-access";
   readonly interactionMode: "default";
-  readonly tokenMode: "balanced";
+  readonly tokenMode: AgentTokenMode;
   readonly requiresProject: boolean;
 }
 
@@ -75,7 +77,7 @@ export function deriveNewTaskDefaults(input: {
     },
     runtimeMode: "full-access",
     interactionMode: "default",
-    tokenMode: "balanced",
+    tokenMode: DEFAULT_AGENT_TOKEN_MODE,
     requiresProject: environment !== null && project === null,
   };
 }

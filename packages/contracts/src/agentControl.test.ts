@@ -709,6 +709,8 @@ describe("AgentControl external MCP", () => {
     });
     expect(value.environment).toBeUndefined();
     expect(value.runtimeMode).toBeUndefined();
+    expect(value.tokenMode).toBeUndefined();
+    expect(decode({ ...value, tokenMode: "balanced" }).tokenMode).toBe("balanced");
     expect(() => decode({ ...value, requestId: undefined })).toThrow();
     expect(() => decode({ ...value, projectId: undefined })).toThrow();
     expect(() => decode({ ...value, options: undefined })).toThrow();

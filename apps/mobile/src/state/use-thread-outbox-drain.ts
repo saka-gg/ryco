@@ -5,6 +5,7 @@ import {
   getWsConnectionUiState,
 } from "@ryco/client-runtime/rpc";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   commitSendTurnDispatch,
@@ -46,7 +47,7 @@ async function sendQueuedThreadMessage(message: QueuedThreadMessage): Promise<vo
     hasSelectedModel: true,
     runtimeMode: message.runtimeMode,
     interactionMode: message.interactionMode,
-    tokenMode: message.tokenMode ?? "balanced",
+    tokenMode: message.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
     bootstrap: undefined,
     sourceControlContexts: [],
     createdAt: message.createdAt,

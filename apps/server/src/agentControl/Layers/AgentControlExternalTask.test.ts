@@ -243,14 +243,26 @@ const withHarness = <A, E>(
 it.effect("external tasks reuse proposals, default safely, and account idempotent capacity", () =>
   withHarness(({ tasks, repository, proposals, submittedPlans }) =>
     Effect.gen(function* () {
-      const created = yield* tasks.create({ integrationId, request: request("request-1") });
+      const created = yield* tasks.create({
+        integrationId,
+        request: request("request-1", { tokenMode: "balanced" }),
+      });
       assert.strictEqual(created.receipt.status, "pending-user-approval");
       assert.strictEqual(created.task.environment, "worktree");
       assert.strictEqual(created.task.runtimeMode, "approval-required");
       assert.strictEqual(submittedPlans.length, 1);
       assert.strictEqual(submittedPlans[0]?.kind, "createThreads");
+      assert.strictEqual(
+        submittedPlans[0]?.kind === "createThreads"
+          ? submittedPlans[0].entries[0]?.tokenMode
+          : undefined,
+        "balanced",
+      );
 
-      const replay = yield* tasks.create({ integrationId, request: request("request-1") });
+      const replay = yield* tasks.create({
+        integrationId,
+        request: request("request-1", { tokenMode: "balanced" }),
+      });
       assert.isTrue(replay.replayed);
       assert.strictEqual(replay.task.taskId, created.task.taskId);
       assert.strictEqual(submittedPlans.length, 1);
@@ -258,7 +270,7 @@ it.effect("external tasks reuse proposals, default safely, and account idempoten
       const conflict = yield* Effect.flip(
         tasks.create({
           integrationId,
-          request: request("request-1", { prompt: "A different plan." }),
+          request: request("request-1", { tokenMode: "aggressive" }),
         }),
       );
       assert.strictEqual(reasonOf(conflict), "task-conflict");
@@ -286,6 +298,12 @@ it.effect("external tasks reuse proposals, default safely, and account idempoten
         0,
       );
       yield* tasks.create({ integrationId, request: request("request-2") });
+      assert.strictEqual(submittedPlans.length, 2);
+      assert.isUndefined(
+        submittedPlans[1]?.kind === "createThreads"
+          ? submittedPlans[1].entries[0]?.tokenMode
+          : undefined,
+      );
     }),
   ),
 );

@@ -7,6 +7,7 @@ import { normalizeInteractionModeForProviderTarget } from "@ryco/client-runtime/
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   EnvironmentId,
+  DEFAULT_AGENT_TOKEN_MODE,
   ProjectId,
   WorktreeId,
   type ModelSelection,
@@ -149,6 +150,8 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const textColor = useThemeColor("--color-foreground");
   const serverConfigs = useEnvironmentServerConfigs();
   const serverConfig = environmentId ? serverConfigs.get(environmentId) : null;
+  const tokenModeReady = serverConfig !== null && serverConfig !== undefined;
+  const tokenMode = serverConfig?.settings.defaultAgentTokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
 
   useEffect(() => {
     if (initialized.current || !defaults.environment) return;
@@ -286,15 +289,16 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   };
 
   const canSend =
+    tokenModeReady &&
     prompt.trim().length > 0 &&
     environment?.connectionState === "connected" &&
     (project !== undefined || newProjectPath.trim().length > 0) &&
     (worktreeSelection.kind !== "new" || newBranch.trim().length > 0);
-  const sendDisabledReason = environments.some(
-    (candidate) => candidate.connectionState === "connected",
-  )
-    ? null
-    : "No verified machine available";
+  const sendDisabledReason = !tokenModeReady
+    ? "Loading node settings"
+    : environments.some((candidate) => candidate.connectionState === "connected")
+      ? null
+      : "No verified machine available";
 
   const createAttempt = (): NewTaskAttempt => {
     if (!environment) throw new Error("Choose a connected node.");
@@ -329,7 +333,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       modelSelection,
       runtimeMode,
       interactionMode,
-      tokenMode: "balanced",
+      tokenMode,
       createdAt: new Date().toISOString(),
       ids: {
         projectId: newProjectId(),

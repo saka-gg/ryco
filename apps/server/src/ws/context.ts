@@ -502,6 +502,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               modelSelection: bootstrap.createThread.modelSelection,
               runtimeMode: bootstrap.createThread.runtimeMode,
               interactionMode: bootstrap.createThread.interactionMode,
+              ...(bootstrap.createThread.tokenMode === undefined
+                ? {}
+                : { tokenMode: bootstrap.createThread.tokenMode }),
               branch: bootstrap.createThread.branch,
               worktreePath: bootstrap.createThread.worktreePath,
               createdAt: bootstrap.createThread.createdAt,

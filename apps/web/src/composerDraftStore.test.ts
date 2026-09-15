@@ -620,6 +620,7 @@ describe("composerDraftStore project draft thread mapping", () => {
       envMode: "worktree",
       runtimeMode: "full-access",
       interactionMode: "default",
+      tokenMode: "off",
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     expect(useComposerDraftStore.getState().getDraftThread(draftId)).toMatchObject({
@@ -631,6 +632,7 @@ describe("composerDraftStore project draft thread mapping", () => {
       envMode: "worktree",
       runtimeMode: "full-access",
       interactionMode: "default",
+      tokenMode: "off",
       createdAt: "2026-01-01T00:00:00.000Z",
     });
   });

@@ -1082,6 +1082,18 @@ it.effect(
         commands.find((c) => c.type === "thread.turn.start"),
         "titleSeed",
       );
+      assert.deepInclude(
+        commands.find((c) => c.type === "thread.create"),
+        {
+          tokenMode: "off",
+        },
+      );
+      assert.deepInclude(
+        commands.find((c) => c.type === "thread.turn.start"),
+        {
+          tokenMode: "off",
+        },
+      );
     }),
 );
 
@@ -1096,6 +1108,7 @@ it.effect("uses the server worktree prefix for agent-created worktrees", () =>
           prompt: "Reply ready",
           envMode: "worktree" as const,
           runtimeMode: "auto" as const,
+          tokenMode: "balanced" as const,
           modelSelection: target.modelSelection,
         },
       ],
@@ -1107,6 +1120,7 @@ it.effect("uses the server worktree prefix for agent-created worktrees", () =>
     };
     const stores = yield* makeExecutionStores(proposal);
     const createdBranches: string[] = [];
+    const commands: ClientOrchestrationCommand[] = [];
     const executor = yield* makeTestExecution({
       ...stores,
       projections: {
@@ -1125,13 +1139,37 @@ it.effect("uses the server worktree prefix for agent-created worktrees", () =>
         },
       },
       engine: { dispatch: () => Effect.succeed({ sequence: 1 }) },
-      commandApplication: { apply: () => Effect.succeed({ sequence: 1 }) },
+      commandApplication: {
+        apply: (command: ClientOrchestrationCommand) => {
+          commands.push(command);
+          return Effect.succeed({ sequence: 1 });
+        },
+      },
     });
     yield* executor.executeApproved(proposal.proposalId);
     assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
     assert.lengthOf(createdBranches, 1);
     assert.match(createdBranches[0]!, /^team\/tasks\/agent-control-/);
-  }).pipe(Effect.provide(ServerSettingsService.layerTest({ worktreeBranchPrefix: "team/tasks" }))),
+    assert.deepInclude(
+      commands.find((command) => command.type === "thread.create"),
+      {
+        tokenMode: "balanced",
+      },
+    );
+    assert.deepInclude(
+      commands.find((command) => command.type === "thread.turn.start"),
+      {
+        tokenMode: "balanced",
+      },
+    );
+  }).pipe(
+    Effect.provide(
+      ServerSettingsService.layerTest({
+        worktreeBranchPrefix: "team/tasks",
+        defaultAgentTokenMode: "aggressive",
+      }),
+    ),
+  ),
 );
 
 for (const mode of ["record-only", "remove-checkout", "restore-checkout"] as const) {

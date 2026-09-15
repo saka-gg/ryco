@@ -273,7 +273,7 @@ export const makeWorktreeOperations = (deps: {
         if (existing !== null) {
           const existingWorktree = yield* loadWorktreeForGitWorkflow(operation, existing);
           yield* loadProjectForGitWorkflow(operation, input.projectId);
-          const { textGenerationModelSelection: modelSelection } =
+          const { defaultAgentTokenMode, textGenerationModelSelection: modelSelection } =
             yield* serverSettings.getSettings.pipe(
               Effect.mapError((cause) =>
                 toGitManagerError(operation, "Failed to load server settings.", cause),
@@ -295,6 +295,7 @@ export const makeWorktreeOperations = (deps: {
               modelSelection,
               runtimeMode: "full-access",
               interactionMode: "default",
+              tokenMode: defaultAgentTokenMode,
               branch: existingWorktree.branch,
               worktreePath: existingWorktree.worktreePath,
               createdAt: now,
@@ -627,6 +628,7 @@ export const makeWorktreeOperations = (deps: {
             modelSelection,
             runtimeMode: "full-access",
             interactionMode: "default",
+            tokenMode: settings.defaultAgentTokenMode,
             branch,
             worktreePath,
             createdAt: now,

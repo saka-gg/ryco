@@ -231,7 +231,7 @@ export const repairProjectionTokenModeColumns = Effect.fn("repairProjectionToken
       if (!columns.some((column) => column.name === "token_mode")) {
         yield* sql`
         ALTER TABLE projection_threads
-        ADD COLUMN token_mode TEXT NOT NULL DEFAULT 'balanced'
+        ADD COLUMN token_mode TEXT NOT NULL DEFAULT 'off'
       `;
         yield* Effect.log("Repaired projection_threads.token_mode column");
       }
@@ -251,7 +251,7 @@ export const repairProjectionTokenModeColumns = Effect.fn("repairProjectionToken
     if (!sessionColumns.some((column) => column.name === "token_mode")) {
       yield* sql`
       ALTER TABLE projection_thread_sessions
-      ADD COLUMN token_mode TEXT NOT NULL DEFAULT 'balanced'
+      ADD COLUMN token_mode TEXT NOT NULL DEFAULT 'off'
     `;
       yield* Effect.log("Repaired projection_thread_sessions.token_mode column");
     }

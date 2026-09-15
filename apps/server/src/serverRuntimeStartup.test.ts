@@ -33,6 +33,7 @@ import {
 import { TestClock } from "effect/testing";
 
 import { ServerConfig } from "./config.ts";
+import { ServerSettingsService } from "./serverSettings.ts";
 import { metricNames } from "./observability/Metrics.ts";
 import { hasMetricSnapshot } from "./observability/testMetricSnapshots.ts";
 import {
@@ -668,7 +669,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
           return yield* PubSub.subscribe(pubsub);
         }),
       } satisfies OrchestrationEngineShape),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(Layer.merge(ServerSettingsService.layerTest(), NodeServices.layer)),
     );
 
     assert.deepStrictEqual(targets, {
@@ -681,7 +682,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
 
 it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when missing", () =>
   Effect.gen(function* () {
-    const dispatchCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const dispatchCalls = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
     const targets = yield* resolveAutoBootstrapWelcomeTargets.pipe(
       Effect.provideService(ServerConfig, {
         cwd: "/tmp/startup-project",
@@ -710,7 +711,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
             hasMore: false,
           }),
         dispatch: (command) =>
-          Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
+          Ref.update(dispatchCalls, (calls) => [...calls, command]).pipe(
             Effect.as({ sequence: 1 }),
           ),
         streamDomainEvents: Stream.empty,
@@ -719,12 +720,22 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
           return yield* PubSub.subscribe(pubsub);
         }),
       } satisfies OrchestrationEngineShape),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(
+        Layer.merge(
+          ServerSettingsService.layerTest({ defaultAgentTokenMode: "aggressive" }),
+          NodeServices.layer,
+        ),
+      ),
     );
 
     assert.equal(typeof targets.bootstrapProjectId, "string");
     assert.equal(typeof targets.bootstrapThreadId, "string");
-    assert.deepStrictEqual(yield* Ref.get(dispatchCalls), ["project.create", "thread.create"]);
+    const commands = yield* Ref.get(dispatchCalls);
+    assert.deepStrictEqual(
+      commands.map((command) => command.type),
+      ["project.create", "thread.create"],
+    );
+    assert.deepInclude(commands[1], { type: "thread.create", tokenMode: "aggressive" });
   }),
 );
 

@@ -39,7 +39,13 @@ import {
   resolveQueuedMessageSteerEligibility,
 } from "@ryco/client-runtime/state/message-queue";
 import { buildThreadInbox } from "@ryco/client-runtime/state/threads";
-import { EnvironmentId, MessageId, ThreadId, type ModelSelection } from "@ryco/contracts";
+import {
+  DEFAULT_AGENT_TOKEN_MODE,
+  EnvironmentId,
+  MessageId,
+  ThreadId,
+  type ModelSelection,
+} from "@ryco/contracts";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   deriveChatFileUploadSendBlock,
@@ -631,7 +637,7 @@ export function ThreadDetailScreen(props: {
         queuedInteractionMode: message.interactionMode,
         activeInteractionMode: thread?.interactionMode,
         queuedTokenMode: message.tokenMode,
-        activeTokenMode: thread?.tokenMode ?? "balanced",
+        activeTokenMode: thread?.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
       });
     },
     [connectionUiState, hydratedFromCacheAt, providers, thread],
@@ -974,7 +980,7 @@ export function ThreadDetailScreen(props: {
       return false;
     }
 
-    const tokenMode = currentThread.tokenMode ?? "balanced";
+    const tokenMode = currentThread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
     const threadBusy = currentThread.latestTurn?.state === "running";
     // Wave 3a: the socket opens one RTT before the live shell snapshot lands,
     // and until it does `threadBusy` is read from a CACHED latestTurn — the
