@@ -1,3 +1,4 @@
+import { callbackRepositories, pendingCallbackInvalidation } from "../approvalResponses.ts";
 import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
 import { ServerConfig } from "../../config.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
@@ -462,6 +463,8 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
     }),
   };
   for (const key of [
+    "isBackgrounded",
+    "canStop",
     "taskType",
     "agentId",
     "title",
@@ -502,6 +505,31 @@ export function runtimeEventToActivities(
       : {};
   })();
   switch (event.type) {
+    case "session.started":
+    case "session.exited":
+    case "session.state.changed": {
+      if (
+        event.type === "session.state.changed" &&
+        event.payload.state !== "stopped" &&
+        event.payload.state !== "error"
+      )
+        return [];
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "background-work.session-boundary",
+          summary: "Background work session changed",
+          payload: {
+            runtimeSessionId: event.runtimeSessionId,
+            state: event.type === "session.started" ? "started" : "stopped",
+          },
+          turnId: null,
+          ...maybeSequence,
+        },
+      ];
+    }
     case "request.opened": {
       if (event.payload.requestType === "tool_user_input") {
         return [];
@@ -522,6 +550,7 @@ export function runtimeEventToActivities(
                   ? "File-change approval requested"
                   : "Approval requested",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
@@ -546,6 +575,7 @@ export function runtimeEventToActivities(
           kind: "approval.resolved",
           summary: "Approval resolved",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
@@ -641,6 +671,7 @@ export function runtimeEventToActivities(
           kind: "user-input.requested",
           summary: "User input requested",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
           },
@@ -657,10 +688,17 @@ export function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "user-input.resolved",
-          summary: "User input submitted",
+          summary: event.payload.cancelled ? "Question cancelled" : "User input submitted",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             ...(event.requestId ? { requestId: event.requestId } : {}),
             answers: event.payload.answers,
+            ...(event.payload.cancelled !== undefined
+              ? { cancelled: event.payload.cancelled }
+              : {}),
+            ...(event.payload.userInputIdentity
+              ? { userInputIdentity: event.payload.userInputIdentity }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -687,6 +725,7 @@ export function runtimeEventToActivities(
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
             ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -696,11 +735,14 @@ export function runtimeEventToActivities(
 
     case "task.progress": {
       const description = event.payload.description.trim();
-      const linkage = taskLinkageActivityFields(event.payload as Record<string, unknown>);
+      const linkage = {
+        ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+        ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
+      };
       // Usage and activity are independent latest-state streams. Separate
       // stable ids keep a command/reasoning update from replacing token usage
       // and keep a pure usage tick from blanking meaningful activity.
-      const identityLinkage = { ...linkage };
+      const identityLinkage: Record<string, unknown> = { ...linkage };
       delete identityLinkage.typedUsage;
       delete identityLinkage.status;
       delete identityLinkage.error;
@@ -789,6 +831,7 @@ export function runtimeEventToActivities(
               ? { isBackgrounded: event.payload.isBackgrounded }
               : {}),
             ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -857,6 +900,7 @@ export function runtimeEventToActivities(
               : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
             ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -2658,6 +2702,17 @@ const make = Effect.gen(function* () {
             (finishedTurnId === undefined || request.turnId !== finishedTurnId)
           )
             continue;
+          const payload = yield* pendingCallbackInvalidation({
+            threadId: thread.id,
+            ...request,
+            source: {
+              runtimeSessionId: event.runtimeSessionId,
+              activities: detailedThread?.activities ?? [],
+              turnId: request.turnId,
+            },
+            detail: "the provider turn ended or was superseded",
+          });
+          if (!payload) continue;
           yield* orchestrationEngine.dispatch({
             type: "thread.activity.append",
             commandId: providerCommandId(
@@ -2669,10 +2724,10 @@ const make = Effect.gen(function* () {
               id: EventId.make(
                 `${event.eventId}:request-resolved:${request.kind}:${request.requestId}`,
               ),
-              kind: `${request.kind}.resolved`,
+              kind: `provider.${request.kind}.respond.failed`,
               tone: "info",
               summary: "Pending request cleared because its provider turn ended or was superseded",
-              payload: { requestId: request.requestId },
+              payload,
               turnId: request.turnId === null ? null : TurnId.make(request.turnId),
               createdAt: now,
             },
@@ -2906,12 +2961,18 @@ const make = Effect.gen(function* () {
           !input.history.completedTurnIds.includes(TurnId.make(request.turnId))
         )
           continue;
+        const payload = yield* pendingCallbackInvalidation({
+          threadId: thread.id,
+          ...request,
+          detail: "provider history confirms that the turn ended",
+        });
+        if (!payload) continue;
         activities.push({
           id: EventId.make(`history:${thread.id}:resolved:${request.kind}:${request.requestId}`),
-          kind: `${request.kind}.resolved`,
+          kind: `provider.${request.kind}.respond.failed`,
           tone: "info",
           summary: "Pending request cleared because its provider turn ended",
-          payload: { requestId: request.requestId },
+          payload,
           turnId: TurnId.make(request.turnId),
           createdAt: now,
         });
@@ -3074,4 +3135,4 @@ const make = Effect.gen(function* () {
 export const ProviderRuntimeIngestionLive = Layer.effect(
   ProviderRuntimeIngestionService,
   make,
-).pipe(Layer.provide(ProjectionTurnRepositoryLive));
+).pipe(Layer.provide(ProjectionTurnRepositoryLive), Layer.provide(callbackRepositories));

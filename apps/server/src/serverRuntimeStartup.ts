@@ -1,3 +1,7 @@
+import {
+  callbackRepositories,
+  pendingCallbackInvalidation,
+} from "./orchestration/approvalResponses.ts";
 import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
 import {
   CommandId,
@@ -568,8 +572,29 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   // requests from an earlier process; resolve them through normal events so the
   // inbox summary, conversation and settlement policy all recover together.
   for (const thread of snapshot.threads) {
-    if (thread.deletedAt !== null || liveThreadIds.has(thread.id)) continue;
+    if (thread.deletedAt !== null) continue;
     for (const request of derivePendingThreadRequests(thread.activities)) {
+      const payload = yield* pendingCallbackInvalidation({
+        threadId: thread.id,
+        ...request,
+        detail: "the provider session did not survive restart",
+      });
+      if (!payload) continue;
+      const identity =
+        "approvalIdentity" in payload
+          ? payload.approvalIdentity
+          : "userInputIdentity" in payload
+            ? payload.userInputIdentity
+            : undefined;
+      const live = liveSessionsExit.value.find((session) => session.threadId === thread.id);
+      if (
+        live?.runtimeSessionId &&
+        typeof identity === "object" &&
+        identity !== null &&
+        "runtimeSessionId" in identity &&
+        identity.runtimeSessionId === live.runtimeSessionId
+      )
+        continue;
       const createdAt = new Date().toISOString();
       yield* orchestrationEngine.dispatch({
         type: "thread.activity.append",
@@ -577,10 +602,10 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
         threadId: thread.id,
         activity: {
           id: EventId.make(crypto.randomUUID()),
-          kind: `${request.kind}.resolved`,
+          kind: `provider.${request.kind}.respond.failed`,
           tone: "info",
           summary: "Pending request cleared because its provider session is no longer running",
-          payload: { requestId: request.requestId },
+          payload,
           turnId: request.turnId === null ? null : TurnId.make(request.turnId),
           createdAt,
         },
@@ -898,7 +923,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
     }),
     enqueueCommand: commandGate.enqueueCommand,
   } satisfies ServerRuntimeStartupShape;
-});
+}).pipe(Effect.provide(callbackRepositories));
 
 export const ServerRuntimeStartupLive = Layer.effect(
   ServerRuntimeStartup,

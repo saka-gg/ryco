@@ -320,6 +320,10 @@ export interface WsRpcClient {
     >;
     readonly readExportChunk: RpcUnaryMethod<typeof CONTEXT_HANDOFF_WS_METHODS.readExportChunk>;
   };
+  readonly automationCentre: {
+    readonly snapshot: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.automationCentre>;
+    readonly command: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.automationCommand>;
+  };
   readonly agentControl: {
     readonly listProposals: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.listProposals>;
     readonly getProposal: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.getProposal>;
@@ -727,6 +731,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         ),
       readExportChunk: (input) =>
         transport.request((client) => client[CONTEXT_HANDOFF_WS_METHODS.readExportChunk](input)),
+    },
+    automationCentre: {
+      snapshot: (input) =>
+        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.automationCentre](input)),
+      command: (input) =>
+        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.automationCommand](input)),
     },
     agentControl: {
       listProposals: (input) =>

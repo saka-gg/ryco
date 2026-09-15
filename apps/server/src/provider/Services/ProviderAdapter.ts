@@ -8,6 +8,7 @@
  * @module ProviderAdapter
  */
 import type {
+  BackgroundTaskStopIdentity,
   ApprovalRequestId,
   ProviderApprovalDecision,
   ProviderDriverKind,
@@ -99,7 +100,13 @@ export interface ProviderAdapterShape<TError> {
    * only providers whose runtime tracks individually stoppable tasks
    * implement it; callers must feature-detect.
    */
-  readonly stopBackgroundTask?: (threadId: ThreadId, taskId: string) => Effect.Effect<void, TError>;
+  // Implementations must validate expected identity again at the native call
+  // boundary: routing and invocation can straddle a runtime replacement.
+  readonly stopBackgroundTask?: (
+    threadId: ThreadId,
+    taskId: string,
+    expected?: BackgroundTaskStopIdentity,
+  ) => Effect.Effect<void, TError>;
 
   /**
    * Respond to an interactive approval request.

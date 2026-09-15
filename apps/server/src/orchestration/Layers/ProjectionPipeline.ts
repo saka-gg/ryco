@@ -1,3 +1,6 @@
+import { pendingRequestActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
+import { ApprovalResponseIdentity, ApprovalResponseState } from "@ryco/contracts";
+import { matchesApprovalAttempt, sameApprovalIdentity } from "../approvalResponses.ts";
 import {
   ApprovalRequestId,
   type ChatAttachment,
@@ -8,7 +11,7 @@ import {
   ThreadId,
 } from "@ryco/contracts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
-import { Effect, FileSystem, Layer, Option, Path, Stream } from "effect";
+import { Effect, FileSystem, Layer, Option, Path, Stream, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
@@ -133,7 +136,10 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
     ORCHESTRATION_PROJECTOR_NAMES.pendingApprovals,
     ORCHESTRATION_PROJECTOR_NAMES.threads,
   ],
-  "thread.user-input-response-requested": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.user-input-response-requested": [
+    ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
+    ORCHESTRATION_PROJECTOR_NAMES.threads,
+  ],
   "thread.checkpoint-revert-requested": [],
   "thread.reverted": [
     ORCHESTRATION_PROJECTOR_NAMES.threadMessages,
@@ -1470,6 +1476,26 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
           return;
 
+        case "thread.user-input-response-requested": {
+          const row = yield* projectionThreadUserInputRequestRepository.getByRequestId({
+            threadId: event.payload.threadId,
+            requestId: event.payload.requestId,
+          });
+          if (
+            Option.isSome(row) &&
+            row.value.isPending &&
+            sameApprovalIdentity(row.value.userInputIdentity, event.payload.userInputIdentity)
+          ) {
+            yield* projectionThreadUserInputRequestRepository.upsert({
+              ...row.value,
+              responseState: "submitting",
+              ...(event.commandId ? { responseAttemptId: event.commandId } : {}),
+              updatedAt: event.occurredAt,
+            });
+          }
+          return;
+        }
+
         case "thread.activity-appended": {
           const requestId = extractActivityRequestId(event.payload.activity.payload);
           const activityPayload =
@@ -1477,25 +1503,82 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             event.payload.activity.payload !== null
               ? (event.payload.activity.payload as Record<string, unknown>)
               : null;
-          const nextPendingState = userInputActivityPendingState({
-            kind: event.payload.activity.kind,
-            detail: typeof activityPayload?.detail === "string" ? activityPayload.detail : null,
-          });
-          if (requestId !== null && nextPendingState !== null) {
-            const existingState = yield* projectionThreadUserInputRequestRepository.getByRequestId({
-              requestId,
-            });
-            const wasPending = Option.isSome(existingState) && existingState.value.isPending;
-            attachmentSideEffects.pendingUserInputDelta += pendingStateDelta(
-              wasPending,
-              nextPendingState,
-            );
-            yield* projectionThreadUserInputRequestRepository.upsert({
-              requestId,
+          const kind = event.payload.activity.kind;
+          if (
+            requestId !== null &&
+            (kind.startsWith("user-input.") || kind === "provider.user-input.respond.failed")
+          ) {
+            const existing = yield* projectionThreadUserInputRequestRepository.getByRequestId({
               threadId: event.payload.threadId,
-              isPending: nextPendingState,
-              updatedAt: event.payload.activity.createdAt,
+              requestId,
             });
+            const row = Option.getOrUndefined(existing);
+            const identity = Schema.is(ApprovalResponseIdentity)(activityPayload?.userInputIdentity)
+              ? activityPayload.userInputIdentity
+              : undefined;
+            const responseState = Schema.is(ApprovalResponseState)(activityPayload?.responseState)
+              ? activityPayload.responseState
+              : undefined;
+            const wasPending = row?.isPending ?? false;
+            if (kind === "user-input.requested") {
+              if (row && sameApprovalIdentity(row.userInputIdentity, identity)) return;
+              const reused =
+                row?.userInputIdentity?.runtimeSessionId === identity?.runtimeSessionId &&
+                row !== undefined;
+              if (wasPending && reused) return;
+              yield* projectionThreadUserInputRequestRepository.upsert({
+                requestId,
+                threadId: event.payload.threadId,
+                isPending: true,
+                updatedAt: event.payload.activity.createdAt,
+                ...(identity ? { userInputIdentity: identity } : {}),
+                settlementRequiresIdentity: reused,
+              });
+              attachmentSideEffects.pendingUserInputDelta += pendingStateDelta(wasPending, true);
+            } else if (kind !== "user-input.response.submitted" && row) {
+              if (!wasPending) return;
+              if (identity && !sameApprovalIdentity(row.userInputIdentity, identity)) return;
+              if (
+                typeof activityPayload?.responseAttemptId === "string" &&
+                row.responseAttemptId !== activityPayload.responseAttemptId
+              )
+                return;
+              if (
+                kind === "user-input.resolved" &&
+                (row.userInputIdentity?.runtimeSessionId !== activityPayload?.runtimeSessionId ||
+                  (row.settlementRequiresIdentity && !identity))
+              )
+                return;
+              if (
+                kind === "provider.user-input.respond.failed" &&
+                row.userInputIdentity &&
+                (!sameApprovalIdentity(row.userInputIdentity, identity) ||
+                  row.responseAttemptId !== activityPayload?.responseAttemptId)
+              )
+                return;
+              const terminal =
+                kind === "user-input.resolved" ||
+                responseState === "invalidated" ||
+                userInputActivityPendingState({
+                  kind,
+                  detail:
+                    typeof activityPayload?.detail === "string" ? activityPayload.detail : null,
+                }) === false;
+              yield* projectionThreadUserInputRequestRepository.upsert({
+                ...row,
+                isPending: !terminal,
+                ...(kind === "user-input.resolved"
+                  ? { responseState: "settled" as const }
+                  : responseState
+                    ? { responseState }
+                    : {}),
+                updatedAt: event.payload.activity.createdAt,
+              });
+              attachmentSideEffects.pendingUserInputDelta += pendingStateDelta(
+                wasPending,
+                !terminal,
+              );
+            }
           }
           yield* projectionThreadActivityRepository.upsert({
             activityId: event.payload.activity.id,
@@ -1505,8 +1588,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             kind: event.payload.activity.kind,
             summary: event.payload.activity.summary,
             payload: event.payload.activity.payload,
-            ...(event.payload.activity.sequence !== undefined
-              ? { sequence: event.payload.activity.sequence }
+            ...(pendingRequestActivityInOrchestrationOrder(event.payload.activity, event.sequence)
+              .sequence !== undefined
+              ? {
+                  sequence: pendingRequestActivityInOrchestrationOrder(
+                    event.payload.activity,
+                    event.sequence,
+                  ).sequence,
+                }
               : {}),
             createdAt: event.payload.activity.createdAt,
           });
@@ -1869,9 +1958,70 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             return;
           }
           const existingRow = yield* projectionPendingApprovalRepository.getByRequestId({
+            threadId: event.payload.threadId,
             requestId,
           });
+          const activityPayload =
+            typeof event.payload.activity.payload === "object" &&
+            event.payload.activity.payload !== null
+              ? (event.payload.activity.payload as Record<string, unknown>)
+              : {};
+          const identity = Schema.is(ApprovalResponseIdentity)(activityPayload.approvalIdentity)
+            ? activityPayload.approvalIdentity
+            : undefined;
+          const responseState = Schema.is(ApprovalResponseState)(activityPayload.responseState)
+            ? activityPayload.responseState
+            : undefined;
+          if (
+            event.payload.activity.kind === "approval.resolved" &&
+            Option.isSome(existingRow) &&
+            existingRow.value.approvalIdentity?.runtimeSessionId !==
+              activityPayload.runtimeSessionId
+          )
+            return;
+          if (
+            event.payload.activity.kind === "provider.approval.respond.failed" &&
+            responseState !== undefined
+          ) {
+            if (
+              Option.isNone(existingRow) ||
+              !matchesApprovalAttempt(
+                existingRow.value,
+                identity,
+                typeof activityPayload.responseAttemptId === "string"
+                  ? activityPayload.responseAttemptId
+                  : undefined,
+              )
+            )
+              return;
+            // Settlement wins over any delayed failure from the same attempt.
+            if (existingRow.value.status === "resolved") return;
+            const invalidated = responseState === "invalidated";
+            if (invalidated) attachmentSideEffects.pendingApprovalDelta -= 1;
+            yield* projectionPendingApprovalRepository.upsert({
+              ...existingRow.value,
+              responseState,
+              decision: invalidated ? null : existingRow.value.decision,
+              status: invalidated ? "resolved" : "pending",
+              resolvedAt: invalidated ? event.payload.activity.createdAt : null,
+            });
+            return;
+          }
           if (event.payload.activity.kind === "approval.resolved") {
+            if (Option.isSome(existingRow)) {
+              if (existingRow.value.status === "resolved") return;
+              if (
+                identity !== undefined &&
+                !sameApprovalIdentity(existingRow.value.approvalIdentity, identity)
+              )
+                return;
+              if (existingRow.value.settlementRequiresIdentity && identity === undefined) return;
+              if (
+                typeof activityPayload.responseAttemptId === "string" &&
+                existingRow.value.responseAttemptId !== activityPayload.responseAttemptId
+              )
+                return;
+            }
             attachmentSideEffects.pendingApprovalDelta += pendingStateDelta(
               Option.isSome(existingRow) && existingRow.value.status === "pending",
               false,
@@ -1890,6 +2040,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 ? resolvedDecisionRaw
                 : null;
             yield* projectionPendingApprovalRepository.upsert({
+              ...(Option.isSome(existingRow) ? existingRow.value : {}),
+              responseState: "settled",
               requestId,
               threadId: Option.isSome(existingRow)
                 ? existingRow.value.threadId
@@ -1907,6 +2059,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             return;
           }
           if (event.payload.activity.kind === "provider.approval.respond.failed") {
+            if (Option.isSome(existingRow) && existingRow.value.responseAttemptId) return;
             const payload =
               typeof event.payload.activity.payload === "object" &&
               event.payload.activity.payload !== null
@@ -1943,22 +2096,30 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (event.payload.activity.kind !== "approval.requested") {
             return;
           }
-          if (Option.isSome(existingRow) && existingRow.value.status === "resolved") {
+          if (
+            Option.isSome(existingRow) &&
+            sameApprovalIdentity(existingRow.value.approvalIdentity, identity)
+          )
             return;
-          }
+          // A new callback may reuse a provider-local id, but an unqualified late
+          // provider settlement can no longer identify that callback unambiguously.
+          const reusedInRuntime =
+            Option.isSome(existingRow) &&
+            existingRow.value.approvalIdentity?.runtimeSessionId === identity?.runtimeSessionId;
+          if (reusedInRuntime && existingRow.value.status === "pending") return;
           attachmentSideEffects.pendingApprovalDelta += pendingStateDelta(
             Option.isSome(existingRow) && existingRow.value.status === "pending",
             true,
           );
           yield* projectionPendingApprovalRepository.upsert({
+            ...(identity ? { approvalIdentity: identity } : {}),
+            settlementRequiresIdentity: reusedInRuntime,
             requestId,
             threadId: event.payload.threadId,
             turnId: event.payload.activity.turnId,
             status: "pending",
             decision: null,
-            createdAt: Option.isSome(existingRow)
-              ? existingRow.value.createdAt
-              : event.payload.activity.createdAt,
+            createdAt: event.payload.activity.createdAt,
             resolvedAt: null,
           });
           return;
@@ -1966,24 +2127,16 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
         case "thread.approval-response-requested": {
           const existingRow = yield* projectionPendingApprovalRepository.getByRequestId({
+            threadId: event.payload.threadId,
             requestId: event.payload.requestId,
           });
-          attachmentSideEffects.pendingApprovalDelta += pendingStateDelta(
-            Option.isSome(existingRow) && existingRow.value.status === "pending",
-            false,
-          );
+          if (Option.isNone(existingRow)) return;
           yield* projectionPendingApprovalRepository.upsert({
-            requestId: event.payload.requestId,
-            threadId: Option.isSome(existingRow)
-              ? existingRow.value.threadId
-              : event.payload.threadId,
-            turnId: Option.isSome(existingRow) ? existingRow.value.turnId : null,
-            status: "resolved",
+            ...existingRow.value,
+            // A durable claim is not provider settlement. Pending counts remain unchanged.
             decision: event.payload.decision,
-            createdAt: Option.isSome(existingRow)
-              ? existingRow.value.createdAt
-              : event.payload.createdAt,
-            resolvedAt: event.payload.createdAt,
+            ...(event.commandId ? { responseAttemptId: event.commandId } : {}),
+            responseState: "submitting",
           });
           return;
         }

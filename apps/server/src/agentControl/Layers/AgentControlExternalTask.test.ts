@@ -152,6 +152,7 @@ const withHarness = <A, E>(
       );
 
       const validator: AgentControlActionValidatorShape = {
+        validateOwnerAutomation: () => Effect.void,
         validateSubmission: () => Effect.die("not used"),
         validateExternalSubmission: ({ integration: current, plan }) => {
           if (plan.kind !== "createThreads" || plan.entries[0] === undefined) {

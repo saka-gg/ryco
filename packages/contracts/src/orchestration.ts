@@ -1,3 +1,4 @@
+import { ApprovalResponseIdentity } from "./approvalResponses.ts";
 import { Effect, Schema, SchemaIssue, SchemaTransformation, Struct } from "effect";
 import { ProviderOptionSelections } from "./model.ts";
 import { RepositoryIdentity } from "./environment.ts";
@@ -1417,6 +1418,7 @@ const ThreadApprovalRespondCommand = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   decision: ProviderApprovalDecision,
+  approvalIdentity: Schema.optional(ApprovalResponseIdentity),
   createdAt: IsoDateTime,
 });
 
@@ -1427,6 +1429,7 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
   createdAt: IsoDateTime,
+  userInputIdentity: Schema.optional(ApprovalResponseIdentity),
 });
 
 const ThreadCheckpointRevertCommand = Schema.Struct({
@@ -2050,6 +2053,7 @@ export const ThreadApprovalResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   decision: ProviderApprovalDecision,
+  approvalIdentity: Schema.optional(ApprovalResponseIdentity),
   createdAt: IsoDateTime,
 });
 
@@ -2058,6 +2062,7 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
   createdAt: IsoDateTime,
+  userInputIdentity: Schema.optional(ApprovalResponseIdentity),
 });
 
 export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
@@ -2689,7 +2694,16 @@ export class OrchestrationGetTaskOutputError extends Schema.TaggedError<Orchestr
   }
 }
 
+/** Identity of the displayed task activation; prevents stale stop actions. */
+export const BackgroundTaskStopIdentity = Schema.Struct({
+  runtimeSessionId: RuntimeSessionId,
+  attempt: NonNegativeInt,
+});
+export type BackgroundTaskStopIdentity = typeof BackgroundTaskStopIdentity.Type;
+
 export const OrchestrationStopBackgroundTaskInput = Schema.Struct({
+  /** Optional for older callers; new background disclosures always supply it. */
+  expected: Schema.optional(BackgroundTaskStopIdentity),
   threadId: ThreadId,
   /** Provider-runtime task id from the task.* linkage fields. */
   taskId: TrimmedNonEmptyString,
