@@ -680,6 +680,27 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         };
       });
 
+  const validateOwnerAutomation: AgentControlActionValidatorShape["validateOwnerAutomation"] = (
+    plan,
+  ) =>
+    Effect.gen(function* () {
+      if (deps.automations === undefined)
+        return yield* fail("automation-unavailable", "Automation control is unavailable.");
+      yield* validateAutomation(deps.automations.validateLifecyclePlan(plan));
+      if (plan.kind === "cancelAutomation") return;
+      const definition = plan.kind === "createAutomation" ? plan.definition : plan.after;
+      const { snapshot, providers } = yield* loadState;
+      yield* validatePlanAgainstSnapshot({
+        plan: { kind: "createThreads", entries: [definition.execution] },
+        originProjectId: definition.execution.projectId,
+        originRuntimeMode: definition.execution.runtimeMode,
+        originEnvMode: definition.execution.envMode,
+        snapshot,
+        providers,
+        requireBaseRef,
+      });
+    });
+
   const revalidateExecution: AgentControlActionValidatorShape["revalidateExecution"] = (
     proposal: AgentControlProposal,
     options,
@@ -711,7 +732,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         if (!origin || origin.projectId !== originProjectId) {
           return yield* fail("caller-stale", "The originating thread is unavailable.");
         }
-      } else {
+      } else if (principal.kind === "external-integration") {
         if (deps.revalidateExternal === undefined) {
           return yield* fail("caller-stale", "The external integration is unavailable.");
         }
@@ -745,6 +766,17 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         ) {
           return yield* fail("caller-stale", "External integration authority changed.");
         }
+      }
+
+      if (
+        principal.kind === "automation-owner" &&
+        !isAutomationLifecyclePlan(proposal.plan) &&
+        proposal.plan.kind !== "automationRun"
+      ) {
+        return yield* fail(
+          "privilege-escalation",
+          "Owner automation authority only permits automation plans.",
+        );
       }
 
       if (proposal.plan.kind === "changeSettings") {
@@ -786,14 +818,13 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail("automation-unavailable", "Automation control is unavailable.");
         }
         yield* validateAutomation(deps.automations.validateLifecyclePlan(proposal.plan));
-        const definition =
-          proposal.plan.kind === "cancelAutomation"
-            ? (yield* validateAutomation(
-                deps.automations.get(proposal.plan.automationId, {
-                  projectId: originProjectId,
-                }),
-              )).definition
-            : automationDefinitionForPlan(proposal.plan);
+        if (proposal.plan.kind === "cancelAutomation") {
+          yield* validateAutomation(
+            deps.automations.get(proposal.plan.automationId, { projectId: originProjectId }),
+          );
+          return;
+        }
+        const definition = automationDefinitionForPlan(proposal.plan);
         yield* validatePlanAgainstSnapshot({
           plan: { kind: "createThreads", entries: [definition.execution] },
           originProjectId,
@@ -869,6 +900,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
     });
 
   return {
+    validateOwnerAutomation,
     validateSubmission,
     validateExternalSubmission,
     revalidateExecution,

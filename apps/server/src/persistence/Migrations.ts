@@ -13,6 +13,8 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 
+import Migration0057 from "./Migrations/057_AutomationCentre.ts";
+
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -134,6 +136,7 @@ export const migrationEntries = [
   [52, "ProjectionThreadsSettled", Migration0052],
   [53, "ThreadPriorityRankings", Migration0053],
   [54, "ProjectionThreadsSnoozed", Migration0054],
+  [57, "AutomationCentre", Migration0057],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

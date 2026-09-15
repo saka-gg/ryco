@@ -1,3 +1,4 @@
+import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
 import { Cause, Effect, Metric, Option, Schema, Stream } from "effect";
 import {
   AuthSessionId,
@@ -133,6 +134,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const chatAttachmentUploads = yield* Effect.serviceOption(ChatAttachmentUploads);
     // Optional for the same route-test reason; production always provides it
     // through the runtime's Agent Control layer.
+    const automationCentre = yield* Effect.serviceOption(AutomationCentre);
     const agentControlProposals = yield* Effect.serviceOption(AgentControlProposalService);
     const agentControlExternalIntegrations = yield* Effect.serviceOption(
       AgentControlExternalIntegrationService,
@@ -751,6 +753,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       contextHandoffInspection,
       threadPriorityCoordinator,
       chatAttachmentUploads,
+      automationCentre,
       agentControlProposals,
       agentControlExternalIntegrations,
       agentControlExternalInstallations,

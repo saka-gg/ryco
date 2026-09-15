@@ -1,3 +1,5 @@
+import { AutomationCentre } from "../automations/AutomationCentre";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
   ExternalLinkIcon,
   FolderOpenIcon,
@@ -68,13 +70,14 @@ function resolveRepositoryProviderIcon(provider: string | undefined): Icon {
 // Navigation items
 // ---------------------------------------------------------------------------
 
-type ProjectSettingsSection = "general" | "location" | "atlassian" | "ai";
+type ProjectSettingsSection = "general" | "location" | "atlassian" | "ai" | "automations";
 
 const PROJECT_SETTINGS_NAV_ITEMS = [
   { id: "general", label: "General", Icon: Settings2Icon },
   { id: "location", label: "Location", Icon: FolderOpenIcon },
   { id: "atlassian", label: "Atlassian", Icon: SlidersHorizontalIcon },
   { id: "ai", label: "AI", Icon: SparklesIcon },
+  { id: "automations", label: "Automations", Icon: SparklesIcon },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -911,6 +914,7 @@ function ProjectSettingsField(props: { label: string; children: React.ReactNode 
 // ---------------------------------------------------------------------------
 
 export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
+  const presentationTier = usePresentationTier();
   const [section, setSection] = useState<ProjectSettingsSection>("general");
   useEffect(() => {
     if (props.open) setSection("general");
@@ -953,7 +957,9 @@ export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
               style={{ transform: `translateY(${activeSectionIndex * 2.5}rem)` }}
               aria-hidden
             />
-            {PROJECT_SETTINGS_NAV_ITEMS.map(({ id, label, Icon }) => {
+            {PROJECT_SETTINGS_NAV_ITEMS.filter(
+              (item) => item.id !== "automations" || presentationTier !== "phone",
+            ).map(({ id, label, Icon }) => {
               const isActive = section === id;
               return (
                 <button
@@ -1003,6 +1009,8 @@ export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
                   onPickWorkspaceRoot={props.onPickWorkspaceRoot}
                   onSave={props.onSave}
                 />
+              ) : section === "automations" ? (
+                <AutomationCentre environmentId={target.environmentId} projectId={target.id} />
               ) : section === "atlassian" ? (
                 <ProjectAtlassianSettingsSection target={target} />
               ) : (
@@ -1020,7 +1028,7 @@ export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
           <Button variant="outline" onClick={props.onClose}>
             Cancel
           </Button>
-          {section === "atlassian" ? null : (
+          {section === "atlassian" || section === "automations" ? null : (
             <Button onClick={props.onSave} disabled={props.saving}>
               {props.saving ? "Saving…" : "Save changes"}
             </Button>

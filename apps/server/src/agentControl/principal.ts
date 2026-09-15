@@ -14,6 +14,8 @@ export function agentControlPrincipalScope(
   principal: AgentControlPrincipal,
 ): AgentControlPrincipalScope {
   switch (principal.kind) {
+    case "automation-owner":
+      return AgentControlPrincipalScope.make(`automation-owner:${principal.projectId}`);
     case "provider-session":
       return AgentControlPrincipalScope.make(`provider-session:${principal.threadId}`);
     case "external-integration":
