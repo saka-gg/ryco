@@ -2,7 +2,7 @@
 // keyboard-inset variable drive the phone readability assertions.
 import "../../index.css";
 
-import { ApprovalRequestId } from "@ryco/contracts";
+import { ApprovalRequestId, EventId, RuntimeSessionId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -60,6 +60,43 @@ describe("ApprovalCard", () => {
     await page.viewport(1_280, 720);
   });
 
+  it("forwards the displayed callback identity and disables uncertain outcomes", async () => {
+    const identity = {
+      requestEventId: EventId.make("displayed-callback"),
+      runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+    };
+    const respond = vi.fn(async () => undefined);
+    mounted = await render(
+      <ApprovalCard
+        approval={approval({ approvalIdentity: identity })}
+        pendingCount={1}
+        isResponding={false}
+        onRespondToApproval={respond}
+      />,
+    );
+    await page.getByRole("button", { name: "Approve once" }).click();
+    expect(respond).toHaveBeenCalledWith("req-approval-card", "accept", identity);
+    await mounted.rerender(
+      <ApprovalCard
+        approval={approval({ approvalIdentity: identity, responseState: "uncertain" })}
+        pendingCount={1}
+        isResponding={false}
+        onRespondToApproval={respond}
+      />,
+    );
+    await expect.element(page.getByRole("button", { name: "Approve once" })).toBeDisabled();
+    await expect.element(page.getByRole("status")).toHaveTextContent("Delivery outcome is unknown");
+    await mounted.rerender(
+      <ApprovalCard
+        approval={approval({ approvalIdentity: identity, responseState: "retryable" })}
+        pendingCount={1}
+        isResponding={false}
+        onRespondToApproval={respond}
+      />,
+    );
+    await expect.element(page.getByRole("button", { name: "Approve once" })).toBeEnabled();
+  });
+
   for (const [width, height] of [
     [320, 568],
     [390, 844],
@@ -111,7 +148,7 @@ describe("ApprovalCard", () => {
       }
 
       await page.getByRole("button", { name: "Approve once" }).click();
-      expect(onRespondToApproval).toHaveBeenCalledWith("req-approval-card", "accept");
+      expect(onRespondToApproval).toHaveBeenCalledWith("req-approval-card", "accept", undefined);
     });
   }
 
@@ -142,7 +179,7 @@ describe("ApprovalCard", () => {
       .querySelector<HTMLButtonElement>('[data-testid="approval-card-actions"] button:last-child')!
       .focus();
     await page.getByRole("button", { name: "Decline" }).click();
-    expect(onRespondToApproval).toHaveBeenCalledWith("req-approval-card", "decline");
+    expect(onRespondToApproval).toHaveBeenCalledWith("req-approval-card", "decline", undefined);
   });
 
   it("keeps the expand affordance off the desktop tier and renders a single inline action set", async () => {

@@ -8,6 +8,9 @@
  */
 import {
   ApprovalRequestId,
+  ApprovalResponseIdentity,
+  ApprovalResponseState,
+  CommandId,
   IsoDateTime,
   ProjectionPendingApprovalDecision,
   ProjectionPendingApprovalStatus,
@@ -27,6 +30,10 @@ export const ProjectionPendingApproval = Schema.Struct({
   decision: ProjectionPendingApprovalDecision,
   createdAt: IsoDateTime,
   resolvedAt: Schema.NullOr(IsoDateTime),
+  approvalIdentity: Schema.optional(ApprovalResponseIdentity),
+  responseAttemptId: Schema.optional(CommandId),
+  responseState: Schema.optional(ApprovalResponseState),
+  settlementRequiresIdentity: Schema.optional(Schema.Boolean),
 });
 export type ProjectionPendingApproval = typeof ProjectionPendingApproval.Type;
 
@@ -36,11 +43,13 @@ export const ListProjectionPendingApprovalsInput = Schema.Struct({
 export type ListProjectionPendingApprovalsInput = typeof ListProjectionPendingApprovalsInput.Type;
 
 export const GetProjectionPendingApprovalInput = Schema.Struct({
+  threadId: ThreadId,
   requestId: ApprovalRequestId,
 });
 export type GetProjectionPendingApprovalInput = typeof GetProjectionPendingApprovalInput.Type;
 
 export const DeleteProjectionPendingApprovalInput = Schema.Struct({
+  threadId: ThreadId,
   requestId: ApprovalRequestId,
 });
 export type DeleteProjectionPendingApprovalInput = typeof DeleteProjectionPendingApprovalInput.Type;
@@ -52,7 +61,7 @@ export interface ProjectionPendingApprovalRepositoryShape {
   /**
    * Insert or replace a projected pending approval row.
    *
-   * Upserts by `requestId`.
+   * Upserts by `(threadId, requestId)`.
    */
   readonly upsert: (
     row: ProjectionPendingApproval,

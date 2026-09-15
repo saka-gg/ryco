@@ -1,6 +1,6 @@
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Schema, Option } from "effect";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
@@ -11,6 +11,22 @@ import {
   ProjectionPendingApprovalRepository,
   type ProjectionPendingApprovalRepositoryShape,
 } from "../Services/ProjectionPendingApprovals.ts";
+
+const ApprovalRow = ProjectionPendingApproval.mapFields((fields) => ({
+  ...fields,
+  approvalIdentity: Schema.NullOr(Schema.fromJsonString(Schema.Unknown)),
+  responseAttemptId: Schema.NullOr(Schema.String),
+  responseState: Schema.NullOr(Schema.String),
+  settlementRequiresIdentity: Schema.Number,
+}));
+const decodeRow = (row: typeof ApprovalRow.Type) =>
+  Schema.decodeUnknownEffect(ProjectionPendingApproval)({
+    ...row,
+    approvalIdentity: row.approvalIdentity ?? undefined,
+    responseAttemptId: row.responseAttemptId ?? undefined,
+    responseState: row.responseState ?? undefined,
+    settlementRequiresIdentity: row.settlementRequiresIdentity === 1,
+  });
 
 const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -26,7 +42,7 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
           status,
           decision,
           created_at,
-          resolved_at
+          resolved_at, identity_json, response_attempt_id, response_state, settlement_requires_identity
         )
         VALUES (
           ${row.requestId},
@@ -35,22 +51,27 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
           ${row.status},
           ${row.decision},
           ${row.createdAt},
-          ${row.resolvedAt}
+          ${row.resolvedAt}, ${row.approvalIdentity ? JSON.stringify(row.approvalIdentity) : null},
+          ${row.responseAttemptId ?? null}, ${row.responseState ?? null}, ${row.settlementRequiresIdentity ? 1 : 0}
         )
-        ON CONFLICT (request_id)
+        ON CONFLICT (thread_id, request_id)
         DO UPDATE SET
           thread_id = excluded.thread_id,
           turn_id = excluded.turn_id,
           status = excluded.status,
           decision = excluded.decision,
           created_at = excluded.created_at,
-          resolved_at = excluded.resolved_at
+          resolved_at = excluded.resolved_at,
+          identity_json = excluded.identity_json,
+          response_attempt_id = excluded.response_attempt_id,
+          response_state = excluded.response_state,
+          settlement_requires_identity = excluded.settlement_requires_identity
       `,
   });
 
   const listProjectionPendingApprovalRows = SqlSchema.findAll({
     Request: ListProjectionPendingApprovalsInput,
-    Result: ProjectionPendingApproval,
+    Result: ApprovalRow,
     execute: ({ threadId }) =>
       sql`
         SELECT
@@ -60,7 +81,9 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
           status,
           decision,
           created_at AS "createdAt",
-          resolved_at AS "resolvedAt"
+          resolved_at AS "resolvedAt",
+          identity_json AS "approvalIdentity", response_attempt_id AS "responseAttemptId",
+          response_state AS "responseState", settlement_requires_identity AS "settlementRequiresIdentity"
         FROM projection_pending_approvals
         WHERE thread_id = ${threadId}
         ORDER BY created_at ASC, request_id ASC
@@ -69,8 +92,8 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
 
   const getProjectionPendingApprovalRow = SqlSchema.findOneOption({
     Request: GetProjectionPendingApprovalInput,
-    Result: ProjectionPendingApproval,
-    execute: ({ requestId }) =>
+    Result: ApprovalRow,
+    execute: ({ threadId, requestId }) =>
       sql`
         SELECT
           request_id AS "requestId",
@@ -79,18 +102,20 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
           status,
           decision,
           created_at AS "createdAt",
-          resolved_at AS "resolvedAt"
+          resolved_at AS "resolvedAt",
+          identity_json AS "approvalIdentity", response_attempt_id AS "responseAttemptId",
+          response_state AS "responseState", settlement_requires_identity AS "settlementRequiresIdentity"
         FROM projection_pending_approvals
-        WHERE request_id = ${requestId}
+        WHERE thread_id = ${threadId} AND request_id = ${requestId}
       `,
   });
 
   const deleteProjectionPendingApprovalRow = SqlSchema.void({
     Request: DeleteProjectionPendingApprovalInput,
-    execute: ({ requestId }) =>
+    execute: ({ threadId, requestId }) =>
       sql`
         DELETE FROM projection_pending_approvals
-        WHERE request_id = ${requestId}
+        WHERE thread_id = ${threadId} AND request_id = ${requestId}
       `,
   });
 
@@ -110,6 +135,7 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
 
   const listByThreadId: ProjectionPendingApprovalRepositoryShape["listByThreadId"] = (input) =>
     listProjectionPendingApprovalRows(input).pipe(
+      Effect.flatMap((rows) => Effect.forEach(rows, decodeRow)),
       Effect.mapError(
         toPersistenceSqlError("ProjectionPendingApprovalRepository.listByThreadId:query"),
       ),
@@ -117,6 +143,11 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
 
   const getByRequestId: ProjectionPendingApprovalRepositoryShape["getByRequestId"] = (input) =>
     getProjectionPendingApprovalRow(input).pipe(
+      Effect.flatMap((row) =>
+        Option.isSome(row)
+          ? decodeRow(row.value).pipe(Effect.map(Option.some))
+          : Effect.succeed(Option.none()),
+      ),
       Effect.mapError(
         toPersistenceSqlError("ProjectionPendingApprovalRepository.getByRequestId:query"),
       ),

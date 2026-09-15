@@ -1,3 +1,4 @@
+import type { ApprovalResponseIdentity } from "@ryco/contracts";
 import type { EnvironmentId } from "@ryco/contracts";
 import {
   type ApprovalRequestId,
@@ -58,7 +59,11 @@ export function useChatSessionActions(input: {
   }, [activeThreadId, environmentId]);
 
   const respondToApproval = useCallback(
-    async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
+    async (
+      requestId: ApprovalRequestId,
+      decision: ProviderApprovalDecision,
+      approvalIdentity?: ApprovalResponseIdentity,
+    ) => {
       const api = readEnvironmentApi(environmentId);
       if (!api || !activeThreadId) {
         return;
@@ -73,6 +78,7 @@ export function useChatSessionActions(input: {
           threadId: activeThreadId,
           requestId,
           decision,
+          approvalIdentity,
         });
       } catch (err: unknown) {
         setThreadError(

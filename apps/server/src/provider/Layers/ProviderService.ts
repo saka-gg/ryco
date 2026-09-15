@@ -1360,8 +1360,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         const routed = yield* resolveRoutableSession({
           threadId: input.threadId,
           operation: "ProviderService.respondToRequest",
-          allowRecovery: true,
+          allowRecovery: false,
         });
+        if (
+          !routed.isActive ||
+          (input.expectedRuntimeSessionId !== undefined &&
+            routed.session?.runtimeSessionId !== input.expectedRuntimeSessionId)
+        ) {
+          return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
+        }
         metricProvider = routed.adapter.provider;
         yield* Effect.annotateCurrentSpan({
           "provider.operation": "respond-to-request",
