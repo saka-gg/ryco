@@ -1,7 +1,7 @@
 import "../index.css";
 
 import { page } from "vite-plus/test/browser";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { EnvironmentId } from "@ryco/contracts";
 
@@ -55,6 +55,7 @@ vi.mock("@pierre/diffs", () => ({
 }));
 
 import ChatMarkdown from "./ChatMarkdown";
+import { syncDocumentPresentationTier } from "../lib/presentationTier";
 
 describe("ChatMarkdown", () => {
   afterEach(() => {
@@ -369,4 +370,52 @@ describe("ChatMarkdown", () => {
       await screen.unmount();
     }
   });
+});
+
+describe("completed Mermaid Markdown boundary", () => {
+  let stopTier: () => void;
+  beforeEach(async () => {
+    await page.viewport(1024, 768);
+    stopTier = syncDocumentPresentationTier();
+  });
+  afterEach(() => stopTier());
+  it("renders completed fences and copies their exact source", async () => {
+    const source = "flowchart LR\nOriginal-->Source\n";
+    const write = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const screen = await render(
+      <ChatMarkdown cwd="/repo" text={`\`\`\`mermaid\n${source}\`\`\``} />,
+    );
+    await expect.element(screen.getByRole("img")).toBeVisible();
+    await screen.getByRole("button", { name: "Copy code" }).click();
+    expect(write).toHaveBeenCalledWith(source);
+    write.mockRestore();
+  });
+
+  it("keeps streaming, unclosed and unsupported fences on code", async () => {
+    const text = "```mermaid\nflowchart TD\nA-->B\n```";
+    const screen = await render(<ChatMarkdown cwd="/repo" text={text} isStreaming />);
+    expect(document.querySelector("[data-mermaid]")).toBeNull();
+    await screen.rerender(<ChatMarkdown cwd="/repo" text={"```mermaid\nflowchart TD\nA-->B"} />);
+    expect(document.querySelector("[data-mermaid]")).toBeNull();
+    await screen.rerender(
+      <ChatMarkdown
+        cwd="/repo"
+        text={"```mermaid\n---\nconfig: {}\n---\nflowchart TD\nA-->B\n```"}
+      />,
+    );
+    expect(document.querySelector("[data-mermaid]")).toBeNull();
+    await screen.rerender(<ChatMarkdown cwd="/repo" text={text} />);
+    await expect.element(screen.getByRole("img")).toBeVisible();
+  });
+});
+
+it("keeps the frozen phone tier on source", async () => {
+  await page.viewport(390, 844);
+  const stop = syncDocumentPresentationTier();
+  try {
+    await render(<ChatMarkdown cwd={undefined} text={"```mermaid\nflowchart TD\nA-->B\n```"} />);
+    expect(document.querySelector("[data-mermaid]")).toBeNull();
+  } finally {
+    stop();
+  }
 });
