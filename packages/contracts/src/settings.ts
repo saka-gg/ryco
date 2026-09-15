@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { EnvironmentId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { EditorId } from "./editor.ts";
 import { EnvironmentMachineKind, EnvironmentMachineHint } from "./environment.ts";
 import {
@@ -56,6 +56,8 @@ export type AiFocusRefreshIntervalMs = typeof AiFocusRefreshIntervalMs.Type;
 export const DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS: AiFocusRefreshIntervalMs = 600_000;
 
 export const ClientSettingsSchema = Schema.Struct({
+  // Local lifecycle metadata. Optional so restoring default preferences preserves it.
+  localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   aiFocusEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   aiFocusRefreshIntervalMs: AiFocusRefreshIntervalMs.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS)),
@@ -637,6 +639,7 @@ export const ServerSettingsPatch = Schema.Struct({
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
+  localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   aiFocusEnabled: Schema.optionalKey(Schema.Boolean),
   aiFocusRefreshIntervalMs: Schema.optionalKey(AiFocusRefreshIntervalMs),
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),

@@ -3,6 +3,7 @@ import type { SettingsSectionId } from "../../settingsDialogStore";
 export interface SettingsSearchEntry {
   readonly section: SettingsSectionId;
   readonly owner: "client" | "node";
+  readonly localOnboardingOnly?: boolean;
   readonly desktopCapability?: "computerUse" | "quitShortcut";
   readonly title: string;
   readonly description: string;
@@ -20,6 +21,14 @@ export interface SettingsSearchEntry {
  * search results keeps the prominent entries honest.
  */
 export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
+  {
+    section: "general",
+    owner: "client",
+    title: "Welcome tour",
+    description: "Replay provider setup, add a project, and learn the essentials.",
+    keywords: "onboarding first run getting started setup",
+    localOnboardingOnly: true,
+  },
   {
     section: "appearance",
     title: "Diff style",
