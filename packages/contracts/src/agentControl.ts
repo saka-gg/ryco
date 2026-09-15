@@ -166,7 +166,16 @@ export const AgentControlExternalIntegrationPrincipal = Schema.Struct({
 export type AgentControlExternalIntegrationPrincipal =
   typeof AgentControlExternalIntegrationPrincipal.Type;
 
+/** Owner-authored automation only; never accepted from an MCP principal. */
+export const AgentControlAutomationOwnerPrincipal = Schema.Struct({
+  kind: Schema.Literal("automation-owner"),
+  projectId: ProjectId,
+  runtimeMode: RuntimeMode,
+  envMode: ThreadEnvMode,
+});
+
 export const AgentControlPrincipal = Schema.Union([
+  AgentControlAutomationOwnerPrincipal,
   AgentControlProviderSessionPrincipal,
   AgentControlExternalIntegrationPrincipal,
 ]);
@@ -929,6 +938,8 @@ export type AgentControlProposal = typeof AgentControlProposal.Type;
 // ── Approval queue and RPC surface ────────────────────────────────────
 
 export const AGENT_CONTROL_WS_METHODS = {
+  automationCentre: "agentControl.automationCentre",
+  automationCommand: "agentControl.automationCommand",
   listProposals: "agentControl.listProposals",
   getProposal: "agentControl.getProposal",
   acceptProposal: "agentControl.acceptProposal",

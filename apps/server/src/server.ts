@@ -1,3 +1,4 @@
+import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Effect, Layer } from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
 
@@ -452,6 +453,10 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
 // registry from the runtime dependencies, and its endpoint never touches
 // the public HTTP server, router, or any client-visible state.
 const RuntimeServicesLive = Layer.mergeAll(
+  AutomationCentreLive.pipe(
+    Layer.provideMerge(AgentControlActionValidatorLive),
+    Layer.provideMerge(AgentControlProjectPlansLive),
+  ),
   ServerRuntimeStartupLive,
   AgentControlMcpServerLive.pipe(
     Layer.provideMerge(AgentControlDiagnosticsServiceLive),

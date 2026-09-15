@@ -422,6 +422,7 @@ it.effect("device mutation tools create immutable proposals without touching Dev
       deviceService: { supported: true, manager },
       getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)),
       validator: {
+        validateOwnerAutomation: () => Effect.void,
         validateSubmission: () => Effect.succeed(proposalOwn.principal as never),
         validateExternalSubmission: () => Effect.die("unused"),
         revalidateExecution: () => Effect.void,
@@ -547,6 +548,7 @@ it.effect("automation create, update, and cancel remain inert exact proposals un
       } as unknown as AgentControlAutomationShape,
       getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)),
       validator: {
+        validateOwnerAutomation: () => Effect.void,
         validateSubmission: () =>
           Effect.succeed({
             kind: "provider-session",
@@ -793,6 +795,7 @@ it.effect("creates an immutable proposal without mutating the target", () =>
     const deps = makeDeps({
       getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)),
       validator: {
+        validateOwnerAutomation: () => Effect.void,
         validateSubmission: ({ plan }) =>
           Effect.succeed({
             kind: "provider-session",
@@ -1029,6 +1032,7 @@ it.effect("project write tools create exact inert proposals and never dispatch m
       projectPlans,
       getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)),
       validator: {
+        validateOwnerAutomation: () => Effect.void,
         validateSubmission: () =>
           Effect.succeed({
             kind: "provider-session",
@@ -1113,6 +1117,7 @@ it.effect("settings requests rejected by validation never reach persistence", ()
       getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
       getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)),
       validator: {
+        validateOwnerAutomation: () => Effect.void,
         validateSubmission: ({ plan }) =>
           plan.kind === "changeSettings"
             ? Effect.fail(
