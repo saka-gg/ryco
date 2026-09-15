@@ -1,6 +1,41 @@
 import type { ServerProviderRateLimitWindow } from "@ryco/contracts";
 import { clampUsedPercent, describeRateLimitPace, rateLimitPace } from "@ryco/client-runtime/usage";
 import { formatRateLimitResetText } from "../settings/codexUsageLimits";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+
+function PaceReference(props: {
+  readonly expectedUsedPercent: number;
+  readonly description: string;
+}) {
+  const expected = clampUsedPercent(props.expectedUsedPercent);
+  if (expected === null) return null;
+
+  const marker = (
+    <button
+      type="button"
+      title={props.description}
+      aria-label={`Even-pace reference: ${props.description}`}
+      className="absolute top-1/2 z-10 flex size-4 -translate-x-1/2 -translate-y-1/2 cursor-help items-center justify-center rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+      style={{ left: `${expected}%` }}
+    >
+      <span
+        aria-hidden="true"
+        className="relative h-2.5 w-[3px] rounded-full bg-background shadow-xs"
+      >
+        <span className="absolute inset-y-px left-1/2 w-px -translate-x-1/2 rounded-full bg-foreground/70" />
+      </span>
+    </button>
+  );
+
+  return (
+    <Tooltip>
+      <TooltipTrigger render={marker} />
+      <TooltipPopup side="top" className="max-w-72 leading-tight">
+        {props.description}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
 
 /** Presentation only: the caller supplies its authoritative connection and snapshot time. */
 export function ProviderLimitWindow(props: {
@@ -30,9 +65,10 @@ export function ProviderLimitWindow(props: {
         ? `${used}% used`
         : `${remaining}% available`;
   const reset = formatRateLimitResetText(props.window.resetsAt);
-  const pace = describeRateLimitPace(
-    rateLimitPace(props.window, props.checkedAt, props.now, props.available),
-  );
+  const pace = rateLimitPace(props.window, props.checkedAt, props.now, props.available);
+  const paceDescription = describeRateLimitPace(pace);
+  const paceReference =
+    pace.status === "reserve" || pace.status === "deficit" ? pace.expectedUsedPercent : null;
   return (
     <div className="grid min-w-0 gap-1.5">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs">
@@ -40,18 +76,23 @@ export function ProviderLimitWindow(props: {
         <span className="text-muted-foreground">{headline}</span>
       </div>
       {used !== null ? (
-        <div
-          className="h-1.5 overflow-hidden rounded-full bg-muted"
-          role="progressbar"
-          aria-label={`${props.label} window usage`}
-          aria-valuenow={used}
-          aria-valuemin={0}
-          aria-valuemax={100}
-        >
+        <div className="relative">
           <div
-            className={`h-full rounded-full ${props.compact ? "" : "transition-[width]"} ${barColor}`}
-            style={{ width: `${used}%` }}
-          />
+            className="h-1.5 overflow-hidden rounded-full bg-muted"
+            role="progressbar"
+            aria-label={`${props.label} window usage`}
+            aria-valuenow={used}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            <div
+              className={`h-full rounded-full ${props.compact ? "" : "transition-[width]"} ${barColor}`}
+              style={{ width: `${used}%` }}
+            />
+          </div>
+          {paceReference !== null && paceDescription ? (
+            <PaceReference expectedUsedPercent={paceReference} description={paceDescription} />
+          ) : null}
         </div>
       ) : null}
       <div className="flex flex-wrap justify-between gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
@@ -60,7 +101,9 @@ export function ProviderLimitWindow(props: {
         ) : null}
         {reset ? <span className="first-letter:uppercase">{reset}</span> : null}
       </div>
-      {pace ? <p className="text-[11px] leading-relaxed text-muted-foreground">{pace}</p> : null}
+      {pace.status === "unavailable" && paceDescription ? (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">{paceDescription}</p>
+      ) : null}
     </div>
   );
 }
