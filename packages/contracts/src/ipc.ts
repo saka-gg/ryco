@@ -1,4 +1,3 @@
-import type { AutomationCentreApi } from "./automationCentre.ts";
 import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
@@ -8,6 +7,7 @@ import type {
   GitReadComparisonInput,
   GitReadComparisonResult,
 } from "./git.ts";
+import type { AutomationCentreApi } from "./automationCentre.ts";
 import type {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,

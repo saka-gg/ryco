@@ -2624,6 +2624,253 @@ describe("ChatView timeline estimator parity (full app)", () => {
     document.body.innerHTML = "";
   });
 
+  function gallerySnapshot() {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "gallery-user" as MessageId,
+      targetText: "Gallery source",
+    });
+    return {
+      ...snapshot,
+      threads: snapshot.threads.map((thread) =>
+        Object.assign({}, thread, {
+          messages: thread.messages.map((message, index) =>
+            index === 0
+              ? {
+                  ...message,
+                  attachments: [
+                    {
+                      type: "image" as const,
+                      id: "gallery-image",
+                      name: "gallery.svg",
+                      mimeType: "image/svg+xml",
+                      sizeBytes: ATTACHMENT_SVG.length,
+                    },
+                  ],
+                }
+              : message,
+          ),
+        }),
+      ),
+    };
+  }
+
+  async function waitForGalleryThreadWindow(): Promise<void> {
+    const sourceThread = fixture.snapshot.threads.find((thread) => thread.id === THREAD_ID)!;
+    // Shell bootstrap and the composer can precede the independent detail stream.
+    // Do not edit history or attachment URLs until that snapshot is projected:
+    // a later initial snapshot would otherwise overwrite the fixture edits.
+    await vi.waitFor(() => {
+      const env = useStore.getState().environmentStateById[THREAD_REF.environmentId];
+      expect(env?.threadHistoryByThreadId?.[THREAD_ID]?.messages).toBeDefined();
+      expect(env?.messageIdsByThreadId[THREAD_ID]).toEqual(
+        sourceThread.messages.map((message) => message.id),
+      );
+      expect(
+        env?.messageByThreadId[THREAD_ID]?.[sourceThread.messages[0]!.id]?.attachments,
+      ).toEqual(expect.arrayContaining([expect.objectContaining({ id: "gallery-image" })]));
+    });
+    await waitForLayout();
+  }
+
+  it("thread gallery real action opens images, loads older history explicitly and restores focus", async () => {
+    const historyRequests: NormalizedWsRpcRequestBody[] = [];
+    const older = createUserMessage({
+      id: "gallery-older" as MessageId,
+      text: "Older image",
+      offsetSeconds: 0,
+      attachments: [
+        {
+          type: "image",
+          id: "older-image",
+          name: "older.svg",
+          mimeType: "image/svg+xml",
+          sizeBytes: ATTACHMENT_SVG.length,
+        },
+      ],
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: gallerySnapshot(),
+      resolveRpc: (body) => {
+        if (body._tag !== ORCHESTRATION_WS_METHODS.getThreadHistoryPage) return undefined;
+        historyRequests.push(body);
+        return {
+          collection: "messages",
+          snapshotSequence: fixture.snapshot.snapshotSequence,
+          items: [older],
+          page: { oldestCursor: null, newestCursor: null, hasMoreBefore: false },
+        };
+      },
+    });
+    try {
+      await waitForComposerEditor();
+      await waitForGalleryThreadWindow();
+      useStore.setState((state) => {
+        const env = state.environmentStateById[THREAD_REF.environmentId]!;
+        const history = env.threadHistoryByThreadId![THREAD_ID]!;
+        return {
+          environmentStateById: {
+            ...state.environmentStateById,
+            [THREAD_REF.environmentId]: {
+              ...env,
+              threadHistoryByThreadId: {
+                ...env.threadHistoryByThreadId,
+                [THREAD_ID]: {
+                  ...history,
+                  messages: {
+                    ...history.messages,
+                    hasMoreBefore: true,
+                    oldestCursor: "gallery-cursor" as NonNullable<
+                      typeof history.messages.oldestCursor
+                    >,
+                  },
+                },
+              },
+            },
+          },
+        };
+      });
+      await page.getByRole("button", { name: "Thread images", exact: true }).click();
+      await expect.element(page.getByRole("dialog", { name: "Thread images" })).toBeVisible();
+      await expect
+        .element(page.getByText("Images in loaded history · Newest messages first"))
+        .toBeVisible();
+      expect(historyRequests).toHaveLength(0);
+      await page.getByRole("button", { name: "Load older messages", exact: true }).click();
+      await expect.element(page.getByRole("button", { name: "Preview older.svg" })).toBeVisible();
+      expect(historyRequests).toHaveLength(1);
+      expect(historyRequests[0]).toMatchObject({
+        threadId: THREAD_ID,
+        collection: "messages",
+        mode: { kind: "before", cursor: "gallery-cursor" },
+        limit: 150,
+      });
+      await page.getByRole("button", { name: "Preview gallery.svg" }).click();
+      await expect
+        .element(page.getByRole("img", { name: "gallery.svg", exact: true }).last())
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("link", { name: "Download gallery.svg" }).last())
+        .toHaveAttribute("download", "gallery.svg");
+      await page.screenshot({ path: "../../../../output/task22-app-gallery.png" });
+      await userEvent.keyboard("{Escape}");
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(page.getByRole("button", { name: "Thread images", exact: true }))
+        .toHaveFocus();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("thread gallery two-pane focus loss cancels RPC and never restores an inactive modal", async () => {
+    const other = "gallery-other-thread" as ThreadId;
+    const mounted = await mountChatView({
+      viewport: { ...DEFAULT_VIEWPORT, width: 1600, height: 1000 },
+      snapshot: addThreadToSnapshot(gallerySnapshot(), other),
+    });
+    try {
+      await waitForComposerEditor();
+      await waitForGalleryThreadWindow();
+      useChatPanesStore.getState().open(threadRefFor(other), "right", THREAD_REF);
+      await vi.waitFor(() =>
+        expect(
+          document.querySelectorAll('[data-pane-thread] [aria-label="Thread images"]'),
+        ).toHaveLength(2),
+      );
+      const api = readEnvironmentApi(THREAD_REF.environmentId)!;
+      let resolve!: (result: { offset: number; totalBytes: number; dataBase64: string }) => void;
+      const readChunk = vi.fn(
+        () =>
+          new Promise<{ offset: number; totalBytes: number; dataBase64: string }>((done) => {
+            resolve = done;
+          }),
+      );
+      __setEnvironmentApiOverrideForTests(THREAD_REF.environmentId, {
+        ...api,
+        attachments: { readChunk },
+      });
+      useStore.setState((state) => {
+        const env = state.environmentStateById[THREAD_REF.environmentId]!;
+        const messages = Object.fromEntries(
+          Object.entries(env.messageByThreadId[THREAD_ID]!).map(([id, message]) => [
+            id,
+            {
+              ...message,
+              attachments: message.attachments?.map(
+                ({ previewUrl: _url, ...attachment }) => attachment,
+              ),
+            },
+          ]),
+        );
+        return {
+          environmentStateById: {
+            ...state.environmentStateById,
+            [THREAD_REF.environmentId]: {
+              ...env,
+              messageByThreadId: { ...env.messageByThreadId, [THREAD_ID]: messages },
+            },
+          },
+        };
+      });
+      const sourcePane = document.querySelector<HTMLElement>(`[data-pane-thread="${THREAD_KEY}"]`)!;
+      const sourceAction = sourcePane.querySelector<HTMLButtonElement>(
+        '[aria-label="Thread images"]',
+      )!;
+      sourceAction.click();
+      await page.getByRole("button", { name: "Preview gallery.svg" }).click();
+      expect(readChunk).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: "Load image", exact: true }).click();
+      await vi.waitFor(() => expect(readChunk).toHaveBeenCalledOnce());
+      const create = vi.spyOn(URL, "createObjectURL");
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: threadRefFor(other),
+      });
+      await vi.waitFor(() => expect(sourcePane.dataset.paneFocused).toBe("false"));
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      resolve({ offset: 0, totalBytes: ATTACHMENT_SVG.length, dataBase64: btoa(ATTACHMENT_SVG) });
+      await waitForLayout();
+      expect(create).not.toHaveBeenCalled();
+      expect(sourcePane.contains(document.activeElement)).toBe(false);
+      sourceAction.click();
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      await mounted.router.navigate({ to: "/$environmentId/$threadId", params: THREAD_REF });
+      await vi.waitFor(() => expect(sourcePane.dataset.paneFocused).toBe("true"));
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      sourceAction.click();
+      await page.getByRole("button", { name: "Preview gallery.svg" }).click();
+      readChunk.mockResolvedValue({
+        offset: 0,
+        totalBytes: ATTACHMENT_SVG.length,
+        dataBase64: btoa(ATTACHMENT_SVG),
+      });
+      await page.getByRole("button", { name: "Load image", exact: true }).click();
+      await expect.element(page.getByRole("link", { name: "Download gallery.svg" })).toBeVisible();
+      const revoke = vi.spyOn(URL, "revokeObjectURL");
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: threadRefFor(other),
+      });
+      await expect
+        .element(page.getByRole("dialog", { name: "Thread images" }))
+        .not.toBeInTheDocument();
+      expect(revoke).toHaveBeenCalled();
+      create.mockRestore();
+      revoke.mockRestore();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("pane focus isolates real thread search and preserves neighboring composer drafts", async () => {
     const other = "pane-other-thread" as ThreadId;
     const mounted = await mountChatView({
