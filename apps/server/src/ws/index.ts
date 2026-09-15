@@ -1,3 +1,6 @@
+import { createSpeechConnection } from "../speech/connection.ts";
+import { SpeechService } from "../speech/service.ts";
+import { SpeechError } from "@ryco/contracts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
@@ -22,7 +25,19 @@ import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization
 const makeWsRpcHandlers = (principal: RpcPrincipal) =>
   Effect.gen(function* () {
     const ctx = yield* makeWsRpcContext(principal);
+    const speech = yield* Effect.serviceOption(SpeechService);
+    const voice = Option.isSome(speech) ? createSpeechConnection(speech.value, principal) : null;
+    yield* Effect.addFinalizer(() => (voice ? Effect.promise(voice.close) : Effect.void));
     return WsRpcGroup.of({
+      "speech.request": (input) =>
+        ctx.ownerEffect(
+          "speech.request",
+          voice
+            ? voice.request(input)
+            : Effect.fail(
+                new SpeechError({ message: "Voice input is unavailable on this server." }),
+              ),
+        ),
       ...makeAgentControlHandlers(ctx),
       ...makeOrchestrationHandlers(ctx),
       ...makeContextHandoffHandlers(ctx),

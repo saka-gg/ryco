@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
@@ -460,7 +461,24 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           undefined,
           undefined,
         );
+        assert.deepStrictEqual(config.asarUnpack, [
+          "apps/server/dist/resource-monitor/**",
+          "node_modules/transcribe-cpp/**",
+          "node_modules/@transcribe-cpp/**",
+          "node_modules/koffi/**",
+          "node_modules/@koromix/**",
+        ]);
         assert.deepStrictEqual(config.mac, {
+          extendInfo: {
+            NSMicrophoneUsageDescription:
+              "Record a short voice prompt and transcribe it on your chosen Ryco machine.",
+          },
+          entitlements: fileURLToPath(
+            new URL("../apps/desktop/resources/entitlements.mac.plist", import.meta.url),
+          ),
+          entitlementsInherit: fileURLToPath(
+            new URL("../apps/desktop/resources/entitlements.mac.plist", import.meta.url),
+          ),
           target: ["dmg", "zip"],
           minimumSystemVersion: "13.0",
           icon: "icon.icns",

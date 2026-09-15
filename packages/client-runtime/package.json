@@ -99,6 +99,10 @@
     "./state/pull-request-review": {
       "types": "./src/state/pull-request-review/index.ts",
       "import": "./src/state/pull-request-review/index.ts"
+    },
+    "./voice": {
+      "types": "./src/voice/index.ts",
+      "import": "./src/voice/index.ts"
     }
   },
   "scripts": {

@@ -295,6 +295,7 @@ interface StagePackageJson {
   readonly main: string;
   readonly build: Record<string, unknown>;
   readonly dependencies: Record<string, unknown>;
+  readonly optionalDependencies?: Record<string, string>;
   readonly devDependencies: {
     readonly electron: string;
   };
@@ -934,7 +935,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       buildResources: "apps/desktop/resources",
     },
     files: DESKTOP_BUILD_FILES,
-    asarUnpack: ["apps/server/dist/resource-monitor/**"],
+    asarUnpack: [
+      "apps/server/dist/resource-monitor/**",
+      "node_modules/transcribe-cpp/**",
+      "node_modules/@transcribe-cpp/**",
+      "node_modules/koffi/**",
+      "node_modules/@koromix/**",
+    ],
     extraResources: [
       {
         from: `apps/desktop/resources/ryco-computer-use-helper${platform === "win" ? ".exe" : ""}`,
@@ -977,6 +984,16 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       },
     ];
     buildConfig.mac = {
+      entitlements: fileURLToPath(
+        new URL("../apps/desktop/resources/entitlements.mac.plist", import.meta.url),
+      ),
+      entitlementsInherit: fileURLToPath(
+        new URL("../apps/desktop/resources/entitlements.mac.plist", import.meta.url),
+      ),
+      extendInfo: {
+        NSMicrophoneUsageDescription:
+          "Record a short voice prompt and transcribe it on your chosen Ryco machine.",
+      },
       target: target === "dmg" ? [target, "zip"] : [target],
       minimumSystemVersion: "13.0",
       icon: "icon.icns",
@@ -1340,6 +1357,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       localSigningIdentity,
     ),
     dependencies: stageDependencies,
+    optionalDependencies: serverPackageJson.optionalDependencies,
     devDependencies: {
       electron: electronVersion,
     },

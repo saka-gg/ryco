@@ -178,6 +178,8 @@ const config: ExpoConfig = {
         }
       : {}),
     infoPlist: {
+      NSMicrophoneUsageDescription:
+        "Record a short voice prompt and transcribe it on your chosen Ryco machine.",
       NSAppTransportSecurity: {
         // Allow LAN/tailnet connections to a local or staging node over http.
         NSAllowsArbitraryLoads: true,

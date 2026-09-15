@@ -1,3 +1,4 @@
+import { VoiceInput } from "../../voice/VoiceInput";
 import { useRef } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { ComposerAccessMenu } from "../threads/ComposerAccessMenu";
@@ -81,6 +82,16 @@ export function NewTaskComposer(props: {
 
   return (
     <View className="gap-3">
+      {props.environmentId && (
+        <VoiceInput
+          draftKey={`new-task:${props.projectId ?? "none"}`}
+          environmentId={props.environmentId}
+          disabled={props.busy}
+          onInsert={(text) =>
+            props.onChangePrompt(`${props.prompt}${props.prompt ? "\n" : ""}${text}`)
+          }
+        />
+      )}
       <View className="items-center gap-2">
         <Text className="text-base text-foreground-muted">Work in</Text>
         <View className="w-full items-center gap-1">

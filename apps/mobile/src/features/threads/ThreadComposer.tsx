@@ -1,3 +1,5 @@
+import { VoiceInput } from "../../voice/VoiceInput";
+import type { EnvironmentId } from "@ryco/contracts";
 import { useRef, useState } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import type { ModelSelection, RuntimeMode, ProviderInteractionMode } from "@ryco/contracts";
@@ -27,6 +29,8 @@ import { PendingContextHandoffChip } from "./PendingContextHandoffChip";
 // Attachment state (images + streamed files) lives in the owning screen, which
 // knows the environment/thread context the upload engine needs.
 export function ThreadComposer(props: {
+  readonly voiceEnvironmentId?: EnvironmentId;
+  readonly voiceDraftKey?: string;
   // Returns false when the send failed (offline/error) so the composer keeps the
   // user's text; enqueue/dispatch success returns true (or void) and clears it.
   readonly onSend: (
@@ -97,6 +101,14 @@ export function ThreadComposer(props: {
 
   return (
     <View className="px-4 pt-1" style={{ paddingBottom: Math.max(8, safeAreaInsets.bottom) }}>
+      {props.voiceEnvironmentId && (
+        <VoiceInput
+          draftKey={props.voiceDraftKey ?? "thread"}
+          environmentId={props.voiceEnvironmentId}
+          disabled={props.disabled || sending}
+          onInsert={(value) => setText((current) => `${current}${current ? "\n" : ""}${value}`)}
+        />
+      )}
       {visibleAttachmentError ? (
         <Text className="px-3 pb-1.5 text-xs font-ryco-medium text-danger-foreground">
           {visibleAttachmentError}

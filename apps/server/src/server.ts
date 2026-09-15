@@ -1,3 +1,4 @@
+import { SpeechServiceLive } from "./speech/service.ts";
 import { Effect, Layer } from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
 
@@ -480,6 +481,7 @@ const RuntimeServicesLive = Layer.mergeAll(
   // One process-scoped manager is shared by control RPC, frame streaming,
   // provider tools, idle cleanup, and crash-recovery ownership.
   Layer.provideMerge(DeviceServiceLive),
+  Layer.provideMerge(SpeechServiceLive),
 );
 
 const authRoutesLayer = Layer.mergeAll(

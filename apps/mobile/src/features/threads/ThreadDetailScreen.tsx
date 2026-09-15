@@ -1231,6 +1231,9 @@ export function ThreadDetailScreen(props: {
       ) : null}
 
       <ThreadComposer
+        key={`${environmentId}:${threadId}`}
+        voiceEnvironmentId={environmentId}
+        voiceDraftKey={`${environmentId}:${threadId}`}
         onOpenSideChat={
           selectedModelSelection
             ? () => sideChatStore.getState().open(sideChatKey, selectedModelSelection)

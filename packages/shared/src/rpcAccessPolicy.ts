@@ -17,6 +17,7 @@ export type RpcMethod =
 export type RpcAccess = RelayEffectiveRole | "authenticated" | "direct_owner";
 
 export const RPC_ACCESS_POLICY = {
+  [WS_METHODS.speechRequest]: "owner",
   [DEVICE_WS_METHODS.read]: "viewer",
   [DEVICE_WS_METHODS.subscribeEvents]: "viewer",
   [DEVICE_WS_METHODS.lifecycle]: "owner",
