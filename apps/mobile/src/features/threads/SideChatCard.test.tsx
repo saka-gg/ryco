@@ -31,6 +31,9 @@ function props() {
     exchanges: [{ requestId: "earlier", question: "Earlier question", answer: "Completed answer" }],
     pending: null,
     error: null,
+    failedQuestion: null,
+    onRestoreFailedQuestion: vi.fn(),
+    onDiscardFailedQuestion: vi.fn(),
     serverConfig: null,
     disabled: false,
     onOpen: vi.fn(),
@@ -82,5 +85,16 @@ describe("native side chat presentation", () => {
     expect(input.onCancel).not.toHaveBeenCalled();
     (control(tree, "New side chat").onPress as () => void)();
     expect(input.onClear).toHaveBeenCalledOnce();
+  });
+  it("keeps newer input and exposes shared recovery actions while blocking another send", () => {
+    const input = { ...props(), draft: "Newer draft", failedQuestion: "Original quote" };
+    const tree = SideChatCard(input);
+    expect(control(tree, "Send side question").disabled).toBe(true);
+    (control(tree, "Add unsent question to draft").onPress as () => void)();
+    (control(tree, "Discard unsent question").onPress as () => void)();
+    expect(input.onRestoreFailedQuestion).toHaveBeenCalledOnce();
+    expect(input.onDiscardFailedQuestion).toHaveBeenCalledOnce();
+    expect(input.onDraftChange).not.toHaveBeenCalled();
+    expect(elements(tree).some((element) => element.props.value === "Newer draft")).toBe(true);
   });
 });

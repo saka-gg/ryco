@@ -56,7 +56,10 @@ from the composer. `/btw` alone reopens it. Native mobile has the same command a
 a dedicated composer button. Minimize preserves the side conversation in memory;
 New chat clears it. Reloading or leaving a native thread discards the conversation.
 Only successful side exchanges enter follow-up history. Stop restores the pending
-question as a draft, while a late response cannot replace current state.
+question as a draft, while a late response cannot replace current state. If a newer draft
+exists, the unsent question is retained separately until explicitly restored or discarded;
+another ask is blocked until that recovery decision. Web and native expose the same
+controls. See [selection to chat](selection-to-chat.md) for quotation transfer.
 
 Requests use the existing authenticated RPC transport and shared role/lifecycle
 policy. Side questions are not queued for later execution after reconnecting.

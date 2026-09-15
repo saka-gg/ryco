@@ -178,4 +178,27 @@ describe("SideChatPanel", () => {
     await page.getByRole("button", { name: "New chat" }).click();
     await expect.element(page.getByLabelText("Side question")).toHaveValue("");
   });
+  it("blocks another ask until the visible unsent question is restored or discarded", async () => {
+    let fail!: (error: Error) => void;
+    mocks.ask.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    await mount();
+    await page.getByLabelText("Side question").fill("A: quoted text");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    await page.getByLabelText("Side question").fill("B: newer draft");
+    fail(new Error("Unavailable"));
+    await expect.element(page.getByRole("button", { name: "Ask", exact: true })).toBeDisabled();
+    await page.getByText("Unsent question", { exact: true }).click();
+    await expect.element(page.getByText("A: quoted text", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Add unsent question to draft" }).click();
+    await expect
+      .element(page.getByLabelText("Side question"))
+      .toHaveValue("B: newer draft\n\nA: quoted text");
+    await expect.element(page.getByRole("button", { name: "Ask", exact: true })).toBeEnabled();
+    expect(mocks.ask).toHaveBeenCalledOnce();
+  });
 });

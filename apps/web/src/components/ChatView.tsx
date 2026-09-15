@@ -1,3 +1,7 @@
+import { startSelectionChat } from "../lib/selectionChat";
+import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
+import { appendSelectionQuote } from "@ryco/client-runtime/state/composer";
+import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
 import type { BackgroundTask } from "@ryco/shared/backgroundWork";
 import { deriveThreadBackgroundWork } from "@ryco/client-runtime/state/session";
@@ -502,6 +506,7 @@ export default function ChatView(props: ChatViewProps) {
   const timestampFormat = settings.timestampFormat;
   const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
   const navigate = useNavigate();
+  const { handleNewThread } = useNewThreadHandler();
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
   const rawSearch = useSearch({
     strict: false,
@@ -3504,6 +3509,18 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const key = scopedThreadKey(activeThreadRef);
+      const side = useSideChatStore.getState().chatsByThreadKey[key];
+      if (sideQuestion && (side?.pending || side?.failedQuestion)) {
+        useSideChatStore.getState().open(key, activeThread.modelSelection);
+        toastManager.add({
+          type: "info",
+          title: side.pending
+            ? "Wait for the side answer or stop it first"
+            : "Restore or discard the unsent side question first",
+          description: "Your composer draft is preserved.",
+        });
+        return;
+      }
       useSideChatStore.getState().open(key, activeThread.modelSelection, sideQuestion || undefined);
       const sideApi = readEnvironmentConnection(activeThreadRef.environmentId)?.client
         .textGeneration;
@@ -4367,6 +4384,83 @@ export default function ChatView(props: ChatViewProps) {
       ref={chatShellRef}
       className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
     >
+      {!isPhoneTier && activeThreadRef ? (
+        <TranscriptSelectionActions
+          key={activeThreadKey}
+          containerRef={chatShellRef}
+          source={activeThreadRef}
+          canUseSide={isServerThread && sideChatCapability.allowed}
+          canCreate={
+            dispatchCapability.allowed &&
+            !isConnecting &&
+            !activeEnvironmentUnavailable &&
+            !!activeProject
+          }
+          canUseWorktree={isGitRepo && !!activeThreadBranch}
+          onCurrent={(quote) => {
+            const nextPrompt = appendSelectionQuote(
+              readComposer()?.getSendContext().prompt ?? promptRef.current,
+              quote,
+            );
+            promptRef.current = nextPrompt;
+            setComposerDraftPrompt(composerDraftTarget, nextPrompt);
+            readComposer()?.resetCursorState({
+              prompt: nextPrompt,
+              cursor: nextPrompt.length,
+              detectTrigger: false,
+            });
+            scheduleComposerFocus();
+          }}
+          onSide={(quote) => {
+            if (!isServerThread || !sideChatCapability.allowed) return;
+            const key = scopedThreadKey(activeThreadRef);
+            const side = useSideChatStore.getState();
+            side.open(key, activeThread.modelSelection);
+            side.setDraft(
+              key,
+              appendSelectionQuote(
+                useSideChatStore.getState().chatsByThreadKey[key]?.draft ?? "",
+                quote,
+              ),
+            );
+            requestAnimationFrame(() =>
+              chatShellRef.current
+                ?.querySelector<HTMLTextAreaElement>('[aria-label="Side question"]')
+                ?.focus(),
+            );
+          }}
+          onNew={async ({ quote, prompt, envMode, intent, requestKey }) => {
+            const context = readComposer()?.getSendContext();
+            if (
+              !context ||
+              !activeProject ||
+              !dispatchCapability.allowed ||
+              isConnecting ||
+              activeEnvironmentUnavailable
+            ) {
+              throw new Error("The workspace is unavailable. Your selection draft is preserved.");
+            }
+            await startSelectionChat({
+              quote,
+              prompt,
+              envMode,
+              intent,
+              requestKey,
+              projectRef: scopeProjectRef(environmentId, activeProject.id),
+              branch: activeThreadBranch,
+              canUseWorktree: isGitRepo,
+              composer: context,
+              settings: { runtimeMode, interactionMode: "default", tokenMode },
+              prepare: prepareEditorSend,
+              isCurrent: () =>
+                editorSendTargetRef.current.allowed &&
+                editorSendTargetRef.current.environmentId === environmentId &&
+                editorSendTargetRef.current.threadId === activeThread.id,
+              createThread: handleNewThread,
+            });
+          }}
+        />
+      ) : null}
       {!isPhoneTier && activeThreadRef ? (
         <SideChatPanel
           threadRef={activeThreadRef}
