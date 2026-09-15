@@ -450,3 +450,99 @@ export const GitActionProgressEvent = Schema.Union([
   GitActionFailedEvent,
 ]);
 export type GitActionProgressEvent = typeof GitActionProgressEvent.Type;
+
+/** A branch/tag name or object ID, not a revision expression or a Git option. */
+export const GitComparisonRef = TrimmedNonEmptyStringSchema.check(
+  Schema.isMaxLength(256),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/),
+  Schema.isPattern(/^(?!.*\.\.).*$/),
+);
+export const GitComparisonSelection = Schema.Struct({
+  ref: GitComparisonRef,
+  mode: Schema.Literals(["mergeBase", "direct"]),
+});
+export type GitComparisonSelection = typeof GitComparisonSelection.Type;
+export const GitReadComparisonInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  selection: GitComparisonSelection,
+  ignoreWhitespace: Schema.Boolean,
+});
+export type GitReadComparisonInput = typeof GitReadComparisonInput.Type;
+/** Immutable endpoints shared by patch rendering and subsequent revision reads. */
+export const GitComparisonSource = Schema.Struct({
+  repositoryPath: TrimmedNonEmptyStringSchema,
+  worktreePath: TrimmedNonEmptyStringSchema,
+  refOid: TrimmedNonEmptyStringSchema,
+  headOid: TrimmedNonEmptyStringSchema,
+  baseOid: TrimmedNonEmptyStringSchema,
+  revision: TrimmedNonEmptyStringSchema,
+});
+export type GitComparisonSource = typeof GitComparisonSource.Type;
+export const GitReadComparisonResult = Schema.Struct({
+  selection: GitComparisonSelection,
+  source: GitComparisonSource,
+  patch: Schema.String,
+});
+export type GitReadComparisonResult = typeof GitReadComparisonResult.Type;
+
+/** One immutable committed-file line. No symbolic refs or working-tree fallback. */
+export const GitReadLineBlameInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  oid: Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)),
+  filePath: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(4096),
+    Schema.isPattern(
+      // Reject control characters in RPC paths; never pass them through to Git.
+      // eslint-disable-next-line no-control-regex
+      /^(?![/\\])(?![A-Za-z]:)(?!.*(?:^|\/)\.\.?(?:\/|$))(?!.*[\\\x00-\x1f\x7f]).+$/,
+    ),
+  ),
+  line: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(10_000_000)),
+});
+export type GitReadLineBlameInput = typeof GitReadLineBlameInput.Type;
+export const GitReadLineBlameResult = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("committed"),
+    oid: Schema.String,
+    author: Schema.String,
+    summary: Schema.String,
+    authorTime: Schema.NullOr(Schema.String),
+  }),
+  Schema.Struct({ kind: Schema.Literal("unavailable"), reason: Schema.String }),
+]);
+export type GitReadLineBlameResult = typeof GitReadLineBlameResult.Type;
+
+export const GitLocalChangesInput = Schema.Struct({ cwd: TrimmedNonEmptyStringSchema });
+export type GitLocalChangesInput = typeof GitLocalChangesInput.Type;
+export const GitLocalChangesScope = Schema.Literals(["staged", "unstaged"]);
+export type GitLocalChangesScope = typeof GitLocalChangesScope.Type;
+const GitLocalPatch = Schema.Struct({
+  patch: Schema.String,
+  files: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      hunkCount: NonNegativeInt,
+      fileAction: Schema.Boolean,
+      hunkAction: Schema.Boolean,
+    }),
+  ),
+});
+export const GitLocalChangesResult = Schema.Struct({
+  worktreePath: Schema.String,
+  headOid: Schema.NullOr(Schema.String),
+  branch: Schema.NullOr(Schema.String),
+  indexIdentity: Schema.String,
+  revision: Schema.String,
+  staged: GitLocalPatch,
+  unstaged: GitLocalPatch,
+});
+export type GitLocalChangesResult = typeof GitLocalChangesResult.Type;
+export const GitApplyIndexPatchInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  scope: GitLocalChangesScope,
+  expectedRevision: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  fileId: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  hunkIndex: Schema.optional(NonNegativeInt),
+});
+export type GitApplyIndexPatchInput = typeof GitApplyIndexPatchInput.Type;

@@ -171,6 +171,10 @@ export interface WsRpcClient {
     }) => ReturnType<LocalApi["shell"]["openInEditor"]>;
   };
   readonly vcs: {
+    readonly readLineBlame: RpcUnaryMethod<typeof WS_METHODS.vcsReadLineBlame>;
+    readonly readLocalChanges: RpcUnaryMethod<typeof WS_METHODS.vcsReadLocalChanges>;
+    readonly applyIndexPatch: RpcUnaryMethod<typeof WS_METHODS.vcsApplyIndexPatch>;
+    readonly readComparison: RpcUnaryMethod<typeof WS_METHODS.vcsReadComparison>;
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.vcsPull>;
     readonly refreshStatus: RpcUnaryMethod<typeof WS_METHODS.vcsRefreshStatus>;
     readonly onStatus: (
@@ -535,6 +539,14 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           { ...options, tag: WS_METHODS.subscribeVcsStatus },
         );
       },
+      readLineBlame: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadLineBlame](input)),
+      readLocalChanges: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadLocalChanges](input)),
+      applyIndexPatch: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsApplyIndexPatch](input)),
+      readComparison: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadComparison](input)),
       listRefs: (input) => transport.request((client) => client[WS_METHODS.vcsListRefs](input)),
       createWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.vcsCreateWorktree](input)),
