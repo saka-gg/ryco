@@ -1,5 +1,8 @@
 "use client";
 
+import { usePresentationTier } from "../hooks/usePresentationTier";
+import { useThreadExportAction } from "../hooks/useThreadExportAction";
+
 import { DeviceIcon } from "./DeviceIcon";
 
 import { isElectron } from "../env";
@@ -1122,7 +1125,12 @@ function OpenCommandPaletteDialog() {
     openAddProjectFlow();
   }, [clearOpenIntent, openAddProjectFlow, openIntent]);
 
-  const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+  const exportAction = useThreadExportAction(
+    activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
+  );
+  const presentationTier = usePresentationTier();
+  const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> =
+    presentationTier === "phone" ? [] : [exportAction];
 
   actionItems.push(
     {

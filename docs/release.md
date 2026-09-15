@@ -183,6 +183,21 @@ Checklist:
 
 ## 5) Troubleshooting
 
+### Packaged runtime dependencies
+
+The desktop artifact builder validates literal imports, re-exports, dynamic imports and
+`require` calls in the staged desktop CJS and backend ESM bundles after production dependency
+installation and provider CLI pruning. Resolution uses the importing file and Node's matching
+import/require conditions. Targets outside the stage, including development-workspace symlinks,
+fail validation. Computed module paths and dependency-internal optional imports are not scanned.
+
+After Electron Builder rebuilds addons, the builder also checks staged native payload presence
+for `node-pty`, `@github/keytar`, and `sharp`/libvips. This does **not** establish ABI compatibility
+or verify the final archive's loadability. Smoke-test the packaged app under its matching
+Electron runtime and architecture; a successful load under development Bun or Node is insufficient.
+
+### Signing
+
 - macOS build unsigned when expected signed:
   - Check all Apple secrets are populated and non-empty.
 - Windows build unsigned when expected signed:

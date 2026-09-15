@@ -591,7 +591,15 @@ export type DesktopHubOriginValidation =
 
 export type DesktopQuitShortcutMode = "press-twice" | "hold" | "immediately";
 
+export interface DesktopThreadExportInput {
+  readonly filename: string;
+  readonly contents: string;
+}
+
+export type DesktopThreadExportResult = { readonly status: "saved" | "cancelled" };
+
 export interface DesktopBridge {
+  saveThreadExport?: (input: DesktopThreadExportInput) => Promise<DesktopThreadExportResult>;
   quitShortcut?: {
     getMode(): Promise<DesktopQuitShortcutMode>;
     setMode(mode: DesktopQuitShortcutMode): Promise<void>;
