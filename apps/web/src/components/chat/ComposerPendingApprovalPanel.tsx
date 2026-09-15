@@ -30,6 +30,13 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           <span className="text-xs text-muted-foreground">1/{pendingCount}</span>
         ) : null}
       </div>
+      {approval.responseState === "submitting" || approval.responseState === "uncertain" ? (
+        <p role="status" className="mt-2 text-sm text-muted-foreground">
+          {approval.responseState === "uncertain"
+            ? "Delivery outcome is unknown. Waiting for provider settlement; do not resend."
+            : "Decision submitted. Waiting for provider settlement."}
+        </p>
+      ) : null}
       {approval.detail ? (
         <div
           data-testid="pending-approval-detail"

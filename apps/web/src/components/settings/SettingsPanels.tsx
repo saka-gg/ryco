@@ -1,6 +1,7 @@
 import { useAppPreferencesLabel } from "../../deviceName";
 import { settingsRestorePlan } from "./settingsRestore";
 import { selectArchivedSettingsGroups } from "./archivedSettings";
+import { WorktreeRootSettings } from "./WorktreeRootSettings";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
@@ -791,6 +792,8 @@ export function GeneralSettingsPanel({
             }
           />
         )}
+
+        {!isPhoneTier && <WorktreeRootSettings />}
 
         <SettingsRow
           title="Add project starts in"

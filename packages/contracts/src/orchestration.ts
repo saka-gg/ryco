@@ -1,3 +1,4 @@
+import { ApprovalResponseIdentity } from "./approvalResponses.ts";
 import { Effect, Schema, SchemaIssue, SchemaTransformation, Struct } from "effect";
 import { ProviderOptionSelections } from "./model.ts";
 import { RepositoryIdentity } from "./environment.ts";
@@ -1417,6 +1418,7 @@ const ThreadApprovalRespondCommand = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   decision: ProviderApprovalDecision,
+  approvalIdentity: Schema.optional(ApprovalResponseIdentity),
   createdAt: IsoDateTime,
 });
 
@@ -2050,6 +2052,7 @@ export const ThreadApprovalResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   decision: ProviderApprovalDecision,
+  approvalIdentity: Schema.optional(ApprovalResponseIdentity),
   createdAt: IsoDateTime,
 });
 

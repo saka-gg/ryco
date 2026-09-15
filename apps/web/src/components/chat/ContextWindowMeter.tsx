@@ -1,12 +1,10 @@
+import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
+import { useRelativeTimeTick } from "../settings/settingsLayout";
 import type { ServerProviderRateLimits, ServerProviderRateLimitWindow } from "@ryco/contracts";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowUsage, formatContextWindowTokens } from "~/lib/contextWindow";
-import {
-  clampUsedPercent,
-  describeRateLimitWindow,
-  formatRateLimitResetText,
-} from "../settings/codexUsageLimits";
+import { describeRateLimitWindow } from "../settings/codexUsageLimits";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 function formatPercentage(value: number | null): string | null {
@@ -41,32 +39,24 @@ function MeterBar(props: { readonly percent: number | null }) {
 function UsageLimitRow(props: {
   readonly window: ServerProviderRateLimitWindow;
   readonly fallbackLabel: string;
+  readonly checkedAt: string | undefined;
+  readonly available: boolean;
+  readonly now: number;
 }) {
   const descriptor = describeRateLimitWindow(props.window);
   const label =
     props.window.windowDurationMins === undefined ? props.fallbackLabel : descriptor.label;
-  const used = clampUsedPercent(props.window.usedPercent);
-  const resetText = formatRateLimitResetText(props.window.resetsAt);
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-baseline justify-between gap-3 whitespace-nowrap text-xs">
-        <span className="font-medium text-foreground">{label}</span>
-        <span className="text-muted-foreground">
-          {used}% used
-          {resetText ? <span className="ml-1">· {resetText}</span> : null}
-        </span>
-      </div>
-      <MeterBar percent={used} />
-    </div>
-  );
+  return <ProviderLimitWindow {...props} label={label} compact />;
 }
 
 export function ContextWindowMeter(props: {
   usage: ContextWindowUsage;
+  checkedAt?: string | undefined;
+  available?: boolean | undefined;
   rateLimits?: ServerProviderRateLimits | undefined;
 }) {
   const { usage, rateLimits } = props;
+  const now = useRelativeTimeTick();
   const showUsageLimits = Boolean(
     rateLimits && (rateLimits.primary || rateLimits.secondary || rateLimits.tertiary),
   );
@@ -184,13 +174,31 @@ export function ContextWindowMeter(props: {
             </div>
             <div className="grid gap-1">
               {rateLimits.primary ? (
-                <UsageLimitRow window={rateLimits.primary} fallbackLabel="Short window" />
+                <UsageLimitRow
+                  checkedAt={props.checkedAt}
+                  available={props.available === true}
+                  now={now}
+                  window={rateLimits.primary}
+                  fallbackLabel="Short window"
+                />
               ) : null}
               {rateLimits.secondary ? (
-                <UsageLimitRow window={rateLimits.secondary} fallbackLabel="Weekly" />
+                <UsageLimitRow
+                  checkedAt={props.checkedAt}
+                  available={props.available === true}
+                  now={now}
+                  window={rateLimits.secondary}
+                  fallbackLabel="Weekly"
+                />
               ) : null}
               {rateLimits.tertiary ? (
-                <UsageLimitRow window={rateLimits.tertiary} fallbackLabel="Monthly" />
+                <UsageLimitRow
+                  checkedAt={props.checkedAt}
+                  available={props.available === true}
+                  now={now}
+                  window={rateLimits.tertiary}
+                  fallbackLabel="Monthly"
+                />
               ) : null}
             </div>
           </div>

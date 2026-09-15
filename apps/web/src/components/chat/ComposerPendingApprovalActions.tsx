@@ -1,3 +1,4 @@
+import type { ApprovalResponseIdentity } from "@ryco/contracts";
 import {
   ORCHESTRATION_WS_METHODS,
   type ApprovalRequestId,
@@ -9,15 +10,18 @@ import { Button } from "../ui/button";
 
 interface ComposerPendingApprovalActionsProps {
   requestId: ApprovalRequestId;
+  approvalIdentity?: ApprovalResponseIdentity | undefined;
   isResponding: boolean;
   onRespondToApproval: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
+    approvalIdentity?: ApprovalResponseIdentity,
   ) => Promise<void>;
 }
 
 export const ComposerPendingApprovalActions = memo(function ComposerPendingApprovalActions({
   requestId,
+  approvalIdentity,
   isResponding,
   onRespondToApproval,
 }: ComposerPendingApprovalActionsProps) {
@@ -30,7 +34,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         variant="ghost"
         disabled={disabled}
         title={capability.reason ?? undefined}
-        onClick={() => void onRespondToApproval(requestId, "cancel")}
+        onClick={() => void onRespondToApproval(requestId, "cancel", approvalIdentity)}
       >
         Cancel turn
       </Button>
@@ -39,7 +43,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         variant="destructive-outline"
         disabled={disabled}
         title={capability.reason ?? undefined}
-        onClick={() => void onRespondToApproval(requestId, "decline")}
+        onClick={() => void onRespondToApproval(requestId, "decline", approvalIdentity)}
       >
         Decline
       </Button>
@@ -48,7 +52,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         variant="outline"
         disabled={disabled}
         title={capability.reason ?? undefined}
-        onClick={() => void onRespondToApproval(requestId, "acceptForSession")}
+        onClick={() => void onRespondToApproval(requestId, "acceptForSession", approvalIdentity)}
       >
         Always allow this session
       </Button>
@@ -57,7 +61,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         variant="default"
         disabled={disabled}
         title={capability.reason ?? undefined}
-        onClick={() => void onRespondToApproval(requestId, "accept")}
+        onClick={() => void onRespondToApproval(requestId, "accept", approvalIdentity)}
       >
         Approve once
       </Button>

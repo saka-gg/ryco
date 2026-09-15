@@ -23,9 +23,9 @@ describe("clampUsedPercent", () => {
     expect(clampUsedPercent(150)).toBe(100);
   });
 
-  it("treats non-finite values as zero", () => {
-    expect(clampUsedPercent(Number.NaN)).toBe(0);
-    expect(clampUsedPercent(Number.POSITIVE_INFINITY)).toBe(0);
+  it("keeps non-finite values unavailable", () => {
+    expect(clampUsedPercent(Number.NaN)).toBeNull();
+    expect(clampUsedPercent(Number.POSITIVE_INFINITY)).toBeNull();
   });
 });
 

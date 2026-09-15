@@ -191,3 +191,35 @@ describe("serverSettings helpers", () => {
     });
   });
 });
+
+describe("worktree root override patches", () => {
+  it("treats project IDs as data, including object prototype property names", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectWorktreeRoots: Object.fromEntries([
+        ["__proto__", "/volumes/a"],
+        ["constructor", "/volumes/b"],
+      ]),
+    });
+    expect(Object.hasOwn(settings.projectWorktreeRoots, "__proto__")).toBe(true);
+    expect(settings.projectWorktreeRoots.constructor).toBe("/volumes/b");
+    expect(
+      applyServerSettingsPatch(settings, { projectWorktreeRoots: { constructor: null } })
+        .projectWorktreeRoots,
+    ).toEqual(Object.fromEntries([["__proto__", "/volumes/a"]]));
+  });
+
+  it("patches individual projects, resets inheritance and preserves sibling edits", () => {
+    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeRoot: "/volumes/default",
+      projectWorktreeRoots: { a: "/volumes/a" },
+    });
+    const second = applyServerSettingsPatch(first, { projectWorktreeRoots: { b: "/volumes/b" } });
+    const reset = applyServerSettingsPatch(second, { projectWorktreeRoots: { a: null } });
+    expect(reset.projectWorktreeRoots).toEqual({ b: "/volumes/b" });
+    expect(reset.worktreeRoot).toBe("/volumes/default");
+    expect(first.projectWorktreeRoots).toEqual({ a: "/volumes/a" });
+    expect(applyServerSettingsPatch(reset, { worktreeRoot: "" }).projectWorktreeRoots).toEqual({
+      b: "/volumes/b",
+    });
+  });
+});

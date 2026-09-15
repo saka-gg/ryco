@@ -1,3 +1,7 @@
+import { ApprovalRequestId } from "@ryco/contracts";
+import { requireApprovalClaim, requireApprovalSource } from "../approvalResponses.ts";
+import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
+import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import type {
   OrchestrationEvent,
   OrchestrationReadModel,
@@ -121,6 +125,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
 
 const makeOrchestrationEngine = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const approvals = yield* ProjectionPendingApprovalRepository;
   const eventStore = yield* OrchestrationEventStore;
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
@@ -194,6 +199,35 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           });
         }
 
+        if (
+          envelope.command.type === "thread.activity.append" &&
+          ["approval.requested", "approval.resolved", "provider.approval.respond.failed"].includes(
+            envelope.command.activity.kind,
+          )
+        ) {
+          const command = envelope.command;
+          const payload = command.activity.payload as Record<string, unknown> | null;
+          const row =
+            typeof payload?.requestId === "string"
+              ? yield* approvals.getByRequestId({
+                  threadId: command.threadId,
+                  requestId: ApprovalRequestId.make(payload.requestId),
+                })
+              : Option.none();
+          const seen =
+            command.activity.kind === "approval.requested"
+              ? yield* sql`SELECT activity_id FROM projection_thread_activities WHERE activity_id = ${command.activity.id} AND thread_id = ${command.threadId} LIMIT 1`.pipe(
+                  Effect.mapError(toPersistenceSqlError("approval.request.identity")),
+                )
+              : [];
+          yield* requireApprovalSource({
+            command,
+            row,
+            seenRequest: seen.length > 0,
+            session: commandReadModel.threads.find((thread) => thread.id === command.threadId)
+              ?.session,
+          });
+        }
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
@@ -202,6 +236,18 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         const committedCommand = yield* sql
           .withTransaction(
             Effect.gen(function* () {
+              if (envelope.command.type === "thread.approval.respond") {
+                const command = envelope.command;
+                yield* requireApprovalClaim({
+                  command,
+                  row: yield* approvals.getByRequestId({
+                    threadId: command.threadId,
+                    requestId: command.requestId,
+                  }),
+                  session: commandReadModel.threads.find((thread) => thread.id === command.threadId)
+                    ?.session,
+                });
+              }
               const committedEvents: OrchestrationEvent[] = [];
               const postCommitEffects: Array<Effect.Effect<void>> = [];
               let nextCommandReadModel = commandReadModel;
@@ -394,4 +440,4 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 export const OrchestrationEngineLive = Layer.effect(
   OrchestrationEngineService,
   makeOrchestrationEngine,
-);
+).pipe(Layer.provide(ProjectionPendingApprovalRepositoryLive));

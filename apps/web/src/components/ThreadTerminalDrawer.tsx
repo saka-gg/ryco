@@ -1,5 +1,9 @@
 import { usePaneEffect } from "./chat/PaneFocus";
 import "@xterm/xterm/css/xterm.css";
+import {
+  createTerminalEventReconciler,
+  isTerminalEventAfterSnapshot,
+} from "@ryco/client-runtime/state/terminal";
 
 import { FitAddon } from "@xterm/addon-fit";
 import { Plus, SquareSplitHorizontal, TerminalSquare, Trash2, XIcon } from "lucide-react";
@@ -93,7 +97,7 @@ function writeSystemMessage(terminal: Terminal, message: string): void {
   terminal.write(`\r\n[terminal] ${message}\r\n`);
 }
 
-function writeTerminalSnapshot(terminal: Terminal, snapshot: TerminalSessionSnapshot): void {
+export function writeTerminalSnapshot(terminal: Terminal, snapshot: TerminalSessionSnapshot): void {
   terminal.write("\u001bc");
   if (snapshot.history.length > 0) {
     terminal.write(snapshot.history);
@@ -171,8 +175,14 @@ export function createTerminalOutputBatcher(options: {
 export function selectTerminalEventEntriesAfterSnapshot(
   entries: ReadonlyArray<{ id: number; event: TerminalEvent }>,
   snapshotUpdatedAt: string,
+  cursor?: TerminalSessionSnapshot["cursor"],
 ): ReadonlyArray<{ id: number; event: TerminalEvent }> {
-  return entries.filter((entry) => entry.event.createdAt > snapshotUpdatedAt);
+  return entries.filter((entry) =>
+    isTerminalEventAfterSnapshot(entry.event, {
+      updatedAt: snapshotUpdatedAt,
+      ...(cursor ? { cursor } : {}),
+    }),
+  );
 }
 
 export function selectPendingTerminalEventEntries(
@@ -416,6 +426,7 @@ export function TerminalViewport({
     if (!mount) return;
 
     let disposed = false;
+    const eventReconciler = createTerminalEventReconciler();
     const api = readEnvironmentApi(environmentId);
     const localApi = readLocalApi();
     if (!api || !localApi) return;
@@ -716,6 +727,11 @@ export function TerminalViewport({
         return;
       }
 
+      if (!eventReconciler.accept(event)) {
+        recordTerminalApply();
+        return;
+      }
+
       if (event.type === "output") {
         outputBatcher.writeOutput(event.data);
         clearSelectionAction();
@@ -827,6 +843,7 @@ export function TerminalViewport({
           ...(runtimeEnv ? { env: runtimeEnv } : {}),
         });
         if (disposed) return;
+        eventReconciler.reset(snapshot);
         writeTerminalSnapshot(activeTerminal, snapshot);
         const bufferedEntries = selectTerminalEventEntries(
           useTerminalStateStore.getState().terminalEventEntriesByKey,
@@ -836,6 +853,7 @@ export function TerminalViewport({
         const replayEntries = selectTerminalEventEntriesAfterSnapshot(
           bufferedEntries,
           snapshot.updatedAt,
+          snapshot.cursor,
         );
         for (const entry of replayEntries) {
           applyTerminalEvent(entry.event);

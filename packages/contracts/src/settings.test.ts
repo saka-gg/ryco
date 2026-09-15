@@ -338,3 +338,21 @@ describe("worktree branch prefix settings", () => {
     expect(() => decodeServerSettingsPatch({ worktreeBranchPrefix: prefix })).toThrow();
   });
 });
+
+describe("worktree root settings", () => {
+  it("defaults old settings to managed roots with no overrides", () => {
+    const settings = decodeServerSettings({});
+    expect(settings.worktreeRoot).toBe("");
+    expect(settings.projectWorktreeRoots).toEqual({});
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("worktreeRoot");
+  });
+  it("accepts bounded server-local inputs and explicit inheritance resets", () => {
+    expect(
+      decodeServerSettingsPatch({
+        worktreeRoot: " ~/checkouts ",
+        projectWorktreeRoots: { a: null },
+      }),
+    ).toMatchObject({ worktreeRoot: "~/checkouts", projectWorktreeRoots: { a: null } });
+    expect(() => decodeServerSettingsPatch({ worktreeRoot: "x".repeat(4097) })).toThrow();
+  });
+});

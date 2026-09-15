@@ -5,6 +5,7 @@ import { assert, it, describe } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Path, PlatformError, Scope } from "effect";
 
 import { GitCommandError } from "@ryco/contracts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
@@ -331,6 +332,125 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
 
   describe("worktree operations", () => {
     it.effect(
+      "uses configured defaults, preserves explicit paths and registrations after reset",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const root = yield* makeTmpDir("custom-worktree-root-");
+          const settings = yield* ServerSettingsService;
+          yield* settings.updateSettings({ worktreeRoot: root });
+          const driver = yield* makeGitVcsDriverCore().pipe(Effect.provide(OverrideTestLayer));
+          const created = yield* driver.createWorktree({
+            cwd,
+            path: null,
+            refName: initialBranch,
+            newRefName: "feature/custom",
+          });
+          const fileSystem = yield* FileSystem.FileSystem;
+          assert.isTrue(created.worktree.path.startsWith(`${yield* fileSystem.realPath(root)}/`));
+          const explicit = `${yield* makeTmpDir("explicit-worktree-")}/checkout`;
+          const imported = yield* driver.createWorktree({
+            cwd,
+            path: explicit,
+            refName: initialBranch,
+            newRefName: "feature/explicit",
+          });
+          assert.equal(imported.worktree.path, yield* fileSystem.realPath(explicit));
+          yield* settings.updateSettings({
+            worktreeRoot: "/unavailable-root-for-future-checkouts",
+          });
+          assert.include(yield* driver.listWorktreePaths(cwd), created.worktree.path);
+          yield* settings.updateSettings({ worktreeRoot: "" });
+          assert.include(yield* driver.listWorktreePaths(cwd), imported.worktree.path);
+          assert.equal(
+            yield* git(created.worktree.path, ["branch", "--show-current"]),
+            "feature/custom",
+          );
+        }).pipe(Effect.provide(ServerSettingsService.layerTest())),
+    );
+
+    it.effect("rejects explicit out-of-root worktree creation before Git mutation", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const allowed = yield* makeTmpDir("restricted-worktree-root-");
+        const outside = yield* makeTmpDir("outside-worktree-root-");
+        const config = yield* ServerConfig;
+        const driver = yield* makeGitVcsDriverCore().pipe(
+          Effect.provideService(ServerConfig, {
+            ...config,
+            workspaceAccessRoot: allowed,
+          }),
+        );
+        const error = yield* driver
+          .createWorktree({
+            cwd,
+            path: `${outside}/checkout`,
+            refName: initialBranch,
+            newRefName: "feature/forbidden",
+          })
+          .pipe(Effect.flip);
+        assert.include(error.detail, "restricted");
+        assert.equal(yield* (yield* FileSystem.FileSystem).exists(`${outside}/checkout`), false);
+        assert.equal(yield* git(cwd, ["branch", "--list", "feature/forbidden"]), "");
+      }).pipe(Effect.provide(OverrideTestLayer)),
+    );
+
+    it.effect("fails collisions without touching existing files or creating branches", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const destination = yield* makeTmpDir("occupied-worktree-");
+        yield* writeTextFile(destination, "keep.txt", "unchanged");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const error = yield* driver
+          .createWorktree({
+            cwd,
+            path: destination,
+            refName: initialBranch,
+            newRefName: "feature/collision",
+          })
+          .pipe(Effect.flip);
+        assert.include(error.detail, "already exists");
+        assert.equal(
+          yield* (yield* FileSystem.FileSystem).readFileString(`${destination}/keep.txt`),
+          "unchanged",
+        );
+        assert.equal(yield* git(cwd, ["branch", "--list", "feature/collision"]), "");
+      }),
+    );
+
+    it.effect(
+      "lets Git arbitrate concurrent destination collisions without overwriting a winner",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const destination = `${yield* makeTmpDir("concurrent-worktrees-")}/checkout`;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const results = yield* Effect.all(
+            ["one", "two"].map((name) =>
+              driver
+                .createWorktree({
+                  cwd,
+                  path: destination,
+                  refName: initialBranch,
+                  newRefName: `feature/${name}`,
+                })
+                .pipe(Effect.result),
+            ),
+            { concurrency: 2 },
+          );
+          assert.equal(results.filter((result) => result._tag === "Success").length, 1);
+          assert.equal(results.filter((result) => result._tag === "Failure").length, 1);
+          assert.equal(
+            yield* (yield* FileSystem.FileSystem).readFileString(`${destination}/README.md`),
+            "# test\n",
+          );
+        }),
+    );
+    it.effect(
       "fetches origin branches and creates from the fresh remote instead of the local base",
       () =>
         Effect.gen(function* () {
@@ -424,7 +544,10 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           newRefName: "feature/worktree",
         });
 
-        assert.equal(created.worktree.path, worktreePath);
+        assert.equal(
+          created.worktree.path,
+          yield* (yield* FileSystem.FileSystem).realPath(worktreePath),
+        );
         assert.equal(created.worktree.refName, "feature/worktree");
         assert.equal(yield* git(worktreePath, ["branch", "--show-current"]), "feature/worktree");
 
@@ -530,7 +653,10 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       Effect.gen(function* () {
         const calls: GitVcsDriver.ExecuteGitInput[] = [];
         const cwd = yield* makeTmpDir();
-        const worktreePath = yield* makeTmpDir("git-worktree-without-submodules-");
+        const worktreePath = (yield* Path.Path).join(
+          yield* makeTmpDir("git-worktree-without-submodules-"),
+          "checkout",
+        );
         const driver = yield* makeGitVcsDriverCore({
           executeOverride: (input) =>
             Effect.sync(() => {
@@ -562,22 +688,40 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
     it.effect("reports a partially created worktree when submodule initialization fails", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
-        const worktreePath = yield* makeTmpDir("git-worktree-with-submodules-");
-        yield* writeTextFile(worktreePath, ".gitmodules", '[submodule "module"]\n');
+        const worktreePath = (yield* Path.Path).join(
+          yield* makeTmpDir("git-worktree-with-submodules-"),
+          "checkout",
+        );
+        const fileSystem = yield* FileSystem.FileSystem;
         const driver = yield* makeGitVcsDriverCore({
           executeOverride: (input) =>
-            Effect.succeed({
-              exitCode: (input.operation === "GitVcsDriver.createWorktree.initializeSubmodules"
-                ? 1
-                : 0) as GitVcsDriver.ExecuteGitResult["exitCode"],
-              stdout: "",
-              stderr:
-                input.operation === "GitVcsDriver.createWorktree.initializeSubmodules"
-                  ? "fatal: unable to clone submodule"
-                  : "",
-              stdoutTruncated: false,
-              stderrTruncated: false,
-            }),
+            (input.operation === "GitVcsDriver.createWorktree"
+              ? fileSystem
+                  .makeDirectory(worktreePath, { recursive: true })
+                  .pipe(
+                    Effect.andThen(
+                      fileSystem.writeFileString(
+                        `${worktreePath}/.gitmodules`,
+                        '[submodule "module"]\n',
+                      ),
+                    ),
+                    Effect.orDie,
+                  )
+              : Effect.void
+            ).pipe(
+              Effect.as({
+                exitCode: (input.operation === "GitVcsDriver.createWorktree.initializeSubmodules"
+                  ? 1
+                  : 0) as GitVcsDriver.ExecuteGitResult["exitCode"],
+                stdout: "",
+                stderr:
+                  input.operation === "GitVcsDriver.createWorktree.initializeSubmodules"
+                    ? "fatal: unable to clone submodule"
+                    : "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              }),
+            ),
         });
 
         const error = yield* driver

@@ -1,5 +1,9 @@
 "use client";
 
+import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
+import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
+import { useRelativeTimeTick } from "./settingsLayout";
+
 import {
   ArrowUpCircleIcon,
   CopyIcon,
@@ -43,12 +47,7 @@ import {
   getProviderVersionLabel,
 } from "./providerStatus";
 import { deriveProviderInstancePresentation } from "./providerInstancePresentation";
-import {
-  availablePercent,
-  clampUsedPercent,
-  describeRateLimitWindow,
-  formatRateLimitResetText,
-} from "./codexUsageLimits";
+import { describeRateLimitWindow } from "./codexUsageLimits";
 
 const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
@@ -252,51 +251,22 @@ function ProviderAccentColorPicker(props: {
 function ProviderUsageLimitWindowRow(props: {
   readonly window: ServerProviderRateLimitWindow;
   readonly fallbackLabel: string;
+  readonly checkedAt: string;
+  readonly available: boolean;
+  readonly now: number;
 }) {
   const descriptor = describeRateLimitWindow(props.window);
-  const headingLabel =
+  const label =
     props.window.windowDurationMins === undefined ? props.fallbackLabel : descriptor.label;
-  const used = clampUsedPercent(props.window.usedPercent);
-  const available = availablePercent(props.window.usedPercent);
-  const resetText = formatRateLimitResetText(props.window.resetsAt);
-  // Past 75% used the user cares about consumption, not headroom — flip
-  // the headline so the number they're about to act on is the prominent
-  // one and tint the bar to match.
-  const isHighUsage = used >= 75;
-  const headlineValue = isHighUsage ? `${used}% used` : `${available}% available`;
-  const trailingValue = isHighUsage ? `${available}% available` : `${used}% used`;
-
-  return (
-    <div className="grid gap-1.5">
-      <div className="flex items-baseline justify-between gap-2 text-xs">
-        <span className="font-medium text-foreground">{headingLabel}</span>
-        <span className="text-muted-foreground">{headlineValue}</span>
-      </div>
-      <div
-        className="h-1.5 overflow-hidden rounded-full bg-muted"
-        role="progressbar"
-        aria-label={`${headingLabel} window usage`}
-        aria-valuenow={used}
-        aria-valuemin={0}
-        aria-valuemax={100}
-      >
-        <div
-          className={cn(
-            "h-full rounded-full transition-[width]",
-            isHighUsage ? "bg-warning" : "bg-foreground/70",
-          )}
-          style={{ width: `${used}%` }}
-        />
-      </div>
-      <div className="flex items-baseline justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>{trailingValue}</span>
-        {resetText ? <span className="first-letter:uppercase">{resetText}</span> : null}
-      </div>
-    </div>
-  );
+  return <ProviderLimitWindow {...props} label={label} />;
 }
 
-function ProviderUsageLimitsSection(props: { readonly rateLimits: ServerProviderRateLimits }) {
+function ProviderUsageLimitsSection(props: {
+  readonly rateLimits: ServerProviderRateLimits;
+  readonly checkedAt: string;
+  readonly available: boolean;
+}) {
+  const now = useRelativeTimeTick();
   const { primary, secondary, tertiary } = props.rateLimits;
   if (!primary && !secondary && !tertiary) return null;
 
@@ -306,13 +276,31 @@ function ProviderUsageLimitsSection(props: { readonly rateLimits: ServerProvider
         <span className="text-xs font-medium text-foreground">Usage limits</span>
         <div className="grid gap-3">
           {primary ? (
-            <ProviderUsageLimitWindowRow window={primary} fallbackLabel="Short window" />
+            <ProviderUsageLimitWindowRow
+              checkedAt={props.checkedAt}
+              available={props.available}
+              now={now}
+              window={primary}
+              fallbackLabel="Short window"
+            />
           ) : null}
           {secondary ? (
-            <ProviderUsageLimitWindowRow window={secondary} fallbackLabel="Weekly" />
+            <ProviderUsageLimitWindowRow
+              checkedAt={props.checkedAt}
+              available={props.available}
+              now={now}
+              window={secondary}
+              fallbackLabel="Weekly"
+            />
           ) : null}
           {tertiary ? (
-            <ProviderUsageLimitWindowRow window={tertiary} fallbackLabel="Monthly" />
+            <ProviderUsageLimitWindowRow
+              checkedAt={props.checkedAt}
+              available={props.available}
+              now={now}
+              window={tertiary}
+              fallbackLabel="Monthly"
+            />
           ) : null}
         </div>
       </div>
@@ -471,6 +459,7 @@ interface ProviderInstanceCardProps {
   readonly driverOption: DriverOption | undefined;
   readonly liveProvider: ServerProvider | undefined;
   readonly isDefault: boolean;
+  readonly usageAvailable?: boolean;
   readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void;
   /**
    * Pass `undefined` to hide the delete button entirely. Built-in default
@@ -525,6 +514,7 @@ export function ProviderInstanceCard({
   driverOption,
   liveProvider,
   isDefault,
+  usageAvailable = false,
   onUpdate,
   onDelete,
   headerAction,
@@ -832,7 +822,11 @@ export function ProviderInstanceCard({
 
       <div className="space-y-0">
         {liveProvider?.rateLimits ? (
-          <ProviderUsageLimitsSection rateLimits={liveProvider.rateLimits} />
+          <ProviderUsageLimitsSection
+            rateLimits={liveProvider.rateLimits}
+            checkedAt={liveProvider.checkedAt}
+            available={isRateLimitSnapshotAvailable(liveProvider, usageAvailable)}
+          />
         ) : null}
 
         <div className="border-t border-border/60 px-4 py-3 sm:px-5">
