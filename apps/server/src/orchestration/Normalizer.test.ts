@@ -12,7 +12,7 @@ import {
 } from "@ryco/contracts";
 import { it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, FileSystem, Layer } from "effect";
-import { expect } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 
 import { applyOrchestrationCommand } from "./Layers/OrchestrationCommandApplication.ts";
 import { attachmentRelativePath, resolveAttachmentPath } from "../attachmentStore.ts";
@@ -419,6 +419,13 @@ it.effect("replays adoption for the same command but rejects reuse by another co
 it.live("rejects adoption on thread, size mismatches, and expired tokens", () =>
   Effect.scoped(
     Effect.gen(function* () {
+      // Upload expiry reads Date.now directly, so hold it fixed across fixture I/O.
+      const clock = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-01-01T00:00:00.000Z")),
+        ),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
       const { uploads, layer } = yield* makeUploadNormalizerContext({ ttlMs: 30 });
       const { created, lease } = yield* completeUploadFixture(uploads, {
         threadId: "file-attachment-thread",
@@ -436,7 +443,7 @@ it.live("rejects adoption on thread, size mismatches, and expired tokens", () =>
       ).pipe(Effect.provide(layer), Effect.flip);
       expect(sizeMismatch.message).toContain("does not match its file upload registration");
 
-      yield* Effect.sleep("40 millis");
+      clock.mockReturnValue(Date.parse(created.expiresAt));
       const expiredError = yield* normalizeDispatchCommand(
         fileTurnCommand({ uploadToken: created.uploadToken }),
       ).pipe(Effect.provide(layer), Effect.flip);
