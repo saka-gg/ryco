@@ -1,3 +1,5 @@
+import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
+import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
 import { ServerConfig } from "../../config.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
@@ -549,6 +551,7 @@ export function runtimeEventToActivities(
                   ? "File-change approval requested"
                   : "Approval requested",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
@@ -573,6 +576,7 @@ export function runtimeEventToActivities(
           kind: "approval.resolved",
           summary: "Approval resolved",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
@@ -1112,6 +1116,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const pendingApprovals = yield* ProjectionPendingApprovalRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const attachmentConfig = yield* Effect.serviceOption(ServerConfig);
   const attachmentAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
@@ -2691,6 +2696,35 @@ const make = Effect.gen(function* () {
             (finishedTurnId === undefined || request.turnId !== finishedTurnId)
           )
             continue;
+          let approvalInvalidation;
+          if (request.kind === "approval") {
+            const row = Option.getOrUndefined(
+              yield* pendingApprovals.getByRequestId({
+                threadId: thread.id,
+                requestId: ApprovalRequestId.make(request.requestId),
+              }),
+            );
+            // The snapshot and the durable row must name the same callback. A
+            // reused provider ID cannot redirect cleanup to a newer request.
+            if (
+              !row ||
+              row.status !== "pending" ||
+              !row.approvalIdentity ||
+              row.turnId !== request.turnId ||
+              row.approvalIdentity.runtimeSessionId !== event.runtimeSessionId ||
+              !detailedThread?.activities.some(
+                (activity) => activity.id === row.approvalIdentity?.requestEventId,
+              )
+            )
+              continue;
+            approvalInvalidation = {
+              requestId: row.requestId,
+              approvalIdentity: row.approvalIdentity,
+              ...(row.responseAttemptId ? { responseAttemptId: row.responseAttemptId } : {}),
+              responseState: "invalidated",
+              detail: "Stale pending approval request: the provider turn ended or was superseded.",
+            };
+          }
           yield* orchestrationEngine.dispatch({
             type: "thread.activity.append",
             commandId: providerCommandId(
@@ -2702,10 +2736,13 @@ const make = Effect.gen(function* () {
               id: EventId.make(
                 `${event.eventId}:request-resolved:${request.kind}:${request.requestId}`,
               ),
-              kind: `${request.kind}.resolved`,
+              kind:
+                request.kind === "approval"
+                  ? "provider.approval.respond.failed"
+                  : "user-input.resolved",
               tone: "info",
               summary: "Pending request cleared because its provider turn ended or was superseded",
-              payload: { requestId: request.requestId },
+              payload: approvalInvalidation ?? { requestId: request.requestId },
               turnId: request.turnId === null ? null : TurnId.make(request.turnId),
               createdAt: now,
             },
@@ -3107,4 +3144,7 @@ const make = Effect.gen(function* () {
 export const ProviderRuntimeIngestionLive = Layer.effect(
   ProviderRuntimeIngestionService,
   make,
-).pipe(Layer.provide(ProjectionTurnRepositoryLive));
+).pipe(
+  Layer.provide(ProjectionTurnRepositoryLive),
+  Layer.provide(ProjectionPendingApprovalRepositoryLive),
+);

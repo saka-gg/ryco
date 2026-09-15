@@ -36,6 +36,12 @@ import { openInPreferredEditor } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
+import {
+  isClosedMermaidFence,
+  isMermaidLanguage,
+  isSupportedMermaidSource,
+} from "../lib/mermaidPolicy";
+import { MermaidDiagram } from "./MermaidDiagram";
 import { useTheme } from "../hooks/useTheme";
 import { useLongPress } from "../hooks/useLongPress";
 import { usePresentationTier } from "../hooks/usePresentationTier";
@@ -269,6 +275,19 @@ function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNo
       {children}
     </div>
   );
+}
+
+// Keep tier subscriptions below the stable Markdown component map. Replacing
+// that map on resize remounts every code block and discards copy/focus state.
+function MermaidFencePresentation({
+  children,
+  phoneFallback,
+}: {
+  children: ReactNode;
+  phoneFallback: ReactNode;
+}) {
+  const isPhoneTier = usePresentationTier() === "phone";
+  return isPhoneTier ? phoneFallback : children;
 }
 
 interface SuspenseShikiCodeBlockProps {
@@ -647,6 +666,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   searchHighlight,
 }: ChatMarkdownProps) {
   usePerfMark("ChatMarkdown");
+  const completedText = isStreaming ? "" : text;
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
   const incrementalParsing = isStreaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
@@ -829,7 +849,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
           />
         );
       },
-      pre({ node: _node, children, ...props }) {
+      pre({ node, children, ...props }) {
         const codeBlock = extractCodeBlock(children);
         if (!codeBlock) {
           return <pre {...props}>{children}</pre>;
@@ -854,19 +874,48 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
           );
         }
 
-        return (
-          <MarkdownCodeBlock code={codeBlock.code}>
-            <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
-              <Suspense fallback={<pre {...props}>{children}</pre>}>
-                <SuspenseShikiCodeBlock
-                  className={codeBlock.className}
-                  code={codeBlock.code}
-                  themeName={diffThemeName}
-                />
-              </Suspense>
-            </CodeHighlightErrorBoundary>
-          </MarkdownCodeBlock>
+        const highlightedCode = (
+          <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
+            <Suspense fallback={<pre {...props}>{children}</pre>}>
+              <SuspenseShikiCodeBlock
+                className={codeBlock.className}
+                code={codeBlock.code}
+                themeName={diffThemeName}
+              />
+            </Suspense>
+          </CodeHighlightErrorBoundary>
         );
+        if (isMermaidLanguage(extractFenceLanguage(codeBlock.className))) {
+          const fallback = (
+            <PlainCodeBlock
+              className={codeBlock.className}
+              code={codeBlock.code}
+              preProps={props}
+            />
+          );
+          return (
+            <MarkdownCodeBlock code={codeBlock.code}>
+              <MermaidFencePresentation phoneFallback={highlightedCode}>
+                {isClosedMermaidFence(
+                  completedText,
+                  node?.position?.start.offset,
+                  node?.position?.end.offset,
+                ) && isSupportedMermaidSource(codeBlock.code) ? (
+                  <MermaidDiagram
+                    key={JSON.stringify([resolvedTheme, codeBlock.code])}
+                    source={codeBlock.code}
+                    theme={resolvedTheme}
+                    fallback={fallback}
+                  />
+                ) : (
+                  fallback
+                )}
+              </MermaidFencePresentation>
+            </MarkdownCodeBlock>
+          );
+        }
+
+        return <MarkdownCodeBlock code={codeBlock.code}>{highlightedCode}</MarkdownCodeBlock>;
       },
     }),
     [
@@ -875,6 +924,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       environmentId,
       fileLinkParentSuffixByPath,
       isStreaming,
+      completedText,
       markdownFileLinkMetaByHref,
       resolvedTheme,
       skills,

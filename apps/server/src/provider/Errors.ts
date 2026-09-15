@@ -60,6 +60,8 @@ export class ProviderAdapterRequestError extends Schema.TaggedError<ProviderAdap
     provider: Schema.String,
     method: Schema.String,
     detail: Schema.String,
+    /** Set only when the adapter proves that no approval decision was sent. */
+    approvalResponseNotSent: Schema.optional(Schema.Boolean),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {

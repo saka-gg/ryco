@@ -5,10 +5,12 @@ import {
   type GitActionProgressEvent,
   type GitManagerServiceError,
   ProjectId,
+  GitCommandError,
   WS_METHODS,
 } from "@ryco/contracts";
 
-import { resolveManagedWorktreesRoot } from "../config.ts";
+import { buildWorktreeCheckoutDirectoryName } from "../project/worktreeCheckoutPaths.ts";
+import { selectConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
 import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
 import { resolveProjectWorktreesDir } from "../project/projectMetadataPaths.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
@@ -33,6 +35,7 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
     deleteWorktree,
     initializeGitForProject,
     config,
+    serverSettings,
   } = ctx;
 
   return defineWsHandlers({
@@ -153,31 +156,49 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         ownerEffect(
           WS_METHODS.gitPreparePullRequestThread,
           (input.projectId
-            ? projectionSnapshotQuery.getProjectShellById(input.projectId).pipe(
-                Effect.mapError((cause) =>
-                  toGitManagerError(
-                    "git.preparePullRequestThread",
-                    `Failed to load project ${input.projectId}.`,
-                    cause,
+            ? projectionSnapshotQuery.getProjectShellById(input.projectId)
+            : projectionSnapshotQuery.getActiveProjectByWorkspaceRoot(input.cwd)
+          )
+            .pipe(
+              Effect.mapError((cause) =>
+                toGitManagerError(
+                  "git.preparePullRequestThread",
+                  `Failed to load project ${input.projectId}.`,
+                  cause,
+                ),
+              ),
+              Effect.map(Option.getOrNull),
+              Effect.flatMap((project) =>
+                serverSettings.getSettings.pipe(
+                  Effect.mapError((cause) =>
+                    toGitManagerError(
+                      "git.preparePullRequestThread",
+                      "Failed to load worktree settings.",
+                      cause,
+                    ),
                   ),
+                  Effect.map((settings) => ({
+                    ...input,
+                    worktreesDir:
+                      input.worktreesDir ??
+                      (input.worktreeLocation === "projectMetadata"
+                        ? resolveProjectWorktreesDir(input.cwd, project?.projectMetadataDir)
+                        : path.join(
+                            selectConfiguredWorktreeRoot({
+                              settings,
+                              config,
+                              projectId: project?.id ?? input.projectId,
+                            }),
+                            project?.id ?? input.projectId ?? ProjectId.make("project-unknown"),
+                          )),
+                  })),
                 ),
-                Effect.map(Option.getOrNull),
-                Effect.map((project) => ({
-                  ...input,
-                  worktreesDir:
-                    input.worktreeLocation === "projectMetadata"
-                      ? resolveProjectWorktreesDir(input.cwd, project?.projectMetadataDir)
-                      : path.join(
-                          resolveManagedWorktreesRoot(config),
-                          project?.id ?? input.projectId ?? ProjectId.make("project-unknown"),
-                        ),
-                })),
-                Effect.flatMap((normalizedInput) =>
-                  gitWorkflow.preparePullRequestThread(normalizedInput),
-                ),
-              )
-            : gitWorkflow.preparePullRequestThread(input)
-          ).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+              ),
+              Effect.flatMap((normalizedInput) =>
+                gitWorkflow.preparePullRequestThread(normalizedInput),
+              ),
+            )
+            .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         ),
         { "rpc.aggregate": "git" },
       ),
@@ -268,7 +289,44 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.vcsCreateWorktree,
         ownerEffect(
           WS_METHODS.vcsCreateWorktree,
-          gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+          Effect.gen(function* () {
+            if (input.path !== null) return yield* gitWorkflow.createWorktree(input);
+            const project = yield* projectionSnapshotQuery
+              .getActiveProjectByWorkspaceRoot(input.cwd)
+              .pipe(
+                Effect.map(Option.getOrNull),
+                Effect.mapError((cause) =>
+                  toGitManagerError("git.createWorktree", "Failed to load project.", cause),
+                ),
+              );
+            if (!project) return yield* gitWorkflow.createWorktree(input);
+            const settings = yield* serverSettings.getSettings.pipe(
+              Effect.mapError((cause) =>
+                toGitManagerError("git.createWorktree", "Failed to load worktree settings.", cause),
+              ),
+            );
+            return yield* gitWorkflow.createWorktree({
+              ...input,
+              path: path.join(
+                selectConfiguredWorktreeRoot({ settings, config, projectId: project.id }),
+                project.id,
+                buildWorktreeCheckoutDirectoryName(input.newRefName ?? input.refName),
+              ),
+            });
+          }).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "GitCommandError"
+                ? cause
+                : new GitCommandError({
+                    operation: "git.createWorktree",
+                    cwd: input.cwd,
+                    command: "git worktree add",
+                    detail: cause.message,
+                    cause,
+                  }),
+            ),
+            Effect.tap(() => refreshGitStatus(input.cwd)),
+          ),
         ),
         { "rpc.aggregate": "vcs" },
       ),

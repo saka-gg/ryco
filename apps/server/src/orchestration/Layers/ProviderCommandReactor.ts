@@ -1,3 +1,8 @@
+import { ProviderSessionNotFoundError } from "../../provider/Errors.ts";
+import { matchesApprovalAttempt } from "../approvalResponses.ts";
+import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
+import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
+import type { ApprovalResponseIdentity, ApprovalResponseState } from "@ryco/contracts";
 import { lstatSync, realpathSync } from "node:fs";
 import nodePath from "node:path";
 
@@ -204,6 +209,7 @@ function stalePendingRequestDetail(
 }
 
 const make = Effect.gen(function* () {
+  const approvals = yield* ProjectionPendingApprovalRepository;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
@@ -241,6 +247,9 @@ const make = Effect.gen(function* () {
     readonly turnId: TurnId | null;
     readonly createdAt: string;
     readonly requestId?: string;
+    readonly approvalIdentity?: ApprovalResponseIdentity;
+    readonly responseAttemptId?: CommandId;
+    readonly responseState?: ApprovalResponseState;
   }) =>
     orchestrationEngine.dispatch({
       type: "thread.activity.append",
@@ -254,6 +263,9 @@ const make = Effect.gen(function* () {
         payload: {
           detail: input.detail,
           ...(input.requestId ? { requestId: input.requestId } : {}),
+          ...(input.approvalIdentity ? { approvalIdentity: input.approvalIdentity } : {}),
+          ...(input.responseAttemptId ? { responseAttemptId: input.responseAttemptId } : {}),
+          ...(input.responseState ? { responseState: input.responseState } : {}),
         },
         turnId: input.turnId,
         createdAt: input.createdAt,
@@ -1392,43 +1404,95 @@ const make = Effect.gen(function* () {
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.approval-response-requested" }>,
   ) {
-    const thread = yield* resolveThread(event.payload.threadId);
-    if (!thread) {
+    const claim = yield* approvals.getByRequestId({
+      threadId: event.payload.threadId,
+      requestId: event.payload.requestId,
+    });
+    if (
+      Option.isNone(claim) ||
+      claim.value.status !== "pending" ||
+      claim.value.responseState !== "submitting" ||
+      !matchesApprovalAttempt(claim.value, event.payload.approvalIdentity, event.commandId)
+    )
       return;
-    }
-    const hasSession = thread.session && thread.session.status !== "stopped";
-    if (!hasSession) {
-      return yield* appendProviderFailureActivity({
+    const thread = yield* resolveThread(event.payload.threadId);
+    const fail = (detail: string, responseState: ApprovalResponseState) =>
+      appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.approval.respond.failed",
         summary: "Provider approval response failed",
-        detail: "No active provider session is bound to this thread.",
+        detail,
         turnId: null,
-        createdAt: event.payload.createdAt,
+        createdAt: new Date().toISOString(),
         requestId: event.payload.requestId,
+        ...(event.payload.approvalIdentity
+          ? { approvalIdentity: event.payload.approvalIdentity }
+          : {}),
+        ...(event.commandId ? { responseAttemptId: event.commandId } : {}),
+        responseState,
       });
+    if (
+      !thread?.session ||
+      thread.session.status === "stopped" ||
+      thread.session.runtimeSessionId !== event.payload.approvalIdentity?.runtimeSessionId
+    ) {
+      return yield* fail(
+        stalePendingRequestDetail("approval", event.payload.requestId),
+        "invalidated",
+      );
     }
-
     yield* providerService
       .respondToRequest({
         threadId: event.payload.threadId,
         requestId: event.payload.requestId,
         decision: event.payload.decision,
+        ...(event.payload.approvalIdentity?.runtimeSessionId
+          ? { expectedRuntimeSessionId: event.payload.approvalIdentity.runtimeSessionId }
+          : {}),
       })
       .pipe(
-        Effect.catchCause((cause) =>
-          appendProviderFailureActivity({
-            threadId: event.payload.threadId,
-            kind: "provider.approval.respond.failed",
-            summary: "Provider approval response failed",
-            detail: isUnknownPendingApprovalRequestError(cause)
-              ? stalePendingRequestDetail("approval", event.payload.requestId)
-              : Cause.pretty(cause),
-            turnId: null,
-            createdAt: event.payload.createdAt,
-            requestId: event.payload.requestId,
-          }),
-        ),
+        Effect.matchCauseEffect({
+          onFailure: (cause) => {
+            const stale =
+              isUnknownPendingApprovalRequestError(cause) ||
+              cause.reasons.some(
+                (reason) =>
+                  Cause.isFailReason(reason) &&
+                  Schema.is(ProviderSessionNotFoundError)(reason.error),
+              );
+            const providerError = findProviderAdapterRequestError(cause);
+            // Only explicit evidence that the decision was never sent permits retry.
+            const retryable = providerError?.approvalResponseNotSent === true;
+            return fail(
+              stale
+                ? stalePendingRequestDetail("approval", event.payload.requestId)
+                : Cause.pretty(cause),
+              stale ? "invalidated" : retryable ? "retryable" : "uncertain",
+            );
+          },
+          onSuccess: () =>
+            orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId: serverCommandId("approval-settled"),
+              threadId: event.payload.threadId,
+              activity: {
+                id: EventId.make(`approval-settled:${event.commandId}`),
+                kind: "approval.resolved",
+                tone: "info",
+                summary: "Approval response delivered",
+                payload: {
+                  requestId: event.payload.requestId,
+                  approvalIdentity: event.payload.approvalIdentity,
+                  runtimeSessionId: event.payload.approvalIdentity?.runtimeSessionId,
+                  responseAttemptId: event.commandId,
+                  decision: event.payload.decision,
+                },
+                turnId: null,
+                createdAt: new Date().toISOString(),
+              },
+              createdAt: new Date().toISOString(),
+            }),
+        }),
       );
   });
 
@@ -1644,4 +1708,6 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
+  Layer.provide(ProjectionPendingApprovalRepositoryLive),
+);
