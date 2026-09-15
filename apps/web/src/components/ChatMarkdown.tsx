@@ -36,6 +36,12 @@ import { openInPreferredEditor } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
+import {
+  isClosedMermaidFence,
+  isMermaidLanguage,
+  isSupportedMermaidSource,
+} from "../lib/mermaidPolicy";
+import { MermaidDiagram } from "./MermaidDiagram";
 import { useTheme } from "../hooks/useTheme";
 import { useLongPress } from "../hooks/useLongPress";
 import { usePresentationTier } from "../hooks/usePresentationTier";
@@ -647,6 +653,8 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   searchHighlight,
 }: ChatMarkdownProps) {
   usePerfMark("ChatMarkdown");
+  const isPhoneTier = usePresentationTier() === "phone";
+  const completedText = isStreaming ? "" : text;
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
   const incrementalParsing = isStreaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
@@ -829,7 +837,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
           />
         );
       },
-      pre({ node: _node, children, ...props }) {
+      pre({ node, children, ...props }) {
         const codeBlock = extractCodeBlock(children);
         if (!codeBlock) {
           return <pre {...props}>{children}</pre>;
@@ -850,6 +858,34 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
                 code={codeBlock.code}
                 preProps={props}
               />
+            </MarkdownCodeBlock>
+          );
+        }
+
+        if (!isPhoneTier && isMermaidLanguage(extractFenceLanguage(codeBlock.className))) {
+          const fallback = (
+            <PlainCodeBlock
+              className={codeBlock.className}
+              code={codeBlock.code}
+              preProps={props}
+            />
+          );
+          return (
+            <MarkdownCodeBlock code={codeBlock.code}>
+              {isClosedMermaidFence(
+                completedText,
+                node?.position?.start.offset,
+                node?.position?.end.offset,
+              ) && isSupportedMermaidSource(codeBlock.code) ? (
+                <MermaidDiagram
+                  key={JSON.stringify([resolvedTheme, codeBlock.code])}
+                  source={codeBlock.code}
+                  theme={resolvedTheme}
+                  fallback={fallback}
+                />
+              ) : (
+                fallback
+              )}
             </MarkdownCodeBlock>
           );
         }
@@ -875,6 +911,8 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       environmentId,
       fileLinkParentSuffixByPath,
       isStreaming,
+      isPhoneTier,
+      completedText,
       markdownFileLinkMetaByHref,
       resolvedTheme,
       skills,
