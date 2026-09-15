@@ -7,7 +7,7 @@ import {
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
 import { memo } from "react";
-import { ListChecksIcon, PanelRightIcon, ImagesIcon } from "lucide-react";
+import { ListChecksIcon, PanelRightIcon, ImagesIcon, BookOpenIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
 import { Toggle } from "../ui/toggle";
@@ -24,6 +24,7 @@ import { formatLiveAgentCount, LiveAgentCountBadge } from "../LiveAgentCountBadg
 interface ChatHeaderProps {
   /** Optional pane-scoped gallery action; gallery implementation is supplied separately. */
   onOpenThreadImages?: () => void;
+  onOpenProjectMemory?: (() => void) | undefined;
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadTitle: string;
   activeProjectName: string | undefined;
@@ -92,6 +93,25 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
           workspace header so it can never overlap the other header controls.
           Renders nothing outside hosted-hub sessions. */}
       <HostedNodeMenu />
+      {props.onOpenProjectMemory ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Project memory"
+                onClick={() => {
+                  if (paneFocused) props.onOpenProjectMemory?.();
+                }}
+              >
+                <BookOpenIcon className="size-4" />
+              </Button>
+            }
+          />
+          <TooltipPopup side="bottom">Project memory</TooltipPopup>
+        </Tooltip>
+      ) : null}
       {props.onOpenThreadImages ? (
         <Tooltip>
           <TooltipTrigger

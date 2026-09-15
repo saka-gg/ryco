@@ -9,6 +9,15 @@ import type {
 } from "./git.ts";
 import type { AutomationCentreApi } from "./automationCentre.ts";
 import type {
+  ProjectMemoryListInput,
+  ProjectMemoryPage,
+  ProjectMemoryMutateInput,
+  ProjectMemoryRecallInput,
+  ProjectMemoryRecallPreview,
+  ProjectMemoryExport,
+  ProjectMemoryScope,
+} from "./projectMemory.ts";
+import type {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
   AcpRegistryInstallInput,
@@ -878,7 +887,15 @@ export interface LocalApi {
  * its own instance of this surface, and callers should resolve it by
  * `environmentId` rather than reaching through the local desktop bridge.
  */
+export interface ProjectMemoryApi {
+  list: (input: typeof ProjectMemoryListInput.Type) => Promise<ProjectMemoryPage>;
+  mutate: (input: ProjectMemoryMutateInput) => Promise<{ revision: number }>;
+  preview: (input: ProjectMemoryRecallInput) => Promise<ProjectMemoryRecallPreview>;
+  export: (input: typeof ProjectMemoryScope.Type) => Promise<ProjectMemoryExport>;
+}
+
 export interface EnvironmentApi {
+  projectMemory?: ProjectMemoryApi;
   attachments?: {
     readChunk: (input: ChatAttachmentReadChunkInput) => Promise<ChatAttachmentReadChunkResult>;
   };

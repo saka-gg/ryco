@@ -14,7 +14,7 @@ import {
 import { isHostedEnvironmentQueryRefreshReady } from "../../rpc/environmentQueryRefresh";
 
 /** Observe existing lifecycle authority; never reconnect, authorize, or publish readiness here. */
-export function useThreadImageReadScope(environmentId: EnvironmentId) {
+export function useEnvironmentRpcReadScope(environmentId: EnvironmentId, method: string) {
   const connection = useSyncExternalStore(subscribeEnvironmentConnections, () =>
     readEnvironmentConnection(environmentId),
   );
@@ -32,7 +32,7 @@ export function useThreadImageReadScope(environmentId: EnvironmentId) {
           fresh: state.directoryStatus === "ready" && state.transportStatus === "online",
           browserCurrent: state.browserStatus === "current",
           sessionReady: state.sessionStatus === "ready",
-          method: "chatAttachments.readChunk",
+          method,
         }).allowed));
   // A reconnect can retain the same client object. Socket epochs and hosted
   // generations therefore also invalidate all gallery-owned sources.
@@ -58,19 +58,44 @@ export function useThreadImageReadScope(environmentId: EnvironmentId) {
       role,
     ],
   );
-  const isCurrent = () => {
-    const currentStatus = getWsConnectionStatusForEnvironment(environmentId);
-    const currentHosted = hostedHubStore.getState();
-    return (
-      available &&
-      readEnvironmentConnection(environmentId) === connection &&
-      currentStatus.phase === "connected" &&
-      currentStatus.connectedAt === status.connectedAt &&
-      currentStatus.disconnectedAt === status.disconnectedAt &&
-      (!hosted ||
-        (isHostedEnvironmentQueryRefreshReady(currentHosted, environmentId, state.generation) &&
-          currentHosted.effectiveRole === state.effectiveRole))
-    );
-  };
-  return { available, lifetime, isCurrent };
+  return useMemo(
+    () => ({
+      available: lifetime.available,
+      lifetime,
+      isCurrent: () => {
+        const currentStatus = getWsConnectionStatusForEnvironment(lifetime.environmentId);
+        const currentHosted = hostedHubStore.getState();
+        return (
+          lifetime.available &&
+          readEnvironmentConnection(lifetime.environmentId) === lifetime.connection &&
+          currentStatus.phase === "connected" &&
+          currentStatus.connectedAt === lifetime.connectedAt &&
+          currentStatus.disconnectedAt === lifetime.disconnectedAt &&
+          (!hosted ||
+            (isHostedEnvironmentQueryRefreshReady(
+              currentHosted,
+              lifetime.environmentId,
+              lifetime.generation ?? -1,
+            ) &&
+              currentHosted.effectiveRole === lifetime.role &&
+              resolveHostedRpcCapability({
+                hosted,
+                role: currentHosted.effectiveRole,
+                fresh:
+                  currentHosted.directoryStatus === "ready" &&
+                  currentHosted.transportStatus === "online",
+                browserCurrent: currentHosted.browserStatus === "current",
+                sessionReady: currentHosted.sessionStatus === "ready",
+                method,
+              }).allowed))
+        );
+      },
+    }),
+    [lifetime, hosted, method],
+  );
+}
+
+/** Gallery retains its existing read policy through the common observer. */
+export function useThreadImageReadScope(environmentId: EnvironmentId) {
+  return useEnvironmentRpcReadScope(environmentId, "chatAttachments.readChunk");
 }

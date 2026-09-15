@@ -104,6 +104,10 @@
     "./state/pull-request-review": {
       "types": "./src/state/pull-request-review/index.ts",
       "import": "./src/state/pull-request-review/index.ts"
+    },
+    "./state/project-memory": {
+      "types": "./src/state/project-memory/index.ts",
+      "import": "./src/state/project-memory/index.ts"
     }
   },
   "scripts": {

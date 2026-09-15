@@ -1,3 +1,4 @@
+import type { ProjectMemoryRecallInput } from "@ryco/contracts";
 import {
   DEFAULT_MODEL,
   type AgentTokenMode,
@@ -206,6 +207,7 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 }
 
 export interface CommitSendTurnDispatchInput {
+  readonly projectMemory?: ProjectMemoryRecallInput;
   readonly api: EnvironmentApi;
   readonly threadId: ThreadId;
   readonly isFirstMessage: boolean;
@@ -268,6 +270,7 @@ export async function commitSendTurnDispatch(input: CommitSendTurnDispatchInput)
   input.beginLocalDispatch({ preparingWorktree: false });
   await input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",
+    ...(input.projectMemory ? { projectMemory: input.projectMemory } : {}),
     commandId: input.newCommandId(),
     threadId: input.threadId,
     message: {
