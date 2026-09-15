@@ -189,6 +189,7 @@ import {
 } from "./chat/ThreadMessageSearch.logic";
 import type { ThreadMessageSearchOccurrence } from "./chat/ThreadMessageSearch.logic";
 import { ChatHeader } from "./chat/ChatHeader";
+import { ThreadImageGallery } from "./chat/ThreadImageGallery";
 import { PhoneThreadAppBar } from "./shell/phone/PhoneThreadAppBar";
 import type { PhoneThreadDockProps } from "./shell/phone/PhoneThreadDock";
 import { PhoneSurfaceScaffold, PhoneWorkSurfaceSheet } from "./shell/phone/PhoneWorkSurface";
@@ -571,6 +572,7 @@ export default function ChatView(props: ChatViewProps) {
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const readComposer = useCallback(() => composerRef.current, [composerRef]);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [threadImagesThreadKey, setThreadImagesThreadKey] = useState<string | null>(null);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const [threadMessageSearchOpen, setThreadMessageSearchOpen] = useState(false);
@@ -803,6 +805,15 @@ export default function ChatView(props: ChatViewProps) {
     [activeThread],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
+  if (
+    threadImagesThreadKey !== null &&
+    (threadImagesThreadKey !== activeThreadKey || !paneFocused || presentationTier === "phone")
+  ) {
+    setThreadImagesThreadKey(null);
+  }
+  const onOpenThreadImages = useCallback(() => {
+    if (paneFocusedRef.current && activeThreadKey) setThreadImagesThreadKey(activeThreadKey);
+  }, [activeThreadKey, paneFocusedRef]);
   const activeThreadMessageHistory = useStore((state) =>
     activeThreadRef
       ? state.environmentStateById[activeThreadRef.environmentId]?.threadHistoryByThreadId?.[
@@ -4537,6 +4548,11 @@ export default function ChatView(props: ChatViewProps) {
           />
         ) : (
           <ChatHeader
+            {...(isServerThread && activeThreadKey
+              ? {
+                  onOpenThreadImages,
+                }
+              : {})}
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadTitle={activeThread.title}
             activeProjectName={activeProject?.name}
@@ -5183,6 +5199,22 @@ export default function ChatView(props: ChatViewProps) {
           />
         </RightPanelSheet>
       ) : null}
+
+      {presentationTier !== "phone" && isServerThread && activeThreadRef && activeThreadKey && (
+        <ThreadImageGallery
+          key={`gallery:${activeThreadKey}`}
+          scope={activeThreadRef}
+          messages={activeThread.messages}
+          open={paneFocused && threadImagesThreadKey === activeThreadKey}
+          onOpenChange={(open) =>
+            setThreadImagesThreadKey(open && paneFocusedRef.current ? activeThreadKey : null)
+          }
+          hasMoreBefore={activeThreadMessageHistory?.hasMoreBefore ?? false}
+          isLoadingOlder={activeThreadMessageHistoryLoad?.status === "loading"}
+          loadOlderError={activeThreadMessageHistoryLoad?.error ?? null}
+          onLoadOlder={handleLoadOlderMessages}
+        />
+      )}
 
       {expandedImage && (
         <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} />
