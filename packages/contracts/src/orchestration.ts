@@ -1429,6 +1429,7 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
   createdAt: IsoDateTime,
+  userInputIdentity: Schema.optional(ApprovalResponseIdentity),
 });
 
 const ThreadCheckpointRevertCommand = Schema.Struct({
@@ -2061,6 +2062,7 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
   createdAt: IsoDateTime,
+  userInputIdentity: Schema.optional(ApprovalResponseIdentity),
 });
 
 export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({

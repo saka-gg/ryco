@@ -32,9 +32,13 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
 
   return (
     <ComposerPendingUserInputCard
-      key={activePrompt.requestId}
+      key={activePrompt.userInputIdentity?.requestEventId ?? activePrompt.requestId}
       prompt={activePrompt}
-      isResponding={respondingRequestIds.includes(activePrompt.requestId)}
+      isResponding={
+        respondingRequestIds.includes(activePrompt.requestId) ||
+        activePrompt.responseState === "submitting" ||
+        activePrompt.responseState === "uncertain"
+      }
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
@@ -139,6 +143,12 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           </span>
         </div>
       </div>
+      {prompt.responseState === "uncertain" ? (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          Answer delivery is unconfirmed. Await provider confirmation or restart the turn; resending
+          could duplicate it.
+        </p>
+      ) : null}
       <p className="mt-1.5 text-sm text-foreground/90">{activeQuestion.question}</p>
       {activeQuestion.multiSelect ? (
         <p className="mt-1 text-xs text-muted-foreground/65">Select one or more options.</p>

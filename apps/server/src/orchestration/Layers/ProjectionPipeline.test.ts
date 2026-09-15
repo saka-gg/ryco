@@ -2881,7 +2881,10 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           tone: "info",
           kind: "user-input.requested",
           summary: "input requested",
-          payload: { requestId: "request-incarnation-user-input-1" },
+          payload: {
+            requestId: "request-incarnation-user-input-1",
+            runtimeSessionId: "incarnation-runtime-1",
+          },
           turnId: null,
           createdAt,
         },

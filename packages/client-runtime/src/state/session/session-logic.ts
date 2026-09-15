@@ -143,6 +143,9 @@ export interface PendingApproval {
 
 export interface PendingUserInput {
   requestId: ApprovalRequestId;
+  userInputIdentity?: ApprovalResponseIdentity;
+  responseState?: ApprovalResponseState;
+  responseAttemptId?: string;
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
 }
@@ -518,6 +521,7 @@ function updatePendingUserInputState(
   if (
     activity.kind !== "user-input.requested" &&
     activity.kind !== "user-input.resolved" &&
+    activity.kind !== "user-input.response.submitted" &&
     activity.kind !== "provider.user-input.respond.failed"
   ) {
     return;
@@ -533,13 +537,58 @@ function updatePendingUserInputState(
     }
     openByRequestId.set(requestId, {
       requestId,
+      ...(Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity)
+        ? { userInputIdentity: payload.userInputIdentity }
+        : {}),
       createdAt: activity.createdAt,
       questions,
     });
     return;
   }
 
+  const current = requestId ? openByRequestId.get(requestId) : undefined;
+  if (
+    current &&
+    requestId &&
+    (activity.kind === "user-input.response.submitted" ||
+      activity.kind === "provider.user-input.respond.failed") &&
+    Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity) &&
+    Schema.is(ApprovalResponseState)(payload?.responseState)
+  ) {
+    const identity = payload.userInputIdentity;
+    if (
+      identity.requestEventId !== current.userInputIdentity?.requestEventId ||
+      identity.runtimeSessionId !== current.userInputIdentity?.runtimeSessionId
+    )
+      return;
+    if (
+      activity.kind !== "user-input.response.submitted" &&
+      current.responseAttemptId !== payload.responseAttemptId
+    )
+      return;
+    if (payload.responseState === "invalidated") openByRequestId.delete(requestId);
+    else
+      openByRequestId.set(requestId, {
+        ...current,
+        responseState: payload.responseState,
+        ...(typeof payload.responseAttemptId === "string"
+          ? { responseAttemptId: payload.responseAttemptId }
+          : {}),
+      });
+    return;
+  }
   if (activity.kind === "user-input.resolved" && requestId) {
+    if (current?.userInputIdentity?.runtimeSessionId !== payload?.runtimeSessionId) return;
+    if (
+      Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity) &&
+      payload.userInputIdentity.requestEventId !== current?.userInputIdentity?.requestEventId
+    )
+      return;
+    if (
+      typeof payload?.responseAttemptId === "string" &&
+      payload.responseAttemptId !== current?.responseAttemptId
+    )
+      return;
     openByRequestId.delete(requestId);
     return;
   }
@@ -552,7 +601,6 @@ function updatePendingUserInputState(
     openByRequestId.delete(requestId);
   }
 }
-
 function pendingUserInputsFromState(
   openByRequestId: ReadonlyMap<ApprovalRequestId, PendingUserInput>,
 ): PendingUserInput[] {

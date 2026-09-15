@@ -93,7 +93,11 @@ export function useChatSessionActions(input: {
   );
 
   const respondToUserInput = useCallback(
-    async (requestId: ApprovalRequestId, answers: Record<string, unknown>) => {
+    async (
+      requestId: ApprovalRequestId,
+      answers: Record<string, unknown>,
+      userInputIdentity?: ApprovalResponseIdentity,
+    ) => {
       const api = readEnvironmentApi(environmentId);
       if (!api || !activeThreadId) {
         return;
@@ -108,6 +112,7 @@ export function useChatSessionActions(input: {
           threadId: activeThreadId,
           requestId,
           answers,
+          userInputIdentity,
         });
       } catch (err: unknown) {
         setThreadError(
