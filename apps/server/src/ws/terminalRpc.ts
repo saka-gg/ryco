@@ -21,6 +21,7 @@ const TERMINAL_SUBSCRIBER_MAX_BYTES = 4 * 1024 * 1024;
 
 export interface TerminalSubscriberLedger {
   bytes: number;
+  events?: number;
 }
 
 export const releaseTerminalSubscriberEvent = (
@@ -29,6 +30,7 @@ export const releaseTerminalSubscriberEvent = (
 ): Effect.Effect<void> =>
   Effect.sync(() => {
     ledger.bytes = Math.max(0, ledger.bytes - approximateJsonBytes(event));
+    ledger.events = Math.max(0, (ledger.events ?? 0) - 1);
   });
 
 export function makeTerminalSubscriberOffer(
@@ -55,12 +57,13 @@ export function makeTerminalSubscriberOffer(
       if (overflowed) return;
       recordServerPerfPayload("server.ws.terminal.events", event);
       const eventBytes = approximateJsonBytes(event);
-      if (ledger.bytes + eventBytes > byteBudget) {
+      if (ledger.bytes + eventBytes > byteBudget || (ledger.events ?? 0) >= capacity) {
         yield* failWithResync();
         return;
       }
       if (Queue.offerUnsafe(queue, event)) {
         ledger.bytes += eventBytes;
+        ledger.events = (ledger.events ?? 0) + 1;
         return;
       }
       yield* failWithResync();
@@ -124,42 +127,74 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.subscribeTerminalEvents,
         ownerStream(
           WS_METHODS.subscribeTerminalEvents,
-          // One fresh byte ledger per subscription run; the release tap keeps
-          // it in sync with what the RPC transport has actually pulled.
-          Stream.suspend(() => {
-            const ledger: TerminalSubscriberLedger = { bytes: 0 };
-            return Stream.callback<TerminalEvent, TerminalSubscriptionResyncError>(
-              (queue) =>
-                Effect.acquireRelease(
-                  Effect.gen(function* () {
-                    const offerEvent = makeTerminalSubscriberOffer(
-                      queue,
-                      TERMINAL_SUBSCRIBER_CAPACITY,
-                      ledger,
-                    );
-                    const unsubscribe = yield* terminalManager.subscribe(offerEvent);
-                    const snapshots = yield* terminalManager.listSessions;
-                    yield* Effect.forEach(
-                      snapshots.filter((snapshot) => snapshot.status === "running"),
-                      (snapshot) => {
-                        const event: TerminalEvent = {
-                          type: "started",
-                          threadId: snapshot.threadId,
-                          terminalId: snapshot.terminalId,
-                          createdAt: new Date().toISOString(),
-                          snapshot,
-                        };
-                        return offerEvent(event);
-                      },
-                      { discard: true },
-                    );
-                    return unsubscribe;
-                  }),
-                  (unsubscribe) => Effect.sync(unsubscribe),
+          Stream.unwrap(
+            Effect.gen(function* () {
+              const ledger: TerminalSubscriberLedger = { bytes: 0 };
+              const queue = yield* Queue.dropping<
+                TerminalEvent,
+                TerminalSubscriptionResyncError | Cause.Done<void>
+              >(TERMINAL_SUBSCRIBER_CAPACITY);
+              yield* Effect.addFinalizer(() => Queue.shutdown(queue));
+              yield* Effect.acquireRelease(
+                terminalManager.subscribe(
+                  makeTerminalSubscriberOffer(queue, TERMINAL_SUBSCRIBER_CAPACITY, ledger),
                 ),
-              { bufferSize: TERMINAL_SUBSCRIBER_CAPACITY, strategy: "dropping" },
-            ).pipe(Stream.tap((event) => releaseTerminalSubscriberEvent(ledger, event)));
-          }),
+                (unsubscribe) => Effect.sync(unsubscribe),
+              );
+              // Subscribe first to avoid a gap, but do not expose queued live events
+              // until the snapshot has been delivered. The captured cursor removes
+              // events already represented by history, even within one millisecond.
+              const snapshots = (yield* terminalManager.listSessions).filter(
+                (snapshot) => snapshot.status === "running",
+              );
+              const cursors = new Map(
+                snapshots.map((snapshot) => [
+                  JSON.stringify([snapshot.threadId, snapshot.terminalId]),
+                  snapshot.cursor,
+                ]),
+              );
+              const initial: TerminalEvent[] = snapshots.map((snapshot) => ({
+                type: "started",
+                threadId: snapshot.threadId,
+                terminalId: snapshot.terminalId,
+                createdAt: snapshot.updatedAt,
+                snapshot,
+                ...(snapshot.cursor ? { cursor: snapshot.cursor } : {}),
+              }));
+              // Bootstrap and live queues share both budgets. Separate queues
+              // enforce snapshot-first ordering without exempting retained history
+              // from the existing per-subscriber bounds.
+              const initialQueue = yield* Queue.dropping<
+                TerminalEvent,
+                TerminalSubscriptionResyncError | Cause.Done<void>
+              >(TERMINAL_SUBSCRIBER_CAPACITY);
+              yield* Effect.addFinalizer(() => Queue.shutdown(initialQueue));
+              const offerInitial = makeTerminalSubscriberOffer(
+                initialQueue,
+                TERMINAL_SUBSCRIBER_CAPACITY,
+                ledger,
+              );
+              yield* Effect.forEach(initial, offerInitial, { discard: true });
+              return Stream.concat(
+                Stream.fromQueue(initialQueue).pipe(
+                  Stream.take(initial.length),
+                  Stream.tap((event) => releaseTerminalSubscriberEvent(ledger, event)),
+                ),
+                Stream.fromQueue(queue).pipe(
+                  Stream.tap((event) => releaseTerminalSubscriberEvent(ledger, event)),
+                  Stream.filter((event) => {
+                    const cursor = cursors.get(JSON.stringify([event.threadId, event.terminalId]));
+                    return (
+                      !cursor ||
+                      !event.cursor ||
+                      (cursor.generation === event.cursor.generation &&
+                        event.cursor.sequence > cursor.sequence)
+                    );
+                  }),
+                ),
+              );
+            }),
+          ),
         ),
         { "rpc.aggregate": "terminal" },
       ),

@@ -5,3 +5,5 @@ export * from "./subagentRuntime.ts";
 export * from "./threadWorkspaceViewModel.ts";
 export * from "./timeline-index.ts";
 export * from "./agentActivity.ts";
+
+export * from "./approvalResponses.ts";

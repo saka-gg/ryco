@@ -1,3 +1,5 @@
+import { recordWsConnectionOpened } from "@ryco/client-runtime/rpc";
+import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import "../index.css";
 
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
@@ -114,6 +116,10 @@ vi.mock("@tanstack/react-router", () => ({
     proceed: undefined,
     reset: undefined,
   })),
+}));
+
+vi.mock("../hostedHub/hostedConnectionCoordinator", () => ({
+  readHostedNodeMutationLease: () => null,
 }));
 
 vi.mock("../environmentApi", () => ({
@@ -237,9 +243,11 @@ describe("PreviewPanel", () => {
     | null = null;
 
   beforeEach(() => {
+    resetPreviewFileSessionsForTests();
     previewHarness.reset();
     resetAppAtomRegistryForTests();
     resetProjectPreviewAtomsForTests();
+    recordWsConnectionOpened({ environmentId: EnvironmentId.make("environment-local") });
   });
 
   afterEach(async () => {
@@ -249,9 +257,11 @@ describe("PreviewPanel", () => {
     }
     mounted = null;
     document.body.innerHTML = "";
+    resetPreviewFileSessionsForTests();
     previewHarness.reset();
     resetAppAtomRegistryForTests();
     resetProjectPreviewAtomsForTests();
+    recordWsConnectionOpened({ environmentId: EnvironmentId.make("environment-local") });
   });
 
   it("places the workspace tree on the right and filters visible files", async () => {
@@ -402,6 +412,7 @@ describe("PreviewPanel", () => {
     mounted = await renderPreviewPanel();
     await page.getByRole("button", { name: "src/app.ts" }).click();
     await page.getByRole("textbox", { name: "Edit src/app.ts" }).fill("const answer = 42;");
+    previewHarness.writeFailure = { reason: "conflict", message: "External edit" };
     await page.getByRole("button", { name: "README.md" }).click();
 
     await expect
@@ -417,7 +428,71 @@ describe("PreviewPanel", () => {
     await expect
       .element(page.getByRole("textbox", { name: "Edit README.md" }))
       .toHaveValue("# Ryco");
-    expect(previewHarness.writeAttempts).toHaveLength(0);
+    expect(previewHarness.writeAttempts).toHaveLength(1);
+  });
+
+  it("autosaves and drains before switching files without a discard dialog", async () => {
+    previewHarness.entries = [
+      { path: "src/app.ts", kind: "file" },
+      { path: "README.md", kind: "file" },
+    ];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "original",
+    });
+    previewHarness.readFiles.set("README.md", { relativePath: "README.md", contents: "readme" });
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "src/app.ts" }).click();
+    await page.getByRole("textbox", { name: "Edit src/app.ts" }).fill("autosaved");
+    await vi.waitFor(() => expect(previewHarness.writeAttempts).toHaveLength(1));
+    await page.getByRole("textbox", { name: "Edit src/app.ts" }).fill("drained before switch");
+    await page.getByRole("button", { name: "README.md" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .toHaveValue("readme");
+    expect(previewHarness.writeAttempts.at(-1)?.contents).toBe("drained before switch");
+    await expect
+      .element(page.getByRole("heading", { name: "Save changes before continuing?" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("retains a failed draft across remount and requires confirmation for a guarded overwrite", async () => {
+    previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "original",
+      version: "v1",
+    });
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "src/app.ts" }).click();
+    previewHarness.writeFailure = { reason: "conflict", message: "External edit" };
+    await page.getByRole("textbox", { name: "Edit src/app.ts" }).fill("retained draft");
+    await page.getByRole("button", { name: "Save file" }).click();
+    await expect
+      .element(page.getByText("File changed on disk", { exact: true }))
+      .toBeInTheDocument();
+    await mounted.unmount?.();
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "external",
+      version: "v2",
+    });
+    mounted = await renderPreviewPanel();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+      .toHaveValue("retained draft");
+    await page.getByRole("button", { name: "Overwrite", exact: true }).click();
+    expect(previewHarness.writeAttempts).toHaveLength(1);
+    previewHarness.writeFailure = null;
+    await page.getByRole("button", { name: "Confirm overwrite" }).click();
+    await vi.waitFor(() => expect(previewHarness.writeAttempts).toHaveLength(2));
+    expect(previewHarness.writeAttempts[1]).toMatchObject({
+      expectedVersion: "v2",
+      contents: "retained draft",
+    });
+    await expect
+      .element(page.getByText("File changed on disk", { exact: true }))
+      .not.toBeInTheDocument();
   });
 
   it("preserves local edits on conflict and reloads the disk version on request", async () => {
@@ -450,6 +525,7 @@ describe("PreviewPanel", () => {
     await expect.element(page.getByRole("button", { name: "Save file" })).toBeDisabled();
 
     await page.getByRole("button", { name: "Reload" }).click();
+    await page.getByRole("button", { name: "Confirm reload" }).click();
     await expect
       .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
       .toHaveValue("const answer = 99;");
@@ -469,9 +545,13 @@ describe("PreviewPanel", () => {
       .toBeInTheDocument();
 
     await page.getByRole("button", { name: "Discard file changes" }).click();
+    await page.getByRole("button", { name: "Confirm discard" }).click();
+    await expect
+      .element(page.getByText("Draft discarded. Reload to read the current disk contents."))
+      .toBeInTheDocument();
     await expect
       .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
-      .toHaveValue("const answer = 100;");
+      .not.toBeInTheDocument();
     await expect
       .element(page.getByText("File changed on disk", { exact: true }))
       .not.toBeInTheDocument();

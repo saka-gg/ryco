@@ -256,7 +256,11 @@
       "types": "./src/macLocalSigning.ts",
       "import": "./src/macLocalSigning.ts"
     },
-    "./voice": "./src/voice.ts"
+    "./voice": "./src/voice.ts",
+    "./threadExport": {
+      "types": "./src/threadExport.ts",
+      "import": "./src/threadExport.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

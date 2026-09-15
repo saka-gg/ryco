@@ -1,4 +1,3 @@
-import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -34,6 +33,8 @@ import { useDiffLayout, type DiffRenderMode } from "../hooks/useDiffLayout";
 import { useTheme } from "../hooks/useTheme";
 import { DiffParseCache } from "../lib/diffParseCache";
 import { buildPatchCacheKey } from "../lib/diffRendering";
+import { ActiveDiffParser, type RenderablePatch } from "../lib/diffParsing";
+import { useDiffFileNavigation } from "../hooks/useDiffFileNavigation";
 import { resolveDiffThemeName } from "../lib/diffRendering";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { selectProjectByRef, useStore } from "../store";
@@ -143,49 +144,6 @@ const DIFF_PANEL_SEARCH_UNSAFE_CSS = `
 
 const DIFF_PANEL_UNSAFE_CSS = `${DIFF_PANEL_BASE_UNSAFE_CSS}${DIFF_PANEL_EDITOR_OPEN_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}`;
 const DIFF_PANEL_PHONE_UNSAFE_CSS = `${DIFF_PANEL_BASE_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}`;
-
-type RenderablePatch =
-  | {
-      kind: "files";
-      files: FileDiffMetadata[];
-    }
-  | {
-      kind: "raw";
-      text: string;
-      reason: string;
-    };
-
-function getRenderablePatch(
-  patch: string | undefined,
-  cacheScope = "diff-panel",
-): RenderablePatch | null {
-  if (!patch) return null;
-  const normalizedPatch = patch.trim();
-  if (normalizedPatch.length === 0) return null;
-
-  try {
-    const parsedPatches = parsePatchFiles(
-      normalizedPatch,
-      buildPatchCacheKey(normalizedPatch, cacheScope),
-    );
-    const files = parsedPatches.flatMap((parsedPatch) => parsedPatch.files);
-    if (files.length > 0) {
-      return { kind: "files", files };
-    }
-
-    return {
-      kind: "raw",
-      text: normalizedPatch,
-      reason: "Unsupported diff format. Showing raw patch.",
-    };
-  } catch {
-    return {
-      kind: "raw",
-      text: normalizedPatch,
-      reason: "Failed to parse patch. Showing raw patch.",
-    };
-  }
-}
 
 function resolveFileDiffPath(fileDiff: FileDiffMetadata): string {
   return resolveDiffFilePath(fileDiff);
@@ -463,7 +421,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const [currentDiffMatchIndex, setCurrentDiffMatchIndex] = useState(0);
   const diffSearchInputRef = useRef<HTMLInputElement>(null);
   const patchViewportRef = useRef<HTMLDivElement>(null);
+  const [activeDiffParser] = useState(() => new ActiveDiffParser());
   const turnStripRef = useRef<HTMLDivElement>(null);
+  const consumedFileJumpRef = useRef<string | null>(null);
   const previousDiffOpenRef = useRef(false);
   const [canScrollTurnStripLeft, setCanScrollTurnStripLeft] = useState(false);
   const [canScrollTurnStripRight, setCanScrollTurnStripRight] = useState(false);
@@ -592,8 +552,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const renderableContent = useMemo<ParsedDiffContent>(() => {
     const parseScope = `diff-panel:${resolvedTheme}`;
-    const normalizedPatch = typeof selectedPatch === "string" ? selectedPatch.trim() : "";
+    const normalizedPatch = typeof selectedPatch === "string" ? selectedPatch : "";
     if (normalizedPatch.length === 0) {
+      activeDiffParser.parse("", parseScope);
       return { patch: null, files: [] };
     }
     const turnScope = selectedTurn
@@ -606,15 +567,16 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     };
     const cached = renderablePatchCache.get(cacheKey);
     if (cached) {
+      activeDiffParser.parse(normalizedPatch, parseScope, cached.patch);
       return cached;
     }
-    const patch = getRenderablePatch(selectedPatch, parseScope);
+    const patch = activeDiffParser.parse(normalizedPatch, parseScope);
     const content: ParsedDiffContent = { patch, files: sortRenderableFiles(patch) };
     if (patch) {
       renderablePatchCache.set(cacheKey, content);
     }
     return content;
-  }, [conversationCacheScope, resolvedTheme, selectedPatch, selectedTurn]);
+  }, [activeDiffParser, conversationCacheScope, resolvedTheme, selectedPatch, selectedTurn]);
   const renderablePatch = renderableContent.patch;
   const renderableFiles = renderableContent.files;
 
@@ -642,6 +604,16 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       fileIndex: index,
     }));
   }, [diffSearchMatches, normalizedDiffSearchQuery, renderableFileEntries, renderableFiles]);
+
+  const navigationPaths = useMemo(
+    () => filteredFileEntries.map(({ fileDiff }) => resolveFileDiffPath(fileDiff)),
+    [filteredFileEntries],
+  );
+  const fileNavigation = useDiffFileNavigation(
+    patchViewportRef,
+    navigationPaths,
+    diffOpen && !isPhonePresentation,
+  );
 
   useEffect(() => {
     setCurrentDiffMatchIndex(0);
@@ -797,13 +769,33 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
 
   useEffect(() => {
     if (!selectedFilePath || !patchViewportRef.current) {
+      consumedFileJumpRef.current = null;
       return;
     }
+    const request = JSON.stringify([
+      activeThread?.environmentId,
+      activeThreadId,
+      selectedTurnId,
+      selectedFilePath,
+    ]);
+    // A patch refresh must not replay a consumed route jump after the user scrolls.
+    if (!isPhonePresentation && consumedFileJumpRef.current === request) return;
+    if (!renderableFiles.some((file) => resolveFileDiffPath(file) === selectedFilePath)) return;
     const target = Array.from(
       patchViewportRef.current.querySelectorAll<HTMLElement>("[data-diff-file-path]"),
     ).find((element) => element.dataset.diffFilePath === selectedFilePath);
-    target?.scrollIntoView({ block: "nearest" });
-  }, [selectedFilePath, renderableFiles]);
+    if (target) {
+      target.scrollIntoView({ block: "nearest" });
+      consumedFileJumpRef.current = request;
+    }
+  }, [
+    activeThread?.environmentId,
+    activeThreadId,
+    isPhonePresentation,
+    selectedFilePath,
+    selectedTurnId,
+    renderableFiles,
+  ]);
 
   const openDiffFileInEditor = useCallback(
     (filePath: string, lineNumber?: number) => {
@@ -1035,6 +1027,36 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1 [-webkit-app-region:no-drag]">
+        {!isPhonePresentation && navigationPaths.length > 0 && (
+          <div className="flex min-w-0 items-center gap-1" aria-label="Changed file navigation">
+            <button
+              type="button"
+              className="rounded p-1 disabled:opacity-40"
+              aria-label="Previous changed file"
+              disabled={!fileNavigation.canPrevious}
+              onClick={() => fileNavigation.jump(-1)}
+            >
+              <ChevronUpIcon className="size-4" />
+            </button>
+            <span
+              className="max-w-32 truncate text-[11px]"
+              title={fileNavigation.path ?? undefined}
+              aria-live="polite"
+              data-diff-active-file={fileNavigation.path}
+            >
+              {fileNavigation.index + 1}/{navigationPaths.length} {fileNavigation.path}
+            </span>
+            <button
+              type="button"
+              className="rounded p-1 disabled:opacity-40"
+              aria-label="Next changed file"
+              disabled={!fileNavigation.canNext}
+              onClick={() => fileNavigation.jump(1)}
+            >
+              <ChevronDownIcon className="size-4" />
+            </button>
+          </div>
+        )}
         {/* Split view is meaningless at phone width: the toolbar reduces to
             wrap and whitespace toggles (the turn strip stays as file nav). */}
         {isPhonePresentation ? null : (
