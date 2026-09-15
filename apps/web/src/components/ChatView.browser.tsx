@@ -24,6 +24,7 @@ import {
   type TurnId,
   WS_METHODS,
   OrchestrationSessionStatus,
+  DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_SERVER_SETTINGS,
 } from "@ryco/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -3282,7 +3283,11 @@ describe("ChatView timeline estimator parity (full app)", () => {
           selectedModelSelection: modelSelection,
           expiredTerminalContextCount: 0,
         },
-        settings: { runtimeMode: "full-access", interactionMode: "default", tokenMode: "balanced" },
+        settings: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          tokenMode: DEFAULT_AGENT_TOKEN_MODE,
+        },
       });
       await vi.waitFor(() =>
         expect(
@@ -3368,7 +3373,11 @@ describe("ChatView timeline estimator parity (full app)", () => {
           selectedModelSelection: modelSelection,
           expiredTerminalContextCount: 0,
         },
-        settings: { runtimeMode: "full-access", interactionMode: "default", tokenMode: "balanced" },
+        settings: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          tokenMode: DEFAULT_AGENT_TOKEN_MODE,
+        },
       });
       await vi.waitFor(() =>
         expect(
@@ -3539,7 +3548,11 @@ describe("ChatView timeline estimator parity (full app)", () => {
           selectedModelSelection: modelSelection,
           expiredTerminalContextCount: 0,
         },
-        settings: { runtimeMode: "full-access", interactionMode: "default", tokenMode: "balanced" },
+        settings: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          tokenMode: DEFAULT_AGENT_TOKEN_MODE,
+        },
       });
       const steer = page.getByRole("button", {
         name: /Steer queued message.*into the active turn/,
