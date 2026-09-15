@@ -1,3 +1,5 @@
+import { DiffComparisonControls } from "./DiffComparisonControls";
+import { useComparison } from "../rpc/useComparison";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -454,6 +456,17 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     cwd: activeCwd ?? null,
   });
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
+  const comparison = useComparison({
+    environmentId: activeThread?.environmentId ?? null,
+    repositoryPath: activeProject?.cwd ?? null,
+    cwd: activeCwd ?? null,
+    ignoreWhitespace: diffIgnoreWhitespace,
+    enabled: diffOpen && isGitRepo && !isPhonePresentation && diffSearch.diffTurnId == null,
+  });
+  // Explicit checkpoint links continue to open the requested turn, even with a saved comparison.
+  const comparing =
+    !isPhonePresentation && diffSearch.diffTurnId == null && comparison.selection !== null;
+
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
     useTurnDiffSummaries(activeThread);
   const orderedTurnDiffSummaries = useMemo(
@@ -530,7 +543,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     toTurnCount: activeCheckpointRange?.toTurnCount ?? null,
     ignoreWhitespace: diffIgnoreWhitespace,
     cacheScope: selectedTurn ? `turn:${selectedTurn.turnId}` : conversationCacheScope,
-    enabled: isGitRepo,
+    enabled: isGitRepo && !comparing,
   });
   const selectedTurnCheckpointDiff = selectedTurn
     ? activeCheckpointDiffQuery.data?.diff
@@ -538,15 +551,25 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const conversationCheckpointDiff = selectedTurn
     ? undefined
     : activeCheckpointDiffQuery.data?.diff;
-  const isLoadingCheckpointDiff = activeCheckpointDiffQuery.isLoading;
-  const checkpointDiffError =
-    activeCheckpointDiffQuery.error instanceof Error
+  const isLoadingCheckpointDiff = comparing
+    ? comparison.isLoading
+    : activeCheckpointDiffQuery.isLoading;
+  const checkpointDiffError = comparing
+    ? comparison.error
+    : activeCheckpointDiffQuery.error instanceof Error
       ? activeCheckpointDiffQuery.error.message
       : activeCheckpointDiffQuery.error
         ? "Failed to load checkpoint diff."
         : null;
 
-  const selectedPatch = selectedTurn ? selectedTurnCheckpointDiff : conversationCheckpointDiff;
+  const selectedPatch = comparing
+    ? comparison.data?.patch
+    : selectedTurn
+      ? selectedTurnCheckpointDiff
+      : conversationCheckpointDiff;
+  const comparisonRevision = comparison.data
+    ? JSON.stringify([activeThread?.environmentId, comparison.data.source.revision])
+    : null;
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const renderableContent = useMemo<ParsedDiffContent>(() => {
@@ -556,9 +579,11 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       activeDiffParser.parse("", parseScope);
       return { patch: null, files: [] };
     }
-    const turnScope = selectedTurn
-      ? `turn:${selectedTurn.turnId}`
-      : (conversationCacheScope ?? "conversation");
+    const turnScope = comparing
+      ? `comparison:${comparisonRevision ?? "pending"}`
+      : selectedTurn
+        ? `turn:${selectedTurn.turnId}`
+        : (conversationCacheScope ?? "conversation");
     const cacheKey = {
       turnId: turnScope,
       filePath: parseScope,
@@ -575,7 +600,15 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       renderablePatchCache.set(cacheKey, content);
     }
     return content;
-  }, [activeDiffParser, conversationCacheScope, resolvedTheme, selectedPatch, selectedTurn]);
+  }, [
+    activeDiffParser,
+    comparing,
+    comparisonRevision,
+    conversationCacheScope,
+    resolvedTheme,
+    selectedPatch,
+    selectedTurn,
+  ]);
   const renderablePatch = renderableContent.patch;
   const renderableFiles = renderableContent.files;
 
@@ -972,8 +1005,11 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
           <button
             type="button"
             className={cn("shrink-0 rounded-md", isPhonePresentation && "min-h-[44px]")}
-            onClick={selectWholeConversation}
-            data-turn-chip-selected={selectedTurnId === null}
+            onClick={() => {
+              if (!isPhonePresentation) comparison.setSelection(null);
+              selectWholeConversation();
+            }}
+            data-turn-chip-selected={!comparing && selectedTurnId === null}
           >
             <div
               className={cn(
@@ -983,7 +1019,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                 // strip is `overflow-x: auto`, which forces the block axis to
                 // `auto` too and clips anything escaping the chip's border box.
                 isPhonePresentation && "flex min-h-[44px] items-center",
-                selectedTurnId === null
+                !comparing && selectedTurnId === null
                   ? "border-border bg-accent text-accent-foreground"
                   : "border-border/70 bg-background/70 text-muted-foreground/80 hover:border-border hover:text-foreground/80",
               )}
@@ -1115,6 +1151,23 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
 
   return (
     <DiffPanelShell mode={mode} header={headerRow}>
+      {!isPhonePresentation && activeThread && isGitRepo && (
+        <DiffComparisonControls
+          key={`${activeThread.environmentId}:${activeProject?.cwd}:${comparison.selection?.mode}:${comparison.selection?.ref}`}
+          selection={comparing ? comparison.selection : null}
+          data={comparison.data}
+          isLoading={comparison.isLoading}
+          error={comparison.error}
+          refMoved={comparison.refMoved}
+          onSelect={(selection) => {
+            comparison.setSelection(selection);
+            selectWholeConversation();
+          }}
+          onRefresh={() => {
+            void comparison.refresh();
+          }}
+        />
+      )}
       {!activeThread ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Select a thread to inspect turn diffs.
@@ -1123,7 +1176,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Turn diffs are unavailable because this project is not a git repository.
         </div>
-      ) : orderedTurnDiffSummaries.length === 0 ? (
+      ) : !comparing && orderedTurnDiffSummaries.length === 0 ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           No completed turns yet.
         </div>
@@ -1140,7 +1193,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
             )}
             {!renderablePatch ? (
               isLoadingCheckpointDiff ? (
-                <DiffPanelLoadingState label="Loading checkpoint diff..." />
+                <DiffPanelLoadingState
+                  label={comparing ? "Loading comparison..." : "Loading checkpoint diff..."}
+                />
               ) : (
                 <div className="flex flex-1 items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
                   <p>

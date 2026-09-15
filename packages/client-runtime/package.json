@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/comparison": {
+      "types": "./src/state/comparison/index.ts",
+      "import": "./src/state/comparison/index.ts"
+    },
     "./scoped": {
       "types": "./src/scoped.ts",
       "import": "./src/scoped.ts"

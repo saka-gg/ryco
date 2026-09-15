@@ -1,3 +1,5 @@
+import { readGitComparison } from "../vcs/GitComparison.ts";
+import type { GitReadComparisonInput, GitReadComparisonResult } from "@ryco/contracts";
 import { existsSync } from "node:fs";
 import { Context, Effect, Layer } from "effect";
 
@@ -32,6 +34,9 @@ import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsDriverRegistry } from "../vcs/VcsDriverRegistry.ts";
 
 export interface GitWorkflowServiceShape {
+  readonly readComparison: (
+    input: GitReadComparisonInput,
+  ) => Effect.Effect<GitReadComparisonResult, GitCommandError>;
   readonly status: (
     input: VcsStatusInput,
   ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
@@ -306,6 +311,10 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
       "GitWorkflowService.preparePullRequestThread",
       gitManager.preparePullRequestThread,
     ),
+    readComparison: (input) =>
+      ensureGitCommand("GitWorkflowService.readComparison", input.cwd).pipe(
+        Effect.andThen(readGitComparison(git.execute, input)),
+      ),
     listRefs: (input) =>
       detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd).pipe(
         Effect.flatMap((isGitRepository) =>

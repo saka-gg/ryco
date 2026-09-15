@@ -1,3 +1,15 @@
+// This suite exercises checkpoint review; repository comparison has its own browser coverage.
+vi.mock("../rpc/useComparison", () => ({
+  useComparison: () => ({
+    selection: null,
+    data: null,
+    isLoading: false,
+    error: null,
+    refMoved: false,
+    setSelection: vi.fn(),
+    refresh: vi.fn(),
+  }),
+}));
 import "../index.css";
 
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";

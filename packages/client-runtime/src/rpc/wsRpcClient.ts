@@ -171,6 +171,7 @@ export interface WsRpcClient {
     }) => ReturnType<LocalApi["shell"]["openInEditor"]>;
   };
   readonly vcs: {
+    readonly readComparison: RpcUnaryMethod<typeof WS_METHODS.vcsReadComparison>;
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.vcsPull>;
     readonly refreshStatus: RpcUnaryMethod<typeof WS_METHODS.vcsRefreshStatus>;
     readonly onStatus: (
@@ -531,6 +532,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           { ...options, tag: WS_METHODS.subscribeVcsStatus },
         );
       },
+      readComparison: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadComparison](input)),
       listRefs: (input) => transport.request((client) => client[WS_METHODS.vcsListRefs](input)),
       createWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.vcsCreateWorktree](input)),

@@ -450,3 +450,37 @@ export const GitActionProgressEvent = Schema.Union([
   GitActionFailedEvent,
 ]);
 export type GitActionProgressEvent = typeof GitActionProgressEvent.Type;
+
+/** A branch/tag name or object ID, not a revision expression or a Git option. */
+export const GitComparisonRef = TrimmedNonEmptyStringSchema.check(
+  Schema.isMaxLength(256),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/),
+  Schema.isPattern(/^(?!.*\.\.).*$/),
+);
+export const GitComparisonSelection = Schema.Struct({
+  ref: GitComparisonRef,
+  mode: Schema.Literals(["mergeBase", "direct"]),
+});
+export type GitComparisonSelection = typeof GitComparisonSelection.Type;
+export const GitReadComparisonInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  selection: GitComparisonSelection,
+  ignoreWhitespace: Schema.Boolean,
+});
+export type GitReadComparisonInput = typeof GitReadComparisonInput.Type;
+/** Immutable endpoints shared by patch rendering and subsequent revision reads. */
+export const GitComparisonSource = Schema.Struct({
+  repositoryPath: TrimmedNonEmptyStringSchema,
+  worktreePath: TrimmedNonEmptyStringSchema,
+  refOid: TrimmedNonEmptyStringSchema,
+  headOid: TrimmedNonEmptyStringSchema,
+  baseOid: TrimmedNonEmptyStringSchema,
+  revision: TrimmedNonEmptyStringSchema,
+});
+export type GitComparisonSource = typeof GitComparisonSource.Type;
+export const GitReadComparisonResult = Schema.Struct({
+  selection: GitComparisonSelection,
+  source: GitComparisonSource,
+  patch: Schema.String,
+});
+export type GitReadComparisonResult = typeof GitReadComparisonResult.Type;

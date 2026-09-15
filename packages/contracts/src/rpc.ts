@@ -1,3 +1,4 @@
+import { GitReadComparisonInput, GitReadComparisonResult } from "./git.ts";
 import { ModelSelection } from "./orchestration.ts";
 import {
   AcpRegistrySearchInput,
@@ -314,6 +315,7 @@ export const WS_METHODS = {
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
   vcsListRefs: "vcs.listRefs",
+  vcsReadComparison: "vcs.readComparison",
   vcsCreateWorktree: "vcs.createWorktree",
   vcsRemoveWorktree: "vcs.removeWorktree",
   vcsCreateRef: "vcs.createRef",
@@ -1422,6 +1424,12 @@ export const WsProjectsInitializeGitRpc = Rpc.make(WS_METHODS.projectsInitialize
   error: Schema.Union([GitManagerServiceError, AuthRpcError]),
 });
 
+export const WsVcsReadComparisonRpc = Rpc.make(WS_METHODS.vcsReadComparison, {
+  payload: GitReadComparisonInput,
+  success: GitReadComparisonResult,
+  error: Schema.Union([GitCommandError, AuthRpcError]),
+});
+
 export const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
   payload: VcsListRefsInput,
   success: VcsListRefsResult,
@@ -1913,6 +1921,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsThreadPriorityEnsureCurrentRpc
   | typeof WsWorktreesSetManualPositionRpc
   | typeof WsProjectsInitializeGitRpc
+  | typeof WsVcsReadComparisonRpc
   | typeof WsVcsListRefsRpc
   | typeof WsVcsCreateWorktreeRpc
   | typeof WsVcsRemoveWorktreeRpc
@@ -2068,6 +2077,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsThreadPriorityEnsureCurrentRpc,
   WsWorktreesSetManualPositionRpc,
   WsProjectsInitializeGitRpc,
+  WsVcsReadComparisonRpc,
   WsVcsListRefsRpc,
   WsVcsCreateWorktreeRpc,
   WsVcsRemoveWorktreeRpc,

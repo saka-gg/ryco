@@ -1,3 +1,4 @@
+import type { GitReadComparisonInput, GitReadComparisonResult } from "./git.ts";
 import type {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
@@ -967,6 +968,7 @@ export interface EnvironmentApi {
     ) => Promise<SourceControlPublishRepositoryResult>;
   };
   vcs: {
+    readComparison: (input: GitReadComparisonInput) => Promise<GitReadComparisonResult>;
     listRefs: (input: VcsListRefsInput) => Promise<VcsListRefsResult>;
     createWorktree: (input: VcsCreateWorktreeInput) => Promise<VcsCreateWorktreeResult>;
     removeWorktree: (input: VcsRemoveWorktreeInput) => Promise<void>;
