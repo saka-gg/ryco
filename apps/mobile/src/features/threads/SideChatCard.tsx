@@ -19,6 +19,9 @@ export function SideChatCard(props: {
   readonly exchanges: ReadonlyArray<{ requestId: string; question: string; answer: string }>;
   readonly pending: { question: string } | null;
   readonly error: string | null;
+  readonly failedQuestion: string | null;
+  readonly onRestoreFailedQuestion: () => void;
+  readonly onDiscardFailedQuestion: () => void;
   readonly serverConfig: ServerConfig | null;
   readonly disabled: boolean;
   readonly onOpen: () => void;
@@ -36,7 +39,8 @@ export function SideChatCard(props: {
     currentSelection: props.modelSelection,
     query: modelQuery,
   });
-  const canSend = !props.disabled && !props.pending && props.draft.trim().length > 0;
+  const canSend =
+    !props.disabled && !props.pending && !props.failedQuestion && props.draft.trim().length > 0;
 
   if (!props.open) {
     return (
@@ -114,6 +118,34 @@ export function SideChatCard(props: {
         <Text accessibilityRole="alert" className="text-xs text-danger-foreground">
           {props.error}
         </Text>
+      ) : null}
+      {props.failedQuestion ? (
+        <View className="gap-2">
+          <Text className="text-xs text-foreground-muted">
+            Restore or discard the unsent question before asking again.
+          </Text>
+          <ScrollView style={{ maxHeight: 100 }}>
+            <Text selectable className="text-sm text-foreground">
+              {props.failedQuestion}
+            </Text>
+          </ScrollView>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Add unsent question to draft"
+            onPress={props.onRestoreFailedQuestion}
+            className="min-h-11 justify-center"
+          >
+            <Text className="text-sm text-foreground">Add unsent question to draft</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Discard unsent question"
+            onPress={props.onDiscardFailedQuestion}
+            className="min-h-11 justify-center"
+          >
+            <Text className="text-sm text-foreground-muted">Discard unsent question</Text>
+          </Pressable>
+        </View>
       ) : null}
       {props.disabled ? (
         <Text className="text-xs text-foreground-muted">Reconnect to ask a side question.</Text>
