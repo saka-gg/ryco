@@ -1374,6 +1374,8 @@ it.live("forwards claudeAgent approval responses to the provider session", () =>
         yield* seedProjectAndThread(harness);
 
         yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+          // The provider must keep its turn open until this callback is answered.
+          completeTurn: false,
           events: [
             {
               type: "turn.started",
@@ -1397,17 +1399,6 @@ it.live("forwards claudeAgent approval responses to the provider session", () =>
               requestId: APPROVAL_REQUEST_ID,
               requestKind: "command",
               detail: "Approve Claude tool call",
-            },
-            {
-              type: "turn.completed",
-              ...runtimeBase(
-                "evt-claude-approval-3",
-                "2026-02-24T10:12:00.100Z",
-                CLAUDE_AGENT_PROVIDER,
-              ),
-              threadId: THREAD_ID,
-              turnId: FIXTURE_TURN_ID,
-              status: "completed",
             },
           ],
         });
