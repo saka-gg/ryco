@@ -6,5 +6,5 @@ export * from "./threadWorkspaceViewModel.ts";
 export * from "./timeline-index.ts";
 export * from "./agentActivity.ts";
 
-export * from "./approvalResponses.ts";
 export * from "./backgroundWork.ts";
+export * from "./approvalResponses.ts";
