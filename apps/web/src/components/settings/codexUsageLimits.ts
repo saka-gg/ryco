@@ -16,7 +16,9 @@ export function formatRateLimitResetLabel(resetsAt: number | undefined): string 
   if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt) || resetsAt <= 0) {
     return null;
   }
-  const iso = new Date(resetsAt * 1000).toISOString();
+  const date = new Date(resetsAt * 1000);
+  if (!Number.isFinite(date.getTime())) return null;
+  const iso = date.toISOString();
   return formatRelativeTimeUntilLabel(iso);
 }
 

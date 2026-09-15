@@ -1,6 +1,13 @@
-import { View } from "react-native";
+import { useEffect, useState } from "react";
+import { AppState, View } from "react-native";
 import type { ServerProvider, ServerProviderRateLimitWindow } from "@ryco/contracts";
-import { availablePercent, describeRateLimitWindow } from "@ryco/client-runtime/usage";
+import {
+  availablePercent,
+  describeRateLimitWindow,
+  describeRateLimitPace,
+  rateLimitPace,
+  isRateLimitSnapshotAvailable,
+} from "@ryco/client-runtime/usage";
 import { AppText as Text } from "../../../components/AppText";
 import { ProviderIcon } from "../../../components/ProviderIcon";
 import { Note, Panel, Row } from "./StatisticsParts";
@@ -8,37 +15,85 @@ import { Note, Panel, Row } from "./StatisticsParts";
 function LimitWindow({
   window,
   fallback,
+  checkedAt,
+  available,
+  now,
 }: {
   window: ServerProviderRateLimitWindow;
   fallback: string;
+  checkedAt: string;
+  available: boolean;
+  now: number;
 }) {
-  const valid = Number.isFinite(window.usedPercent);
   const remaining = availablePercent(window.usedPercent);
+  const pace = describeRateLimitPace(rateLimitPace(window, checkedAt, now, available));
   const cadence = describeRateLimitWindow(window).label;
   const reset = window.resetsAt ? new Date(window.resetsAt * 1000) : null;
   return (
     <View className="gap-2">
       <Row
         label={cadence === "Window" ? fallback : cadence}
-        value={valid ? `${Math.round(remaining)}% left` : "Unavailable"}
+        value={remaining !== null ? `${Math.round(remaining)}% left` : "Unavailable"}
       />
-      <View className="h-1.5 overflow-hidden rounded-full bg-card-alt">
-        <View
-          style={{
-            width: `${valid ? remaining : 0}%`,
-            height: 6,
-            borderRadius: 3,
-            backgroundColor: remaining <= 10 ? "#ef4444" : remaining <= 25 ? "#f59e0b" : "#22c55e",
-          }}
-        />
-      </View>
+      {remaining !== null ? (
+        <View className="h-1.5 overflow-hidden rounded-full bg-card-alt">
+          <View
+            style={{
+              width: `${remaining}%`,
+              height: 6,
+              borderRadius: 3,
+              backgroundColor:
+                remaining <= 10 ? "#ef4444" : remaining <= 25 ? "#f59e0b" : "#22c55e",
+            }}
+          />
+        </View>
+      ) : null}
+      {pace ? <Note>{pace}</Note> : null}
       {reset && Number.isFinite(reset.getTime()) ? (
         <Note>Resets {reset.toLocaleString()}</Note>
       ) : null}
     </View>
   );
 }
-export function ProviderLimits({ providers }: { providers: readonly ServerProvider[] }) {
+export function ProviderLimits({
+  providers,
+  connected,
+}: {
+  providers: readonly ServerProvider[];
+  connected: boolean;
+}) {
+  const [clock, setNow] = useState(Date.now);
+  const now = clock;
+  useEffect(() => {
+    if (providers.length === 0) return;
+    const timer = setTimeout(() => setNow(Date.now()), 0);
+    return () => clearTimeout(timer);
+  }, [providers]);
+  // One wakeup at the next reset, plus foreground recovery. No provider polling.
+  useEffect(() => {
+    const update = () => setNow(Date.now());
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") update();
+    });
+    const currentTime = Math.max(clock, Date.now());
+    const resets = providers
+      .flatMap((provider) =>
+        [
+          provider.rateLimits?.primary,
+          provider.rateLimits?.secondary,
+          provider.rateLimits?.tertiary,
+        ].flatMap((window) => (window?.resetsAt ? [window.resetsAt * 1000] : [])),
+      )
+      .filter((reset) => Number.isFinite(reset) && reset > currentTime);
+    const next = Math.min(...resets);
+    const timer = Number.isFinite(next)
+      ? setTimeout(update, Math.min(Math.max(0, next - Date.now()), 2_147_483_647))
+      : undefined;
+    return () => {
+      subscription.remove();
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [providers, clock]);
   const enabled = providers.filter((provider) => provider.enabled);
   return (
     <View className="gap-4">
@@ -61,10 +116,32 @@ export function ProviderLimits({ providers }: { providers: readonly ServerProvid
               </View>
             </View>
             {limits?.primary ? (
-              <LimitWindow window={limits.primary} fallback="Short window" />
+              <LimitWindow
+                available={isRateLimitSnapshotAvailable(provider, connected)}
+                checkedAt={provider.checkedAt}
+                now={now}
+                window={limits.primary}
+                fallback="Short window"
+              />
             ) : null}
-            {limits?.secondary ? <LimitWindow window={limits.secondary} fallback="Weekly" /> : null}
-            {limits?.tertiary ? <LimitWindow window={limits.tertiary} fallback="Monthly" /> : null}
+            {limits?.secondary ? (
+              <LimitWindow
+                available={isRateLimitSnapshotAvailable(provider, connected)}
+                checkedAt={provider.checkedAt}
+                now={now}
+                window={limits.secondary}
+                fallback="Weekly"
+              />
+            ) : null}
+            {limits?.tertiary ? (
+              <LimitWindow
+                available={isRateLimitSnapshotAvailable(provider, connected)}
+                checkedAt={provider.checkedAt}
+                now={now}
+                window={limits.tertiary}
+                fallback="Monthly"
+              />
+            ) : null}
             {!limits?.primary && !limits?.secondary && !limits?.tertiary ? (
               <Note>
                 {provider.unavailableReason ??

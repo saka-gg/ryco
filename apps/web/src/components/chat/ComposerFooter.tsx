@@ -399,6 +399,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   compact: boolean;
   contextWindowUsage: ContextWindowUsage;
   contextWindowRateLimits: ServerProvider["rateLimits"] | undefined;
+  contextWindowRateLimitsCheckedAt?: string | undefined;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -425,6 +426,8 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
       <ContextWindowMeter
         usage={props.contextWindowUsage}
         rateLimits={props.contextWindowRateLimits}
+        checkedAt={props.contextWindowRateLimitsCheckedAt}
+        available={!props.isEnvironmentUnavailable}
       />
       {props.isPreparingWorktree ? (
         <span className="text-muted-foreground/70 text-xs">Preparing worktree...</span>
@@ -505,6 +508,7 @@ export interface ComposerFooterProps {
   // Primary actions
   contextWindowUsage: ContextWindowUsage;
   contextWindowRateLimits: ServerProvider["rateLimits"] | undefined;
+  contextWindowRateLimitsCheckedAt?: string | undefined;
   pendingAction: {
     questionIndex: number;
     isLastQuestion: boolean;
@@ -729,6 +733,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           compact={props.isPrimaryActionsCompact}
           contextWindowUsage={props.contextWindowUsage}
           contextWindowRateLimits={props.contextWindowRateLimits}
+          contextWindowRateLimitsCheckedAt={props.contextWindowRateLimitsCheckedAt}
           pendingAction={props.pendingAction}
           isRunning={props.isRunning}
           showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
