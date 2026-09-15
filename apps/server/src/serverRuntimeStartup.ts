@@ -378,6 +378,7 @@ export const resolveWelcomeBase = Effect.gen(function* () {
 
 export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
+  const serverSettings = yield* ServerSettingsService;
   const projectionReadModelQuery = yield* ProjectionSnapshotQuery;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const path = yield* Path.Path;
@@ -412,6 +413,7 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
       const existingThreadId =
         yield* projectionReadModelQuery.getFirstActiveThreadIdByProjectId(nextProjectId);
       if (Option.isNone(existingThreadId)) {
+        const { defaultAgentTokenMode } = yield* serverSettings.getSettings;
         const createdAt = new Date().toISOString();
         const createdThreadId = ThreadId.make(crypto.randomUUID());
         yield* orchestrationEngine.dispatch({
@@ -423,6 +425,7 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
           modelSelection: initialThreadModelSelection,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "full-access",
+          tokenMode: defaultAgentTokenMode,
           branch: null,
           worktreePath: null,
           createdAt,

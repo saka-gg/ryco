@@ -25,12 +25,13 @@ import type {
   ThreadGoal,
   ThreadPriorityProjectedRanking,
 } from "@ryco/contracts";
+import { DEFAULT_AGENT_TOKEN_MODE as CONTRACT_DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 
 export const DEFAULT_INTERACTION_MODE: ProviderInteractionMode = "default";
-export const DEFAULT_AGENT_TOKEN_MODE: AgentTokenMode = "balanced";
+export const DEFAULT_AGENT_TOKEN_MODE: AgentTokenMode = CONTRACT_DEFAULT_AGENT_TOKEN_MODE;
 export const DEFAULT_THREAD_TERMINAL_HEIGHT = 280;
 export const DEFAULT_THREAD_TERMINAL_ID = "default";
 export const MAX_TERMINALS_PER_GROUP = 4;

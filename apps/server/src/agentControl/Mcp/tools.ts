@@ -594,6 +594,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
                 type: "string",
                 enum: ["approval-required", "auto-accept-edits", "auto", "full-access"],
               },
+              tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
               envMode: { type: "string", enum: ["local", "worktree"] },
               baseRef: { type: "string", maxLength: 256 },
             },
@@ -805,6 +806,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
         model: { type: "string" },
         options: { type: "array" },
         runtimeMode: { type: "string" },
+        tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { type: "string", maxLength: 256 },
         schedule: automationScheduleSchema,
@@ -840,6 +842,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
         model: { type: "string" },
         options: { type: "array" },
         runtimeMode: { type: "string" },
+        tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
         schedule: automationScheduleSchema,
@@ -2214,6 +2217,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
                 options: input.options,
               },
               runtimeMode: input.runtimeMode,
+              ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
               envMode: input.envMode,
               ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
             },
@@ -2269,6 +2273,11 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
                 ...(nextOptions === undefined ? {} : { options: nextOptions }),
               },
               runtimeMode: input.runtimeMode ?? currentExecution.runtimeMode,
+              ...(input.tokenMode !== undefined
+                ? { tokenMode: input.tokenMode }
+                : currentExecution.tokenMode !== undefined
+                  ? { tokenMode: currentExecution.tokenMode }
+                  : {}),
               envMode: input.envMode ?? currentExecution.envMode,
               ...(nextBaseRef === undefined ? {} : { baseRef: nextBaseRef }),
             },

@@ -90,15 +90,45 @@ describe("New Task controller", () => {
         threadId: ids.threadId,
         modelSelection,
         interactionMode,
+        tokenMode: "off",
       });
       expect(runtime.commands[1]).toMatchObject({
         commandId: ids.turnCommandId,
         message: { messageId: ids.messageId, text: "Fix the mobile header" },
         modelSelection,
         interactionMode,
+        tokenMode: "off",
       });
     },
   );
+
+  it("preserves an explicit token-saving opt-in on creation and turn start", async () => {
+    const runtime = deps();
+    const result = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Use the selected token mode",
+        project: {
+          kind: "existing",
+          projectId: existingProjectId,
+          workspaceRoot: "/code/ryco",
+        },
+        worktree: { kind: "local" },
+        tokenMode: "balanced",
+        createdAt,
+        ids,
+      }),
+      runtime,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(runtime.commands).toHaveLength(2);
+    expect(runtime.commands[0]).toMatchObject({ type: "thread.create", tokenMode: "balanced" });
+    expect(runtime.commands[1]).toMatchObject({
+      type: "thread.turn.start",
+      tokenMode: "balanced",
+    });
+  });
 
   it("waits for a new project before creating its thread", async () => {
     const order: string[] = [];

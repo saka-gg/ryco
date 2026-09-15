@@ -121,6 +121,19 @@ describe("ServerSettings.enableLegacyTokenStreaming", () => {
   });
 });
 
+describe("ServerSettings.defaultAgentTokenMode", () => {
+  it("defaults missing settings to off without changing explicit opt-ins", () => {
+    expect(DEFAULT_SERVER_SETTINGS.defaultAgentTokenMode).toBe("off");
+    expect(decodeServerSettings({}).defaultAgentTokenMode).toBe("off");
+    expect(decodeServerSettings({ defaultAgentTokenMode: "balanced" }).defaultAgentTokenMode).toBe(
+      "balanced",
+    );
+    expect(
+      decodeServerSettings({ defaultAgentTokenMode: "aggressive" }).defaultAgentTokenMode,
+    ).toBe("aggressive");
+  });
+});
+
 describe("ServerSettings.enableProviderUpdateChecks", () => {
   it("defaults provider update checks on", () => {
     expect(DEFAULT_SERVER_SETTINGS.enableProviderUpdateChecks).toBe(true);

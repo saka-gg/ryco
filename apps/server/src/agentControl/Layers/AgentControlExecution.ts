@@ -1035,6 +1035,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             const threadId = plannedThreadIds[index]!;
             const worktree = prepared.find((candidate) => candidate.index === index);
             const createdAt = new Date().toISOString();
+            const tokenMode = entry.tokenMode ?? worktreeSettings.defaultAgentTokenMode;
             yield* validator.revalidateExecution(proposal);
             yield* dispatch(
               `thread-created:${index}`,
@@ -1047,6 +1048,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 modelSelection: entry.modelSelection,
                 runtimeMode: entry.runtimeMode,
                 interactionMode: "default",
+                tokenMode,
                 branch: worktree?.branch ?? null,
                 worktreePath: worktree?.checkoutPath ?? null,
                 createdAt,
@@ -1081,6 +1083,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               modelSelection: entry.modelSelection,
               runtimeMode: entry.runtimeMode,
               interactionMode: "default",
+              tokenMode,
               createdAt,
             });
           }

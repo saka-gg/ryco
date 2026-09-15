@@ -338,6 +338,7 @@ export const AgentControlCreateThreadEntry = Schema.Struct({
   prompt: AgentControlPrompt,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
+  tokenMode: Schema.optional(AgentTokenMode),
   /** Isolated worktree vs the project's shared local checkout. */
   envMode: ThreadEnvMode,
   /** Base ref for worktree creation; the project default when absent. */
@@ -576,6 +577,7 @@ export const AgentControlAutomationExecutionTemplate = Schema.Struct({
   ),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
+  tokenMode: Schema.optional(AgentTokenMode),
   envMode: ThreadEnvMode,
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
@@ -1607,6 +1609,7 @@ export const AgentControlMcpProposeAutomationCreateInput = Schema.Struct({
   model: TrimmedNonEmptyString,
   options: ProviderOptionSelections,
   runtimeMode: RuntimeMode,
+  tokenMode: Schema.optional(AgentTokenMode),
   envMode: ThreadEnvMode,
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
   schedule: AgentControlAutomationSchedule,
@@ -1625,6 +1628,7 @@ export const AgentControlMcpProposeAutomationUpdateInput = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyString),
   options: Schema.optional(ProviderOptionSelections),
   runtimeMode: Schema.optional(RuntimeMode),
+  tokenMode: Schema.optional(AgentTokenMode),
   envMode: Schema.optional(ThreadEnvMode),
   baseRef: Schema.optional(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(256)))),
   schedule: Schema.optional(AgentControlAutomationSchedule),
@@ -2375,6 +2379,7 @@ export const AgentControlExternalCreateTaskInput = Schema.Struct({
   prompt: AgentControlPrompt,
   environment: Schema.optional(ThreadEnvMode),
   runtimeMode: Schema.optional(Schema.Literals(["approval-required", "full-access"])),
+  tokenMode: Schema.optional(AgentTokenMode),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type AgentControlExternalCreateTaskInput = typeof AgentControlExternalCreateTaskInput.Type;
 

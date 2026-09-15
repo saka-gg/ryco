@@ -7,6 +7,7 @@ import {
 import type { Project, SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
 import {
   DEFAULT_MODEL,
+  DEFAULT_AGENT_TOKEN_MODE,
   ProviderInstanceId,
   type AgentTokenMode,
   type ClientOrchestrationCommand,
@@ -250,7 +251,7 @@ export function createNewTaskAttempt(input: {
     },
     runtimeMode: input.runtimeMode ?? "full-access",
     interactionMode: input.interactionMode ?? "default",
-    tokenMode: input.tokenMode ?? "balanced",
+    tokenMode: input.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
     createdAt: input.createdAt,
     ids: input.ids,
     projectId: existingProject ? input.project.projectId : input.ids.projectId,

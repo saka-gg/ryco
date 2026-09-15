@@ -9,7 +9,7 @@ export default Effect.gen(function* () {
   if (!columns.some((column) => column.name === "token_mode")) {
     yield* sql`
       ALTER TABLE projection_threads
-      ADD COLUMN token_mode TEXT NOT NULL DEFAULT 'balanced'
+      ADD COLUMN token_mode TEXT NOT NULL DEFAULT 'off'
     `;
   }
 
@@ -19,7 +19,7 @@ export default Effect.gen(function* () {
   if (!sessionColumns.some((column) => column.name === "token_mode")) {
     yield* sql`
       ALTER TABLE projection_thread_sessions
-      ADD COLUMN token_mode TEXT NOT NULL DEFAULT 'balanced'
+      ADD COLUMN token_mode TEXT NOT NULL DEFAULT 'off'
     `;
   }
 });

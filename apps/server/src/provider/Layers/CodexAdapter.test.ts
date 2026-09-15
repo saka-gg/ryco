@@ -332,7 +332,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
       assert.equal(validationRuntimeFactory.factory.mock.calls.length, 0);
     }),
   );
-  it.effect("maps codex model options before starting a session", () =>
+  it.effect("maps codex model options and defaults token saving off", () =>
     Effect.gen(function* () {
       validationRuntimeFactory.factory.mockClear();
       const adapter = yield* CodexAdapter;
@@ -358,10 +358,31 @@ validationLayer("CodexAdapterLive validation", (it) => {
         serviceTier: "fast",
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
+        tokenMode: "off",
+      });
+      assert.strictEqual(tokenReductionInstructions, undefined);
+    }),
+  );
+  it.effect("preserves an explicit balanced token-saving opt-in", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-codexadapter-balanced"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-balanced"),
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex"),
+        runtimeMode: "full-access",
         tokenMode: "balanced",
       });
+
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      assert.strictEqual(runtimeOptions?.tokenMode, "balanced");
       assert.ok(
-        tokenReductionInstructions?.includes(buildAgentTokenModeInstructions("balanced") ?? ""),
+        runtimeOptions?.tokenReductionInstructions?.includes(
+          buildAgentTokenModeInstructions("balanced") ?? "",
+        ),
       );
     }),
   );

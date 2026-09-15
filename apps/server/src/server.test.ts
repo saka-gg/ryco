@@ -3702,6 +3702,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           );
           const settings = {
             ...DEFAULT_SERVER_SETTINGS,
+            defaultAgentTokenMode: "aggressive" as const,
             worktreeRoot: rootScope === "managed" ? "" : `${roots}/environment`,
             projectWorktreeRoots:
               rootScope === "project" ? { [defaultProjectId]: `${roots}/project` } : {},
@@ -3799,6 +3800,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           );
           assert.equal(worktreeCreate?.origin, "branch");
           assert.equal(worktreeCreate?.branch, createdWorktreeInput?.newRefName);
+          assert.deepInclude(
+            dispatchedCommands.find((command) => command.type === "thread.create"),
+            { tokenMode: "aggressive" },
+          );
         }).pipe(Effect.provide(NodeHttpServer.layerTest)),
     );
   }
@@ -6505,6 +6510,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   modelSelection: defaultModelSelection,
                   runtimeMode: "full-access",
                   interactionMode: "default",
+                  tokenMode: "aggressive",
                   branch: "main",
                   worktreePath: null,
                   createdAt,
@@ -6534,6 +6540,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             "thread.turn.start",
           ],
         );
+        assert.deepInclude(dispatchedCommands[0], {
+          type: "thread.create",
+          tokenMode: "aggressive",
+        });
         const createdWorktreeInput = createWorktree.mock.calls[0]?.[0];
         assert.equal(createdWorktreeInput?.cwd, "/tmp/project");
         assert.equal(createdWorktreeInput?.refName, "main");

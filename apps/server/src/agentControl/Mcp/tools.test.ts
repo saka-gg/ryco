@@ -598,6 +598,7 @@ it.effect("automation create, update, and cancel remain inert exact proposals un
           model: "gpt-5.3-codex",
           options: [],
           runtimeMode: "auto",
+          tokenMode: "balanced",
           envMode: "worktree",
           schedule: { kind: "once", runAt: "2099-08-19T00:00:00.000Z" },
         },
@@ -609,6 +610,7 @@ it.effect("automation create, update, and cancel remain inert exact proposals un
           automationId: currentAutomation.automationId,
           expectedRevision: 1,
           title: "Updated bounded review",
+          tokenMode: "aggressive",
         },
       ],
       [
@@ -627,6 +629,18 @@ it.effect("automation create, update, and cancel remain inert exact proposals un
     assert.deepStrictEqual(
       submitted.map((entry) => entry.plan.kind),
       ["createAutomation", "updateAutomation", "cancelAutomation"],
+    );
+    const createdPlan = submitted[0]?.plan;
+    const updatedPlan = submitted[1]?.plan;
+    assert.strictEqual(
+      createdPlan?.kind === "createAutomation"
+        ? createdPlan.definition.execution.tokenMode
+        : undefined,
+      "balanced",
+    );
+    assert.strictEqual(
+      updatedPlan?.kind === "updateAutomation" ? updatedPlan.after.execution.tokenMode : undefined,
+      "aggressive",
     );
     assert.strictEqual(shellSnapshot.threads, beforeThreads);
     assert.deepStrictEqual(
@@ -873,6 +887,32 @@ it.effect("creates an immutable proposal without mutating the target", () =>
       text: "Continue",
       delivery: "queue",
     });
+    const createResult = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.createThreads,
+      {
+        requestId: "request-create-balanced",
+        entries: [
+          {
+            projectId: "project-1",
+            title: "Balanced worker",
+            prompt: "Complete the bounded task.",
+            modelSelection,
+            runtimeMode: "auto",
+            tokenMode: "balanced",
+            envMode: "worktree",
+          },
+        ],
+      },
+      writeSession,
+    );
+    assert.isUndefined(createResult.isError);
+    assert.strictEqual(submitted.length, 2);
+    const createPlan = submitted[1]?.plan;
+    assert.strictEqual(
+      createPlan?.kind === "createThreads" ? createPlan.entries[0]?.tokenMode : undefined,
+      "balanced",
+    );
     assert.strictEqual(shellSnapshot.threads, before);
     assert.strictEqual((structured(result) as { replayed: boolean }).replayed, false);
   }),

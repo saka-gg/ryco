@@ -197,6 +197,7 @@ export const makeAgentControlExternalTask = (options?: AgentControlExternalTaskL
                 options: request.options,
               },
               runtimeMode,
+              ...(request.tokenMode === undefined ? {} : { tokenMode: request.tokenMode }),
               envMode: environment,
             },
           ],

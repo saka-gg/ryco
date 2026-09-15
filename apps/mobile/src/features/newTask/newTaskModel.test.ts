@@ -59,6 +59,7 @@ describe("New Task defaults", () => {
       instanceId: "codex",
       model: "gpt-5.6-terra",
     });
+    expect(defaults.tokenMode).toBe("off");
   });
 
   it("ignores a model stored by older versions on the selected project", () => {
