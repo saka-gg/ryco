@@ -38,7 +38,8 @@ import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch"
 import { useDiffLayout, type DiffRenderMode } from "../hooks/useDiffLayout";
 import { useTheme } from "../hooks/useTheme";
 import { DiffParseCache } from "../lib/diffParseCache";
-import { buildPatchCacheKey, ActiveDiffParser, type RenderablePatch } from "../lib/diffRendering";
+import { buildPatchCacheKey } from "../lib/diffRendering";
+import { ActiveDiffParser, type RenderablePatch } from "../lib/diffParsing";
 import { useDiffFileNavigation } from "../hooks/useDiffFileNavigation";
 import { resolveDiffThemeName } from "../lib/diffRendering";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
