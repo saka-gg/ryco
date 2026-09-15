@@ -2654,6 +2654,24 @@ describe("ChatView timeline estimator parity (full app)", () => {
     };
   }
 
+  async function waitForGalleryThreadWindow(): Promise<void> {
+    const sourceThread = fixture.snapshot.threads.find((thread) => thread.id === THREAD_ID)!;
+    // Shell bootstrap and the composer can precede the independent detail stream.
+    // Do not edit history or attachment URLs until that snapshot is projected:
+    // a later initial snapshot would otherwise overwrite the fixture edits.
+    await vi.waitFor(() => {
+      const env = useStore.getState().environmentStateById[THREAD_REF.environmentId];
+      expect(env?.threadHistoryByThreadId?.[THREAD_ID]?.messages).toBeDefined();
+      expect(env?.messageIdsByThreadId[THREAD_ID]).toEqual(
+        sourceThread.messages.map((message) => message.id),
+      );
+      expect(
+        env?.messageByThreadId[THREAD_ID]?.[sourceThread.messages[0]!.id]?.attachments,
+      ).toEqual(expect.arrayContaining([expect.objectContaining({ id: "gallery-image" })]));
+    });
+    await waitForLayout();
+  }
+
   it("thread gallery real action opens images, loads older history explicitly and restores focus", async () => {
     const historyRequests: NormalizedWsRpcRequestBody[] = [];
     const older = createUserMessage({
@@ -2686,6 +2704,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     });
     try {
       await waitForComposerEditor();
+      await waitForGalleryThreadWindow();
       useStore.setState((state) => {
         const env = state.environmentStateById[THREAD_REF.environmentId]!;
         const history = env.threadHistoryByThreadId![THREAD_ID]!;
@@ -2754,6 +2773,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     });
     try {
       await waitForComposerEditor();
+      await waitForGalleryThreadWindow();
       useChatPanesStore.getState().open(threadRefFor(other), "right", THREAD_REF);
       await vi.waitFor(() =>
         expect(
