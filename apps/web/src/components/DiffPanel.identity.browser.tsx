@@ -1,4 +1,5 @@
 import "../index.css";
+import { buildPatchCacheKey } from "../lib/diffRendering";
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { useEffect } from "react";
 import { page } from "vite-plus/test/browser";
@@ -14,8 +15,8 @@ const fixture = vi.hoisted(() => ({
   mounts: {} as Record<string, number>,
 }));
 // Baseline uses the former whole-patch React identity with the same real renderer.
-vi.mock("../lib/diffRendering", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/diffRendering")>();
+vi.mock("../lib/diffParsing", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/diffParsing")>();
   return {
     ...actual,
     ActiveDiffParser: class extends actual.ActiveDiffParser {
@@ -26,7 +27,7 @@ vi.mock("../lib/diffRendering", async (importOriginal) => {
           ...result,
           files: result.files.map((file, index) =>
             Object.assign({}, file, {
-              cacheKey: `${actual.buildPatchCacheKey(args[0] ?? "")}:${index}`,
+              cacheKey: `${buildPatchCacheKey(args[0] ?? "")}:${index}`,
             }),
           ),
         };
