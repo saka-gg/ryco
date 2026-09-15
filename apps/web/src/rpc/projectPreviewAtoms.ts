@@ -167,6 +167,7 @@ export function setProjectReadFileCacheData(
   if (cacheKey === null) return;
   const controller = projectPreviewRegistry.controllers.get(cacheKey);
   if (controller) {
+    projectPreviewRegistry.cancel(controller);
     controller.hasData = true;
     controller.lastFetchedAt = Date.now();
   }

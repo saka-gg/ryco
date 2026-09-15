@@ -2,9 +2,16 @@ import { describe, it, assert } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@ryco/contracts";
 import { createModelCapabilities } from "@ryco/shared/model";
 import { Deferred, Duration, Effect, Equal, Fiber, PubSub, Ref, Stream } from "effect";
+import { vi } from "vitest";
 import { TestClock } from "effect/testing";
 
 import { isProviderSnapshotFresh, makeManagedServerProvider } from "./makeManagedServerProvider.ts";
+
+// Keep the real PubSub implementation, but allow a test to pause its publication boundary.
+vi.mock("effect", async (importOriginal) => {
+  const effect = await importOriginal<typeof import("effect")>();
+  return { ...effect, PubSub: { ...effect.PubSub } };
+});
 
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
 const fastModeCapabilities = createModelCapabilities({
@@ -81,6 +88,8 @@ const refreshedSnapshotSecond: ServerProvider = {
   ...refreshedSnapshot,
   checkedAt: "2026-04-10T00:00:03.000Z",
   message: "Refreshed provider availability again.",
+  skills: [{ name: "new", path: "/skills/new/SKILL.md", enabled: true }],
+  slashCommands: [{ name: "new" }],
 };
 
 const enrichedSnapshotSecond: ServerProvider = {
@@ -446,6 +455,82 @@ describe("makeManagedServerProvider", () => {
     ),
   );
 
+  it.effect("orders an in-flight skill enrichment publication before a newer refresh", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const oldInventory: ServerProvider = {
+          ...refreshedSnapshot,
+          skills: [{ name: "old", path: "/skills/old/SKILL.md", enabled: true }],
+          slashCommands: [{ name: "old" }],
+        };
+        const oldEnrichment = { ...oldInventory, message: "Old enrichment" };
+        const removedInventory = { ...refreshedSnapshotSecond, skills: [], slashCommands: [] };
+        const callbackReady = yield* Deferred.make<void>();
+        const publicationStarted = yield* Deferred.make<void>();
+        const releasePublication = yield* Deferred.make<void>();
+        const firstCheck = yield* Deferred.make<void>();
+        const checks = yield* Ref.make(0);
+        const callbacks: Array<(snapshot: ServerProvider) => Effect.Effect<void>> = [];
+        const originalPublish = PubSub.publish;
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            vi
+              .spyOn(PubSub, "publish")
+              .mockImplementation((pubsub, value) =>
+                value === oldEnrichment
+                  ? Deferred.succeed(publicationStarted, undefined).pipe(
+                      Effect.andThen(Deferred.await(releasePublication)),
+                      Effect.andThen(originalPublish(pubsub, value)),
+                    )
+                  : originalPublish(pubsub, value),
+              ),
+          ),
+          (spy) => Effect.sync(() => spy.mockRestore()),
+        );
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Ref.updateAndGet(checks, (n) => n + 1).pipe(
+            Effect.flatMap((n) =>
+              n === 1
+                ? Deferred.await(firstCheck).pipe(Effect.as(oldInventory))
+                : Effect.succeed(removedInventory),
+            ),
+          ),
+          enrichSnapshot: ({ publishSnapshot }) =>
+            Effect.sync(() => {
+              callbacks.push(publishSnapshot);
+            }).pipe(Effect.andThen(Deferred.succeed(callbackReady, undefined)), Effect.asVoid),
+          refreshInterval: null,
+        });
+        const observed: Array<ServerProvider> = [];
+        yield* Stream.runForEach(provider.streamChanges, (snapshot) =>
+          Effect.sync(() => {
+            observed.push(snapshot);
+          }),
+        ).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(firstCheck, undefined);
+        yield* Deferred.await(callbackReady);
+        const oldPublication = yield* callbacks[0]!(oldEnrichment).pipe(Effect.forkChild);
+        yield* Deferred.await(publicationStarted);
+        const refresh = yield* provider.refresh.pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(releasePublication, undefined);
+        yield* Fiber.join(oldPublication);
+        yield* Fiber.join(refresh);
+        yield* Effect.yieldNow;
+        assert.deepStrictEqual(yield* provider.getSnapshot, removedInventory);
+        assert.deepStrictEqual(observed.at(-1), removedInventory);
+        yield* callbacks[0]!(oldEnrichment);
+        assert.deepStrictEqual(yield* provider.getSnapshot, removedInventory);
+      }),
+    ),
+  );
+
   it.effect("retains the last known inventory when a refresh reports an error", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -481,7 +566,11 @@ describe("makeManagedServerProvider", () => {
             Effect.flatMap((count) =>
               count === 1
                 ? Deferred.succeed(firstCheckComplete, undefined).pipe(Effect.as(availableSnapshot))
-                : Effect.succeed(failedSnapshot),
+                : Effect.succeed(
+                    count === 2
+                      ? failedSnapshot
+                      : { ...refreshedSnapshotSecond, skills: [], slashCommands: [] },
+                  ),
             ),
           ),
           retainInventoryOnError: true,
@@ -499,6 +588,10 @@ describe("makeManagedServerProvider", () => {
         assert.deepStrictEqual(result.models, availableSnapshot.models);
         assert.deepStrictEqual(result.slashCommands, availableSnapshot.slashCommands);
         assert.deepStrictEqual(result.skills, availableSnapshot.skills);
+        const recovered = yield* provider.refresh;
+        assert.strictEqual(recovered.status, "ready");
+        assert.deepStrictEqual(recovered.skills, []);
+        assert.deepStrictEqual(recovered.slashCommands, []);
       }),
     ),
   );

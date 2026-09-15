@@ -277,6 +277,9 @@ export const ProviderRegistryLive = Layer.effect(
     // Serialize `syncLiveSources` so a rapid burst of reconciles doesn't
     // interleave two passes clobbering each other's fiber bookkeeping.
     const syncSemaphore = yield* Semaphore.make(1);
+    // Commit the materialized list, disk cache and full-list stream in order.
+    // This is separate from lifecycle synchronization, which calls upsertProviders.
+    const publicationSemaphore = yield* Semaphore.make(1);
 
     const getLiveSources: Effect.Effect<ReadonlyArray<ProviderSnapshotSource>> = Ref.get(
       liveSubsRef,
@@ -373,7 +376,7 @@ export const ProviderRegistryLive = Layer.effect(
       }
 
       return providers;
-    });
+    }, publicationSemaphore.withPermits(1));
 
     const syncProvider = Effect.fn("syncProvider")(function* (
       provider: ServerProvider,
