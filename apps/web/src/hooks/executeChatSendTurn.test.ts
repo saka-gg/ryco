@@ -865,16 +865,14 @@ describe("worktree branch defaults", () => {
   });
 });
 
-it("forwards only explicit memory references into the canonical turn command", async () => {
+it("rejects a saved memory-dependent composer without dispatching or clearing its draft", async () => {
   const { input, dispatchCommand } = makeSendInput();
-  const projectMemory = {
-    projectId: input.thread.projectId,
-    references: [{ id: "entry", revision: 7 }],
-  };
-  input.composer.projectMemory = projectMemory;
-  expect(await executeChatSendTurn(input)).toBe(true);
-  expect(dispatchCommand).toHaveBeenCalledWith(
-    expect.objectContaining({ type: "thread.turn.start", projectMemory }),
+  Object.assign(input.composer, { projectMemory: { projectId: "old-project", references: [] } });
+  expect(await executeChatSendTurn(input)).toBe(false);
+  expect(dispatchCommand).not.toHaveBeenCalled();
+  expect(input.draft.clearComposerDraftContent).not.toHaveBeenCalled();
+  expect(input.dispatch.setThreadError).toHaveBeenCalledWith(
+    input.thread.threadId,
+    expect.stringContaining("Project memory was intentionally removed"),
   );
-  expect(projectMemory.references).toEqual([{ id: "entry", revision: 7 }]);
 });

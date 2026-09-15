@@ -1,3 +1,7 @@
+import {
+  hasRetiredProjectMemory,
+  REMOVED_PROJECT_MEMORY_MESSAGE,
+} from "@ryco/shared/retiredFeatures";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -34,8 +38,8 @@ export function ThreadQueuedMessages(props: {
         const steering = props.steeringIds.has(message.messageId);
         return (
           <View key={message.messageId} className="flex-row items-center gap-2 py-1">
-            <Text numberOfLines={1} className="flex-1 text-sm text-foreground">
-              {summary(message)}
+            <Text className="flex-1 text-sm text-foreground">
+              {hasRetiredProjectMemory(message) ? REMOVED_PROJECT_MEMORY_MESSAGE : summary(message)}
             </Text>
             <Pressable
               accessibilityRole="button"

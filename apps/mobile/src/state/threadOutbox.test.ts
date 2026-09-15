@@ -127,3 +127,19 @@ describe("threadOutbox store + drain", () => {
     expect(listThreadOutboxMessages()).toHaveLength(0);
   });
 });
+
+it("keeps legacy memory requests without dispatching a changed prompt or later queued messages", async () => {
+  const legacy = {
+    ...queued("legacy", "2026-09-15T10:00:00.000Z"),
+    projectMemory: { projectId: "old", references: [] },
+  };
+  enqueueThreadOutboxMessage(legacy);
+  enqueueThreadOutboxMessage(queued("later", "2026-09-15T11:00:00.000Z"));
+  const sendQueuedMessage = vi.fn(async () => undefined);
+  await drainThreadOutbox({ readThreadDeliveryState: liveConnected, sendQueuedMessage });
+  expect(sendQueuedMessage).not.toHaveBeenCalled();
+  expect(listThreadOutboxMessages()).toEqual([
+    legacy,
+    expect.objectContaining({ messageId: "later" }),
+  ]);
+});

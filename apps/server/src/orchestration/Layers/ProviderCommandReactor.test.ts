@@ -707,6 +707,28 @@ describe("ProviderCommandReactor", () => {
     expect(setThreadGoal).not.toHaveBeenCalled();
   });
 
+  it("rejects a legacy memory command before any provider submission", async () => {
+    const harness = await createHarness();
+    const legacy = {
+      type: "thread.turn.start" as const,
+      commandId: CommandId.make("retired-memory"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("legacy-memory"),
+        role: "user" as const,
+        text: "Original prompt",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required" as const,
+      createdAt: new Date().toISOString(),
+      projectMemory: { projectId: "project-1", references: [] },
+    };
+    await expect(Effect.runPromise(harness.engine.dispatch(legacy as never))).rejects.toThrow();
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

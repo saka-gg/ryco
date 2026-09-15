@@ -1,4 +1,3 @@
-import { ProjectMemoryServiceLive } from "./projectMemory/ProjectMemoryService.ts";
 import { Effect, Layer } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
 import { HttpRouter, HttpServerRequest } from "effect/unstable/http";
@@ -30,7 +29,6 @@ import { ContextHandoffRepositoryLive } from "./persistence/Layers/ContextHandof
 
 export const makeServerWsRpcLayer = (principal: RpcPrincipal) =>
   makeWsRpcLayer(principal).pipe(
-    Layer.provide(ProjectMemoryServiceLive.pipe(Layer.provide(SqlitePersistenceLayerLive))),
     Layer.provide(
       ContextHandoffInspectionLive.pipe(
         Layer.provide(ContextHandoffRepositoryLive),

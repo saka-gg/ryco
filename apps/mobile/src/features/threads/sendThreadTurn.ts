@@ -1,4 +1,3 @@
-import type { ProjectMemoryRecallInput } from "@ryco/contracts";
 import type {
   AgentTokenMode,
   EnvironmentId,
@@ -26,7 +25,6 @@ export function resolveThreadSendAction(input: {
 }
 
 export interface SendThreadTurnContext {
-  readonly projectMemory?: ProjectMemoryRecallInput;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly text: string;
@@ -64,7 +62,6 @@ export async function sendThreadTurn(
   });
   if (action === "enqueue") {
     deps.enqueue({
-      ...(context.projectMemory ? { projectMemory: context.projectMemory } : {}),
       environmentId: context.environmentId,
       threadId: context.threadId,
       messageId: deps.newMessageId() as QueuedThreadMessage["messageId"],

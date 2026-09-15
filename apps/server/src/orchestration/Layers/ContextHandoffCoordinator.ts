@@ -1,5 +1,7 @@
-import { ProjectMemoryService } from "../../projectMemory/ProjectMemoryService.ts";
-import { submitWithProjectMemory } from "../../projectMemory/dispatch.ts";
+import {
+  hasRetiredProjectMemory,
+  REMOVED_PROJECT_MEMORY_MESSAGE,
+} from "@ryco/shared/retiredFeatures";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   CONTEXT_HANDOFF_CONTEXT_VERSION,
@@ -263,7 +265,6 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
   const manifestService = yield* Effect.serviceOption(ModelManifest);
   const repository = yield* ContextHandoffRepository;
   const contextService = yield* ContextHandoffService;
-  const projectMemory = yield* Effect.serviceOption(ProjectMemoryService);
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -601,6 +602,9 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       readonly activityId: EventId;
       readonly rememberSourceBinding: (binding: ProviderRuntimeBinding | undefined) => void;
     }) {
+      if (hasRetiredProjectMemory(decodeRequestedActivity(input.thread, input.activityId))) {
+        return yield* Effect.fail(new Error(REMOVED_PROJECT_MEMORY_MESSAGE));
+      }
       const presentation = yield* resolvePresentation(input.thread, input.record);
       const sourceSession = Option.getOrUndefined(
         yield* providerService.getSession(input.thread.id),
@@ -727,33 +731,21 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       if (!dispatching) {
         return yield* Effect.die("Context handoff dispatch reservation was lost.");
       }
-      const memoryRequest = decodeRequestedActivity(input.thread, input.activityId);
-      const turn = yield* submitWithProjectMemory({
-        memory: projectMemory,
-        engine: orchestrationEngine,
-        providers: providerService,
-        ...(memoryRequest?.projectMemory ? { recall: memoryRequest.projectMemory } : {}),
-        threadId: record.threadId,
-        commandId: memoryRequest?.projectMemoryCommandId ?? "missing-memory-authority",
-        messageId: record.firstMessageId,
-        submit: (envelope, expectedRuntime) =>
-          providerService.sendTurn(
-            {
-              threadId: record.threadId,
-              input: envelope + deliveryArtifact.providerInput,
-              ...(message.attachments && message.attachments.length > 0
-                ? { attachments: message.attachments }
-                : {}),
-              modelSelection: record.targetSelection,
-              interactionMode: input.thread.interactionMode,
-              tokenMode: input.thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-              ...(project?.customSystemPrompt
-                ? { customSystemPrompt: project.customSystemPrompt }
-                : {}),
-            },
-            expectedRuntime,
-          ),
-      }).pipe(withMetrics({ timer: contextHandoffDispatchDuration }));
+      const turn = yield* providerService
+        .sendTurn({
+          threadId: record.threadId,
+          input: deliveryArtifact.providerInput,
+          ...(message.attachments && message.attachments.length > 0
+            ? { attachments: message.attachments }
+            : {}),
+          modelSelection: record.targetSelection,
+          interactionMode: input.thread.interactionMode,
+          tokenMode: input.thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+          ...(project?.customSystemPrompt
+            ? { customSystemPrompt: project.customSystemPrompt }
+            : {}),
+        })
+        .pipe(withMetrics({ timer: contextHandoffDispatchDuration }));
       const acceptedAt = nowIso();
       const accepted = yield* repository.compareAndSetStatus({
         handoffId: record.handoffId,

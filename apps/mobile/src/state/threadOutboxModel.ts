@@ -1,4 +1,3 @@
-import type { ProjectMemoryRecallInput } from "@ryco/contracts";
 import { isTransportConnectionErrorMessage } from "@ryco/client-runtime/errors";
 import { scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import type {
@@ -27,7 +26,6 @@ const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
 export type EnvironmentShellStatus = "idle" | "loading" | "live";
 
 export interface QueuedThreadMessage {
-  readonly projectMemory?: ProjectMemoryRecallInput;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;

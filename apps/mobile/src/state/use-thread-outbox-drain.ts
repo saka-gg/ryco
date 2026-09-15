@@ -49,7 +49,6 @@ async function sendQueuedThreadMessage(message: QueuedThreadMessage): Promise<vo
     tokenMode: message.tokenMode ?? "balanced",
     bootstrap: undefined,
     sourceControlContexts: [],
-    ...(message.projectMemory ? { projectMemory: message.projectMemory } : {}),
     createdAt: message.createdAt,
     newCommandId,
     beginLocalDispatch: () => {},

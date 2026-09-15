@@ -1,4 +1,3 @@
-import type { ProjectMemoryRecallInput } from "@ryco/contracts";
 import type {
   AgentTokenMode,
   EnvironmentApi,
@@ -31,7 +30,6 @@ import { isDraftComposerFileAttachment } from "../../lib/composerFiles";
 // send logic. persistThreadSettingsForNextTurn is a no-op for the MVP (§3-13).
 
 export interface ExecuteSendTurnInput {
-  readonly projectMemory?: ProjectMemoryRecallInput;
   readonly api: EnvironmentApi;
   readonly thread: {
     readonly threadId: ThreadId;
@@ -160,7 +158,6 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
       tokenMode: input.settings.tokenMode,
       bootstrap,
       sourceControlContexts: [],
-      ...(input.projectMemory ? { projectMemory: input.projectMemory } : {}),
       createdAt,
       newCommandId,
       beginLocalDispatch: input.beginLocalDispatch ?? (() => {}),

@@ -1,4 +1,3 @@
-import { ProjectMemoryRecallInput } from "./projectMemory.ts";
 import { ApprovalResponseIdentity } from "./approvalResponses.ts";
 import { Effect, Schema, SchemaIssue, SchemaTransformation, Struct } from "effect";
 import { ProviderOptionSelections } from "./model.ts";
@@ -189,8 +188,8 @@ export type ContextHandoffInspectionSummaryMetadata =
   typeof ContextHandoffInspectionSummaryMetadata.Type;
 
 const ContextHandoffActivityBaseFields = {
-  projectMemory: Schema.optional(ProjectMemoryRecallInput),
-  projectMemoryCommandId: Schema.optional(CommandId),
+  // Decode historical records without enabling recall or persisting rendered text.
+  projectMemory: Schema.optional(Schema.Unknown),
   schemaVersion: Schema.Literal(CONTEXT_HANDOFF_SCHEMA_VERSION),
   handoffId: ContextHandoffId,
   mode: ContextHandoffMode,
@@ -1331,7 +1330,8 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
-  projectMemory: Schema.optional(ProjectMemoryRecallInput),
+  // Reject retired recall requests instead of silently stripping their context.
+  projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1356,7 +1356,8 @@ export const ThreadTurnStartCommand = Schema.Struct({
 });
 
 const ClientThreadTurnStartCommand = Schema.Struct({
-  projectMemory: Schema.optional(ProjectMemoryRecallInput),
+  // Reject retired recall requests instead of silently stripping their context.
+  projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -2047,7 +2048,8 @@ export const ThreadContextHandoffRequestedPayload = Schema.Struct({
 export type ThreadContextHandoffRequestedPayload = typeof ThreadContextHandoffRequestedPayload.Type;
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
-  projectMemory: Schema.optional(ProjectMemoryRecallInput),
+  // Decode historical records without enabling recall or persisting rendered text.
+  projectMemory: Schema.optional(Schema.Unknown),
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),

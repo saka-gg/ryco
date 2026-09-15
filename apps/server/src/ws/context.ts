@@ -1,5 +1,3 @@
-import { revokeMemoryDispatchScope } from "../projectMemory/dispatchAuthorization.ts";
-import { ProjectMemoryService } from "../projectMemory/ProjectMemoryService.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
 import { Cause, Effect, Metric, Option, Schema, Stream } from "effect";
 import {
@@ -119,14 +117,6 @@ const guardedMethodAccess = (method: string): WsRpcAccess => {
 
 export const makeWsRpcContext = (principal: RpcPrincipal) =>
   Effect.gen(function* () {
-    const memoryDispatchScope = {};
-    let memoryDispatchScopeActive = true;
-    yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
-        memoryDispatchScopeActive = false;
-        revokeMemoryDispatchScope(memoryDispatchScope);
-      }),
-    );
     const currentSessionId =
       principal.directSessionId ?? AuthSessionId.make(`relay-scope-${principal.scopeId}`);
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -138,7 +128,6 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // Most server route tests intentionally provide only the services used by
     // the RPC under test. Keep this additive capability optional at context
     // construction; production provides it in `makeServerWsRpcLayer`.
-    const projectMemory = yield* Effect.serviceOption(ProjectMemoryService);
     const contextHandoffInspection = yield* Effect.serviceOption(ContextHandoffInspection);
     const threadPriorityCoordinator = yield* Effect.serviceOption(ThreadPriorityCoordinator);
     // Optional for the same route-test reason; production provides it in the
@@ -766,14 +755,11 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       );
 
     return {
-      memoryDispatchScope,
-      isMemoryDispatchScopeActive: () => memoryDispatchScopeActive,
       currentSessionId,
       projectionSnapshotQuery,
       statisticsQuery,
       usageService,
       orchestrationEngine,
-      projectMemory,
       contextHandoffInspection,
       threadPriorityCoordinator,
       chatAttachmentUploads,

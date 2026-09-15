@@ -1,4 +1,3 @@
-import { recoverProjectMemorySubmissions } from "./projectMemory/recovery.ts";
 import {
   callbackRepositories,
   pendingCallbackInvalidation,
@@ -790,7 +789,6 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
 
     yield* Effect.logDebug("startup phase: reconciling orphaned provider sessions");
     yield* runStartupPhase("provider-sessions.reconcile", reconcileOrphanedProviderSessions);
-    yield* runStartupPhase("project-memory.recover", recoverProjectMemorySubmissions);
 
     const welcomeBase = yield* resolveWelcomeBase;
     const environment = yield* serverEnvironment.getDescriptor;

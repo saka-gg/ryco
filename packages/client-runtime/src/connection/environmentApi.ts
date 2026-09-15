@@ -127,7 +127,6 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
           }
         : {}),
     },
-    projectMemory: rpcClient.projectMemory,
     contextHandoff: {
       getInspectionSummary: rpcClient.contextHandoff.getInspectionSummary,
       listInspectionEntries: rpcClient.contextHandoff.listInspectionEntries,

@@ -1,4 +1,4 @@
-import type { ProjectMemoryRecallInput } from "@ryco/contracts";
+import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import {
   DEFAULT_MODEL,
   type AgentTokenMode,
@@ -207,7 +207,6 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 }
 
 export interface CommitSendTurnDispatchInput {
-  readonly projectMemory?: ProjectMemoryRecallInput;
   readonly api: EnvironmentApi;
   readonly threadId: ThreadId;
   readonly isFirstMessage: boolean;
@@ -246,6 +245,7 @@ export interface CommitSendTurnDispatchInput {
  * remain in the web caller, which invokes this only once the turn commits.
  */
 export async function commitSendTurnDispatch(input: CommitSendTurnDispatchInput): Promise<void> {
+  rejectRetiredProjectMemory(input);
   // Server-side writes derived from this message must only run once the send
   // commits; otherwise an undone first send leaves orphan title/settings.
   if (input.isFirstMessage && input.isServerThread) {
@@ -270,7 +270,6 @@ export async function commitSendTurnDispatch(input: CommitSendTurnDispatchInput)
   input.beginLocalDispatch({ preparingWorktree: false });
   await input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",
-    ...(input.projectMemory ? { projectMemory: input.projectMemory } : {}),
     commandId: input.newCommandId(),
     threadId: input.threadId,
     message: {

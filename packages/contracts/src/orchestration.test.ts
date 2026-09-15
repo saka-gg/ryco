@@ -1520,3 +1520,24 @@ it.effect("ModelSelection rejects malformed instance ids", () =>
     assert.strictEqual(result._tag, "Failure");
   }),
 );
+
+it("rejects legacy recall commands while preserving historical recall payloads", () => {
+  const projectMemory = { projectId: "old-project", references: [{ id: "entry", revision: 1 }] };
+  const command = clientTurnWithAttachments([]);
+  assert.doesNotThrow(() => Schema.decodeUnknownSync(ClientOrchestrationCommand)(command));
+  for (const value of [projectMemory, null, {}, "invalid"]) {
+    assert.throws(() =>
+      Schema.decodeUnknownSync(ClientOrchestrationCommand)({ ...command, projectMemory: value }),
+    );
+    assert.throws(() =>
+      Schema.decodeUnknownSync(ThreadTurnStartCommand)({ ...command, projectMemory: value }),
+    );
+  }
+  const payload = Schema.decodeUnknownSync(ThreadTurnStartRequestedPayload)({
+    threadId: "attachment-thread",
+    messageId: "attachment-message",
+    createdAt: command.createdAt,
+    projectMemory,
+  });
+  assert.deepEqual(payload.projectMemory, projectMemory);
+});

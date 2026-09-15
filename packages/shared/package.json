@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./retiredFeatures": "./src/retiredFeatures.ts",
     "./backgroundWork": {
       "types": "./src/backgroundWork.ts",
       "import": "./src/backgroundWork.ts"
@@ -260,7 +261,6 @@
       "types": "./src/macLocalSigning.ts",
       "import": "./src/macLocalSigning.ts"
     },
-    "./projectMemory": "./src/projectMemory.ts",
     "./threadExport": {
       "types": "./src/threadExport.ts",
       "import": "./src/threadExport.ts"

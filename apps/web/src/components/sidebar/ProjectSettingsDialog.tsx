@@ -1,4 +1,3 @@
-import { ProjectMemorySettings } from "../projectMemory/ProjectMemorySettings";
 import { AutomationCentre } from "../automations/AutomationCentre";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
@@ -71,20 +70,13 @@ function resolveRepositoryProviderIcon(provider: string | undefined): Icon {
 // Navigation items
 // ---------------------------------------------------------------------------
 
-type ProjectSettingsSection =
-  | "general"
-  | "location"
-  | "atlassian"
-  | "ai"
-  | "memory"
-  | "automations";
+type ProjectSettingsSection = "general" | "location" | "atlassian" | "ai" | "automations";
 
 const PROJECT_SETTINGS_NAV_ITEMS = [
   { id: "general", label: "General", Icon: Settings2Icon },
   { id: "location", label: "Location", Icon: FolderOpenIcon },
   { id: "atlassian", label: "Atlassian", Icon: SlidersHorizontalIcon },
   { id: "ai", label: "AI", Icon: SparklesIcon },
-  { id: "memory", label: "Memory", Icon: SparklesIcon },
   { id: "automations", label: "Automations", Icon: SparklesIcon },
 ] as const;
 
@@ -1017,8 +1009,6 @@ export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
                   onPickWorkspaceRoot={props.onPickWorkspaceRoot}
                   onSave={props.onSave}
                 />
-              ) : section === "memory" ? (
-                <ProjectMemorySettings environmentId={target.environmentId} projectId={target.id} />
               ) : section === "automations" ? (
                 <AutomationCentre environmentId={target.environmentId} projectId={target.id} />
               ) : section === "atlassian" ? (
@@ -1038,7 +1028,7 @@ export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
           <Button variant="outline" onClick={props.onClose}>
             Cancel
           </Button>
-          {section === "atlassian" || section === "memory" || section === "automations" ? null : (
+          {section === "atlassian" || section === "automations" ? null : (
             <Button onClick={props.onSave} disabled={props.saving}>
               {props.saving ? "Saving…" : "Save changes"}
             </Button>

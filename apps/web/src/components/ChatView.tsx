@@ -1,5 +1,8 @@
-import { useProjectMemoryController } from "./projectMemory/useProjectMemoryController";
-import { ProjectMemoryPanel, ProjectMemoryRecallPreview } from "./projectMemory/ProjectMemoryPanel";
+import {
+  rejectRetiredProjectMemory,
+  hasRetiredProjectMemory,
+  REMOVED_PROJECT_MEMORY_MESSAGE,
+} from "@ryco/shared/retiredFeatures";
 import { usePaneEffect, usePaneFocus, usePaneFocusRef, usePaneThreadRef } from "./chat/PaneFocus";
 import { startSelectionChat } from "../lib/selectionChat";
 import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
@@ -191,7 +194,6 @@ import {
 } from "./chat/ThreadMessageSearch.logic";
 import type { ThreadMessageSearchOccurrence } from "./chat/ThreadMessageSearch.logic";
 import { ChatHeader } from "./chat/ChatHeader";
-import { ThreadImageGallery } from "./chat/ThreadImageGallery";
 import { PhoneThreadAppBar } from "./shell/phone/PhoneThreadAppBar";
 import type { PhoneThreadDockProps } from "./shell/phone/PhoneThreadDock";
 import { PhoneSurfaceScaffold, PhoneWorkSurfaceSheet } from "./shell/phone/PhoneWorkSurface";
@@ -574,7 +576,6 @@ export default function ChatView(props: ChatViewProps) {
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const readComposer = useCallback(() => composerRef.current, [composerRef]);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [threadImagesThreadKey, setThreadImagesThreadKey] = useState<string | null>(null);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const [threadMessageSearchOpen, setThreadMessageSearchOpen] = useState(false);
@@ -807,15 +808,6 @@ export default function ChatView(props: ChatViewProps) {
     [activeThread],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
-  if (
-    threadImagesThreadKey !== null &&
-    (threadImagesThreadKey !== activeThreadKey || !paneFocused || presentationTier === "phone")
-  ) {
-    setThreadImagesThreadKey(null);
-  }
-  const onOpenThreadImages = useCallback(() => {
-    if (paneFocusedRef.current && activeThreadKey) setThreadImagesThreadKey(activeThreadKey);
-  }, [activeThreadKey, paneFocusedRef]);
   const activeThreadMessageHistory = useStore((state) =>
     activeThreadRef
       ? state.environmentStateById[activeThreadRef.environmentId]?.threadHistoryByThreadId?.[
@@ -944,21 +936,6 @@ export default function ChatView(props: ChatViewProps) {
   const activeProject = useStore(
     useMemo(() => createProjectSelectorByRef(activeProjectRef), [activeProjectRef]),
   );
-
-  const memoryScopeKey = `${routeThreadKey}:${draftId ?? "server"}`;
-  const memoryController = useProjectMemoryController(
-    environmentId,
-    activeProject?.id ?? null,
-    memoryScopeKey,
-  );
-  const [openMemoryScope, setOpenMemoryScope] = useState<string | null>(null);
-  const memoryPaneCurrent = !paneThreadRef || scopedThreadKey(paneThreadRef) === routeThreadKey;
-
-  const handleOpenProjectMemory = useCallback(() => {
-    if (paneFocusedRef.current && memoryPaneCurrent) {
-      setOpenMemoryScope((current) => (current === memoryScopeKey ? null : memoryScopeKey));
-    }
-  }, [paneFocusedRef, memoryPaneCurrent, memoryScopeKey]);
 
   const activeWorktreeSummary = useStore(
     useMemo(
@@ -2505,10 +2482,7 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const startGoalTurnRef = useRef<
-    (
-      goal: NonNullable<SendTurnComposerSnapshot["goal"]>,
-      projectMemory?: SendTurnComposerSnapshot["projectMemory"],
-    ) => Promise<boolean>
+    (goal: NonNullable<SendTurnComposerSnapshot["goal"]>) => Promise<boolean>
   >(async () => false);
 
   const dispatchThreadGoalUpdate = useCallback(
@@ -3100,11 +3074,8 @@ export default function ChatView(props: ChatViewProps) {
 
   const getQueuedSteerEligibility = useCallback(
     (message: QueuedMessage) => {
-      if (message.composer.projectMemory)
-        return {
-          allowed: false as const,
-          reason: "Selected memory must be sent as a new turn; it cannot steer an active turn.",
-        };
+      if (hasRetiredProjectMemory(message.composer))
+        return { allowed: false as const, reason: REMOVED_PROJECT_MEMORY_MESSAGE };
       const providerInstanceId = activeThread?.session?.providerInstanceId;
       const provider = providerInstanceId
         ? composerProviderStatuses.find((entry) => entry.instanceId === providerInstanceId)
@@ -3253,6 +3224,7 @@ export default function ChatView(props: ChatViewProps) {
     editorSendPreparationRef.current = true;
     const composerChangedDuringPreparation = captureComposerContentGuard();
     try {
+      rejectRetiredProjectMemory(composerSnapshot);
       if (!(await drainEditorsBeforeSend())) return false;
       if (enforceBuildMode) {
         composerSnapshot = {
@@ -3508,7 +3480,7 @@ export default function ChatView(props: ChatViewProps) {
   };
   const dispatchComposerSnapshotRef = useRef(dispatchComposerSnapshot);
   dispatchComposerSnapshotRef.current = dispatchComposerSnapshot;
-  startGoalTurnRef.current = async (goal, projectMemory) => {
+  startGoalTurnRef.current = async (goal) => {
     const context = readComposer()?.getSendContext();
     if (!context || sendInFlightRef.current || isConnecting || activeEnvironmentUnavailable)
       return false;
@@ -3522,7 +3494,6 @@ export default function ChatView(props: ChatViewProps) {
     return dispatchComposerSnapshotRef.current(
       {
         goal,
-        ...(projectMemory ? { projectMemory } : {}),
         prompt: `Continue pursuing this goal: ${objective}`,
         promptForRestore: promptRef.current,
         trimmedPrompt: `Continue pursuing this goal: ${objective}`,
@@ -3542,16 +3513,11 @@ export default function ChatView(props: ChatViewProps) {
 
   const runSend = async (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
-    if (!paneFocusedRef.current || !memoryPaneCurrent || !dispatchCapability.allowed) return;
-    const reviewedMemory = memoryController?.reviewedRecall();
+    if (!dispatchCapability.allowed) return;
     const api = readEnvironmentApi(environmentId);
     // When a turn is already running the submit is queued, so don't let the
     // transient post-dispatch `isSendBusy` window swallow a mid-turn message.
     const sideQuestion = parseSideQuestionCommand(promptRef.current);
-    if (sideQuestion !== null && memoryController?.getSnapshot().references.length) {
-      toastManager.add({ type: "info", title: "Deselect memory before sending a side question" });
-      return;
-    }
     if (sideQuestion !== null && presentationTier !== "phone" && activeThreadRef && activeThread) {
       const sideContext = readComposer()?.getSendContext();
       if (
@@ -3613,10 +3579,6 @@ export default function ChatView(props: ChatViewProps) {
       return;
     if (activePendingProgress) {
       onAdvanceActivePendingUserInput();
-      return;
-    }
-    if (memoryController?.getSnapshot().references.length && !reviewedMemory) {
-      toastManager.add({ type: "info", title: "Review selected memories before sending" });
       return;
     }
     const sendCtx = readComposer()?.getSendContext();
@@ -3697,8 +3659,7 @@ export default function ChatView(props: ChatViewProps) {
         if (await dispatchThreadGoalUpdate(goal)) clearGoalDraft();
       } else {
         // Uses the same worktree/thread bootstrap as a normal first message.
-        if (await startGoalTurnRef.current(goal, reviewedMemory ?? undefined))
-          memoryController?.invalidate();
+        await startGoalTurnRef.current(goal);
       }
       return;
     }
@@ -3711,12 +3672,10 @@ export default function ChatView(props: ChatViewProps) {
       clearComposerDraftContent(composerDraftTarget);
       setComposerDraftTokenMode(composerDraftTarget, tokenMode);
       readComposer()?.resetCursorState();
-      const submitted = await onSubmitPlanFollowUp({
-        ...(reviewedMemory ? { projectMemory: reviewedMemory } : {}),
+      await onSubmitPlanFollowUp({
         text: followUp.text,
         interactionMode: followUp.interactionMode,
       });
-      if (submitted) memoryController?.invalidate();
       return;
     }
     const standaloneSlashCommand =
@@ -3762,7 +3721,6 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const composerSnapshot: SendTurnComposerSnapshot = {
-      ...(reviewedMemory ? { projectMemory: reviewedMemory } : {}),
       prompt: promptForSend,
       trimmedPrompt: trimmed,
       images: composerImages,
@@ -3808,7 +3766,6 @@ export default function ChatView(props: ChatViewProps) {
         },
         settings: settingsSnapshot,
       });
-      memoryController?.invalidate();
       if (!composerChangedDuringPreparation()) {
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
@@ -3818,8 +3775,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
-    if (await dispatchComposerSnapshotRef.current(composerSnapshot, settingsSnapshot))
-      memoryController?.invalidate();
+    await dispatchComposerSnapshotRef.current(composerSnapshot, settingsSnapshot);
   };
   const runSendRef = useRef(runSend);
   runSendRef.current = runSend;
@@ -3882,11 +3838,9 @@ export default function ChatView(props: ChatViewProps) {
   const onSubmitPlanFollowUp = useCallback(
     async ({
       text,
-      projectMemory,
       interactionMode: nextInteractionMode,
     }: {
       text: string;
-      projectMemory?: SendTurnComposerSnapshot["projectMemory"];
       interactionMode: ProviderInteractionMode;
     }) => {
       const api = readEnvironmentApi(environmentId);
@@ -3979,7 +3933,6 @@ export default function ChatView(props: ChatViewProps) {
 
         await api.orchestration.dispatchCommand({
           type: "thread.turn.start",
-          ...(projectMemory ? { projectMemory } : {}),
           commandId: newCommandId(),
           threadId: threadIdForSend,
           message: {
@@ -4011,7 +3964,6 @@ export default function ChatView(props: ChatViewProps) {
           setPlanSidebarOpen(true);
         }
         sendInFlightRef.current = false;
-        return true;
       } catch (err) {
         setOptimisticUserMessages((existing) =>
           existing.filter((message) => message.id !== messageIdForSend),
@@ -4593,12 +4545,6 @@ export default function ChatView(props: ChatViewProps) {
           />
         ) : (
           <ChatHeader
-            onOpenProjectMemory={memoryController ? handleOpenProjectMemory : undefined}
-            {...(isServerThread && activeThreadKey
-              ? {
-                  onOpenThreadImages,
-                }
-              : {})}
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadTitle={activeThread.title}
             activeProjectName={activeProject?.name}
@@ -4928,23 +4874,6 @@ export default function ChatView(props: ChatViewProps) {
                 getSteerUnavailableReason={getQueuedSteerUnavailableReason}
                 onSteer={(message) => void handleSteerQueuedMessage(message)}
               />
-              {presentationTier !== "phone" && memoryController ? (
-                <div className="mb-2 space-y-2" inert={!paneFocused || !memoryPaneCurrent}>
-                  {openMemoryScope === memoryScopeKey && paneFocused && memoryPaneCurrent ? (
-                    <section
-                      aria-label="Project memory curation"
-                      className="max-h-96 overflow-y-auto rounded-lg border border-border p-3"
-                    >
-                      <Button variant="ghost" onClick={() => setOpenMemoryScope(null)}>
-                        Close project memory
-                      </Button>
-                      <ProjectMemoryPanel key={memoryScopeKey} controller={memoryController} />
-                    </section>
-                  ) : (
-                    <ProjectMemoryRecallPreview controller={memoryController} />
-                  )}
-                </div>
-              ) : null}
               <div className="relative z-10">
                 <ChatComposer
                   ref={composerRef}
@@ -5262,22 +5191,6 @@ export default function ChatView(props: ChatViewProps) {
           />
         </RightPanelSheet>
       ) : null}
-
-      {presentationTier !== "phone" && isServerThread && activeThreadRef && activeThreadKey && (
-        <ThreadImageGallery
-          key={`gallery:${activeThreadKey}`}
-          scope={activeThreadRef}
-          messages={activeThread.messages}
-          open={paneFocused && threadImagesThreadKey === activeThreadKey}
-          onOpenChange={(open) =>
-            setThreadImagesThreadKey(open && paneFocusedRef.current ? activeThreadKey : null)
-          }
-          hasMoreBefore={activeThreadMessageHistory?.hasMoreBefore ?? false}
-          isLoadingOlder={activeThreadMessageHistoryLoad?.status === "loading"}
-          loadOlderError={activeThreadMessageHistoryLoad?.error ?? null}
-          onLoadOlder={handleLoadOlderMessages}
-        />
-      )}
 
       {expandedImage && (
         <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} />

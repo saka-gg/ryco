@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ExpandedImageItem } from "./ExpandedImagePreview";
 
-/** Shared image presentation for message expansion and the thread gallery. */
+/** Image presentation for expanded message attachments. */
 export function ExpandedImageContent({
   image,
   className = "max-h-[86vh] max-w-[92vw]",
