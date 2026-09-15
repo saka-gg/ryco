@@ -2047,3 +2047,21 @@ label:has(> select#reasoning-effort) select {
     transform: scaleX(1);
   }
 }
+
+/* Mermaid stays local to the Markdown code-block boundary. */
+.chat-markdown-mermaid {
+  min-width: 0;
+  overflow: auto;
+}
+.chat-markdown-mermaid-toggle {
+  margin: 0.5rem 2.5rem 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.chat-markdown-mermaid > img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}

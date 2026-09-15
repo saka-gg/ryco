@@ -1,3 +1,4 @@
+import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { SideChatPanel } from "./SideChatPanel";
@@ -640,6 +641,7 @@ export default function ChatView(props: ChatViewProps) {
   const isAtEndRef = useRef(true);
   const [timelineLiveFollowEnabled, setTimelineLiveFollowEnabled] = useState(true);
   const sendInFlightRef = useRef(false);
+  const editorSendPreparationRef = useRef(false);
   const terminalOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   const terminalState = useTerminalStateStore((state) =>
@@ -2937,6 +2939,74 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, [providerSelectionPolicy.reason]);
 
+  const captureComposerContentGuard = () => {
+    const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    const prompt = promptRef.current;
+    return () => {
+      const current = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+      return (
+        promptRef.current !== prompt ||
+        current?.images !== draft?.images ||
+        current?.terminalContexts !== draft?.terminalContexts ||
+        current?.sourceControlContexts !== draft?.sourceControlContexts
+      );
+    };
+  };
+
+  const editorSendTargetRef = useRef({
+    environmentId,
+    threadId: activeThread?.id,
+    cwd: gitCwd,
+    allowed: dispatchCapability.allowed,
+  });
+  editorSendTargetRef.current = {
+    environmentId,
+    threadId: activeThread?.id,
+    cwd: gitCwd,
+    allowed: dispatchCapability.allowed,
+  };
+  useEffect(() => {
+    editorSendTargetRef.current = {
+      environmentId,
+      threadId: activeThread?.id,
+      cwd: gitCwd,
+      allowed: dispatchCapability.allowed,
+    };
+    return () => {
+      editorSendTargetRef.current = { ...editorSendTargetRef.current, allowed: false };
+    };
+  }, [activeThread?.id, dispatchCapability.allowed, environmentId, gitCwd]);
+  const drainEditorsBeforeSend = useCallback(async () => {
+    if (!activeProject || !activeThread) return false;
+    const scope = { environmentId, cwd: activeThread.worktreePath ?? activeProject.cwd };
+    if (hasUnsavedPreviewFiles(scope) && !(await flushPreviewFiles(scope))) {
+      toastManager.add({
+        type: "error",
+        title: "Editor changes could not be saved",
+        description:
+          "Your message and file draft are preserved. Resolve the save error in File Preview before sending.",
+      });
+      return false;
+    }
+    const current = editorSendTargetRef.current;
+    return (
+      current.allowed &&
+      current.environmentId === environmentId &&
+      current.threadId === activeThread.id &&
+      current.cwd === scope.cwd
+    );
+  }, [activeProject, activeThread, environmentId]);
+
+  const prepareEditorSend = useCallback(async () => {
+    if (editorSendPreparationRef.current) return false;
+    editorSendPreparationRef.current = true;
+    try {
+      return await drainEditorsBeforeSend();
+    } finally {
+      editorSendPreparationRef.current = false;
+    }
+  }, [drainEditorsBeforeSend]);
+
   const getQueuedSteerEligibility = useCallback(
     (message: QueuedMessage) => {
       const providerInstanceId = activeThread?.session?.providerInstanceId;
@@ -2994,6 +3064,7 @@ export default function ChatView(props: ChatViewProps) {
       const api = readEnvironmentApi(environmentId);
       if (!api) return;
 
+      if (!(await prepareEditorSend())) return;
       beginQueuedMessageSteer(activeThreadKey, message.id);
       try {
         const baseText = buildOutgoingMessageText({
@@ -3034,6 +3105,7 @@ export default function ChatView(props: ChatViewProps) {
       activeThreadKey,
       beginQueuedMessageSteer,
       endQueuedMessageSteer,
+      prepareEditorSend,
       environmentId,
       getQueuedSteerEligibility,
     ],
@@ -3081,254 +3153,262 @@ export default function ChatView(props: ChatViewProps) {
   ): Promise<boolean> => {
     if (!dispatchCapability.allowed) return false;
     const api = readEnvironmentApi(environmentId);
-    if (!api || !activeThread || !activeProject) return false;
-    if (enforceBuildMode) {
-      composerSnapshot = {
-        ...composerSnapshot,
-        selectedModelSelection: resolveBuildModeModelSelection(
-          composerSnapshot.selectedProvider,
-          composerSnapshot.selectedModelSelection,
-        ),
-      };
-    }
-    if (!canSendModelSelection(composerSnapshot.selectedModelSelection)) {
-      notifySelectionBecameIneligible();
-      return false;
-    }
-    const devicePromptAttachment: DevicePromptAttachmentResolution =
-      await maybeResolveDevicePromptAttachment({
-        api,
-        threadId: activeThread.id,
-        prompt: composerSnapshot.prompt,
-      }).catch(() => ({ requested: false, image: null }));
-    if (devicePromptAttachment.image) {
-      if (composerSnapshot.images.length < PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+    if (!api || !activeThread || !activeProject || editorSendPreparationRef.current) return false;
+    editorSendPreparationRef.current = true;
+    const composerChangedDuringPreparation = captureComposerContentGuard();
+    try {
+      if (!(await drainEditorsBeforeSend())) return false;
+      if (enforceBuildMode) {
         composerSnapshot = {
           ...composerSnapshot,
-          images: [...composerSnapshot.images, devicePromptAttachment.image],
+          selectedModelSelection: resolveBuildModeModelSelection(
+            composerSnapshot.selectedProvider,
+            composerSnapshot.selectedModelSelection,
+          ),
         };
-      } else {
-        URL.revokeObjectURL(devicePromptAttachment.image.previewUrl);
+      }
+      if (!canSendModelSelection(composerSnapshot.selectedModelSelection)) {
+        notifySelectionBecameIneligible();
+        return false;
+      }
+      const devicePromptAttachment: DevicePromptAttachmentResolution =
+        await maybeResolveDevicePromptAttachment({
+          api,
+          threadId: activeThread.id,
+          prompt: composerSnapshot.prompt,
+        }).catch(() => ({ requested: false, image: null }));
+      if (devicePromptAttachment.image) {
+        if (composerSnapshot.images.length < PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+          composerSnapshot = {
+            ...composerSnapshot,
+            images: [...composerSnapshot.images, devicePromptAttachment.image],
+          };
+        } else {
+          URL.revokeObjectURL(devicePromptAttachment.image.previewUrl);
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "The simulator screenshot was skipped",
+              description: `This message already has ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} attachments.`,
+            }),
+          );
+        }
+      } else if (devicePromptAttachment.requested) {
+        const description =
+          devicePromptAttachment.reason === "no-attached-device"
+            ? "Open the Simulator workspace and choose a device first."
+            : devicePromptAttachment.reason === "device-not-booted"
+              ? "The selected simulator is still starting."
+              : "The current simulator screen could not be attached.";
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "The simulator screenshot was skipped",
-            description: `This message already has ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} attachments.`,
+            title: "Couldn’t attach the simulator screen",
+            description,
           }),
         );
       }
-    } else if (devicePromptAttachment.requested) {
-      const description =
-        devicePromptAttachment.reason === "no-attached-device"
-          ? "Open the Simulator workspace and choose a device first."
-          : devicePromptAttachment.reason === "device-not-booted"
-            ? "The selected simulator is still starting."
-            : "The current simulator screen could not be attached.";
-      toastManager.add(
-        stackedThreadToast({
-          type: "warning",
-          title: "Couldn’t attach the simulator screen",
-          description,
-        }),
-      );
-    }
-    // Queued messages keep the settings snapshot from enqueue time; when the
-    // Build-mode lock is on, every dispatched turn must still run in Build
-    // mode even if it was queued as Plan/Ask before the setting flipped.
-    const effectiveSettingsSnapshot: SendTurnSettings = enforceBuildMode
-      ? { ...settingsSnapshot, interactionMode: DEFAULT_INTERACTION_MODE }
-      : settingsSnapshot;
-    const threadIdForSend = activeThread.id;
-    const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
-    const { shouldMaterializeLegacyBranchWorktree, baseBranchForWorktree, shouldCreateWorktree } =
-      resolveChatSendWorktreePlan({
-        isServerThread,
-        isFirstMessage,
-        threadWorktreePath: activeThread.worktreePath,
-        activeThreadBranch,
-        currentGitRefName: gitStatusQuery.data?.refName ?? null,
-        sendEnvMode,
-      });
+      // Queued messages keep the settings snapshot from enqueue time; when the
+      // Build-mode lock is on, every dispatched turn must still run in Build
+      // mode even if it was queued as Plan/Ask before the setting flipped.
+      const effectiveSettingsSnapshot: SendTurnSettings = enforceBuildMode
+        ? { ...settingsSnapshot, interactionMode: DEFAULT_INTERACTION_MODE }
+        : settingsSnapshot;
+      const threadIdForSend = activeThread.id;
+      const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
+      const { shouldMaterializeLegacyBranchWorktree, baseBranchForWorktree, shouldCreateWorktree } =
+        resolveChatSendWorktreePlan({
+          isServerThread,
+          isFirstMessage,
+          threadWorktreePath: activeThread.worktreePath,
+          activeThreadBranch,
+          currentGitRefName: gitStatusQuery.data?.refName ?? null,
+          sendEnvMode,
+        });
 
-    // A PR / issue / work item source is only *recorded* when picked — creating
-    // a git worktree is a side effect on disk, and picking a source is not a
-    // decision to perform one. This is where the two join: the intent goes
-    // through the same `createWorktreeForProject` call the New worktree dialog
-    // makes, so the derived branch name, origin linkage, and sidebar badges all
-    // match. That call also creates the thread, so the composed message is sent
-    // into it rather than promoting the draft.
-    const pendingWorktreeSource =
-      isFirstMessage && sendEnvMode === "worktree" ? (draftThread?.worktreeSource ?? null) : null;
-    if (pendingWorktreeSource && !api.git.createWorktreeForProject) {
-      setThreadError(threadIdForSend, "Worktree creation is unavailable in this environment.");
-      return false;
-    }
-    // Filled by `prepareForDispatch` below when a source-backed worktree is created,
-    // so the navigation at the end of this function targets the resulting thread.
-    let sourceThreadRef: ScopedThreadRef | null = null;
-    const prepareWorktreeSourceForDispatch = async () => {
-      const createWorktree = api.git.createWorktreeForProject;
-      if (!pendingWorktreeSource || !createWorktree || !activeProject) return null;
-      const created = await createWorktree({
-        fetchOrigin: draftThread?.fetchOrigin ?? true,
-        projectId: activeProject.id,
-        intent:
-          pendingWorktreeSource.kind === "pr"
-            ? { kind: "pr", number: pendingWorktreeSource.number }
-            : pendingWorktreeSource.kind === "issue"
-              ? {
-                  kind: "issue",
-                  number: pendingWorktreeSource.number,
-                  title: pendingWorktreeSource.title,
-                }
-              : {
-                  kind: "workItem",
-                  provider: pendingWorktreeSource.provider,
-                  key: pendingWorktreeSource.key,
-                  title: pendingWorktreeSource.title,
-                  ...(pendingWorktreeSource.state ? { state: pendingWorktreeSource.state } : {}),
-                  ...(pendingWorktreeSource.stateName
-                    ? { stateName: pendingWorktreeSource.stateName }
-                    : {}),
-                  ...(pendingWorktreeSource.url ? { url: pendingWorktreeSource.url } : {}),
-                },
-      });
-      sourceThreadRef = scopeThreadRef(environmentId, created.sessionId);
-      return {
-        threadId: created.sessionId,
-        isServerThread: true,
-        isFirstMessage: true,
+      // A PR / issue / work item source is only *recorded* when picked — creating
+      // a git worktree is a side effect on disk, and picking a source is not a
+      // decision to perform one. This is where the two join: the intent goes
+      // through the same `createWorktreeForProject` call the New worktree dialog
+      // makes, so the derived branch name, origin linkage, and sidebar badges all
+      // match. That call also creates the thread, so the composed message is sent
+      // into it rather than promoting the draft.
+      const pendingWorktreeSource =
+        isFirstMessage && sendEnvMode === "worktree" ? (draftThread?.worktreeSource ?? null) : null;
+      if (pendingWorktreeSource && !api.git.createWorktreeForProject) {
+        setThreadError(threadIdForSend, "Worktree creation is unavailable in this environment.");
+        return false;
+      }
+      // Filled by `prepareForDispatch` below when a source-backed worktree is created,
+      // so the navigation at the end of this function targets the resulting thread.
+      let sourceThreadRef: ScopedThreadRef | null = null;
+      const prepareWorktreeSourceForDispatch = async () => {
+        const createWorktree = api.git.createWorktreeForProject;
+        if (!pendingWorktreeSource || !createWorktree || !activeProject) return null;
+        const created = await createWorktree({
+          fetchOrigin: draftThread?.fetchOrigin ?? true,
+          projectId: activeProject.id,
+          intent:
+            pendingWorktreeSource.kind === "pr"
+              ? { kind: "pr", number: pendingWorktreeSource.number }
+              : pendingWorktreeSource.kind === "issue"
+                ? {
+                    kind: "issue",
+                    number: pendingWorktreeSource.number,
+                    title: pendingWorktreeSource.title,
+                  }
+                : {
+                    kind: "workItem",
+                    provider: pendingWorktreeSource.provider,
+                    key: pendingWorktreeSource.key,
+                    title: pendingWorktreeSource.title,
+                    ...(pendingWorktreeSource.state ? { state: pendingWorktreeSource.state } : {}),
+                    ...(pendingWorktreeSource.stateName
+                      ? { stateName: pendingWorktreeSource.stateName }
+                      : {}),
+                    ...(pendingWorktreeSource.url ? { url: pendingWorktreeSource.url } : {}),
+                  },
+        });
+        sourceThreadRef = scopeThreadRef(environmentId, created.sessionId);
+        return {
+          threadId: created.sessionId,
+          isServerThread: true,
+          isFirstMessage: true,
+        };
       };
-    };
 
-    const accepted = await executeChatSendTurn({
-      ...(messageId !== undefined ? { messageId, preserveComposerDraft: true } : {}),
-      composer: composerSnapshot,
-      thread: {
-        threadId: threadIdForSend,
-        isFirstMessage,
-        isServerThread,
-        // A pending source materializes its own thread at commit time, so this
-        // draft must not also be promoted by the bootstrap.
-        isLocalDraftThread: isLocalDraftThread && !pendingWorktreeSource,
-        activeThreadBranch,
-        worktreePath: activeThread.worktreePath,
-        createdAt: activeThread.createdAt,
-        projectId: activeProject.id,
-      },
-      worktree: pendingWorktreeSource
-        ? {
-            // The source's own worktree is created in `prepareForDispatch`; the
-            // bootstrap must not prepare a second one.
-            shouldMaterializeLegacyBranchWorktree: false,
-            baseBranchForWorktree: null,
-            shouldCreateWorktree: false,
-          }
-        : {
-            shouldMaterializeLegacyBranchWorktree,
-            baseBranchForWorktree:
-              shouldCreateWorktree && !shouldMaterializeLegacyBranchWorktree
-                ? newWorktreeBaseBranch(activeThreadBranch, draftThread?.fetchOrigin ?? true)
-                : baseBranchForWorktree,
-            ...(shouldCreateWorktree && !shouldMaterializeLegacyBranchWorktree
-              ? {
-                  fetchOrigin: draftThread?.fetchOrigin ?? true,
-                  worktreeBranchName: draftThread?.worktreeBranchName ?? null,
-                }
-              : {}),
-            shouldCreateWorktree,
-          },
-      settings: effectiveSettingsSnapshot,
-      project: {
-        projectId: activeProject.id,
-        projectCwd: activeProject.cwd,
-      },
-      ...(pendingWorktreeSource ? { prepareForDispatch: prepareWorktreeSourceForDispatch } : {}),
-      scroll: {
-        scrollToEndBeforeOptimistic: async () => {
-          isAtEndRef.current = true;
-          setTimelineLiveFollowEnabled(true);
-          showScrollDebouncer.current.cancel();
-          setShowScrollToBottom(false);
-          await legendListRef.current?.scrollToEnd?.({ animated: false });
+      const accepted = await executeChatSendTurn({
+        ...(messageId !== undefined ? { messageId } : {}),
+        preserveComposerDraft: messageId !== undefined || composerChangedDuringPreparation(),
+        composer: composerSnapshot,
+        thread: {
+          threadId: threadIdForSend,
+          isFirstMessage,
+          isServerThread,
+          // A pending source materializes its own thread at commit time, so this
+          // draft must not also be promoted by the bootstrap.
+          isLocalDraftThread: isLocalDraftThread && !pendingWorktreeSource,
+          activeThreadBranch,
+          worktreePath: activeThread.worktreePath,
+          createdAt: activeThread.createdAt,
+          projectId: activeProject.id,
         },
-        scrollToEndAfterOptimistic,
-      },
-      draft: {
-        // Clearing has to target the thread the turn actually went to, or the
-        // composed prompt would linger on the abandoned draft.
-        composerDraftTarget,
-        environmentId,
-        clearComposerDraftContent,
-        setComposerDraftTokenMode,
-        setComposerDraftPrompt,
-        addComposerDraftImages,
-        removeComposerDraftImage,
-        setComposerDraftTerminalContexts,
-        setDraftThreadContext,
-      },
-      dispatch: {
-        api,
-        beginLocalDispatch,
-        resetLocalDispatch,
-        setOptimisticUserMessages,
-        setThreadError,
-      },
-      refs: {
-        promptRef,
-        composerImagesRef,
-        composerTerminalContextsRef,
-        sendInFlightRef,
-      },
-      sourceControl: {
-        fetcher: async (ctx) => {
-          const cwd = gitCwd;
-          if (!cwd) return ctx;
-          const now = DateTime.fromDateUnsafe(new Date());
-          const staleAfterDate = DateTime.fromDateUnsafe(new Date(Date.now() + 5 * 60 * 1000));
-          if (ctx.kind === "issue") {
+        worktree: pendingWorktreeSource
+          ? {
+              // The source's own worktree is created in `prepareForDispatch`; the
+              // bootstrap must not prepare a second one.
+              shouldMaterializeLegacyBranchWorktree: false,
+              baseBranchForWorktree: null,
+              shouldCreateWorktree: false,
+            }
+          : {
+              shouldMaterializeLegacyBranchWorktree,
+              baseBranchForWorktree:
+                shouldCreateWorktree && !shouldMaterializeLegacyBranchWorktree
+                  ? newWorktreeBaseBranch(activeThreadBranch, draftThread?.fetchOrigin ?? true)
+                  : baseBranchForWorktree,
+              ...(shouldCreateWorktree && !shouldMaterializeLegacyBranchWorktree
+                ? {
+                    fetchOrigin: draftThread?.fetchOrigin ?? true,
+                    worktreeBranchName: draftThread?.worktreeBranchName ?? null,
+                  }
+                : {}),
+              shouldCreateWorktree,
+            },
+        settings: effectiveSettingsSnapshot,
+        project: {
+          projectId: activeProject.id,
+          projectCwd: activeProject.cwd,
+        },
+        ...(pendingWorktreeSource ? { prepareForDispatch: prepareWorktreeSourceForDispatch } : {}),
+        scroll: {
+          scrollToEndBeforeOptimistic: async () => {
+            isAtEndRef.current = true;
+            setTimelineLiveFollowEnabled(true);
+            showScrollDebouncer.current.cancel();
+            setShowScrollToBottom(false);
+            await legendListRef.current?.scrollToEnd?.({ animated: false });
+          },
+          scrollToEndAfterOptimistic,
+        },
+        draft: {
+          // Clearing has to target the thread the turn actually went to, or the
+          // composed prompt would linger on the abandoned draft.
+          composerDraftTarget,
+          environmentId,
+          clearComposerDraftContent,
+          setComposerDraftTokenMode,
+          setComposerDraftPrompt,
+          addComposerDraftImages,
+          removeComposerDraftImage,
+          setComposerDraftTerminalContexts,
+          setDraftThreadContext,
+        },
+        dispatch: {
+          api,
+          beginLocalDispatch,
+          resetLocalDispatch,
+          setOptimisticUserMessages,
+          setThreadError,
+        },
+        refs: {
+          promptRef,
+          composerImagesRef,
+          composerTerminalContextsRef,
+          sendInFlightRef,
+        },
+        sourceControl: {
+          fetcher: async (ctx) => {
+            const cwd = gitCwd;
+            if (!cwd) return ctx;
+            const now = DateTime.fromDateUnsafe(new Date());
+            const staleAfterDate = DateTime.fromDateUnsafe(new Date(Date.now() + 5 * 60 * 1000));
+            if (ctx.kind === "issue") {
+              const detail = await queryClient.fetchQuery(
+                issueDetailQueryOptions({
+                  environmentId,
+                  cwd,
+                  reference: String(ctx.detail.number),
+                }),
+              );
+              return {
+                ...ctx,
+                detail,
+                fetchedAt: now,
+                staleAfter: staleAfterDate,
+              };
+            }
             const detail = await queryClient.fetchQuery(
-              issueDetailQueryOptions({
+              changeRequestDetailQueryOptions({
                 environmentId,
                 cwd,
                 reference: String(ctx.detail.number),
               }),
             );
-            return {
-              ...ctx,
-              detail,
-              fetchedAt: now,
-              staleAfter: staleAfterDate,
-            };
-          }
-          const detail = await queryClient.fetchQuery(
-            changeRequestDetailQueryOptions({
-              environmentId,
-              cwd,
-              reference: String(ctx.detail.number),
-            }),
-          );
-          return { ...ctx, detail, fetchedAt: now, staleAfter: staleAfterDate };
+            return { ...ctx, detail, fetchedAt: now, staleAfter: staleAfterDate };
+          },
         },
-      },
-      persistSettings: { persistThreadSettingsForNextTurn },
-      composerHandle: { readComposer },
-      formatOutgoingPrompt,
-    });
-    if (!accepted) return false;
-    if (sourceThreadRef) {
-      // The draft has served its purpose — retire it and follow the turn to
-      // the thread the worktree call created.
-      if (draftId) {
-        clearDraftThread(draftId);
-      }
-      await navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(sourceThreadRef),
-        replace: true,
+        persistSettings: { persistThreadSettingsForNextTurn },
+        composerHandle: { readComposer },
+        formatOutgoingPrompt,
       });
+      if (!accepted) return false;
+      if (sourceThreadRef) {
+        // The draft has served its purpose — retire it and follow the turn to
+        // the thread the worktree call created.
+        if (draftId) {
+          clearDraftThread(draftId);
+        }
+        await navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(sourceThreadRef),
+          replace: true,
+        });
+      }
+      return true;
+    } finally {
+      editorSendPreparationRef.current = false;
     }
-    return true;
   };
   const dispatchComposerSnapshotRef = useRef(dispatchComposerSnapshot);
   dispatchComposerSnapshotRef.current = dispatchComposerSnapshot;
@@ -3586,6 +3666,14 @@ export default function ChatView(props: ChatViewProps) {
     // A turn is already running: queue this message instead of sending it. Queued
     // messages auto-dispatch, in order, once the thread reaches quiescence.
     if (phase === "running" && activeThreadKey) {
+      if (editorSendPreparationRef.current) return;
+      editorSendPreparationRef.current = true;
+      const composerChangedDuringPreparation = captureComposerContentGuard();
+      try {
+        if (!(await drainEditorsBeforeSend())) return;
+      } finally {
+        editorSendPreparationRef.current = false;
+      }
       const queuedMessageId = newMessageId();
       enqueueMessage(activeThreadKey, {
         id: queuedMessageId,
@@ -3598,10 +3686,12 @@ export default function ChatView(props: ChatViewProps) {
         },
         settings: settingsSnapshot,
       });
-      promptRef.current = "";
-      clearComposerDraftContent(composerDraftTarget);
-      setComposerDraftTokenMode(composerDraftTarget, tokenMode);
-      readComposer()?.resetCursorState();
+      if (!composerChangedDuringPreparation()) {
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        setComposerDraftTokenMode(composerDraftTarget, tokenMode);
+        readComposer()?.resetCursorState();
+      }
       return;
     }
 
@@ -3690,6 +3780,7 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
+      if (!(await prepareEditorSend())) return;
       const sendCtx = readComposer()?.getSendContext();
       if (!sendCtx) {
         return;
@@ -3823,6 +3914,7 @@ export default function ChatView(props: ChatViewProps) {
       setComposerDraftTokenMode,
       setThreadError,
       autoOpenPlanSidebar,
+      prepareEditorSend,
       environmentId,
       tokenMode,
     ],
@@ -3844,6 +3936,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
+    if (!(await prepareEditorSend())) return;
     const sendCtx = readComposer()?.getSendContext();
     if (!sendCtx) {
       return;
@@ -3965,6 +4058,7 @@ export default function ChatView(props: ChatViewProps) {
     runtimeMode,
     tokenMode,
     autoOpenPlanSidebar,
+    prepareEditorSend,
     environmentId,
   ]);
 

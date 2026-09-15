@@ -1,5 +1,5 @@
 import { File as DiffsFile } from "@pierre/diffs/react";
-import { useBlocker, useParams, useSearch } from "@tanstack/react-router";
+import { useParams, useSearch } from "@tanstack/react-router";
 import { Schema } from "effect";
 import {
   ArrowLeftIcon,
@@ -22,6 +22,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import { parsePreviewRouteSearch } from "../previewRouteSearch";
@@ -30,8 +31,6 @@ import { useSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "../hooks/useLocalStorage";
 import { useProjectListEntries, useProjectReadFile } from "~/rpc/useProjectPreview";
-import { setProjectReadFileCacheData } from "~/rpc/projectPreviewAtoms";
-import { ensureEnvironmentApi } from "~/environmentApi";
 import { selectProjectByRef, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef } from "../threadRoutes";
@@ -41,19 +40,12 @@ import { ChangedFilesTree } from "./chat/ChangedFilesTree";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { PreviewFileEditor } from "./PreviewFileEditor";
 import { PREVIEW_FILE_UNSAFE_CSS } from "./PreviewFileStyles";
+import { createPreviewFileDocument, isPreviewFileSessionDirty } from "./PreviewFileEditSession";
 import {
-  beginPreviewFileSave,
-  createPreviewFileDocument,
-  createPreviewFileEditSession,
-  discardPreviewFileChanges,
-  failPreviewFileSave,
-  finishPreviewFileSave,
-  isPreviewFileSessionDirty,
-  readPreviewFileSaveFailure,
-  reconcilePreviewFileSession,
-  updatePreviewFileSessionContents,
-  type PreviewFileEditSession,
-} from "./PreviewFileEditSession";
+  getPreviewFileSession,
+  readPreviewFileSession,
+  retainedPreviewFilePath,
+} from "./previewFileSessions";
 import { Badge } from "./ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
@@ -73,6 +65,9 @@ import {
   inferPreviewLanguage,
   resolvePreviewSizeGuard,
 } from "./PreviewPanel.logic";
+
+const subscribeNoSession = () => () => {};
+const readNoSession = () => null;
 
 const PREVIEW_TREE_WIDTH_STORAGE_KEY = "chat_preview_tree_width";
 const PREVIEW_TREE_MIN_WIDTH = 220;
@@ -290,8 +285,9 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   );
   const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-  const [editSession, setEditSession] = useState<PreviewFileEditSession | null>(null);
-  const editSessionRef = useRef<PreviewFileEditSession | null>(null);
+  const [recoveryAction, setRecoveryAction] = useState<"reload" | "discard" | "overwrite" | null>(
+    null,
+  );
   const [pendingFilePath, setPendingFilePath] = useState<string | null>(null);
   const [fileFilterQuery, setFileFilterQuery] = useState("");
   const [isTreeVisible, setIsTreeVisible] = useState(true);
@@ -322,21 +318,20 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   const previousSelectedFileRefreshKeyRef = useRef<string | null>(null);
   const missingFileRefreshKeyRef = useRef<string | null>(null);
 
-  const commitEditSession = useCallback((next: PreviewFileEditSession | null) => {
-    editSessionRef.current = next;
-    setEditSession(next);
-  }, []);
-
   useEffect(() => {
     setWrapPreviewLines(isPhonePresentation ? true : settings.diffWordWrap);
   }, [isPhonePresentation, settings.diffWordWrap]);
 
   useEffect(() => {
-    setSelectedFilePath(null);
-    commitEditSession(null);
+    setSelectedFilePath(
+      !isPhonePresentation && activeThread?.environmentId && activeCwd
+        ? retainedPreviewFilePath({ environmentId: activeThread.environmentId, cwd: activeCwd })
+        : null,
+    );
     setPendingFilePath(null);
+    setRecoveryAction(null);
     setIsTreeVisible(true);
-  }, [activeThread?.environmentId, activeThread?.id, commitEditSession]);
+  }, [activeCwd, activeThread?.environmentId, activeThread?.id, isPhonePresentation]);
 
   const latestProjectFilesRefreshKey = useMemo(() => {
     const latestChangedSummary = (activeThread?.turnDiffSummaries ?? [])
@@ -379,23 +374,21 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   const isFilteringProjectFiles = fileFilterQuery.trim().length > 0;
 
   useEffect(() => {
-    if (!projectFiles) {
+    if (
+      !projectFiles ||
+      !selectedFilePath ||
+      projectFiles.entries.some((file) => file.path === selectedFilePath)
+    )
       return;
-    }
-    if (projectFiles.entries.length === 0) {
-      if (!isPreviewFileSessionDirty(editSessionRef.current)) {
-        setSelectedFilePath(null);
-        commitEditSession(null);
-      }
-      return;
-    }
-    if (selectedFilePath && !projectFiles.entries.some((file) => file.path === selectedFilePath)) {
-      if (!isPreviewFileSessionDirty(editSessionRef.current)) {
-        setSelectedFilePath(null);
-        commitEditSession(null);
-      }
-    }
-  }, [commitEditSession, projectFiles, selectedFilePath]);
+    const retained =
+      activeThread?.environmentId && activeCwd
+        ? readPreviewFileSession(
+            { environmentId: activeThread.environmentId, cwd: activeCwd },
+            selectedFilePath,
+          )
+        : null;
+    if (!retained?.unsaved) setSelectedFilePath(null);
+  }, [activeCwd, activeThread?.environmentId, projectFiles, selectedFilePath]);
 
   useEffect(() => {
     if (previewSearch.preview !== "1") {
@@ -479,40 +472,6 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     void refetchSelectedFile();
   }, [latestSelectedFileRefreshKey, previewSearch.preview, refetchSelectedFile, selectedFilePath]);
 
-  useEffect(() => {
-    if (!selectedFilePath || !isMissingWorkspaceFileError(selectedFileError)) {
-      missingFileRefreshKeyRef.current = null;
-      return;
-    }
-    const refreshKey = `${activeCwd ?? ""}\u0000${selectedFilePath}\u0000${selectedFileError}`;
-    if (missingFileRefreshKeyRef.current === refreshKey) {
-      return;
-    }
-    missingFileRefreshKeyRef.current = refreshKey;
-    void refetchProjectFiles()
-      .then((result) => {
-        if (!result.data?.entries.some((entry) => entry.path === selectedFilePath)) {
-          const currentSession = editSessionRef.current;
-          if (
-            currentSession?.relativePath === selectedFilePath &&
-            isPreviewFileSessionDirty(currentSession)
-          ) {
-            commitEditSession(
-              failPreviewFileSave(currentSession, {
-                reason: "deleted",
-                message:
-                  "This file was removed from disk after it was opened. Explorer will not recreate it.",
-              }),
-            );
-          } else {
-            setSelectedFilePath((current) => (current === selectedFilePath ? null : current));
-            if (currentSession?.relativePath === selectedFilePath) commitEditSession(null);
-          }
-        }
-      })
-      .catch(() => undefined);
-  }, [activeCwd, commitEditSession, refetchProjectFiles, selectedFileError, selectedFilePath]);
-
   const selectedFileDocument = useMemo(() => {
     if (
       !activeThread?.environmentId ||
@@ -528,176 +487,96 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     );
   }, [activeCwd, activeThread?.environmentId, selectedFileData, selectedFilePath]);
 
+  const sessionOwner = useMemo(() => {
+    if (isPhonePresentation || !activeThread?.environmentId || !activeCwd || !selectedFilePath)
+      return null;
+    const scope = { environmentId: activeThread.environmentId, cwd: activeCwd };
+    const existing = readPreviewFileSession(scope, selectedFilePath);
+    if (existing) return existing;
+    return selectedFileDocument && selectedFileKind === "text"
+      ? getPreviewFileSession(scope, selectedFileDocument)
+      : null;
+  }, [
+    activeCwd,
+    activeThread?.environmentId,
+    isPhonePresentation,
+    selectedFileDocument,
+    selectedFileKind,
+    selectedFilePath,
+  ]);
+  const currentEditSession = useSyncExternalStore(
+    sessionOwner?.subscribe ?? subscribeNoSession,
+    sessionOwner?.getSnapshot ?? readNoSession,
+  );
   useEffect(() => {
-    if (!selectedFileDocument) return;
-    commitEditSession(reconcilePreviewFileSession(editSessionRef.current, selectedFileDocument));
-  }, [commitEditSession, selectedFileDocument]);
-
-  const currentEditSession =
-    selectedFileDocument && editSession?.key === selectedFileDocument.key ? editSession : null;
+    if (selectedFileDocument) sessionOwner?.load(selectedFileDocument);
+  }, [sessionOwner, selectedFileDocument]);
   const hasUnsavedChanges = isPreviewFileSessionDirty(currentEditSession);
   const isSelectedFileEditable = Boolean(
     !isPhonePresentation &&
     selectedFileKind === "text" &&
-    selectedFileDocument &&
-    selectedFileDocument.lineEnding !== "mixed",
+    currentEditSession &&
+    currentEditSession.lineEnding !== "mixed" &&
+    currentEditSession.diskState === "known",
   );
-  const shouldBlockNavigation = useCallback(() => hasUnsavedChanges, [hasUnsavedChanges]);
-  const navigationBlocker = useBlocker({
-    shouldBlockFn: shouldBlockNavigation,
-    disabled: !hasUnsavedChanges,
-    enableBeforeUnload: hasUnsavedChanges,
-    withResolver: true,
-  });
-
-  const openFileImmediately = useCallback(
-    (filePath: string) => {
-      commitEditSession(null);
-      setSelectedFilePath(filePath);
-    },
-    [commitEditSession],
-  );
+  const selectionGeneration = useRef(0);
+  useEffect(() => {
+    selectionGeneration.current++;
+    return () => {
+      selectionGeneration.current++;
+    };
+  }, [sessionOwner]);
 
   const onSelectFile = useCallback(
-    (filePath: string) => {
+    async (filePath: string) => {
       if (filePath === selectedFilePath) return;
-      if (isPreviewFileSessionDirty(editSessionRef.current)) {
-        setPendingFilePath(filePath);
+      const generation = ++selectionGeneration.current;
+      if (sessionOwner?.unsaved && !(await sessionOwner.flush())) {
+        if (generation === selectionGeneration.current) setPendingFilePath(filePath);
         return;
       }
-      openFileImmediately(filePath);
+      if (generation === selectionGeneration.current) setSelectedFilePath(filePath);
     },
-    [openFileImmediately, selectedFilePath],
+    [selectedFilePath, sessionOwner],
   );
 
   const onEditContentsChange = useCallback(
-    (contents: string) => {
-      const current = editSessionRef.current;
-      if (!current || current.key !== selectedFileDocument?.key) return;
-      commitEditSession(updatePreviewFileSessionContents(current, contents));
-    },
-    [commitEditSession, selectedFileDocument?.key],
+    (contents: string) => sessionOwner?.change(contents),
+    [sessionOwner],
+  );
+  const onDiscardFileChanges = useCallback(() => setRecoveryAction("discard"), []);
+  const reloadSelectedFile = useCallback(() => setRecoveryAction("reload"), []);
+  const saveSelectedFile = useCallback(
+    () => sessionOwner?.flush(true) ?? Promise.resolve(false),
+    [sessionOwner],
   );
 
-  const reloadSelectedFile = useCallback(async () => {
-    if (!activeThread?.environmentId || !activeCwd || !selectedFilePath) return false;
-    try {
-      const data = await ensureEnvironmentApi(activeThread.environmentId).projects.readFile({
-        cwd: activeCwd,
-        relativePath: selectedFilePath,
-      });
-      setProjectReadFileCacheData(
-        {
-          environmentId: activeThread.environmentId,
-          cwd: activeCwd,
-          relativePath: selectedFilePath,
-        },
-        data,
-      );
-      commitEditSession(
-        createPreviewFileEditSession(
-          createPreviewFileDocument(
-            { environmentId: activeThread.environmentId, cwd: activeCwd },
-            data,
-          ),
-        ),
-      );
-      return true;
-    } catch (error) {
-      const current = editSessionRef.current;
-      if (current) {
-        commitEditSession(
-          failPreviewFileSave(current, {
-            reason: isMissingWorkspaceFileError(
-              error instanceof Error ? error.message : String(error),
-            )
-              ? "deleted"
-              : "failed",
-            message: error instanceof Error ? error.message : "Failed to reload this file.",
-          }),
-        );
-      }
-      return false;
-    }
-  }, [activeCwd, activeThread?.environmentId, commitEditSession, selectedFilePath]);
-
-  const onDiscardFileChanges = useCallback(() => {
-    const current = editSessionRef.current;
-    if (!current || current.key !== selectedFileDocument?.key) return;
-    if (current.errorReason === "deleted") {
-      commitEditSession(null);
-      setSelectedFilePath(null);
-      void refetchProjectFiles();
+  useEffect(() => {
+    if (!selectedFilePath || !isMissingWorkspaceFileError(selectedFileError)) {
+      missingFileRefreshKeyRef.current = null;
       return;
     }
-    if (current.saveStatus === "conflict") {
-      void reloadSelectedFile();
-      return;
-    }
-    commitEditSession(discardPreviewFileChanges(current));
-  }, [commitEditSession, refetchProjectFiles, reloadSelectedFile, selectedFileDocument?.key]);
-
-  const saveSelectedFile = useCallback(async () => {
-    const current = editSessionRef.current;
-    if (
-      !current ||
-      !activeThread?.environmentId ||
-      !activeCwd ||
-      current.relativePath !== selectedFilePath ||
-      current.lineEnding === "mixed" ||
-      current.saveStatus === "saving" ||
-      current.saveStatus === "conflict" ||
-      !isPreviewFileSessionDirty(current)
-    ) {
-      return false;
-    }
-
-    const savingKey = current.key;
-    const savedContents = current.contents;
-    commitEditSession(beginPreviewFileSave(current));
-    try {
-      const result = await ensureEnvironmentApi(activeThread.environmentId).projects.writeFile({
-        cwd: activeCwd,
-        relativePath: current.relativePath,
-        contents: savedContents,
-        expectedVersion: current.version,
-        encoding: current.encoding,
-        lineEnding: current.lineEnding,
-      });
-      setProjectReadFileCacheData(
-        {
-          environmentId: activeThread.environmentId,
-          cwd: activeCwd,
-          relativePath: current.relativePath,
-        },
-        {
-          relativePath: current.relativePath,
-          contents: savedContents,
-          version: result.version,
-          encoding: current.encoding,
-          lineEnding: current.lineEnding,
-        },
-      );
-      const latest = editSessionRef.current;
-      if (!latest || latest.key !== savingKey) return false;
-      const saved = finishPreviewFileSave(latest, savedContents, result.version);
-      commitEditSession(saved);
-      return !isPreviewFileSessionDirty(saved);
-    } catch (error) {
-      const latest = editSessionRef.current;
-      if (latest?.key === savingKey) {
-        commitEditSession(failPreviewFileSave(latest, readPreviewFileSaveFailure(error)));
-      }
-      return false;
-    }
-  }, [activeCwd, activeThread?.environmentId, commitEditSession, selectedFilePath]);
+    const refreshKey = `${activeCwd}\u0000${selectedFilePath}\u0000${selectedFileError}`;
+    if (missingFileRefreshKeyRef.current === refreshKey) return;
+    missingFileRefreshKeyRef.current = refreshKey;
+    const generation = selectionGeneration.current;
+    void refetchProjectFiles()
+      .then((result) => {
+        if (generation !== selectionGeneration.current) return;
+        if (!result.data?.entries.some((entry) => entry.path === selectedFilePath)) {
+          if (sessionOwner?.unsaved) sessionOwner.markDeleted();
+          else setSelectedFilePath(null);
+        }
+      })
+      .catch(() => undefined);
+  }, [activeCwd, refetchProjectFiles, selectedFileError, selectedFilePath, sessionOwner]);
 
   const saveIsBlocked =
     currentEditSession?.saveStatus === "conflict" ||
     currentEditSession?.errorReason === "unsupported";
   const canSaveSelectedFile = Boolean(
     isSelectedFileEditable &&
-    hasUnsavedChanges &&
+    sessionOwner?.unsaved &&
     currentEditSession?.saveStatus !== "saving" &&
     !saveIsBlocked,
   );
@@ -715,7 +594,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   }, [canSaveSelectedFile, hasUnsavedChanges, isSelectedFileEditable, saveSelectedFile]);
 
   const previewTextFile = useMemo(() => {
-    const contents = richSelectedFileData?.contents;
+    const contents = currentEditSession?.contents ?? richSelectedFileData?.contents;
     if (!selectedFilePath || selectedFileKind !== "text" || contents === undefined) {
       return null;
     }
@@ -726,7 +605,12 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
       lang: inferPreviewLanguage(selectedFilePath),
       cacheKey: buildPreviewFileCacheKey(selectedFilePath, contents),
     };
-  }, [richSelectedFileData?.contents, selectedFileKind, selectedFilePath]);
+  }, [
+    currentEditSession?.contents,
+    richSelectedFileData?.contents,
+    selectedFileKind,
+    selectedFilePath,
+  ]);
   const previewFileOptions = useMemo(
     () => ({
       disableFileHeader: true,
@@ -814,28 +698,35 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     setIsTreeVisible((current) => !current);
   }, [isTreeVisible]);
 
-  const unsavedDialogOpen = pendingFilePath !== null || navigationBlocker.status === "blocked";
-
-  const cancelUnsavedNavigation = useCallback(() => {
+  const unsavedDialogOpen = pendingFilePath !== null;
+  const cancelUnsavedNavigation = useCallback(() => setPendingFilePath(null), []);
+  const continueUnsavedNavigation = useCallback(async () => {
+    const generation = selectionGeneration.current;
+    if (sessionOwner && !(await sessionOwner.discard())) return;
+    if (generation !== selectionGeneration.current) return;
+    setSelectedFilePath(pendingFilePath);
     setPendingFilePath(null);
-    if (navigationBlocker.status === "blocked") navigationBlocker.reset();
-  }, [navigationBlocker]);
-
-  const continueUnsavedNavigation = useCallback(() => {
-    const nextFilePath = pendingFilePath;
-    setPendingFilePath(null);
-    commitEditSession(null);
-    if (nextFilePath) {
-      setSelectedFilePath(nextFilePath);
-      return;
-    }
-    if (navigationBlocker.status === "blocked") navigationBlocker.proceed();
-  }, [commitEditSession, navigationBlocker, pendingFilePath]);
-
+  }, [sessionOwner, pendingFilePath]);
   const saveAndContinueNavigation = useCallback(async () => {
-    if (!(await saveSelectedFile())) return;
-    continueUnsavedNavigation();
-  }, [continueUnsavedNavigation, saveSelectedFile]);
+    const generation = selectionGeneration.current;
+    if (!(await saveSelectedFile()) || generation !== selectionGeneration.current) return;
+    setSelectedFilePath(pendingFilePath);
+    setPendingFilePath(null);
+  }, [pendingFilePath, saveSelectedFile]);
+  const confirmRecovery = async () => {
+    const owner = sessionOwner;
+    const generation = selectionGeneration.current;
+    const action = recoveryAction;
+    setRecoveryAction(null);
+    if (!owner) return;
+    if (action === "reload") await owner.reload();
+    else if (action === "overwrite") await owner.flush(true, true);
+    else if (action === "discard") {
+      const deleted = owner.getSnapshot().errorReason === "deleted";
+      if ((await owner.discard()) && deleted && generation === selectionGeneration.current)
+        setSelectedFilePath(null);
+    }
+  };
 
   const headerRow = (
     <>
@@ -899,14 +790,14 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   );
 
   const selectedFileView =
-    selectedFileSizeGuard?.state === "too-large" ? (
+    selectedFileSizeGuard?.state === "too-large" && !currentEditSession ? (
       <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
         File is too large to preview ({selectedFileSizeGuard.sizeBytes} bytes). Limit is{" "}
         {selectedFileSizeGuard.limitBytes} bytes.
       </div>
-    ) : selectedFileQuery.isLoading && !selectedFileData ? (
+    ) : selectedFileQuery.isLoading && !selectedFileData && !currentEditSession ? (
       <DiffPanelLoadingState label="Loading file preview..." />
-    ) : selectedFileError && !selectedFileData ? (
+    ) : selectedFileError && !selectedFileData && !currentEditSession ? (
       <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
         {selectedFileError}
       </div>
@@ -938,11 +829,13 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
                 </span>
               ) : null}
             </div>
-            {isSelectedFileEditable && currentEditSession ? (
+            {!isPhonePresentation &&
+            currentEditSession &&
+            (isSelectedFileEditable || sessionOwner?.unsaved) ? (
               <div className="preview-panel-file-actions flex shrink-0 items-center gap-1">
                 <Button
                   aria-label="Discard file changes"
-                  disabled={!hasUnsavedChanges || currentEditSession.saveStatus === "saving"}
+                  disabled={!sessionOwner?.unsaved}
                   onClick={onDiscardFileChanges}
                   size="xs"
                   variant="ghost"
@@ -967,6 +860,17 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
               </div>
             ) : null}
           </div>
+          {currentEditSession?.diskState === "unknown" ? (
+            <div
+              role="status"
+              className="flex items-center gap-2 border-b border-border p-3 text-xs"
+            >
+              Draft discarded. Reload to read the current disk contents.
+              <Button size="xs" variant="outline" onClick={reloadSelectedFile}>
+                Reload
+              </Button>
+            </div>
+          ) : null}
           {currentEditSession?.errorMessage ? (
             <div className="shrink-0 border-b border-border/60 p-2">
               <Alert
@@ -987,18 +891,27 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
                 </AlertTitle>
                 <AlertDescription className="gap-2 text-[11px] leading-4">
                   <span>{currentEditSession.errorMessage}</span>
-                  {currentEditSession.saveStatus === "conflict" ? (
+                  <Button
+                    className="self-start"
+                    onClick={
+                      currentEditSession.errorReason === "deleted"
+                        ? onDiscardFileChanges
+                        : () => void reloadSelectedFile()
+                    }
+                    size="xs"
+                    variant="outline"
+                  >
+                    {currentEditSession.errorReason === "deleted" ? "Close file" : "Reload"}
+                  </Button>
+
+                  {currentEditSession.saveStatus === "conflict" &&
+                  currentEditSession.errorReason !== "deleted" ? (
                     <Button
-                      className="self-start"
-                      onClick={
-                        currentEditSession.errorReason === "deleted"
-                          ? onDiscardFileChanges
-                          : () => void reloadSelectedFile()
-                      }
                       size="xs"
                       variant="outline"
+                      onClick={() => setRecoveryAction("overwrite")}
                     >
-                      {currentEditSession.errorReason === "deleted" ? "Close file" : "Reload"}
+                      Overwrite
                     </Button>
                   ) : null}
                 </AlertDescription>
@@ -1029,7 +942,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
               onChange={onEditContentsChange}
               options={previewFileOptions}
             />
-          ) : previewTextFile ? (
+          ) : currentEditSession?.diskState === "unknown" ? null : previewTextFile ? (
             <div className="min-h-0 flex-1 overflow-auto">
               <DiffsFile
                 file={previewTextFile}
@@ -1197,6 +1110,39 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
           </div>
         )}
       </DiffPanelShell>
+      <AlertDialog
+        open={recoveryAction !== null}
+        onOpenChange={(open) => {
+          if (!open) setRecoveryAction(null);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {recoveryAction === "overwrite"
+                ? "Overwrite the disk file?"
+                : recoveryAction === "reload"
+                  ? "Reload from disk?"
+                  : "Discard file changes?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {recoveryAction === "overwrite"
+                ? "Replace the current disk contents with your draft. Another external edit will stop the write."
+                : recoveryAction === "reload"
+                  ? "Replace your draft with the latest disk contents. This cannot be undone."
+                  : "Abandon your unsaved edits without writing the file. This cannot be undone."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <Button variant="outline" onClick={() => setRecoveryAction(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive-outline" onClick={() => void confirmRecovery()}>
+              Confirm {recoveryAction}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
       <AlertDialog
         open={unsavedDialogOpen}
         onOpenChange={(open) => {
