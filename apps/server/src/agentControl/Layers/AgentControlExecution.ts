@@ -1,4 +1,4 @@
-import { DEFAULT_WORKTREE_BRANCH_PREFIX } from "@ryco/contracts";
+import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { existsSync } from "node:fs";
@@ -21,12 +21,13 @@ import {
 } from "@ryco/contracts";
 import { Cause, Duration, Effect, Layer, Option, Stream } from "effect";
 
-import { resolveManagedWorktreesRoot, ServerConfig } from "../../config.ts";
+import { ServerConfig } from "../../config.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { resolveConfiguredWorktreeRoot } from "../../project/worktreeRoot.ts";
 import { resolveWorktreeCheckoutPath } from "../../project/worktreeCheckoutPaths.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
 import {
@@ -235,7 +236,6 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const deviceService = yield* Effect.serviceOption(DeviceService);
     const config = yield* ServerConfig;
     const startup = yield* ServerRuntimeStartup;
-    const managedWorktreesRoot = resolveManagedWorktreesRoot(config);
 
     const loadThread = (threadId: ThreadId) =>
       projections.getThreadShellById(threadId).pipe(
@@ -814,9 +814,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             readonly baseRef: string;
           }>;
 
-          const worktreeBranchPrefix = Option.isSome(settingsService)
-            ? (yield* settingsService.value.getSettings).worktreeBranchPrefix
-            : DEFAULT_WORKTREE_BRANCH_PREFIX;
+          const worktreeSettings = Option.isSome(settingsService)
+            ? yield* settingsService.value.getSettings
+            : DEFAULT_SERVER_SETTINGS;
+          const { worktreeBranchPrefix } = worktreeSettings;
 
           // Entire batch preflight completes before any thread command is dispatched.
           for (const [index, entry] of entries.entries()) {
@@ -826,7 +827,12 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             const branch = branchFor(operation.operationId, index, worktreeBranchPrefix);
             const checkoutPath = resolveWorktreeCheckoutPath({
               location: undefined,
-              appWorktreesRoot: managedWorktreesRoot,
+              appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
+                settings: worktreeSettings,
+                projectId: project.id,
+                config,
+                policy: workspaceAccess,
+              }),
               projectId: project.id,
               workspaceRoot: project.workspaceRoot,
               projectMetadataDir: project.projectMetadataDir,

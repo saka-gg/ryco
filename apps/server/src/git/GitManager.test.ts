@@ -2866,7 +2866,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
 
       expect(result.worktreePath).not.toBeNull();
       expect(result.worktreePath).toBe(
-        path.join(repoDir, ".ryco", "worktrees", "feature-pr-worktree-setup"),
+        fs.realpathSync(path.join(repoDir, ".ryco", "worktrees", "feature-pr-worktree-setup")),
       );
       expect(setupCalls).toHaveLength(1);
       expect(setupCalls[0]).toEqual({
@@ -3195,6 +3195,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         cwd: repoDir,
         reference: "93",
         mode: "worktree",
+        // Future storage being unavailable must not revoke a registered checkout.
+        worktreesDir: "/unavailable-root-for-new-worktrees",
       });
       expect(reused.branch).toBe(legacyBranch);
       expect(fs.realpathSync(reused.worktreePath!)).toBe(fs.realpathSync(worktreePath));
