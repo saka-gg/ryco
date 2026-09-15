@@ -1,3 +1,4 @@
+import Migration0055 from "./Migrations/055_ApprovalResponseClaims.ts";
 /**
  * MigrationsLive - Migration runner with inline loader
  *
@@ -134,6 +135,7 @@ export const migrationEntries = [
   [52, "ProjectionThreadsSettled", Migration0052],
   [53, "ThreadPriorityRankings", Migration0053],
   [54, "ProjectionThreadsSnoozed", Migration0054],
+  [55, "ApprovalResponseClaims", Migration0055],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -54,6 +54,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   readonly retainInventoryOnError?: boolean;
 }): Effect.fn.Return<ServerProviderShape, ServerSettingsError, Scope.Scope> {
   const refreshSemaphore = yield* Semaphore.make(1);
+  // Generation validation, snapshot mutation and stream publication are one commit.
+  // Keep probes and enrichment teardown outside this short critical section.
+  const publicationSemaphore = yield* Semaphore.make(1);
   const changesPubSub = yield* Effect.acquireRelease(
     PubSub.sliding<ServerProvider>(1),
     PubSub.shutdown,
@@ -96,7 +99,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       return;
     }
     yield* PubSub.publish(changesPubSub, snapshotToPublish);
-  });
+  }, publicationSemaphore.withPermits(1));
 
   const restartSnapshotEnrichment = Effect.fn("restartSnapshotEnrichment")(function* (
     settings: Settings,
@@ -150,38 +153,47 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         ),
       ),
     );
-    const previousSnapshot = yield* Ref.get(snapshotStateRef).pipe(
-      Effect.map((state) => state.snapshot),
+    const [nextSnapshot, nextGeneration] = yield* publicationSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const previousSnapshot = yield* Ref.get(snapshotStateRef).pipe(
+          Effect.map((state) => state.snapshot),
+        );
+        const nextSnapshot =
+          input.retainInventoryOnError === true && checkedSnapshot.status === "error"
+            ? {
+                ...checkedSnapshot,
+                models:
+                  checkedSnapshot.models.length > 0
+                    ? checkedSnapshot.models
+                    : previousSnapshot.models,
+                slashCommands:
+                  checkedSnapshot.slashCommands.length > 0
+                    ? checkedSnapshot.slashCommands
+                    : previousSnapshot.slashCommands,
+                skills:
+                  checkedSnapshot.skills.length > 0
+                    ? checkedSnapshot.skills
+                    : previousSnapshot.skills,
+              }
+            : checkedSnapshot;
+        const nextGeneration = yield* Ref.modify(snapshotStateRef, (state) => {
+          const generation = input.enrichSnapshot
+            ? state.enrichmentGeneration + 1
+            : state.enrichmentGeneration;
+          return [
+            generation,
+            {
+              snapshot: nextSnapshot,
+              enrichmentGeneration: generation,
+              lastRefreshAttemptAtMs: state.lastRefreshAttemptAtMs,
+            },
+          ] as const;
+        });
+        yield* Ref.set(settingsRef, nextSettings);
+        yield* PubSub.publish(changesPubSub, nextSnapshot);
+        return [nextSnapshot, nextGeneration] as const;
+      }),
     );
-    const nextSnapshot =
-      input.retainInventoryOnError === true && checkedSnapshot.status === "error"
-        ? {
-            ...checkedSnapshot,
-            models:
-              checkedSnapshot.models.length > 0 ? checkedSnapshot.models : previousSnapshot.models,
-            slashCommands:
-              checkedSnapshot.slashCommands.length > 0
-                ? checkedSnapshot.slashCommands
-                : previousSnapshot.slashCommands,
-            skills:
-              checkedSnapshot.skills.length > 0 ? checkedSnapshot.skills : previousSnapshot.skills,
-          }
-        : checkedSnapshot;
-    const nextGeneration = yield* Ref.modify(snapshotStateRef, (state) => {
-      const generation = input.enrichSnapshot
-        ? state.enrichmentGeneration + 1
-        : state.enrichmentGeneration;
-      return [
-        generation,
-        {
-          snapshot: nextSnapshot,
-          enrichmentGeneration: generation,
-          lastRefreshAttemptAtMs: state.lastRefreshAttemptAtMs,
-        },
-      ] as const;
-    });
-    yield* Ref.set(settingsRef, nextSettings);
-    yield* PubSub.publish(changesPubSub, nextSnapshot);
     yield* restartSnapshotEnrichment(nextSettings, nextSnapshot, nextGeneration);
     return nextSnapshot;
   });

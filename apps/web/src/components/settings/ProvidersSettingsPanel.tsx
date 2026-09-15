@@ -595,6 +595,7 @@ export function ProvidersSettingsPanel() {
           >
             {selectedRow ? (
               <ProviderInstanceCard
+                usageAvailable={settingsTarget?.connected === true}
                 key={selectedRow.instanceId}
                 instanceId={selectedRow.instanceId}
                 instance={selectedRow.instance}

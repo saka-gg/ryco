@@ -75,7 +75,15 @@ export function applyServerSettingsPatch(
   patch: ServerSettingsPatch,
 ): ServerSettings {
   const selectionPatch = patch.textGenerationModelSelection;
-  const next = deepMerge(current, patch);
+  let next = deepMerge(current, patch);
+  if (patch.projectWorktreeRoots !== undefined) {
+    const roots = new Map(Object.entries(current.projectWorktreeRoots));
+    for (const [projectId, root] of Object.entries(patch.projectWorktreeRoots)) {
+      if (root === null || root === "") roots.delete(projectId);
+      else roots.set(projectId, root);
+    }
+    next = { ...next, projectWorktreeRoots: Object.fromEntries(roots) };
+  }
   const nextWithReplacements =
     patch.providerInstances !== undefined
       ? {

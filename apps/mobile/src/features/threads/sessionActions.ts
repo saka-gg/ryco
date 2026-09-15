@@ -1,3 +1,5 @@
+import { submitApprovalResponse } from "@ryco/client-runtime/state/session";
+import type { ApprovalResponseIdentity } from "@ryco/contracts";
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
   type ApprovalRequestId,
@@ -122,14 +124,20 @@ export async function respondToThreadApproval(input: {
   threadId: ThreadId;
   requestId: ApprovalRequestId;
   decision: ProviderApprovalDecision;
+  approvalIdentity?: ApprovalResponseIdentity | undefined;
 }): Promise<void> {
-  await input.api.orchestration.dispatchCommand({
-    type: "thread.approval.respond",
-    commandId: newCommandId(),
-    threadId: input.threadId,
-    requestId: input.requestId,
-    decision: input.decision,
-    createdAt: new Date().toISOString(),
+  await submitApprovalResponse({
+    ...input,
+    submit: () =>
+      input.api.orchestration.dispatchCommand({
+        type: "thread.approval.respond",
+        commandId: newCommandId(),
+        threadId: input.threadId,
+        requestId: input.requestId,
+        decision: input.decision,
+        ...(input.approvalIdentity ? { approvalIdentity: input.approvalIdentity } : {}),
+        createdAt: new Date().toISOString(),
+      }),
   });
 }
 

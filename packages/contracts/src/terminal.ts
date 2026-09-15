@@ -84,6 +84,13 @@ export type TerminalCloseInput = typeof TerminalCloseInput.Type;
 export const TerminalSessionStatus = Schema.Literals(["starting", "running", "exited", "error"]);
 export type TerminalSessionStatus = typeof TerminalSessionStatus.Type;
 
+/** Ordering within one manager lifetime; never persisted across server restarts. */
+export const TerminalCursor = Schema.Struct({
+  generation: TrimmedNonEmptyString,
+  sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type TerminalCursor = typeof TerminalCursor.Type;
+
 export const TerminalSessionSnapshot = Schema.Struct({
   threadId: Schema.String.check(Schema.isNonEmpty()),
   terminalId: Schema.String.check(Schema.isNonEmpty()),
@@ -95,6 +102,7 @@ export const TerminalSessionSnapshot = Schema.Struct({
   exitCode: Schema.NullOr(Schema.Int),
   exitSignal: Schema.NullOr(Schema.Int),
   updatedAt: Schema.String,
+  cursor: Schema.optional(TerminalCursor),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 
@@ -102,6 +110,7 @@ const TerminalEventBaseSchema = Schema.Struct({
   threadId: Schema.String.check(Schema.isNonEmpty()),
   terminalId: Schema.String.check(Schema.isNonEmpty()),
   createdAt: Schema.String,
+  cursor: Schema.optional(TerminalCursor),
 });
 
 const TerminalStartedEvent = Schema.Struct({

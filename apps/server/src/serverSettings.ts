@@ -53,6 +53,9 @@ import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerSecretStore } from "./auth/Services/ServerSecretStore.ts";
 
+import { validateWorktreeRoot } from "./project/worktreeRoot.ts";
+import { makeWorkspaceAccessPolicy } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -242,7 +245,8 @@ function stripDefaultServerSettings(current: unknown, defaults: unknown): unknow
 }
 
 const makeServerSettings = Effect.gen(function* () {
-  const { settingsPath } = yield* ServerConfig;
+  const { settingsPath, workspaceAccessRoot } = yield* ServerConfig;
+  const worktreeAccessPolicy = yield* makeWorkspaceAccessPolicy(workspaceAccessRoot);
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const secretStore = yield* ServerSecretStore;
@@ -545,9 +549,25 @@ const makeServerSettings = Effect.gen(function* () {
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
+          const normalizedPatch = { ...patch };
+          const validateRoot = (root: string) =>
+            validateWorktreeRoot(root, worktreeAccessPolicy).pipe(
+              Effect.mapError(
+                (cause) => new ServerSettingsError({ settingsPath, detail: cause.message, cause }),
+              ),
+            );
+          if (patch.worktreeRoot)
+            normalizedPatch.worktreeRoot = yield* validateRoot(patch.worktreeRoot);
+          if (patch.projectWorktreeRoots !== undefined) {
+            const roots: Array<[string, string | null]> = [];
+            for (const [id, root] of Object.entries(patch.projectWorktreeRoots)) {
+              roots.push([id, root ? yield* validateRoot(root) : null]);
+            }
+            normalizedPatch.projectWorktreeRoots = Object.fromEntries(roots);
+          }
           const nextPersisted = yield* persistProviderEnvironmentSecrets(
             current,
-            applyServerSettingsPatch(current, patch),
+            applyServerSettingsPatch(current, normalizedPatch),
           );
           const next = yield* Schema.decodeEffect(ServerSettings)(nextPersisted).pipe(
             Effect.mapError(

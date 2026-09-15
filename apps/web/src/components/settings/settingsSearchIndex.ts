@@ -161,6 +161,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Worktree root",
+    owner: "node",
+    description:
+      "Environment worktree directory and project overrides. Existing checkouts keep their paths.",
+    keywords: "folder path location inherit reset",
+  },
+  {
+    section: "general",
     title: "Add project starts in",
     owner: "node",
     description: "Starting directory for the Add Project browser.",
