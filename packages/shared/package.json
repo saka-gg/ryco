@@ -255,6 +255,10 @@
     "./macLocalSigning": {
       "types": "./src/macLocalSigning.ts",
       "import": "./src/macLocalSigning.ts"
+    },
+    "./threadExport": {
+      "types": "./src/threadExport.ts",
+      "import": "./src/threadExport.ts"
     }
   },
   "scripts": {
