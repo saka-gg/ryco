@@ -522,6 +522,7 @@ export function runtimeEventToActivities(
                   ? "File-change approval requested"
                   : "Approval requested",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
@@ -546,6 +547,7 @@ export function runtimeEventToActivities(
           kind: "approval.resolved",
           summary: "Approval resolved",
           payload: {
+            ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,

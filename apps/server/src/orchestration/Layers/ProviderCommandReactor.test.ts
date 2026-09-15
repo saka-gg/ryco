@@ -1,3 +1,6 @@
+import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
+import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
+import type { ApprovalResponseIdentity } from "@ryco/contracts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -88,7 +91,10 @@ async function waitFor(
 
 describe("ProviderCommandReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderCommandReactor | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderCommandReactor
+    | ProjectionSnapshotQuery
+    | ProjectionPendingApprovalRepository,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -382,6 +388,10 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(SqlitePersistenceMemory),
     );
     const layer = ProviderCommandReactorLive.pipe(
+      Layer.provideMerge(
+        ProjectionPendingApprovalRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
+      ),
+      Layer.provide(SqlitePersistenceMemory),
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -429,6 +439,7 @@ describe("ProviderCommandReactor", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
+    const approvals = await runtime.runPromise(Effect.service(ProjectionPendingApprovalRepository));
     scope = await Effect.runPromise(Scope.make("sequential"));
     const drain = () => Effect.runPromise(reactor.drain);
 
@@ -475,6 +486,14 @@ describe("ProviderCommandReactor", () => {
     return {
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
+      readApproval: (requestId: string) =>
+        Effect.runPromise(
+          approvals.getByRequestId({
+            threadId: ThreadId.make("thread-1"),
+            requestId: ApprovalRequestId.make(requestId),
+          }),
+        ),
       startSession,
       sendTurn,
       interruptTurn,
@@ -2423,6 +2442,375 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  async function prepareApproval() {
+    const harness = await createHarness();
+    const createdAt = new Date().toISOString();
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("approval-safety-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeSessionId: RuntimeSessionId.make("approval-runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("approval-safety-request"),
+        threadId,
+        activity: {
+          id: EventId.make("approval-safety-request"),
+          tone: "approval",
+          kind: "approval.requested",
+          summary: "Command approval requested",
+          payload: {
+            requestId: "approval-safety",
+            requestKind: "command",
+            runtimeSessionId: "approval-runtime-1",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      }),
+    );
+    const identity: ApprovalResponseIdentity = {
+      requestEventId: EventId.make("approval-safety-request"),
+      runtimeSessionId: RuntimeSessionId.make("approval-runtime-1"),
+    };
+    const respond = (
+      id: string,
+      decision: "accept" | "decline" = "accept",
+      approvalIdentity = identity,
+    ) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.approval.respond",
+          commandId: CommandId.make(id),
+          threadId,
+          requestId: asApprovalRequestId("approval-safety"),
+          approvalIdentity,
+          decision,
+          createdAt,
+        }),
+      );
+    const activity = (id: string, kind: string, payload: Record<string, unknown>) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`command:${id}`),
+          threadId,
+          activity: {
+            id: EventId.make(id),
+            kind,
+            tone: "info",
+            summary: kind,
+            payload: {
+              requestId: "approval-safety",
+              runtimeSessionId: "approval-runtime-1",
+              ...payload,
+            },
+            turnId: null,
+            createdAt: new Date().toISOString(),
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    return { ...harness, respond, activity, identity };
+  }
+
+  it("approval safety: distinct simultaneous commands forward only the winning decision", async () => {
+    const harness = await prepareApproval();
+    const results = await Promise.allSettled([
+      harness.respond("approval-first", "accept"),
+      harness.respond("approval-second", "decline"),
+    ]);
+    await harness.drain();
+    expect(harness.respondToRequest.mock.calls.map(([input]) => input.decision)).toEqual([
+      "accept",
+    ]);
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
+    await harness.respond("approval-first", "accept");
+    await harness.drain();
+    expect(harness.respondToRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("approval safety: ambiguous provider failure stays unresolved and cannot be replayed", async () => {
+    const harness = await prepareApproval();
+    harness.respondToRequest.mockImplementation(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "approval.respond",
+          detail: "Connection lost after sending the decision",
+        }),
+      ),
+    );
+    await harness.respond("approval-ambiguous");
+    await waitFor(
+      async () =>
+        (await harness.readModel()).threads[0]?.activities.some(
+          (activity) => activity.kind === "provider.approval.respond.failed",
+        ) ?? false,
+    );
+    expect.soft((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(true);
+    await expect.soft(harness.respond("approval-ambiguous-retry")).rejects.toThrow();
+    await harness.drain();
+    expect(harness.respondToRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("approval safety: dispatch acknowledgement does not imply provider settlement", async () => {
+    const harness = await prepareApproval();
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    harness.respondToRequest.mockImplementation(() => Effect.promise(() => pending));
+    try {
+      await harness.respond("approval-in-flight");
+      await waitFor(() => harness.respondToRequest.mock.calls.length === 1);
+      expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(true);
+    } finally {
+      release?.();
+      await harness.drain();
+    }
+  });
+
+  it("approval safety: exact command retry is already idempotent", async () => {
+    const harness = await prepareApproval();
+    const first = await harness.respond("approval-same-command");
+    const retry = await harness.respond("approval-same-command");
+    await harness.drain();
+    expect(retry).toEqual(first);
+    expect(harness.respondToRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("approval safety: only a proven pre-send failure permits a new attempt", async () => {
+    const harness = await prepareApproval();
+    harness.respondToRequest.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "approval.respond",
+          detail: "Validation rejected before sending",
+          approvalResponseNotSent: true,
+        }),
+      ),
+    );
+    await harness.respond("safe-failure");
+    await waitFor(
+      async () =>
+        (await harness.readModel()).threads[0]?.activities.some(
+          (a) => a.kind === "provider.approval.respond.failed",
+        ) ?? false,
+    );
+    expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(true);
+    await harness.respond("safe-retry", "decline");
+    await harness.drain();
+    expect(harness.respondToRequest.mock.calls.map(([input]) => input.decision)).toEqual([
+      "accept",
+      "decline",
+    ]);
+    expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(false);
+    await expect(
+      harness.activity("late-failure", "provider.approval.respond.failed", {
+        approvalIdentity: harness.identity,
+        responseAttemptId: "safe-failure",
+        responseState: "retryable",
+      }),
+    ).rejects.toThrow("Stale approval response failure");
+    expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(false);
+  });
+
+  it("approval safety: source runtime is validated instead of rebinding old callbacks", async () => {
+    const harness = await prepareApproval();
+    await expect(
+      harness.activity("old-open", "approval.requested", {
+        runtimeSessionId: "old-runtime",
+        requestKind: "command",
+      }),
+    ).rejects.toThrow("Stale approval runtime");
+    await expect(
+      harness.activity("old-resolved", "approval.resolved", {
+        runtimeSessionId: "old-runtime",
+        decision: "decline",
+      }),
+    ).rejects.toThrow("Stale approval runtime");
+    await expect(
+      harness.activity("missing-runtime", "approval.requested", {
+        runtimeSessionId: undefined,
+        requestKind: "command",
+      }),
+    ).rejects.toThrow("Stale approval runtime");
+    await harness.respond("current-runtime-response");
+    await harness.drain();
+    expect(harness.respondToRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("approval safety: reused provider ids require distinct callback identity and qualified settlement", async () => {
+    const harness = await prepareApproval();
+    await expect(
+      harness.activity("overlapping-open", "approval.requested", { requestKind: "command" }),
+    ).rejects.toThrow("still pending");
+    await harness.respond("first-instance");
+    await harness.drain();
+    await harness.activity("second-open", "approval.requested", { requestKind: "command" });
+    const secondIdentity = { ...harness.identity, requestEventId: EventId.make("second-open") };
+    await expect(
+      harness.activity("old-callback-invalidation", "provider.approval.respond.failed", {
+        approvalIdentity: harness.identity,
+        responseAttemptId: "first-instance",
+        responseState: "invalidated",
+        detail: "Stale pending approval request: old callback expired",
+      }),
+    ).rejects.toThrow("Stale approval response failure");
+
+    await expect(harness.respond("stale-response", "decline")).rejects.toThrow("identity changed");
+    await expect(
+      harness.activity("late-first-settlement", "approval.resolved", {
+        approvalIdentity: harness.identity,
+        responseAttemptId: "first-instance",
+        decision: "accept",
+      }),
+    ).rejects.toThrow("Stale or ambiguous");
+    await expect(
+      harness.activity("unqualified-settlement", "approval.resolved", { decision: "accept" }),
+    ).rejects.toThrow("Stale or ambiguous");
+    expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(true);
+    await harness.respond("second-instance", "decline", secondIdentity);
+    await harness.drain();
+    expect(harness.respondToRequest.mock.calls.map(([input]) => input.decision)).toEqual([
+      "accept",
+      "decline",
+    ]);
+    await expect(
+      harness.activity("duplicate-settlement", "approval.resolved", {
+        approvalIdentity: secondIdentity,
+        responseAttemptId: "second-instance",
+        decision: "accept",
+      }),
+    ).rejects.toThrow("Stale or ambiguous");
+    expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(false);
+    await expect(
+      harness.activity("second-open", "approval.requested", { requestKind: "command" }),
+    ).resolves.toBeDefined(); // exact command receipt
+    await expect(harness.respond("second-again", "accept", secondIdentity)).rejects.toThrow();
+  });
+
+  it("approval safety: missing and stopped sessions cannot open new callbacks", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.make("thread-1");
+    const open = (id: string, runtimeSessionId?: string) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(id),
+          threadId,
+          activity: {
+            id: EventId.make(id),
+            kind: "approval.requested",
+            tone: "approval",
+            summary: "Approval",
+            turnId: null,
+            payload: {
+              requestId: "no-session",
+              requestKind: "command",
+              ...(runtimeSessionId ? { runtimeSessionId } : {}),
+            },
+            createdAt: new Date().toISOString(),
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    await expect(open("without-session")).rejects.toThrow("active session");
+    for (const runtimeSessionId of [undefined, RuntimeSessionId.make("stopped-runtime")]) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`stopped:${runtimeSessionId}`),
+          threadId,
+          session: {
+            threadId,
+            status: "stopped",
+            providerName: "codex",
+            ...(runtimeSessionId ? { runtimeSessionId } : {}),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: new Date().toISOString(),
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await expect(open(`stopped-open:${runtimeSessionId}`, runtimeSessionId)).rejects.toThrow(
+        "active session",
+      );
+    }
+    expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(false);
+  });
+
+  it("approval safety: a qualified late provider settlement may finish a stopped runtime", async () => {
+    const harness = await prepareApproval();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("stop-before-settlement"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "stopped",
+          providerName: "codex",
+          runtimeSessionId: RuntimeSessionId.make("approval-runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: new Date().toISOString(),
+        },
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await harness.activity("late-authoritative", "approval.resolved", {
+      approvalIdentity: harness.identity,
+      decision: "decline",
+    });
+    expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(false);
+    expect(harness.respondToRequest).not.toHaveBeenCalled();
+  });
+
+  it("approval safety: an authoritative provider decision wins over a delayed local acknowledgement", async () => {
+    const harness = await prepareApproval();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    harness.respondToRequest.mockImplementation(() => Effect.promise(() => pending));
+    try {
+      await harness.respond("local-attempt");
+      await waitFor(() => harness.respondToRequest.mock.calls.length === 1);
+      await harness.activity("provider-winner", "approval.resolved", { decision: "decline" });
+    } finally {
+      release();
+      await harness.drain();
+    }
+    const settlements = (await harness.readModel()).threads[0]?.activities.filter(
+      (activity) => activity.kind === "approval.resolved",
+    );
+    expect(settlements).toHaveLength(1);
+    expect(settlements?.[0]?.payload).toMatchObject({ decision: "decline" });
+    await expect(harness.respond("late-retry", "accept")).rejects.toThrow("no longer pending");
+  });
+
   it("reacts to thread.approval.respond by forwarding provider approval response", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();
@@ -2436,6 +2824,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "codex",
+          runtimeSessionId: RuntimeSessionId.make("approval-runtime-legacy-test"),
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
@@ -2447,10 +2836,35 @@ describe("ProviderCommandReactor", () => {
 
     await Effect.runPromise(
       harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("forward-approval-open"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("forward-approval-open"),
+          kind: "approval.requested",
+          tone: "approval",
+          summary: "Approval requested",
+          payload: {
+            requestId: "approval-request-1",
+            requestKind: "command",
+            runtimeSessionId: "approval-runtime-legacy-test",
+          },
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
         type: "thread.approval.respond",
         commandId: CommandId.make("cmd-approval-respond"),
         threadId: ThreadId.make("thread-1"),
         requestId: asApprovalRequestId("approval-request-1"),
+        approvalIdentity: {
+          requestEventId: EventId.make("forward-approval-open"),
+          runtimeSessionId: RuntimeSessionId.make("approval-runtime-legacy-test"),
+        },
         decision: "accept",
         createdAt: now,
       }),
@@ -2461,6 +2875,7 @@ describe("ProviderCommandReactor", () => {
       threadId: "thread-1",
       requestId: "approval-request-1",
       decision: "accept",
+      expectedRuntimeSessionId: "approval-runtime-legacy-test",
     });
   });
 
@@ -2531,6 +2946,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "codex",
+          runtimeSessionId: RuntimeSessionId.make("approval-runtime-legacy-test"),
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
@@ -2553,6 +2969,7 @@ describe("ProviderCommandReactor", () => {
           payload: {
             requestId: "approval-request-1",
             requestKind: "command",
+            runtimeSessionId: "approval-runtime-legacy-test",
           },
           turnId: null,
           createdAt: now,
@@ -2567,6 +2984,10 @@ describe("ProviderCommandReactor", () => {
         commandId: CommandId.make("cmd-approval-respond-stale"),
         threadId: ThreadId.make("thread-1"),
         requestId: asApprovalRequestId("approval-request-1"),
+        approvalIdentity: {
+          requestEventId: EventId.make("activity-approval-requested"),
+          runtimeSessionId: RuntimeSessionId.make("approval-runtime-legacy-test"),
+        },
         decision: "acceptForSession",
         createdAt: now,
       }),
@@ -2602,6 +3023,11 @@ describe("ProviderCommandReactor", () => {
         (activity.payload as Record<string, unknown>).requestId === "approval-request-1",
     );
     expect(resolvedActivity).toBeUndefined();
+    expect(Option.getOrUndefined(await harness.readApproval("approval-request-1"))).toMatchObject({
+      status: "resolved",
+      responseState: "invalidated",
+      decision: null,
+    });
   });
 
   it("surfaces stale provider user-input failures without faking user-input resolution", async () => {

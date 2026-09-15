@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
   ApprovalRequestId,
+  ApprovalResponseIdentity,
   CommandId,
   ContextHandoffActivityPayload,
   defaultInstanceIdForDriver,
@@ -827,6 +828,7 @@ it.live("tracks approval requests and resolves pending approvals on user respons
       );
 
       const pendingRow = yield* harness.waitForPendingApproval(
+        THREAD_ID,
         "req-approval-1",
         (row) => row.status === "pending" && row.decision === null,
       );
@@ -837,11 +839,18 @@ it.live("tracks approval requests and resolves pending approvals on user respons
         commandId: CommandId.make("cmd-approval-respond"),
         threadId: THREAD_ID,
         requestId: APPROVAL_REQUEST_ID,
+        approvalIdentity: Schema.decodeUnknownSync(ApprovalResponseIdentity)(
+          (
+            thread.activities.find((activity) => activity.kind === "approval.requested")
+              ?.payload as Record<string, unknown>
+          ).approvalIdentity,
+        ),
         decision: "accept",
         createdAt: nowIso(),
       });
 
       const resolvedRow = yield* harness.waitForPendingApproval(
+        THREAD_ID,
         "req-approval-1",
         (row) => row.status === "resolved" && row.decision === "accept",
       );
@@ -1424,11 +1433,18 @@ it.live("forwards claudeAgent approval responses to the provider session", () =>
           commandId: CommandId.make("cmd-claude-approval-respond"),
           threadId: THREAD_ID,
           requestId: APPROVAL_REQUEST_ID,
+          approvalIdentity: Schema.decodeUnknownSync(ApprovalResponseIdentity)(
+            (
+              thread.activities.find((activity) => activity.kind === "approval.requested")
+                ?.payload as Record<string, unknown>
+            ).approvalIdentity,
+          ),
           decision: "accept",
           createdAt: nowIso(),
         });
 
         yield* harness.waitForPendingApproval(
+          THREAD_ID,
           "req-approval-1",
           (row) => row.status === "resolved" && row.decision === "accept",
         );

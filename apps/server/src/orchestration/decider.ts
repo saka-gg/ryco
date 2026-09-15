@@ -1194,7 +1194,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      return {
+      const response: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -1209,9 +1209,40 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           requestId: command.requestId,
           decision: command.decision,
+          ...(command.approvalIdentity ? { approvalIdentity: command.approvalIdentity } : {}),
           createdAt: command.createdAt,
         },
       };
+      return [
+        response,
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: command.threadId,
+            activity: {
+              id: EventId.make(`approval-response:${command.commandId}`),
+              kind: "approval.response.submitted",
+              tone: "info",
+              summary: "Approval response submitted",
+              payload: {
+                requestId: command.requestId,
+                approvalIdentity: command.approvalIdentity,
+                responseAttemptId: command.commandId,
+                responseState: "submitting",
+                decision: command.decision,
+              },
+              turnId: null,
+              createdAt: command.createdAt,
+            },
+          },
+        },
+      ];
     }
 
     case "thread.user-input.respond": {
@@ -1763,6 +1794,27 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ? ((command.activity.payload as { requestId: string })
               .requestId as OrchestrationEvent["metadata"]["requestId"])
           : undefined;
+      const activity =
+        command.activity.kind === "approval.requested"
+          ? {
+              ...command.activity,
+              payload: {
+                ...(typeof command.activity.payload === "object" &&
+                command.activity.payload !== null
+                  ? command.activity.payload
+                  : {}),
+                approvalIdentity: {
+                  requestEventId: command.activity.id,
+                  ...(typeof command.activity.payload === "object" &&
+                  command.activity.payload !== null &&
+                  "runtimeSessionId" in command.activity.payload &&
+                  typeof command.activity.payload.runtimeSessionId === "string"
+                    ? { runtimeSessionId: command.activity.payload.runtimeSessionId }
+                    : {}),
+                },
+              },
+            }
+          : command.activity;
       const activityEvent: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
@@ -1774,7 +1826,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.activity-appended",
         payload: {
           threadId: command.threadId,
-          activity: command.activity,
+          activity,
         },
       };
       if (
