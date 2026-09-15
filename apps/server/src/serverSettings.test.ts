@@ -24,6 +24,33 @@ const makeServerSettingsLayer = () =>
   );
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("canonicalizes root saves and persists independent project resets", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "settings-root-" });
+      const canonical = yield* fs.realPath(root);
+      const settings = yield* ServerSettingsService;
+      const saved = yield* settings.updateSettings({
+        worktreeRoot: root,
+        projectWorktreeRoots: { a: `${root}/a`, b: `${root}/b` },
+      });
+      assert.equal(saved.worktreeRoot, canonical);
+      assert.equal(saved.projectWorktreeRoots.a, `${canonical}/a`);
+      yield* settings.updateSettings({ projectWorktreeRoots: { a: null } });
+      const { settingsPath } = yield* ServerConfig;
+      const persisted = JSON.parse(yield* fs.readFileString(settingsPath));
+      assert.equal(persisted.worktreeRoot, canonical);
+      assert.deepEqual(persisted.projectWorktreeRoots, { b: `${canonical}/b` });
+      const before = yield* fs.readFileString(settingsPath);
+      const result = yield* settings
+        .updateSettings({ worktreeRoot: "relative/path" })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.equal(yield* fs.readFileString(settingsPath), before);
+      assert.equal((yield* settings.getSettings).worktreeRoot, canonical);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("decodes nested settings patches", () =>
     Effect.sync(() => {
       const decodePatch = Schema.decodeUnknownSync(ServerSettingsPatch);
