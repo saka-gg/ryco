@@ -49,3 +49,5 @@ export * from "./agentControlInspection.ts";
 export * from "./acpRegistry.ts";
 
 export * from "./approvalResponses.ts";
+
+export * from "./projectMemory.ts";

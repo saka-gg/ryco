@@ -1,3 +1,4 @@
+import Migration0058 from "./Migrations/058_ProjectMemory.ts";
 import Migration0055 from "./Migrations/055_ApprovalResponseClaims.ts";
 import Migration0056 from "./Migrations/056_UserInputResponseClaims.ts";
 /**
@@ -138,6 +139,7 @@ export const migrationEntries = [
   [54, "ProjectionThreadsSnoozed", Migration0054],
   [55, "ApprovalResponseClaims", Migration0055],
   [56, "UserInputResponseClaims", Migration0056],
+  [58, "ProjectMemory", Migration0058],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

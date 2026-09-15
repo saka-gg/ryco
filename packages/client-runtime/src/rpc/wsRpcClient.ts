@@ -1,3 +1,4 @@
+import { PROJECT_MEMORY_WS_METHODS } from "@ryco/contracts";
 import {
   type GitActionProgressEvent,
   type GitRunStackedActionInput,
@@ -306,6 +307,12 @@ export interface WsRpcClient {
   };
   readonly threadPriority: {
     readonly ensureCurrent: RpcUnaryMethod<typeof WS_METHODS.threadPriorityEnsureCurrent>;
+  };
+  readonly projectMemory: {
+    readonly list: RpcUnaryMethod<typeof PROJECT_MEMORY_WS_METHODS.list>;
+    readonly mutate: RpcUnaryMethod<typeof PROJECT_MEMORY_WS_METHODS.mutate>;
+    readonly preview: RpcUnaryMethod<typeof PROJECT_MEMORY_WS_METHODS.preview>;
+    readonly export: RpcUnaryMethod<typeof PROJECT_MEMORY_WS_METHODS.export>;
   };
   readonly contextHandoff: {
     readonly getInspectionSummary: RpcUnaryMethod<
@@ -708,6 +715,15 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
     threadPriority: {
       ensureCurrent: (input) =>
         transport.request((client) => client[WS_METHODS.threadPriorityEnsureCurrent](input)),
+    },
+    projectMemory: {
+      list: (input) => transport.request((client) => client[PROJECT_MEMORY_WS_METHODS.list](input)),
+      mutate: (input) =>
+        transport.request((client) => client[PROJECT_MEMORY_WS_METHODS.mutate](input)),
+      preview: (input) =>
+        transport.request((client) => client[PROJECT_MEMORY_WS_METHODS.preview](input)),
+      export: (input) =>
+        transport.request((client) => client[PROJECT_MEMORY_WS_METHODS.export](input)),
     },
     contextHandoff: {
       getInspectionSummary: (input) =>

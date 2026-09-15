@@ -1,3 +1,15 @@
+import {
+  PROJECT_MEMORY_WS_METHODS,
+  ProjectMemoryListInput,
+  ProjectMemoryPage,
+  ProjectMemoryMutateInput,
+  ProjectMemoryMutationResult,
+  ProjectMemoryRecallInput,
+  ProjectMemoryRecallPreview,
+  ProjectMemoryScope,
+  ProjectMemoryExport,
+  ProjectMemoryError,
+} from "./projectMemory.ts";
 import { ModelSelection } from "./orchestration.ts";
 import {
   AcpRegistrySearchInput,
@@ -1605,6 +1617,30 @@ export const WsOrchestrationSubscribeThreadWindowRpc = Rpc.make(
   },
 );
 
+export const WsProjectMemoryListRpc = Rpc.make(PROJECT_MEMORY_WS_METHODS.list, {
+  payload: ProjectMemoryListInput,
+  success: ProjectMemoryPage,
+  error: Schema.Union([ProjectMemoryError, AuthRpcError]),
+});
+
+export const WsProjectMemoryMutateRpc = Rpc.make(PROJECT_MEMORY_WS_METHODS.mutate, {
+  payload: ProjectMemoryMutateInput,
+  success: ProjectMemoryMutationResult,
+  error: Schema.Union([ProjectMemoryError, AuthRpcError]),
+});
+
+export const WsProjectMemoryPreviewRpc = Rpc.make(PROJECT_MEMORY_WS_METHODS.preview, {
+  payload: ProjectMemoryRecallInput,
+  success: ProjectMemoryRecallPreview,
+  error: Schema.Union([ProjectMemoryError, AuthRpcError]),
+});
+
+export const WsProjectMemoryExportRpc = Rpc.make(PROJECT_MEMORY_WS_METHODS.export, {
+  payload: ProjectMemoryScope,
+  success: ProjectMemoryExport,
+  error: Schema.Union([ProjectMemoryError, AuthRpcError]),
+});
+
 export const WsContextHandoffGetInspectionSummaryRpc = Rpc.make(
   CONTEXT_HANDOFF_WS_METHODS.getInspectionSummary,
   {
@@ -1958,6 +1994,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationSubscribeShellRpc
   | typeof WsOrchestrationSubscribeThreadRpc
   | typeof WsOrchestrationSubscribeThreadWindowRpc
+  | typeof WsProjectMemoryListRpc
+  | typeof WsProjectMemoryMutateRpc
+  | typeof WsProjectMemoryPreviewRpc
+  | typeof WsProjectMemoryExportRpc
   | typeof WsContextHandoffGetInspectionSummaryRpc
   | typeof WsContextHandoffListInspectionEntriesRpc
   | typeof WsContextHandoffReadRawPayloadChunkRpc
@@ -2113,6 +2153,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
   WsOrchestrationSubscribeThreadWindowRpc,
+  WsProjectMemoryListRpc,
+  WsProjectMemoryMutateRpc,
+  WsProjectMemoryPreviewRpc,
+  WsProjectMemoryExportRpc,
   WsContextHandoffGetInspectionSummaryRpc,
   WsContextHandoffListInspectionEntriesRpc,
   WsContextHandoffReadRawPayloadChunkRpc,

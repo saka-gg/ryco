@@ -259,7 +259,8 @@
     "./macLocalSigning": {
       "types": "./src/macLocalSigning.ts",
       "import": "./src/macLocalSigning.ts"
-    }
+    },
+    "./projectMemory": "./src/projectMemory.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

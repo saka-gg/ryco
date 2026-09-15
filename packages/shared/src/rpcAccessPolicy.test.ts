@@ -4,6 +4,7 @@ import {
   AGENT_CONTROL_WS_METHODS,
   CONTEXT_HANDOFF_WS_METHODS,
   DEVICE_WS_METHODS,
+  PROJECT_MEMORY_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -17,6 +18,7 @@ describe("shared RPC access policy", () => {
         ...Object.values(ORCHESTRATION_WS_METHODS),
         ...Object.values(CONTEXT_HANDOFF_WS_METHODS),
         ...Object.values(DEVICE_WS_METHODS),
+        ...Object.values(PROJECT_MEMORY_WS_METHODS),
         ...Object.values(AGENT_CONTROL_WS_METHODS),
       ]),
     );

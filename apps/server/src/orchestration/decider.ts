@@ -1032,6 +1032,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                   handoffId,
                   mode: "full-context-fresh-session",
                   status: "requested",
+                  ...(command.projectMemory
+                    ? {
+                        projectMemory: command.projectMemory,
+                        projectMemoryCommandId: command.commandId,
+                      }
+                    : {}),
                   targetMessageId: command.message.messageId,
                   sourceSelection: targetThread.modelSelection,
                   targetSelection: requestedSelection,
@@ -1057,6 +1063,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          ...(command.projectMemory ? { projectMemory: command.projectMemory } : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),

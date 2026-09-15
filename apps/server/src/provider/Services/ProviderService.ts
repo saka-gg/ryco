@@ -118,6 +118,10 @@ export interface ProviderServiceShape {
    */
   readonly sendTurn: (
     input: ProviderSendTurnInput,
+    expectedRuntime?: Pick<
+      ProviderRuntimeBinding,
+      "provider" | "providerInstanceId" | "runtimeSessionId"
+    > & { readonly beforeSubmit?: Effect.Effect<void, ProviderServiceError> },
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
   /** Synchronize a goal and return the provider-confirmed state; false means unsupported. Inactive sessions fail. */

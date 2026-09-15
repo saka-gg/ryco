@@ -1,4 +1,5 @@
 import {
+  PROJECT_MEMORY_WS_METHODS,
   AGENT_CONTROL_WS_METHODS,
   CONTEXT_HANDOFF_WS_METHODS,
   DEVICE_WS_METHODS,
@@ -8,6 +9,7 @@ import {
 } from "@ryco/contracts";
 
 export type RpcMethod =
+  | (typeof PROJECT_MEMORY_WS_METHODS)[keyof typeof PROJECT_MEMORY_WS_METHODS]
   | (typeof WS_METHODS)[keyof typeof WS_METHODS]
   | (typeof ORCHESTRATION_WS_METHODS)[keyof typeof ORCHESTRATION_WS_METHODS]
   | (typeof CONTEXT_HANDOFF_WS_METHODS)[keyof typeof CONTEXT_HANDOFF_WS_METHODS]
@@ -17,6 +19,10 @@ export type RpcMethod =
 export type RpcAccess = RelayEffectiveRole | "authenticated" | "direct_owner";
 
 export const RPC_ACCESS_POLICY = {
+  [PROJECT_MEMORY_WS_METHODS.list]: "operator",
+  [PROJECT_MEMORY_WS_METHODS.preview]: "operator",
+  [PROJECT_MEMORY_WS_METHODS.export]: "operator",
+  [PROJECT_MEMORY_WS_METHODS.mutate]: "operator",
   [DEVICE_WS_METHODS.read]: "viewer",
   [DEVICE_WS_METHODS.subscribeEvents]: "viewer",
   [DEVICE_WS_METHODS.lifecycle]: "owner",

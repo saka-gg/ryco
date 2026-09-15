@@ -16,6 +16,7 @@ import {
   type MessageId,
   type OrchestrationReadModel,
   type ProjectId,
+  type ProjectMemoryEntry,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerConfig,
@@ -2772,6 +2773,15 @@ describe("ChatView timeline estimator parity (full app)", () => {
         ...api,
         attachments: { readChunk },
       });
+      // Composer availability precedes the separately loaded thread message window.
+      // Wait for that projection before enriching the fixture's attachment metadata.
+      await vi.waitFor(() =>
+        expect(
+          useStore.getState().environmentStateById[THREAD_REF.environmentId]?.messageByThreadId[
+            THREAD_ID
+          ],
+        ).toBeDefined(),
+      );
       useStore.setState((state) => {
         const env = state.environmentStateById[THREAD_REF.environmentId]!;
         const messages = Object.fromEntries(
@@ -3467,6 +3477,81 @@ describe("ChatView timeline estimator parity (full app)", () => {
       }
     },
   );
+
+  it("reviews project memory in the real composer and dispatches only its references", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "memory-existing" as MessageId,
+      targetText: "Existing turn",
+    });
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    try {
+      await waitForComposerEditor();
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const projectId = snapshot.threads[0]!.projectId;
+      const entry: ProjectMemoryEntry = {
+        id: "memory-entry",
+        projectId,
+        kind: "fact",
+        text: "Synthetic project convention",
+        revision: 2,
+        pinned: true,
+        createdAt: "2026-09-15T00:00:00Z",
+        updatedAt: "2026-09-15T00:00:00Z",
+        affirmedAt: "2026-09-15T00:00:00Z",
+        provenance: { kind: "user", actorId: "b".repeat(64) },
+      };
+      const sent: unknown[] = [];
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+        ...api,
+        projectMemory: {
+          list: async () => ({
+            enabled: true,
+            revision: 2,
+            entries: [entry],
+            total: 1,
+            matched: 1,
+            nextOffset: null,
+            asOf: entry.createdAt,
+          }),
+          preview: async () => ({ entries: [entry], envelopeBytes: 420 }),
+          mutate: async () => ({ revision: 3 }),
+          export: async () => ({
+            version: 1,
+            projectId,
+            enabled: true,
+            entries: [entry],
+            exportedAt: entry.createdAt,
+          }),
+        },
+        orchestration: {
+          ...api.orchestration,
+          dispatchCommand: async (command) => {
+            if (command.type === "thread.turn.start") sent.push(command);
+            return { sequence: snapshot.snapshotSequence + 1 };
+          },
+        },
+      });
+      await page.getByRole("button", { name: "Project memory", exact: true }).click();
+      await page.getByRole("button", { name: "Select for recall", exact: true }).click();
+      await page.getByRole("button", { name: "Review selected memories", exact: true }).click();
+      await expect
+        .element(page.getByRole("region", { name: "Selected project memory" }))
+        .toHaveTextContent(entry.text);
+      await page.getByRole("button", { name: "Close project memory", exact: true }).click();
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use the selected convention");
+      await waitForLayout();
+      await page.getByRole("button", { name: "Send message", exact: true }).click();
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toMatchObject({
+        projectMemory: { projectId, references: [{ id: entry.id, revision: 2 }] },
+        message: { text: "Use the selected convention" },
+      });
+      expect(JSON.stringify(sent[0])).not.toContain(entry.text);
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
 
   it("retains a failed queued send and the next draft until explicit retry", async () => {
     const snapshot = createSnapshotForTargetUser({

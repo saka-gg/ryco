@@ -1,3 +1,4 @@
+import { makeProjectMemoryHandlers } from "./projectMemoryRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
@@ -25,6 +26,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
     return WsRpcGroup.of({
       ...makeAgentControlHandlers(ctx),
       ...makeOrchestrationHandlers(ctx),
+      ...makeProjectMemoryHandlers(ctx),
       ...makeContextHandoffHandlers(ctx),
       ...makeProviderHandlers(ctx),
       ...makeSideQuestionHandlers(ctx),

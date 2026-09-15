@@ -1,5 +1,6 @@
 import {
   type AgentTokenMode,
+  type ProjectMemoryRecallInput,
   type ComposerSourceControlContext,
   type EnvironmentApi,
   type EnvironmentId,
@@ -51,6 +52,7 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface SendTurnComposerSnapshot {
+  projectMemory?: ProjectMemoryRecallInput;
   /** Preserve slash-command text when a synthesized turn fails to dispatch. */
   promptForRestore?: string;
   goal?: ThreadGoalUpdate;
@@ -517,6 +519,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       // A prepared thread already exists server-side, so there is nothing left
       // for the bootstrap to create.
       ...(composer.goal ? { goal: composer.goal } : {}),
+      ...(composer.projectMemory ? { projectMemory: composer.projectMemory } : {}),
       bootstrap: prepared ? undefined : bootstrap,
       sourceControlContexts: freshSourceControlContexts,
       createdAt: messageCreatedAt,
