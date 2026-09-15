@@ -28,6 +28,13 @@ export interface ValidateAgentControlExternalSubmissionInput {
 }
 
 export interface AgentControlActionValidatorShape {
+  readonly validateOwnerAutomation: (
+    plan: Extract<
+      AgentControlActionPlan,
+      { kind: "createAutomation" | "updateAutomation" | "cancelAutomation" }
+    >,
+  ) => Effect.Effect<void, AgentControlPlanValidationError>;
+
   /** Validate live exact-turn authority and return immutable origin/target evidence. */
   readonly validateSubmission: (
     input: ValidateAgentControlSubmissionInput,

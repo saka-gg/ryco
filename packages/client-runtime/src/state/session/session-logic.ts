@@ -1,3 +1,5 @@
+import { ApprovalResponseIdentity, ApprovalResponseState } from "@ryco/contracts";
+import { Schema } from "effect";
 import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import { isContextCompactionActivity } from "@ryco/shared/threadActivity";
 
@@ -130,6 +132,9 @@ interface DerivedWorkLogEntry extends WorkLogEntry {
 }
 
 export interface PendingApproval {
+  approvalIdentity?: ApprovalResponseIdentity;
+  responseState?: ApprovalResponseState;
+  responseAttemptId?: string;
   requestId: ApprovalRequestId;
   requestKind: "command" | "file-read" | "file-change";
   createdAt: string;
@@ -138,6 +143,9 @@ export interface PendingApproval {
 
 export interface PendingUserInput {
   requestId: ApprovalRequestId;
+  userInputIdentity?: ApprovalResponseIdentity;
+  responseState?: ApprovalResponseState;
+  responseAttemptId?: string;
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
 }
@@ -342,6 +350,7 @@ function updatePendingApprovalState(
   if (
     activity.kind !== "approval.requested" &&
     activity.kind !== "approval.resolved" &&
+    activity.kind !== "approval.response.submitted" &&
     activity.kind !== "provider.approval.respond.failed"
   ) {
     return;
@@ -355,13 +364,58 @@ function updatePendingApprovalState(
     openByRequestId.set(requestId, {
       requestId,
       requestKind,
+      ...(Schema.is(ApprovalResponseIdentity)(payload?.approvalIdentity)
+        ? { approvalIdentity: payload.approvalIdentity }
+        : {}),
       createdAt: activity.createdAt,
       ...(detail ? { detail } : {}),
     });
     return;
   }
 
+  const current = requestId ? openByRequestId.get(requestId) : undefined;
+  if (
+    current &&
+    requestId &&
+    (activity.kind === "approval.response.submitted" ||
+      activity.kind === "provider.approval.respond.failed") &&
+    Schema.is(ApprovalResponseIdentity)(payload?.approvalIdentity) &&
+    Schema.is(ApprovalResponseState)(payload?.responseState)
+  ) {
+    const identity = payload.approvalIdentity;
+    if (
+      identity.requestEventId !== current.approvalIdentity?.requestEventId ||
+      identity.runtimeSessionId !== current.approvalIdentity?.runtimeSessionId
+    )
+      return;
+    if (
+      activity.kind !== "approval.response.submitted" &&
+      current.responseAttemptId !== payload.responseAttemptId
+    )
+      return;
+    if (payload.responseState === "invalidated") openByRequestId.delete(requestId);
+    else
+      openByRequestId.set(requestId, {
+        ...current,
+        responseState: payload.responseState,
+        ...(typeof payload.responseAttemptId === "string"
+          ? { responseAttemptId: payload.responseAttemptId }
+          : {}),
+      });
+    return;
+  }
   if (activity.kind === "approval.resolved" && requestId) {
+    if (current?.approvalIdentity?.runtimeSessionId !== payload?.runtimeSessionId) return;
+    if (
+      Schema.is(ApprovalResponseIdentity)(payload?.approvalIdentity) &&
+      payload.approvalIdentity.requestEventId !== current?.approvalIdentity?.requestEventId
+    )
+      return;
+    if (
+      typeof payload?.responseAttemptId === "string" &&
+      payload.responseAttemptId !== current?.responseAttemptId
+    )
+      return;
     openByRequestId.delete(requestId);
     return;
   }
@@ -467,6 +521,7 @@ function updatePendingUserInputState(
   if (
     activity.kind !== "user-input.requested" &&
     activity.kind !== "user-input.resolved" &&
+    activity.kind !== "user-input.response.submitted" &&
     activity.kind !== "provider.user-input.respond.failed"
   ) {
     return;
@@ -482,13 +537,58 @@ function updatePendingUserInputState(
     }
     openByRequestId.set(requestId, {
       requestId,
+      ...(Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity)
+        ? { userInputIdentity: payload.userInputIdentity }
+        : {}),
       createdAt: activity.createdAt,
       questions,
     });
     return;
   }
 
+  const current = requestId ? openByRequestId.get(requestId) : undefined;
+  if (
+    current &&
+    requestId &&
+    (activity.kind === "user-input.response.submitted" ||
+      activity.kind === "provider.user-input.respond.failed") &&
+    Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity) &&
+    Schema.is(ApprovalResponseState)(payload?.responseState)
+  ) {
+    const identity = payload.userInputIdentity;
+    if (
+      identity.requestEventId !== current.userInputIdentity?.requestEventId ||
+      identity.runtimeSessionId !== current.userInputIdentity?.runtimeSessionId
+    )
+      return;
+    if (
+      activity.kind !== "user-input.response.submitted" &&
+      current.responseAttemptId !== payload.responseAttemptId
+    )
+      return;
+    if (payload.responseState === "invalidated") openByRequestId.delete(requestId);
+    else
+      openByRequestId.set(requestId, {
+        ...current,
+        responseState: payload.responseState,
+        ...(typeof payload.responseAttemptId === "string"
+          ? { responseAttemptId: payload.responseAttemptId }
+          : {}),
+      });
+    return;
+  }
   if (activity.kind === "user-input.resolved" && requestId) {
+    if (current?.userInputIdentity?.runtimeSessionId !== payload?.runtimeSessionId) return;
+    if (
+      Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity) &&
+      payload.userInputIdentity.requestEventId !== current?.userInputIdentity?.requestEventId
+    )
+      return;
+    if (
+      typeof payload?.responseAttemptId === "string" &&
+      payload.responseAttemptId !== current?.responseAttemptId
+    )
+      return;
     openByRequestId.delete(requestId);
     return;
   }
@@ -501,7 +601,6 @@ function updatePendingUserInputState(
     openByRequestId.delete(requestId);
   }
 }
-
 function pendingUserInputsFromState(
   openByRequestId: ReadonlyMap<ApprovalRequestId, PendingUserInput>,
 ): PendingUserInput[] {
@@ -754,6 +853,7 @@ function isAgentTaskLifecycleActivity(activity: OrchestrationThreadActivity): bo
 }
 
 function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean {
+  if (activity.kind.startsWith("background-work.")) return true;
   const payload =
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)

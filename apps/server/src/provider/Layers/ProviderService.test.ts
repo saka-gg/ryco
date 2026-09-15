@@ -1339,6 +1339,54 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("does not recover a lost runtime to answer a pending question", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(asThreadId("question-lost-runtime"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("question-lost-runtime"),
+        runtimeMode: "full-access",
+      });
+      yield* routing.codex.stopAll();
+      routing.codex.startSession.mockClear();
+      routing.codex.respondToUserInput.mockClear();
+      const result = yield* Effect.result(
+        provider.respondToUserInput({
+          threadId: session.threadId,
+          requestId: asRequestId("expired-question"),
+          answers: { answer: "Yes" },
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.respondToUserInput.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("rejects an old question identity while a replacement runtime is active", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(asThreadId("question-replacement"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("question-replacement"),
+        runtimeMode: "full-access",
+      });
+      routing.codex.respondToUserInput.mockClear();
+      const result = yield* Effect.result(
+        provider.respondToUserInput({
+          threadId: session.threadId,
+          requestId: asRequestId("reused-question"),
+          expectedRuntimeSessionId: RuntimeSessionId.make("old-runtime"),
+          answers: { answer: "Old" },
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.equal(routing.codex.respondToUserInput.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("lists no sessions after adapter runtime clears", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -2298,4 +2346,40 @@ it.effect("goal operations distinguish unsupported providers from inactive sessi
       assert.equal(failure._tag, "ProviderSessionNotFoundError");
     }).pipe(Effect.provide(makeStandaloneProviderServiceLayer([codex])));
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "rejects stale background stop identity before routing and forwards the displayed attempt",
+  () => {
+    const fake = makeFakeCodexAdapter();
+    const stop = vi.fn((_threadId: ThreadId, _taskId: string, _expected?: unknown) => Effect.void);
+    const providerLayer = makeStandaloneProviderServiceLayer([
+      { ...fake, adapter: { ...fake.adapter, stopBackgroundTask: stop } },
+    ]);
+    return Effect.gen(function* () {
+      const service = yield* ProviderService;
+      const threadId = asThreadId("background-stop-identity");
+      const session = yield* service.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const stale = yield* service
+        .stopBackgroundTask({
+          threadId,
+          taskId: "reused-task",
+          expected: { runtimeSessionId: RuntimeSessionId.make("replaced-runtime"), attempt: 0 },
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(stale));
+      assert.lengthOf(stop.mock.calls, 0);
+      const expected = { runtimeSessionId: session.runtimeSessionId!, attempt: 3 };
+      yield* service.stopBackgroundTask({ threadId, taskId: "reused-task", expected });
+      assert.deepEqual(stop.mock.calls, [[threadId, "reused-task", expected]]);
+      // Existing API clients retain their previous behavior.
+      yield* service.stopBackgroundTask({ threadId, taskId: "legacy-task" });
+      assert.equal(stop.mock.calls[1]?.[1], "legacy-task");
+    }).pipe(Effect.provide(providerLayer.pipe(Layer.provideMerge(NodeServices.layer))));
+  },
 );

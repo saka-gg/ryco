@@ -20,6 +20,43 @@ export interface ClaimedAgentControlAutomationRun {
 }
 
 export interface AgentControlAutomationRepositoryShape {
+  readonly activeProposalIds: () => Effect.Effect<
+    ReadonlyArray<AgentControlProposalId>,
+    AgentControlAutomationRepositoryError
+  >;
+  readonly quarantineRecord: (input: {
+    readonly kind: "proposal" | "run";
+    readonly id: string;
+    readonly projectId: ProjectId;
+  }) => Effect.Effect<void, AgentControlAutomationRepositoryError>;
+  readonly listProjectRuns: (
+    projectId: ProjectId,
+  ) => Effect.Effect<
+    ReadonlyArray<AgentControlAutomationRun>,
+    AgentControlAutomationRepositoryError
+  >;
+  readonly centreMetadata: (projectId: ProjectId) => Effect.Effect<
+    {
+      readonly unavailableRecords: number;
+      readonly runs: ReadonlyArray<{
+        readonly runId: string;
+        readonly readUpdatedAt: string | null;
+        readonly retryOfRunId: string | null;
+      }>;
+    },
+    AgentControlAutomationRepositoryError
+  >;
+  readonly markRead: (input: {
+    readonly runId: AgentControlAutomationRunId;
+    readonly expectedUpdatedAt: string;
+    readonly unread: boolean;
+  }) => Effect.Effect<boolean, AgentControlAutomationRepositoryError>;
+  readonly retryRun: (input: {
+    readonly runId: AgentControlAutomationRunId;
+    readonly source: AgentControlAutomationRun;
+    readonly now: IsoDateTime;
+  }) => Effect.Effect<boolean, AgentControlAutomationRepositoryError>;
+
   readonly insertAutomation: (
     automation: AgentControlAutomation,
   ) => Effect.Effect<boolean, AgentControlAutomationRepositoryError>;

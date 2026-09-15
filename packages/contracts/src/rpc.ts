@@ -4,6 +4,11 @@ import {
   GitReadComparisonInput,
   GitReadComparisonResult,
 } from "./git.ts";
+import {
+  AutomationCentreInput,
+  AutomationCentreCommand,
+  AutomationCentreSnapshot,
+} from "./automationCentre.ts";
 import { ModelSelection } from "./orchestration.ts";
 import {
   AcpRegistrySearchInput,
@@ -1702,6 +1707,17 @@ export const WsDeviceRpcGroup = RpcGroup.make(
   WsSubscribeDeviceEventsRpc,
 );
 
+export const WsAutomationCentreRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.automationCentre, {
+  payload: AutomationCentreInput,
+  success: AutomationCentreSnapshot,
+  error: Schema.Union([AgentControlRpcError, AuthRpcError]),
+});
+export const WsAutomationCommandRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.automationCommand, {
+  payload: AutomationCentreCommand,
+  success: AutomationCentreSnapshot,
+  error: Schema.Union([AgentControlRpcError, AuthRpcError]),
+});
+
 export const WsAgentControlListProposalsRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.listProposals, {
   payload: AgentControlListProposalsInput,
   success: AgentControlProposalQueue,
@@ -1951,6 +1967,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSubscribeServerConfigRpc
   | typeof WsSubscribeServerLifecycleRpc
   | typeof WsSubscribeAuthAccessRpc
+  | typeof WsAutomationCentreRpc
+  | typeof WsAutomationCommandRpc
   | typeof WsAgentControlListProposalsRpc
   | typeof WsAgentControlGetProposalRpc
   | typeof WsAgentControlAcceptProposalRpc
@@ -2108,6 +2126,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,
+  WsAutomationCentreRpc,
+  WsAutomationCommandRpc,
   WsAgentControlListProposalsRpc,
   WsAgentControlGetProposalRpc,
   WsAgentControlAcceptProposalRpc,

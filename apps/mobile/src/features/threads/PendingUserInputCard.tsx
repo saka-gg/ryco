@@ -45,10 +45,15 @@ export function PendingUserInputCard(props: {
     Boolean(drafts[questionId]?.selectedOptionLabels?.includes(optionLabel));
 
   const answers = buildPendingUserInputAnswers(props.userInput.questions, drafts);
-  const canSubmit = answers !== null && !submitting && props.disabled !== true;
+  const canSubmit =
+    answers !== null &&
+    !submitting &&
+    props.disabled !== true &&
+    props.userInput.responseState !== "submitting" &&
+    props.userInput.responseState !== "uncertain";
 
   const submit = async () => {
-    if (!answers) return;
+    if (!answers || !canSubmit) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -57,6 +62,7 @@ export function PendingUserInputCard(props: {
         threadId: props.threadId,
         requestId: props.userInput.requestId,
         answers,
+        userInputIdentity: props.userInput.userInputIdentity,
       });
     } catch {
       // `ensureEnvironmentApi` throws synchronously without a connection, and
@@ -94,6 +100,12 @@ export function PendingUserInputCard(props: {
           </View>
         </View>
       ))}
+      {props.userInput.responseState === "uncertain" ? (
+        <Text accessibilityRole="text" className="mt-2 font-sans text-sm text-foreground-muted">
+          Answer delivery is unconfirmed. Await provider confirmation or restart the turn; resending
+          could duplicate it.
+        </Text>
+      ) : null}
       {error ? <Text className="mt-2 font-sans text-sm text-danger">{error}</Text> : null}
       <Pressable
         disabled={!canSubmit}

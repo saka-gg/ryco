@@ -22,12 +22,16 @@ export interface SideChat {
   readonly exchanges: readonly { requestId: string; question: string; answer: string }[];
   readonly pending: { requestId: string; question: string } | null;
   readonly error: string | null;
+  /** Retains failed input even when the user has already typed a newer draft. */
+  readonly failedQuestion: string | null;
 }
 export interface SideChatState {
   readonly chatsByThreadKey: Readonly<Record<string, SideChat>>;
   open(key: string, modelSelection: ModelSelection, question?: string): void;
   close(key: string): void;
   setDraft(key: string, draft: string): void;
+  restoreFailedQuestion(key: string): void;
+  discardFailedQuestion(key: string): void;
   setModel(key: string, selection: ModelSelection): void;
   ask(
     key: string,
@@ -54,7 +58,12 @@ export function createSideChatStore() {
       requests.delete(key); // Fence late success and failure before cancellation crosses the transport.
       const chat = get().chatsByThreadKey[key];
       if (chat?.pending)
-        update(key, { pending: null, error, draft: chat.draft || chat.pending.question });
+        update(key, {
+          pending: null,
+          error,
+          draft: chat.draft || chat.pending.question,
+          failedQuestion: chat.draft ? chat.pending.question : null,
+        });
       if (request && sendCancel)
         void request.api.cancelSideQuestion({ requestId: request.requestId }).catch(() => {});
     };
@@ -74,17 +83,27 @@ export function createSideChatStore() {
                   exchanges: [],
                   pending: null,
                   error: null,
+                  failedQuestion: null,
                 },
           },
         }));
       },
       close: (key) => update(key, { open: false }),
       setDraft: (key, draft) => update(key, { draft }),
+      restoreFailedQuestion: (key) => {
+        const chat = get().chatsByThreadKey[key];
+        if (!chat?.failedQuestion) return;
+        update(key, {
+          draft: [chat.draft, chat.failedQuestion].filter(Boolean).join("\n\n"),
+          failedQuestion: null,
+        });
+      },
+      discardFailedQuestion: (key) => update(key, { failedQuestion: null }),
       setModel: (key, modelSelection) => update(key, { modelSelection }),
       ask: async (key, { threadId, requestId, api }) => {
         const chat = get().chatsByThreadKey[key];
         const question = chat?.draft.trim();
-        if (!chat || !question || chat.pending) return;
+        if (!chat || !question || chat.pending || chat.failedQuestion) return;
         const request = { requestId, api };
         requests.set(key, request);
         update(key, { pending: { requestId, question }, draft: "", error: null });
@@ -108,6 +127,7 @@ export function createSideChatStore() {
           update(key, {
             pending: null,
             draft: get().chatsByThreadKey[key]?.draft || question,
+            failedQuestion: get().chatsByThreadKey[key]?.draft ? question : null,
             error: error instanceof Error ? error.message : String(error),
           });
         } finally {
@@ -120,7 +140,7 @@ export function createSideChatStore() {
       disconnect: (key) => interrupt(key, "Connection lost. Ask again after reconnecting.", false),
       clear: (key) => {
         interrupt(key, null);
-        update(key, { exchanges: [], pending: null, error: null, draft: "" });
+        update(key, { exchanges: [], pending: null, error: null, draft: "", failedQuestion: null });
       },
     };
   });

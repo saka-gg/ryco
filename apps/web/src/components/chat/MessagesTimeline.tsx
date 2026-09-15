@@ -1188,14 +1188,21 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
           return (
             <>
               <div className="min-w-0 px-1 py-0.5" {...messageLongPress}>
-                <ChatMarkdown
-                  text={messageText}
-                  cwd={ctx.markdownCwd}
-                  environmentId={ctx.activeThreadEnvironmentId}
-                  isStreaming={assistantResponseStillInProgress}
-                  skills={ctx.skills}
-                  searchHighlight={messageSearchHighlight}
-                />
+                <div
+                  tabIndex={-1}
+                  data-selection-message-id={
+                    assistantResponseStillInProgress ? undefined : row.message.id
+                  }
+                >
+                  <ChatMarkdown
+                    text={messageText}
+                    cwd={ctx.markdownCwd}
+                    environmentId={ctx.activeThreadEnvironmentId}
+                    isStreaming={assistantResponseStillInProgress}
+                    skills={ctx.skills}
+                    searchHighlight={messageSearchHighlight}
+                  />
+                </div>
                 <MessageAttachments
                   attachments={row.message.attachments ?? []}
                   onImageExpand={ctx.onImageExpand}

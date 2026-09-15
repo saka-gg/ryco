@@ -108,6 +108,21 @@ export function SideChatPanel({
           </p>
         ) : null}
       </div>
+      {chat.failedQuestion ? (
+        <div className="border-t px-3 py-2 text-xs">
+          <p>Restore or discard the unsent question before asking again.</p>
+          <details>
+            <summary>Unsent question</summary>
+            <p className="max-h-32 overflow-auto whitespace-pre-wrap">{chat.failedQuestion}</p>
+          </details>
+          <Button size="xs" variant="ghost" onClick={() => actions.restoreFailedQuestion(key)}>
+            Add unsent question to draft
+          </Button>
+          <Button size="xs" variant="ghost" onClick={() => actions.discardFailedQuestion(key)}>
+            Discard unsent question
+          </Button>
+        </div>
+      ) : null}
       <form
         className="space-y-3 border-t p-3"
         onSubmit={(event) => {
@@ -204,7 +219,11 @@ export function SideChatPanel({
               Cancel
             </Button>
           ) : (
-            <Button type="submit" size="sm" disabled={!ready || !chat.draft.trim()}>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={!ready || !chat.draft.trim() || !!chat.failedQuestion}
+            >
               Ask
             </Button>
           )}

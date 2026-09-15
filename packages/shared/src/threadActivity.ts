@@ -4,6 +4,7 @@ import {
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
 import { Schema } from "effect";
+import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
 
 export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";
 
@@ -52,12 +53,16 @@ export function capThreadActivitiesPreservingMilestones<
   }
 
   const recent = activities.slice(-limit);
+  // A newer snapshot checkpoint already covers the older page being merged.
+  const checkpoint = recent.some((activity) => activity.kind === BACKGROUND_WORK_CHECKPOINT)
+    ? undefined
+    : backgroundWorkCheckpoint(activities.slice(0, -limit));
   const recentIds = new Set(recent.map((activity) => activity.id));
   const preserved = activities.filter(
     (activity) => isThreadActivityMilestone(activity) && !recentIds.has(activity.id),
   );
 
-  return preserved.length === 0 ? [...recent] : [...preserved, ...recent];
+  return [...preserved, ...(checkpoint ? [checkpoint] : []), ...recent];
 }
 
 interface PendingThreadRequestActivity {
@@ -181,4 +186,19 @@ export function derivePendingThreadRequestState(
     hasPendingApprovals: pendingApprovalCount > 0,
     hasPendingUserInput: pendingUserInputCount > 0,
   };
+}
+
+/** Response attempts and provider callbacks share the durable orchestration order.
+ * Provider-local sequence numbers cannot be compared to local response attempts.
+ */
+export function pendingRequestActivityInOrchestrationOrder(
+  activity: OrchestrationThreadActivity,
+  sequence: number,
+): OrchestrationThreadActivity {
+  return activity.kind.startsWith("approval.") ||
+    activity.kind === "provider.approval.respond.failed" ||
+    activity.kind.startsWith("user-input.") ||
+    activity.kind === "provider.user-input.respond.failed"
+    ? { ...activity, sequence }
+    : activity;
 }

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { usePaneEffect } from "./PaneFocus";
 import type { ProjectScript, ResolvedKeybindingsConfig, ThreadId } from "@ryco/contracts";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { isTerminalFocused } from "../../lib/terminalFocus";
@@ -52,7 +52,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
     runProjectScript,
   } = input;
 
-  useEffect(() => {
+  usePaneEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
       if (!activeThreadId || useCommandPaletteStore.getState().open || event.defaultPrevented) {
         return;

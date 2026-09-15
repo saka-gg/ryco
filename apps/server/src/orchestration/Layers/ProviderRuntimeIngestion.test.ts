@@ -157,7 +157,18 @@ function createProviderServiceHarness() {
   };
 
   const emit = (event: LegacyProviderRuntimeEvent): void => {
-    Effect.runSync(PubSub.publish(runtimeEventPubSub, normalizeLegacyEvent(event)));
+    // Model the provider emitter's source runtime; explicit stale/missing identities
+    // supplied by a test remain authoritative and are never overwritten.
+    const session = runtimeSessions.find((entry) => entry.threadId === event.threadId);
+    Effect.runSync(
+      PubSub.publish(
+        runtimeEventPubSub,
+        normalizeLegacyEvent({
+          ...(session?.runtimeSessionId ? { runtimeSessionId: session.runtimeSessionId } : {}),
+          ...event,
+        }),
+      ),
+    );
   };
 
   return {
@@ -225,6 +236,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   async function createHarness(options?: {
+    callbackRuntime?: boolean;
     getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
     serverSettings?: Partial<ServerSettings>;
     readThreadHistory?: NonNullable<ProviderServiceShape["readThreadHistory"]>;
@@ -319,6 +331,9 @@ describe("ProviderRuntimeIngestion", () => {
         session: {
           threadId: ThreadId.make("thread-1"),
           status: "ready",
+          ...(options?.callbackRuntime
+            ? { runtimeSessionId: RuntimeSessionId.make("test-runtime") }
+            : {}),
           providerName: "codex",
           runtimeMode: "approval-required",
           activeTurnId: null,
@@ -329,6 +344,9 @@ describe("ProviderRuntimeIngestion", () => {
       }),
     );
     provider.setSession({
+      ...(options?.callbackRuntime
+        ? { runtimeSessionId: RuntimeSessionId.make("test-runtime") }
+        : {}),
       provider: ProviderDriverKind.make("codex"),
       status: "ready",
       runtimeMode: "approval-required",
@@ -484,7 +502,7 @@ describe("ProviderRuntimeIngestion", () => {
           id: asEventId("recovery-pending-input"),
           kind: "user-input.requested",
           turnId,
-          payload: { requestId: "abandoned-question" },
+          payload: { requestId: "abandoned-question", runtimeSessionId },
           tone: "info",
           summary: "Question",
           createdAt: at,
@@ -552,7 +570,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("expires previous-turn requests on turn start while retaining current requests", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const threadId = asThreadId("thread-1");
     for (const [requestId, turnId] of [
       ["old-input", "old-turn"],
@@ -567,7 +585,7 @@ describe("ProviderRuntimeIngestion", () => {
             id: asEventId(`seed-${requestId}`),
             kind: "user-input.requested",
             turnId: asTurnId(turnId!),
-            payload: { requestId },
+            payload: { requestId, runtimeSessionId: "test-runtime" },
             tone: "info",
             summary: "Question",
             createdAt: "2026-01-01T00:00:00.000Z",
@@ -587,14 +605,16 @@ describe("ProviderRuntimeIngestion", () => {
     await harness.drain();
     const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId)!;
     const resolutions = thread.activities.filter(
-      (activity) => activity.kind === "user-input.resolved",
+      (activity) => activity.kind === "provider.user-input.respond.failed",
     );
-    expect(resolutions.map((activity) => activity.payload)).toEqual([{ requestId: "old-input" }]);
+    expect(resolutions.map((activity) => activity.payload)).toMatchObject([
+      { requestId: "old-input", responseState: "invalidated" },
+    ]);
     expect(derivePendingThreadRequestState(thread.activities).pendingUserInputCount).toBe(1);
   });
 
   it("maps turn started/completed events into thread session updates", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -638,7 +658,7 @@ describe("ProviderRuntimeIngestion", () => {
   it.each(["turn.completed", "turn.aborted"] as const)(
     "clears abandoned requests on %s and allows settlement",
     async (type) => {
-      const harness = await createHarness();
+      const harness = await createHarness({ callbackRuntime: true });
       const threadId = ThreadId.make("thread-1");
       const turnId = TurnId.make("turn-pending");
       harness.emit({
@@ -659,7 +679,11 @@ describe("ProviderRuntimeIngestion", () => {
             activity: {
               id: asEventId(`pending-${kind}`),
               kind: `${kind}.requested`,
-              payload: { requestId: `request-${kind}`, requestKind: "command" },
+              payload: {
+                requestId: `request-${kind}`,
+                requestKind: "command",
+                runtimeSessionId: "test-runtime",
+              },
               tone: "info",
               summary: "Input needed",
               turnId,
@@ -669,6 +693,34 @@ describe("ProviderRuntimeIngestion", () => {
           }),
         );
       }
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.approval.respond",
+          commandId: CommandId.make("pending-approval-attempt"),
+          threadId,
+          requestId: ApprovalRequestId.make("request-approval"),
+          decision: "accept",
+          approvalIdentity: {
+            requestEventId: asEventId("pending-approval"),
+            runtimeSessionId: RuntimeSessionId.make("test-runtime"),
+          },
+          createdAt: "2026-01-01T00:00:02.500Z",
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("pending-question-attempt"),
+          threadId,
+          requestId: ApprovalRequestId.make("request-user-input"),
+          answers: { answer: "Yes" },
+          userInputIdentity: {
+            requestEventId: asEventId("pending-user-input"),
+            runtimeSessionId: RuntimeSessionId.make("test-runtime"),
+          },
+          createdAt: "2026-01-01T00:00:02.500Z",
+        }),
+      );
       harness.emit({
         type,
         eventId: asEventId("pending-complete"),
@@ -680,6 +732,33 @@ describe("ProviderRuntimeIngestion", () => {
       });
       await harness.drain();
       const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId)!;
+      expect(thread.activities.some((activity) => activity.kind === "approval.resolved")).toBe(
+        false,
+      );
+      expect(
+        thread.activities.find((activity) => activity.kind === "provider.approval.respond.failed")
+          ?.payload,
+      ).toMatchObject({
+        requestId: "request-approval",
+        responseState: "invalidated",
+        approvalIdentity: { requestEventId: "pending-approval", runtimeSessionId: "test-runtime" },
+        responseAttemptId: "pending-approval-attempt",
+      });
+      expect(thread.activities.some((activity) => activity.kind === "user-input.resolved")).toBe(
+        false,
+      );
+      expect(
+        thread.activities.find((activity) => activity.kind === "provider.user-input.respond.failed")
+          ?.payload,
+      ).toMatchObject({
+        requestId: "request-user-input",
+        responseState: "invalidated",
+        userInputIdentity: {
+          requestEventId: "pending-user-input",
+          runtimeSessionId: "test-runtime",
+        },
+        responseAttemptId: "pending-question-attempt",
+      });
       expect(thread.session?.status).toBe("ready");
       if (type === "turn.completed") {
         // CheckpointReactor owns turn finalization and is not part of this harness.
@@ -803,7 +882,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("fences late A1 lifecycle events after A1 -> B -> A2", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const threadId = asThreadId("thread-1");
     const codexInstanceId = ProviderInstanceId.make("codex");
     const runtimeA1 = RuntimeSessionId.make("runtime-a1");
@@ -2724,7 +2803,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("flushes and completes buffered assistant text when an approval request opens", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -2784,7 +2863,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("flushes and completes buffered assistant text when user input is requested", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -2851,7 +2930,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("does not create assistant segments for whitespace-only buffered text at approval boundaries", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const startedAt = "2026-03-28T06:28:00.000Z";
     const pausedAt = "2026-03-28T06:28:01.000Z";
 
@@ -2911,7 +2990,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("starts a new buffered assistant message segment after approval and completes without duplication", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const startedAt = "2026-03-28T06:07:00.000Z";
     const pausedAt = "2026-03-28T06:07:01.000Z";
     const resumedAt = "2026-03-28T06:07:02.000Z";
@@ -3043,7 +3122,10 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("starts a new streaming assistant message segment after approval", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({
+      callbackRuntime: true,
+      serverSettings: { enableLegacyTokenStreaming: true },
+    });
     const startedAt = "2026-03-28T07:00:00.000Z";
     const pausedAt = "2026-03-28T07:00:01.000Z";
     const resumedAt = "2026-03-28T07:00:02.000Z";
@@ -3666,7 +3748,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("maps canonical request events into approval activities with requestKind", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -3717,6 +3799,11 @@ describe("ProviderRuntimeIngestion", () => {
       requested?.payload && typeof requested.payload === "object"
         ? (requested.payload as Record<string, unknown>)
         : undefined;
+    expect(requestedPayload?.runtimeSessionId).toBe("test-runtime");
+    expect(requestedPayload?.approvalIdentity).toEqual({
+      requestEventId: "evt-request-opened",
+      runtimeSessionId: "test-runtime",
+    });
     expect(requestedPayload?.requestKind).toBe("command");
     expect(requestedPayload?.requestType).toBe("command_execution_approval");
 
@@ -3727,6 +3814,7 @@ describe("ProviderRuntimeIngestion", () => {
       resolved?.payload && typeof resolved.payload === "object"
         ? (resolved.payload as Record<string, unknown>)
         : undefined;
+    expect(resolvedPayload?.runtimeSessionId).toBe("test-runtime");
     expect(resolvedPayload?.requestKind).toBe("command");
     expect(resolvedPayload?.requestType).toBe("command_execution_approval");
   });
@@ -4360,7 +4448,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("projects structured user input request and resolution as thread activities", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();
 
     harness.emit({

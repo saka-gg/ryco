@@ -3,6 +3,7 @@ import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, useEffectEvent, useRef } from "react";
 
+import { OnboardingCoordinator } from "./onboarding/OnboardingCoordinator";
 import { AppSidebarLayout } from "./AppSidebarLayout";
 import { CommandPalette } from "./CommandPalette";
 import {
@@ -77,6 +78,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
     <ToastProvider>
       <AnchoredToastProvider>
         {localTracingAllowed ? <AuthenticatedTracingBootstrap /> : null}
+        {authGateState.status === "authenticated" ? <OnboardingCoordinator /> : null}
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
         {primaryEnvironmentAuthenticated ? <ThreadPriorityRefreshBridge /> : null}

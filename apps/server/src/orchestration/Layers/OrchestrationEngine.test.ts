@@ -1,3 +1,7 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { ApprovalRequestId, EventId, RuntimeSessionId } from "@ryco/contracts";
 import {
   CheckpointRef,
   CommandId,
@@ -16,7 +20,10 @@ import { describe, expect, it } from "vite-plus/test";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import {
+  SqlitePersistenceMemory,
+  makeSqlitePersistenceLive,
+} from "../../persistence/Layers/Sqlite.ts";
 import {
   OrchestrationEventStore,
   type OrchestrationEventStoreShape,
@@ -49,7 +56,7 @@ const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
 
-async function createOrchestrationSystem() {
+async function createOrchestrationSystem(databasePath?: string) {
   const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "ryco-orchestration-engine-test-",
   });
@@ -66,7 +73,7 @@ async function createOrchestrationSystem() {
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolverLive),
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(databasePath ? makeSqlitePersistenceLive(databasePath) : SqlitePersistenceMemory),
     Layer.provideMerge(ServerConfigLayer),
     Layer.provideMerge(NodeServices.layer),
   );
@@ -86,6 +93,210 @@ function now() {
 }
 
 describe("OrchestrationEngine", () => {
+  it("restores durable approval claims after closing and reopening the database", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-approval-restart-"));
+    const database = path.join(directory, "state.sqlite");
+    const projectId = ProjectId.make("approval-project");
+    const threadId = ThreadId.make("approval-thread");
+    const runtimeSessionId = RuntimeSessionId.make("approval-runtime");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+    const command = {
+      type: "thread.approval.respond" as const,
+      commandId: CommandId.make("claim-before-restart"),
+      threadId,
+      requestId: ApprovalRequestId.make("provider-request"),
+      decision: "accept" as const,
+      createdAt,
+      approvalIdentity: {
+        requestEventId: EventId.make("callback-before-restart"),
+        runtimeSessionId,
+      },
+    };
+    let system = await createOrchestrationSystem(database);
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("approval-project-create"),
+          projectId,
+          title: "Approval",
+          workspaceRoot: directory,
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("approval-thread-create"),
+          threadId,
+          projectId,
+          title: "Approval",
+          modelSelection,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("approval-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeSessionId,
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("approval-open"),
+          threadId,
+          activity: {
+            id: command.approvalIdentity.requestEventId,
+            kind: "approval.requested",
+            tone: "approval",
+            summary: "Approval",
+            turnId: null,
+            payload: { requestId: command.requestId, requestKind: "command", runtimeSessionId },
+            createdAt,
+          },
+          createdAt,
+        }),
+      );
+      const receipt = await system.run(system.engine.dispatch(command));
+      await system.dispose();
+      system = await createOrchestrationSystem(database);
+      expect(await system.run(system.engine.dispatch(command))).toEqual(receipt);
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            ...command,
+            commandId: CommandId.make("claim-after-restart"),
+            decision: "decline",
+          }),
+        ),
+      ).rejects.toThrow("already submitted");
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("restores durable question claims after closing and reopening the database", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-question-restart-"));
+    const database = path.join(directory, "state.sqlite");
+    const projectId = ProjectId.make("approval-project");
+    const threadId = ThreadId.make("approval-thread");
+    const runtimeSessionId = RuntimeSessionId.make("approval-runtime");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+    const command = {
+      type: "thread.user-input.respond" as const,
+      commandId: CommandId.make("claim-before-restart"),
+      threadId,
+      requestId: ApprovalRequestId.make("provider-request"),
+      answers: { answer: "Yes" },
+      createdAt,
+      userInputIdentity: {
+        requestEventId: EventId.make("callback-before-restart"),
+        runtimeSessionId,
+      },
+    };
+    let system = await createOrchestrationSystem(database);
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("approval-project-create"),
+          projectId,
+          title: "Approval",
+          workspaceRoot: directory,
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("approval-thread-create"),
+          threadId,
+          projectId,
+          title: "Approval",
+          modelSelection,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("approval-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeSessionId,
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("approval-open"),
+          threadId,
+          activity: {
+            id: command.userInputIdentity.requestEventId,
+            kind: "user-input.requested",
+            tone: "approval",
+            summary: "Approval",
+            turnId: null,
+            payload: { requestId: command.requestId, requestKind: "command", runtimeSessionId },
+            createdAt,
+          },
+          createdAt,
+        }),
+      );
+      const receipt = await system.run(system.engine.dispatch(command));
+      await system.dispose();
+      system = await createOrchestrationSystem(database);
+      expect(await system.run(system.engine.dispatch(command))).toEqual(receipt);
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            ...command,
+            commandId: CommandId.make("claim-after-restart"),
+            answers: { answer: "No" },
+          }),
+        ),
+      ).rejects.toThrow("already submitted");
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps command handling from persisted projections without reading the full snapshot", async () => {
     let nextSequence = 8;
     const eventStore: OrchestrationEventStoreShape = {
