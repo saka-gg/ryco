@@ -969,25 +969,111 @@ pub fn set_element_value(
     ))
 }
 
-pub fn focus_window(window: &WindowInfo, raise: bool) -> Result<bool> {
+/// Check the app's existing keyboard recipient without making it main, focused,
+/// or frontmost. Changing AXMain/AXFocused can raise inactive app windows.
+pub fn is_keyboard_target(window: &WindowInfo) -> Result<bool> {
+    ensure_trusted()?;
+    let app = application(window.pid.ok_or_else(HelperError::window_unavailable)?)?;
+    Ok(copy_attribute(&app, "AXFocusedWindow")
+        .map(AxElement::from_cf)
+        .is_some_and(|focused| same_window(&focused, window)))
+}
+
+pub fn raise_window(window: &WindowInfo) -> Result<bool> {
     ensure_trusted()?;
     let element = resolve(window)?;
     let value = CFBoolean::new(true);
     let focused = set_value(&element, "AXMain", (value as *const CFBoolean).cast())
         | set_value(&element, "AXFocused", (value as *const CFBoolean).cast());
-    Ok(if raise {
-        perform(&element, "AXRaise") || focused
-    } else {
-        focused
-    })
+    Ok(perform(&element, "AXRaise") || focused)
+}
+
+pub fn is_device_hub(window: &WindowInfo) -> bool {
+    window.app.ends_with("/DeviceHub.app")
+}
+
+fn press_candidate(element: &ElementInfo, x: f64, y: f64) -> bool {
+    let bounds = &element.bounds;
+    element.enabled
+        && !element.offscreen
+        && element.actions.contains(&ElementAction::Invoke)
+        && x >= f64::from(bounds.x)
+        && y >= f64::from(bounds.y)
+        && x < f64::from(bounds.x) + f64::from(bounds.width)
+        && y < f64::from(bounds.y) + f64::from(bounds.height)
+}
+
+// Device Hub exposes the phone's remote AX tree but its macOS hit test does
+// not resolve those controls. Search the current window's tree instead. Never
+// guess between overlapping controls or act from a truncated snapshot.
+fn press_device_hub_position(
+    window: &WindowInfo,
+    x: f64,
+    y: f64,
+    cancel: &CancelToken,
+) -> Result<Option<DeliveryTarget>> {
+    let snapshot = build_snapshot(window, 2_000, cancel)?;
+    if snapshot.truncated {
+        return Ok(None);
+    }
+    let mut selected: Option<usize> = None;
+    for (index, info) in snapshot.elements.iter().enumerate() {
+        if !press_candidate(info, x, y) || !belongs_to_window(&snapshot.handles[index], window) {
+            continue;
+        }
+        if let Some(previous) = selected {
+            // Device Hub can expose the same phone subtree twice.
+            if !same_element(&snapshot.handles[previous], &snapshot.handles[index]) {
+                return Ok(None);
+            }
+        } else {
+            selected = Some(index);
+        }
+    }
+    let Some(index) = selected else {
+        return Ok(None);
+    };
+    cancel.check()?;
+    let handle = &snapshot.handles[index];
+    let (live, _) = element_info(handle, window, 0);
+    let current = super::window_list::resolve(&crate::protocol::window::WindowRef {
+        app: Some(window.app.clone()),
+        id: window.id,
+        title: None,
+    })?;
+    if current != *window {
+        return Err(HelperError::window_unavailable());
+    }
+    if !belongs_to_window(handle, window)
+        || live.bounds != snapshot.elements[index].bounds
+        || !press_candidate(&live, x, y)
+        || !perform(handle, "AXPress")
+    {
+        return Ok(None);
+    }
+    Ok(Some(DeliveryTarget {
+        kind: "ax".into(),
+        id: snapshot.elements[index].id.clone(),
+        role: Some(live.role),
+        name: live.name,
+    }))
 }
 
 pub fn press_at_position(
     window: &WindowInfo,
     screen_x: f64,
     screen_y: f64,
+    cancel: &CancelToken,
 ) -> Result<Option<DeliveryTarget>> {
     ensure_trusted()?;
+    if is_device_hub(window) {
+        return press_device_hub_position(
+            window,
+            screen_x - f64::from(window.x),
+            screen_y - f64::from(window.y),
+            cancel,
+        );
+    }
     let pid = window.pid.ok_or_else(HelperError::window_unavailable)?;
     let application = application(pid)?;
     let mut element = std::ptr::null_mut();
@@ -1017,7 +1103,42 @@ pub fn press_at_position(
 
 #[cfg(test)]
 mod tests {
-    use super::{repeats_ancestor, unique_title_fallback};
+    use super::{press_candidate, repeats_ancestor, unique_title_fallback};
+    use crate::protocol::actions::{ElementAction, ElementBounds, ElementInfo};
+
+    #[test]
+    fn device_hub_press_requires_an_enabled_visible_control_containing_the_point() {
+        let mut element = ElementInfo {
+            id: "test".into(),
+            role: "button".into(),
+            name: None,
+            value: None,
+            automation_id: None,
+            bounds: ElementBounds {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 40,
+            },
+            enabled: true,
+            focused: false,
+            offscreen: false,
+            actions: vec![ElementAction::Invoke],
+            depth: 0,
+        };
+        assert!(press_candidate(&element, 10.0, 20.0));
+        assert!(!press_candidate(&element, 40.0, 20.0));
+        assert!(!press_candidate(&element, 10.0, 60.0));
+        assert!(!press_candidate(&element, f64::NAN, 25.0));
+        element.enabled = false;
+        assert!(!press_candidate(&element, 20.0, 30.0));
+        element.enabled = true;
+        element.offscreen = true;
+        assert!(!press_candidate(&element, 20.0, 30.0));
+        element.offscreen = false;
+        element.actions.clear();
+        assert!(!press_candidate(&element, 20.0, 30.0));
+    }
 
     fn titles(values: &[Option<&str>]) -> Vec<Option<String>> {
         values

@@ -1,0 +1,2 @@
+/** Shared by the native overlay and the browser's isolated cursor shadow root. */
+export const COMPUTER_CURSOR_HTML = `<svg width="20" height="23" viewBox="0 0 28 32"><path d="M3 2L23 17L14 18L10 28Z" fill="#b1a4ff" stroke="#fff" stroke-width="2"/></svg><span style="position:absolute;left:15px;top:18px;background:#252238;color:white;border-radius:4px;padding:1px 4px;font:9px system-ui">Ryco</span>`;

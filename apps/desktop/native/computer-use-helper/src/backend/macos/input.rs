@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
-use objc2_core_foundation::{CFString, CFType, CGPoint};
+use objc2_core_foundation::{CFString, CGPoint};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
     CGEventType, CGMouseButton, CGScrollEventUnit,
@@ -174,7 +174,7 @@ pub fn activate(window: &WindowInfo) -> Result<InteractiveResult> {
     let _ = application.unhide();
     let requested =
         application.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
-    let raised = ax::focus_window(window, true).unwrap_or(false);
+    let raised = ax::raise_window(window).unwrap_or(false);
     if !requested && !raised {
         return Ok(InteractiveResult::refused(
             window.clone(),
@@ -217,14 +217,24 @@ pub fn pointer(
             }
             let point = frame_to_screen(window, x, y);
             if options.mode == InputMode::Background
+                && button == MouseButton::Left
+                && count == 1
                 && let Some(target) =
-                    ax::press_at_position(window, f64::from(point.0), f64::from(point.1))?
+                    ax::press_at_position(window, f64::from(point.0), f64::from(point.1), cancel)?
             {
                 return Ok(InteractiveResult::delivered(
                     window.clone(),
                     Delivery::background(Route::Accessibility)
                         .with_verified(Verified::Confirmed)
                         .with_target(target),
+                ));
+            }
+            if options.mode == InputMode::Background && ax::is_device_hub(window) {
+                return Ok(InteractiveResult::refused(
+                    window.clone(),
+                    Refusal::background_unavailable(
+                        "Device Hub ignores process-targeted clicks. No unambiguous accessibility press target was available; use find_elements and invoke_element, or request foreground input.",
+                    ),
                 ));
             }
             if options.mode == InputMode::Background && is_chromium(window) {
@@ -456,20 +466,9 @@ unsafe extern "C" {
     fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
 }
 
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    fn AXUIElementCreateApplication(pid: libc::pid_t) -> *mut c_void;
-    fn AXUIElementCopyAttributeValue(
-        element: *const c_void,
-        attribute: *const CFString,
-        value: *mut *mut CFType,
-    ) -> i32;
-}
-
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRelease(value: *const c_void);
-    fn CFEqual(left: *const c_void, right: *const c_void) -> u8;
 }
 
 /// Carbon modifier bits. `UCKeyTranslate` wants `(carbonFlags >> 8) & 0xFF`.
@@ -625,37 +624,6 @@ fn current_layout_character_keycode(character: char) -> Option<(u16, CGEventFlag
     cache.as_ref()?.characters.get(&character).copied()
 }
 
-/// The app's current `AXFocusedWindow`, used to report a truthful
-/// `in_app_focus_changed` note. `ax::focus_window` only reports whether the
-/// attribute write was accepted, not whether focus actually moved.
-fn focused_window(pid: Option<u32>) -> Option<CfOwned> {
-    let pid = pid?;
-    // SAFETY: A Create-rule AX element for a process id.
-    let application =
-        CfOwned::from_created(unsafe { AXUIElementCreateApplication(pid as libc::pid_t) })?;
-    let attribute = CFString::from_str("AXFocusedWindow");
-    let mut value = std::ptr::null_mut();
-    // SAFETY: The element is live, the attribute is a live CFString, and `value`
-    // is a writable Copy-rule output slot.
-    let status =
-        unsafe { AXUIElementCopyAttributeValue(application.as_ptr(), &*attribute, &mut value) };
-    if status != 0 {
-        return None;
-    }
-    CfOwned::from_created(value.cast::<c_void>())
-}
-
-fn focus_changed(before: Option<&CfOwned>, after: Option<&CfOwned>) -> bool {
-    match (before, after) {
-        (Some(before), Some(after)) => {
-            // SAFETY: Both pointers are live AX element references.
-            unsafe { CFEqual(before.as_ptr(), after.as_ptr()) == 0 }
-        }
-        (None, None) => false,
-        _ => true,
-    }
-}
-
 fn ansi_character_keycode(character: char) -> Option<(u16, CGEventFlags)> {
     let shifted = character.is_ascii_uppercase();
     let character = character.to_ascii_lowercase();
@@ -785,25 +753,18 @@ pub fn keyboard(
     if !ax::is_trusted() {
         return Ok(permission_refusal(window));
     }
-    let mut notes = Vec::new();
     if options.mode == InputMode::Foreground {
         let activation = activate(window)?;
         if activation.refused.is_some() {
             return Ok(activation);
         }
-    } else {
-        let before = focused_window(window.pid);
-        if !ax::focus_window(window, false)? {
-            return Ok(InteractiveResult::refused(
-                window.clone(),
-                Refusal::background_unavailable(
-                    "The target app did not accept an in-app accessibility focus change.",
-                ),
-            ));
-        }
-        if focus_changed(before.as_ref(), focused_window(window.pid).as_ref()) {
-            notes.push("in_app_focus_changed".into());
-        }
+    } else if !ax::is_keyboard_target(window)? {
+        return Ok(InteractiveResult::refused(
+            window.clone(),
+            Refusal::background_unavailable(
+                "This window is not the app's current keyboard recipient. Background mode will not change window focus. Use find_elements and set_element_value for text, or invoke_element for controls.",
+            ),
+        ));
     }
     let event_source = source()?;
     match action {
@@ -857,11 +818,7 @@ pub fn keyboard(
             }
         }
     }
-    let mut result = delivery(window, options.mode);
-    if let Some(delivery) = &mut result.delivery {
-        delivery.notes.extend(notes);
-    }
-    Ok(result)
+    Ok(delivery(window, options.mode))
 }
 
 #[cfg(test)]

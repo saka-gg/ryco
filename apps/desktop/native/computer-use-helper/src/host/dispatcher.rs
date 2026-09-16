@@ -375,10 +375,42 @@ pub fn dispatch_request(
             }
             cancel.check()?;
             let accessibility = if input.wants_text() {
-                Some(backend.snapshot_tree(&window, input.tree_max_nodes(), cancel)?)
+                match backend.snapshot_tree(&window, input.tree_max_nodes(), cancel) {
+                    Ok(tree) => Some(tree),
+                    Err(error)
+                        if !screenshots.is_empty()
+                            && matches!(
+                                error.code,
+                                ErrorCode::PermissionDenied
+                                    | ErrorCode::WindowUnavailable
+                                    | ErrorCode::Internal
+                                    | ErrorCode::Timeout
+                            ) =>
+                    {
+                        // Rendered surfaces (including Simulator) need not have
+                        // a matching AX window. Keep their pixels, but first
+                        // distinguish an AX failure from a closed/reused window.
+                        cancel.check()?;
+                        let current = backend.resolve_window(&WindowRef {
+                            app: Some(window.app.clone()),
+                            id: window.id,
+                            title: None,
+                        })?;
+                        if current != window {
+                            return Err(HelperError::window_unavailable());
+                        }
+                        notes.push(format!(
+                            "accessibility_unavailable: {} Use the screenshot and window-relative coordinates.",
+                            error.message
+                        ));
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 None
             };
+            cancel.check()?;
             serialize(WindowStateResult {
                 window,
                 mode: "passive",
@@ -516,6 +548,7 @@ mod tests {
     use super::*;
     use crate::backend::{HelloInfo, UnsupportedBackend};
     use crate::protocol::actions::{Capabilities, PermissionState, Permissions};
+    use crate::protocol::window::WindowInfo;
     use serde_json::json;
 
     fn backend() -> UnsupportedBackend {
@@ -540,13 +573,15 @@ mod tests {
         }
     }
 
-    /// Resolves one window, always fails capture with a configurable error, and
-    /// always has an accessibility tree.
-    struct CaptureFailsBackend {
-        error: HelperError,
+    #[derive(Default)]
+    struct ObservationBackend {
+        capture_error: Option<HelperError>,
+        tree_error: Option<HelperError>,
+        window_after_tree: Option<WindowInfo>,
+        tree_read: std::sync::atomic::AtomicBool,
     }
 
-    impl Backend for CaptureFailsBackend {
+    impl Backend for ObservationBackend {
         fn hello(&self) -> HelloInfo {
             unreachable!()
         }
@@ -557,6 +592,11 @@ mod tests {
             &self,
             _window: &WindowRef,
         ) -> Result<crate::protocol::window::WindowInfo> {
+            if self.tree_read.load(std::sync::atomic::Ordering::Relaxed)
+                && let Some(window) = &self.window_after_tree
+            {
+                return Ok(window.clone());
+            }
             Ok(window())
         }
         fn capture(
@@ -564,7 +604,14 @@ mod tests {
             _window: &crate::protocol::window::WindowInfo,
             _cancel: &CancelToken,
         ) -> Result<crate::capture::CaptureResult> {
-            Err(self.error.clone())
+            if let Some(error) = &self.capture_error {
+                return Err(error.clone());
+            }
+            Ok(crate::capture::CaptureResult {
+                frame: crate::capture::Frame::new(100, 80, vec![255; 100 * 80 * 4])?,
+                method: "test",
+                notes: vec![],
+            })
         }
         fn snapshot_tree(
             &self,
@@ -572,6 +619,11 @@ mod tests {
             _max_nodes: usize,
             _cancel: &CancelToken,
         ) -> Result<crate::protocol::actions::AccessibilityState> {
+            self.tree_read
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(error) = &self.tree_error {
+                return Err(error.clone());
+            }
             Ok(crate::protocol::actions::AccessibilityState {
                 source: "test".into(),
                 tree: "window \"test\"".into(),
@@ -616,7 +668,10 @@ mod tests {
 
     fn window_state(error: HelperError, input: Value) -> Result<Value> {
         dispatch_request(
-            &CaptureFailsBackend { error },
+            &ObservationBackend {
+                capture_error: Some(error),
+                ..Default::default()
+            },
             &Request {
                 id: 1,
                 action: "get_window_state".into(),
@@ -686,6 +741,77 @@ mod tests {
         )
         .expect_err("cancelled request");
         assert_eq!(error.code, ErrorCode::Cancelled);
+    }
+
+    fn observe(backend: &ObservationBackend, screenshot: bool) -> Result<Value> {
+        dispatch_request(
+            backend,
+            &Request {
+                id: 1,
+                action: "get_window_state".into(),
+                input: json!({"window": {"id": 1}, "include_text": true,
+                "include_screenshot": screenshot}),
+            },
+            &CancelToken::default(),
+        )
+    }
+
+    #[test]
+    fn keeps_pixels_when_accessibility_cannot_resolve_a_rendered_window() {
+        let backend = ObservationBackend {
+            tree_error: Some(HelperError::window_unavailable()),
+            ..Default::default()
+        };
+        let result = observe(&backend, true).expect("screenshot survives missing AX window");
+        assert_eq!(result["screenshots"].as_array().unwrap().len(), 1);
+        assert!(result["accessibility"].is_null());
+        assert!(
+            result["notes"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("accessibility_unavailable:")
+        );
+        assert_eq!(
+            observe(&backend, false).unwrap_err().code,
+            ErrorCode::WindowUnavailable
+        );
+    }
+
+    #[test]
+    fn failed_accessibility_does_not_hide_a_reused_window() {
+        let backend = ObservationBackend {
+            tree_error: Some(HelperError::window_unavailable()),
+            window_after_tree: Some(WindowInfo {
+                pid: Some(999),
+                ..window()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            observe(&backend, true).unwrap_err().code,
+            ErrorCode::WindowUnavailable
+        );
+    }
+
+    #[test]
+    fn failed_accessibility_does_not_hide_cancellation_or_total_observation_failure() {
+        let backend = ObservationBackend {
+            tree_error: Some(HelperError::new(ErrorCode::Cancelled, "cancelled")),
+            ..Default::default()
+        };
+        assert_eq!(
+            observe(&backend, true).unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+        let backend = ObservationBackend {
+            capture_error: Some(HelperError::capture_failed("no pixels")),
+            tree_error: Some(HelperError::permission_denied("no tree")),
+            ..Default::default()
+        };
+        assert_eq!(
+            observe(&backend, true).unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
     }
 
     #[test]

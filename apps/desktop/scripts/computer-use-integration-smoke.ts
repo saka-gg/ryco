@@ -124,6 +124,9 @@ async function main() {
       assert(!value.isError, JSON.stringify(value));
       return JSON.parse(value.content[0].text);
     };
+    const activeTabs = () =>
+      worker.evaluate("chrome.tabs.query({active:true}).then(tabs=>tabs.map(tab=>tab.id))");
+    const beforeActiveTabs = await activeTabs();
     const tab = (
       await execute({ action: "open", url: `http://127.0.0.1:${address.port}`, visible: false })
     ).id;
@@ -143,6 +146,11 @@ async function main() {
     await execute({ action: "fill", tab, ref: field.ref, text: "Ada" });
     await execute({ action: "click", tab, ref: button.ref });
     assert.match((await execute({ action: "observe", tab })).text, /Saved Ada/);
+    assert.deepEqual(
+      await activeTabs(),
+      beforeActiveTabs,
+      "Background browser control must not switch the user's tab",
+    );
     runtime.stop();
     assert.equal((await (await call({ action: "tabs" })).json()).isError, true);
     const rotated = runtime.backendBinding();

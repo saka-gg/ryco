@@ -1,0 +1,120 @@
+.simulator-device {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex: none;
+  max-width: 100%;
+  padding: 6px;
+  background: linear-gradient(115deg, #686868 0%, #292929 12%, #101010 42%, #383838 88%, #777 100%);
+  border: 1px solid #858585;
+  box-shadow:
+    inset 0 0 0 1px #161616,
+    0 0 0 1px #252525,
+    0 15px 35px -20px rgb(0 0 0 / 75%);
+  isolation: isolate;
+}
+
+.simulator-device::before {
+  position: absolute;
+  inset: 3px;
+  z-index: -1;
+  border: 1px solid rgb(255 255 255 / 23%);
+  border-radius: inherit;
+  content: "";
+  pointer-events: none;
+}
+
+.simulator-device--phone {
+  height: 100%;
+  max-height: 58rem;
+  aspect-ratio: 9 / 19.5;
+  border-radius: clamp(2rem, 8%, 3.5rem);
+}
+
+.simulator-device--tablet {
+  width: min(88%, 52rem);
+  max-height: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 1.8rem;
+}
+
+.simulator-device--android {
+  background: linear-gradient(115deg, #505258, #17191d 16%, #111215 76%, #4c4e53);
+  border-color: #66686e;
+}
+
+.simulator-device-screen {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  background: #050505;
+  border: 3px solid #090909;
+  border-radius: inherit;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 85%);
+}
+
+.simulator-device--tablet .simulator-device-screen {
+  border-radius: 1.25rem;
+}
+
+.simulator-device-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  color: #858585;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.simulator-device-button {
+  position: absolute;
+  z-index: -1;
+  width: 3px;
+  background: linear-gradient(#646464, #242424 15%, #353535 85%, #737373);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 65%);
+  pointer-events: none;
+}
+
+.simulator-device-button--left-top {
+  top: 18%;
+  left: -4px;
+  height: 4%;
+}
+
+.simulator-device-button--left-bottom {
+  top: 25%;
+  left: -4px;
+  height: 13%;
+}
+
+.simulator-device-button--right {
+  top: 27%;
+  right: -4px;
+  height: 11%;
+}
+
+.simulator-device--android .simulator-device-button--left-top,
+.simulator-device--tablet .simulator-device-button--left-bottom {
+  display: none;
+}
+
+.simulator-device--android .simulator-device-button--left-bottom {
+  top: 18%;
+  right: -4px;
+  left: auto;
+  height: 10%;
+  background: linear-gradient(#575a60, #202226 15%, #303238 85%, #5d6066);
+}
+
+.simulator-device--android .simulator-device-button--right {
+  top: 31%;
+  height: 5%;
+  background: linear-gradient(#575a60, #202226 15%, #303238 85%, #5d6066);
+}

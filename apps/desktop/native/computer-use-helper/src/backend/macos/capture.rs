@@ -1,11 +1,9 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use block2::RcBlock;
-use objc2::AnyThread as _;
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
@@ -20,65 +18,35 @@ use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow,
 };
 
-use crate::capture::{CaptureResult, Frame};
+use crate::capture::Frame;
 use crate::protocol::window::WindowInfo;
 use crate::protocol::{HelperError, Result};
 
-const CALLBACK_TIMEOUT: Duration = Duration::from_secs(4);
+pub(super) const CALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The largest backing scale any shipping Mac display reports. Guards against a
 /// nonsense display mode inflating a capture into a multi-gigabyte allocation.
 const MAX_BACKING_SCALE: f64 = 4.0;
-
-/// Emitted whenever a capture had to use the legacy CoreGraphics path because
-/// ScreenCaptureKit never answered.
-const SCREEN_CAPTURE_KIT_UNAVAILABLE_NOTE: &str = concat!(
-    "screen_capture_kit_unavailable: ScreenCaptureKit did not respond within the capture timeout, ",
-    "so this window was captured with the legacy CGWindowListCreateImage path. ",
-    "Later captures in this helper process skip ScreenCaptureKit entirely."
-);
-
-/// Emitted whenever ScreenCaptureKit answered with a real failure and the
-/// legacy CoreGraphics path produced the returned image instead.
-const SCREEN_CAPTURE_KIT_FAILED_NOTE: &str = "screen_capture_kit_failed";
 
 /// Returned instead of a screenshot while the console screen is locked. macOS
 /// stops rendering window content behind the login window: ScreenCaptureKit
 /// fails immediately with an audio/video capture error and
 /// `CGWindowListCreateImage` returns a fully blank image, so there is no
 /// capture path to try.
-const SCREEN_LOCKED_CAPTURE_MESSAGE: &str = concat!(
+pub(super) const SCREEN_LOCKED_CAPTURE_MESSAGE: &str = concat!(
     "The desktop is locked, so macOS renders no window content and every capture path returns ",
     "a blank image. The accessibility tree is no substitute while locked: it is reduced to an ",
     "app proxy exposing only the menu bar. Ask the user to unlock the screen and retry then."
 );
 
-/// Process-lifetime health flag. ScreenCaptureKit only calls its completion
-/// blocks when the process has a usable window-server connection; when it goes
-/// silent once it stays silent, and paying `CALLBACK_TIMEOUT` on every capture
-/// would make the helper unusable.
-static SCREEN_CAPTURE_KIT_UNHEALTHY: AtomicBool = AtomicBool::new(false);
-
-/// A ScreenCaptureKit failure, split by whether the framework is permanently
-/// silent in this process or merely failed this one request. Both fall back to
-/// the legacy CoreGraphics path; only `TimedOut` retires ScreenCaptureKit.
-enum SckError {
-    /// The framework accepted the request but never called back.
-    TimedOut,
-    /// The framework answered with a real, usually request-specific failure.
-    Failed(HelperError),
-}
-
-type SckResult<T> = std::result::Result<T, SckError>;
-
-fn callback_error(error: *mut NSError, fallback: &str) -> String {
+pub(super) fn callback_error(error: *mut NSError, fallback: &str) -> String {
     // SAFETY: ScreenCaptureKit passes a live NSError for the duration of the callback.
     unsafe { error.as_ref() }
         .map(|error| error.localizedDescription().to_string())
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn shareable_content() -> SckResult<Retained<SCShareableContent>> {
+fn shareable_content() -> Result<Retained<SCShareableContent>> {
     let (sender, receiver) = mpsc::sync_channel::<std::result::Result<usize, String>>(1);
     let completion = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -111,18 +79,15 @@ fn shareable_content() -> SckResult<Retained<SCShareableContent>> {
     }
     let address = receiver
         .recv_timeout(CALLBACK_TIMEOUT)
-        .map_err(|_| SckError::TimedOut)?
-        .map_err(|message| SckError::Failed(HelperError::capture_failed(message)))?;
+        .map_err(|_| HelperError::capture_failed("ScreenCaptureKit did not respond in time."))?
+        .map_err(HelperError::capture_failed)?;
     // SAFETY: The callback converted one retained SCShareableContent pointer
     // to this address, transferring its +1 ownership to this thread.
-    unsafe { Retained::from_raw(address as *mut SCShareableContent) }.ok_or_else(|| {
-        SckError::Failed(HelperError::capture_failed(
-            "ScreenCaptureKit returned a null content.",
-        ))
-    })
+    unsafe { Retained::from_raw(address as *mut SCShareableContent) }
+        .ok_or_else(|| HelperError::capture_failed("ScreenCaptureKit returned a null content."))
 }
 
-fn find_sc_window(window_id: u32) -> SckResult<Retained<SCWindow>> {
+pub(super) fn find_sc_window(target: &WindowInfo) -> Result<Retained<SCWindow>> {
     let content = shareable_content()?;
     // SAFETY: `content` is a live ScreenCaptureKit object.
     let windows = unsafe { content.windows() };
@@ -130,14 +95,27 @@ fn find_sc_window(window_id: u32) -> SckResult<Retained<SCWindow>> {
         .to_vec()
         .into_iter()
         // SAFETY: Each object is a retained SCWindow from the framework array.
-        .find(|window| unsafe { window.windowID() } == window_id)
-        .ok_or_else(|| SckError::Failed(HelperError::window_unavailable()))
+        .find(|window| {
+            // SAFETY: Retained framework objects; validate the process too so a
+            // recycled window id cannot capture a different application.
+            unsafe {
+                i64::from(window.windowID()) == target.id
+                    && window
+                        .owningApplication()
+                        .is_some_and(|app| u32::try_from(app.processID()).ok() == target.pid)
+            }
+        })
+        .ok_or_else(HelperError::window_unavailable)
 }
 
-fn screenshot_image(
+pub(super) fn has_screenshot_api() -> bool {
+    AnyClass::get(c"SCScreenshotManager").is_some()
+}
+
+pub(super) fn screenshot_image(
     filter: &SCContentFilter,
     configuration: &SCStreamConfiguration,
-) -> SckResult<CFRetained<CGImage>> {
+) -> Result<CFRetained<CGImage>> {
     let (sender, receiver) = mpsc::sync_channel::<std::result::Result<usize, String>>(1);
     let completion = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
         let Some(image) = NonNull::new(image) else {
@@ -167,13 +145,10 @@ fn screenshot_image(
     }
     let address = receiver
         .recv_timeout(CALLBACK_TIMEOUT)
-        .map_err(|_| SckError::TimedOut)?
-        .map_err(|message| SckError::Failed(HelperError::capture_failed(message)))?;
-    let pointer = NonNull::new(address as *mut CGImage).ok_or_else(|| {
-        SckError::Failed(HelperError::capture_failed(
-            "ScreenCaptureKit returned a null image.",
-        ))
-    })?;
+        .map_err(|_| HelperError::capture_failed("ScreenCaptureKit did not respond in time."))?
+        .map_err(HelperError::capture_failed)?;
+    let pointer = NonNull::new(address as *mut CGImage)
+        .ok_or_else(|| HelperError::capture_failed("ScreenCaptureKit returned a null image."))?;
     // SAFETY: The callback transferred one retained CGImage reference here.
     Ok(unsafe { CFRetained::from_raw(pointer) })
 }
@@ -193,7 +168,7 @@ fn display_containing(point: CGPoint) -> Option<CGDirectDisplayID> {
 /// macOS window geometry is in points, so a 2x display must be captured at
 /// twice the window's point size to keep Retina detail. Reads CoreGraphics
 /// display modes rather than `NSScreen`, which would require the main thread.
-fn backing_scale(window: &WindowInfo) -> f64 {
+pub(super) fn backing_scale(window: &WindowInfo) -> f64 {
     let center = CGPoint::new(
         f64::from(window.x) + f64::from(window.width.max(1)) / 2.0,
         f64::from(window.y) + f64::from(window.height.max(1)) / 2.0,
@@ -229,14 +204,8 @@ fn capture_pixel_size(window: &WindowInfo, scale: f64) -> (usize, usize) {
     (dimension(window.width), dimension(window.height))
 }
 
-fn screen_capture_kit(window: &WindowInfo, scale: f64) -> SckResult<CFRetained<CGImage>> {
-    let id = u32::try_from(window.id)
-        .map_err(|_| SckError::Failed(HelperError::window_unavailable()))?;
-    let sc_window = find_sc_window(id)?;
-    // SAFETY: `sc_window` is retained and valid for the filter initializer.
-    let filter = unsafe {
-        SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &sc_window)
-    };
+pub(super) fn configuration(window: &WindowInfo) -> Retained<SCStreamConfiguration> {
+    let scale = backing_scale(window);
     // SAFETY: ScreenCaptureKit configuration initialization and property
     // setters accept these bounded scalar values.
     let configuration = unsafe { SCStreamConfiguration::new() };
@@ -248,13 +217,17 @@ fn screen_capture_kit(window: &WindowInfo, scale: f64) -> SckResult<CFRetained<C
         configuration.setWidth(width);
         configuration.setHeight(height);
         configuration.setShowsCursor(false);
-        configuration.setIgnoreShadowsSingleWindow(true);
+        if has_screenshot_api() {
+            configuration.setIgnoreShadowsSingleWindow(true);
+        }
         configuration.setPixelFormat(u32::from_be_bytes(*b"BGRA"));
     }
-    screenshot_image(&filter, &configuration)
+    configuration
 }
 
-fn legacy_window_image(window: &WindowInfo) -> Result<CFRetained<CGImage>> {
+/// macOS 13 has SCStream but predates SCScreenshotManager. This image path
+/// is only used inside an already active, window-scoped sharing session.
+pub(super) fn legacy_window_image(window: &WindowInfo) -> Result<CFRetained<CGImage>> {
     type CreateWindowImage =
         unsafe extern "C" fn(CGRect, CGWindowListOption, u32, CGWindowImageOption) -> *mut CGImage;
 
@@ -263,7 +236,7 @@ fn legacy_window_image(window: &WindowInfo) -> Result<CFRetained<CGImage>> {
     let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"CGWindowListCreateImage".as_ptr()) };
     if symbol.is_null() {
         return Err(HelperError::capture_failed(
-            "This macOS version exposes neither ScreenCaptureKit screenshots nor CGWindowListCreateImage.",
+            "The macOS 13 compatibility screenshot API is unavailable.",
         ));
     }
     // SAFETY: `symbol` was resolved by the exact exported function name.
@@ -292,7 +265,7 @@ fn legacy_window_image(window: &WindowInfo) -> Result<CFRetained<CGImage>> {
 /// `CGContextDrawImage` into a `CGBitmapContext` already writes the image's top
 /// row into the first row of the buffer, so the CTM stays identity here. A
 /// `translate`/`scale(1, -1)` pair would flip every capture upside down.
-fn frame_from_image(image: &CGImage) -> Result<Frame> {
+pub(super) fn frame_from_image(image: &CGImage) -> Result<Frame> {
     let width = u32::try_from(CGImage::width(Some(image)))
         .map_err(|_| HelperError::capture_failed("Window image is too wide to encode."))?
         .max(1);
@@ -333,107 +306,6 @@ fn frame_from_image(image: &CGImage) -> Result<Frame> {
 
 pub fn screen_recording_granted() -> bool {
     CGPreflightScreenCaptureAccess()
-}
-
-fn screen_capture_kit_available() -> bool {
-    AnyClass::get(c"SCScreenshotManager").is_some()
-        && !SCREEN_CAPTURE_KIT_UNHEALTHY.load(Ordering::Relaxed)
-}
-
-fn legacy_capture(window: &WindowInfo, notes: Vec<String>) -> Result<CaptureResult> {
-    let image = legacy_window_image(window)?;
-    Ok(CaptureResult {
-        frame: frame_from_image(&image)?,
-        method: "cg_window",
-        notes,
-    })
-}
-
-/// Which capture path, if any, is worth attempting for this observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CaptureAttempt {
-    /// Nothing can produce pixels; fail with [`SCREEN_LOCKED_CAPTURE_MESSAGE`].
-    NoneScreenLocked,
-    /// Try ScreenCaptureKit, with legacy CoreGraphics as the fallback.
-    ScreenCaptureKit,
-    /// Go straight to legacy CoreGraphics.
-    Legacy,
-}
-
-/// Decide the capture path from the two facts that rule it out.
-///
-/// A locked console short-circuits everything: measured on real hardware,
-/// ScreenCaptureKit returns "Failed to start stream due to audio/video capture
-/// failure" and `CGWindowListCreateImage` yields a blank image, so trying
-/// either only costs ~150 ms and reports a misleading reason.
-fn capture_attempt(screen_locked: bool, screen_capture_kit_available: bool) -> CaptureAttempt {
-    if screen_locked {
-        return CaptureAttempt::NoneScreenLocked;
-    }
-    if screen_capture_kit_available {
-        CaptureAttempt::ScreenCaptureKit
-    } else {
-        CaptureAttempt::Legacy
-    }
-}
-
-pub fn capture(window: &WindowInfo) -> Result<CaptureResult> {
-    if !screen_recording_granted() {
-        return Err(HelperError::permission_denied(
-            "Screen Recording permission is required to capture macOS windows.",
-        ));
-    }
-    match capture_attempt(
-        super::session::screen_locked(),
-        screen_capture_kit_available(),
-    ) {
-        CaptureAttempt::NoneScreenLocked => {
-            Err(HelperError::capture_failed(SCREEN_LOCKED_CAPTURE_MESSAGE))
-        }
-        CaptureAttempt::Legacy => {
-            let notes = if SCREEN_CAPTURE_KIT_UNHEALTHY.load(Ordering::Relaxed) {
-                vec![SCREEN_CAPTURE_KIT_UNAVAILABLE_NOTE.to_string()]
-            } else {
-                Vec::new()
-            };
-            legacy_capture(window, notes)
-        }
-        CaptureAttempt::ScreenCaptureKit => match screen_capture_kit(window, backing_scale(window))
-        {
-            Ok(image) => Ok(CaptureResult {
-                frame: frame_from_image(&image)?,
-                method: "screen_capture_kit",
-                notes: Vec::new(),
-            }),
-            Err(SckError::TimedOut) => {
-                // A silent ScreenCaptureKit stays silent for the life of the
-                // process, so stop paying the timeout on every later capture.
-                SCREEN_CAPTURE_KIT_UNHEALTHY.store(true, Ordering::Relaxed);
-                log::warn!(
-                    "ScreenCaptureKit did not answer within {:?}; falling back to CGWindowListCreateImage",
-                    CALLBACK_TIMEOUT
-                );
-                // If CGWindowListCreateImage is missing too, its own error explains
-                // that this system exposes no window capture path at all.
-                legacy_capture(
-                    window,
-                    vec![SCREEN_CAPTURE_KIT_UNAVAILABLE_NOTE.to_string()],
-                )
-            }
-            // A reported failure is usually transient (a stream the window
-            // server refused to start for this one window), so try the legacy
-            // path once but leave ScreenCaptureKit healthy for later captures.
-            // If legacy fails too, ScreenCaptureKit's reason is the useful one.
-            Err(SckError::Failed(error)) => legacy_capture(
-                window,
-                vec![format!(
-                    "{SCREEN_CAPTURE_KIT_FAILED_NOTE}: {}",
-                    error.message
-                )],
-            )
-            .map_err(|_| error),
-        },
-    }
 }
 
 #[cfg(test)]
@@ -520,27 +392,6 @@ mod tests {
             frame.bgra[offset + 1],
             frame.bgra[offset + 2],
         ]
-    }
-
-    #[test]
-    fn a_locked_screen_skips_every_capture_path() {
-        assert_eq!(
-            capture_attempt(true, true),
-            CaptureAttempt::NoneScreenLocked
-        );
-        assert_eq!(
-            capture_attempt(true, false),
-            CaptureAttempt::NoneScreenLocked
-        );
-    }
-
-    #[test]
-    fn an_unlocked_screen_prefers_screen_capture_kit_when_it_is_healthy() {
-        assert_eq!(
-            capture_attempt(false, true),
-            CaptureAttempt::ScreenCaptureKit
-        );
-        assert_eq!(capture_attempt(false, false), CaptureAttempt::Legacy);
     }
 
     /// The message must not offer the accessibility tree as a workaround: while

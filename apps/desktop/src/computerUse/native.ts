@@ -122,7 +122,11 @@ export class NativeComputerDriver {
     await context.authorizeApp(app.id, app.name);
     const mode = args.mode ?? "background";
     if (mode !== "background" && mode !== "foreground") throw new Error("Invalid input mode.");
-    if (mode === "foreground" || action === "activate") await context.authorizeForeground();
+    if (action === "activate" && mode !== "foreground")
+      throw new Error(
+        "Activation requires explicit foreground mode. Background control never activates windows.",
+      );
+    if (mode === "foreground") await context.authorizeForeground();
     const hello = await this.hello(context.signal);
     if (hello.screenLocked === true)
       throw new Error("The desktop is locked. Unlock it before continuing computer use.");
@@ -161,12 +165,17 @@ export class NativeComputerDriver {
     let nativeAction = action;
     switch (action) {
       case "observe":
+        if (args.screenshot === false && args.accessibility === false)
+          throw new Error("Observation must request a screenshot or accessibility text.");
         nativeAction = "get_window_state";
         Object.assign(input, {
           include_screenshot: args.screenshot !== false,
-          include_text: true,
+          include_text: args.accessibility !== false,
           tree_max_nodes: 1_000,
-          max_dimension: 1600,
+          max_dimension:
+            args.max_dimension === undefined
+              ? 1600
+              : Math.round(numberArg(args, "max_dimension", 320, 3200)),
           format: "png",
         });
         break;
@@ -221,10 +230,14 @@ export class NativeComputerDriver {
       input.x = point.x;
       input.y = point.y;
     }
+    const target =
+      typeof window.title === "string" && window.title.trim()
+        ? `${app.name} — ${window.title}`.slice(0, 512)
+        : app.name;
     await context.activity({
-      target: app.name,
+      target,
       mode: action === "activate" ? "foreground" : mode,
-      action,
+      action: action === "observe" && args.screenshot === false ? "find_elements" : action,
       ...(typeof input.x === "number" && typeof input.y === "number"
         ? { x: window.x + input.x, y: window.y + input.y }
         : {}),
@@ -232,7 +245,7 @@ export class NativeComputerDriver {
     if (action === "drag") {
       for (const fraction of [0, 0.5, 1])
         await context.activity({
-          target: app.name,
+          target,
           mode,
           action,
           x:
@@ -268,6 +281,12 @@ export class NativeComputerDriver {
         type: "text",
         text: JSON.stringify({
           ...state,
+          screenshotStatus:
+            args.screenshot === false
+              ? "not_requested"
+              : screenshots.length > 0
+                ? "captured"
+                : "unavailable",
           screenshots: screenshots.map((raw) => {
             const shot = record(raw);
             const { data: _data, ...metadata } = shot;
@@ -283,7 +302,12 @@ export class NativeComputerDriver {
         throw new Error("Unexpected native screenshot format.");
       content.push({ type: "image", data: textArg(shot, "data", 16 * 1024 * 1024), mimeType });
     }
-    return { content };
+    // A tree can still be useful, but it must not masquerade as successful
+    // visual observation when the caller asked to see the target.
+    return {
+      content,
+      ...(args.screenshot !== false && screenshots.length === 0 ? { isError: true } : {}),
+    };
   }
 
   stop(): void {

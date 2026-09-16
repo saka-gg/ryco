@@ -436,7 +436,7 @@ impl Refusal {
         }
     }
 
-    pub const FOREGROUND_HINT: &'static str = "Retry with mode:\"foreground\" (takes over the real mouse/keyboard and shows the takeover border), or use find_elements + invoke_element / set_element_value.";
+    pub const FOREGROUND_HINT: &'static str = "Use find_elements + invoke_element / set_element_value, or the browser connection for web pages. Only request mode:\"foreground\" when the user explicitly asks to take over the real mouse/keyboard.";
 
     pub fn background_unavailable(reason: impl Into<String>) -> Self {
         Self::new(

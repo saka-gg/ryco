@@ -77,6 +77,18 @@ async function run(message, attempt) {
       throw Error("Control revoked");
     }
     attached.add(tabId);
+    try {
+      // Give the page a keyboard/input context without selecting its tab or
+      // activating the browser window. Detaching clears this emulation state.
+      await chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", {
+        enabled: true,
+      });
+      check();
+    } catch (error) {
+      attached.delete(tabId);
+      await chrome.debugger.detach({ tabId }).catch(() => {});
+      throw error;
+    }
   }
   check();
   return await chrome.debugger.sendCommand({ tabId }, message.method, message.params || {});

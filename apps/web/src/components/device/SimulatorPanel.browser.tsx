@@ -65,7 +65,7 @@ function updateAttachment(udid: string | null) {
 }
 async function mount() {
   return render(
-    <div style={{ width: 600, height: 700, display: "flex" }}>
+    <div style={{ width: "min(600px, 100vw)", height: 700, display: "flex" }}>
       <SimulatorPanel environmentId={environmentId} threadId={threadId} />
     </div>,
   );
@@ -132,6 +132,9 @@ describe("Android simulator pane", () => {
   it("renders the PNG preview, maps pixel input, and exposes Android buttons", async () => {
     await mount();
     await expect.poll(() => document.querySelector("canvas")?.width).toBe(200);
+    expect(
+      document.querySelector(".simulator-device--android .simulator-device-screen canvas"),
+    ).not.toBeNull();
     await expect
       .element(page.getByText("Simulator testing", { exact: true }))
       .not.toBeInTheDocument();
@@ -233,6 +236,10 @@ describe("Android simulator pane", () => {
       .applyInventory(environmentId, generation, snapshot.devices, snapshot.availability);
     updateAttachment(null);
     await mount();
+    await expect.element(page.getByText(/Choose a simulator to/)).toBeVisible();
+    expect(
+      document.querySelector(".simulator-device--ios .simulator-device-screen"),
+    ).not.toBeNull();
     await page.getByRole("combobox").selectOptions("IOS-1");
     await expect.poll(() => mocks.api.attach.mock.calls.length).toBe(1);
     expect(mocks.api.attach).toHaveBeenCalledWith({ threadId, udid: "IOS-1" });

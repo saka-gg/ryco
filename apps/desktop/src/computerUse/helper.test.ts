@@ -43,3 +43,27 @@ it("ignores a late write error from a stopped helper after its replacement start
   await expect(resumed).resolves.toBe("ready");
   helper.stop();
 });
+it("stops immediately on macOS sharing termination, even between requests", async () => {
+  const process = child();
+  spawn.mockReturnValueOnce(process);
+  const stopped = vi.fn();
+  const helper = new ComputerNativeHelper("helper", "state", stopped);
+  const ready = helper.call("hello");
+  process.stdout.write(JSON.stringify({ id: 1, ok: true, result: "ready" }) + "\n");
+  await ready;
+  process.stdout.write('{"event":"capture_stopped"}\n');
+  expect(process.kill).toHaveBeenCalledWith("SIGKILL");
+  expect(stopped).toHaveBeenCalledTimes(1);
+  process.stdout.write('{"event":"capture_stopped"}\n');
+  expect(stopped).toHaveBeenCalledTimes(1);
+});
+it("rejects in-flight work and ignores late responses after macOS stops sharing", async () => {
+  const process = child();
+  spawn.mockReturnValueOnce(process);
+  const stopped = vi.fn();
+  const helper = new ComputerNativeHelper("helper", "state", stopped);
+  const failed = expect(helper.call("click")).rejects.toThrow("stopped");
+  process.stdout.write('{"event":"capture_stopped"}\n{"id":1,"ok":true,"result":"late"}\n');
+  await failed;
+  expect(stopped).toHaveBeenCalledTimes(1);
+});
