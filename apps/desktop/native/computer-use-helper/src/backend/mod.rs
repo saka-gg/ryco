@@ -232,7 +232,11 @@ pub fn capability_unavailable(window: WindowInfo, what: &str) -> InteractiveResu
     )
 }
 
+pub type CaptureStoppedHandler = Arc<dyn Fn() + Send + Sync>;
+
 pub trait Backend: Send + Sync {
+    fn set_capture_stopped_handler(&self, _handler: Option<CaptureStoppedHandler>) {}
+
     fn hello(&self) -> HelloInfo;
 
     fn list_windows(&self) -> Result<Vec<WindowInfo>>;

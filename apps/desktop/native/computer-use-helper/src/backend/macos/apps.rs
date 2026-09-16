@@ -27,6 +27,16 @@ fn collect_apps(root: &Path, depth: usize, apps: &mut Vec<AppInfo>) {
                 path.to_string_lossy().into_owned(),
                 name.to_string(),
             ));
+            // Xcode 27 moved its tools (including Device Hub, the Simulator
+            // replacement) from Contents/Developer/Applications to Contents/Applications.
+            // Inspect only these known applications directories, not arbitrary
+            // bundle internals (frameworks, helpers, plug-ins, etc.).
+            collect_apps(
+                &path.join("Contents/Developer/Applications"),
+                depth + 1,
+                apps,
+            );
+            collect_apps(&path.join("Contents/Applications"), depth + 1, apps);
         } else if path.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
             collect_apps(&path, depth + 1, apps);
         }
@@ -77,5 +87,37 @@ mod tests {
         collect_apps(root.path(), 0, &mut apps);
 
         assert_eq!(apps.len(), 1);
+    }
+
+    #[test]
+    fn discovers_simulator_inside_renamed_xcode_bundles() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(
+            root.path()
+                .join("Xcode Beta.app/Contents/Developer/Applications/Simulator.app/Contents"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(
+            root.path()
+                .join("Xcode Beta.app/Contents/Other/Private Helper.app"),
+        )
+        .unwrap();
+        let mut apps = Vec::new();
+        collect_apps(root.path(), 0, &mut apps);
+        assert_eq!(apps.len(), 2);
+        assert!(apps.iter().any(|app| app.display_name == "Simulator"));
+    }
+
+    #[test]
+    fn discovers_device_hub_in_xcode_27_without_private_helpers() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(
+            "Xcode.app/Contents/Applications/DeviceHub.app/Contents/PrivateApplications/Helper.app",
+        ))
+        .unwrap();
+        let mut apps = Vec::new();
+        collect_apps(root.path(), 0, &mut apps);
+        assert_eq!(apps.len(), 2);
+        assert!(apps.iter().any(|app| app.display_name == "DeviceHub"));
     }
 }

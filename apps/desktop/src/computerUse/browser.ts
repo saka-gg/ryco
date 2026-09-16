@@ -1,6 +1,7 @@
 import type { ComputerBrowser, ComputerUseResult } from "@ryco/contracts";
 import { numberArg, record, result, textArg } from "./native.ts";
 import type { ComputerOperationContext } from "./policy.ts";
+import { COMPUTER_CURSOR_HTML } from "./cursor.ts";
 
 export interface BrowserTab {
   id: string;
@@ -53,7 +54,7 @@ export function browserCursorScript(x: number, y: number): string {
       cursor = document.createElement('div'); cursor.id='__ryco_agent_cursor'; cursor.setAttribute('aria-hidden','true');
       cursor.style.cssText='position:fixed;left:0;top:0;z-index:2147483647;pointer-events:none;transition:transform 160ms ease-out;will-change:transform;';
       const shadow=cursor.attachShadow({mode:'closed'});
-      shadow.innerHTML='<svg width="28" height="32" viewBox="0 0 28 32"><path d="M3 2L23 17L14 18L10 28Z" fill="#b1a4ff" stroke="#fff" stroke-width="2"/></svg><span style="position:absolute;left:19px;top:23px;background:#252238;color:white;border-radius:5px;padding:2px 5px;font:11px system-ui">Ryco</span>';
+      shadow.innerHTML=${JSON.stringify(COMPUTER_CURSOR_HTML)};
       document.documentElement.append(cursor);
     }
     cursor.style.visibility='visible'; cursor.style.transform='translate(${x}px,${y}px)';
@@ -138,6 +139,10 @@ export class BrowserComputerDriver {
     const args = context.request.args;
     const action = textArg(args, "action");
     if (action === "tabs") return result(await transport.tabs(context.signal));
+    const visible = action === "show" || (action === "open" && args.visible === true);
+    // Showing an external tab changes the user's selected tab; even an inactive
+    // preview can cover their work. Presentation is a consent-gated operation.
+    if (visible) await context.authorizeForeground();
     if (action === "open") {
       const tab = await transport.open(
         browserUrl(textArg(args, "url", 8192)),
@@ -145,7 +150,11 @@ export class BrowserComputerDriver {
         context.signal,
       );
       context.claim(`browser:${browser}:${tab.id}`);
-      await context.activity({ target: browser, mode: "background", action });
+      await context.activity({
+        target: browser,
+        mode: visible ? "foreground" : "background",
+        action,
+      });
       return result(tab);
     }
     const tab = textArg(args, "tab");
@@ -155,7 +164,11 @@ export class BrowserComputerDriver {
     if (target.url !== "about:blank") browserUrl(target.url);
     context.claim(`browser:${browser}:${tab}`);
     context.check();
-    await context.activity({ target: browser, mode: "background", action });
+    await context.activity({
+      target: target.title ? `${browser} — ${target.title}`.slice(0, 512) : browser,
+      mode: visible ? "foreground" : "background",
+      action: action === "observe" ? "find_elements" : action,
+    });
     if (action === "show") {
       await transport.show(tab, context.signal);
       return result({ shown: true });

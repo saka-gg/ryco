@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, BrowserWindow } from "electron";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -51,16 +51,27 @@ async function main() {
     const decoded = (value: Awaited<ReturnType<typeof execute>>) =>
       JSON.parse((value.content[0] as { text: string }).text);
     const tab = decoded(
-      await execute({ action: "open", url: `http://127.0.0.1:${address.port}`, visible: true }),
+      await execute({ action: "open", url: `http://127.0.0.1:${address.port}`, visible: false }),
     ).id;
+    const assertBackground = () => {
+      assert.equal(BrowserWindow.getFocusedWindow(), null, "Agent tabs must not take native focus");
+      assert(
+        BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
+        "Agent hosts must stay hidden",
+      );
+    };
+    assertBackground();
     let state = decoded(await execute({ action: "observe", tab }));
     const ref = (name: string) =>
       state.elements.find((element: { name: string }) => element.name === name)?.ref;
     await execute({ action: "fill", tab, ref: ref("Name"), text: "Ada" });
+    await execute({ action: "key", tab, key: "End" });
+    await execute({ action: "type", tab, text: " Lovelace!" });
+    await execute({ action: "key", tab, key: "Backspace" });
     await execute({ action: "select", tab, ref: ref("Colour"), value: "green" });
     await execute({ action: "click", tab, ref: ref("Save sample") });
     state = decoded(await execute({ action: "observe", tab }));
-    assert.match(state.text, /Saved Ada green/);
+    assert.match(state.text, /Saved Ada Lovelace green/);
     for (const name of ["Read only", "Disabled"]) {
       await assert.rejects(
         execute({ action: "fill", tab, ref: ref(name), text: "Must not change" }),
@@ -103,10 +114,11 @@ async function main() {
     assert.equal(shot.content[0]?.type, "image");
     await execute({ action: "navigate", tab, url: `http://127.0.0.1:${address.port}/next` });
     await assert.rejects(execute({ action: "click", tab, ref: "e1" }), /Observe this document/);
+    assertBackground();
     controller.stop();
     await assert.rejects(execute({ action: "tabs" }), /stopped/);
     console.log(
-      "PASS: live Chromium rejects covered/moving/readonly/disabled targets; fill/select/click, visible cursor, screenshot, navigation invalidation and stop.",
+      "PASS: hidden Chromium input/navigation stays hidden and unfocused; rejects covered/moving/readonly/disabled targets; fill/type/key/select/click, visible cursor, screenshot, navigation invalidation and stop.",
     );
   } catch (error) {
     console.error(error);

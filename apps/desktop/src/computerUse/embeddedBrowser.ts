@@ -353,7 +353,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     signal.throwIfAborted();
     const wc = this.entry(tab).view.webContents;
     const debuggerApi = wc.debugger;
-    if (!debuggerApi.isAttached()) debuggerApi.attach("1.3");
+    const attaching = !debuggerApi.isAttached();
+    if (attaching) debuggerApi.attach("1.3");
     const abort = () => {
       if (!wc.isDestroyed() && debuggerApi.isAttached()) debuggerApi.detach();
     };
@@ -361,7 +362,14 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const value = await Promise.race([
-        debuggerApi.sendCommand(method, params),
+        (async () => {
+          // Activate the page inside Chromium, without focusing its host window
+          // or changing the user's selected tab/application.
+          if (attaching)
+            await debuggerApi.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+          signal.throwIfAborted();
+          return debuggerApi.sendCommand(method, params);
+        })(),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => {
             abort();
@@ -371,6 +379,9 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       ]);
       signal.throwIfAborted();
       return value;
+    } catch (error) {
+      if (attaching) abort();
+      throw error;
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", abort);

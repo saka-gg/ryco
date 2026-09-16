@@ -26,7 +26,11 @@ where
     W: Write + Send + 'static,
 {
     let (writer, writer_thread) = LineWriter::spawn(sink);
-    let mut dispatcher = Dispatcher::new(backend, writer.clone());
+    let events = writer.clone();
+    backend.set_capture_stopped_handler(Some(Arc::new(move || {
+        events.send(b"{\"event\":\"capture_stopped\"}\n".to_vec());
+    })));
+    let mut dispatcher = Dispatcher::new(backend.clone(), writer.clone());
 
     for line in reader.lines() {
         let line = line?;
@@ -72,6 +76,7 @@ where
     }
 
     dispatcher.shutdown();
+    backend.set_capture_stopped_handler(None);
     drop(writer);
     let _ = writer_thread.join();
     Ok(())

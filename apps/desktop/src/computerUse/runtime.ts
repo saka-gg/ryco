@@ -85,7 +85,15 @@ export class DesktopComputerUseRuntime {
     const exe = app.getPath("exe");
     const marker = exe.indexOf(".app/");
     this.native = new NativeComputerDriver(
-      new ComputerNativeHelper(options.helperPath, join(options.stateDir, "computer-use-native")),
+      new ComputerNativeHelper(
+        options.helperPath,
+        join(options.stateDir, "computer-use-native"),
+        () => {
+          this.error =
+            "macOS ended screen sharing. Computer use stopped; start a new turn to resume.";
+          this.stop();
+        },
+      ),
       marker >= 0 ? exe.slice(0, marker + 4) : exe,
     );
     this.permissions = new ComputerPermissionMonitor(
@@ -100,6 +108,7 @@ export class DesktopComputerUseRuntime {
     this.overlay = new ComputerUseOverlay(
       () => this.stop(),
       () => {
+        this.native.stop();
         this.activity = null;
         this.publish();
       },
@@ -114,6 +123,7 @@ export class DesktopComputerUseRuntime {
         queueMicrotask(() => this.publish());
       },
       activity: (activity) => {
+        if (activity === null) this.native.stop();
         this.activity = activity;
         const updated = this.overlay.show(activity);
         this.publish();

@@ -25,6 +25,7 @@ mod ax;
 mod capture;
 mod input;
 mod session;
+mod stream;
 mod window_list;
 
 /// A launched window is first seen mid open-animation, so its frame is still
@@ -114,6 +115,7 @@ fn has_url_scheme(value: &str) -> bool {
 }
 
 pub struct MacOsBackend {
+    capture_sessions: stream::CaptureSessions,
     elements: SnapshotCache<ax::AxElement>,
     installed_apps: Arc<InstalledAppCache>,
 }
@@ -124,6 +126,7 @@ impl MacOsBackend {
         installed_apps.prewarm(apps::list);
         Self {
             elements: SnapshotCache::default(),
+            capture_sessions: stream::CaptureSessions::new(),
             installed_apps,
         }
     }
@@ -136,7 +139,8 @@ impl MacOsBackend {
     /// re-check, and the lasting evidence of a successful click (a sheet, a menu,
     /// a selection, an updated label) is usually nowhere near the click point.
     fn capture_window_hash(&self, window: &WindowInfo) -> Option<u64> {
-        capture::capture(window)
+        self.capture_sessions
+            .capture(window, &CancelToken::default())
             .ok()
             .map(|capture| capture.frame.content_hash())
     }
@@ -195,6 +199,10 @@ impl Default for MacOsBackend {
 }
 
 impl Backend for MacOsBackend {
+    fn set_capture_stopped_handler(&self, handler: Option<crate::backend::CaptureStoppedHandler>) {
+        self.capture_sessions.set_handler(handler);
+    }
+
     fn hello(&self) -> HelloInfo {
         HelloInfo {
             platform: "darwin",
@@ -240,12 +248,15 @@ impl Backend for MacOsBackend {
     }
 
     fn resolve_window(&self, window: &WindowRef) -> Result<WindowInfo> {
-        window_list::resolve(window)
+        self.capture_sessions.check()?;
+        let resolved = window_list::resolve(window)?;
+        self.capture_sessions.touch(&resolved)?;
+        Ok(resolved)
     }
 
     fn capture(&self, window: &WindowInfo, cancel: &CancelToken) -> Result<CaptureResult> {
         cancel.check()?;
-        capture::capture(window)
+        self.capture_sessions.capture(window, cancel)
     }
 
     fn snapshot_tree(
@@ -328,6 +339,7 @@ impl Backend for MacOsBackend {
     }
 
     fn launch_app(&self, app: &str, mode: InputMode, cancel: &CancelToken) -> Result<LaunchResult> {
+        self.capture_sessions.check()?;
         let target = LaunchTarget::parse(app)?;
         let locked = session::screen_locked();
         if let Some(refusal) = session::foreground_refusal(locked, mode) {

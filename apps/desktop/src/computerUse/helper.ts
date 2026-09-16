@@ -15,7 +15,9 @@ export class ComputerNativeHelper {
   private pending = new Map<number, Pending>();
   private readonly binary: string;
   private readonly stateDir: string;
-  constructor(binary: string, stateDir: string) {
+  private readonly captureStopped: (() => void) | undefined;
+  constructor(binary: string, stateDir: string, captureStopped?: () => void) {
+    this.captureStopped = captureStopped;
     this.binary = binary;
     this.stateDir = stateDir;
   }
@@ -67,11 +69,17 @@ export class ComputerNativeHelper {
         this.buffer = this.buffer.slice(end + 1);
         try {
           const response = JSON.parse(line) as {
+            event?: string;
             id: number;
             ok: boolean;
             result?: unknown;
             error?: string;
           };
+          if (response.event === "capture_stopped") {
+            this.stop();
+            this.captureStopped?.();
+            return;
+          }
           const pending = this.pending.get(response.id);
           if (!pending) continue;
           this.pending.delete(response.id);
