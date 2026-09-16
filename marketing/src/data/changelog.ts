@@ -21,6 +21,76 @@ const RELEASE_BASE = "https://github.com/saka-gg/ryco/releases/tag";
  */
 export const CHANGELOG_RELEASES: ChangelogRelease[] = [
   {
+    version: "0.1.27",
+    date: "September 16, 2026",
+    dateTime: "2026-09-16",
+    summary:
+      "Review code across revisions, work in multiple chats, and manage project automations with a more capable desktop workspace.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.27`,
+    highlights: [
+      {
+        title: "Review the changes that matter",
+        summary:
+          "Compare your branch or a commit with HEAD, inspect line blame at the right revision, and navigate files without losing your place. Staged and unstaged changes get separate views with guarded staging actions.",
+      },
+      {
+        title: "Keep several conversations in view",
+        summary:
+          "Split the workspace into up to four thread panes, send selected assistant text to a current, side, or new chat, and export a complete thread as Markdown. Completed messages can display bounded Mermaid diagrams.",
+      },
+      {
+        title: "Plan and review scheduled work",
+        summary:
+          "Project settings gain an automation centre for schedules and recent runs. Each due run still requires its own approval, and governed workspace tools keep agent-initiated lifecycle actions under review.",
+      },
+      {
+        title: "A smoother path from setup to editing",
+        summary:
+          "First-run local setup walks through providers and projects, while editor autosave protects against conflicting changes. Pending questions and approvals recover more predictably after interruptions.",
+      },
+      {
+        title: "Clearer device and desktop control",
+        summary:
+          "The simulator panel gains a dedicated device frame, and macOS computer-use capture keeps its live sharing stream resilient and visible while an agent works.",
+      },
+    ],
+  },
+  {
+    version: "0.1.26",
+    date: "September 14, 2026",
+    dateTime: "2026-09-14",
+    summary:
+      "Work with attachments, side questions, simulators, and more provider workflows without losing track of the main task.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.26`,
+    highlights: [
+      {
+        title: "Preview more files in chat",
+        summary:
+          "PDF and text attachments open inside the app, and queued send retries preserve drafts and attachments. Streaming Markdown also reuses completed content to keep long answers responsive.",
+      },
+      {
+        title: "Ask a quick side question",
+        summary:
+          "An isolated, read-only Side chat and /btw let you ask without derailing the current task. Approval history stays scoped to the active thread.",
+      },
+      {
+        title: "Test on more devices",
+        summary:
+          "Simulator controls cover iOS and Android, including multiple simulator hosts over SSH, with lifecycle safeguards for device testing.",
+      },
+      {
+        title: "More providers and review context",
+        summary:
+          "Verified ACP Registry providers can be added, OpenCode Task subagents show their lifecycles, and GitHub review remembers which files you have viewed.",
+      },
+      {
+        title: "Worktrees and sessions stay dependable",
+        summary:
+          "Set a worktree branch prefix, keep Codex child cancellation predictable, and find project paths and settings directly from thread menus.",
+      },
+    ],
+  },
+  {
     version: "0.1.25",
     date: "September 11, 2026",
     dateTime: "2026-09-11",
