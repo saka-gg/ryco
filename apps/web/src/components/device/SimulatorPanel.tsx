@@ -54,7 +54,7 @@ import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useHostedWorkspaceState } from "../../hostedHub/hostedConnectionCoordinator";
 
 import { SimulatorTestingDrawer } from "./SimulatorTestingDrawer";
-import "./SimulatorPanel.css";
+import { DeviceScreen, deviceKindFor, RESOLUTION_SCALE } from "./DeviceFrame";
 
 const SETUP_POLL_MS = 5_000;
 
@@ -534,15 +534,18 @@ export default function SimulatorPanel(props: {
       : [];
   const frameDevice =
     attached ?? devices.find((device) => device.state === "booted") ?? devices[0] ?? null;
-  const isTablet =
-    frameDevice?.family === "tablet" || frameDevice?.name.toLowerCase().includes("ipad");
-  const isAndroid = frameDevice?.platform === "android-emulator";
-  const frameWidth = attached
-    ? (dimensions?.width ?? frameDevice?.geometry?.pointWidth)
-    : frameDevice?.geometry?.pointWidth;
-  const frameHeight = attached
-    ? (dimensions?.height ?? frameDevice?.geometry?.pointHeight)
-    : frameDevice?.geometry?.pointHeight;
+  const deviceKind = frameDevice ? deviceKindFor(frameDevice) : "iPhone";
+  const frameScale = frameDevice?.geometry?.scale ?? RESOLUTION_SCALE[deviceKind];
+  const frameWidth = frameDevice?.geometry
+    ? Math.round(frameDevice.geometry.pointWidth * frameScale)
+    : attached
+      ? dimensions?.width
+      : undefined;
+  const frameHeight = frameDevice?.geometry
+    ? Math.round(frameDevice.geometry.pointHeight * frameScale)
+    : attached
+      ? dimensions?.height
+      : undefined;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background">
@@ -632,77 +635,57 @@ export default function SimulatorPanel(props: {
         </div>
       ) : null}
 
-      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/25 p-5 sm:p-8">
-        <div
-          style={
-            isAndroid
-              ? {
-                  aspectRatio: `${frameWidth ?? 9} / ${frameHeight ?? 19.5}`,
-                }
-              : undefined
-          }
-          className={cn(
-            "simulator-device",
-            isTablet ? "simulator-device--tablet" : "simulator-device--phone",
-            isAndroid ? "simulator-device--android" : "simulator-device--ios",
-          )}
+      <div className="relative flex min-h-0 flex-1 bg-muted/25">
+        <DeviceScreen
+          className="min-h-0 w-full flex-1"
+          kind={deviceKind}
+          pixelWidth={frameWidth}
+          pixelHeight={frameHeight}
+          buttonsDisabled={!attached || busy}
+          onPressButton={pressButton}
         >
-          <span
-            aria-hidden="true"
-            className="simulator-device-button simulator-device-button--left-top"
-          />
-          <span
-            aria-hidden="true"
-            className="simulator-device-button simulator-device-button--left-bottom"
-          />
-          <span
-            aria-hidden="true"
-            className="simulator-device-button simulator-device-button--right"
-          />
-          <div className="simulator-device-screen">
-            {attached ? (
-              <>
-                <canvas
-                  ref={canvasRef}
-                  tabIndex={0}
-                  aria-label={`${attached.name} screen`}
-                  className="h-full w-full touch-none object-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400"
-                  onPointerDown={pointerDown}
-                  onPointerUp={pointerUp}
-                  onPointerCancel={() => {
-                    pressRef.current = null;
-                  }}
-                  onKeyDown={(event) => keyEvent(event, "down")}
-                  onKeyUp={(event) => keyEvent(event, "up")}
-                />
-                {videoStatus !== "streaming" ? (
-                  <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center bg-black/75 p-6 text-center text-white">
-                    <LoaderCircleIcon className="size-5 animate-spin text-white/60" />
-                    <p className="mt-3 text-xs font-medium">
-                      {videoStatus === "unsupported"
-                        ? "This browser does not support WebCodecs."
-                        : videoStatus === "recovering"
-                          ? "Reconnecting the live screen…"
-                          : attachLabel(attached, threadState?.attachPhase)}
-                    </p>
-                    {videoError ? (
-                      <p className="mt-2 max-w-52 text-[10px] text-white/60">{videoError}</p>
-                    ) : null}
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <p className="simulator-device-placeholder">
-                Choose a simulator to
-                <br />
-                start streaming it here.
+          {attached ? (
+            <>
+              <canvas
+                ref={canvasRef}
+                tabIndex={0}
+                aria-label={`${attached.name} screen`}
+                className="h-full w-full touch-none object-cover outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400"
+                onPointerDown={pointerDown}
+                onPointerUp={pointerUp}
+                onPointerCancel={() => {
+                  pressRef.current = null;
+                }}
+                onKeyDown={(event) => keyEvent(event, "down")}
+                onKeyUp={(event) => keyEvent(event, "up")}
+              />
+              {videoStatus !== "streaming" ? (
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center bg-black/75 p-6 text-center text-white">
+                  <LoaderCircleIcon className="size-5 animate-spin text-white/60" />
+                  <p className="mt-3 text-xs font-medium">
+                    {videoStatus === "unsupported"
+                      ? "This browser does not support WebCodecs."
+                      : videoStatus === "recovering"
+                        ? "Reconnecting the live screen…"
+                        : attachLabel(attached, threadState?.attachPhase)}
+                  </p>
+                  {videoError ? (
+                    <p className="mt-2 max-w-52 text-[10px] text-white/60">{videoError}</p>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <div className="flex h-full flex-col items-center justify-center gap-1 px-[12%] text-center">
+              <p className="text-balance text-[11px] leading-snug text-white/45">
+                Choose a simulator to start streaming it here.
               </p>
-            )}
-          </div>
-        </div>
+            </div>
+          )}
+        </DeviceScreen>
       </div>
 
-      <div className="flex min-h-12 shrink-0 items-center justify-center gap-0.5 border-t border-border/60 bg-card/40 px-2">
+      <div className="relative z-10 flex min-h-12 shrink-0 items-center justify-center gap-0.5 bg-muted/25 px-2">
         {attached?.platform === "android-emulator" ? (
           <>
             <Control
