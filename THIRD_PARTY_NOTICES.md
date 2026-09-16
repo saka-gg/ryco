@@ -46,6 +46,8 @@ interaction logic, and related tests were copied or adapted from
 [`Emanuele-web04/synara`](https://github.com/Emanuele-web04/synara) tag `v0.7.2`, primarily feature
 commit `467d2f21` (`feat(device): iOS Simulator pane (#529)`). The upstream work is Copyright (c)
 2026 T3 Tools Inc. and Copyright (c) 2026 Emanuele Di Pietro and is licensed under the MIT License.
+The SVG device chassis in `apps/web/src/components/device/DeviceFrame.tsx` was subsequently adapted
+from Synara commit `dd88d9272f97e4dda5735281e73ce14de388ad25` under the same license.
 
 ### MIT License
 

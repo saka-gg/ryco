@@ -9,6 +9,7 @@ import {
   type ThreadDeviceState,
 } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { screenGeometry } from "./DeviceFrame";
 import SimulatorPanel from "./SimulatorPanel";
 
 vi.mock("../../composerDraftStore", () => ({ DraftId: { make: (value: string) => value } }));
@@ -132,9 +133,8 @@ describe("Android simulator pane", () => {
   it("renders the PNG preview, maps pixel input, and exposes Android buttons", async () => {
     await mount();
     await expect.poll(() => document.querySelector("canvas")?.width).toBe(200);
-    expect(
-      document.querySelector(".simulator-device--android .simulator-device-screen canvas"),
-    ).not.toBeNull();
+    expect(document.querySelector('[data-device-kind="androidPhone"] canvas')).not.toBeNull();
+    expect(screenGeometry("androidPhone", 200, 400).insetXPct).toBeLessThan(10);
     await expect
       .element(page.getByText("Simulator testing", { exact: true }))
       .not.toBeInTheDocument();
@@ -237,9 +237,13 @@ describe("Android simulator pane", () => {
     updateAttachment(null);
     await mount();
     await expect.element(page.getByText(/Choose a simulator to/)).toBeVisible();
+    expect(document.querySelector('[data-device-kind="iPhone"] svg')).not.toBeNull();
+    expect(screenGeometry("iPhone", 200, 400).insetXPct).toBeLessThan(10);
     expect(
-      document.querySelector(".simulator-device--ios .simulator-device-screen"),
-    ).not.toBeNull();
+      document.querySelector<HTMLButtonElement>(
+        '[data-device-kind="iPhone"] button[aria-label="Volume up"]',
+      )?.disabled,
+    ).toBe(true);
     await page.getByRole("combobox").selectOptions("IOS-1");
     await expect.poll(() => mocks.api.attach.mock.calls.length).toBe(1);
     expect(mocks.api.attach).toHaveBeenCalledWith({ threadId, udid: "IOS-1" });
