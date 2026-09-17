@@ -26,7 +26,7 @@ import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
 import { summarizeToolCallGroup, type ToolCallGroupSummary } from "./toolCallGroup.logic";
 
-export const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
+const MIN_COLLAPSIBLE_WORK_LOG_ENTRIES = 2;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
 export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
 export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";
@@ -797,7 +797,7 @@ export function deriveMessagesTimelineRows(input: {
         groupedEntries.push(nextEntry.entry);
         cursor += 1;
       }
-      if (groupedEntries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
+      if (groupedEntries.length < MIN_COLLAPSIBLE_WORK_LOG_ENTRIES) {
         nextRows.push({
           kind: "work",
           id: timelineEntry.id,
@@ -807,16 +807,9 @@ export function deriveMessagesTimelineRows(input: {
       } else {
         const groupId = `work-group:${timelineEntry.id}`;
         const expanded = input.workGroupExpandedById?.[groupId] ?? false;
-        // Agent-spawn CTA rows are always visible: a running fleet must
-        // never hide behind a "+N tool calls" toggle. Selection is by
-        // membership (spawn OR recent-tail), preserving the group's
-        // chronological order in both collapsed and expanded states.
-        const overflowCandidates = groupedEntries.filter((entry) => entry.agentSpawn === undefined);
-        const hiddenEntries = overflowCandidates.slice(0, -MAX_VISIBLE_WORK_LOG_ENTRIES);
-        // Spawn rows alone can push the group over the threshold while
-        // nothing is actually hidden; render the single grouped row then,
-        // so crossing the threshold never changes the row shape without a
-        // toggle to explain it.
+        // Keep agent navigation available, but fold the entire tool run into
+        // one summary instead of leaving the latest tool beneath it.
+        const hiddenEntries = groupedEntries.filter((entry) => entry.agentSpawn === undefined);
         if (hiddenEntries.length === 0) {
           nextRows.push({
             kind: "work",

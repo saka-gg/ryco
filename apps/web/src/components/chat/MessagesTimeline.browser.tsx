@@ -1153,8 +1153,10 @@ describe("MessagesTimeline", () => {
       await expect
         .element(page.getByText("I am checking the current implementation."))
         .toBeVisible();
-      await expect.element(page.getByText("Latest command · bun typecheck")).toBeVisible();
-      await expect.element(page.getByText("+1 previous tool call")).toBeVisible();
+      await expect
+        .element(page.getByText("Latest command · bun typecheck"))
+        .not.toBeInTheDocument();
+      await expect.element(page.getByText("Ran 2 tool calls · Running")).toBeVisible();
 
       runningFold.element().focus();
       await userEvent.keyboard("{Enter}");
@@ -1218,17 +1220,24 @@ describe("MessagesTimeline", () => {
       await expect
         .element(page.getByText("I am checking the current implementation."))
         .toBeVisible();
-      await expect.element(page.getByText("+1 previous tool call")).toBeVisible();
+      await expect.element(page.getByText("Ran 2 tool calls · Running")).toBeVisible();
 
       const previousToolsToggle = page.getByRole("button", {
-        name: "+1 previous tool call",
+        name: "Ran 2 tool calls · Running",
       });
       previousToolsToggle.element().focus();
       await userEvent.keyboard(" ");
       await expect.element(page.getByText("First command · rg -n Working")).toBeVisible();
+      await expect.element(page.getByText("Latest command · bun typecheck")).toBeVisible();
+      await expect.element(previousToolsToggle).toHaveAttribute("aria-expanded", "true");
+      await userEvent.keyboard(" ");
+      await expect.element(page.getByText("First command · rg -n Working")).not.toBeInTheDocument();
+      await expect
+        .element(page.getByText("Latest command · bun typecheck"))
+        .not.toBeInTheDocument();
       // The recap keeps its label in both states — the chevron carries the
       // open/closed meaning, so the row does not rewrite itself on toggle.
-      await expect.element(previousToolsToggle).toHaveAttribute("aria-expanded", "true");
+      await expect.element(previousToolsToggle).toHaveAttribute("aria-expanded", "false");
     } finally {
       await screen.unmount();
     }
