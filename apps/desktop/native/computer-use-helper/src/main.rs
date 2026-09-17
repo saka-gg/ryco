@@ -1,8 +1,8 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use poracode_computer_use::backend::{self, BackendOptions};
-use poracode_computer_use::host::run;
+use ryco_computer_use::backend::{self, BackendOptions};
+use ryco_computer_use::host::run;
 
 #[derive(Default)]
 struct Arguments {
@@ -45,7 +45,7 @@ fn main() {
     if arguments.version {
         println!(
             "{}",
-            poracode_computer_use::protocol::version::HELPER_VERSION
+            ryco_computer_use::protocol::version::HELPER_VERSION
         );
         return;
     }

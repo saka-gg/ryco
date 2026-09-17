@@ -1,11 +1,11 @@
 #![cfg(target_os = "macos")]
 
-use poracode_computer_use::backend::macos::MacOsBackend;
-use poracode_computer_use::backend::{
+use ryco_computer_use::backend::macos::MacOsBackend;
+use ryco_computer_use::backend::{
     Backend, CancelToken, InputOptions, PointerAction, build_hello,
 };
-use poracode_computer_use::protocol::ErrorCode;
-use poracode_computer_use::protocol::actions::{
+use ryco_computer_use::protocol::ErrorCode;
+use ryco_computer_use::protocol::actions::{
     InputMode, MouseButton, PermissionState, RefusalCode, Verify,
 };
 

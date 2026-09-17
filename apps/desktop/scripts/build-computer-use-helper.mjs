@@ -25,7 +25,7 @@ if (process.platform === "darwin") {
   run("xcrun", [
     "lipo",
     "-create",
-    ...targets.map((target) => join(source, "target", target, "release/poracode-computer-use")),
+    ...targets.map((target) => join(source, "target", target, "release/ryco-computer-use")),
     "-output",
     output,
   ]);
@@ -36,7 +36,7 @@ if (process.platform === "darwin") {
       `Build the native helper on a ${requestedArch} runner; this runner is ${process.arch}.`,
     );
   run(cargo, ["+1.98.1", "build", "--locked", "--release"]);
-  copyFileSync(join(source, "target/release", `poracode-computer-use${suffix}`), output);
+  copyFileSync(join(source, "target/release", `ryco-computer-use${suffix}`), output);
 }
 chmodSync(output, 0o755);
 const checked = spawnSync(output, ["--hello"], { encoding: "utf8" });

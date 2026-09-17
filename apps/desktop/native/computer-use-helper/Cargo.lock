@@ -1002,7 +1002,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "poracode-computer-use"
+name = "ryco-computer-use"
 version = "0.3.3"
 dependencies = [
  "ashpd",

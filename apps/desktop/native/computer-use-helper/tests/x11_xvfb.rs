@@ -2,14 +2,14 @@
 
 use std::time::{Duration, Instant};
 
-use poracode_computer_use::backend::linux::LinuxBackend;
-use poracode_computer_use::backend::{
+use ryco_computer_use::backend::linux::LinuxBackend;
+use ryco_computer_use::backend::{
     Backend, BackendOptions, CancelToken, InputOptions, KeyboardAction, PointerAction,
 };
-use poracode_computer_use::protocol::actions::{
+use ryco_computer_use::protocol::actions::{
     Delivered, InputMode, MouseButton, RefusalCode, Route, Verify,
 };
-use poracode_computer_use::protocol::window::{WindowRef, WindowSource};
+use ryco_computer_use::protocol::window::{WindowRef, WindowSource};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::composite::{ConnectionExt as _, Redirect};
@@ -305,7 +305,7 @@ fn sends_background_events_and_captures_an_xwayland_window() {
         Err(error) => {
             assert_eq!(
                 error.code,
-                poracode_computer_use::protocol::ErrorCode::CaptureFailed
+                ryco_computer_use::protocol::ErrorCode::CaptureFailed
             );
             assert!(error.message.contains("XComposite"));
         }

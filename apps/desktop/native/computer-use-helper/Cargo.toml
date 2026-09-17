@@ -1,5 +1,5 @@
 [package]
-name = "poracode-computer-use"
+name = "ryco-computer-use"
 # helperVersion reported by the hello handshake. Bump on any behavior change so
 # stale staged binaries are detectable (see .agents/docs/computer-use.md).
 version = "0.3.3"
@@ -7,14 +7,14 @@ edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
 publish = false
-description = "Poracode background computer-use helper (window control without stealing focus)"
+description = "Ryco background computer-use helper (window control without stealing focus)"
 
 [lib]
-name = "poracode_computer_use"
+name = "ryco_computer_use"
 path = "src/lib.rs"
 
 [[bin]]
-name = "poracode-computer-use"
+name = "ryco-computer-use"
 path = "src/main.rs"
 
 [dependencies]

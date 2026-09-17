@@ -1,10 +1,10 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use poracode_computer_use::protocol::actions::{ElementAction, RefusalCode};
+use ryco_computer_use::protocol::actions::{ElementAction, RefusalCode};
 
 fn helper() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_poracode-computer-use"))
+    Command::new(env!("CARGO_BIN_EXE_ryco-computer-use"))
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn hello_flag_emits_bare_handshake() {
     let hello: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         hello["protocolVersion"],
-        poracode_computer_use::protocol::version::PROTOCOL_VERSION
+        ryco_computer_use::protocol::version::PROTOCOL_VERSION
     );
     assert!(hello["helperVersion"].is_string());
     assert!(hello["platform"].is_string());
@@ -69,7 +69,7 @@ fn hello_flag_emits_bare_handshake() {
 #[test]
 fn preserves_window_unavailable_recovery_text() {
     assert_eq!(
-        poracode_computer_use::protocol::HelperError::window_unavailable().to_string(),
+        ryco_computer_use::protocol::HelperError::window_unavailable().to_string(),
         "Window is no longer available. Call list_windows or get_window for a fresh id and retry."
     );
 }
