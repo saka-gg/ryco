@@ -1588,12 +1588,9 @@ function WorkGroupToggleTimelineRow({
     : row.hiddenCount === 1
       ? "log entry"
       : "log entries";
-  // A recap only exists for a settled run of plain tool calls; anything else
-  // (errors, approvals, a single hidden row) keeps the explicit count.
-  const label =
-    row.summary && !row.summary.hasRunningEntry
-      ? row.summary.label
-      : `+${row.hiddenCount} previous ${labelNoun}`;
+  const label = row.summary
+    ? `${row.summary.label}${row.summary.hasRunningEntry ? " · Running" : ""}`
+    : `${row.hiddenCount} ${labelNoun}`;
   const SummaryIcon = row.summary ? workEntryIcon(row.summary.iconEntry) : ChevronDownIcon;
 
   return (

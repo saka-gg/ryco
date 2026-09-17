@@ -709,7 +709,7 @@ describe("deriveMessagesTimelineRows", () => {
     );
   });
 
-  it("shows the latest tool and discloses previous tool calls", () => {
+  it("shows one summary and reveals all tool calls only when expanded", () => {
     const timelineEntries = [
       {
         id: "work-entry-1",
@@ -735,11 +735,11 @@ describe("deriveMessagesTimelineRows", () => {
     // The disclosure leads the group, so the recap reads as the heading of the
     // run it folds and expanding it reveals the rows directly beneath.
     const collapsed = deriveMessagesTimelineRows(baseInput);
-    expect(collapsed.map((row) => row.id)).toEqual(["work-toggle:work-entry-1", "work-2"]);
+    expect(collapsed.map((row) => row.id)).toEqual(["work-toggle:work-entry-1"]);
     expect(collapsed[0]).toEqual(
       expect.objectContaining({
         kind: "work-toggle",
-        hiddenCount: 1,
+        hiddenCount: 2,
         onlyToolEntries: true,
         expanded: false,
       }),
@@ -842,7 +842,7 @@ describe("deriveMessagesTimelineRows", () => {
 
     const toggle = rows.find((row) => row.kind === "work-toggle");
     expect(toggle?.kind === "work-toggle" ? toggle.summary?.label : null).toBe(
-      "Ran 1 command, Read 1 file",
+      "Ran 1 command, Read 1 file, 1 other tool call",
     );
   });
 
