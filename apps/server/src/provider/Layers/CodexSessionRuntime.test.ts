@@ -5,6 +5,7 @@ import { describe, it } from "vite-plus/test";
 import { MessageId, ThreadId, TurnId } from "@ryco/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
+import * as CodexSchema from "effect-codex-app-server/schema";
 
 import {
   CODEX_ASK_MODE_DEVELOPER_INSTRUCTIONS,
@@ -308,6 +309,59 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("openCodexThread", () => {
+  it.each(["inProgress", "completed"] as const)(
+    "resumes without historical items while preserving the latest %s turn",
+    async (status) => {
+      const latestTurn = {
+        id: "latest-turn",
+        items: [],
+        status,
+        error: null,
+      };
+      const client = {
+        request: <M extends "thread/start" | "thread/resume">(
+          method: M,
+          payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          assert.equal(method, "thread/resume");
+          assert.ok("threadId" in payload);
+          // Exercise wire encoding: an unknown field would otherwise be silently stripped.
+          const encoded = Schema.encodeSync(CodexSchema.V2ThreadResumeParams)(payload);
+          assert.equal(encoded.threadId, "long-thread");
+          assert.equal(encoded.excludeTurns, true);
+          assert.deepStrictEqual(encoded.initialTurnsPage, {
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "notLoaded",
+          });
+          const page = Schema.decodeUnknownSync(
+            CodexSchema.V2ThreadResumeResponse.fields.initialTurnsPage,
+          )({
+            data: [latestTurn],
+            nextCursor: "older-turns",
+          });
+          return Effect.succeed({
+            ...makeThreadOpenResponse("long-thread"),
+            initialTurnsPage: page,
+          } as CodexRpc.ClientRequestResponsesByMethod[M]);
+        },
+      };
+      const result = await Effect.runPromise(
+        openCodexThread({
+          client,
+          threadId: ThreadId.make("thread-1"),
+          runtimeMode: "full-access",
+          cwd: "/tmp/project",
+          requestedModel: undefined,
+          serviceTier: undefined,
+          resumeThreadId: "long-thread",
+        }),
+      );
+      assert.equal(result.thread.id, "long-thread");
+      assert.deepStrictEqual(result.thread.turns, [latestTurn]);
+    },
+  );
+
   it("composes device and Agent Control MCP bindings in one thread config", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const client = {
