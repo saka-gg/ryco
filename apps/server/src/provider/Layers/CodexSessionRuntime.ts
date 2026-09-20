@@ -630,8 +630,19 @@ export const openCodexThread = (input: {
     .request("thread/resume", {
       threadId: resumeThreadId,
       ...startParams,
+      // Ryco owns the transcript. Hydrating it here can exceed the protocol frame limit.
+      excludeTurns: true,
+      initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "notLoaded" },
     })
     .pipe(
+      // Preserve active-turn recovery using only the latest turn metadata.
+      Effect.map((response) => ({
+        ...response,
+        thread: {
+          ...response.thread,
+          turns: response.initialTurnsPage?.data ?? response.thread.turns,
+        },
+      })),
       Effect.mapError((error) =>
         error.message.includes("already has an active writer")
           ? new CodexErrors.CodexAppServerRequestError({

@@ -40814,6 +40814,32 @@ export const V2ThreadRealtimeTranscriptDoneNotification = Schema.Struct({
     "EXPERIMENTAL - final transcript text emitted when realtime completes a transcript part.",
 });
 
+export type V2ThreadResumeParams__ThreadResumeInitialTurnsPageParams = {
+  readonly itemsView?: V2ThreadResumeParams__TurnItemsView | null;
+  readonly limit?: number | null;
+  readonly sortDirection?: V2ThreadResumeParams__SortDirection | null;
+};
+export const V2ThreadResumeParams__ThreadResumeInitialTurnsPageParams = Schema.Struct({
+  itemsView: Schema.optionalKey(
+    Schema.Union([V2ThreadResumeParams__TurnItemsView, Schema.Null]).annotate({
+      description: "How much item detail to include for each returned turn; defaults to summary.",
+    }),
+  ),
+  limit: Schema.optionalKey(
+    Schema.Union([
+      Schema.Number.annotate({ description: "Optional turn page size.", format: "uint32" })
+        .check(Schema.isInt())
+        .check(Schema.isGreaterThanOrEqualTo(0)),
+      Schema.Null,
+    ]),
+  ),
+  sortDirection: Schema.optionalKey(
+    Schema.Union([V2ThreadResumeParams__SortDirection, Schema.Null]).annotate({
+      description: "Optional turn pagination direction; defaults to descending.",
+    }),
+  ),
+});
+
 export type V2ThreadResumeParams = {
   readonly approvalPolicy?: V2ThreadResumeParams__AskForApproval | null;
   readonly approvalsReviewer?: V2ThreadResumeParams__ApprovalsReviewer | null;
@@ -40821,6 +40847,8 @@ export type V2ThreadResumeParams = {
   readonly config?: { readonly [x: string]: unknown } | null;
   readonly cwd?: string | null;
   readonly developerInstructions?: string | null;
+  readonly excludeTurns?: boolean;
+  readonly initialTurnsPage?: V2ThreadResumeParams__ThreadResumeInitialTurnsPageParams;
   readonly model?: string | null;
   readonly modelProvider?: string | null;
   readonly personality?: V2ThreadResumeParams__Personality | null;
@@ -40844,6 +40872,8 @@ export const V2ThreadResumeParams = Schema.Struct({
   ),
   cwd: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
   developerInstructions: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+  excludeTurns: Schema.optionalKey(Schema.Boolean),
+  initialTurnsPage: Schema.optionalKey(V2ThreadResumeParams__ThreadResumeInitialTurnsPageParams),
   model: Schema.optionalKey(
     Schema.Union([
       Schema.String.annotate({
@@ -41168,30 +41198,15 @@ export const V2ThreadResumeParams__ResponseItem = Schema.Union(
   { mode: "oneOf" },
 );
 
-export type V2ThreadResumeParams__ThreadResumeInitialTurnsPageParams = {
-  readonly itemsView?: V2ThreadResumeParams__TurnItemsView | null;
-  readonly limit?: number | null;
-  readonly sortDirection?: V2ThreadResumeParams__SortDirection | null;
+export type V2ThreadResumeResponse__TurnsPage = {
+  readonly backwardsCursor?: string | null;
+  readonly data: ReadonlyArray<V2ThreadResumeResponse__Turn>;
+  readonly nextCursor?: string | null;
 };
-export const V2ThreadResumeParams__ThreadResumeInitialTurnsPageParams = Schema.Struct({
-  itemsView: Schema.optionalKey(
-    Schema.Union([V2ThreadResumeParams__TurnItemsView, Schema.Null]).annotate({
-      description: "How much item detail to include for each returned turn; defaults to summary.",
-    }),
-  ),
-  limit: Schema.optionalKey(
-    Schema.Union([
-      Schema.Number.annotate({ description: "Optional turn page size.", format: "uint32" })
-        .check(Schema.isInt())
-        .check(Schema.isGreaterThanOrEqualTo(0)),
-      Schema.Null,
-    ]),
-  ),
-  sortDirection: Schema.optionalKey(
-    Schema.Union([V2ThreadResumeParams__SortDirection, Schema.Null]).annotate({
-      description: "Optional turn pagination direction; defaults to descending.",
-    }),
-  ),
+export const V2ThreadResumeResponse__TurnsPage = Schema.Struct({
+  backwardsCursor: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+  data: Schema.Array(V2ThreadResumeResponse__Turn),
+  nextCursor: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
 });
 
 export type V2ThreadResumeResponse = {
@@ -41199,6 +41214,7 @@ export type V2ThreadResumeResponse = {
   readonly approvalsReviewer: "user" | "auto_review" | "guardian_subagent";
   readonly cwd: V2ThreadResumeResponse__AbsolutePathBuf;
   readonly instructionSources?: ReadonlyArray<V2ThreadResumeResponse__LegacyAppPathString>;
+  readonly initialTurnsPage?: V2ThreadResumeResponse__TurnsPage | null;
   readonly model: string;
   readonly modelProvider: string;
   readonly reasoningEffort?: V2ThreadResumeResponse__ReasoningEffort | null;
@@ -41229,6 +41245,9 @@ export const V2ThreadResumeResponse = Schema.Struct({
         "Environment-native paths to instruction source files currently loaded for this thread.",
       default: [],
     }),
+  ),
+  initialTurnsPage: Schema.optionalKey(
+    Schema.Union([V2ThreadResumeResponse__TurnsPage, Schema.Null]),
   ),
   model: Schema.String,
   modelProvider: Schema.String,
@@ -41485,17 +41504,6 @@ export const V2ThreadResumeResponse__TurnItemsView = Schema.Literals([
   "summary",
   "full",
 ]);
-
-export type V2ThreadResumeResponse__TurnsPage = {
-  readonly backwardsCursor?: string | null;
-  readonly data: ReadonlyArray<V2ThreadResumeResponse__Turn>;
-  readonly nextCursor?: string | null;
-};
-export const V2ThreadResumeResponse__TurnsPage = Schema.Struct({
-  backwardsCursor: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  data: Schema.Array(V2ThreadResumeResponse__Turn),
-  nextCursor: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-});
 
 export type V2ThreadRollbackParams = { readonly numTurns: number; readonly threadId: string };
 export const V2ThreadRollbackParams = Schema.Struct({

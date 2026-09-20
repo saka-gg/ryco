@@ -152,6 +152,20 @@ const Codex0150DefinitionSchemas: Record<string, typeof Schema.Json.Type> = {
   },
 };
 
+// The upstream stable schema omits these experimental 0.155 resume fields.
+// Keep metadata-only resume available without regenerating the entire experimental API.
+const ResumeSchemaProperties: Record<string, Record<string, typeof Schema.Json.Type>> = {
+  V2ThreadResumeParams: {
+    excludeTurns: { type: "boolean" },
+    initialTurnsPage: { $ref: "#/definitions/ThreadResumeInitialTurnsPageParams" },
+  },
+  V2ThreadResumeResponse: {
+    initialTurnsPage: {
+      anyOf: [{ $ref: "#/definitions/TurnsPage" }, { type: "null" }],
+    },
+  },
+};
+
 const getGeneratedPaths = Effect.fn("getGeneratedPaths")(function* () {
   const path = yield* Path.Path;
   const generatedDir = path.join(import.meta.dirname, "..", "src", "_generated");
@@ -605,6 +619,14 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
       if (key !== "definitions") {
         topLevelSchema[key] = value;
       }
+    }
+
+    const resumeProperties = ResumeSchemaProperties[file.exportName];
+    if (resumeProperties) {
+      topLevelSchema.properties = {
+        ...(topLevelSchema.properties as Record<string, typeof Schema.Json.Type>),
+        ...resumeProperties,
+      };
     }
 
     aggregateSchemas[file.exportName] = stripNullDefaults(
