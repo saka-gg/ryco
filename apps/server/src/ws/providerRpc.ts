@@ -10,7 +10,7 @@ import {
   readResourceTelemetryHistory,
   retryResourceTelemetry,
 } from "../diagnostics/ResourceTelemetry.ts";
-import { Duration, Effect, Ref, Stream, Schema } from "effect";
+import { Duration, Effect, Option, Ref, Stream, Schema } from "effect";
 import { type AuthAccessStreamEvent, TextGenerationError, WS_METHODS } from "@ryco/contracts";
 
 import { signalDiagnosticProcess } from "../diagnostics/ProcessDiagnostics.ts";
@@ -36,6 +36,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     ownerEffect,
     directOwnerStreamEffect,
     providerRegistry,
+    modelManifest,
     providerMaintenanceRunner,
     keybindings,
     serverSettings,
@@ -180,10 +181,23 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.serverRefreshProviders,
         ownerEffect(
           WS_METHODS.serverRefreshProviders,
-          (input.instanceId !== undefined
-            ? providerRegistry.refreshInstance(input.instanceId)
-            : providerRegistry.refresh()
-          ).pipe(Effect.map((providers) => ({ providers }))),
+          Effect.gen(function* () {
+            const currentProviders = yield* providerRegistry.getProviders;
+            const refreshingClaude = currentProviders.some(
+              (provider) =>
+                provider.driver === "claudeAgent" &&
+                (input.instanceId === undefined || provider.instanceId === input.instanceId),
+            );
+            if (refreshingClaude && Option.isSome(modelManifest)) {
+              yield* modelManifest.value.refresh;
+            }
+            const refreshProviders =
+              input.instanceId !== undefined
+                ? providerRegistry.refreshInstance(input.instanceId)
+                : providerRegistry.refresh();
+            const providers = yield* refreshProviders;
+            return { providers };
+          }),
         ),
         { "rpc.aggregate": "server" },
       ),
