@@ -14,6 +14,8 @@ import { cn } from "~/lib/utils";
 
 export const ModelListRow = memo(function ModelListRow(props: {
   index: number;
+  value?: string;
+  effortLabel?: string | undefined;
   model: ModelEsque;
   /** Instance the model belongs to — the routing key used in combobox values. */
   instanceId: ProviderInstanceId;
@@ -42,7 +44,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
     <ComboboxItem
       hideIndicator
       index={props.index}
-      value={`${props.instanceId}:${props.model.slug}`}
+      value={props.value ?? `${props.instanceId}:${props.model.slug}`}
       contentClassName="flex w-full items-start gap-2"
       className={cn(
         "w-full cursor-pointer rounded px-3 py-2 transition-colors group",
@@ -87,6 +89,9 @@ export const ModelListRow = memo(function ModelListRow(props: {
                   )}
             </span>
           </div>
+          {props.effortLabel ? (
+            <span className="shrink-0 text-xs text-muted-foreground">{props.effortLabel}</span>
+          ) : null}
           {props.jumpLabel ? (
             <Kbd className="h-4 min-w-0 shrink-0 rounded-sm px-1.5 text-[10px] pointer-coarse:hidden">
               {props.jumpLabel}

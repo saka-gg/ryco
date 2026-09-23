@@ -93,3 +93,24 @@ describe("preferencesStore persistence", () => {
     expect(getPreferencesSnapshot().sidebarAutoSettleAfterDays).toBeUndefined();
   });
 });
+
+it("migrates model-only favorites unchanged and reloads multiple effort presets", async () => {
+  const favorites = [
+    { provider: "codex", model: "gpt-5" },
+    { provider: "codex", model: "gpt-5", reasoningEffort: "low" },
+    { provider: "codex", model: "gpt-5", reasoningEffort: "high" },
+  ];
+  kvStore.set(
+    "ryco.preferences",
+    JSON.stringify({ favorites: [...favorites, favorites[1], { provider: "codex", model: "" }] }),
+  );
+  hydratePreferences();
+  await flush();
+  expect(getPreferencesSnapshot().favorites).toEqual(favorites);
+  updatePreferences({ baseFontSize: 18 });
+  await flush();
+  resetPreferencesStoreForTests();
+  hydratePreferences();
+  await flush();
+  expect(getPreferencesSnapshot().favorites).toEqual(favorites);
+});

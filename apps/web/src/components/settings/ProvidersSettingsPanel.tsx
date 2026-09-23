@@ -1,3 +1,4 @@
+import { updateInstanceModelFavorites } from "@ryco/client-runtime/state/composer";
 import { LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useRef, useState, type KeyboardEvent } from "react";
 import {
@@ -287,10 +288,7 @@ export function ProvidersSettingsPanel() {
       ...new Set(nextFavoriteModels.map((slug) => slug.trim()).filter((slug) => slug.length > 0)),
     ];
     updateSettings({
-      favorites: [
-        ...withoutProviderInstanceFavorites(settings.favorites ?? [], instanceId),
-        ...favoriteModels.map((model) => ({ provider: instanceId, model })),
-      ],
+      favorites: updateInstanceModelFavorites(settings.favorites ?? [], instanceId, favoriteModels),
     });
   };
 
@@ -458,6 +456,7 @@ export function ProvidersSettingsPanel() {
               <ProviderModelPicker
                 activeInstanceId={textGenInstanceId}
                 model={textGenModel}
+                modelOptions={textGenModelOptions}
                 lockedProvider={null}
                 instanceEntries={gitModelInstanceEntries}
                 modelOptionsByInstance={gitModelOptionsByInstance}
@@ -465,12 +464,16 @@ export function ProvidersSettingsPanel() {
                 triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
                 disabled={settingsBlocked}
                 {...(settingsBlockedReason ? { disabledReason: settingsBlockedReason } : {})}
-                onInstanceModelChange={(instanceId, model) => {
+                onInstanceModelChange={(instanceId, model, options) => {
                   updateSettings({
                     textGenerationModelSelection: resolveAppModelSelectionState(
                       {
                         ...settings,
-                        textGenerationModelSelection: createModelSelection(instanceId, model),
+                        textGenerationModelSelection: createModelSelection(
+                          instanceId,
+                          model,
+                          options,
+                        ),
                       },
                       serverProviders,
                     ),

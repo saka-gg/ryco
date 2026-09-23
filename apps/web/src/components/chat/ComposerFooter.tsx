@@ -1,3 +1,4 @@
+import type { ProviderOptionSelection } from "@ryco/contracts";
 import {
   ORCHESTRATION_WS_METHODS,
   type AgentTokenMode,
@@ -478,6 +479,7 @@ export interface ComposerFooterProps {
   // Model picker
   selectedInstanceId: ProviderInstanceId;
   selectedModel: string;
+  modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey: string | null;
   providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry>;
@@ -487,7 +489,11 @@ export interface ComposerFooterProps {
   isModelPickerOpen: boolean;
   modelPickerIconClassName?: string | undefined;
   onModelPickerOpenChange: (open: boolean) => void;
-  onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
+  onProviderModelSelect: (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ReadonlyArray<ProviderOptionSelection>,
+  ) => void;
 
   // Mode controls
   showInteractionModeToggle: boolean;
@@ -565,6 +571,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           compact={props.isFooterCompact}
           activeInstanceId={props.selectedInstanceId}
           model={props.selectedModel}
+          modelOptions={props.modelOptions}
           lockedProvider={props.lockedProvider}
           lockedContinuationGroupKey={props.lockedContinuationGroupKey}
           instanceEntries={props.providerInstanceEntries}

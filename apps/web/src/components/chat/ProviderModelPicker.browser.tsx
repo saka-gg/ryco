@@ -3,6 +3,7 @@ import {
   ProviderInstanceId,
   type ResolvedKeybindingsConfig,
   type ServerProvider,
+  type ProviderOptionSelection,
 } from "@ryco/contracts";
 import { EnvironmentId } from "@ryco/contracts";
 import { createModelCapabilities } from "@ryco/shared/model";
@@ -257,6 +258,7 @@ function buildOpenCodeProvider(models: ServerProvider["models"]): ServerProvider
 async function mountPicker(props: {
   activeInstanceId?: ProviderInstanceId;
   model: string;
+  modelOptions?: ReadonlyArray<ProviderOptionSelection>;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey?: string | null;
   providers?: ReadonlyArray<ServerProvider>;
@@ -282,6 +284,7 @@ async function mountPicker(props: {
     <ProviderModelPicker
       activeInstanceId={activeInstanceId}
       model={props.model}
+      modelOptions={props.modelOptions}
       lockedProvider={props.lockedProvider}
       lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
       instanceEntries={instanceEntries}
@@ -351,6 +354,104 @@ describe("ProviderModelPicker", () => {
   afterEach(async () => {
     document.body.innerHTML = "";
     await __resetLocalApiForTests();
+  });
+
+  it("stars two efforts for one model without selecting it or closing the picker", async () => {
+    for (const effort of ["low", "high"]) {
+      const mounted = await mountPicker({
+        model: "gpt-5-codex",
+        lockedProvider: null,
+        modelOptions: [{ id: "reasoningEffort", value: effort }],
+      });
+      try {
+        await page.getByRole("button").click();
+        await page.getByRole("button", { name: "Codex", exact: true }).click();
+        await page
+          .getByRole("option")
+          .filter({ hasText: "GPT-5 Codex" })
+          .getByRole("button", { name: "Add to favorites" })
+          .click();
+        expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+        await vi.waitFor(() => {
+          expect(getModelPickerListText()).toContain("GPT-5 Codex");
+          expect(
+            JSON.parse(localStorage.getItem("ryco:client-settings:v1")!).favorites,
+          ).toContainEqual({
+            provider: "codex",
+            model: "gpt-5-codex",
+            reasoningEffort: effort,
+          });
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    }
+    expect(JSON.parse(localStorage.getItem("ryco:client-settings:v1")!).favorites).toEqual([
+      { provider: "codex", model: "gpt-5-codex", reasoningEffort: "low" },
+      { provider: "codex", model: "gpt-5-codex", reasoningEffort: "high" },
+    ]);
+    localStorage.removeItem("ryco:client-settings:v1");
+  });
+
+  it("restores effort presets independently, preserves fast mode, removes exactly one, and reloads", async () => {
+    localStorage.setItem(
+      "ryco:client-settings:v1",
+      JSON.stringify({
+        ...DEFAULT_CLIENT_SETTINGS,
+        favorites: [
+          { provider: "codex", model: "gpt-5-codex", reasoningEffort: "low" },
+          { provider: "codex", model: "gpt-5-codex", reasoningEffort: "high" },
+        ],
+      }),
+    );
+    const mounted = await mountPicker({
+      model: "gpt-5-codex",
+      lockedProvider: null,
+      modelOptions: [
+        { id: "reasoningEffort", value: "high" },
+        { id: "fastMode", value: true },
+      ],
+    });
+    try {
+      await page.getByRole("button").click();
+      await page.getByRole("button", { name: "Favorites", exact: true }).click();
+      await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]').length).toBe(2));
+      await page.getByRole("option").filter({ hasText: "low" }).click();
+      expect(mounted.onInstanceModelChange).toHaveBeenLastCalledWith(
+        CODEX_INSTANCE_ID,
+        "gpt-5-codex",
+        [
+          { id: "reasoningEffort", value: "low" },
+          { id: "fastMode", value: true },
+        ],
+      );
+      await page.getByRole("button").click();
+      await page
+        .getByRole("option")
+        .filter({ hasText: "high" })
+        .getByRole("button", { name: "Remove from favorites" })
+        .click();
+      await vi.waitFor(() => {
+        expect(JSON.parse(localStorage.getItem("ryco:client-settings:v1")!).favorites).toEqual([
+          { provider: "codex", model: "gpt-5-codex", reasoningEffort: "low" },
+        ]);
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+    await __resetLocalApiForTests();
+    const reloaded = await mountPicker({ model: "gpt-5-codex", lockedProvider: null });
+    try {
+      await page.getByRole("button").click();
+      await page.getByRole("button", { name: "Favorites", exact: true }).click();
+      await vi.waitFor(() => {
+        expect(document.querySelectorAll('[role="option"]').length).toBe(1);
+        expect(getModelPickerListText()).toContain("low");
+      });
+    } finally {
+      await reloaded.cleanup();
+      localStorage.removeItem("ryco:client-settings:v1");
+    }
   });
 
   it("shows provider sidebar in unlocked mode", async () => {

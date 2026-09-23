@@ -1,3 +1,4 @@
+import type { ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
 import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
 import type {
@@ -377,7 +378,11 @@ export interface ChatComposerProps {
     cursorAdjacentToMention: boolean,
   ) => void;
 
-  onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
+  onProviderModelSelect: (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ReadonlyArray<ProviderOptionSelection>,
+  ) => void;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
@@ -2741,6 +2746,7 @@ export const ChatComposer = memo(
                 providerInstanceEntries={providerInstanceEntries}
                 keybindings={keybindings}
                 modelOptionsByInstance={modelOptionsByInstance}
+                modelOptions={selectedModelOptionsForDispatch}
                 terminalOpen={terminalOpen}
                 isModelPickerOpen={isComposerModelPickerOpen}
                 {...(composerProviderState.modelPickerIconClassName

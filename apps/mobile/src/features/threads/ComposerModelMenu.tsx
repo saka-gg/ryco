@@ -1,3 +1,10 @@
+import {
+  applyModelFavorite,
+  createModelFavorite,
+  modelFavoriteKey,
+  toggleModelFavorite,
+} from "@ryco/client-runtime/state/composer";
+import { usePreferences, updatePreferences } from "../../state/preferencesStore";
 import type { MenuAction } from "@react-native-menu/menu";
 import type { ModelSelection } from "@ryco/contracts";
 import { applyModelOption, type ModelPickerModel } from "./modelPickerModel";
@@ -21,6 +28,7 @@ export function ComposerModelMenu(props: {
     },
   ) => ReactNode;
 }) {
+  const favorites = usePreferences().favorites ?? [];
   const groups = props.model.groups;
   const entries = groups.flatMap((group) => group.entries);
   const selectedKey = `${props.selection.instanceId}:${props.selection.model}`;
@@ -51,6 +59,49 @@ export function ComposerModelMenu(props: {
       subtitle: model.disabledReason ?? undefined,
     })),
   }));
+  const currentFavorite = createModelFavorite(props.selection, selectedOption?.capabilities);
+  const currentFavoriteSaved = favorites.some(
+    (favorite) => modelFavoriteKey(favorite) === modelFavoriteKey(currentFavorite),
+  );
+  const favoriteEntries = favorites.flatMap((favorite) => {
+    const entry = entries.find(
+      (entry) =>
+        entry.selection.instanceId === favorite.provider &&
+        entry.selection.model === favorite.model,
+    );
+    return entry ? [{ favorite, entry, key: `favorite:${modelFavoriteKey(favorite)}` }] : [];
+  });
+  if (favoriteEntries.length)
+    actions.unshift({
+      id: "favorites",
+      title: "Favorites",
+      subactions: favoriteEntries.map(({ favorite, entry, key }) => ({
+        id: key,
+        title: `${entry.label}${favorite.reasoningEffort ? ` · ${favorite.reasoningEffort}` : ""}`,
+        subtitle: groups.find((group) => group.providerKey === entry.providerKey)?.providerLabel,
+        attributes: { disabled: props.disabled || entry.disabled },
+      })),
+    });
+  if (favorites.length)
+    actions.push({
+      id: "remove-favorite",
+      title: "Remove favorite",
+      subactions: favorites.map((favorite) => ({
+        id: `remove:${modelFavoriteKey(favorite)}`,
+        title: `${favoriteEntries.find((item) => modelFavoriteKey(item.favorite) === modelFavoriteKey(favorite))?.entry.label ?? favorite.model}${favorite.reasoningEffort ? ` · ${favorite.reasoningEffort}` : ""}`,
+        subtitle:
+          groups.find((group) => group.providerKey === favorite.provider)?.providerLabel ??
+          favorite.provider,
+        attributes: { disabled: props.disabled },
+      })),
+    });
+  actions.push({
+    id: "toggle-favorite",
+    title: currentFavoriteSaved
+      ? "Remove current preset from favorites"
+      : "Favorite current model and effort",
+    attributes: { disabled: props.disabled || !selectedOption || selectedOption.disabled },
+  });
   return (
     <AnchoredMenu
       title="Provider"
@@ -83,6 +134,25 @@ export function ComposerModelMenu(props: {
         return <ProviderIcon provider={driver} size={16} />;
       }}
       onPressAction={({ nativeEvent }) => {
+        if (props.disabled) return;
+        const removed = favorites.find(
+          (favorite) => `remove:${modelFavoriteKey(favorite)}` === nativeEvent.event,
+        );
+        if (removed) {
+          updatePreferences({ favorites: toggleModelFavorite(favorites, removed) });
+          return;
+        }
+        if (nativeEvent.event === "toggle-favorite" && selectedOption && !selectedOption.disabled) {
+          updatePreferences({ favorites: toggleModelFavorite(favorites, currentFavorite) });
+          return;
+        }
+        const preset = favoriteEntries.find((entry) => entry.key === nativeEvent.event);
+        if (preset && !preset.entry.disabled) {
+          props.onSelect(
+            applyModelFavorite(preset.favorite, props.selection, preset.entry.capabilities),
+          );
+          return;
+        }
         const option = entries.find((candidate) => candidate.key === nativeEvent.event);
         if (option && !props.disabled && !option.disabled && !option.selected)
           props.onSelect(option.selection);
