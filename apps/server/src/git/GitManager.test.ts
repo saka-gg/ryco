@@ -2342,6 +2342,65 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  for (const baseAdvances of [false, true]) {
+    it.effect(
+      `generates PR content from branch changes with ${baseAdvances ? "a diverged" : "an ancestor"} base`,
+      () =>
+        Effect.gen(function* () {
+          const repoDir = yield* makeTempDir("ryco-git-manager-");
+          yield* initRepo(repoDir);
+          yield* runGit(repoDir, ["checkout", "-b", "feature/pr-context"]);
+          fs.writeFileSync(path.join(repoDir, "feature.txt"), "feature change\n");
+          yield* runGit(repoDir, ["add", "feature.txt"]);
+          yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+
+          if (baseAdvances) {
+            yield* runGit(repoDir, ["checkout", "main"]);
+            fs.writeFileSync(path.join(repoDir, "base-only.txt"), "unrelated base addition\n");
+            fs.writeFileSync(path.join(repoDir, "README.md"), "unrelated base edit\n");
+            yield* runGit(repoDir, ["add", "."]);
+            yield* runGit(repoDir, ["commit", "-m", "Unrelated base commit"]);
+            yield* runGit(repoDir, ["checkout", "feature/pr-context"]);
+          }
+
+          const remoteDir = yield* createBareRemote();
+          yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+          yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-context"]);
+          yield* runGit(repoDir, ["config", "branch.feature/pr-context.gh-merge-base", "main"]);
+
+          const generatedInputs: Parameters<FakeGitTextGeneration["generatePrContent"]>[0][] = [];
+          const { manager } = yield* makeManager({
+            ghScenario: { prListSequence: ["[]", "[]"] },
+            textGeneration: {
+              generatePrContent: (input) => {
+                generatedInputs.push(input);
+                return Effect.succeed({ title: "Feature PR", body: "Feature body" });
+              },
+            },
+          });
+          const result = yield* runStackedAction(manager, {
+            cwd: repoDir,
+            action: "commit_push_pr",
+          });
+
+          expect(result.pr.status).toBe("created");
+          expect(generatedInputs).toHaveLength(1);
+          const generated = generatedInputs[0]!;
+          expect(generated.baseBranch).toBe("main");
+          expect(generated.commitSummary).toContain("Feature commit");
+          expect(generated.commitSummary).not.toContain("Initial commit");
+          expect(generated.commitSummary).not.toContain("Unrelated base commit");
+          expect(generated.diffSummary).toContain("feature.txt");
+          expect(generated.diffSummary).toContain("1 file changed, 1 insertion(+)");
+          expect(generated.diffPatch).toContain("+feature change");
+          for (const diff of [generated.diffSummary, generated.diffPatch]) {
+            expect(diff).not.toContain("base-only.txt");
+            expect(diff).not.toContain("README.md");
+          }
+        }),
+    );
+  }
+
   it.effect("adds closing references for linked issues when creating a PR", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("ryco-git-manager-");

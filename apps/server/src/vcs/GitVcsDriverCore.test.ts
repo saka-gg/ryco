@@ -77,6 +77,69 @@ const initRepoWithCommit = (
   });
 
 it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
+  describe("readRangeContext", () => {
+    it.effect("returns empty context when base and HEAD are identical", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        assert.deepStrictEqual(yield* driver.readRangeContext(cwd, initialBranch), {
+          commitSummary: "",
+          diffSummary: "",
+          diffPatch: "",
+        });
+      }),
+    );
+
+    it.effect("preserves patch truncation and its marker for large ranges", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["checkout", "-b", "feature/large-patch"]);
+        yield* writeTextFile(cwd, "large.txt", "feature change\n".repeat(5_000));
+        yield* git(cwd, ["add", "large.txt"]);
+        yield* git(cwd, ["commit", "-m", "Large feature commit"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const context = yield* driver.readRangeContext(cwd, initialBranch);
+        assert.include(context.commitSummary, "Large feature commit");
+        assert.include(context.diffSummary, "5000 insertions(+)");
+        assert.include(context.diffPatch, "+feature change");
+        assert.isTrue(context.diffPatch.endsWith("\n\n[truncated]"));
+        assert.equal(Buffer.byteLength(context.diffPatch), 59_000 + "\n\n[truncated]".length);
+      }),
+    );
+
+    it.effect("propagates invalid base errors", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const error = yield* driver.readRangeContext(cwd, "missing-base").pipe(Effect.flip);
+        assert.instanceOf(error, GitCommandError);
+        assert.include(error.operation, "GitVcsDriver.readRangeContext.");
+        assert.include(error.detail, "missing-base");
+      }),
+    );
+
+    it.effect("fails when the base has no common ancestor", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["checkout", "--orphan", "unrelated"]);
+        yield* git(cwd, ["commit", "-m", "Unrelated root"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const error = yield* driver.readRangeContext(cwd, initialBranch).pipe(Effect.flip);
+        assert.instanceOf(error, GitCommandError);
+        assert.include(error.operation, "GitVcsDriver.readRangeContext.diff");
+        assert.include(error.detail, "no merge base");
+      }),
+    );
+  });
+
   describe("repository status", () => {
     it.effect("reports non-repository directories without failing", () =>
       Effect.gen(function* () {
