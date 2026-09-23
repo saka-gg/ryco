@@ -176,8 +176,12 @@ function ComposerFileAttachmentRow(props: {
               </View>
             ) : status?.kind === "failed" ? (
               <View className="flex-row items-center gap-1">
-                <Text className="text-2xs text-danger-foreground" numberOfLines={1}>
-                  Upload failed
+                <Text
+                  className="min-w-0 flex-1 text-2xs text-danger-foreground"
+                  numberOfLines={1}
+                  accessibilityLabel={status.message}
+                >
+                  {status.label ?? "Upload failed"}
                 </Text>
                 {props.onRetry ? (
                   <Pressable

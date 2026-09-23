@@ -167,6 +167,7 @@ describe("upload engine", () => {
     const record = engine.get("att-1");
     expect(record?.status).toEqual({ kind: "uploaded", uploadToken: "token-1", expiresAt: FUTURE });
     expect(transport.createFileUploadUrl).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
       environmentId: ENV_ID,
       threadId: THREAD_ID,
       name: "file.bin",
@@ -424,5 +425,279 @@ describe("deriveChatFileUploadSendBlock", () => {
         nowMs: Date.now(),
       }).blockReason,
     ).toBeNull();
+  });
+});
+
+function readinessHarness() {
+  const generations = new Map<EnvironmentId, object | null>([[ENV_ID, {}]]);
+  const listeners = new Map<EnvironmentId, Set<() => void>>();
+  return {
+    watchReadiness: (id: EnvironmentId, onChange: () => void) => {
+      const set = listeners.get(id) ?? new Set<() => void>();
+      listeners.set(id, set);
+      set.add(onChange);
+      return {
+        read: () => generations.get(id) ?? null,
+        dispose: () => {
+          set.delete(onChange);
+        },
+      };
+    },
+    set(id: EnvironmentId, ready: boolean) {
+      generations.set(id, ready ? {} : null);
+      for (const listener of listeners.get(id) ?? []) listener();
+    },
+    notify() {
+      for (const set of listeners.values()) for (const listener of set) listener();
+    },
+    listenerCount: () => [...listeners.values()].reduce((count, set) => count + set.size, 0),
+  };
+}
+
+describe("upload reconnect recovery", () => {
+  it("does not repeat an in-flight upload that succeeds after reconnect", async () => {
+    const readiness = readinessHarness();
+    const transfer = Promise.withResolvers<{}>();
+    const transport = makeTransport({ transferBytes: vi.fn(() => transfer.promise) });
+    const engine = createChatFileUploadEngine(transport, readiness);
+    engine.enqueue(makeRequest());
+    await flushMicrotasks();
+    readiness.set(ENV_ID, false);
+    readiness.set(ENV_ID, true);
+    transfer.resolve({});
+    await flushMicrotasks();
+    expect(engine.get("att-1")?.status.kind).toBe("uploaded");
+    expect(transport.transferBytes).toHaveBeenCalledTimes(1);
+    expect(readiness.listenerCount()).toBe(0);
+    engine.releaseAll();
+  });
+
+  it("replaces a retained source without inheriting the old recovery budget", async () => {
+    const readiness = readinessHarness();
+    const first = Promise.withResolvers<{}>();
+    const transport = makeTransport({
+      transferBytes: vi.fn().mockReturnValueOnce(first.promise).mockRejectedValue(new Error("503")),
+    });
+    const engine = createChatFileUploadEngine(transport, readiness);
+    engine.enqueue(makeRequest());
+    await flushMicrotasks();
+    readiness.set(ENV_ID, false);
+    readiness.set(ENV_ID, true);
+    const replacementSource = vi.fn(() => new Uint8Array([9]));
+    engine.enqueue(makeRequest({ name: "replacement.txt", readBytes: replacementSource }));
+    first.reject(new Error("stale"));
+    await flushMicrotasks();
+    expect(engine.get("att-1")?.name).toBe("replacement.txt");
+    expect(engine.get("att-1")?.status.kind).toBe("failed");
+    expect(replacementSource).toHaveBeenCalledTimes(1);
+    expect(transport.transferBytes).toHaveBeenCalledTimes(2);
+    expect(readiness.listenerCount()).toBe(1);
+    engine.releaseAll();
+    expect(readiness.listenerCount()).toBe(0);
+  });
+
+  it.each([false, true])(
+    "retries once per recovery with failure after reconnect=%s",
+    async (late) => {
+      const readiness = readinessHarness();
+      const first = Promise.withResolvers<{}>();
+      const source = vi.fn(() => new Uint8Array([4, 5, 6]));
+      const transport = makeTransport({
+        transferBytes: vi
+          .fn()
+          .mockReturnValueOnce(first.promise)
+          .mockRejectedValue(new Error("503")),
+      });
+      const engine = createChatFileUploadEngine(transport, readiness);
+      engine.enqueue(makeRequest({ readBytes: source }));
+      await flushMicrotasks();
+      readiness.set(ENV_ID, false);
+      if (late) readiness.set(ENV_ID, true);
+      first.reject(new Error("interrupted"));
+      await flushMicrotasks();
+      if (!late) {
+        expect(engine.get("att-1")?.readBytes).toBe(source);
+        expect(source).toHaveBeenCalledTimes(1);
+        readiness.set(ENV_ID, true);
+      }
+      await flushMicrotasks();
+      expect(transport.transferBytes).toHaveBeenCalledTimes(2);
+      expect(source).toHaveBeenCalledTimes(2);
+      readiness.notify();
+      await flushMicrotasks();
+      expect(transport.transferBytes).toHaveBeenCalledTimes(2);
+      expect(engine.get("att-1")?.status.kind).toBe("failed");
+      // A later recovery gets a new bounded attempt. Success ends observation.
+      transport.transferBytes.mockResolvedValue({});
+      readiness.set(ENV_ID, false);
+      readiness.set(ENV_ID, true);
+      await flushMicrotasks();
+      expect(transport.transferBytes).toHaveBeenCalledTimes(3);
+      expect(engine.get("att-1")?.status.kind).toBe("uploaded");
+      expect(readiness.listenerCount()).toBe(0);
+      readiness.set(ENV_ID, false);
+      readiness.set(ENV_ID, true);
+      engine.retry("att-1");
+      await flushMicrotasks();
+      expect(transport.transferBytes).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it("isolates environments and does not spin on failure without a recovery", async () => {
+    const readiness = readinessHarness();
+    const transport = makeTransport({ transferBytes: vi.fn().mockRejectedValue(new Error("503")) });
+    const engine = createChatFileUploadEngine(transport, readiness);
+    engine.enqueue(makeRequest());
+    await flushMicrotasks();
+    readiness.set("other" as EnvironmentId, false);
+    readiness.set("other" as EnvironmentId, true);
+    for (let i = 0; i < 10; i++) readiness.notify();
+    await flushMicrotasks();
+    expect(transport.createFileUploadUrl).toHaveBeenCalledTimes(1);
+    expect(engine.get("att-1")?.status.kind).toBe("failed");
+    engine.releaseAll();
+  });
+
+  it.each(["release", "releaseAll", "replace", "reattach"] as const)(
+    "cancels a scheduled recovery on %s",
+    async (action) => {
+      const readiness = readinessHarness();
+      const transport = makeTransport({
+        transferBytes: vi.fn().mockRejectedValue(new Error("503")),
+      });
+      const engine = createChatFileUploadEngine(transport, readiness);
+      engine.enqueue(makeRequest());
+      await flushMicrotasks();
+      readiness.set(ENV_ID, false);
+      readiness.set(ENV_ID, true);
+      if (action === "release") engine.release("att-1");
+      if (action === "releaseAll") engine.releaseAll();
+      if (action === "reattach") engine.seedNeedsReattach("att-1");
+      if (action === "replace")
+        engine.seedUploaded({ ...makeRequest(), uploadToken: "restored", expiresAt: FUTURE });
+      await flushMicrotasks();
+      expect(transport.transferBytes).toHaveBeenCalledTimes(1);
+      expect(readiness.listenerCount()).toBe(0);
+      engine.releaseAll();
+    },
+  );
+
+  it("coalesces manual retry with automatic retry and keeps one transfer active", async () => {
+    const readiness = readinessHarness();
+    const retry = Promise.withResolvers<{}>();
+    const transport = makeTransport({
+      transferBytes: vi.fn().mockRejectedValueOnce(new Error("503")).mockReturnValue(retry.promise),
+    });
+    const engine = createChatFileUploadEngine(transport, readiness);
+    engine.enqueue(makeRequest());
+    await flushMicrotasks();
+    readiness.set(ENV_ID, false);
+    readiness.set(ENV_ID, true);
+    engine.retry("att-1");
+    engine.retry("att-1");
+    await flushMicrotasks();
+    expect(transport.transferBytes).toHaveBeenCalledTimes(2);
+    retry.reject(new Error("still failing"));
+    await flushMicrotasks();
+    readiness.notify();
+    await flushMicrotasks();
+    expect(transport.transferBytes).toHaveBeenCalledTimes(2);
+    engine.releaseAll();
+  });
+
+  it("checks current readiness when queued work finally gets a slot", async () => {
+    const readiness = readinessHarness();
+    const otherId = "other" as EnvironmentId;
+    readiness.set(otherId, true);
+    const blocker = Promise.withResolvers<{}>();
+    const transport = makeTransport({
+      transferBytes: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("503"))
+        .mockReturnValueOnce(blocker.promise)
+        .mockResolvedValue({}),
+    });
+    const engine = createChatFileUploadEngine(transport, readiness);
+    engine.enqueue(makeRequest());
+    await flushMicrotasks();
+    engine.enqueue(makeRequest({ attachmentId: "blocker", environmentId: otherId }));
+    await flushMicrotasks();
+    readiness.set(ENV_ID, false);
+    readiness.set(ENV_ID, true);
+    await flushMicrotasks();
+    readiness.set(ENV_ID, false);
+    blocker.resolve({});
+    await flushMicrotasks();
+    expect(transport.transferBytes).toHaveBeenCalledTimes(2);
+    readiness.set(ENV_ID, true);
+    await flushMicrotasks();
+    expect(transport.transferBytes).toHaveBeenCalledTimes(3);
+    engine.releaseAll();
+  });
+
+  it.each(["mint", "read"] as const)("fences a stale generation during %s", async (stage) => {
+    const readiness = readinessHarness();
+    const gate = Promise.withResolvers<void>();
+    const transport = makeTransport({
+      createFileUploadUrl: vi.fn(async () => {
+        if (stage === "mint") await gate.promise;
+        return { uploadToken: "token", expiresAt: FUTURE, maxUploadBytes: 1024 };
+      }),
+    });
+    const engine = createChatFileUploadEngine(transport, readiness);
+    engine.enqueue(
+      makeRequest({
+        readBytes: async () => {
+          if (stage === "read") await gate.promise;
+          return new Uint8Array([1]);
+        },
+      }),
+    );
+    await flushMicrotasks();
+    readiness.set(ENV_ID, false);
+    gate.resolve();
+    await flushMicrotasks();
+    expect(transport.transferBytes).not.toHaveBeenCalled();
+    expect(engine.get("att-1")?.status.kind).toBe("failed");
+    readiness.set(ENV_ID, true);
+    await flushMicrotasks();
+    expect(transport.transferBytes).toHaveBeenCalledTimes(1);
+    engine.releaseAll();
+  });
+
+  it("disposes late watcher initialization after teardown", async () => {
+    const setup = Promise.withResolvers<{ read: () => object; dispose: () => void }>();
+    const dispose = vi.fn();
+    const transport = makeTransport();
+    const engine = createChatFileUploadEngine(transport, { watchReadiness: () => setup.promise });
+    engine.enqueue(makeRequest());
+    engine.releaseAll();
+    setup.resolve({ read: () => ({}), dispose });
+    await flushMicrotasks();
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(transport.createFileUploadUrl).not.toHaveBeenCalled();
+  });
+
+  it("never resumes persisted or expired tokens even when local bytes once existed", async () => {
+    const readiness = readinessHarness();
+    const transport = makeTransport();
+    const engine = createChatFileUploadEngine(transport, readiness);
+    engine.enqueue(makeRequest());
+    await flushMicrotasks();
+    engine.verifyUsable("att-1", Date.parse(FUTURE));
+    engine.seedNeedsReattach("reloaded");
+    engine.seedUploaded({
+      ...makeRequest({ attachmentId: "persisted" }),
+      uploadToken: "old",
+      expiresAt: PAST,
+    });
+    readiness.set(ENV_ID, false);
+    readiness.set(ENV_ID, true);
+    await flushMicrotasks();
+    expect(transport.transferBytes).toHaveBeenCalledTimes(1);
+    expect(
+      [...engine.snapshot().values()].every((record) => record.status.kind === "needsReattach"),
+    ).toBe(true);
+    engine.releaseAll();
   });
 });

@@ -132,8 +132,8 @@ export function getWsConnectionStatusForEnvironment(
  * for good (node switch, environment removal): the transport drops close events
  * for inactive sessions, so nothing else would ever move a disposed
  * environment's slot off "connected". The known-set guard keeps this a true
- * no-op for sockets that never recorded per-environment status (web/desktop),
- * so disposal there allocates nothing.
+ * no-op for sockets that never recorded per-environment status, so disposal
+ * allocates no unused status slots.
  */
 export function clearWsConnectionStatusForEnvironment(environmentId: EnvironmentId): void {
   if (!knownWsConnectionEnvironmentIds.has(environmentId)) return;

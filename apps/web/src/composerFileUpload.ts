@@ -1,6 +1,7 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import {
   createChatFileUploadEngine,
+  watchDirectChatFileUploadReadiness,
   isFileUploadTokenUsable,
   resolveFileUploadMaxBytes,
   type ChatFileUploadRecord,
@@ -8,7 +9,11 @@ import {
 import { useSyncExternalStore } from "react";
 
 import { usePrimaryEnvironmentDescriptor } from "./environments/primary/context";
-import { useSavedEnvironmentRuntimeStore } from "./environments/runtime/catalog";
+import {
+  getEnvironmentHttpBaseUrl,
+  useSavedEnvironmentRuntimeStore,
+  useSavedEnvironmentRegistryStore,
+} from "./environments/runtime/catalog";
 import { webChatFileUploadTransport } from "./platform/attachmentUpload";
 
 export type {
@@ -26,7 +31,35 @@ export {
  * by composer attachment id and hold bytes only in memory — the draft store
  * persists token metadata, never streamed bytes.
  */
-export const composerFileUploadEngine = createChatFileUploadEngine(webChatFileUploadTransport);
+export const composerFileUploadEngine = createChatFileUploadEngine(webChatFileUploadTransport, {
+  watchReadiness: async (environmentId, onChange) => {
+    // Lazy: the connection service imports composer drafts back.
+    const { readEnvironmentConnection, subscribeEnvironmentConnections } =
+      await import("./environments/runtime/service");
+    return watchDirectChatFileUploadReadiness({
+      environmentId,
+      onChange,
+      readConnection: () => readEnvironmentConnection(environmentId),
+      canUpload: () =>
+        getEnvironmentHttpBaseUrl(environmentId) !== null &&
+        (readEnvironmentConnection(environmentId)?.kind === "primary" ||
+          useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.authState ===
+            "authenticated"),
+      subscribe: (listener) => {
+        const stopConnections = subscribeEnvironmentConnections(listener);
+        const stopRuntime = useSavedEnvironmentRuntimeStore.subscribe(listener);
+        const stopRegistry = useSavedEnvironmentRegistryStore.subscribe(listener);
+        return () => {
+          stopConnections();
+          stopRuntime();
+          stopRegistry();
+        };
+      },
+    });
+  },
+});
+
+if (import.meta.hot) import.meta.hot.dispose(() => composerFileUploadEngine.releaseAll());
 
 /** Release only uploads previously owned by this composer, preserving other drafts. */
 export function releaseUnusedComposerFileUploads(
@@ -106,7 +139,7 @@ export function deriveComposerFileUploadSendBlock(input: {
         return `Uploading '${attachment.name}'…`;
       }
       if (status.kind === "failed") {
-        return `'${attachment.name}' failed to upload. Retry it or remove it.`;
+        return `'${attachment.name}' failed to upload. ${status.message} Retry it or remove it.`;
       }
       if (
         status.kind === "needsReattach" ||
