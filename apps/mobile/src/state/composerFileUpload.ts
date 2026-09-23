@@ -1,6 +1,7 @@
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import {
   createChatFileUploadEngine,
+  watchDirectChatFileUploadReadiness,
   resolveFileUploadMaxBytes,
   type ChatFileUploadRecord,
 } from "@ryco/client-runtime/state/composer";
@@ -26,7 +27,27 @@ export {
  * transport. Records are keyed by composer attachment id and hold bytes only
  * in memory — the outbox persists token metadata, never streamed bytes.
  */
-export const composerFileUploadEngine = createChatFileUploadEngine(mobileChatFileUploadTransport);
+export const composerFileUploadEngine = createChatFileUploadEngine(mobileChatFileUploadTransport, {
+  watchReadiness: (environmentId, onChange) => {
+    const { catalog, driver } = createMobileConnectionRegistry();
+    return watchDirectChatFileUploadReadiness({
+      environmentId,
+      onChange,
+      readConnection: () => driver.supervisor.read(environmentId),
+      canUpload: () =>
+        catalog.get(environmentId) !== null &&
+        catalog.getRuntime(environmentId).authState === "authenticated",
+      subscribe: (listener) => {
+        const stopConnections = driver.supervisor.subscribe(listener);
+        const stopRuntime = catalog.runtimeStore.subscribe(listener);
+        return () => {
+          stopConnections();
+          stopRuntime();
+        };
+      },
+    });
+  },
+});
 
 /** Seeds an uploaded file restored from persisted outbox state. */
 export function seedComposerFileUploadFromPersisted(input: {

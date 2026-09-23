@@ -7,6 +7,8 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 
+import type { ChatFileUploadReadiness } from "./attachmentUploadReadiness.ts";
+
 // ---------------------------------------------------------------------------
 // Upload state machine
 // ---------------------------------------------------------------------------
@@ -109,11 +111,70 @@ export interface ChatFileUploadEngine {
 
 export function createChatFileUploadEngine(
   transport: ChatFileUploadTransport,
-  options?: { nowMs?: () => number },
+  options?: {
+    nowMs?: () => number;
+    /** One automatic retry per new ready generation; no timers or failure-driven loops. */
+    watchReadiness?: (
+      environmentId: EnvironmentId,
+      onChange: () => void,
+    ) => ChatFileUploadReadiness | Promise<ChatFileUploadReadiness>;
+  },
 ): ChatFileUploadEngine {
   const nowMs = options?.nowMs ?? (() => Date.now());
   const records = new Map<string, ChatFileUploadRecord>();
   const queue: string[] = [];
+  interface Job {
+    readiness: ChatFileUploadReadiness | null;
+    initialized: boolean;
+    generation: object | null;
+    recovery: number;
+    attemptedRecovery: number;
+    started: boolean;
+  }
+  const jobs = new Map<string, Job>();
+  let scheduled = false;
+
+  function cancelJob(attachmentId: string): void {
+    const job = jobs.get(attachmentId);
+    jobs.delete(attachmentId);
+    const index = queue.indexOf(attachmentId);
+    if (index !== -1) queue.splice(index, 1);
+    job?.readiness?.dispose();
+  }
+
+  function refreshReadiness(job: Job): boolean {
+    if (!options?.watchReadiness) return true;
+    if (!job.initialized) return false;
+    const generation = job.readiness?.read() ?? null;
+    if (generation !== job.generation) {
+      if (generation !== null && job.started) job.recovery += 1;
+      job.generation = generation;
+    }
+    return generation !== null;
+  }
+
+  function schedule(): void {
+    if (scheduled) return;
+    scheduled = true;
+    void Promise.resolve().then(() => {
+      scheduled = false;
+      for (const [id, job] of jobs) {
+        const ready = refreshReadiness(job);
+        const record = records.get(id);
+        if (
+          ready &&
+          job.recovery > job.attemptedRecovery &&
+          record?.status.kind === "failed" &&
+          record.status.retryable
+        ) {
+          if (!queue.includes(id)) queue.push(id);
+          put({ ...record, status: { kind: "pending" } });
+        }
+      }
+      void pump();
+    });
+  }
+
   let inFlightCount = 0;
   const listeners = new Set<() => void>();
   let snapshotCache: ReadonlyMap<string, ChatFileUploadRecord> | null = null;
@@ -127,6 +188,9 @@ export function createChatFileUploadEngine(
   function put(record: ChatFileUploadRecord): void {
     records.set(record.attachmentId, record);
     snapshotCache = null;
+    if (record.status.kind === "uploaded" || record.status.kind === "needsReattach") {
+      cancelJob(record.attachmentId);
+    }
     notify();
   }
 
@@ -141,15 +205,25 @@ export function createChatFileUploadEngine(
     if (inFlightCount > 0) {
       return;
     }
-    const attachmentId = queue.shift();
-    if (!attachmentId) {
-      return;
-    }
+    const index = queue.findIndex((id) => {
+      const job = jobs.get(id);
+      return job !== undefined && refreshReadiness(job);
+    });
+    if (index === -1) return;
+    const attachmentId = queue.splice(index, 1)[0]!;
     const record = records.get(attachmentId);
-    if (!record) {
-      void pump();
-      return;
-    }
+    const job = jobs.get(attachmentId);
+    if (!record || !job || record.status.kind !== "pending") return;
+    job.started = true;
+    // Consume recovery only when work starts. A manual retry consumes the same
+    // budget, and multiple recoveries while one request settles coalesce here.
+    job.attemptedRecovery = job.recovery;
+    const generation = job.generation;
+    const assertReady = () => {
+      if (!refreshReadiness(job) || job.generation !== generation) {
+        throw new Error("The environment connection changed during the upload.");
+      }
+    };
     let activeRecord = record;
     const isCurrent = () => records.get(attachmentId) === activeRecord;
     const update = (next: ChatFileUploadRecord) => {
@@ -159,13 +233,12 @@ export function createChatFileUploadEngine(
     };
     inFlightCount += 1;
     try {
-      if (record.status.kind === "needsReattach" || record.status.kind === "uploaded") {
-        return;
-      }
       update({ ...record, status: { kind: "uploading", progress: 0 } });
       let token: string;
       let expiresAt: string;
       try {
+        if (!isCurrent()) return;
+        assertReady();
         const minted = await transport.createFileUploadUrl({
           environmentId: record.environmentId,
           threadId: record.threadId,
@@ -188,8 +261,10 @@ export function createChatFileUploadEngine(
       }
       try {
         if (!isCurrent()) return;
+        assertReady();
         const bytes = await record.readBytes();
         if (!isCurrent()) return;
+        assertReady();
         const confirmed = await transport.transferBytes({
           environmentId: record.environmentId,
           uploadToken: token,
@@ -229,7 +304,7 @@ export function createChatFileUploadEngine(
       }
     } finally {
       inFlightCount -= 1;
-      void pump();
+      schedule();
     }
   }
 
@@ -243,10 +318,47 @@ export function createChatFileUploadEngine(
       };
     },
     enqueue: (request) => {
-      put({ ...request, status: { kind: "pending" } });
-      if (!queue.includes(request.attachmentId)) {
-        queue.push(request.attachmentId);
+      cancelJob(request.attachmentId);
+      const job: Job = {
+        readiness: null,
+        initialized: !options?.watchReadiness,
+        generation: null,
+        recovery: 0,
+        attemptedRecovery: 0,
+        started: false,
+      };
+      jobs.set(request.attachmentId, job);
+      if (options?.watchReadiness) {
+        // Read synchronously on notifications so even a fast disconnect/reconnect
+        // cannot collapse into a single ready observation before the queued retry.
+        const onChange = () => {
+          if (jobs.get(request.attachmentId) !== job) return;
+          refreshReadiness(job);
+          schedule();
+        };
+        void Promise.resolve(options.watchReadiness(request.environmentId, onChange)).then(
+          (readiness) => {
+            if (jobs.get(request.attachmentId) !== job) {
+              readiness.dispose();
+              return;
+            }
+            job.readiness = readiness;
+            job.initialized = true;
+            onChange();
+          },
+          () => {
+            if (jobs.get(request.attachmentId) !== job) return;
+            const record = records.get(request.attachmentId);
+            if (record)
+              put({
+                ...record,
+                status: { kind: "needsReattach", message: "The upload could not be initialized." },
+              });
+          },
+        );
       }
+      queue.push(request.attachmentId);
+      put({ ...request, status: { kind: "pending" } });
       void pump();
     },
     retry: (attachmentId) => {
@@ -254,13 +366,14 @@ export function createChatFileUploadEngine(
       if (!record || record.status.kind !== "failed" || !record.status.retryable) {
         return;
       }
-      put({ ...record, status: { kind: "pending" } });
       if (!queue.includes(attachmentId)) {
         queue.push(attachmentId);
       }
+      put({ ...record, status: { kind: "pending" } });
       void pump();
     },
     seedUploaded: (input) => {
+      cancelJob(input.attachmentId);
       const record: ChatFileUploadRecord = {
         attachmentId: input.attachmentId,
         threadId: input.threadId,
@@ -312,12 +425,9 @@ export function createChatFileUploadEngine(
       return false;
     },
     release: (attachmentId) => {
+      cancelJob(attachmentId);
       if (!records.delete(attachmentId)) {
         return;
-      }
-      const queueIndex = queue.indexOf(attachmentId);
-      if (queueIndex !== -1) {
-        queue.splice(queueIndex, 1);
       }
       snapshotCache = null;
       notify();
@@ -326,6 +436,7 @@ export function createChatFileUploadEngine(
       if (records.size === 0) {
         return;
       }
+      for (const id of jobs.keys()) cancelJob(id);
       records.clear();
       queue.length = 0;
       snapshotCache = null;
