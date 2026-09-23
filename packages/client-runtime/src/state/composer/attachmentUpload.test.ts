@@ -167,6 +167,7 @@ describe("upload engine", () => {
     const record = engine.get("att-1");
     expect(record?.status).toEqual({ kind: "uploaded", uploadToken: "token-1", expiresAt: FUTURE });
     expect(transport.createFileUploadUrl).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
       environmentId: ENV_ID,
       threadId: THREAD_ID,
       name: "file.bin",

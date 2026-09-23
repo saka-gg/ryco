@@ -40,9 +40,11 @@ export const composerFileUploadEngine = createChatFileUploadEngine(mobileChatFil
       subscribe: (listener) => {
         const stopConnections = driver.supervisor.subscribe(listener);
         const stopRuntime = catalog.runtimeStore.subscribe(listener);
+        const stopRegistry = catalog.registryStore.subscribe(listener);
         return () => {
           stopConnections();
           stopRuntime();
+          stopRegistry();
         };
       },
     });

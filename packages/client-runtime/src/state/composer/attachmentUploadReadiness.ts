@@ -7,16 +7,23 @@ import {
   wsConnectionStatusForEnvironmentAtom,
 } from "../../rpc/wsConnectionState.ts";
 
+export interface ChatFileUploadUnavailable {
+  readonly label: string;
+  readonly message: string;
+  /** Transient socket loss can leave an independent HTTP transfer running. */
+  readonly cancelInFlight: boolean;
+}
+
 /** A generation is authority only while it is still returned by read(). */
 export interface ChatFileUploadReadiness {
   readonly read: () => object | null;
+  readonly unavailable?: () => ChatFileUploadUnavailable;
   readonly dispose: () => void;
 }
 
 /**
- * Direct HTTP uploads only. Hosted adapters must fail closed here: their relay
- * lifecycle owns authorization and streaming HTTP uploads are not supported.
- * The current authenticated socket and its shell bootstrap must both be ready.
+ * Direct HTTP uploads only. Hosted relay lifecycle authority stays with its
+ * owner; a resolved bootstrap promise from a previous socket is never evidence.
  */
 export function watchDirectChatFileUploadReadiness(input: {
   readonly environmentId: EnvironmentId;
@@ -26,46 +33,49 @@ export function watchDirectChatFileUploadReadiness(input: {
   readonly onChange: () => void;
 }): ChatFileUploadReadiness {
   let disposed = false;
-  let current: {
-    connection: EnvironmentConnection;
-    bootstrap: Promise<void>;
-    attempt: number;
-    ready: boolean;
-  } | null = null;
-
-  const read = (): object | null => {
-    if (disposed) return null;
-    const status = getWsConnectionStatusForEnvironment(input.environmentId);
+  let observedConnection: EnvironmentConnection | null = null;
+  let stopShell = () => {};
+  const readConnection = () => {
     const connection = input.readConnection();
-    if (
-      !input.canUpload() ||
-      status.phase !== "connected" ||
-      !connection ||
-      connection.knownEnvironment.source === "hub-hosted"
-    ) {
-      current = null;
-      return null;
+    if (connection !== observedConnection) {
+      stopShell();
+      observedConnection = connection;
+      stopShell = connection?.shellSnapshotReadiness.subscribe(input.onChange) ?? (() => {});
     }
-    const bootstrap = connection.ensureBootstrapped();
-    if (
-      current?.connection !== connection ||
-      current.bootstrap !== bootstrap ||
-      current.attempt !== status.attemptCount
-    ) {
-      const generation = { connection, bootstrap, attempt: status.attemptCount, ready: false };
-      current = generation;
-      void bootstrap.then(
-        () => {
-          if (disposed || current !== generation) return;
-          generation.ready = true;
-          input.onChange();
-        },
-        () => {
-          // A failed bootstrap waits for a new connection/subscription, never polls.
-        },
-      );
+    return connection;
+  };
+  const unavailable = (): ChatFileUploadUnavailable => {
+    const connection = readConnection();
+    const status = getWsConnectionStatusForEnvironment(input.environmentId);
+    if (!connection)
+      return {
+        label: "Reconnect",
+        message: "Environment unavailable. Reconnect it or remove this attachment.",
+        cancelInFlight: true,
+      };
+    if (!input.canUpload() || connection.knownEnvironment.source === "hub-hosted") {
+      return {
+        label: "Authorize",
+        message:
+          "Upload unavailable. Reconnect and authorize this environment, or remove this attachment.",
+        cancelInFlight: true,
+      };
     }
-    return current.ready ? current : null;
+    if (status.reconnectPhase === "exhausted" || status.phase === "idle") {
+      return {
+        label: "Reconnect",
+        message: "Environment disconnected. Reconnect it to retry, or remove this attachment.",
+        cancelInFlight: true,
+      };
+    }
+    return {
+      label: status.phase === "connected" ? "Syncing" : "Reconnecting",
+      message:
+        status.phase === "connected"
+          ? "Waiting for the current environment snapshot. Reconnect or remove this attachment if it does not recover."
+          : "Waiting for the environment to reconnect. The upload will retry automatically; you can also remove it.",
+      cancelInFlight: false,
+    };
   };
   const stopStatus = appAtomRegistry.subscribe(
     wsConnectionStatusForEnvironmentAtom(input.environmentId),
@@ -73,12 +83,25 @@ export function watchDirectChatFileUploadReadiness(input: {
   );
   const stopConnections = input.subscribe(input.onChange);
   return {
-    read,
+    read: () => {
+      if (disposed) return null;
+      const connection = readConnection();
+      if (
+        !input.canUpload() ||
+        !connection ||
+        connection.knownEnvironment.source === "hub-hosted" ||
+        getWsConnectionStatusForEnvironment(input.environmentId).phase !== "connected"
+      )
+        return null;
+      return connection.shellSnapshotReadiness.read();
+    },
+    unavailable,
     dispose: () => {
       disposed = true;
-      current = null;
       stopStatus();
       stopConnections();
+      stopShell();
+      observedConnection = null;
     },
   };
 }

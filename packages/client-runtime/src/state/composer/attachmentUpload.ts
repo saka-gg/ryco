@@ -17,7 +17,12 @@ export type ChatFileUploadStatus =
   | { readonly kind: "pending" }
   | { readonly kind: "uploading"; readonly progress: number }
   | { readonly kind: "uploaded"; readonly uploadToken: string; readonly expiresAt: string }
-  | { readonly kind: "failed"; readonly retryable: boolean; readonly message: string }
+  | {
+      readonly kind: "failed";
+      readonly retryable: boolean;
+      readonly message: string;
+      readonly label?: string;
+    }
   | { readonly kind: "needsReattach"; readonly message: string };
 
 export interface ChatFileUploadRequest {
@@ -38,11 +43,15 @@ export interface ChatFileUploadRecord extends ChatFileUploadRequest {
 /** Port the platform adapter implements: token minting plus raw byte transfer. */
 export interface ChatFileUploadTransport {
   createFileUploadUrl(
-    input: FileAttachmentCreateUploadUrlInput & { readonly environmentId: EnvironmentId },
+    input: FileAttachmentCreateUploadUrlInput & {
+      readonly environmentId: EnvironmentId;
+      readonly signal?: AbortSignal;
+    },
   ): Promise<FileAttachmentCreateUploadUrlResult>;
   transferBytes(input: {
     readonly environmentId: EnvironmentId;
     readonly uploadToken: string;
+    readonly signal?: AbortSignal;
     readonly bytes: Uint8Array;
     readonly onProgress?: (progress: number) => void;
   }): Promise<{ name?: string; mimeType?: string; sizeBytes?: number }>;
@@ -129,17 +138,19 @@ export function createChatFileUploadEngine(
     generation: object | null;
     recovery: number;
     attemptedRecovery: number;
-    started: boolean;
+    cancelAttempt: (() => void) | null;
+    reportUnavailable: ((message: string, label: string) => void) | null;
   }
   const jobs = new Map<string, Job>();
   let scheduled = false;
 
-  function cancelJob(attachmentId: string): void {
+  function cancelJob(attachmentId: string, cancelActive = true): void {
     const job = jobs.get(attachmentId);
     jobs.delete(attachmentId);
     const index = queue.indexOf(attachmentId);
     if (index !== -1) queue.splice(index, 1);
     job?.readiness?.dispose();
+    if (cancelActive) job?.cancelAttempt?.();
   }
 
   function refreshReadiness(job: Job): boolean {
@@ -147,10 +158,42 @@ export function createChatFileUploadEngine(
     if (!job.initialized) return false;
     const generation = job.readiness?.read() ?? null;
     if (generation !== job.generation) {
-      if (generation !== null && job.started) job.recovery += 1;
+      if (generation !== null) job.recovery += 1;
       job.generation = generation;
     }
     return generation !== null;
+  }
+
+  function showUnavailable(id: string, job: Job): void {
+    if (!job.initialized) return;
+    const record = records.get(id);
+    if (!record || record.status.kind === "uploaded" || record.status.kind === "needsReattach")
+      return;
+    if (record.status.kind === "failed" && !record.status.retryable) return;
+    const unavailable = job.readiness?.unavailable?.() ?? {
+      label: "Reconnect",
+      message: "Waiting for the environment to reconnect. Reconnect or remove this attachment.",
+      cancelInFlight: false,
+    };
+    if (job.reportUnavailable) job.reportUnavailable(unavailable.message, unavailable.label);
+    else if (
+      record.status.kind !== "failed" ||
+      record.status.message !== unavailable.message ||
+      record.status.label !== unavailable.label
+    ) {
+      put({
+        ...record,
+        status: {
+          kind: "failed",
+          retryable: true,
+          message: unavailable.message,
+          label: unavailable.label,
+        },
+      });
+    }
+    const index = queue.indexOf(id);
+    if (index !== -1) queue.splice(index, 1);
+    if (unavailable.cancelInFlight) job.cancelAttempt?.();
   }
 
   function schedule(): void {
@@ -160,9 +203,19 @@ export function createChatFileUploadEngine(
       scheduled = false;
       for (const [id, job] of jobs) {
         const ready = refreshReadiness(job);
+        if (!ready) {
+          showUnavailable(id, job);
+          continue;
+        }
         const record = records.get(id);
+        if (job.cancelAttempt && record?.status.kind === "failed" && record.status.label) {
+          job.reportUnavailable?.(
+            "An interrupted upload is still settling. Retry it or remove this attachment.",
+            "Interrupted",
+          );
+        }
         if (
-          ready &&
+          !job.cancelAttempt &&
           job.recovery > job.attemptedRecovery &&
           record?.status.kind === "failed" &&
           record.status.retryable
@@ -189,7 +242,7 @@ export function createChatFileUploadEngine(
     records.set(record.attachmentId, record);
     snapshotCache = null;
     if (record.status.kind === "uploaded" || record.status.kind === "needsReattach") {
-      cancelJob(record.attachmentId);
+      cancelJob(record.attachmentId, record.status.kind !== "uploaded");
     }
     notify();
   }
@@ -214,13 +267,13 @@ export function createChatFileUploadEngine(
     const record = records.get(attachmentId);
     const job = jobs.get(attachmentId);
     if (!record || !job || record.status.kind !== "pending") return;
-    job.started = true;
     // Consume recovery only when work starts. A manual retry consumes the same
     // budget, and multiple recoveries while one request settles coalesce here.
     job.attemptedRecovery = job.recovery;
     const generation = job.generation;
+    const controller = new AbortController();
     const assertReady = () => {
-      if (!refreshReadiness(job) || job.generation !== generation) {
+      if (controller.signal.aborted || !refreshReadiness(job) || job.generation !== generation) {
         throw new Error("The environment connection changed during the upload.");
       }
     };
@@ -231,6 +284,32 @@ export function createChatFileUploadEngine(
       activeRecord = next;
       put(next);
     };
+    let cancel!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      cancel = () => {
+        controller.abort();
+        reject(
+          new Error(
+            activeRecord.status.kind === "failed"
+              ? activeRecord.status.message
+              : "The upload was cancelled.",
+          ),
+        );
+      };
+    });
+    // Cancellation can happen in a synchronous subscriber before the first await.
+    void cancelled.catch(() => undefined);
+    const waitForAttempt = <T>(work: Promise<T>): Promise<T> => Promise.race([work, cancelled]);
+    job.cancelAttempt = cancel;
+    job.reportUnavailable = (message, label) => {
+      if (
+        activeRecord.status.kind === "failed" &&
+        activeRecord.status.message === message &&
+        activeRecord.status.label === label
+      )
+        return;
+      update({ ...activeRecord, status: { kind: "failed", retryable: true, message, label } });
+    };
     inFlightCount += 1;
     try {
       update({ ...record, status: { kind: "uploading", progress: 0 } });
@@ -239,13 +318,16 @@ export function createChatFileUploadEngine(
       try {
         if (!isCurrent()) return;
         assertReady();
-        const minted = await transport.createFileUploadUrl({
-          environmentId: record.environmentId,
-          threadId: record.threadId,
-          name: record.name,
-          mimeType: record.mimeType,
-          sizeBytes: record.sizeBytes,
-        });
+        const minted = await waitForAttempt(
+          transport.createFileUploadUrl({
+            signal: controller.signal,
+            environmentId: record.environmentId,
+            threadId: record.threadId,
+            name: record.name,
+            mimeType: record.mimeType,
+            sizeBytes: record.sizeBytes,
+          }),
+        );
         token = minted.uploadToken;
         expiresAt = minted.expiresAt;
       } catch (error) {
@@ -262,21 +344,26 @@ export function createChatFileUploadEngine(
       try {
         if (!isCurrent()) return;
         assertReady();
-        const bytes = await record.readBytes();
+        const bytes = await waitForAttempt(Promise.resolve(record.readBytes()));
         if (!isCurrent()) return;
         assertReady();
-        const confirmed = await transport.transferBytes({
-          environmentId: record.environmentId,
-          uploadToken: token,
-          bytes,
-          onProgress: (progress) => {
-            const current = records.get(record.attachmentId);
-            if (!isCurrent() || !current || current.status.kind !== "uploading") {
-              return;
-            }
-            update({ ...current, status: { kind: "uploading", progress } });
-          },
-        });
+        const confirmed = await waitForAttempt(
+          transport.transferBytes({
+            signal: controller.signal,
+            environmentId: record.environmentId,
+            uploadToken: token,
+            bytes,
+            onProgress: (progress) => {
+              const current = records.get(record.attachmentId);
+              if (!isCurrent() || !current || current.status.kind !== "uploading") {
+                return;
+              }
+              update({ ...current, status: { kind: "uploading", progress } });
+            },
+          }),
+        );
+        // A response can resolve just before cancellation wins the next microtask.
+        if (controller.signal.aborted) return;
         const confirmedSizeBytes =
           confirmed.sizeBytes !== undefined &&
           Number.isFinite(confirmed.sizeBytes) &&
@@ -303,6 +390,8 @@ export function createChatFileUploadEngine(
         });
       }
     } finally {
+      job.cancelAttempt = null;
+      job.reportUnavailable = null;
       inFlightCount -= 1;
       schedule();
     }
@@ -325,7 +414,8 @@ export function createChatFileUploadEngine(
         generation: null,
         recovery: 0,
         attemptedRecovery: 0,
-        started: false,
+        cancelAttempt: null,
+        reportUnavailable: null,
       };
       jobs.set(request.attachmentId, job);
       if (options?.watchReadiness) {
@@ -333,7 +423,7 @@ export function createChatFileUploadEngine(
         // cannot collapse into a single ready observation before the queued retry.
         const onChange = () => {
           if (jobs.get(request.attachmentId) !== job) return;
-          refreshReadiness(job);
+          if (!refreshReadiness(job)) showUnavailable(request.attachmentId, job);
           schedule();
         };
         void Promise.resolve(options.watchReadiness(request.environmentId, onChange)).then(
@@ -360,17 +450,20 @@ export function createChatFileUploadEngine(
       queue.push(request.attachmentId);
       put({ ...request, status: { kind: "pending" } });
       void pump();
+      schedule();
     },
     retry: (attachmentId) => {
       const record = records.get(attachmentId);
       if (!record || record.status.kind !== "failed" || !record.status.retryable) {
         return;
       }
+      jobs.get(attachmentId)?.cancelAttempt?.();
       if (!queue.includes(attachmentId)) {
         queue.push(attachmentId);
       }
       put({ ...record, status: { kind: "pending" } });
       void pump();
+      schedule();
     },
     seedUploaded: (input) => {
       cancelJob(input.attachmentId);
@@ -468,7 +561,7 @@ export function deriveChatFileUploadSendBlock(input: {
       return {
         blockReason:
           record.status.kind === "failed"
-            ? `'${record.name}' failed to upload. Retry it or remove it.`
+            ? `'${record.name}' failed to upload. ${record.status.message} Retry it or remove it.`
             : `Uploading '${record.name}'…`,
       };
     }

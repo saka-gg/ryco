@@ -8,7 +8,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 const fixture = vi.hoisted(() => {
-  const bootstrap = Promise.resolve();
+  const generation = {};
   const listeners = new Set<() => void>();
   const subscribe = (listener: () => void) => {
     listeners.add(listener);
@@ -19,7 +19,10 @@ const fixture = vi.hoisted(() => {
   return {
     listeners,
     runtime: { authState: "authenticated" },
-    connection: { knownEnvironment: { source: "manual" }, ensureBootstrapped: () => bootstrap },
+    connection: {
+      knownEnvironment: { source: "manual" },
+      shellSnapshotReadiness: { read: () => generation, subscribe },
+    },
     subscribe,
     mint: vi.fn(),
     transfer: vi.fn(),
@@ -32,6 +35,7 @@ vi.mock("../runtime/bootstrap", () => ({
       get: () => ({ httpBaseUrl: "http://test.invalid" }),
       getRuntime: () => fixture.runtime,
       runtimeStore: { subscribe: fixture.subscribe },
+      registryStore: { subscribe: fixture.subscribe },
     },
     driver: { supervisor: { read: () => fixture.connection, subscribe: fixture.subscribe } },
   }),

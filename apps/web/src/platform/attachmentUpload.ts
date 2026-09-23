@@ -31,10 +31,18 @@ interface ChatAttachmentUploadResponse {
 function uploadBytesWithProgress(input: {
   readonly url: string;
   readonly bytes: Uint8Array;
+  readonly signal?: AbortSignal;
   readonly onProgress?: (progress: number) => void;
 }): Promise<ChatAttachmentUploadResponse> {
   return new Promise((resolve, reject) => {
+    if (input.signal?.aborted) {
+      reject(new Error("The upload was cancelled."));
+      return;
+    }
     const request = new XMLHttpRequest();
+    const abort = () => request.abort();
+    input.signal?.addEventListener("abort", abort, { once: true });
+    request.addEventListener("loadend", () => input.signal?.removeEventListener("abort", abort));
     request.open("POST", input.url, true);
     request.withCredentials = true;
     request.responseType = "text";
@@ -77,7 +85,8 @@ export const webChatFileUploadTransport: ChatFileUploadTransport = {
     if (!connection) {
       throw new Error("The environment is not connected.");
     }
-    const { environmentId: _environmentId, ...createInput } = input;
+    if (input.signal?.aborted) throw new Error("The upload was cancelled.");
+    const { environmentId: _environmentId, signal: _signal, ...createInput } = input;
     return connection.client.chatAttachments.createFileUpload(createInput);
   },
   transferBytes: async (input) => {
@@ -88,6 +97,7 @@ export const webChatFileUploadTransport: ChatFileUploadTransport = {
     const confirmed = await uploadBytesWithProgress({
       url,
       bytes: input.bytes,
+      ...(input.signal ? { signal: input.signal } : {}),
       ...(input.onProgress ? { onProgress: input.onProgress } : {}),
     });
     return {

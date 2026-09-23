@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { EnvironmentConnection } from "../../connection/connection.ts";
 import {
+  getWsConnectionStatusForEnvironment,
   recordWsConnectionAttempt,
   recordWsConnectionClosed,
   recordWsConnectionOpened,
@@ -20,11 +21,25 @@ const flush = async () => {
 afterEach(resetWsConnectionStateForTests);
 
 function harness() {
-  let bootstrap = Promise.withResolvers<void>();
+  let snapshot: object | null = null;
+  let snapshotAttempt = -1;
+  const shellListeners = new Set<() => void>();
   const connection = {
     environmentId,
     knownEnvironment: { source: "manual" },
-    ensureBootstrapped: () => bootstrap.promise,
+    shellSnapshotReadiness: {
+      read: () =>
+        getWsConnectionStatusForEnvironment(environmentId).phase === "connected" &&
+        getWsConnectionStatusForEnvironment(environmentId).attemptCount === snapshotAttempt
+          ? snapshot
+          : null,
+      subscribe: (listener: () => void) => {
+        shellListeners.add(listener);
+        return () => {
+          shellListeners.delete(listener);
+        };
+      },
+    },
   } as EnvironmentConnection;
   let current: EnvironmentConnection | null = connection;
   let allowed = true;
@@ -56,9 +71,14 @@ function harness() {
     connection,
     onChange,
     open,
-    resolve: () => bootstrap.resolve(),
+    resolve: () => {
+      snapshot = {};
+      snapshotAttempt = getWsConnectionStatusForEnvironment(environmentId).attemptCount;
+      for (const listener of shellListeners) listener();
+    },
     replaceBootstrap: () => {
-      bootstrap = Promise.withResolvers<void>();
+      snapshot = null;
+      for (const listener of shellListeners) listener();
     },
     setConnection: (value: EnvironmentConnection | null) => {
       current = value;
@@ -97,7 +117,7 @@ describe("direct upload readiness", () => {
     h.readiness.dispose();
   });
 
-  it("ignores a stale bootstrap resolution after disconnect or replacement", async () => {
+  it("stays unavailable after disconnect or connection removal", async () => {
     const h = harness();
     h.open();
     const resolveOld = h.resolve;

@@ -12,6 +12,7 @@ import { usePrimaryEnvironmentDescriptor } from "./environments/primary/context"
 import {
   getEnvironmentHttpBaseUrl,
   useSavedEnvironmentRuntimeStore,
+  useSavedEnvironmentRegistryStore,
 } from "./environments/runtime/catalog";
 import { webChatFileUploadTransport } from "./platform/attachmentUpload";
 
@@ -47,9 +48,11 @@ export const composerFileUploadEngine = createChatFileUploadEngine(webChatFileUp
       subscribe: (listener) => {
         const stopConnections = subscribeEnvironmentConnections(listener);
         const stopRuntime = useSavedEnvironmentRuntimeStore.subscribe(listener);
+        const stopRegistry = useSavedEnvironmentRegistryStore.subscribe(listener);
         return () => {
           stopConnections();
           stopRuntime();
+          stopRegistry();
         };
       },
     });
@@ -136,7 +139,7 @@ export function deriveComposerFileUploadSendBlock(input: {
         return `Uploading '${attachment.name}'…`;
       }
       if (status.kind === "failed") {
-        return `'${attachment.name}' failed to upload. Retry it or remove it.`;
+        return `'${attachment.name}' failed to upload. ${status.message} Retry it or remove it.`;
       }
       if (
         status.kind === "needsReattach" ||
