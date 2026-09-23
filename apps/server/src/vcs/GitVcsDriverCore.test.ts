@@ -77,6 +77,105 @@ const initRepoWithCommit = (
   });
 
 it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
+  describe("readRangeContext", () => {
+    it.effect("returns empty context when base and HEAD are identical", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        assert.deepStrictEqual(yield* driver.readRangeContext(cwd, initialBranch), {
+          commitSummary: "",
+          diffSummary: "",
+          diffPatch: "",
+        });
+      }),
+    );
+
+    it.effect("preserves patch truncation and its marker for large ranges", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["checkout", "-b", "feature/large-patch"]);
+        yield* writeTextFile(cwd, "large.txt", "feature change\n".repeat(5_000));
+        yield* git(cwd, ["add", "large.txt"]);
+        yield* git(cwd, ["commit", "-m", "Large feature commit"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const context = yield* driver.readRangeContext(cwd, initialBranch);
+        assert.include(context.commitSummary, "Large feature commit");
+        assert.include(context.diffSummary, "5000 insertions(+)");
+        assert.include(context.diffPatch, "+feature change");
+        assert.isTrue(context.diffPatch.endsWith("\n\n[truncated]"));
+        assert.equal(Buffer.byteLength(context.diffPatch), 59_000 + "\n\n[truncated]".length);
+      }),
+    );
+
+    it.effect("propagates invalid base errors", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const error = yield* driver.readRangeContext(cwd, "missing-base").pipe(Effect.flip);
+        assert.instanceOf(error, GitCommandError);
+        assert.include(error.operation, "GitVcsDriver.readRangeContext.");
+        assert.include(error.detail, "missing-base");
+      }),
+    );
+
+    it.effect("fails when the base has no common ancestor", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["checkout", "--orphan", "unrelated"]);
+        yield* git(cwd, ["commit", "-m", "Unrelated root"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const error = yield* driver.readRangeContext(cwd, initialBranch).pipe(Effect.flip);
+        assert.instanceOf(error, GitCommandError);
+        assert.include(error.operation, "GitVcsDriver.readRangeContext.mergeBase");
+        assert.include(error.detail, "no common ancestor");
+        assert.include(error.detail, "Fetch the base branch and its history");
+        assert.include(error.detail, "rebase or cherry-pick");
+      }),
+    );
+
+    it.effect("rejects criss-cross histories instead of choosing an arbitrary merge base", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["checkout", "-b", "left"]);
+        yield* writeTextFile(cwd, "left.txt", "left\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "Left change"]);
+        const left = yield* git(cwd, ["rev-parse", "HEAD"]);
+        yield* git(cwd, ["checkout", "-b", "right", "HEAD~1"]);
+        yield* writeTextFile(cwd, "right.txt", "right\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "Right change"]);
+        const right = yield* git(cwd, ["rev-parse", "HEAD"]);
+        yield* git(cwd, ["merge", "--no-ff", left, "-m", "Merge left"]);
+        yield* git(cwd, ["checkout", "left"]);
+        yield* git(cwd, ["merge", "--no-ff", right, "-m", "Merge right"]);
+        yield* git(cwd, ["checkout", "right"]);
+        yield* writeTextFile(cwd, "feature.txt", "feature\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "Feature change"]);
+
+        const bases = (yield* git(cwd, ["merge-base", "--all", "left", "HEAD"])).split("\n");
+        assert.sameMembers(bases, [left, right]);
+        // Git's implicit choice includes a change already present on both sides.
+        assert.include(yield* git(cwd, ["diff", "--stat", "left...HEAD"]), "2 files changed");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const error = yield* driver.readRangeContext(cwd, "left").pipe(Effect.flip);
+        assert.instanceOf(error, GitCommandError);
+        assert.include(error.detail, "multiple merge bases");
+        assert.include(error.detail, "Merge or rebase");
+      }),
+    );
+  });
+
   describe("repository status", () => {
     it.effect("reports non-repository directories without failing", () =>
       Effect.gen(function* () {
