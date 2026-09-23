@@ -1,3 +1,4 @@
+import { providerModelKey } from "./modelOrdering.ts";
 import type { ModelCapabilities, ModelSelection, ProviderOptionSelection } from "@ryco/contracts";
 import type { ModelFavorite } from "@ryco/contracts/settings";
 import {
@@ -23,6 +24,60 @@ export function uniqueModelFavorites(favorites: ReadonlyArray<ModelFavorite>): M
     seen.add(key);
     return true;
   });
+}
+
+/** Built once per favorites change; provider rows and preset rows share exact identities. */
+export function indexModelFavorites(favorites: ReadonlyArray<ModelFavorite>) {
+  const byKey = new Map<string, ModelFavorite>();
+  const byModel = new Map<string, ModelFavorite[]>();
+  for (const favorite of favorites) {
+    const key = modelFavoriteKey(favorite);
+    if (byKey.has(key)) continue;
+    byKey.set(key, favorite);
+    const modelKey = providerModelKey(favorite.provider, favorite.model);
+    const entries = byModel.get(modelKey);
+    if (entries) entries.push(favorite);
+    else byModel.set(modelKey, [favorite]);
+  }
+  return { byKey, byModel };
+}
+
+export function resolveModelFavoriteForRow(
+  candidate: ModelFavorite,
+  index: ReturnType<typeof indexModelFavorites>,
+): ModelFavorite {
+  const legacy = index.byKey.get(
+    modelFavoriteKey({ provider: candidate.provider, model: candidate.model }),
+  );
+  // A legacy star remains a model-only star. Changing effort must not turn its
+  // removal action into an insertion. Effort presets otherwise match exactly.
+  return (
+    legacy ??
+    index.byKey.get(modelFavoriteKey(candidate)) ??
+    (candidate.reasoningEffort === undefined
+      ? index.byModel.get(providerModelKey(candidate.provider, candidate.model))?.[0]
+      : undefined) ??
+    candidate
+  );
+}
+
+export function getModelFavoriteEffortLabel(
+  favorite: ModelFavorite,
+  caps: ModelCapabilities | null | undefined,
+): string | undefined {
+  if (favorite.reasoningEffort === undefined) return undefined;
+  const descriptor = caps?.optionDescriptors?.find(
+    (option) => option.type === "select" && EFFORT_OPTION_IDS.has(option.id),
+  );
+  const choice =
+    descriptor?.type === "select"
+      ? descriptor.options.find(
+          (choice) =>
+            choice.id === favorite.reasoningEffort &&
+            !descriptor.promptInjectedValues?.includes(choice.id),
+        )
+      : undefined;
+  return choice?.label ?? `${favorite.reasoningEffort} (unavailable)`;
 }
 
 export function toggleModelFavorite(
@@ -90,7 +145,10 @@ export function applyModelFavorite(
 ): ModelSelection {
   const base = { instanceId: favorite.provider, model: favorite.model };
   if (!caps) return base;
-  const descriptors = getProviderOptionDescriptors({ caps, selections: current.options });
+  const descriptors = getProviderOptionDescriptors({
+    caps,
+    selections: current.instanceId === favorite.provider ? current.options : undefined,
+  });
   const next = descriptors.map((descriptor) => {
     if (
       favorite.reasoningEffort === undefined ||

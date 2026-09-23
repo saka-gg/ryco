@@ -1,3 +1,8 @@
+import {
+  indexModelFavorites,
+  resolveModelFavoriteForRow,
+  getModelFavoriteEffortLabel,
+} from "./modelFavorites";
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderInstanceId, type ModelSelection } from "@ryco/contracts";
 import { createModelCapabilities } from "@ryco/shared/model";
@@ -160,5 +165,34 @@ describe("model and effort favorites", () => {
       [other, low, high, { provider, model: "new" }],
     );
     expect(updateInstanceModelFavorites([other, low, high], provider, [])).toEqual([other]);
+  });
+});
+
+describe("favorite row identity and labels", () => {
+  it("recognizes legacy stars independently of current effort and removes collapsed old-reader duplicates", () => {
+    const index = indexModelFavorites([base, base, low, high]);
+    expect(resolveModelFavoriteForRow(high, index)).toEqual(base);
+    expect(
+      toggleModelFavorite([base, base, low, high], resolveModelFavoriteForRow(high, index)),
+    ).toEqual([low, high]);
+    expect(index.byKey.size).toBe(3);
+  });
+  it("keeps distinct efforts selectable and uses declared labels rather than raw ids", () => {
+    const index = indexModelFavorites([low, high]);
+    expect(resolveModelFavoriteForRow(low, index)).toEqual(low);
+    expect(
+      resolveModelFavoriteForRow({ ...base, reasoningEffort: "medium" }, index).reasoningEffort,
+    ).toBe("medium");
+    expect(getModelFavoriteEffortLabel(high, caps)).toBe("High");
+    expect(getModelFavoriteEffortLabel(base, caps)).toBeUndefined();
+    expect(getModelFavoriteEffortLabel({ ...base, reasoningEffort: "retired" }, caps)).toBe(
+      "retired (unavailable)",
+    );
+  });
+  it("never copies same-id options from a foreign instance when a caller lacks a target selection", () => {
+    expect(
+      applyModelFavorite(low, { ...current, instanceId: ProviderInstanceId.make("other") }, caps)
+        .options,
+    ).toEqual([{ id: "reasoningEffort", value: "low" }]);
   });
 });

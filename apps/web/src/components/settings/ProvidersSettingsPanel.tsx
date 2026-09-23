@@ -15,7 +15,11 @@ import { Equal } from "effect";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import {
+  useSettings,
+  useUpdateSettings,
+  updateClientModelFavorites,
+} from "../../hooks/useSettings";
 import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionState,
@@ -244,10 +248,10 @@ export function ProvidersSettingsPanel() {
   };
 
   const deleteProviderInstance = (id: ProviderInstanceId) => {
+    updateClientModelFavorites((favorites) => withoutProviderInstanceFavorites(favorites, id));
     updateSettings({
       providerInstances: withoutProviderInstanceKey(settings.providerInstances, id),
       providerModelPreferences: withoutProviderInstanceKey(settings.providerModelPreferences, id),
-      favorites: withoutProviderInstanceFavorites(settings.favorites ?? [], id),
       ...(textGenInstanceId === id
         ? {
             textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
@@ -287,9 +291,9 @@ export function ProvidersSettingsPanel() {
     const favoriteModels = [
       ...new Set(nextFavoriteModels.map((slug) => slug.trim()).filter((slug) => slug.length > 0)),
     ];
-    updateSettings({
-      favorites: updateInstanceModelFavorites(settings.favorites ?? [], instanceId, favoriteModels),
-    });
+    updateClientModelFavorites((favorites) =>
+      updateInstanceModelFavorites(favorites, instanceId, favoriteModels),
+    );
   };
 
   const runProviderUpdate = useCallback(
@@ -339,6 +343,9 @@ export function ProvidersSettingsPanel() {
     const defaultInstanceId = defaultInstanceIdForDriver(driverKind);
     const defaultLegacyProvider = defaultLegacyProviders[driverKind];
     if (defaultLegacyProvider === undefined) return;
+    updateClientModelFavorites((favorites) =>
+      withoutProviderInstanceFavorites(favorites, defaultInstanceId),
+    );
     updateSettings({
       providers: {
         ...settings.providers,
@@ -349,7 +356,6 @@ export function ProvidersSettingsPanel() {
         settings.providerModelPreferences,
         defaultInstanceId,
       ),
-      favorites: withoutProviderInstanceFavorites(settings.favorites ?? [], defaultInstanceId),
       ...(textGenInstanceId === defaultInstanceId
         ? {
             textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,

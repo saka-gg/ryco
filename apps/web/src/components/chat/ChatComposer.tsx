@@ -2747,6 +2747,7 @@ export const ChatComposer = memo(
                 keybindings={keybindings}
                 modelOptionsByInstance={modelOptionsByInstance}
                 modelOptions={selectedModelOptionsForDispatch}
+                savedModelOptionsByInstance={composerModelOptions ?? undefined}
                 terminalOpen={terminalOpen}
                 isModelPickerOpen={isComposerModelPickerOpen}
                 {...(composerProviderState.modelPickerIconClassName

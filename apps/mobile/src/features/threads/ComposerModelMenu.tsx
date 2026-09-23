@@ -1,5 +1,8 @@
 import {
   applyModelFavorite,
+  indexModelFavorites,
+  resolveModelFavoriteForRow,
+  getModelFavoriteEffortLabel,
   createModelFavorite,
   modelFavoriteKey,
   toggleModelFavorite,
@@ -59,26 +62,43 @@ export function ComposerModelMenu(props: {
       subtitle: model.disabledReason ?? undefined,
     })),
   }));
-  const currentFavorite = createModelFavorite(props.selection, selectedOption?.capabilities);
-  const currentFavoriteSaved = favorites.some(
-    (favorite) => modelFavoriteKey(favorite) === modelFavoriteKey(currentFavorite),
+  const favoriteIndex = indexModelFavorites(favorites);
+  const currentFavorite = resolveModelFavoriteForRow(
+    createModelFavorite(props.selection, selectedOption?.capabilities),
+    favoriteIndex,
   );
-  const favoriteEntries = favorites.flatMap((favorite) => {
-    const entry = entries.find(
-      (entry) =>
-        entry.selection.instanceId === favorite.provider &&
-        entry.selection.model === favorite.model,
-    );
-    return entry ? [{ favorite, entry, key: `favorite:${modelFavoriteKey(favorite)}` }] : [];
+  const currentFavoriteSaved = favoriteIndex.byKey.has(modelFavoriteKey(currentFavorite));
+  const entryByModel = new Map(
+    entries.map((entry) => [
+      JSON.stringify([entry.selection.instanceId, entry.selection.model]),
+      entry,
+    ]),
+  );
+  const favoriteEntries = [...favoriteIndex.byKey.values()].flatMap((favorite) => {
+    const entry = entryByModel.get(JSON.stringify([favorite.provider, favorite.model]));
+    return entry
+      ? [
+          {
+            favorite,
+            entry,
+            effortLabel: getModelFavoriteEffortLabel(favorite, entry.capabilities),
+            key: `favorite:${modelFavoriteKey(favorite)}`,
+          },
+        ]
+      : [];
   });
+  const favoriteEntryByKey = new Map(
+    favoriteEntries.map((item) => [modelFavoriteKey(item.favorite), item]),
+  );
+  const providerLabels = new Map(groups.map((group) => [group.providerKey, group.providerLabel]));
   if (favoriteEntries.length)
     actions.unshift({
       id: "favorites",
       title: "Favorites",
-      subactions: favoriteEntries.map(({ favorite, entry, key }) => ({
+      subactions: favoriteEntries.map(({ effortLabel, entry, key }) => ({
         id: key,
-        title: `${entry.label}${favorite.reasoningEffort ? ` · ${favorite.reasoningEffort}` : ""}`,
-        subtitle: groups.find((group) => group.providerKey === entry.providerKey)?.providerLabel,
+        title: `${entry.label}${effortLabel ? ` · ${effortLabel}` : ""}`,
+        subtitle: providerLabels.get(entry.providerKey),
         attributes: { disabled: props.disabled || entry.disabled },
       })),
     });
@@ -86,14 +106,16 @@ export function ComposerModelMenu(props: {
     actions.push({
       id: "remove-favorite",
       title: "Remove favorite",
-      subactions: favorites.map((favorite) => ({
-        id: `remove:${modelFavoriteKey(favorite)}`,
-        title: `${favoriteEntries.find((item) => modelFavoriteKey(item.favorite) === modelFavoriteKey(favorite))?.entry.label ?? favorite.model}${favorite.reasoningEffort ? ` · ${favorite.reasoningEffort}` : ""}`,
-        subtitle:
-          groups.find((group) => group.providerKey === favorite.provider)?.providerLabel ??
-          favorite.provider,
-        attributes: { disabled: props.disabled },
-      })),
+      subactions: [...favoriteIndex.byKey].map(([key, favorite]) => {
+        const item = favoriteEntryByKey.get(key);
+        const effort = item?.effortLabel ?? getModelFavoriteEffortLabel(favorite, null);
+        return {
+          id: `remove:${key}`,
+          title: `${item?.entry.label ?? favorite.model}${effort ? ` · ${effort}` : ""}`,
+          subtitle: providerLabels.get(favorite.provider) ?? favorite.provider,
+          attributes: { disabled: props.disabled },
+        };
+      }),
     });
   actions.push({
     id: "toggle-favorite",
@@ -149,7 +171,13 @@ export function ComposerModelMenu(props: {
         const preset = favoriteEntries.find((entry) => entry.key === nativeEvent.event);
         if (preset && !preset.entry.disabled) {
           props.onSelect(
-            applyModelFavorite(preset.favorite, props.selection, preset.entry.capabilities),
+            applyModelFavorite(
+              preset.favorite,
+              preset.favorite.provider === props.selection.instanceId
+                ? props.selection
+                : preset.entry.selection,
+              preset.entry.capabilities,
+            ),
           );
           return;
         }

@@ -1,3 +1,9 @@
+import { SettingsEditingScopeProvider } from "../../settingsTarget";
+import {
+  createComposerDraftStore,
+  deriveEffectiveComposerModelState,
+} from "@ryco/client-runtime/state/composer";
+import { ThreadId } from "@ryco/contracts";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -258,19 +264,28 @@ function buildOpenCodeProvider(models: ServerProvider["models"]): ServerProvider
 async function mountPicker(props: {
   activeInstanceId?: ProviderInstanceId;
   model: string;
-  modelOptions?: ReadonlyArray<ProviderOptionSelection>;
+  modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey?: string | null;
   providers?: ReadonlyArray<ServerProvider>;
   settings?: UnifiedSettings;
   keybindings?: ResolvedKeybindingsConfig;
   insideOpenDialog?: boolean;
+  editingScope?: "all" | "node";
   open?: boolean;
   triggerVariant?: "ghost" | "outline";
+  savedModelOptionsByInstance?:
+    | Readonly<Partial<Record<string, ReadonlyArray<ProviderOptionSelection>>>>
+    | undefined;
+  onSelect?: (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ReadonlyArray<ProviderOptionSelection>,
+  ) => void;
 }) {
   const host = document.createElement("div");
   document.body.append(host);
-  const onInstanceModelChange = vi.fn();
+  const onInstanceModelChange = vi.fn(props.onSelect);
   const providers = props.providers ?? TEST_PROVIDERS;
   const instanceEntries = sortProviderInstanceEntries(deriveProviderInstanceEntries(providers));
   const activeInstanceId = props.activeInstanceId ?? CODEX_INSTANCE_ID;
@@ -281,19 +296,22 @@ async function mountPicker(props: {
     props.model,
   );
   const picker = (
-    <ProviderModelPicker
-      activeInstanceId={activeInstanceId}
-      model={props.model}
-      modelOptions={props.modelOptions}
-      lockedProvider={props.lockedProvider}
-      lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
-      instanceEntries={instanceEntries}
-      {...(props.keybindings ? { keybindings: props.keybindings } : {})}
-      modelOptionsByInstance={modelOptionsByInstance}
-      {...(props.open !== undefined ? { open: props.open } : {})}
-      triggerVariant={props.triggerVariant}
-      onInstanceModelChange={onInstanceModelChange}
-    />
+    <SettingsEditingScopeProvider value={props.editingScope ?? "all"}>
+      <ProviderModelPicker
+        activeInstanceId={activeInstanceId}
+        model={props.model}
+        modelOptions={props.modelOptions}
+        savedModelOptionsByInstance={props.savedModelOptionsByInstance}
+        lockedProvider={props.lockedProvider}
+        lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
+        instanceEntries={instanceEntries}
+        {...(props.keybindings ? { keybindings: props.keybindings } : {})}
+        modelOptionsByInstance={modelOptionsByInstance}
+        {...(props.open !== undefined ? { open: props.open } : {})}
+        triggerVariant={props.triggerVariant}
+        onInstanceModelChange={onInstanceModelChange}
+      />
+    </SettingsEditingScopeProvider>
   );
   const screen = await render(
     props.insideOpenDialog ? (
@@ -355,6 +373,267 @@ describe("ProviderModelPicker", () => {
     document.body.innerHTML = "";
     await __resetLocalApiForTests();
   });
+
+  it("persists client favorites when the picker is embedded in node settings", async () => {
+    const mounted = await mountPicker({
+      model: "gpt-5-codex",
+      lockedProvider: null,
+      editingScope: "node",
+    });
+    try {
+      await page.getByRole("button").click();
+      await page
+        .getByRole("option")
+        .filter({ hasText: "GPT-5 Codex" })
+        .getByRole("button", { name: "Add to favorites" })
+        .click();
+      await vi.waitFor(() =>
+        expect(JSON.parse(localStorage.getItem("ryco:client-settings:v1")!).favorites).toEqual([
+          { provider: "codex", model: "gpt-5-codex", reasoningEffort: "medium" },
+        ]),
+      );
+      expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+    } finally {
+      await mounted.cleanup();
+      localStorage.removeItem("ryco:client-settings:v1");
+    }
+  });
+
+  it("uses human effort labels only for the active model and actual presets", async () => {
+    const providers = [
+      buildCodexProvider(
+        ["first", "second"].map((slug) => ({
+          slug,
+          name: slug,
+          isCustom: false,
+          capabilities: createModelCapabilities({
+            optionDescriptors: [
+              selectDescriptor("reasoningEffort", "Reasoning", [
+                { id: "xhigh", label: "Extra High", isDefault: true },
+                { id: "low", label: "Low" },
+              ]),
+            ],
+          }),
+        })),
+      ),
+    ];
+    localStorage.setItem(
+      "ryco:client-settings:v1",
+      JSON.stringify({
+        ...DEFAULT_CLIENT_SETTINGS,
+        favorites: [{ provider: "codex", model: "second", reasoningEffort: "xhigh" }],
+      }),
+    );
+    const mounted = await mountPicker({
+      model: "first",
+      lockedProvider: null,
+      providers,
+      modelOptions: [{ id: "reasoningEffort", value: "low" }],
+    });
+    try {
+      await page.getByRole("button").click();
+      await page.getByRole("button", { name: "Codex", exact: true }).click();
+      expect(page.getByRole("option").filter({ hasText: "first" }).element().textContent).toContain(
+        "Low",
+      );
+      expect(
+        page.getByRole("option").filter({ hasText: "second" }).element().textContent,
+      ).not.toMatch(/Low|Extra High|xhigh/);
+      await page.getByRole("button", { name: "Favorites", exact: true }).click();
+      expect(page.getByRole("option").element().textContent).toContain("Extra High");
+      expect(page.getByRole("option").element().textContent).not.toContain("xhigh");
+    } finally {
+      await mounted.cleanup();
+      localStorage.removeItem("ryco:client-settings:v1");
+    }
+  });
+
+  it("indexes a large catalog once and does not rescan runtime models when searching", async () => {
+    let slugReads = 0;
+    const count = 200;
+    const models = Array.from({ length: count }, (_, index) => ({
+      get slug() {
+        slugReads += 1;
+        return `catalog-${index}`;
+      },
+      name: `Catalog ${index}`,
+      isCustom: false,
+      capabilities: createModelCapabilities({
+        optionDescriptors: [
+          selectDescriptor("reasoningEffort", "Reasoning", [
+            { id: "high", label: "High", isDefault: true },
+          ]),
+        ],
+      }),
+    }));
+    const mounted = await mountPicker({
+      model: "catalog-0",
+      lockedProvider: null,
+      providers: [buildCodexProvider(models)],
+    });
+    try {
+      slugReads = 0;
+      await page.getByRole("button").click();
+      expect(slugReads).toBeLessThanOrEqual(count * 3);
+      const readsAfterOpen = slugReads;
+      await page.getByRole("combobox").fill("catalog 19");
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll('[role="option"]').length).toBeLessThan(count),
+      );
+      expect(slugReads).toBe(readsAfterOpen);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("recognizes and removes a legacy favorite in its provider tab, including after reload", async () => {
+    localStorage.setItem(
+      "ryco:client-settings:v1",
+      JSON.stringify({
+        ...DEFAULT_CLIENT_SETTINGS,
+        favorites: [{ provider: "codex", model: "gpt-5-codex" }],
+      }),
+    );
+    const mounted = await mountPicker({ model: "gpt-5-codex", lockedProvider: null });
+    try {
+      await page.getByRole("button").click();
+      await page.getByRole("button", { name: "Codex", exact: true }).click();
+      const row = page.getByRole("option").filter({ hasText: "GPT-5 Codex" });
+      await row.getByRole("button", { name: "Remove from favorites" }).click();
+      await vi.waitFor(() =>
+        expect(JSON.parse(localStorage.getItem("ryco:client-settings:v1")!).favorites).toEqual([]),
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+    await __resetLocalApiForTests();
+    const reloaded = await mountPicker({ model: "gpt-5-codex", lockedProvider: null });
+    try {
+      await page.getByRole("button").click();
+      expect(
+        page
+          .getByRole("option")
+          .filter({ hasText: "GPT-5 Codex" })
+          .getByRole("button", { name: "Add to favorites" })
+          .query(),
+      ).not.toBeNull();
+      expect(JSON.parse(localStorage.getItem("ryco:client-settings:v1")!).favorites).toEqual([]);
+    } finally {
+      await reloaded.cleanup();
+      localStorage.removeItem("ryco:client-settings:v1");
+    }
+  });
+
+  it.each([undefined, "low"])(
+    "switches Claude -> Codex favorite (%s) using the destination draft options",
+    async (reasoningEffort) => {
+      const { useComposerDraftStore: store } = createComposerDraftStore({
+        storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+        flushStorage: () => {},
+        revokePreviewUrl: () => {},
+        hydrateImages: () => [],
+        readPersistedAttachmentIds: () => [],
+      });
+      const ref = {
+        environmentId: EnvironmentId.make("favorite-test"),
+        threadId: ThreadId.make("thread"),
+      };
+      const saved = [
+        { id: "reasoningEffort", value: "xhigh" },
+        { id: "fastMode", value: true },
+      ];
+      store.getState().setModelSelection(ref, {
+        instanceId: CODEX_INSTANCE_ID,
+        model: "gpt-5-codex",
+        options: saved,
+      });
+      store.getState().setModelSelection(ref, {
+        instanceId: CLAUDE_INSTANCE_ID,
+        model: "claude-opus-4-6",
+        options: [
+          { id: "effort", value: "max" },
+          { id: "fastMode", value: false },
+        ],
+      });
+      store.getState().setRuntimeMode(ref, "approval-required");
+      const providers = TEST_PROVIDERS.map((provider) =>
+        provider.instanceId !== CODEX_INSTANCE_ID
+          ? provider
+          : {
+              ...provider,
+              models: provider.models.map((model) => ({
+                ...model,
+                capabilities: createModelCapabilities({
+                  optionDescriptors: [
+                    selectDescriptor("reasoningEffort", "Reasoning", [
+                      { id: "low", label: "Low" },
+                      { id: "medium", label: "Medium", isDefault: true },
+                      { id: "xhigh", label: "Extra High" },
+                    ]),
+                    booleanDescriptor("fastMode", "Fast"),
+                  ],
+                }),
+              })),
+            },
+      );
+      const state = deriveEffectiveComposerModelState({
+        draft: store.getState().getComposerDraft(ref),
+        providers,
+        selectedProvider: ProviderDriverKind.make("claudeAgent"),
+        selectedInstanceId: CLAUDE_INSTANCE_ID,
+        threadModelSelection: null,
+        settings: DEFAULT_UNIFIED_SETTINGS,
+      });
+      localStorage.setItem(
+        "ryco:client-settings:v1",
+        JSON.stringify({
+          ...DEFAULT_CLIENT_SETTINGS,
+          favorites: [
+            {
+              provider: "codex",
+              model: "gpt-5-codex",
+              ...(reasoningEffort ? { reasoningEffort } : {}),
+            },
+          ],
+        }),
+      );
+      const mounted = await mountPicker({
+        activeInstanceId: CLAUDE_INSTANCE_ID,
+        model: "claude-opus-4-6",
+        lockedProvider: null,
+        providers,
+        modelOptions: state.modelOptions?.[CLAUDE_INSTANCE_ID],
+        savedModelOptionsByInstance: state.modelOptions ?? undefined,
+        onSelect: (instanceId, model, options) =>
+          store
+            .getState()
+            .setModelSelection(ref, { instanceId, model, ...(options ? { options } : {}) }),
+      });
+      try {
+        await page.getByRole("button").click();
+        await page.getByRole("button", { name: "Favorites", exact: true }).click();
+        await page.getByRole("option").filter({ hasText: "GPT-5 Codex" }).click();
+        const draft = store.getState().getComposerDraft(ref)!;
+        expect(draft.modelSelectionByProvider[CODEX_INSTANCE_ID]?.options).toEqual([
+          { id: "reasoningEffort", value: reasoningEffort ?? "xhigh" },
+          { id: "fastMode", value: true },
+        ]);
+        expect(draft.runtimeMode).toBe("approval-required");
+        expect(draft.modelSelectionByProvider[CLAUDE_INSTANCE_ID]?.options).toEqual([
+          { id: "effort", value: "max" },
+          { id: "fastMode", value: false },
+        ]);
+        if (!reasoningEffort)
+          expect(mounted.onInstanceModelChange).toHaveBeenCalledWith(
+            CODEX_INSTANCE_ID,
+            "gpt-5-codex",
+          );
+      } finally {
+        await mounted.cleanup();
+        localStorage.removeItem("ryco:client-settings:v1");
+      }
+    },
+  );
 
   it("stars two efforts for one model without selecting it or closing the picker", async () => {
     for (const effort of ["low", "high"]) {

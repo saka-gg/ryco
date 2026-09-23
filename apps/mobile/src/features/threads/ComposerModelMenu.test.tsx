@@ -42,12 +42,17 @@ const selection: ModelSelection = {
     { id: "fastMode", value: true },
   ],
 };
-function menu(disabled = false, locked = false) {
-  state.favorites = [low, high];
+function menu(
+  disabled = false,
+  locked = false,
+  activeSelection = selection,
+  favorites: ModelFavorite[] = [low, high],
+) {
+  state.favorites = favorites;
   state.update.mockClear();
   const onSelect = vi.fn();
   const model = buildModelPickerModelFromOptions({
-    currentSelection: selection,
+    currentSelection: activeSelection,
     ...(locked ? { lockedProviderKey: "other" } : {}),
     modelOptions: [
       {
@@ -65,7 +70,7 @@ function menu(disabled = false, locked = false) {
   });
   const tree = ComposerModelMenu({
     model,
-    selection,
+    selection: activeSelection,
     disabled,
     onSelect,
     onClose: vi.fn(),
@@ -105,4 +110,34 @@ describe("native model effort presets", () => {
     disabled.press("toggle-favorite");
     expect(state.update).not.toHaveBeenCalled();
   });
+});
+
+it("native favorites preserve the destination selection when the active instance is different", () => {
+  const foreign = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "opus",
+    options: [
+      { id: "effort", value: "max" },
+      { id: "fastMode", value: false },
+    ],
+  };
+  const mounted = menu(false, false, foreign);
+  mounted.press(`favorite:${modelFavoriteKey(low)}`);
+  expect(mounted.onSelect).toHaveBeenCalledWith({
+    ...selection,
+    options: [
+      { id: "reasoningEffort", value: "low" },
+      { id: "fastMode", value: true },
+    ],
+  });
+  const legacy = { provider, model: "test" };
+  const old = menu(false, false, foreign, [legacy]);
+  old.press(`favorite:${modelFavoriteKey(legacy)}`);
+  expect(old.onSelect).toHaveBeenCalledWith(selection);
+});
+it("native current-model action removes a legacy favorite rather than adding an effort duplicate", () => {
+  const legacy = { provider, model: "test" };
+  const mounted = menu(false, false, selection, [legacy]);
+  mounted.press("toggle-favorite");
+  expect(state.update).toHaveBeenCalledWith({ favorites: [] });
 });

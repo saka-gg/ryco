@@ -32,6 +32,9 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   activeInstanceId: ProviderInstanceId;
   model: string;
   modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
+  savedModelOptionsByInstance?:
+    | Readonly<Partial<Record<string, ReadonlyArray<ProviderOptionSelection>>>>
+    | undefined;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey?: string | null;
   /** Instance entries rendered in the sidebar + used to resolve display name. */
@@ -273,6 +276,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       >
         <ModelPickerContent
           modelOptions={props.modelOptions}
+          savedModelOptionsByInstance={props.savedModelOptionsByInstance}
           activeInstanceId={activeInstanceId}
           model={props.model}
           lockedProvider={props.lockedProvider}

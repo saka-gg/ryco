@@ -3,10 +3,12 @@ import {
   createModelFavorite,
   modelFavoriteKey,
   toggleModelFavorite,
-  uniqueModelFavorites,
+  indexModelFavorites,
+  resolveModelFavoriteForRow,
+  getModelFavoriteEffortLabel,
 } from "@ryco/client-runtime/state/composer";
 import type { ModelFavorite } from "@ryco/contracts/settings";
-import type { ProviderOptionSelection } from "@ryco/contracts";
+import type { ModelCapabilities, ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocus } from "./PaneFocus";
 import {
   type ProviderInstanceId,
@@ -27,7 +29,7 @@ import {
   resolveShortcutCommand,
   shortcutLabelForCommand,
 } from "../../keybindings";
-import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
+import { useSettings, updateClientModelFavorites } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { TooltipProvider } from "../ui/tooltip";
 import type { ProviderInstanceEntry } from "../../providerInstances";
@@ -59,6 +61,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   activeInstanceId: ProviderInstanceId;
   model: string;
   modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
+  savedModelOptionsByInstance?:
+    | Readonly<Partial<Record<string, ReadonlyArray<ProviderOptionSelection>>>>
+    | undefined;
   /**
    * When set, the picker is locked to the given driver kind — typically
    * because the user is editing a previously-sent message and can't change
@@ -116,7 +121,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     () => providedKeybindings ?? [],
     [providedKeybindings],
   );
-  const { updateSettings } = useUpdateSettings();
 
   const focusSearchInput = useCallback(() => {
     searchInputRef.current?.focus({ preventScroll: true });
@@ -151,9 +155,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   // to ProviderInstanceId so pre-migration favorites keyed by driver slugs
   // (e.g. `"codex:gpt-5"`) still resolve — the default instance id equals
   // the driver slug.
-  const favoritesSet = useMemo(() => {
-    return new Set(favorites.map((fav) => providerModelKey(fav.provider, fav.model)));
-  }, [favorites]);
+  const favoriteIndex = useMemo(() => indexModelFavorites(favorites), [favorites]);
+  const favoritesSet = useMemo(() => new Set(favoriteIndex.byModel.keys()), [favoriteIndex]);
 
   /**
    * Lookup table keyed by `instanceId`. Used for display name + driver
@@ -164,6 +167,34 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     () => new Map(instanceEntries.map((entry) => [entry.instanceId, entry])),
     [instanceEntries],
   );
+  const capabilitiesByModelKey = useMemo(() => {
+    const index = new Map<string, ModelCapabilities | null>();
+    for (const entry of instanceEntries) {
+      for (const model of entry.models)
+        index.set(providerModelKey(entry.instanceId, model.slug), model.capabilities);
+    }
+    return index;
+  }, [instanceEntries]);
+  const currentModelKey = providerModelKey(props.activeInstanceId, props.model);
+  const currentFavorite = useMemo(
+    () =>
+      createModelFavorite(
+        {
+          instanceId: props.activeInstanceId,
+          model: props.model,
+          ...(props.modelOptions ? { options: props.modelOptions } : {}),
+        },
+        capabilitiesByModelKey.get(currentModelKey),
+      ),
+    [
+      props.activeInstanceId,
+      props.model,
+      props.modelOptions,
+      capabilitiesByModelKey,
+      currentModelKey,
+    ],
+  );
+
   const matchesLockedProvider = useCallback(
     (entry: Pick<ProviderInstanceEntry, "driverKind" | "continuationGroupKey">): boolean => {
       if (props.lockedProvider === null) return true;
@@ -218,6 +249,43 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     }
     return out;
   }, [modelOptionsByInstance, entryByInstanceId, readyInstanceSet]);
+
+  // Index row presentation independently of search. Each model and preset is
+  // visited once; typing only scores/filter rows and performs map lookups.
+  const rowStateByKey = useMemo(() => {
+    const index = new Map<
+      string,
+      { favorite: ModelFavorite; isFavorite: boolean; effortLabel: string | undefined }
+    >();
+    for (const model of flatModels) {
+      const key = providerModelKey(model.instanceId, model.slug);
+      const candidate =
+        key === currentModelKey
+          ? currentFavorite
+          : { provider: model.instanceId, model: model.slug };
+      const favorite = resolveModelFavoriteForRow(candidate, favoriteIndex);
+      index.set(key, {
+        favorite,
+        isFavorite: favoriteIndex.byKey.has(modelFavoriteKey(favorite)),
+        // Only the active model has a current effort on a provider tab.
+        effortLabel:
+          key === currentModelKey
+            ? getModelFavoriteEffortLabel(currentFavorite, capabilitiesByModelKey.get(key))
+            : undefined,
+      });
+    }
+    for (const [key, favorite] of favoriteIndex.byKey) {
+      index.set(key, {
+        favorite,
+        isFavorite: true,
+        effortLabel: getModelFavoriteEffortLabel(
+          favorite,
+          capabilitiesByModelKey.get(providerModelKey(favorite.provider, favorite.model)),
+        ),
+      });
+    }
+    return index;
+  }, [flatModels, currentModelKey, currentFavorite, favoriteIndex, capabilitiesByModelKey]);
 
   const isLocked = props.lockedProvider !== null;
   const isSearching = searchQuery.trim().length > 0;
@@ -315,11 +383,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         result = result.filter((m) => m.instanceId === selectedInstanceId);
       }
     } else if (selectedInstanceId === "favorites") {
-      const presets = uniqueModelFavorites(favorites);
       result = result.flatMap((m) =>
-        presets
-          .filter((favorite) => favorite.provider === m.instanceId && favorite.model === m.slug)
-          .map((favorite) => Object.assign({}, m, { favorite })),
+        (favoriteIndex.byModel.get(providerModelKey(m.instanceId, m.slug)) ?? []).map((favorite) =>
+          Object.assign({}, m, { favorite }),
+        ),
       );
     } else {
       result = result.filter((m) => m.instanceId === selectedInstanceId);
@@ -331,7 +398,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       instanceOrder: selectedInstanceId === "favorites" ? instanceOrder : [],
     });
   }, [
-    favorites,
+    favoriteIndex,
     favoritesSet,
     flatModels,
     instanceOrder,
@@ -357,15 +424,18 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       // normalization rules, so pass the driver kind here.
       const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
       if (resolvedModel) {
-        if (favorite) {
+        if (favorite?.reasoningEffort !== undefined) {
           const selection = applyModelFavorite(
             favorite,
             {
-              instanceId: props.activeInstanceId,
-              model: props.model,
-              ...(props.modelOptions ? { options: props.modelOptions } : {}),
+              instanceId,
+              model: resolvedModel,
+              options:
+                instanceId === props.activeInstanceId
+                  ? (props.modelOptions ?? [])
+                  : (props.savedModelOptionsByInstance?.[instanceId] ?? []),
             },
-            entry.models.find((model) => model.slug === resolvedModel)?.capabilities,
+            capabilitiesByModelKey.get(providerModelKey(instanceId, resolvedModel)),
           );
           onInstanceModelChange(instanceId, resolvedModel, selection.options ?? []);
         } else {
@@ -378,24 +448,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       modelOptionsByInstance,
       onInstanceModelChange,
       props.activeInstanceId,
-      props.model,
       props.modelOptions,
+      props.savedModelOptionsByInstance,
+      capabilitiesByModelKey,
     ],
   );
-
-  const favoriteForRow = (model: ModelPickerItem): ModelFavorite =>
-    model.favorite ??
-    createModelFavorite(
-      {
-        instanceId: model.instanceId,
-        model: model.slug,
-        ...(props.modelOptions ? { options: props.modelOptions } : {}),
-      },
-      entryByInstanceId
-        .get(model.instanceId)
-        ?.models.find((candidate) => candidate.slug === model.slug)?.capabilities,
-    );
-  const favoriteKeys = new Set(favorites.map(modelFavoriteKey));
 
   const LockedProviderIcon =
     isLocked && props.lockedProvider ? PROVIDER_ICON_BY_PROVIDER[props.lockedProvider] : null;
@@ -559,8 +616,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       model.slug === props.model &&
       (!model.favorite ||
         model.favorite.reasoningEffort === undefined ||
-        model.favorite.reasoningEffort ===
-          favoriteForRow({ ...model, favorite: undefined }).reasoningEffort),
+        model.favorite.reasoningEffort === currentFavorite.reasoningEffort),
   );
 
   if (!paneFocused) return null;
@@ -662,7 +718,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               <ComboboxList className="model-picker-list size-full divide-y px-2 py-1">
                 {filteredModelKeys.map((modelKey, index) => {
                   const model = filteredModelByKey.get(modelKey);
-                  if (!model) {
+                  const row = rowStateByKey.get(modelKey);
+                  if (!model || !row) {
                     return null;
                   }
                   return (
@@ -675,18 +732,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                       providerDisplayName={model.instanceDisplayName}
                       providerAccentColor={model.instanceAccentColor}
                       value={modelKey}
-                      effortLabel={
-                        model.favorite?.reasoningEffort ?? favoriteForRow(model).reasoningEffort
-                      }
-                      isFavorite={favoriteKeys.has(modelFavoriteKey(favoriteForRow(model)))}
+                      effortLabel={row.effortLabel}
+                      isFavorite={row.isFavorite}
                       showProvider={!isLocked || showLockedInstanceSidebar}
                       preferShortName={!isLocked}
                       useTriggerLabel={isLocked && !showLockedInstanceSidebar}
                       jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
                       onToggleFavorite={() =>
-                        updateSettings({
-                          favorites: toggleModelFavorite(favorites, favoriteForRow(model)),
-                        })
+                        updateClientModelFavorites((current) =>
+                          toggleModelFavorite(current, row.favorite),
+                        )
                       }
                     />
                   );

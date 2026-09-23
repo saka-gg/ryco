@@ -480,6 +480,9 @@ export interface ComposerFooterProps {
   selectedInstanceId: ProviderInstanceId;
   selectedModel: string;
   modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
+  savedModelOptionsByInstance?:
+    | Readonly<Partial<Record<string, ReadonlyArray<ProviderOptionSelection>>>>
+    | undefined;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey: string | null;
   providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry>;
@@ -572,6 +575,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           activeInstanceId={props.selectedInstanceId}
           model={props.selectedModel}
           modelOptions={props.modelOptions}
+          savedModelOptionsByInstance={props.savedModelOptionsByInstance}
           lockedProvider={props.lockedProvider}
           lockedContinuationGroupKey={props.lockedContinuationGroupKey}
           instanceEntries={props.providerInstanceEntries}
