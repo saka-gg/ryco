@@ -143,35 +143,57 @@ function readNumber(record: Record<string, unknown>, key: string, fallback: numb
  * envelope, and re-parsing it here would duplicate `decodeDeviceFrame`.
  */
 export class DeviceFramePrefixParser {
-  private buffer: Buffer = Buffer.alloc(0);
+  private readonly prefix = Buffer.alloc(FRAME_LENGTH_PREFIX_BYTES);
+  private prefixBytes = 0;
+  private payload: Uint8Array | undefined;
+  private payloadBytes = 0;
+  private failure: DeviceHelperError | undefined;
 
   /** Returns every complete payload now available, in order. */
   push(chunk: Uint8Array): readonly Uint8Array[] {
-    this.buffer =
-      this.buffer.byteLength === 0
-        ? Buffer.from(chunk)
-        : Buffer.concat([this.buffer, Buffer.from(chunk)]);
-
+    if (this.failure) throw this.failure;
     const payloads: Uint8Array[] = [];
-    while (this.buffer.byteLength >= FRAME_LENGTH_PREFIX_BYTES) {
-      const length = this.buffer.readUInt32LE(0);
-      if (length > FRAME_MAX_PAYLOAD_BYTES) {
-        throw new DeviceHelperError(
-          "frame_stream_desync",
-          `Helper frame record claims ${length} bytes`,
+    let offset = 0;
+    while (offset < chunk.byteLength) {
+      if (!this.payload) {
+        const count = Math.min(
+          FRAME_LENGTH_PREFIX_BYTES - this.prefixBytes,
+          chunk.byteLength - offset,
         );
+        this.prefix.set(chunk.subarray(offset, offset + count), this.prefixBytes);
+        this.prefixBytes += count;
+        offset += count;
+        if (this.prefixBytes < FRAME_LENGTH_PREFIX_BYTES) break;
+
+        const length = this.prefix.readUInt32LE(0);
+        if (length > FRAME_MAX_PAYLOAD_BYTES) {
+          // A desynced stream cannot recover. Subsequent pushes must fail without
+          // retaining or copying more input, even if the caller keeps reading.
+          this.failure = new DeviceHelperError(
+            "frame_stream_desync",
+            `Helper frame record claims ${length} bytes`,
+          );
+          throw this.failure;
+        }
+        // Allocate only after validating the length. Each byte is copied once;
+        // neither borrowed input views nor per-fragment metadata are retained.
+        this.payload = new Uint8Array(length);
+        this.prefixBytes = 0;
       }
-      const total = FRAME_LENGTH_PREFIX_BYTES + length;
-      if (this.buffer.byteLength < total) break;
-      // Copied: the payload outlives this parse and `this.buffer` is reassigned.
-      payloads.push(
-        Uint8Array.prototype.slice.call(
-          this.buffer,
-          FRAME_LENGTH_PREFIX_BYTES,
-          total,
-        ) as Uint8Array,
+
+      const count = Math.min(
+        this.payload.byteLength - this.payloadBytes,
+        chunk.byteLength - offset,
       );
-      this.buffer = this.buffer.subarray(total);
+      this.payload.set(chunk.subarray(offset, offset + count), this.payloadBytes);
+      this.payloadBytes += count;
+      offset += count;
+      if (this.payloadBytes === this.payload.byteLength) {
+        // Transfer ownership, including empty records. Never reuse emitted memory.
+        payloads.push(this.payload);
+        this.payload = undefined;
+        this.payloadBytes = 0;
+      }
     }
     return payloads;
   }

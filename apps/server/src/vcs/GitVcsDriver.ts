@@ -177,6 +177,7 @@ export interface GitVcsDriverShape {
   readonly readRangeContext: (
     cwd: string,
     baseRef: string,
+    options?: { readonly remoteName?: string | null },
   ) => Effect.Effect<GitRangeContext, GitCommandError>;
   readonly readConfigValue: (
     cwd: string,

@@ -12,7 +12,10 @@ import type {
 import type { KnownEnvironment } from "../knownEnvironment.ts";
 import type { WsRpcClient } from "../rpc/index.ts";
 import { projectServerConfigEvent } from "../rpc/serverConfigProjection.ts";
-import { clearWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState.ts";
+import {
+  getWsConnectionStatusForEnvironment,
+  clearWsConnectionStatusForEnvironment,
+} from "../rpc/wsConnectionState.ts";
 import { bindDeviceConnection } from "../state/device/runtime.ts";
 
 export interface PushSequenceMonitor {
@@ -26,6 +29,11 @@ export interface EnvironmentConnection {
   readonly knownEnvironment: KnownEnvironment;
   readonly client: WsRpcClient;
   readonly ensureBootstrapped: () => Promise<void>;
+  /** Snapshot evidence is scoped to the socket attempt that delivered it. */
+  readonly shellSnapshotReadiness: {
+    readonly read: () => object | null;
+    readonly subscribe: (listener: () => void) => () => void;
+  };
   readonly reconnect: () => Promise<void>;
   readonly dispose: () => Promise<void>;
 }
@@ -111,6 +119,17 @@ export function createEnvironmentConnection(
 
   let disposed = false;
   const bootstrapGate = createBootstrapGate();
+  let shellSnapshot: { readonly attempt: number } | null = null;
+  const shellReadinessListeners = new Set<() => void>();
+  const notifyShellReadiness = () => {
+    // A callback can replace its connection subscription while being notified.
+    const listeners = Array.from(shellReadinessListeners);
+    for (const listener of listeners) listener();
+  };
+  const invalidateShellReadiness = () => {
+    shellSnapshot = null;
+    notifyShellReadiness();
+  };
   const shouldObserveLifecycle = input.kind === "saved" || input.onWelcome !== undefined;
   const shouldObserveConfig = input.kind === "saved" || input.onConfigUpdated !== undefined;
   let observedConfig: ServerConfig | null = null;
@@ -183,10 +202,14 @@ export function createEnvironmentConnection(
     : () => undefined;
   const unsubShell = input.client.orchestration.subscribeShell(
     (item) => {
+      if (disposed) return;
       if (item.kind === "snapshot") {
         input.pushSequenceMonitor.recordSnapshot(environmentId, item.snapshot.snapshotSequence);
         input.syncShellSnapshot(item.snapshot, environmentId);
         bootstrapGate.resolve();
+        const attempt = getWsConnectionStatusForEnvironment(environmentId).attemptCount;
+        if (shellSnapshot?.attempt !== attempt) shellSnapshot = { attempt };
+        notifyShellReadiness();
         return;
       }
       input.pushSequenceMonitor.recordEvent(environmentId, item.sequence);
@@ -196,12 +219,14 @@ export function createEnvironmentConnection(
       onResubscribe: () => {
         if (disposed) return;
         bootstrapGate.reset();
+        invalidateShellReadiness();
         input.resetShellProjection(environmentId);
         input.onResubscribe?.(environmentId);
       },
       onError: () => {
         if (disposed) return;
         bootstrapGate.reject(new Error("Shell snapshot synchronization failed."));
+        invalidateShellReadiness();
         input.onShellError?.(environmentId);
       },
     },
@@ -214,6 +239,8 @@ export function createEnvironmentConnection(
     : null;
   const cleanup = () => {
     disposed = true;
+    invalidateShellReadiness();
+    shellReadinessListeners.clear();
     unsubShell();
     unsubTerminalEvent();
     unsubLifecycle();
@@ -227,8 +254,25 @@ export function createEnvironmentConnection(
     knownEnvironment: input.knownEnvironment,
     client: input.client,
     ensureBootstrapped: () => bootstrapGate.wait(),
+    shellSnapshotReadiness: {
+      read: () => {
+        const status = getWsConnectionStatusForEnvironment(environmentId);
+        return !disposed &&
+          status.phase === "connected" &&
+          shellSnapshot?.attempt === status.attemptCount
+          ? shellSnapshot
+          : null;
+      },
+      subscribe: (listener) => {
+        shellReadinessListeners.add(listener);
+        return () => {
+          shellReadinessListeners.delete(listener);
+        };
+      },
+    },
     reconnect: async () => {
       bootstrapGate.reset();
+      invalidateShellReadiness();
       deviceBinding?.reconnecting();
       try {
         await input.client.reconnect();

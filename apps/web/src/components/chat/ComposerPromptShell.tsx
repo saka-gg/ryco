@@ -450,10 +450,12 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
           </span>
         ) : status?.kind === "failed" ? (
           <span className="flex items-center gap-1 text-[10px] text-destructive">
-            <span>Upload failed</span>
+            <span className="min-w-0 truncate" title={status.message} aria-label={status.message}>
+              {status.label ?? "Upload failed"}
+            </span>
             <button
               type="button"
-              className="cursor-pointer font-medium underline underline-offset-2"
+              className="shrink-0 cursor-pointer whitespace-nowrap font-medium underline underline-offset-2"
               onClick={() => onRetry(image.id)}
               aria-label={`Retry uploading ${image.name}`}
             >

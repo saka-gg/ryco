@@ -38,6 +38,7 @@ function connection(environmentId: EnvironmentId): EnvironmentConnection {
     environmentId,
     knownEnvironment: {} as never,
     client: {} as never,
+    shellSnapshotReadiness: { read: () => null, subscribe: () => () => {} },
     ensureBootstrapped: async () => undefined,
     reconnect: async () => undefined,
     dispose: async () => undefined,

@@ -1376,7 +1376,10 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       phase: "pr",
       label: `Generating ${terms.shortLabel} content...`,
     });
-    const rangeContext = yield* gitCore.readRangeContext(cwd, baseBranch);
+    const rangeContext = yield* gitCore.readRangeContext(cwd, baseBranch, {
+      // A fork's head remote must not supply the target repository's base.
+      remoteName: headContext.isCrossRepository ? "origin" : headContext.remoteName,
+    });
 
     const generated = yield* textGeneration.generatePrContent({
       cwd,

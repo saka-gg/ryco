@@ -28,11 +28,19 @@ interface ChatAttachmentUploadResponse {
 function uploadBytesWithProgress(input: {
   readonly url: string;
   readonly bytes: Uint8Array;
+  readonly signal?: AbortSignal;
   readonly bearerToken: string | null;
   readonly onProgress?: (progress: number) => void;
 }): Promise<ChatAttachmentUploadResponse> {
   return new Promise((resolve, reject) => {
+    if (input.signal?.aborted) {
+      reject(new Error("The upload was cancelled."));
+      return;
+    }
     const request = new XMLHttpRequest();
+    const abort = () => request.abort();
+    input.signal?.addEventListener("abort", abort, { once: true });
+    request.addEventListener("loadend", () => input.signal?.removeEventListener("abort", abort));
     request.open("POST", input.url, true);
     request.responseType = "text";
     request.upload.addEventListener("progress", (event) => {
@@ -79,6 +87,7 @@ export const mobileChatFileUploadTransport: ChatFileUploadTransportPort = {
   createFileUploadUrl: async (
     input: FileAttachmentCreateUploadUrlInput & {
       readonly environmentId: EnvironmentId;
+      readonly signal?: AbortSignal;
     },
   ) => {
     // Dynamic import: the connection registry lazily builds its supervisor and
@@ -89,13 +98,15 @@ export const mobileChatFileUploadTransport: ChatFileUploadTransportPort = {
     if (!client) {
       throw new Error("The environment is not connected.");
     }
-    const { environmentId: _environmentId, ...createInput } = input;
+    if (input.signal?.aborted) throw new Error("The upload was cancelled.");
+    const { environmentId: _environmentId, signal: _signal, ...createInput } = input;
     return client.chatAttachments.createFileUpload(createInput);
   },
   transferBytes: async (input: {
     readonly environmentId: EnvironmentId;
     readonly uploadToken: string;
     readonly bytes: Uint8Array;
+    readonly signal?: AbortSignal;
     readonly onProgress?: (progress: number) => void;
   }) => {
     const { createMobileConnectionRegistry } = await import("../runtime/bootstrap");
@@ -112,6 +123,7 @@ export const mobileChatFileUploadTransport: ChatFileUploadTransportPort = {
     const confirmed = await uploadBytesWithProgress({
       url,
       bytes: input.bytes,
+      ...(input.signal ? { signal: input.signal } : {}),
       bearerToken,
       ...(input.onProgress ? { onProgress: input.onProgress } : {}),
     });
