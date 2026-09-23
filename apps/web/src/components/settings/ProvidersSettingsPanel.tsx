@@ -1,3 +1,4 @@
+import { updateInstanceModelFavorites } from "@ryco/client-runtime/state/composer";
 import { LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useRef, useState, type KeyboardEvent } from "react";
 import {
@@ -14,7 +15,11 @@ import { Equal } from "effect";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import {
+  useSettings,
+  useUpdateSettings,
+  updateClientModelFavorites,
+} from "../../hooks/useSettings";
 import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionState,
@@ -243,10 +248,10 @@ export function ProvidersSettingsPanel() {
   };
 
   const deleteProviderInstance = (id: ProviderInstanceId) => {
+    updateClientModelFavorites((favorites) => withoutProviderInstanceFavorites(favorites, id));
     updateSettings({
       providerInstances: withoutProviderInstanceKey(settings.providerInstances, id),
       providerModelPreferences: withoutProviderInstanceKey(settings.providerModelPreferences, id),
-      favorites: withoutProviderInstanceFavorites(settings.favorites ?? [], id),
       ...(textGenInstanceId === id
         ? {
             textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
@@ -286,12 +291,9 @@ export function ProvidersSettingsPanel() {
     const favoriteModels = [
       ...new Set(nextFavoriteModels.map((slug) => slug.trim()).filter((slug) => slug.length > 0)),
     ];
-    updateSettings({
-      favorites: [
-        ...withoutProviderInstanceFavorites(settings.favorites ?? [], instanceId),
-        ...favoriteModels.map((model) => ({ provider: instanceId, model })),
-      ],
-    });
+    updateClientModelFavorites((favorites) =>
+      updateInstanceModelFavorites(favorites, instanceId, favoriteModels),
+    );
   };
 
   const runProviderUpdate = useCallback(
@@ -341,6 +343,9 @@ export function ProvidersSettingsPanel() {
     const defaultInstanceId = defaultInstanceIdForDriver(driverKind);
     const defaultLegacyProvider = defaultLegacyProviders[driverKind];
     if (defaultLegacyProvider === undefined) return;
+    updateClientModelFavorites((favorites) =>
+      withoutProviderInstanceFavorites(favorites, defaultInstanceId),
+    );
     updateSettings({
       providers: {
         ...settings.providers,
@@ -351,7 +356,6 @@ export function ProvidersSettingsPanel() {
         settings.providerModelPreferences,
         defaultInstanceId,
       ),
-      favorites: withoutProviderInstanceFavorites(settings.favorites ?? [], defaultInstanceId),
       ...(textGenInstanceId === defaultInstanceId
         ? {
             textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
@@ -458,6 +462,7 @@ export function ProvidersSettingsPanel() {
               <ProviderModelPicker
                 activeInstanceId={textGenInstanceId}
                 model={textGenModel}
+                modelOptions={textGenModelOptions}
                 lockedProvider={null}
                 instanceEntries={gitModelInstanceEntries}
                 modelOptionsByInstance={gitModelOptionsByInstance}
@@ -465,12 +470,16 @@ export function ProvidersSettingsPanel() {
                 triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
                 disabled={settingsBlocked}
                 {...(settingsBlockedReason ? { disabledReason: settingsBlockedReason } : {})}
-                onInstanceModelChange={(instanceId, model) => {
+                onInstanceModelChange={(instanceId, model, options) => {
                   updateSettings({
                     textGenerationModelSelection: resolveAppModelSelectionState(
                       {
                         ...settings,
-                        textGenerationModelSelection: createModelSelection(instanceId, model),
+                        textGenerationModelSelection: createModelSelection(
+                          instanceId,
+                          model,
+                          options,
+                        ),
                       },
                       serverProviders,
                     ),

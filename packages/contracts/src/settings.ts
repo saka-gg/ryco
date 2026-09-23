@@ -55,6 +55,14 @@ export const AiFocusRefreshIntervalMs = Schema.Literals([
 export type AiFocusRefreshIntervalMs = typeof AiFocusRefreshIntervalMs.Type;
 export const DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS: AiFocusRefreshIntervalMs = 600_000;
 
+/** Missing effort is a legacy model-only preset; provider remains the stable instance id. */
+export const ModelFavorite = Schema.Struct({
+  provider: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+  reasoningEffort: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type ModelFavorite = typeof ModelFavorite.Type;
+
 export const ClientSettingsSchema = Schema.Struct({
   // Local lifecycle metadata. Optional so restoring default preferences preserves it.
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
@@ -81,12 +89,7 @@ export const ClientSettingsSchema = Schema.Struct({
   // default instance for their kind (because `defaultInstanceIdForDriver(kind)`
   // uses the same slug). The field name is kept as `provider` for storage
   // stability; new call sites should treat the value as an instance id.
-  favorites: Schema.Array(
-    Schema.Struct({
-      provider: ProviderInstanceId,
-      model: TrimmedNonEmptyString,
-    }),
-  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  favorites: Schema.Array(ModelFavorite).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   providerModelPreferences: Schema.Record(
     ProviderInstanceId,
     Schema.Struct({
@@ -648,14 +651,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
-  favorites: Schema.optionalKey(
-    Schema.Array(
-      Schema.Struct({
-        provider: ProviderInstanceId,
-        model: TrimmedNonEmptyString,
-      }),
-    ),
-  ),
+  favorites: Schema.optionalKey(Schema.Array(ModelFavorite)),
   providerModelPreferences: Schema.optionalKey(
     Schema.Record(
       ProviderInstanceId,

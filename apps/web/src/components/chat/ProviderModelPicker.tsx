@@ -1,3 +1,4 @@
+import type { ProviderOptionSelection } from "@ryco/contracts";
 import {
   type ProviderInstanceId,
   type ProviderDriverKind,
@@ -30,6 +31,10 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
    */
   activeInstanceId: ProviderInstanceId;
   model: string;
+  modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
+  savedModelOptionsByInstance?:
+    | Readonly<Partial<Record<string, ReadonlyArray<ProviderOptionSelection>>>>
+    | undefined;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey?: string | null;
   /** Instance entries rendered in the sidebar + used to resolve display name. */
@@ -67,7 +72,11 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
   onOpenChange?: (open: boolean) => void;
-  onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
+  onInstanceModelChange: (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ReadonlyArray<ProviderOptionSelection>,
+  ) => void;
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
@@ -118,9 +127,14 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     };
   }, [isMenuOpen]);
 
-  const handleInstanceModelChange = (instanceId: ProviderInstanceId, model: string) => {
+  const handleInstanceModelChange = (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ReadonlyArray<ProviderOptionSelection>,
+  ) => {
     if (props.disabled) return;
-    props.onInstanceModelChange(instanceId, model);
+    if (options) props.onInstanceModelChange(instanceId, model, options);
+    else props.onInstanceModelChange(instanceId, model);
     setIsMenuOpen(false);
   };
 
@@ -261,6 +275,8 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         className="border-0 bg-transparent p-0 shadow-none before:hidden [--viewport-inline-padding:0] *:data-[slot=popover-viewport]:p-0"
       >
         <ModelPickerContent
+          modelOptions={props.modelOptions}
+          savedModelOptionsByInstance={props.savedModelOptionsByInstance}
           activeInstanceId={activeInstanceId}
           model={props.model}
           lockedProvider={props.lockedProvider}

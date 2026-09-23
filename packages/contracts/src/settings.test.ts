@@ -1,3 +1,4 @@
+import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ENVIRONMENT_MACHINE_KINDS, ExecutionEnvironmentPlatform } from "./environment.ts";
 import { describe, expect, it } from "vite-plus/test";
 import { Schema } from "effect";
@@ -367,5 +368,51 @@ describe("worktree root settings", () => {
       }),
     ).toMatchObject({ worktreeRoot: "~/checkouts", projectWorktreeRoots: { a: null } });
     expect(() => decodeServerSettingsPatch({ worktreeRoot: "x".repeat(4097) })).toThrow();
+  });
+});
+
+describe("model effort favorite compatibility", () => {
+  it("decodes legacy presets without assigning an effort and round-trips distinct efforts", () => {
+    const favorites = [
+      { provider: "codex", model: "gpt-5" },
+      { provider: "codex_personal", model: "gpt-5", reasoningEffort: "low" },
+      { provider: "codex_personal", model: "gpt-5", reasoningEffort: "high" },
+    ];
+    expect(decodeClientSettings({ favorites }).favorites).toEqual(favorites);
+    const patch = decodeClientSettingsPatch({ favorites });
+    expect(decodeClientSettings(JSON.parse(JSON.stringify(patch))).favorites).toEqual(favorites);
+    expect(() =>
+      decodeClientSettingsPatch({ favorites: [{ ...favorites[0], reasoningEffort: "" }] }),
+    ).toThrow();
+  });
+});
+
+// The exact pre-preset field schema, retained here to make the rollback limit
+// executable rather than assuming how Effect handles excess properties.
+describe("older favorite reader compatibility", () => {
+  it("keeps current forward migration lossless but demonstrates old readers erase effort", () => {
+    const favorites = [
+      { provider: "codex", model: "gpt-5", reasoningEffort: "low" },
+      { provider: "codex", model: "gpt-5", reasoningEffort: "high" },
+    ];
+    const oldReader = Schema.Array(
+      Schema.Struct({ provider: ProviderInstanceId, model: TrimmedNonEmptyString }),
+    );
+    const oldFavorites = Schema.decodeUnknownSync(oldReader)(favorites);
+    expect(oldFavorites).toEqual([
+      { provider: "codex", model: "gpt-5" },
+      { provider: "codex", model: "gpt-5" },
+    ]);
+    // The pre-feature toggle used findIndex + splice, removing only one match.
+    const oldToggleResult = [...oldFavorites];
+    oldToggleResult.splice(
+      oldToggleResult.findIndex(
+        (favorite) => favorite.provider === "codex" && favorite.model === "gpt-5",
+      ),
+      1,
+    );
+    expect(oldToggleResult).toHaveLength(1);
+    expect(decodeClientSettings({ favorites }).favorites).toEqual(favorites);
+    expect(decodeClientSettings({ favorites: oldFavorites }).favorites).toEqual(oldFavorites);
   });
 });

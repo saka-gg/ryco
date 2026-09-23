@@ -1,3 +1,6 @@
+import { Schema } from "effect";
+import { ModelFavorite } from "@ryco/contracts/settings";
+import { uniqueModelFavorites } from "@ryco/client-runtime/state/composer";
 import { useSyncExternalStore } from "react";
 import { AI_FOCUS_REFRESH_INTERVAL_OPTIONS } from "@ryco/shared/aiFocusSettings";
 import {
@@ -19,6 +22,7 @@ import { mobileKV } from "../platform/kv";
 const PREFERENCES_KEY = "ryco.preferences";
 
 export interface Preferences {
+  readonly favorites?: ReadonlyArray<ModelFavorite>;
   readonly liveActivitiesEnabled?: boolean;
   readonly baseFontSize?: number;
   readonly terminalFontSize?: number | null;
@@ -36,6 +40,7 @@ export interface Preferences {
 
 export function sanitizePreferences(parsed: Preferences): Preferences {
   const preferences: {
+    favorites?: ReadonlyArray<ModelFavorite>;
     liveActivitiesEnabled?: boolean;
     baseFontSize?: number;
     terminalFontSize?: number | null;
@@ -101,6 +106,15 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
       ))
   ) {
     preferences.sidebarAutoSettleAfterDays = parsed.sidebarAutoSettleAfterDays;
+  }
+  if (Array.isArray(parsed.favorites)) {
+    const decode = Schema.decodeUnknownOption(ModelFavorite);
+    preferences.favorites = uniqueModelFavorites(
+      parsed.favorites.flatMap((favorite) => {
+        const result = decode(favorite);
+        return result._tag === "Some" ? [result.value] : [];
+      }),
+    );
   }
   return preferences;
 }

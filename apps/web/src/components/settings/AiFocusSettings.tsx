@@ -152,6 +152,7 @@ function EnvironmentModelControl({ row }: { row: AiFocusEnvironmentRow }) {
       <ProviderModelPicker
         activeInstanceId={selection.instanceId}
         model={selection.model}
+        modelOptions={selection.options}
         lockedProvider={null}
         instanceEntries={entries}
         modelOptionsByInstance={optionsByInstance}
@@ -160,12 +161,12 @@ function EnvironmentModelControl({ row }: { row: AiFocusEnvironmentRow }) {
         {...(!row.connected
           ? { disabledReason: "Connect this environment to change its model." }
           : {})}
-        onInstanceModelChange={(instanceId, model) => {
+        onInstanceModelChange={(instanceId, model, options) => {
           void persist(
             resolveAppModelSelectionState(
               {
                 ...unifiedSettings,
-                textGenerationModelSelection: createModelSelection(instanceId, model),
+                textGenerationModelSelection: createModelSelection(instanceId, model, options),
               },
               serverConfig.providers,
             ),

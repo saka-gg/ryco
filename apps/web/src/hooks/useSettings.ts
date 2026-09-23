@@ -95,6 +95,16 @@ function persistClientSettings(settings: ClientSettings): void {
 
 // ── Hooks ────────────────────────────────────────────────────────────
 
+/** Favorites are client-owned even when their control appears in node settings.
+ * This field-specific writer cannot modify node configuration or other preferences.
+ */
+export function updateClientModelFavorites(
+  update: (favorites: ClientSettings["favorites"]) => ClientSettings["favorites"],
+): void {
+  const settings = getClientSettingsSnapshot();
+  persistClientSettings({ ...settings, favorites: update(settings.favorites) });
+}
+
 /**
  * Read merged settings. Selector narrows the subscription so components
  * only re-render when the slice they care about changes.
