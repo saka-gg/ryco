@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { decodeDeviceFrame, encodeDeviceFrame } from "@ryco/shared/deviceFrame";
 
@@ -95,6 +95,115 @@ describe("helper frame prefix parser", () => {
 
     expect(() => parser.push(desynced)).toThrow(DeviceHelperError);
   });
+
+  it("preserves ordered records at every pair of fragment boundaries", () => {
+    const expected = [Uint8Array.of(9, 8, 7), new Uint8Array(), Uint8Array.of(6, 5)];
+    const stream = Buffer.concat(expected.map(encodeFrameRecord));
+    for (let first = 0; first <= stream.length; first++) {
+      for (let second = first; second <= stream.length; second++) {
+        const parser = new DeviceFramePrefixParser();
+        const actual = [
+          ...parser.push(stream.subarray(0, first)),
+          ...parser.push(stream.subarray(first, second)),
+          ...parser.push(stream.subarray(second)),
+          ...parser.push(new Uint8Array()),
+        ];
+        expect(actual).toEqual(expected);
+      }
+    }
+  });
+
+  it("owns partial input and emitted buffers across scratch-buffer reuse", () => {
+    const parser = new DeviceFramePrefixParser();
+    const stream = Buffer.concat([
+      encodeFrameRecord(Uint8Array.of(7, 8, 9)),
+      encodeFrameRecord(Uint8Array.of(10, 11)),
+    ]);
+    const scratch = new Uint8Array(3);
+    const actual: Uint8Array[] = [];
+    for (let offset = 0; offset < stream.length; offset += scratch.length) {
+      const count = Math.min(scratch.length, stream.length - offset);
+      scratch.set(stream.subarray(offset, offset + count));
+      actual.push(...parser.push(scratch.subarray(0, count)));
+      scratch.fill(0);
+    }
+    expect(actual).toEqual([Uint8Array.of(7, 8, 9), Uint8Array.of(10, 11)]);
+    actual[0]!.fill(0);
+    expect(actual[1]).toEqual(Uint8Array.of(10, 11));
+    expect(actual[0]!.buffer).not.toBe(actual[1]!.buffer);
+    expect(parser.push(encodeFrameRecord(Uint8Array.of(12)))).toEqual([Uint8Array.of(12)]);
+    expect(actual[1]).toEqual(Uint8Array.of(10, 11));
+  });
+
+  it.each([8 * 1024 * 1024 + 1, 0x8000_0000, 0xffff_ffff])(
+    "rejects length %i as soon as a fragmented prefix completes and stays failed",
+    (length) => {
+      const parser = new DeviceFramePrefixParser();
+      const prefix = Buffer.alloc(4);
+      prefix.writeUInt32LE(length);
+      for (let offset = 0; offset < 3; offset++) {
+        expect(parser.push(prefix.subarray(offset, offset + 1))).toEqual([]);
+      }
+      const tail = new Uint8Array(1025);
+      tail[0] = prefix[3]!;
+      const set = vi.spyOn(Uint8Array.prototype, "set");
+      const concat = vi.spyOn(Buffer, "concat");
+      const from = vi.spyOn(Buffer, "from");
+      try {
+        expect(() => parser.push(tail)).toThrow(
+          expect.objectContaining({
+            code: "frame_stream_desync",
+            message: `Helper frame record claims ${length} bytes`,
+          }),
+        );
+        expect(set.mock.calls.map(([source]) => source.length)).toEqual([1]);
+        set.mockClear();
+        expect(() => parser.push(new Uint8Array(1024))).toThrow(DeviceHelperError);
+        expect(() => parser.push(new Uint8Array())).toThrow(DeviceHelperError);
+        expect(set).not.toHaveBeenCalled();
+        expect(concat.mock.calls.length).toBe(0);
+        expect(from.mock.calls.length).toBe(0);
+      } finally {
+        set.mockRestore();
+        concat.mockRestore();
+        from.mockRestore();
+      }
+    },
+  );
+
+  it.each([1, 2, 4, 8])(
+    "copies each byte once for a %i MiB payload in 1 KiB reads, including the maximum",
+    (mib) => {
+      const payload = new Uint8Array(mib * 1024 * 1024).fill(0xa5);
+      const wire = encodeFrameRecord(payload);
+      const parser = new DeviceFramePrefixParser();
+      const set = vi.spyOn(Uint8Array.prototype, "set");
+      const concat = vi.spyOn(Buffer, "concat");
+      const from = vi.spyOn(Buffer, "from");
+      const slice = vi.spyOn(Uint8Array.prototype, "slice");
+      const actual: Uint8Array[] = [];
+      let copiedBytes: number;
+      try {
+        for (let offset = 0; offset < wire.length; offset += 1024) {
+          actual.push(...parser.push(wire.subarray(offset, offset + 1024)));
+        }
+        copiedBytes = set.mock.calls.reduce((sum, [source]) => sum + source.length, 0);
+        expect(concat.mock.calls.length).toBe(0);
+        expect(from.mock.calls.length).toBe(0);
+        expect(slice.mock.calls.length).toBe(0);
+      } finally {
+        set.mockRestore();
+        concat.mockRestore();
+        from.mockRestore();
+        slice.mockRestore();
+      }
+      // A deterministic copy-work bound, not a wall-clock performance assertion.
+      expect(copiedBytes).toBe(wire.length);
+      expect(actual).toHaveLength(1);
+      expect(actual[0]!.byteLength).toBe(payload.length);
+      expect(Buffer.compare(actual[0]!, payload)).toBe(0);
+    },
+  );
 
   it("emits nothing for a length prefix with no payload yet", () => {
     const parser = new DeviceFramePrefixParser();
