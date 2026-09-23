@@ -1842,10 +1842,43 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const readRangeContext: GitVcsDriver.GitVcsDriverShape["readRangeContext"] = Effect.fn(
     "readRangeContext",
-  )(function* (cwd, baseRef) {
+  )(function* (cwd, baseRef, options) {
+    const remoteName = options?.remoteName;
+    if (
+      remoteName &&
+      remoteName !== "." &&
+      !baseRef.startsWith("refs/") &&
+      (yield* remoteBranchExists(cwd, remoteName, baseRef))
+    ) {
+      // Prefer the PR target's tracking branch, without requiring a local checkout.
+      // Explicit refs and bases that only exist locally retain their meaning.
+      baseRef = `refs/remotes/${remoteName}/${baseRef}`;
+    }
     const commitRange = `${baseRef}..HEAD`;
-    // PR diffs start at the common ancestor when the base branch has advanced.
-    const diffRange = `${baseRef}...HEAD`;
+    const mergeBaseArgs = ["merge-base", "--all", baseRef, "HEAD"];
+    const mergeBaseResult = yield* executeGit(
+      "GitVcsDriver.readRangeContext.mergeBase",
+      cwd,
+      mergeBaseArgs,
+      { allowNonZeroExit: true },
+    );
+    const mergeBases = mergeBaseResult.stdout.trim().split("\n").filter(Boolean);
+    if (mergeBaseResult.exitCode !== 0 || mergeBases.length !== 1) {
+      const detail =
+        mergeBaseResult.exitCode === 1 && mergeBases.length === 0
+          ? `Cannot generate PR content: '${baseRef}' and HEAD have no common ancestor. Fetch the base branch and its history (deepen a shallow clone), then retry. For unrelated histories, choose the correct base or rebase or cherry-pick your changes onto it.`
+          : mergeBaseResult.exitCode === 0 && mergeBases.length > 1
+            ? `Cannot generate PR content: '${baseRef}' and HEAD have multiple merge bases. Merge or rebase the base branch into your feature branch to establish a unique common ancestor, then retry.`
+            : mergeBaseResult.stderr.trim() || "git merge-base failed";
+      return yield* createGitCommandError(
+        "GitVcsDriver.readRangeContext.mergeBase",
+        cwd,
+        mergeBaseArgs,
+        detail,
+      );
+    }
+    // Resolve once so stat and patch use the same unambiguous common ancestor.
+    const diffRange = `${mergeBases[0]}..HEAD`;
     const [commitSummary, diffSummary, diffPatch] = yield* Effect.all(
       [
         runGitStdoutWithOptions(

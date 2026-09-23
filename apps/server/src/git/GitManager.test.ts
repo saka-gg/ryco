@@ -2401,6 +2401,110 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     );
   }
 
+  for (const scenario of [
+    "stale",
+    "missing",
+    "custom",
+    "local-only",
+    "explicit-local",
+    "fork",
+  ] as const) {
+    it.effect(`generates PR content with a ${scenario} local base`, () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        const baseBranch =
+          scenario === "custom" || scenario === "local-only" ? "release/next" : "main";
+        if (baseBranch !== "main") {
+          yield* runGit(repoDir, ["branch", "-m", baseBranch]);
+        }
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "upstream", remoteDir]);
+        if (scenario === "fork") {
+          const originDir = yield* createBareRemote();
+          // Public-shaped URLs exercise repository identity; all Git I/O stays local.
+          yield* runGit(repoDir, [
+            "config",
+            `url.${remoteDir}.insteadOf`,
+            "https://github.com/contributor/repo.git",
+          ]);
+          yield* runGit(repoDir, [
+            "config",
+            `url.${originDir}.insteadOf`,
+            "https://github.com/owner/repo.git",
+          ]);
+          yield* runGit(repoDir, [
+            "remote",
+            "set-url",
+            "upstream",
+            "https://github.com/contributor/repo.git",
+          ]);
+          yield* runGit(repoDir, ["remote", "add", "origin", "https://github.com/owner/repo.git"]);
+          yield* runGit(repoDir, ["push", "upstream", baseBranch]);
+        }
+        yield* runGit(repoDir, ["checkout", "-b", "base-seed"]);
+        fs.writeFileSync(path.join(repoDir, "base-only.txt"), "already on the base\n");
+        yield* runGit(repoDir, ["add", "."]);
+        yield* runGit(repoDir, ["commit", "-m", "Base commit"]);
+        if (scenario === "local-only") {
+          yield* runGit(repoDir, ["branch", "-f", baseBranch, "HEAD"]);
+        } else {
+          yield* runGit(repoDir, [
+            "push",
+            scenario === "fork" ? "origin" : "upstream",
+            `HEAD:refs/heads/${baseBranch}`,
+          ]);
+        }
+        yield* runGit(repoDir, ["checkout", "-b", "feature/pr-context"]);
+        fs.writeFileSync(path.join(repoDir, "feature.txt"), "feature\n");
+        yield* runGit(repoDir, ["add", "."]);
+        yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+        yield* runGit(repoDir, ["push", "-u", "upstream", "feature/pr-context"]);
+        if (scenario === "missing") {
+          yield* runGit(repoDir, ["branch", "-D", baseBranch]);
+        }
+        const configuredBase =
+          scenario === "explicit-local" ? `refs/heads/${baseBranch}` : baseBranch;
+        if (scenario !== "missing") {
+          yield* runGit(repoDir, [
+            "config",
+            "branch.feature/pr-context.gh-merge-base",
+            configuredBase,
+          ]);
+        }
+
+        const generatedInputs: Parameters<FakeGitTextGeneration["generatePrContent"]>[0][] = [];
+        const { manager, ghCalls } = yield* makeManager({
+          ghScenario: { prListSequence: ["[]", "[]"] },
+          textGeneration: {
+            generatePrContent: (input) => {
+              generatedInputs.push(input);
+              return Effect.succeed({ title: "Feature PR", body: "Feature body" });
+            },
+          },
+        });
+        const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+        expect(result.pr.status).toBe("created");
+        expect(generatedInputs).toHaveLength(1);
+        const generated = generatedInputs[0]!;
+        expect(generated.baseBranch).toBe(configuredBase);
+        expect(ghCalls.some((call) => call.includes(`pr create --base ${configuredBase} `))).toBe(
+          true,
+        );
+        expect(generated.commitSummary).toContain("Feature commit");
+        expect(generated.diffPatch).toContain("+feature");
+        if (scenario === "explicit-local") {
+          expect(generated.commitSummary).toContain("Base commit");
+          expect(generated.diffPatch).toContain("base-only.txt");
+        } else {
+          expect(generated.commitSummary).not.toContain("Base commit");
+          expect(generated.diffSummary).toContain("1 file changed, 1 insertion(+)");
+          expect(generated.diffPatch).not.toContain("base-only.txt");
+        }
+      }),
+    );
+  }
+
   it.effect("adds closing references for linked issues when creating a PR", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("ryco-git-manager-");
