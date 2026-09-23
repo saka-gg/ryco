@@ -1,5 +1,6 @@
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import fs from "node:fs";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import os from "node:os";
 import path from "node:path";
 
@@ -209,7 +210,10 @@ async function waitForThread(
 
 describe("ProviderRuntimeIngestion", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderRuntimeIngestionService
+    | ProjectionSnapshotQuery
+    | SqlClient.SqlClient,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -283,6 +287,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);
+    const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
@@ -356,6 +361,12 @@ describe("ProviderRuntimeIngestion", () => {
     });
 
     return {
+      chunkCount: () =>
+        Effect.runPromise(
+          sql<{ count: number }>`SELECT count(*) AS count FROM projection_message_chunks`.pipe(
+            Effect.map((rows) => rows[0]!.count),
+          ),
+        ),
       workspaceRoot,
       attachmentsDir: path.join(workspaceRoot, "userdata", "attachments"),
       reconcileThread: (threadId: ThreadId) =>
@@ -510,7 +521,9 @@ describe("ProviderRuntimeIngestion", () => {
         createdAt: at,
       }),
     );
+    expect(await harness.chunkCount()).toBeGreaterThan(0);
     await harness.reconcileThread(threadId);
+    expect(await harness.chunkCount()).toBe(0);
     const recovered = (await harness.readModel()).threads[0]!;
     expect(recovered.messages.map((message) => message.text)).toEqual([
       "question",

@@ -1,3 +1,4 @@
+import { messageTextJson, decodeMessageText } from "../../persistence/messageText.ts";
 import {
   CheckpointRef,
   CommandId,
@@ -1661,9 +1662,12 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       yield* projectionPipeline.bootstrap;
 
       const messageRows = yield* sql<{ readonly text: string }>`
-        SELECT text FROM projection_thread_messages WHERE message_id = 'message-a'
+        SELECT ${messageTextJson(sql)} AS text FROM projection_thread_messages WHERE message_id = 'message-a'
       `;
-      assert.deepEqual(messageRows, [{ text: "hello world" }]);
+      assert.deepEqual(
+        messageRows.map((row) => ({ text: decodeMessageText(row.text) })),
+        [{ text: "hello world" }],
+      );
 
       const stateRows = yield* sql<{
         readonly projector: string;
@@ -2414,7 +2418,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "assistant",
           text: "kept",
           turnId: TurnId.make("turn-1"),
-          streaming: false,
+          streaming: true,
           createdAt: "2026-02-26T12:00:02.100Z",
           updatedAt: "2026-02-26T12:00:02.100Z",
         },
@@ -2458,7 +2462,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "user",
           text: "removed",
           turnId: TurnId.make("turn-2"),
-          streaming: false,
+          streaming: true,
           createdAt: "2026-02-26T12:00:03.050Z",
           updatedAt: "2026-02-26T12:00:03.050Z",
         },
@@ -2480,7 +2484,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "assistant",
           text: "removed",
           turnId: TurnId.make("turn-2"),
-          streaming: false,
+          streaming: true,
           createdAt: "2026-02-26T12:00:03.100Z",
           updatedAt: "2026-02-26T12:00:03.100Z",
         },
@@ -2522,6 +2526,19 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "assistant",
         },
       ]);
+      const keptText = yield* sql<{
+        text: string;
+        sequence: number;
+      }>`SELECT ${messageTextJson(sql)} AS text, text_event_sequence AS sequence FROM projection_thread_messages WHERE message_id = 'assistant-keep'`;
+      assert.equal(decodeMessageText(keptText[0]!.text), "kept");
+      assert.isAbove(keptText[0]!.sequence, 0);
+      assert.equal(
+        (yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM projection_message_chunks WHERE message_id IN ('assistant-keep', 'assistant-remove', 'user-remove')`)[0]
+          ?.count,
+        0,
+      );
     }),
   );
 });

@@ -1,0 +1,3088 @@
+{
+  "refs": {
+    "base": "1b53113f4a91f8aefc0d42db6791940fad3b4418",
+    "reviewed": "da8127a58b9a2688b0abdf7e846367bda37d5489",
+    "fixed": ""
+  },
+  "methodology": "Sequential alternating fresh processes; no provider delays; read samples include 3 warmups and 20 checked operations per process",
+  "runs": [
+    {
+      "version": "base",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1.0718329999999696,
+      "completionMs": 0.5499999999999545,
+      "walBytes": 156592,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "fixed",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1.1332500000000323,
+      "completionMs": 0.883624999999995,
+      "walBytes": 177192,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "base",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 2.589917000000014,
+      "completionMs": 0.5702909999999974,
+      "walBytes": 477952,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 2.625042000000036,
+      "completionMs": 0.8568329999999946,
+      "walBytes": 482072,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 7.452792000000045,
+      "completionMs": 0.5647500000000036,
+      "walBytes": 2051792,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 7.138333999999986,
+      "completionMs": 1.299000000000035,
+      "walBytes": 1421432,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 9.972334000000046,
+      "completionMs": 0.7643330000000788,
+      "walBytes": 1520312,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 9.624083999999982,
+      "completionMs": 1.099833999999987,
+      "walBytes": 1289592,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 33.31774999999993,
+      "completionMs": 0.5204170000000659,
+      "walBytes": 9179392,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 27.465250000000026,
+      "completionMs": 3.232167000000004,
+      "walBytes": 4746272,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 67.65183300000012,
+      "completionMs": 0.31416600000011385,
+      "walBytes": 16092752,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 0,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 68.2235,
+      "completionMs": 1.2467910000000302,
+      "walBytes": 12623712,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1.2892500000000098,
+      "completionMs": 1.0082500000000039,
+      "walBytes": 177192,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "base",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 0.9744170000000167,
+      "completionMs": 0.5982089999999971,
+      "walBytes": 156592,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "fixed",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 2.566500000000019,
+      "completionMs": 0.9878749999999741,
+      "walBytes": 482072,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 3.2856250000000955,
+      "completionMs": 0.5672499999999445,
+      "walBytes": 477952,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 9.761417000000051,
+      "completionMs": 1.441250000000025,
+      "walBytes": 1421432,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 14.151125000000093,
+      "completionMs": 0.9090419999999995,
+      "walBytes": 2051792,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 11.424624999999992,
+      "completionMs": 1.2250419999999735,
+      "walBytes": 1289592,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 7.255500000000211,
+      "completionMs": 0.40162499999996726,
+      "walBytes": 1520312,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 33.463209000000006,
+      "completionMs": 7.033500000000004,
+      "walBytes": 4746272,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 33.880792000000156,
+      "completionMs": 0.43687499999987267,
+      "walBytes": 9179392,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 93.34562500000004,
+      "completionMs": 2.015958000000012,
+      "walBytes": 12623712,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 1,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 95.48795900000005,
+      "completionMs": 0.6421669999999722,
+      "walBytes": 16092752,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 5.161666999999852,
+      "completionMs": 4.133458000000019,
+      "walBytes": 156592,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "fixed",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1.5972919999999817,
+      "completionMs": 1.4073750000000018,
+      "walBytes": 177192,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "base",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 12.699542000000065,
+      "completionMs": 7.840958999999884,
+      "walBytes": 477952,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 3.104417000000012,
+      "completionMs": 1.2579999999999814,
+      "walBytes": 482072,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 10.938041000000112,
+      "completionMs": 1.0977500000001328,
+      "walBytes": 2051792,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 10.315625000000011,
+      "completionMs": 2.4329999999999927,
+      "walBytes": 1421432,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 10.206249999999955,
+      "completionMs": 0.5412499999999909,
+      "walBytes": 1520312,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 10.541917000000012,
+      "completionMs": 1.1928330000000074,
+      "walBytes": 1289592,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 33.705875000000106,
+      "completionMs": 0.6345830000000205,
+      "walBytes": 9179392,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 27.340874999999983,
+      "completionMs": 3.526708000000042,
+      "walBytes": 4746272,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 83.48729200000002,
+      "completionMs": 0.32637499999987085,
+      "walBytes": 16092752,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 2,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 75.49904200000003,
+      "completionMs": 1.532291999999984,
+      "walBytes": 12623712,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1.114582999999982,
+      "completionMs": 0.7862909999999488,
+      "walBytes": 177192,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "base",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1.3905829999998787,
+      "completionMs": 0.79424999999992,
+      "walBytes": 156592,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "fixed",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 2.782083,
+      "completionMs": 1.0323329999999942,
+      "walBytes": 482072,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 2.3432920000000195,
+      "completionMs": 0.4611250000000382,
+      "walBytes": 477952,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 6.27195900000001,
+      "completionMs": 1.3223329999999862,
+      "walBytes": 1421432,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 7.649042000000009,
+      "completionMs": 0.5993750000000091,
+      "walBytes": 2051792,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 7.831707999999992,
+      "completionMs": 0.9710420000000113,
+      "walBytes": 1289592,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 7.706542000000013,
+      "completionMs": 0.38541699999996126,
+      "walBytes": 1520312,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 27.75679199999999,
+      "completionMs": 3.5214579999999955,
+      "walBytes": 4746272,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 57.64037500000006,
+      "completionMs": 0.8589580000000296,
+      "walBytes": 9179392,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 67.21975000000003,
+      "completionMs": 1.2684999999999604,
+      "walBytes": 12623712,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 3,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 72.93837499999995,
+      "completionMs": 0.2993749999999409,
+      "walBytes": 16092752,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 0.8912920000000213,
+      "completionMs": 0.5361659999999802,
+      "walBytes": 156592,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "fixed",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 4000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 2,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1.1185419999999908,
+      "completionMs": 0.9375409999999533,
+      "walBytes": 177192,
+      "finalContentMatches": true,
+      "sha256": ["a8f71c7a1c123732d970105ce72c3122e412640927f9ea2c8c8a34c252da1c45"]
+    },
+    {
+      "version": "base",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 2.2770830000000615,
+      "completionMs": 0.46795799999995324,
+      "walBytes": 477952,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 4,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 2.4028749999999945,
+      "completionMs": 0.8525419999999997,
+      "walBytes": 482072,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 8.248333000000002,
+      "completionMs": 0.6541250000000218,
+      "walBytes": 2051792,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "buffered",
+      "batchChars": 24040,
+      "eventsPerMessage": 10,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 13.476083000000017,
+      "completionMs": 2.535083000000043,
+      "walBytes": 1421432,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 9.876624999999876,
+      "completionMs": 0.49212499999998727,
+      "walBytes": 1520312,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 14,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 10.859874999999988,
+      "completionMs": 2.1345000000000027,
+      "walBytes": 1289592,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 44.716458999999986,
+      "completionMs": 0.9619999999999891,
+      "walBytes": 9179392,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "fixed",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "profile": "streaming",
+      "batchChars": 4096,
+      "eventsPerMessage": 50,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 32.829583000000014,
+      "completionMs": 3.681041999999991,
+      "walBytes": 4746272,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "version": "base",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 72.06420800000001,
+      "completionMs": 0.3473340000000462,
+      "walBytes": 16092752,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "fixed",
+      "sample": 4,
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "profile": "timer",
+      "batchChars": 320,
+      "eventsPerMessage": 158,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 77.22691700000001,
+      "completionMs": 1.8349999999999795,
+      "walBytes": 12623712,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "version": "base",
+      "sample": 0,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          8.260708000000022, 7.273124999999936, 8.520708000000013, 5.660499999999956,
+          6.9240420000000995, 5.551875000000109, 6.882125000000087, 5.666666999999961,
+          5.743458000000146, 8.55279100000007, 6.0980409999999665, 8.449499999999944,
+          6.665957999999819, 7.834375000000136, 5.619083000000046, 5.524958999999853,
+          10.620707999999922, 5.609375, 5.420292000000018, 5.434499999999844
+        ],
+        "repositoryGet": [
+          0.01379199999996672, 0.01424999999994725, 0.012040999999953783, 0.01154099999985192,
+          0.011083000000098764, 0.011915999999928317, 0.015000000000100044, 0.01191700000003948,
+          0.010499999999865395, 0.010166000000026543, 0.010417000000188636, 0.010333000000173342,
+          0.01029200000016317, 0.010417000000188636, 0.010166000000026543, 0.010084000000006199,
+          0.01008300000012241, 0.010791999999810287, 0.010208999999804291, 0.009999999999990905
+        ],
+        "snapshot": [
+          16.597499999999854, 10.112374999999929, 8.688333000000057, 9.82208300000002,
+          8.082541999999876, 9.978166999999985, 7.789583999999877, 9.351250000000164,
+          7.743290999999999, 9.260667000000012, 9.249749999999949, 7.778792000000067,
+          9.31879099999992, 7.636625000000095, 9.748666999999841, 9.04645900000014,
+          9.575874999999996, 7.82425000000012, 12.180541000000176, 11.882749999999987
+        ],
+        "detail": [
+          7.254875000000084, 8.147416999999905, 7.4284999999999854, 8.591499999999996,
+          7.701291999999967, 9.396792000000005, 7.275750000000016, 8.727082999999993,
+          7.076207999999951, 8.462041999999883, 7.2908330000000205, 8.579499999999825,
+          8.475916999999981, 7.025208999999904, 8.15366599999993, 7.1340839999998025,
+          8.102666999999883, 7.039125000000013, 8.368958999999904, 6.973165999999992
+        ],
+        "window100": [
+          1.584916000000021, 0.5105829999999969, 0.5008339999999407, 0.51237500000002,
+          0.4803340000000844, 0.5101669999999103, 0.5048329999999623, 0.4605410000001484,
+          0.47575000000006185, 0.48033299999997325, 0.45541700000012497, 0.4560420000000249,
+          0.4964159999999538, 0.4714999999998781, 0.4477079999999205, 0.4484589999999571,
+          0.4552920000000995, 0.4863749999999527, 0.48337500000002365, 0.46287499999994
+        ],
+        "history100": [
+          0.3360410000000229, 0.32654100000013386, 1.7565829999998641, 0.38762499999984357,
+          0.3263329999999769, 0.32816700000012133, 0.32354099999997743, 0.31150000000002365,
+          0.3094579999999496, 0.3084169999999631, 0.300707999999986, 0.30529200000000856,
+          0.30395800000019335, 0.3350000000000364, 0.30770799999982046, 0.3217500000000655,
+          0.33037500000000364, 0.3264160000001084, 0.30645800000002055, 0.30712499999981446
+        ],
+        "turn100": [
+          0.23250000000007276, 0.2279590000000553, 0.2352499999999509, 0.23866599999996652,
+          0.22670799999991686, 0.24420800000007148, 0.22866700000008677, 0.23441700000012133,
+          0.23212499999999636, 0.22749999999996362, 0.22633300000006784, 0.22649999999998727,
+          0.22512499999993452, 0.22629100000017388, 0.22458300000016607, 0.22749999999996362,
+          0.2292499999998654, 0.23362500000007458, 0.22758299999986775, 1.4687920000001213
+        ],
+        "queryMessage": [
+          0.01325000000019827, 0.012707999999975073, 0.01295799999979863, 0.03566699999987577,
+          0.011833000000024185, 0.013457999999900494, 0.02666699999986122, 0.012582999999949607,
+          0.01133399999980611, 0.010833000000047832, 0.01062499999989086, 0.010874999999941792,
+          0.011500000000069122, 0.01108299999987139, 0.010667000000012195, 0.010541999999986729,
+          0.010666000000128406, 0.010667000000012195, 0.011500000000069122, 0.011500000000069122
+        ],
+        "commandReadModel": [
+          0.20729099999994105, 0.16916700000001583, 0.1939589999999498, 0.16183300000011513,
+          0.15645800000015697, 0.15775000000007822, 0.1971249999999145, 0.15245800000002419,
+          0.15045800000007148, 0.1492920000000595, 0.15124999999989086, 0.1484579999998914,
+          0.18462499999986903, 0.1557500000001255, 0.15995799999996052, 0.16037499999993088,
+          0.15124999999989086, 0.15399999999999636, 0.18441699999993943, 0.15620899999998983
+        ],
+        "search50": [
+          9.590207999999848, 8.885999999999967, 8.950166999999965, 9.212875000000167,
+          9.014083000000028, 8.978624999999965, 8.62804200000005, 8.604000000000042,
+          8.505083000000013, 8.589750000000095, 8.387291000000005, 8.39129099999991,
+          8.247125000000096, 8.207625000000007, 8.356665999999905, 9.596083000000135,
+          8.20616700000005, 8.392666999999847, 8.389582999999902, 8.405749999999898
+        ],
+        "priority": [
+          0.17991699999993216, 0.17791600000009566, 0.18091700000013589, 0.18129099999987375,
+          0.1803749999999127, 0.18245900000010806, 0.18600000000014916, 0.18079199999988305,
+          0.1777079999999387, 0.1770000000001346, 0.18687499999987267, 0.17854200000010678,
+          0.1795830000000933, 0.180625000000191, 0.18091700000013589, 0.17954200000008314,
+          0.1832080000001497, 0.2299160000000029, 0.1801669999999831, 0.18116600000007566
+        ],
+        "sideContext201": [
+          0.47524999999996, 0.4751249999999345, 0.48279200000001765, 0.4936250000000655,
+          0.5009170000000722, 0.5001250000000255, 0.5071660000000975, 0.5275829999998223,
+          0.5330000000001291, 0.7058749999998781, 0.6047499999999673, 0.6188329999999951,
+          0.540749999999889, 0.5225000000000364, 0.5245830000001206, 0.531041999999843,
+          2.272375000000011, 0.548917000000074, 0.5004160000000866, 0.4813329999999496
+        ],
+        "revertIncludingSummary": [
+          12.005332999999837, 11.19341600000007, 11.262208999999984, 11.700124999999844,
+          13.963624999999865, 11.887082999999848, 11.525040999999874, 11.01520800000003,
+          11.346499999999878, 11.583875000000035, 10.44549999999981, 12.06399999999985,
+          14.076583999999912, 12.86566700000003, 12.332124999999905, 11.806790999999976,
+          11.10170799999969, 11.240833000000293, 11.229082999999719, 10.55600000000004
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    },
+    {
+      "version": "reviewed",
+      "sample": 0,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          27.30491700000016, 21.638750000000073, 21.800709000000097, 21.15691700000002,
+          19.099208999999973, 19.856374999999844, 21.755999999999858, 20.853624999999965,
+          19.82137499999999, 19.448583999999983, 19.498499999999922, 19.53629100000012,
+          19.925707999999986, 19.296374999999898, 19.949041999999963, 23.39562499999988,
+          18.53862499999991, 22.708458000000064, 20.085000000000036, 20.060791999999992
+        ],
+        "repositoryGet": [
+          0.02250000000003638, 0.022874999999885404, 0.023332999999865933, 0.022249999999985448,
+          0.020833000000038737, 0.020874999999932697, 0.023500000000012733, 0.02091700000005403,
+          0.040332999999918684, 0.020332999999936874, 0.03133299999990413, 0.0206670000000031,
+          0.01945900000009715, 0.01983299999983501, 0.019708000000036918, 0.01954200000000128,
+          0.019334000000071683, 0.019584000000122614, 0.019416999999975815, 0.019041999999899417
+        ],
+        "snapshot": [
+          22.697584000000006, 21.867582999999968, 21.74008300000014, 22.541500000000042,
+          26.329375000000027, 21.27300000000014, 22.53033399999981, 23.554125000000113,
+          22.2142080000001, 21.598582999999962, 21.386792000000014, 21.76454200000012, 21.800792,
+          21.43074999999999, 21.822834000000057, 22.12504200000012, 21.797167000000172,
+          25.909999999999854, 21.141707999999653, 21.68683299999975
+        ],
+        "detail": [
+          20.961416999999983, 20.850458999999773, 20.82445800000005, 20.658374999999978,
+          21.090041999999812, 20.740999999999985, 25.346416999999747, 20.73337500000025,
+          20.945666000000074, 20.312167000000045, 21.1553329999997, 20.75866700000006,
+          20.955417000000125, 20.860041000000365, 20.823167000000012, 20.763540999999805,
+          20.5759579999999, 20.72550000000001, 24.604791999999634, 20.80749999999989
+        ],
+        "window100": [
+          1.0964579999999842, 1.108625000000302, 1.1118340000002718, 2.905083000000104,
+          1.22662500000024, 1.1512499999998909, 1.1180829999998423, 1.0782500000000255,
+          1.1041669999999613, 1.0815000000002328, 1.064875000000029, 1.0787500000001273,
+          1.0695000000000618, 1.1097500000000764, 1.0632080000000315, 1.0660000000002583,
+          1.0766669999998157, 1.0523749999997563, 1.0913330000003043, 1.0580839999997806
+        ],
+        "history100": [
+          0.9743329999996604, 0.9746249999998327, 1.0161249999996471, 1.0219999999999345,
+          0.9700419999999212, 0.9577500000000327, 1.0143330000000788, 0.9873750000001564,
+          0.950832999999875, 1.0030000000001564, 0.9407499999997526, 0.9434589999996206,
+          0.9630839999999807, 2.501541999999972, 1.0123340000000098, 0.977542000000085,
+          0.9442089999997734, 0.931416999999783, 0.9392499999999018, 0.9422500000000582
+        ],
+        "turn100": [
+          0.8841659999998228, 0.8517080000001442, 0.8718750000002728, 0.8850840000000062,
+          0.8669169999998303, 0.8661670000001322, 0.8769169999995938, 0.8622080000000096,
+          2.208708000000115, 0.9388750000002801, 0.8779999999997017, 0.8736669999998412,
+          0.8665829999999914, 0.8545829999998205, 0.8490830000000642, 0.8612499999999272,
+          0.8302079999998568, 0.8333750000001601, 0.8347499999999854, 0.8336669999998776
+        ],
+        "queryMessage": [
+          0.019708999999693333, 0.019624999999905413, 0.019750000000385626, 0.019541000000117492,
+          0.019249999999829015, 0.02070800000001327, 0.02366699999993216, 0.01954200000000128,
+          0.01883399999996982, 0.01920800000016243, 0.01883300000008603, 0.0187090000003991,
+          0.018791000000419444, 0.01900000000023283, 0.018874999999752617, 0.019166999999924883,
+          0.01920800000016243, 0.018624999999701686, 0.018667000000277767, 0.018791999999848485
+        ],
+        "commandReadModel": [
+          0.1738749999999527, 0.17524999999977808, 0.18820800000003146, 0.1698750000000473,
+          0.18079200000011042, 0.16641600000002654, 0.1667080000001988, 0.16150000000016007,
+          0.16229100000009566, 0.17629200000010314, 0.16037499999993088, 0.17595899999969333,
+          0.16550000000006548, 0.15924999999970169, 0.16116699999975026, 0.20691699999997581,
+          0.15695800000003146, 0.16716699999960838, 0.17391700000007404, 0.1597500000002583
+        ],
+        "search50": [
+          12.44616700000006, 12.546875, 12.522249999999985, 13.723541000000296, 12.573583999999755,
+          12.222334000000046, 12.427874999999858, 12.405083000000104, 12.187082999999802,
+          12.109667000000172, 12.128959000000123, 12.029042000000118, 12.128833000000213,
+          12.125916999999845, 12.025750000000244, 11.872875000000022, 12.080875000000106,
+          12.008749999999964, 12.06054099999983, 12.273499999999785
+        ],
+        "priority": [
+          0.1913750000003347, 0.1847080000002279, 0.18554199999971388, 0.18770900000026813,
+          0.19574999999986176, 0.1985829999998714, 0.19108400000004622, 0.18662499999982174,
+          0.18383300000004965, 0.18320799999992232, 0.18904199999997218, 0.18304200000011406,
+          0.18245800000022427, 0.18245800000022427, 0.18487499999991996, 0.181583000000046,
+          0.18458300000020245, 0.1904580000000351, 0.182709000000159, 0.18204200000036508
+        ],
+        "sideContext201": [
+          2.0895840000002863, 2.0379589999997734, 2.090791999999965, 2.0280840000000353,
+          2.0555829999998423, 2.034208000000035, 3.3465409999998883, 2.311167000000296,
+          2.180207999999766, 2.1755000000002838, 2.1616250000001855, 2.209958999999799,
+          2.033374999999978, 2.023667000000387, 2.0400829999998678, 2.0272500000000946,
+          2.0540829999999914, 2.026542000000063, 2.016125000000102, 1.9948330000001988
+        ],
+        "revertIncludingSummary": [
+          38.38145799999984, 37.828250000000025, 37.242249999999785, 37.445124999999734,
+          38.43529099999978, 41.247749999999996, 38.746042000000216, 39.17704099999992,
+          37.6680409999999, 37.614042000000154, 39.075582999999824, 43.568665999999666,
+          40.245708999999806, 38.24299999999994, 37.44204200000013, 38.194082999999864,
+          39.89249999999993, 42.978250000000116, 38.995416000000205, 37.95845899999995
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    },
+    {
+      "version": "fixed",
+      "sample": 0,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          8.499916999999982, 7.165707999999995, 8.392916999999898, 6.752875000000017,
+          5.926124999999956, 6.261124999999993, 6.092291000000046, 5.744542000000024,
+          6.176458000000025, 5.618291999999997, 6.042124999999942, 5.750167000000033,
+          5.771124999999984, 6.990125000000035, 6.14712499999996, 6.6506669999999986,
+          6.14554099999998, 6.12662499999999, 6.584958000000029, 5.695500000000038
+        ],
+        "repositoryGet": [
+          0.01608299999998053, 0.016957999999931417, 0.016458999999940715, 0.022582999999940512,
+          0.015499999999974534, 0.014708000000041466, 0.017541999999934887, 0.014542000000005828,
+          0.01412500000003547, 0.01375000000007276, 0.013291999999978543, 0.013291999999978543,
+          0.013707999999951426, 0.013749999999959073, 0.020833999999922526, 0.01391599999999471,
+          0.013459000000011656, 0.013707999999951426, 0.013708999999948901, 0.013457999999900494
+        ],
+        "snapshot": [
+          9.135457999999971, 11.260625000000005, 8.93541700000003, 9.658874999999966,
+          9.30600000000004, 8.019625000000019, 9.348875000000021, 7.955625000000055,
+          9.743875000000003, 9.505083000000013, 8.10916700000007, 9.702749999999924,
+          8.21449999999993, 9.570916000000011, 12.272625000000062, 13.147790999999984,
+          13.434875000000034, 15.761124999999993, 8.603416000000038, 8.539708000000019
+        ],
+        "detail": [
+          8.520583999999985, 8.087792000000036, 8.274082999999905, 7.884958999999981,
+          8.477958000000058, 7.729583000000048, 8.434708, 8.018791999999962, 9.46229100000005,
+          9.369500000000016, 8.826583000000028, 8.07183299999997, 8.559958000000051,
+          7.632875000000013, 8.228457999999819, 7.458750000000009, 8.123291999999992,
+          7.5357910000000174, 8.231415999999854, 7.509791999999834
+        ],
+        "window100": [
+          0.5620830000000296, 0.5130420000000413, 0.5297499999999218, 0.5256249999999909,
+          0.49491699999998673, 0.549167000000125, 0.5017499999999018, 0.4906250000001364,
+          0.5030420000000504, 0.4993329999999787, 0.5029580000000351, 0.7274580000000697,
+          0.7415829999999914, 0.6840420000000904, 0.5944590000001426, 0.6316659999999956,
+          0.5707919999999831, 0.5829169999999522, 0.5298330000000533, 0.51237500000002
+        ],
+        "history100": [
+          0.36599999999998545, 0.3592919999998685, 0.4054169999999431, 0.3583340000000135,
+          0.3442499999998745, 0.3444160000001375, 0.34620799999993324, 0.330208999999968,
+          0.3519579999999678, 0.32791599999995924, 0.3262079999999514, 0.3263329999999769,
+          1.055749999999989, 0.5153340000001663, 0.3669999999999618, 0.36000000000012733,
+          0.3597500000000764, 0.3482089999999971, 0.33024999999997817, 0.33608399999980065
+        ],
+        "turn100": [
+          0.2583749999998872, 0.25454199999990124, 0.2599170000000868, 0.25787500000001273,
+          0.2550420000000031, 0.2562080000000151, 0.25529100000017024, 0.2546669999999267,
+          0.25233400000001893, 0.25441700000010314, 0.25137500000005275, 0.2533329999998841,
+          0.24900000000002365, 0.24849999999992178, 0.2514169999999467, 0.25029099999983373,
+          0.2607919999998103, 0.2905000000000655, 0.2594579999999951, 0.25254100000006474
+        ],
+        "queryMessage": [
+          0.013583000000153334, 0.01308300000005147, 0.012999999999919964, 0.013166000000182976,
+          0.012917000000015832, 0.013916999999992186, 0.01700000000005275, 0.013666999999941254,
+          0.013500000000021828, 0.012833999999884327, 0.01262500000007094, 0.012542000000166809,
+          0.012542000000166809, 0.012459000000035303, 0.012541000000055647, 0.012584000000060769,
+          0.013500000000021828, 0.012999999999919964, 0.01262500000007094, 0.012833000000000538
+        ],
+        "commandReadModel": [
+          0.19775000000004184, 0.17566699999997581, 0.19775000000004184, 0.16695900000013353,
+          0.15762500000005275, 0.1566250000000764, 0.18299999999999272, 0.15574999999989814,
+          0.1565419999999449, 0.15670799999998053, 0.15650000000005093, 0.1504170000000613,
+          0.17450000000008004, 0.15233299999999872, 0.15195799999992232, 0.17191700000012133,
+          0.15091700000016317, 0.17300000000000182, 0.16212500000006003, 0.15041599999995015
+        ],
+        "search50": [
+          8.426791000000094, 8.412750000000187, 8.371457999999848, 9.020291999999927,
+          9.421832999999879, 9.508458999999903, 9.265374999999949, 9.120625000000018,
+          8.606167000000141, 8.494957999999997, 8.455874999999878, 8.540834000000132,
+          9.423082999999906, 9.98824999999988, 9.204124999999976, 8.947165999999925,
+          8.594542000000047, 8.453458999999839, 8.420083000000204, 8.420165999999881
+        ],
+        "priority": [
+          0.1764579999999114, 0.17574999999987995, 0.17699999999990723, 0.17991700000015953,
+          0.17466699999999946, 0.18200000000001637, 0.18595800000002782, 0.17724999999995816,
+          0.17549999999982901, 0.17283399999996618, 0.17791600000009566, 0.1760420000000522,
+          0.17345899999986614, 0.17191699999989396, 0.1725420000000213, 0.67775000000006,
+          0.17379100000016479, 0.17287499999997635, 0.17829199999982848, 0.1787090000000262
+        ],
+        "sideContext201": [
+          0.6702090000001135, 0.6514999999999418, 0.6485419999999067, 0.6758749999999054,
+          0.6571250000001783, 0.6497910000000502, 0.6464169999999285, 0.668416999999863,
+          0.6424580000000333, 0.6410419999999704, 0.6380419999998139, 0.6449170000000777,
+          0.6917499999999563, 0.5317080000002079, 0.5168750000000273, 0.5777080000000296,
+          0.6836249999998927, 0.510915999999952, 0.5019580000000587, 0.5046250000000327
+        ],
+        "revertIncludingSummary": [
+          11.747749999999996, 11.242624999999862, 11.370374999999967, 13.828416999999945,
+          14.079666999999972, 13.629832999999962, 12.312332999999853, 11.70354199999997,
+          11.254707999999937, 11.597708000000011, 11.013083999999935, 11.29466699999989,
+          11.019624999999905, 10.80275000000006, 11.204041000000188, 11.10958299999993,
+          10.7806250000001, 10.930499999999938, 11.090917000000218, 10.640959000000066
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    },
+    {
+      "version": "fixed",
+      "sample": 1,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          7.208541999999966, 7.963665999999989, 9.140582999999992, 7.7026670000000195,
+          7.225582999999972, 6.986999999999966, 6.3174999999999955, 6.079499999999996,
+          6.66658300000006, 5.8659580000000915, 6.2087080000000014, 5.872874999999908,
+          6.190082999999959, 6.200207999999975, 5.636291000000028, 6.064583000000084,
+          5.686290999999983, 5.603707999999983, 6.328708000000006, 5.867915999999923
+        ],
+        "repositoryGet": [
+          0.017125000000078217, 0.017542000000048574, 0.016875000000027285, 0.02608300000008512,
+          0.015292000000044936, 0.015541999999982181, 0.01749999999992724, 0.014999999999986358,
+          0.014041000000020176, 0.013749999999959073, 0.013459000000011656, 0.014083000000027823,
+          0.013708000000065113, 0.015041999999994005, 0.021917000000030384, 0.013708000000065113,
+          0.013584000000037122, 0.013499999999908141, 0.013916999999992186, 0.013167000000066764
+        ],
+        "snapshot": [
+          8.31433400000003, 9.218665999999985, 8.195999999999913, 9.086582999999905,
+          9.774708000000032, 8.018916999999988, 10.702750000000037, 10.085874999999987,
+          13.463540999999964, 11.44870800000001, 8.857834000000025, 10.106833999999935,
+          8.470790999999963, 9.874082999999928, 12.043999999999983, 13.205999999999904,
+          13.64312499999994, 15.754125000000045, 8.602457999999956, 8.58183299999996
+        ],
+        "detail": [
+          8.397874999999999, 7.674333000000047, 8.047582999999918, 7.606291000000056,
+          8.915583999999967, 8.125083000000018, 8.38854200000003, 8.264084000000025,
+          8.265667000000008, 7.530040999999983, 9.26708300000007, 9.234707999999955,
+          9.931416000000013, 8.568667000000005, 9.127708000000098, 7.778291999999965,
+          8.14833299999998, 7.32833299999993, 7.883166000000074, 7.65887500000008
+        ],
+        "window100": [
+          0.6744169999999485, 0.5305409999998574, 0.5421670000000631, 0.5024579999999332,
+          0.49129199999993034, 0.5398749999999382, 0.4874999999999545, 0.4686659999999847,
+          0.47533400000020265, 0.49474999999983993, 0.4716249999999036, 0.4930409999999483,
+          0.46575000000007094, 0.48004100000002836, 0.4709580000001097, 0.47612500000013824,
+          0.4815000000000964, 0.5068330000001424, 0.6509590000000571, 0.4809580000001006
+        ],
+        "history100": [
+          0.3326250000000073, 0.34895800000003874, 0.3845410000001266, 0.346416999999974,
+          0.3334580000000642, 0.3381660000000011, 0.33958400000005895, 0.3309160000001157,
+          0.34874999999988177, 0.33304199999997763, 0.32562499999994543, 0.32445899999993344,
+          1.2337079999999787, 0.4736250000000837, 0.35370799999986957, 0.35674999999991996,
+          0.36295800000016243, 0.33066699999994853, 0.3389169999998103, 0.3190829999998641
+        ],
+        "turn100": [
+          0.25012500000002547, 0.25329099999999016, 0.25324999999998, 0.2568750000000364,
+          0.25120799999990595, 0.26274999999986903, 0.25291600000014114, 0.2508330000000569,
+          0.25241699999992306, 0.26445799999987685, 0.26062500000011823, 0.2535419999999249,
+          0.24812500000007276, 0.2517089999998916, 0.2516659999998865, 0.25187499999992724,
+          0.24799999999981992, 0.2956669999998667, 0.24729200000001583, 0.24712499999986903
+        ],
+        "queryMessage": [
+          0.01312499999994543, 0.013000000000147338, 0.013040999999930136, 0.012874999999894499,
+          0.012624999999843567, 0.013542000000143162, 0.016000000000076398, 0.012791999999990367,
+          0.01679199999989578, 0.012541000000055647, 0.012542000000166809, 0.012417000000141343,
+          0.012209000000211745, 0.012458000000151515, 0.012458000000151515, 0.012333999999782463,
+          0.012333000000126049, 0.012208000000100583, 0.012208000000100583, 0.0126669999999649
+        ],
+        "commandReadModel": [
+          0.18824999999992542, 0.16499999999996362, 0.18908399999986614, 0.158333999999968,
+          0.1509169999999358, 0.15204100000005383, 0.179915999999821, 0.15116600000010294,
+          0.14750000000003638, 0.14679099999989376, 0.1487499999998363, 0.14804099999992104,
+          0.1716670000000704, 0.1483339999999771, 0.14720899999997528, 0.16529200000013589,
+          0.15041599999995015, 0.17104200000017045, 0.16791699999998855, 0.14833299999986593
+        ],
+        "search50": [
+          8.548208000000159, 8.604083000000173, 8.583834000000024, 9.569000000000187,
+          10.060416000000032, 10.466375000000198, 9.99083399999995, 9.48354100000006,
+          9.028917000000092, 8.730916999999863, 8.80941699999994, 8.619959000000108,
+          8.525457999999844, 8.440458999999919, 8.368041999999832, 8.31616699999995,
+          8.492750000000115, 8.522791000000097, 8.495999999999867, 8.313957999999957
+        ],
+        "priority": [
+          0.1794159999999465, 0.1790000000000873, 0.17762500000003456, 0.1772920000000795,
+          0.17954200000008314, 0.18783299999995506, 0.18687500000010004, 0.19466600000009748,
+          0.18266700000003766, 0.1832089999998061, 0.1815839999999298, 0.17895799999996598,
+          0.17670799999996234, 0.17675000000008367, 0.17595800000003692, 0.6632079999999405,
+          0.18554200000016863, 0.18341699999996308, 0.17708299999981136, 0.17716599999994287
+        ],
+        "sideContext201": [
+          0.5148750000000746, 0.510332999999946, 0.5029580000000351, 0.5208339999999225,
+          0.5110839999999826, 0.5050830000000133, 0.49862499999994725, 0.5030830000000606,
+          0.509499999999889, 0.5140839999999116, 0.5051250000001346, 0.5092500000000655,
+          0.5109170000000631, 0.5566250000001673, 0.6729169999998703, 0.6140000000000327,
+          0.5413340000000062, 0.5479169999998703, 0.5284580000000005, 0.5047079999999369
+        ],
+        "revertIncludingSummary": [
+          12.399625000000015, 11.840875000000096, 11.571249999999964, 11.483042000000069,
+          11.328209000000015, 11.444542000000183, 11.319375000000036, 11.089750000000095,
+          10.822750000000042, 12.235541000000012, 13.913334000000077, 13.83725000000004,
+          12.902332999999999, 11.969500000000153, 11.962540999999874, 11.517667000000074,
+          11.193708000000015, 12.652332999999999, 14.388625000000047, 13.34416699999997
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    },
+    {
+      "version": "reviewed",
+      "sample": 1,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          22.375082999999904, 20.646207999999888, 23.63816699999984, 17.96333400000003,
+          20.94929100000013, 18.885083000000122, 18.56683299999986, 19.296082999999953,
+          21.846959000000197, 20.353374999999915, 19.540457999999944, 19.604082999999946,
+          19.451917000000094, 19.518291999999974, 23.29537500000015, 17.529541999999992,
+          21.466957999999977, 18.823583999999983, 19.75149999999985, 19.290583000000197
+        ],
+        "repositoryGet": [
+          0.02295900000012807, 0.02299999999991087, 0.023332999999865933, 0.021250000000009095,
+          0.020250000000032742, 0.021041999999852123, 0.024208000000044194, 0.02179200000000492,
+          0.04233399999998255, 0.020541000000093845, 0.01974999999993088, 0.020250000000032742,
+          0.019375000000081855, 0.019416999999975815, 0.01916599999981372, 0.01904100000001563,
+          0.018749999999954525, 0.018957999999884123, 0.018958999999995285, 0.019083000000136963
+        ],
+        "snapshot": [
+          23.30320800000004, 23.142000000000053, 22.726707999999917, 26.91841700000009,
+          22.56533400000012, 24.918290999999954, 24.89320799999996, 24.82770800000003,
+          24.657625000000053, 25.06516600000009, 26.731791000000158, 24.870625000000018,
+          25.268334000000095, 24.941500000000133, 25.719125000000076, 24.907791999999972,
+          30.841459000000214, 24.599874999999884, 25.22316600000022, 25.081916999999976
+        ],
+        "detail": [
+          22.031375000000025, 21.330625000000055, 21.54095899999993, 24.305374999999913, 25.011708,
+          28.972957999999835, 25.256124999999884, 25.155125000000226, 24.967540999999983,
+          25.29662499999995, 24.333832999999686, 27.346374999999625, 25.664332999999715,
+          22.103834000000006, 21.660167, 22.06729200000018, 21.64904200000001, 25.69275000000016,
+          20.942291999999725, 21.165166000000227
+        ],
+        "window100": [
+          1.0891660000002048, 2.5367089999999735, 1.2827919999999722, 1.1262499999998,
+          1.1307499999998072, 1.107582999999977, 1.1262919999999212, 1.1672090000001845,
+          1.1489580000002206, 1.1007079999999405, 1.0552090000001044, 1.058415999999852,
+          1.0815420000003542, 1.2338329999997768, 1.1457080000000133, 1.0725829999996677,
+          1.0657500000002074, 2.813250000000153, 1.2465829999996458, 1.111250000000382
+        ],
+        "history100": [
+          0.9666659999998046, 0.9306660000002012, 1.034708000000137, 0.9588750000002619,
+          0.9160829999996167, 0.9336249999996653, 0.9387499999997999, 0.9164590000000317,
+          0.9147079999997914, 2.3230829999997695, 1.04495900000029, 0.9368329999997513,
+          0.9469999999996617, 0.9442500000000109, 0.9401669999997466, 0.9733339999997952,
+          0.9488329999999223, 0.9110420000001795, 0.9416249999999309, 0.9280839999996715
+        ],
+        "turn100": [
+          0.8384170000003905, 0.8414999999999964, 0.8701249999999163, 0.9087919999997212,
+          2.1727500000001783, 0.9737920000002305, 0.8503750000004402, 0.8475830000002134,
+          0.8488750000001346, 0.8662500000000364, 0.8560410000000047, 0.8955000000000837,
+          0.8873750000002474, 0.8396659999998519, 0.8338749999998072, 0.840458000000126,
+          0.8253329999997732, 0.8392499999999927, 0.8323340000001735, 0.8282920000001468
+        ],
+        "queryMessage": [
+          0.02016700000012861, 0.01983299999983501, 0.019959000000199012, 0.019332999999733147,
+          0.01999999999998181, 0.02091599999994287, 0.02383300000019517, 0.020041999999648397,
+          0.019292000000405096, 0.019250000000283762, 0.01900000000023283, 0.02162499999985812,
+          0.019624999999905413, 0.01904100000001563, 0.018875000000207365, 0.019042000000354165,
+          0.018583999999918888, 0.018958000000111497, 0.018708000000060565, 0.01954200000000128
+        ],
+        "commandReadModel": [
+          0.17558299999973315, 0.18620800000007875, 0.19620800000029703, 0.171875,
+          0.19037500000013097, 0.16845799999964584, 0.16670799999974406, 0.17395900000019537,
+          0.16487499999993815, 0.18458400000008623, 0.16366599999992104, 0.16466600000012477,
+          0.165958000000046, 0.16712500000039654, 0.17712500000016007, 1.9940839999999298,
+          0.1962079999998423, 0.1839999999997417, 0.18395800000007512, 0.17120799999975134
+        ],
+        "search50": [
+          12.185874999999669, 12.231209000000035, 12.150582999999642, 12.610583000000133,
+          12.565209000000323, 12.749749999999949, 13.040332999999919, 13.317290999999841,
+          13.487541999999848, 13.766458000000057, 13.18212500000027, 13.981582999999773,
+          13.93612499999972, 14.39929200000006, 14.093833999999788, 14.523083999999926,
+          14.217833000000155, 14.241375000000062, 14.127457999999933, 14.172458000000006
+        ],
+        "priority": [
+          0.1987080000003516, 0.1947920000002341, 0.1922500000000582, 0.20108299999992596,
+          0.21400000000039654, 0.2131670000003396, 0.20583399999986796, 0.1955840000000535,
+          0.2231659999997646, 0.22237499999982901, 0.20879199999990306, 0.19083299999965675,
+          0.19091699999989942, 0.20850000000018554, 0.19416700000010678, 0.1906659999999647,
+          0.24295800000027157, 0.2074999999999818, 0.19379200000003038, 0.19308399999999892
+        ],
+        "sideContext201": [
+          2.5554160000001502, 2.399417000000085, 4.332042000000001, 2.6688340000000608,
+          2.4520840000000135, 2.4372920000000704, 2.474333999999999, 2.3931250000000546,
+          2.50066599999991, 2.337665999999899, 2.4918750000001637, 2.431583000000046,
+          2.3759580000000824, 2.614958000000115, 2.6553750000002765, 2.414458000000195,
+          2.567916999999852, 2.690374999999676, 3.7049999999999272, 2.604207999999744
+        ],
+        "revertIncludingSummary": [
+          45.623333, 42.00283300000001, 40.45133299999998, 40.188624999999774, 39.70433400000002,
+          42.864959, 41.013790999999856, 39.15016699999978, 39.17262500000015, 39.47054200000002,
+          39.628749999999854, 40.38529200000039, 40.30162500000006, 38.407708000000184,
+          38.20887500000026, 38.60908300000028, 38.371083, 40.33462499999996, 39.15420800000038,
+          37.596457999999984
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    },
+    {
+      "version": "base",
+      "sample": 1,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          9.254874999999856, 7.989084000000048, 9.348749999999882, 6.072000000000116,
+          7.981958000000077, 6.267458999999917, 8.435416000000032, 6.396792000000005,
+          7.561750000000075, 8.750707999999804, 6.264249999999947, 8.621290999999928,
+          6.415415999999823, 8.221542, 6.517166999999972, 9.048584000000119, 10.255957999999964,
+          6.40929200000005, 6.504708000000164, 6.3615839999999935
+        ],
+        "repositoryGet": [
+          0.014167000000043117, 0.014083000000027823, 0.01191700000003948, 0.011124999999992724,
+          0.010833000000047832, 0.011292000000139524, 0.014417000000094049, 0.011791000000130225,
+          0.010167000000137705, 0.010041999999884865, 0.010874999999941792, 0.010209000000031665,
+          0.010375000000067303, 0.009749999999939973, 0.009833000000071479, 0.009833000000071479,
+          0.00987499999996544, 0.010209000000031665, 0.009750000000167347, 0.009833000000071479
+        ],
+        "snapshot": [
+          11.210041000000047, 10.539250000000038, 9.274374999999964, 10.584166000000096,
+          9.194500000000062, 10.695707999999968, 8.997834000000012, 10.46137500000009,
+          8.923916999999847, 11.197916999999961, 10.606541000000107, 8.854708000000073,
+          10.72287499999993, 8.354125000000067, 9.761541999999963, 8.079958000000033,
+          10.18162499999994, 7.887958000000026, 11.987833999999793, 10.838915999999926
+        ],
+        "detail": [
+          7.460125000000062, 7.410249999999905, 8.488541000000168, 8.79641700000002,
+          7.419792000000143, 8.487041999999974, 7.238166000000092, 8.772917000000007,
+          7.140790999999808, 7.995333999999957, 7.155582999999979, 8.529333000000179,
+          8.765958000000182, 7.434416999999939, 8.855332999999973, 7.299833000000035,
+          8.63233299999979, 7.202250000000049, 8.264042000000018, 7.15341699999999
+        ],
+        "window100": [
+          1.8672919999999067, 0.5234159999999974, 0.5204169999999522, 0.5148750000000746,
+          0.47145799999998417, 0.4927500000001146, 0.5125840000000608, 0.44974999999999454,
+          0.4514169999999922, 0.4751659999999447, 0.45104200000014316, 0.48320799999987685,
+          0.5459579999999278, 0.49491699999998673, 0.45670799999993505, 0.45595800000000963,
+          0.45145899999988615, 0.49479199999996126, 0.46983399999999165, 0.6527500000001965
+        ],
+        "history100": [
+          0.3217080000001715, 0.3232500000001437, 0.38799999999991996, 0.3163750000001073,
+          0.3071669999999358, 0.3241249999998672, 0.34600000000000364, 0.37787500000013097,
+          0.37095899999985704, 0.3703339999999571, 0.3692080000000715, 0.3170829999999114,
+          0.3214170000001104, 1.788041000000021, 0.37274999999999636, 0.347541000000092,
+          0.34095800000000054, 0.31862500000011096, 0.30074999999987995, 0.30791599999997743
+        ],
+        "turn100": [
+          0.22870800000009694, 0.22845900000015718, 0.24454100000002654, 0.23529099999996106,
+          0.23375000000010004, 0.23662500000000364, 0.23433299999987867, 0.22900000000004184,
+          0.22891699999991033, 0.23254199999996672, 0.2331659999999829, 0.2355840000000171,
+          0.22945800000002237, 0.2340830000000551, 0.2308339999999589, 0.2375000000001819,
+          0.23095800000010058, 0.22545900000000074, 0.2296249999999418, 0.27358399999980065
+        ],
+        "queryMessage": [
+          0.010833000000047832, 0.01062499999989086, 0.012999999999919964, 0.03083399999991343,
+          0.010708000000022366, 0.011541000000079293, 0.013500000000021828, 0.010541999999986729,
+          0.010084000000006199, 0.010166000000026543, 0.009833999999955267, 0.009790999999950145,
+          0.009999999999990905, 0.00987499999996544, 0.010041999999884865, 0.009667000000035841,
+          0.009999999999990905, 0.010249999999814463, 0.009792000000061307, 0.010041999999884865
+        ],
+        "commandReadModel": [
+          0.1960830000000442, 0.16595799999981864, 0.20170899999993708, 0.1610000000000582,
+          0.15170800000009876, 0.1512920000000122, 0.19458399999984977, 0.1508329999999205,
+          0.14708299999983865, 0.14741699999990487, 0.15300000000002, 0.15066699999988487,
+          1.6890419999999722, 0.1905420000000504, 0.16050000000018372, 0.16270799999983865,
+          0.1527089999999589, 0.16037499999993088, 0.19670800000017152, 0.1519580000001497
+        ],
+        "search50": [
+          8.42245899999989, 8.47462500000006, 8.37129200000004, 8.298500000000104,
+          8.705791999999974, 9.31004199999984, 9.490708999999924, 9.470041000000037,
+          9.397417000000132, 9.243750000000091, 9.308500000000095, 9.531541000000061,
+          9.353332999999793, 9.005290999999943, 9.24087499999996, 9.291666999999961,
+          9.209333000000015, 9.027041999999938, 8.86412499999983, 8.974874999999884
+        ],
+        "priority": [
+          0.17841600000019753, 0.1772920000000795, 0.20924999999988358, 0.19966599999997925,
+          0.18154200000003584, 0.1847499999998945, 0.18812499999989996, 0.1803749999999127,
+          0.18254099999990103, 0.17820800000004056, 0.19483400000012807, 0.17520799999988412,
+          0.1799999999998363, 0.17629099999999198, 0.1774159999999938, 0.17824999999993452,
+          0.17633300000011332, 0.22520800000006602, 0.18154200000003584, 0.1764579999999114
+        ],
+        "sideContext201": [
+          0.5040409999999156, 0.5075830000000678, 0.8522910000001502, 0.559624999999869,
+          0.5272500000000946, 0.6668750000001182, 0.5354590000001735, 0.531624999999849,
+          0.5204579999999623, 0.5016249999998763, 0.5022089999999935, 0.507291000000123,
+          0.5042499999999563, 0.5093329999999696, 0.4963749999999436, 0.5090420000001359,
+          2.185375000000022, 0.7359169999999722, 0.7178750000000491, 0.6727080000000569
+        ],
+        "revertIncludingSummary": [
+          13.696916000000101, 12.63579199999981, 12.724249999999984, 12.70720899999992,
+          11.460415999999896, 12.202209000000039, 12.95950000000039, 13.812958000000435,
+          12.739917000000332, 13.31658299999981, 12.499624999999924, 13.041083999999955,
+          13.2509170000003, 12.454041999999845, 13.459374999999909, 13.606250000000273,
+          13.038957999999639, 13.185249999999996, 13.160542000000078, 12.49587500000007
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    },
+    {
+      "version": "base",
+      "sample": 2,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          8.877124999999978, 7.836084000000028, 10.39129099999991, 6.7302920000001905,
+          9.518166999999949, 7.799375000000055, 10.518709000000172, 7.669709000000012,
+          6.259792000000061, 9.066500000000133, 6.646333000000141, 8.718208000000004,
+          5.959374999999909, 7.523750000000064, 5.552374999999984, 5.563417000000072,
+          11.126874999999927, 5.660542000000078, 5.527125000000069, 5.409750000000031
+        ],
+        "repositoryGet": [
+          0.014666000000033819, 0.014333999999962543, 0.012165999999979249, 0.012375000000020009,
+          0.01166600000010476, 0.012083999999958905, 0.014291000000184795, 0.011541000000079293,
+          0.010958000000073298, 0.010917000000063126, 0.0104159999998501, 0.010332999999945969,
+          0.010374999999839929, 0.010459000000082597, 0.010749999999916326, 0.010332999999945969,
+          0.010332999999945969, 0.0107500000001437, 0.010375000000067303, 0.010207999999920503
+        ],
+        "snapshot": [
+          9.94575000000009, 10.092083000000002, 7.9138329999998405, 9.949959000000035,
+          8.625500000000102, 12.157999999999902, 9.522207999999864, 11.369541000000027,
+          9.00541700000008, 11.435541999999941, 11.440500000000156, 9.642000000000053,
+          11.106667000000016, 9.030040999999983, 11.289832999999817, 9.916375000000016,
+          10.92495800000006, 9.499166999999943, 14.96304199999986, 11.845749999999953
+        ],
+        "detail": [
+          7.349499999999807, 8.142458000000033, 7.233208000000104, 8.84333300000003,
+          7.269999999999982, 9.813458999999966, 7.774374999999964, 9.359874999999874,
+          7.447750000000042, 8.578583999999864, 7.183083000000124, 8.463457999999946,
+          8.795459000000164, 8.4396670000001, 9.08766700000001, 7.391624999999976,
+          8.384917000000087, 7.39366700000005, 8.961958999999979, 7.338749999999891
+        ],
+        "window100": [
+          1.6993749999999181, 0.5313329999999041, 0.521874999999909, 0.514458999999988,
+          0.4923749999998108, 0.4966670000001159, 0.50912500000004, 0.4586669999998776,
+          0.46045799999978954, 0.4689579999999296, 0.4546250000000782, 0.4473750000001928,
+          0.513332999999875, 0.4840830000000551, 0.45270800000002964, 0.4500829999999496,
+          0.44629200000008495, 0.46716700000001765, 0.45499999999992724, 0.45804199999997763
+        ],
+        "history100": [
+          0.33054199999992306, 0.3197909999998956, 1.7548329999999623, 0.38391599999999926,
+          0.34112499999991996, 0.3397090000000844, 0.3293750000000273, 0.31074999999987085,
+          0.3017090000000735, 0.3048749999998108, 0.3038340000000517, 0.3042920000000322,
+          0.305417000000034, 0.34474999999997635, 0.30462499999998727, 0.31899999999996,
+          0.3245830000000751, 0.304834000000028, 0.2997089999998934, 0.30475000000001273
+        ],
+        "turn100": [
+          0.231708000000026, 0.22949999999991633, 0.24283300000001873, 0.23649999999997817,
+          0.22908300000017334, 0.22770799999989322, 0.22591699999998127, 0.23420899999996436,
+          0.22562500000003638, 0.23470800000018244, 0.230167000000165, 0.2248340000001008,
+          0.2258750000000873, 0.22929199999998673, 0.22391700000002857, 0.22854099999995015,
+          0.22958300000004783, 0.22662500000001273, 0.22516700000005585, 1.4435419999999795
+        ],
+        "queryMessage": [
+          0.012083999999958905, 0.015374999999949068, 0.012750000000096406, 0.03220899999996618,
+          0.011209000000008018, 0.012249999999994543, 0.015458999999964362, 0.011625000000094587,
+          0.010667000000012195, 0.011124999999992724, 0.010875000000169166, 0.010584000000108063,
+          0.010499999999865395, 0.010500000000092768, 0.010167000000137705, 0.010332999999945969,
+          0.010249999999814463, 0.010416000000077474, 0.010249999999814463, 0.010625000000118234
+        ],
+        "commandReadModel": [
+          0.20887500000003456, 0.17279199999984485, 0.19775000000004184, 0.17391700000007404,
+          0.15545799999995324, 0.15895900000009533, 0.2044580000001588, 0.1618750000000091,
+          0.15791699999999764, 0.15137499999991633, 0.14995799999996962, 0.15262500000017099,
+          0.173041000000012, 0.16354200000000674, 0.15483400000016445, 0.1507080000001224,
+          0.1609169999999267, 0.15958299999988412, 0.18650000000002365, 0.15316699999993943
+        ],
+        "search50": [
+          8.475165999999945, 8.887500000000045, 9.02879199999984, 9.480375000000095,
+          9.529958000000079, 9.283542000000125, 9.14366700000005, 9.163167000000158,
+          9.176749999999856, 9.188499999999976, 8.68708300000003, 8.667416999999887,
+          8.2990420000001, 9.366500000000087, 9.74920800000018, 9.539874999999938,
+          11.20358299999998, 10.433374999999842, 8.964917000000014, 8.967374999999947
+        ],
+        "priority": [
+          0.18100000000004002, 0.17816599999991922, 0.18049999999993815, 0.17774999999983265,
+          0.18375000000014552, 0.18941700000004857, 0.18779200000017227, 0.18058300000029703,
+          0.17862500000001091, 0.1793340000003809, 0.1818329999996422, 0.18066599999974642,
+          0.1772080000000642, 0.17733300000008967, 0.17804200000000492, 0.18262499999991633,
+          0.17904200000020865, 0.21733399999993708, 0.1770000000001346, 0.18283400000018446
+        ],
+        "sideContext201": [
+          0.5108749999999418, 0.5091660000002776, 0.5128749999998945, 0.5184999999996762,
+          0.5269580000003771, 0.5508749999999054, 0.5469170000001213, 0.5639169999999467,
+          0.5172090000000935, 0.48549999999977445, 0.5192500000002838, 0.5229159999998956,
+          0.5634170000002996, 0.5519579999995585, 0.5626250000000255, 0.49912499999982174,
+          2.4187919999999394, 0.5855830000000424, 0.5419170000000122, 0.5482920000004015
+        ],
+        "revertIncludingSummary": [
+          11.628500000000258, 11.223916999999801, 12.088582999999744, 11.601000000000113,
+          14.216707999999926, 13.972333000000162, 13.775458000000071, 14.184041999999863,
+          13.795959000000039, 14.328457999999955, 13.417875000000095, 14.219833000000108,
+          15.066417000000001, 14.115707999999813, 14.423541999999998, 14.063125000000127,
+          13.009042000000136, 14.219458999999915, 14.93899999999985, 13.011207999999897
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    },
+    {
+      "version": "reviewed",
+      "sample": 2,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          24.040707999999995, 20.37083400000006, 23.488583999999946, 22.279749999999922,
+          20.27774999999997, 20.82725000000005, 20.283792000000176, 20.542459000000008,
+          21.70404099999996, 21.52404200000001, 21.268458999999893, 20.78150000000005,
+          20.583583999999973, 20.80104099999994, 21.336458999999877, 21.43816599999991,
+          20.955417000000125, 26.051291999999876, 19.20812500000011, 22.940041000000065
+        ],
+        "repositoryGet": [
+          0.022416000000021086, 0.0232499999999618, 0.023084000000153537, 0.02175000000011096,
+          0.023083000000042375, 0.0206670000000031, 0.023584000000028027, 0.0204590000000735,
+          0.0442920000000413, 0.019917000000077678, 0.019708000000036918, 0.019665999999915584,
+          0.01912499999980355, 0.019249999999829015, 0.01908299999990959, 0.01904200000012679,
+          0.018958000000111497, 0.01950000000010732, 0.019833000000062384, 0.019167000000152257
+        ],
+        "snapshot": [
+          24.19066600000042, 23.60525000000007, 24.084957999999915, 23.51745800000026,
+          23.679541999999856, 23.474459000000024, 27.990792000000056, 22.43216700000039,
+          23.302291000000423, 23.10158300000012, 23.344959000000017, 23.265707999999904,
+          23.26616699999977, 23.91991700000017, 23.818249999999807, 23.999708000000282,
+          24.154374999999618, 23.80058400000007, 23.748333999999886, 28.089332999999897
+        ],
+        "detail": [
+          22.38320799999974, 22.739708000000064, 22.98129199999994, 23.19316600000002,
+          23.982332999999926, 28.667291999999634, 25.680583999999726, 22.518208999999842,
+          27.75583400000005, 23.476458000000093, 24.26895800000011, 37.34574999999995,
+          23.524374999999964, 22.670708999999988, 22.809792000000016, 22.56945799999994,
+          22.78262500000028, 22.854957999999897, 22.392624999999953, 27.15391600000021
+        ],
+        "window100": [
+          1.365624999999909, 1.4118329999996604, 1.3290830000000824, 1.1746250000001055,
+          1.1302910000003976, 1.1227499999999964, 1.1519160000002557, 1.135124999999789,
+          1.2400000000002365, 1.172874999999749, 1.1074589999998352, 1.271291999999903,
+          1.1948750000001382, 1.4195420000000922, 1.2921249999999418, 1.1931249999997817,
+          1.140374999999949, 1.0761670000001686, 1.1161660000002485, 2.938915999999608
+        ],
+        "history100": [
+          1.0082499999998618, 0.9905829999997877, 1.0005839999998898, 1.0386669999998048,
+          1.0124160000000302, 0.9918339999999262, 0.983208999999988, 1.0802499999999782,
+          1.0273749999996653, 3.259958000000097, 1.1317910000002485, 1.021792000000005,
+          1.012333000000126, 1.190042000000176, 1.4972499999998945, 1.1008339999998498,
+          1.1190409999999247, 1.0760000000000218, 1.0262909999996737, 0.9748750000003383
+        ],
+        "turn100": [
+          0.940375000000131, 0.9821670000001177, 0.9073749999997744, 0.9050409999999829,
+          0.903458999999657, 2.613082999999733, 1.0207080000000133, 0.9164580000001479,
+          0.881333999999697, 0.9092909999999392, 0.9560419999997976, 0.9540419999998448,
+          0.9006669999998849, 0.9525830000002316, 0.939542000000074, 0.8919999999998254,
+          0.8936670000002778, 0.9035839999996824, 0.9070420000002741, 0.8832919999999831
+        ],
+        "queryMessage": [
+          0.022167000000081316, 0.020333999999820662, 0.020292000000154076, 0.020665999999891937,
+          0.01929100000006656, 0.021124999999756255, 0.024540999999771884, 0.01999999999998181,
+          0.020042000000103144, 0.023541000000022905, 0.01974999999993088, 0.019249999999829015,
+          0.01904100000001563, 0.019249999999829015, 0.01920799999970768, 0.019166000000041095,
+          0.018958999999995285, 0.02312500000016371, 0.019499999999879947, 0.019708999999693333
+        ],
+        "commandReadModel": [
+          0.17554100000006656, 0.18062499999996362, 0.1921660000002703, 0.1732080000001588,
+          0.18325000000004366, 0.16766599999982645, 0.1738340000001699, 0.16804099999990285,
+          0.16820800000004965, 0.2440839999999298, 0.23999999999978172, 0.19695799999999508,
+          0.19437500000003638, 0.18020800000022064, 0.17712500000016007, 2.621291999999812,
+          0.2274170000000595, 0.18320799999992232, 0.1831250000000182, 0.1637919999998303
+        ],
+        "search50": [
+          13.304541999999856, 14.170166000000336, 13.491500000000087, 13.250540999999885,
+          13.522541000000274, 13.944625000000087, 13.513750000000073, 13.251042000000325,
+          13.116708000000017, 13.45450000000028, 14.39587500000016, 14.249416999999994,
+          13.712333999999828, 14.837667000000238, 15.064125000000331, 13.905874999999924,
+          14.730916999999863, 14.814666000000216, 15.029125000000022, 18.315999999999804
+        ],
+        "priority": [
+          0.3621250000001055, 0.4483749999999418, 0.4967079999996713, 0.4486669999996593,
+          0.26529100000016115, 0.24358299999994415, 0.28745800000024246, 0.6319160000002739,
+          0.26241699999991397, 0.3302920000000995, 0.36924999999973807, 0.4427499999997053,
+          0.5100840000000062, 0.2861250000000837, 0.3815829999998641, 0.4635840000000826,
+          0.38499999999976353, 0.36999999999989086, 0.36241599999993923, 0.3552500000000691
+        ],
+        "sideContext201": [
+          2.8060419999997066, 3.351333000000068, 4.817708000000039, 2.8738750000002256,
+          2.8624159999999392, 3.3058750000000146, 2.4969999999998436, 2.6418330000001333,
+          2.751875000000382, 3.086917000000085, 2.733708000000206, 2.5349169999999503,
+          2.3465839999998934, 2.396875000000364, 2.3932920000002014, 2.6980419999999867,
+          2.7767499999999927, 2.5180420000001504, 4.122875000000022, 3.1402079999998023
+        ],
+        "revertIncludingSummary": [
+          54.22745900000018, 49.883208000000195, 47.11054100000001, 43.47804200000019,
+          46.49308299999984, 48.34695899999997, 49.918125000000146, 44.73833399999967,
+          43.82049999999981, 45.81462499999998, 45.98991599999954, 45.36579100000017,
+          52.809416000000056, 48.14308299999993, 46.71941700000025, 45.0912500000004,
+          45.25495800000044, 44.62583300000006, 47.16741700000057, 43.55241699999988
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    },
+    {
+      "version": "fixed",
+      "sample": 2,
+      "profile": "reads",
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "runtime": "v24.21.0",
+      "rows": 2000,
+      "charsPerRow": 4200,
+      "warmup": 3,
+      "samples": 20,
+      "results": {
+        "repositoryList": [
+          8.906334000000015, 8.293542000000002, 8.48554200000001, 8.003791999999976,
+          7.4874999999999545, 7.561624999999935, 7.5125000000000455, 7.973792000000003,
+          8.834959000000026, 8.650125000000003, 8.889374999999973, 8.941834000000085,
+          8.392624999999953, 7.758041999999932, 7.0150409999999965, 7.445875000000001,
+          6.8735000000000355, 7.20454200000006, 7.742624999999975, 7.006708000000003
+        ],
+        "repositoryGet": [
+          0.016792000000009466, 0.016708999999991647, 0.016875000000027285, 0.015333000000055108,
+          0.015375000000062755, 0.014916999999968539, 0.018082999999933236, 0.014916999999968539,
+          0.01416699999992943, 0.013958000000002357, 0.013542000000029475, 0.013499999999908141,
+          0.013459000000011656, 0.01391599999999471, 0.020041999999989457, 0.013749999999959073,
+          0.01329200000009223, 0.01345800000001418, 0.013625000000047294, 0.013958000000002357
+        ],
+        "snapshot": [
+          10.299084000000107, 11.300417000000039, 10.243041999999946, 12.513916999999992,
+          12.577209000000039, 13.43662500000005, 12.343541999999957, 9.771541999999954,
+          11.694666999999981, 11.926958000000013, 10.037417000000005, 11.973499999999945,
+          9.672416999999996, 11.869416999999999, 21.204541999999947, 21.847374999999943,
+          30.199542000000065, 14.004832999999962, 14.898041999999919, 10.052584000000024
+        ],
+        "detail": [
+          9.492375000000038, 10.895667000000003, 9.80841600000008, 9.976417000000083,
+          12.529667000000018, 12.809249999999793, 11.966167000000041, 14.308999999999969,
+          12.255499999999984, 10.302708999999822, 9.571166999999832, 10.214292000000114,
+          9.913250000000062, 10.853000000000065, 10.243667000000187, 11.129083000000037,
+          10.593165999999883, 9.448458999999957, 9.917457999999897, 9.907916000000114
+        ],
+        "window100": [
+          0.8368749999999636, 0.5851670000001832, 1.22199999999998, 1.899541999999883,
+          0.8452079999999569, 0.6971669999998085, 2.220166000000063, 0.7373330000000351,
+          1.2619999999999436, 0.7174589999999625, 0.5502919999998994, 0.5882500000000164,
+          0.6108749999998508, 0.8775000000000546, 1.1039160000000265, 0.6234580000000278,
+          0.5391669999999067, 0.5558340000000044, 0.5152910000001611, 0.505666999999903
+        ],
+        "history100": [
+          0.6000420000000304, 0.44829200000003766, 0.47145799999998417, 0.3960420000000795,
+          0.3710839999998825, 0.36887499999988904, 0.40012499999988904, 0.3624170000000504,
+          0.4155000000000655, 0.5934589999999389, 0.4626659999998992, 0.3528329999999187,
+          1.2420419999998558, 0.5220840000001772, 0.3924170000000231, 0.3910000000000764,
+          0.39983399999982794, 0.502042000000074, 0.4562499999999545, 0.3762909999998101
+        ],
+        "turn100": [
+          0.2782919999999649, 0.2894579999999678, 0.3048750000000382, 0.29645800000002964,
+          0.28933299999994233, 0.2906669999999849, 0.28445800000008603, 0.28300000000012915,
+          0.26804199999992306, 0.27791599999977734, 0.2794579999999769, 0.7550000000001091,
+          0.7440000000001419, 0.334041999999954, 0.29445799999984956, 0.39837499999998727,
+          0.33170800000016243, 0.7297920000000886, 0.3692080000000715, 0.287166999999954
+        ],
+        "queryMessage": [
+          0.014791000000059285, 0.014707999999927779, 0.1946250000000873, 0.09620800000016061,
+          0.031207999999878666, 0.021958000000040556, 0.024208000000044194, 0.017082999999956883,
+          0.014832999999953245, 0.01445899999998801, 0.014541999999892141, 0.014374999999972715,
+          0.014209000000164451, 0.014000000000123691, 0.014582999999902313, 0.013542000000143162,
+          0.013999999999896318, 0.01333399999998619, 0.013374999999996362, 0.013583999999809748
+        ],
+        "commandReadModel": [
+          0.22079199999984667, 0.18624999999997272, 0.20462500000007822, 0.18174999999996544,
+          0.16645900000003166, 0.16687499999989086, 0.19733399999995527, 0.162166999999954,
+          0.15966699999989942, 0.16174999999998363, 0.16804099999990285, 0.1800829999999678,
+          0.19525000000021464, 0.16095900000004804, 0.1639580000000933, 0.17979200000013407,
+          0.2342909999999847, 0.24479100000007747, 0.1899999999998272, 0.17183300000010604
+        ],
+        "search50": [
+          12.247041000000081, 10.22787500000004, 9.918875000000071, 10.728916000000027,
+          10.968209000000115, 12.080582999999933, 10.806041999999934, 13.960583999999926,
+          10.097916999999825, 10.262917000000016, 11.795665999999983, 10.284374999999955,
+          9.463541999999961, 9.803792000000158, 9.588334000000032, 9.342916999999943,
+          10.28816599999982, 9.705832999999984, 9.668666999999914, 9.486291000000165
+        ],
+        "priority": [
+          0.18325000000004366, 0.18358299999999872, 0.18712500000015098, 0.1824579999999969,
+          0.18066700000008495, 0.1871249999999236, 0.18574999999987085, 0.17962499999998727,
+          0.1823749999998654, 0.17995799999994233, 0.18770900000004076, 0.18191600000000108,
+          0.18316700000013952, 0.18437500000004547, 0.1749579999998332, 0.5818329999999605,
+          0.18995799999993324, 0.1818749999999909, 0.1812919999999849, 0.17812499999990905
+        ],
+        "sideContext201": [
+          0.5524579999998878, 0.9284999999999854, 0.7782090000000608, 0.6101670000000468,
+          0.5739160000000538, 0.5527079999999387, 0.550333000000137, 0.5322920000000977,
+          0.5224590000000262, 0.5227919999999813, 0.6129170000001523, 0.723540999999841,
+          0.7001669999999649, 0.6860830000000533, 0.6957499999998618, 0.7393750000001091,
+          0.6997920000001159, 0.687458000000106, 0.686916999999994, 0.6933330000001661
+        ],
+        "revertIncludingSummary": [
+          15.10850000000005, 13.631750000000011, 13.90929200000005, 14.317207999999937,
+          13.563625000000002, 13.60608400000001, 13.379040999999916, 13.436916999999994,
+          15.986333999999943, 16.998916999999892, 13.207125000000133, 13.420166000000108,
+          13.584958000000142, 13.491125000000011, 14.084959000000026, 13.902958000000126,
+          13.017042000000174, 13.59229100000016, 13.340875000000096, 13.135458999999855
+        ]
+      },
+      "finalContentMatches": true,
+      "sha256": "e1cde44781efd79275dc435d66838276f5a2f06ee1a2bd16f7dd6ccac9f7cd4c"
+    }
+  ]
+}

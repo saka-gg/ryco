@@ -1327,44 +1327,29 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
 
         case "thread.message-sent": {
-          const existingMessage = yield* projectionThreadMessageRepository.getByMessageId({
-            messageId: event.payload.messageId,
-          });
-          const previousMessage = Option.getOrUndefined(existingMessage);
-          const nextText = Option.match(existingMessage, {
-            onNone: () => event.payload.text,
-            onSome: (message) => {
-              if (event.payload.streaming) {
-                return `${message.text}${event.payload.text}`;
-              }
-              if (event.payload.text.length === 0) {
-                return message.text;
-              }
-              return event.payload.text;
-            },
-          });
-          const nextAttachments =
+          const attachments =
             event.payload.attachments !== undefined
               ? yield* materializeAttachmentsForProjection({
                   attachments: event.payload.attachments,
                 })
-              : previousMessage?.attachments;
-          yield* projectionThreadMessageRepository.upsert({
-            messageId: event.payload.messageId,
-            threadId: event.payload.threadId,
-            turnId: event.payload.turnId,
-            role: event.payload.role,
-            text: nextText,
-            ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),
-            ...(event.payload.dispatchMode !== undefined
-              ? { dispatchMode: event.payload.dispatchMode }
-              : previousMessage?.dispatchMode !== undefined
-                ? { dispatchMode: previousMessage.dispatchMode }
+              : undefined;
+          yield* projectionThreadMessageRepository.applyEvent(
+            {
+              messageId: event.payload.messageId,
+              threadId: event.payload.threadId,
+              turnId: event.payload.turnId,
+              role: event.payload.role,
+              text: event.payload.text,
+              ...(attachments !== undefined ? { attachments: [...attachments] } : {}),
+              ...(event.payload.dispatchMode !== undefined
+                ? { dispatchMode: event.payload.dispatchMode }
                 : {}),
-            isStreaming: event.payload.streaming,
-            createdAt: previousMessage?.createdAt ?? event.payload.createdAt,
-            updatedAt: event.payload.updatedAt,
-          });
+              isStreaming: event.payload.streaming,
+              createdAt: event.payload.createdAt,
+              updatedAt: event.payload.updatedAt,
+            },
+            event.sequence,
+          );
           return;
         }
 
@@ -1391,9 +1376,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* projectionThreadMessageRepository.deleteByThreadId({
             threadId: event.payload.threadId,
           });
-          yield* Effect.forEach(keptRows, projectionThreadMessageRepository.upsert, {
-            concurrency: 1,
-          }).pipe(Effect.asVoid);
+          // Retained bodies are compacted with a fence against pre-revert deltas.
+          yield* Effect.forEach(
+            keptRows,
+            (row) =>
+              projectionThreadMessageRepository.upsert(row, { eventSequence: event.sequence }),
+            {
+              concurrency: 1,
+            },
+          ).pipe(Effect.asVoid);
           attachmentSideEffects.prunedThreadRelativePaths.set(
             event.payload.threadId,
             collectThreadAttachmentRelativePaths(event.payload.threadId, keptRows),

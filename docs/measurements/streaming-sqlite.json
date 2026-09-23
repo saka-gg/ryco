@@ -1,0 +1,367 @@
+{
+  "baselineRef": "1b53113f4a91f8aefc0d42db6791940fad3b4418",
+  "platform": "macOS arm64",
+  "fixture": "apps/server/scripts/measure-streaming-sqlite.ts",
+  "baseline": [
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 8000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 192.96583299999998,
+      "completionMs": 0.978458000000046,
+      "walBytes": 15462392,
+      "finalContentMatches": true,
+      "sha256": ["be365c6bfd50849bca8b2a5c6a61a1bf8766fff6caacb6bc796665ee87466a9e"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 766.0569170000001,
+      "completionMs": 0.39325000000008004,
+      "walBytes": 129083752,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 3974.3793749999995,
+      "completionMs": 0.38791700000001583,
+      "walBytes": 901641432,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 3612.107292,
+      "completionMs": 0.3834999999999127,
+      "walBytes": 901641432,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 2797.30625,
+      "completionMs": 0.39487499999995634,
+      "walBytes": 901641432,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 4,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1987.6741670000001,
+      "completionMs": 1.5794999999998254,
+      "walBytes": 522144112,
+      "finalContentMatches": true,
+      "sha256": [
+        "f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9",
+        "f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9",
+        "f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9",
+        "f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"
+      ]
+    }
+  ],
+  "after": [
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 8000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 84.64270799999997,
+      "completionMs": 0.8091249999999945,
+      "walBytes": 15190472,
+      "finalContentMatches": true,
+      "sha256": ["be365c6bfd50849bca8b2a5c6a61a1bf8766fff6caacb6bc796665ee87466a9e"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 447.752625,
+      "completionMs": 1.8959999999999582,
+      "walBytes": 97557512,
+      "finalContentMatches": true,
+      "sha256": ["f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1714.211209,
+      "completionMs": 5.107625000000098,
+      "walBytes": 396043272,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1646.531792,
+      "completionMs": 5.080416000000014,
+      "walBytes": 396043272,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 200000,
+      "messages": 1,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1600.1700420000002,
+      "completionMs": 5.1033330000000205,
+      "walBytes": 396043272,
+      "finalContentMatches": true,
+      "sha256": ["aaaf61c0c2b493188249ab288bd92fbfb101d037dda0e47b2fc5a2929cb8305d"]
+    },
+    {
+      "runtime": "v24.21.0",
+      "bun": null,
+      "bytesPerMessage": 50000,
+      "messages": 4,
+      "deltaBytes": 40,
+      "settings": {
+        "sqlite": [
+          {
+            "version": "3.53.4"
+          }
+        ],
+        "synchronous": [
+          {
+            "synchronous": 2
+          }
+        ],
+        "pageSize": [
+          {
+            "page_size": 4096
+          }
+        ]
+      },
+      "streamingMs": 1700.5307500000001,
+      "completionMs": 6.227292000000034,
+      "walBytes": 400225072,
+      "finalContentMatches": true,
+      "sha256": [
+        "f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9",
+        "f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9",
+        "f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9",
+        "f7eeeffff131cca3b34078f0d43f1c133abb0882bda368560dc9b0f1157dc0e9"
+      ]
+    }
+  ]
+}

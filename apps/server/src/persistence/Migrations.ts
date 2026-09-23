@@ -1,3 +1,5 @@
+import Migration0061 from "./Migrations/061_ProjectionMessageTextFallback.ts";
+import Migration0060 from "./Migrations/060_ProjectionMessageChunks.ts";
 import Migration0059 from "./Migrations/059_RetireProjectMemory.ts";
 import Migration0058 from "./Migrations/058_ProjectMemory.ts";
 import Migration0055 from "./Migrations/055_ApprovalResponseClaims.ts";
@@ -145,6 +147,8 @@ export const migrationEntries = [
   [57, "AutomationCentre", Migration0057],
   [58, "ProjectMemory", Migration0058],
   [59, "RetireProjectMemory", Migration0059],
+  [60, "ProjectionMessageChunks", Migration0060],
+  [61, "ProjectionMessageTextFallback", Migration0061],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -401,6 +405,25 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       ? "Running all migrations..."
       : `Running migrations 1 through ${toMigrationInclusive}...`,
   );
+  // Future binaries can fail closed on downgrade. This cannot retrofit a check
+  // into already shipped binaries that ignore newer migration records.
+  const sql = yield* SqlClient.SqlClient;
+  const tracking =
+    yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
+  if (tracking.length > 0) {
+    const latest = yield* sql<{
+      id: number | null;
+    }>`SELECT max(migration_id) AS id FROM effect_sql_migrations`;
+    const supported = Math.max(...migrationEntries.map(([id]) => id));
+    if (latest[0]?.id !== null && latest[0]?.id !== undefined && latest[0].id > supported) {
+      return yield* Effect.fail(
+        new Migrator.MigrationError({
+          kind: "BadState",
+          message: `Database schema ${latest[0].id} is newer than this binary supports (${supported}). Use the newer binary or restore a pre-upgrade backup into a separate data directory.`,
+        }),
+      );
+    }
+  }
   const executedMigrations = yield* run({
     loader: makeMigrationLoader(toMigrationInclusive),
   });

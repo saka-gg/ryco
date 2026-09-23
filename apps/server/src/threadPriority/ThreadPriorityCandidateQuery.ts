@@ -1,3 +1,4 @@
+import { assembledMessageText, decodeMessageText } from "../persistence/messageText.ts";
 import { ThreadId } from "@ryco/contracts";
 import { Context, Effect, Layer } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -34,6 +35,7 @@ interface CandidateRow {
   readonly issueTitle: string | null;
   readonly issueState: string | null;
   readonly latestUserRequest: string | null;
+  readonly latestUserRequestParts: string | null;
 }
 
 const makeThreadPriorityCandidateQuery = Effect.gen(function* () {
@@ -58,19 +60,19 @@ const makeThreadPriorityCandidateQuery = Effect.gen(function* () {
       worktree.pr_state AS "prState",
       COALESCE(worktree.issue_title, worktree.work_item_title) AS "issueTitle",
       COALESCE(worktree.issue_state, worktree.work_item_state) AS "issueState",
-      (
-        SELECT message.text
-        FROM projection_thread_messages AS message
-        WHERE message.thread_id = thread.thread_id AND message.role = 'user'
-        ORDER BY message.created_at DESC, message.message_id DESC
-        LIMIT 1
-      ) AS "latestUserRequest"
+      message.text AS "latestUserRequest",
+      ${assembledMessageText(sql, "message")} AS "latestUserRequestParts"
     FROM projection_threads AS thread
     INNER JOIN projection_projects AS project ON project.project_id = thread.project_id
     LEFT JOIN projection_thread_sessions AS session ON session.thread_id = thread.thread_id
     LEFT JOIN projection_turns AS latest_turn
       ON latest_turn.thread_id = thread.thread_id AND latest_turn.turn_id = thread.latest_turn_id
     LEFT JOIN projection_worktrees AS worktree ON worktree.worktree_id = thread.worktree_id
+    LEFT JOIN projection_thread_messages AS message ON message.message_id = (
+      SELECT candidate.message_id FROM projection_thread_messages AS candidate
+      WHERE candidate.thread_id = thread.thread_id AND candidate.role = 'user'
+      ORDER BY candidate.created_at DESC, candidate.message_id DESC LIMIT 1
+    )
     WHERE thread.deleted_at IS NULL
       AND thread.archived_at IS NULL
       AND project.deleted_at IS NULL
@@ -103,7 +105,10 @@ const makeThreadPriorityCandidateQuery = Effect.gen(function* () {
           row.issueTitle === null
             ? null
             : { title: row.issueTitle, state: row.issueState ?? "unknown" },
-        latestUserRequest: row.latestUserRequest,
+        latestUserRequest:
+          row.latestUserRequestParts === null
+            ? row.latestUserRequest
+            : decodeMessageText(row.latestUserRequestParts),
       })),
     ),
     Effect.mapError(toPersistenceSqlError("ThreadPriorityCandidateQuery.listActive")),
