@@ -1,4 +1,9 @@
-import { encodeMessageTextFallback, messageTextJson, MessageTextFromSql } from "../messageText.ts";
+import {
+  encodeMessageTextFallback,
+  messageTextColumns,
+  resolveMessageText,
+  MessageTextFromSql,
+} from "../messageText.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import { Effect, Layer, Option, Schema, Struct } from "effect";
@@ -16,7 +21,7 @@ import {
 
 const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   Struct.assign({
-    text: MessageTextFromSql,
+    assembledText: Schema.NullOr(MessageTextFromSql),
     isStreaming: Schema.Number,
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
     dispatchMode: Schema.NullOr(TurnDispatchMode),
@@ -31,7 +36,7 @@ function toProjectionThreadMessage(
     threadId: row.threadId,
     turnId: row.turnId,
     role: row.role,
-    text: row.text,
+    text: resolveMessageText(row),
     isStreaming: row.isStreaming === 1,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -114,7 +119,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           thread_id AS "threadId",
           turn_id AS "turnId",
           role,
-          ${messageTextJson(sql)} AS text,
+          ${messageTextColumns(sql)},
           attachments_json AS "attachments",
           dispatch_mode AS "dispatchMode",
           is_streaming AS "isStreaming",
@@ -136,7 +141,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           thread_id AS "threadId",
           turn_id AS "turnId",
           role,
-          ${messageTextJson(sql)} AS text,
+          ${messageTextColumns(sql)},
           attachments_json AS "attachments",
           dispatch_mode AS "dispatchMode",
           is_streaming AS "isStreaming",
@@ -196,7 +201,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
                 : Option.none();
             yield* upsertProjectionThreadMessageRow({
               ...row,
-              text: Option.isSome(existing) ? existing.value.text : row.text,
+              text: Option.isSome(existing) ? resolveMessageText(existing.value) : row.text,
               createdAt: state?.createdAt ?? row.createdAt,
             });
             yield* sql`DELETE FROM projection_message_chunks WHERE message_id = ${row.messageId}`;

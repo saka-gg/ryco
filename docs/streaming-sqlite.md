@@ -16,7 +16,8 @@ event sequence, plus a per-message sequence fence and optional JSON text fallbac
   buffer to lose on restart.
 - Reads assemble ordered chunks through `persistence/messageText.ts`. Snapshot,
   detail, turn, paginated history, search, and priority readers share this logic.
-  Completed ordinary messages take a direct JSON-escaped base-text path.
+  Completed ordinary messages return raw TEXT without JSON encoding or decoding.
+  Only streaming rows and explicit fallback rows assemble/decode JSON.
 - Empty completion preserves assembled text; nonempty completion replaces it.
   Completion removes chunks atomically. Repeated/stale message events are fenced
   by sequence even after compaction. Event-store duplicate identity rejection and
@@ -30,7 +31,10 @@ event sequence, plus a per-message sequence fence and optional JSON text fallbac
   SQLite TEXT truncation/replacement. SQL search keeps SQLite's existing LIKE
   case/NUL semantics; returned message content is decoded in JavaScript.
 
-The additive migration leaves saved bodies and projector cursors intact. Existing
+The additive migrations leave saved bodies and projector cursors intact. Migration
+61 scans saved text once to populate the fallback for legacy NUL bodies, including
+databases already at migration 60; existing surrogate fallbacks are retained. This
+adds upgrade work proportional to saved body size, outside the measurements below. Existing
 streaming rows convert lazily on the next delta. This supports upgrading saved
 databases, not running an older binary against the new in-flight chunk layout.
 Previously lost/corrupted legacy code units cannot be reconstructed from a body
@@ -38,54 +42,137 @@ that no longer contains them; rebuilding uses the retained event log.
 
 ## Reproducible measurement
 
-Run from the repository root after installing with the pinned Bun and frozen
-lockfile:
-
 ```sh
-node apps/server/scripts/measure-streaming-sqlite.ts 8000 1
-node apps/server/scripts/measure-streaming-sqlite.ts 50000 1
-node apps/server/scripts/measure-streaming-sqlite.ts 200000 1
-node apps/server/scripts/measure-streaming-sqlite.ts 50000 4
+bun install --frozen-lockfile # Bun 1.4.0
+node apps/server/scripts/compare-streaming-sqlite.ts
+# Individual run; profiles: buffered, streaming, timer, stress, reads
+node apps/server/scripts/measure-streaming-sqlite.ts 200000 1 buffered
+# Exact base server sources, same fixture/runtime/dependencies, no checkout needed
+RYCO_SQLITE_FIXTURE_REF=1b53113f4a91f8aefc0d42db6791940fad3b4418 node --import ./apps/server/scripts/streaming-sqlite-revision.ts apps/server/scripts/measure-streaming-sqlite.ts 200000 1 buffered
+node apps/server/scripts/reproduce-streaming-downgrade.ts
 ```
 
-Each invocation creates and removes its own synthetic file database, uses real
-migrations, the production Effect SQL client, event store and projection pipeline,
-and commits each event with its projections. It does not invoke the engine command
-queue, command receipts, provider journal, providers, Electron, or UI. Therefore
-these are **event-store/projection fixture measurements**, not whole-app results.
-An empty completion exercises durable assembly; every result checks exact text,
-streaming status, and reports a SHA-256 digest. Four messages are interleaved in one
-thread. No timing assertion is used as a correctness test.
+The comparison runs sequential fresh processes, alternating base and fixed order.
+It loads committed server source via a read-only Node module hook: base
+`1b53113f4a91f8aefc0d42db6791940fad3b4418`, reviewed PR
+`da8127a58b9a2688b0abdf7e846367bda37d5489`, and the fixed working tree. The
+fixture and installed dependencies stay identical. Node 24.21.0, SQLite 3.53.4,
+macOS arm64, 4096-byte pages, synchronous FULL (2). No other verification suite
+was launched by this task during measurement; shared-host activity is uncontrolled.
+[Raw samples](measurements/streaming-sqlite-review.json) include every timing,
+WAL byte count, settings, and final-content hash.
 
-The baseline used the unchanged implementation before this patch, with the same
-fixture script copied into that checkout. WAL was truncated after setup and
-`wal_autocheckpoint` disabled solely in the fixture so file size measures WAL
-volume. Production checkpoint configuration is unchanged. Measurements use
-Node 24.21.0, SQLite 3.53.4, macOS arm64, 4096-byte pages, synchronous FULL (2),
-and 40-byte ASCII deltas. Byte counts below are decimal input bytes; WAL uses MiB.
+Each write invocation creates a synthetic file database, runs real migrations,
+and commits each event through the production Effect SQL client, event store and
+projection pipeline. WAL is truncated after setup and automatic checkpoints are
+disabled only in the fixture. Every final body is checked exactly and SHA-256
+hashes match across versions. This measures **event-store/projection work**, not
+provider throughput or whole-app performance. It excludes the engine command queue,
+command receipts, provider journal, provider/network waiting, Electron and UI.
 
-| Input             | Samples per version | WAL before → after (MiB) | WAL reduction | Stream before → after (ms) | Completion before → after (ms) |
-| ----------------- | ------------------: | -----------------------: | ------------: | -------------------------: | -----------------------------: |
-| 1 × 8,000 bytes   |                   1 |            14.75 → 14.49 |         1.76% |             192.97 → 84.64 |                    0.98 → 0.81 |
-| 1 × 50,000 bytes  |                   1 |           123.10 → 93.04 |        24.42% |            766.06 → 447.75 |                    0.39 → 1.90 |
-| 1 × 200,000 bytes |                   3 |          859.87 → 377.70 |        56.08% |          3612.11 → 1646.53 |                    0.39 → 5.10 |
-| 4 × 50,000 bytes  |                   1 |          497.96 → 381.68 |        23.35% |          1987.67 → 1700.53 |                    1.58 → 6.23 |
+Batch profiles follow `ProviderRuntimeIngestion`'s existing policy:
 
-The 200,000-byte row reports medians of three fresh-process samples; WAL byte
-counts were identical across those samples. Every before/after final-content hash
-matched. [Raw results](measurements/streaming-sqlite.json) retain individual times,
-exact WAL byte counts, settings, and final hashes. Baseline source was
-`1b53113f4a91f8aefc0d42db6791940fad3b4418`; copy the fixture script into that revision
-to repeat the baseline. Final measurements ran after tests finished, with no
-other verification suite launched by this task running simultaneously.
+- **Buffered (default token streaming off):** 40-character source fragments spill
+  after exceeding 24,000 characters, hence 24,040-character persisted batches;
+  flush the remainder before an empty final.
+- **Streaming threshold:** 4,096-character persisted batches, representing the
+  size-triggered flush. The production timer also flushes after 32 ms.
+- **Streaming timer:** 320-character batches model 40 characters arriving every
+  4 ms for 32 ms. Slower arrivals can produce still smaller batches; 4 KB is not
+  a minimum. These are synthetic post-coalescing profiles, not recordings of
+  provider traffic, and the fixture does not sleep between commits.
+- **Stress:** the original unbatched 40-character profile remains available.
+  Its historical [raw results](measurements/streaming-sqlite.json) are retained
+  only as stress evidence. The original single-sample speedup claims are withdrawn.
 
-WAL volume is not physical SSD writes. No claim is made about whole-app disk,
-RAM, battery, or provider throughput. Timing on this shared host is noisy; the
-8 KB, 50 KB and interleaved cases are single samples. Large-answer completion
-cost increases because assembly now happens once at completion. Reads of an
-unfinished body still require work proportional to its accumulated content.
-Normal completed side-question reads retain their SQL character bound; unusual
-JSON-fallback bodies are decoded before the existing output bound is applied.
+### Writes
+
+Five samples per version/scenario. Times below are median [minimum–maximum] ms;
+WAL byte counts were identical within every scenario/version. ASCII input sizes
+are decimal bytes. Completion timing is separate from streaming timing.
+
+| Profile / bytes     | WAL base → fixed (bytes) | Change | Streaming base → fixed (ms)               | Completion base → fixed (ms)        |
+| ------------------- | -----------------------: | -----: | ----------------------------------------- | ----------------------------------- |
+| buffered / 4,000    |        156,592 → 177,192 | +13.2% | 1.07 [0.89–5.16] → 1.13 [1.11–1.60]       | 0.60 [0.54–4.13] → 0.94 [0.79–1.41] |
+| buffered / 50,000   |        477,952 → 482,072 |  +0.9% | 2.59 [2.28–12.70] → 2.63 [2.40–3.10]      | 0.57 [0.46–7.84] → 0.99 [0.85–1.26] |
+| buffered / 200,000  |    2,051,792 → 1,421,432 | -30.7% | 8.25 [7.45–14.15] → 9.76 [6.27–13.48]     | 0.65 [0.56–1.10] → 1.44 [1.30–2.54] |
+| streaming / 50,000  |    1,520,312 → 1,289,592 | -15.2% | 9.88 [7.26–10.21] → 10.54 [7.83–11.42]    | 0.49 [0.39–0.76] → 1.19 [0.97–2.13] |
+| streaming / 200,000 |    9,179,392 → 4,746,272 | -48.3% | 33.88 [33.32–57.64] → 27.76 [27.34–33.46] | 0.63 [0.44–0.96] → 3.53 [3.23–7.03] |
+| timer / 50,000      |  16,092,752 → 12,623,712 | -21.6% | 72.94 [67.65–95.49] → 75.50 [67.22–93.35] | 0.33 [0.30–0.64] → 1.53 [1.25–2.02] |
+
+The long-message WAL benefit is real in this fixture, but there is **no established
+general net benefit for default users**: short/default messages write more WAL,
+most timing distributions overlap, and completion is slower. The 200 KB
+size-triggered streaming case shows lower median streaming time, but that does
+not establish an application-wide speedup. WAL bytes are not physical disk writes
+or SSD wear; checkpointing, the event log and other application writes still exist.
+
+### Completed-message reads
+
+Each fresh process seeds 2,000 completed 4,200-character messages (quotes,
+backslashes and newlines included). For each operation, three warmups precede
+20 timed calls with result checks; three processes per version give 60 samples.
+All full bodies and the final retained-history hash match. Repository, query,
+pagination and priority calls include SQL, schema decoding and result mapping.
+The actual `thread.reverted` event transaction retains all messages and recomputes
+the shell summary, including its full message-list read. Setup is outside timing.
+Search checks snippets; command read model returns the first user message.
+
+Median [p10–p90] ms (nearest-rank percentiles); these are warm-operation distributions, not independent host trials.
+
+| Read path              |                   Base |            Reviewed PR |                  Fixed |
+| ---------------------- | ---------------------: | ---------------------: | ---------------------: |
+| repositoryList         |    6.903 [5.552–9.349] | 20.563 [18.885–23.295] |    6.813 [5.745–8.500] |
+| repositoryGet          |    0.011 [0.010–0.014] |    0.020 [0.019–0.024] |    0.014 [0.013–0.018] |
+| snapshot               |   9.792 [7.888–11.846] | 23.580 [21.687–25.910] |  10.069 [8.214–14.005] |
+| detail                 |    8.049 [7.141–8.843] | 22.544 [20.741–25.693] |   8.540 [7.606–10.896] |
+| window100              |    0.480 [0.450–0.523] |    1.124 [1.065–1.366] |    0.540 [0.476–0.845] |
+| history100             |    0.323 [0.304–0.378] |    0.976 [0.931–1.119] |    0.360 [0.328–0.515] |
+| turn100                |    0.230 [0.225–0.239] |    0.877 [0.834–0.956] |    0.257 [0.249–0.332] |
+| queryMessage           |    0.011 [0.010–0.014] |    0.019 [0.019–0.022] |    0.013 [0.012–0.017] |
+| commandReadModel       |    0.160 [0.150–0.197] |    0.175 [0.162–0.197] |    0.165 [0.148–0.197] |
+| search50               |    8.992 [8.357–9.532] | 13.278 [12.081–14.523] |   9.235 [8.420–10.729] |
+| priority               |    0.181 [0.177–0.189] |    0.200 [0.183–0.443] |    0.180 [0.174–0.188] |
+| sideContext201         |    0.526 [0.494–0.706] |    2.463 [2.028–3.306] |    0.576 [0.505–0.696] |
+| revertIncludingSummary | 12.803 [11.224–14.217] | 40.318 [37.668–47.167] | 12.356 [11.013–14.080] |
+
+These results reproduce the reviewed JSON regression (including revert) and show
+its removal. They do **not** prove every path is as fast as base: additional row
+metadata, fallback selection, query shape, allocation and host noise remain.
+Small-page/side-context and revert medians can remain higher. Normal completed
+side-question reads keep their SQL character bound; unusual fallback bodies are
+decoded before the existing output bound. Unfinished reads remain proportional to
+the accumulated body/chunk count.
+
+## Restart and downgrade limits
+
+A file reopen and projector replay do not invent a terminal event. Without provider
+completion evidence, orphaned messages keep their durable chunks indefinitely;
+this is retained message content, not a volatile cache with a timeout. Repeated
+close/reopen tests check exact text and unchanged chunk counts. Existing provider
+history reconciliation completes recovered messages and removes their chunks;
+a regression now asserts both the pending chunks and their cleanup. Completion,
+replacement, hard message deletion and revert remove applicable chunks. Thread
+soft deletion intentionally retains history; no automatic orphan garbage collection
+is added. If a provider never supplies terminal history, retained chunks continue
+to cost storage and assembly work. No process-kill/provider integration was run;
+file-backed connection reopen and ingestion reconciliation are separate tests.
+
+The downgrade counterexample is **reproduced**, not hypothetical. On a synthetic
+schema-61 database with `prefix more` in chunks, the actual base repository and
+migration runner open successfully and read an empty body. Appending ` OLD` with
+that repository and then ` NEW` with the new repository yields
+` OLDprefix more NEW`, demonstrating reordered/corrupted content.
+
+The new migration runner refuses a schema newer than its supported migration
+before migrations/repairs run. A regression checks refusal without schema mutation.
+This protects future downgrades between binaries containing that check; it cannot
+make already-shipped older binaries reject schema 60/61 or prevent their reads.
+Triggers would not prevent old reads and would add another write protocol, so
+none are introduced. Do not open this migrated database with an older binary.
+For rollback, restore a **pre-upgrade backup in a separate data directory**, keeping
+the upgraded database intact; the backup will not include subsequent events.
+There is no supported in-place downgrade or automatic repair of mixed-version writes.
 
 ## Upstream reference
 
@@ -103,7 +190,8 @@ outside this change; its published percentages are not Ryco measurements.
 
 Focused tests cover per-delta reads, duplicate/stale events, rollback and retry,
 empty and replacement finals, resuming completed messages, metadata/attachments,
-NUL/Unicode/split surrogates, upgrade from migration 59, actual file close/reopen
+NUL/Unicode/split surrogates, upgrade from migrations 59 and 60, raw completed read/bounded-text fallback,
+future-schema rejection, actual file close/reopen
 mid-stream, lagging projector replay, message projection rebuild, unchanged event
 identity/order, snapshot/detail/turn/window/history/search, revert with live chunks,
 replacement/fork copying and cascade cleanup. Existing engine/client tests remain

@@ -29,17 +29,41 @@ const messageTextParts = (sql: SqlClient.SqlClient, alias: string) => sql`
   ORDER BY sequence
 `;
 
-/** One lossless assembly expression for every message reader. */
-export const messageTextJson = (
+/** Assemble streaming chunks or lossless fallback text only when needed.
+ * Migration 61 backfills legacy NUL rows once. Ordinary completed
+ * bodies never enter SQLite's JSON encoder or JavaScript's JSON decoder.
+ */
+export const assembledMessageText = (
+  sql: SqlClient.SqlClient,
+  alias = "projection_thread_messages",
+) => sql`
+  CASE WHEN ${sql.literal(alias)}.is_streaming <> 0
+    OR ${sql.literal(alias)}.text_json IS NOT NULL
+    THEN (SELECT json_group_array(json(parts.text_json)) FROM (${messageTextParts(sql, alias)}) AS parts)
+    ELSE NULL
+  END
+`;
+
+export const messageTextColumns = (
   sql: SqlClient.SqlClient,
   alias = "projection_thread_messages",
   completedCharacterLimit?: number,
 ) => sql`
-  CASE WHEN ${sql.literal(alias)}.is_streaming = 0 AND ${sql.literal(alias)}.text_json IS NULL
-    ${completedCharacterLimit === undefined ? sql`` : sql`AND instr(${sql.literal(alias)}.text, char(0)) = 0`}
-    THEN json_array(${completedCharacterLimit === undefined ? sql`${sql.literal(alias)}.text` : sql`substr(${sql.literal(alias)}.text, 1, ${completedCharacterLimit})`})
-    ELSE (SELECT json_group_array(json(parts.text_json)) FROM (${messageTextParts(sql, alias)}) AS parts)
-  END
+  ${completedCharacterLimit === undefined ? sql`${sql.literal(alias)}.text` : sql`substr(${sql.literal(alias)}.text, 1, ${completedCharacterLimit})`} AS text,
+  ${assembledMessageText(sql, alias)} AS "assembledText"
+`;
+
+export const resolveMessageText = (row: {
+  readonly text: string;
+  readonly assembledText: string | null;
+}) => row.assembledText ?? row.text;
+
+// Explicit encoded read for diagnostics/tests, not the ordinary read path.
+export const messageTextJson = (
+  sql: SqlClient.SqlClient,
+  alias = "projection_thread_messages",
+) => sql`
+  (SELECT json_group_array(json(parts.text_json)) FROM (${messageTextParts(sql, alias)}) AS parts)
 `;
 
 /** Join JSON string interiors before decoding, including split surrogate pairs.

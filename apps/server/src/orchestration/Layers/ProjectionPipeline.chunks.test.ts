@@ -161,6 +161,22 @@ it.effect(
         yield* store.append(third);
       }).pipe(Effect.provide(makeLayer()));
 
+      // Reopening without a terminal event must not invent completion or expire
+      // durable chunks. Repeat using independent file connections/scopes.
+      for (let restart = 0; restart < 2; restart++) {
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* (yield* OrchestrationProjectionPipeline).bootstrap;
+          yield* check(expected, true);
+          assert.equal(
+            (yield* sql<{
+              count: number;
+            }>`SELECT count(*) AS count FROM projection_message_chunks`)[0]?.count,
+            3,
+          );
+        }).pipe(Effect.provide(makeLayer()));
+      }
+
       yield* Effect.gen(function* () {
         const store = yield* OrchestrationEventStore;
         const pipeline = yield* OrchestrationProjectionPipeline;

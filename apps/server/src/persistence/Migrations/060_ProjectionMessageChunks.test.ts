@@ -1,4 +1,4 @@
-import { messageTextJson, decodeMessageText } from "../messageText.ts";
+import { messageTextColumns, decodeMessageText } from "../messageText.ts";
 import { assert, it } from "@effect/vitest";
 import { MessageId, ThreadId } from "@ryco/contracts";
 import { Effect, Layer, Option } from "effect";
@@ -37,8 +37,14 @@ it.effect(
         assert.equal(row.text, "legacy\0漢字🚀");
         const bounded = yield* sql<{
           text: string;
-        }>`SELECT ${messageTextJson(sql, "m", 64001)} AS text FROM projection_thread_messages m WHERE message_id = ${id}`;
-        assert.equal(decodeMessageText(bounded[0]!.text), row.text);
+          assembledText: string | null;
+        }>`SELECT ${messageTextColumns(sql, "m", 64001)} FROM projection_thread_messages m WHERE message_id = ${id}`;
+        assert.equal(
+          bounded[0]!.assembledText === null
+            ? bounded[0]!.text
+            : decodeMessageText(bounded[0]!.assembledText),
+          row.text,
+        );
         yield* repo.applyEvent({ ...row, text: "\0 continued", isStreaming: true }, 43);
         assert.equal(
           Option.getOrThrow(yield* repo.getByMessageId(row)).text,
