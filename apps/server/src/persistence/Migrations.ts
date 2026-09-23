@@ -1,3 +1,4 @@
+import Migration0060 from "./Migrations/060_ProjectionMessageChunks.ts";
 import Migration0059 from "./Migrations/059_RetireProjectMemory.ts";
 import Migration0058 from "./Migrations/058_ProjectMemory.ts";
 import Migration0055 from "./Migrations/055_ApprovalResponseClaims.ts";
@@ -145,6 +146,7 @@ export const migrationEntries = [
   [57, "AutomationCentre", Migration0057],
   [58, "ProjectMemory", Migration0058],
   [59, "RetireProjectMemory", Migration0059],
+  [60, "ProjectionMessageChunks", Migration0060],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

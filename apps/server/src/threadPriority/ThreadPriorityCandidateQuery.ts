@@ -1,3 +1,4 @@
+import { messageTextJson, decodeMessageText } from "../persistence/messageText.ts";
 import { ThreadId } from "@ryco/contracts";
 import { Context, Effect, Layer } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -59,7 +60,7 @@ const makeThreadPriorityCandidateQuery = Effect.gen(function* () {
       COALESCE(worktree.issue_title, worktree.work_item_title) AS "issueTitle",
       COALESCE(worktree.issue_state, worktree.work_item_state) AS "issueState",
       (
-        SELECT message.text
+        SELECT ${messageTextJson(sql, "message")}
         FROM projection_thread_messages AS message
         WHERE message.thread_id = thread.thread_id AND message.role = 'user'
         ORDER BY message.created_at DESC, message.message_id DESC
@@ -103,7 +104,8 @@ const makeThreadPriorityCandidateQuery = Effect.gen(function* () {
           row.issueTitle === null
             ? null
             : { title: row.issueTitle, state: row.issueState ?? "unknown" },
-        latestUserRequest: row.latestUserRequest,
+        latestUserRequest:
+          row.latestUserRequest === null ? null : decodeMessageText(row.latestUserRequest),
       })),
     ),
     Effect.mapError(toPersistenceSqlError("ThreadPriorityCandidateQuery.listActive")),

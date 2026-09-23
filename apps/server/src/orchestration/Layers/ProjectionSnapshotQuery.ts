@@ -1,4 +1,10 @@
 import {
+  messageTextJson,
+  messageTextForSearch,
+  MessageTextFromSql,
+  decodeMessageText,
+} from "../../persistence/messageText.ts";
+import {
   ChatAttachment,
   DEFAULT_AGENT_TOKEN_MODE,
   IsoDateTime,
@@ -85,6 +91,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
 );
 const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   Struct.assign({
+    text: MessageTextFromSql,
     isStreaming: Schema.Number,
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
     dispatchMode: Schema.NullOr(TurnDispatchMode),
@@ -195,7 +202,7 @@ const ProjectionThreadIdLookupRowSchema = Schema.Struct({
 const ProjectionThreadMessageSearchRowSchema = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
-  text: Schema.String,
+  text: MessageTextFromSql,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -681,7 +688,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           thread_id AS "threadId",
           turn_id AS "turnId",
           role,
-          text,
+          ${messageTextJson(sql)} AS text,
           attachments_json AS "attachments",
           dispatch_mode AS "dispatchMode",
           is_streaming AS "isStreaming",
@@ -706,7 +713,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           messages.thread_id AS "threadId",
           messages.turn_id AS "turnId",
           messages.role,
-          messages.text,
+          ${messageTextJson(sql, "messages")} AS text,
           messages.attachments_json AS "attachments",
           messages.dispatch_mode AS "dispatchMode",
           messages.is_streaming AS "isStreaming",
@@ -1062,7 +1069,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           thread_id AS "threadId",
           turn_id AS "turnId",
           role,
-          text,
+          ${messageTextJson(sql)} AS text,
           attachments_json AS "attachments",
           dispatch_mode AS "dispatchMode",
           is_streaming AS "isStreaming",
@@ -1082,7 +1089,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           messages.thread_id AS "threadId",
           messages.message_id AS "messageId",
-          messages.text,
+          ${messageTextJson(sql, "messages")} AS text,
           messages.created_at AS "createdAt",
           messages.updated_at AS "updatedAt"
         FROM projection_thread_messages AS messages
@@ -1095,7 +1102,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           AND messages.role IN ('user', 'assistant')
           AND (${projectId} IS NULL OR threads.project_id = ${projectId})
           AND (${threadId} IS NULL OR messages.thread_id = ${threadId})
-          AND lower(messages.text) LIKE ${likePattern} ESCAPE '\\'
+          AND lower(${messageTextForSearch(sql, "messages")}) LIKE ${likePattern} ESCAPE '\\'
         ORDER BY messages.created_at DESC, messages.message_id DESC
         LIMIT ${limit}
       `,
@@ -1330,7 +1337,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         thread_id AS "threadId",
         turn_id AS "turnId",
         role,
-        text,
+        ${messageTextJson(sql)} AS text,
         attachments_json AS "attachments",
         dispatch_mode AS "dispatchMode",
         is_streaming AS "isStreaming",
@@ -1358,7 +1365,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         thread_id AS "threadId",
         turn_id AS "turnId",
         role,
-        text,
+        ${messageTextJson(sql)} AS text,
         attachments_json AS "attachments",
         dispatch_mode AS "dispatchMode",
         is_streaming AS "isStreaming",
@@ -1384,7 +1391,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         thread_id AS "threadId",
         turn_id AS "turnId",
         role,
-        text,
+        ${messageTextJson(sql)} AS text,
         attachments_json AS "attachments",
         dispatch_mode AS "dispatchMode",
         is_streaming AS "isStreaming",
@@ -1418,7 +1425,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         thread_id AS "threadId",
         turn_id AS "turnId",
         role,
-        text,
+        ${messageTextJson(sql)} AS text,
         attachments_json AS "attachments",
         dispatch_mode AS "dispatchMode",
         is_streaming AS "isStreaming",
@@ -1444,7 +1451,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         thread_id AS "threadId",
         turn_id AS "turnId",
         role,
-        text,
+        ${messageTextJson(sql)} AS text,
         attachments_json AS "attachments",
         dispatch_mode AS "dispatchMode",
         is_streaming AS "isStreaming",
@@ -1466,7 +1473,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         thread_id AS "threadId",
         turn_id AS "turnId",
         role,
-        text,
+        ${messageTextJson(sql)} AS text,
         attachments_json AS "attachments",
         dispatch_mode AS "dispatchMode",
         is_streaming AS "isStreaming",
@@ -2936,7 +2943,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       .withTransaction(
         Effect.all({
           messages: sql<{ role: string; text: string }>`
-        SELECT m.role, substr(m.text, 1, 64001) AS text FROM projection_thread_messages m
+        SELECT m.role, ${messageTextJson(sql, "m", 64001)} AS text FROM projection_thread_messages m
         JOIN projection_turns t ON t.thread_id = m.thread_id
           AND (t.turn_id = m.turn_id OR t.pending_message_id = m.message_id)
         WHERE m.thread_id = ${threadId} AND t.state = 'completed' AND m.is_streaming = 0
@@ -2955,6 +2962,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         }),
       )
       .pipe(
+        Effect.map(({ messages, activities }) => ({
+          messages: messages.map((message) => ({
+            ...message,
+            text: decodeMessageText(message.text).slice(0, 64001),
+          })),
+          activities,
+        })),
         Effect.mapError(
           toPersistenceSqlError("ProjectionSnapshotQuery.getCompletedSideQuestionContext"),
         ),
