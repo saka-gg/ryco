@@ -189,7 +189,7 @@ describe("ClaudeModelCatalog", () => {
       if (effort?.type === "select") {
         assert.deepEqual(
           effort.options.map((option) => option.id),
-          ["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"],
+          ["low", "medium", "high", "xhigh", "max", "ultracode"],
         );
       }
     });

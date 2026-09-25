@@ -23,10 +23,8 @@
                   { "id": "high", "label": "High", "isDefault": true },
                   { "id": "xhigh", "label": "Extra High" },
                   { "id": "max", "label": "Max" },
-                  { "id": "ultracode", "label": "Ultracode" },
-                  { "id": "ultrathink", "label": "Ultrathink" }
-                ],
-                "promptInjectedValues": ["ultrathink"]
+                  { "id": "ultracode", "label": "Ultracode" }
+                ]
               },
               {
                 "id": "contextWindow",
@@ -60,10 +58,8 @@
                   { "id": "high", "label": "High", "isDefault": true },
                   { "id": "xhigh", "label": "Extra High" },
                   { "id": "max", "label": "Max" },
-                  { "id": "ultracode", "label": "Ultracode" },
-                  { "id": "ultrathink", "label": "Ultrathink" }
-                ],
-                "promptInjectedValues": ["ultrathink"]
+                  { "id": "ultracode", "label": "Ultracode" }
+                ]
               }
             ]
           },
@@ -87,10 +83,8 @@
                   { "id": "high", "label": "High", "isDefault": true },
                   { "id": "xhigh", "label": "Extra High" },
                   { "id": "max", "label": "Max" },
-                  { "id": "ultracode", "label": "Ultracode" },
-                  { "id": "ultrathink", "label": "Ultrathink" }
-                ],
-                "promptInjectedValues": ["ultrathink"]
+                  { "id": "ultracode", "label": "Ultracode" }
+                ]
               },
               { "id": "fastMode", "label": "Fast Mode", "type": "boolean" },
               {
@@ -124,7 +118,8 @@
                   { "id": "medium", "label": "Medium", "isDefault": true },
                   { "id": "high", "label": "High" },
                   { "id": "xhigh", "label": "Extra High" },
-                  { "id": "max", "label": "Max" }
+                  { "id": "max", "label": "Max" },
+                  { "id": "ultracode", "label": "Ultracode" }
                 ]
               }
             ]
@@ -149,10 +144,8 @@
                   { "id": "high", "label": "High", "isDefault": true },
                   { "id": "xhigh", "label": "Extra High" },
                   { "id": "max", "label": "Max" },
-                  { "id": "ultracode", "label": "Ultracode" },
-                  { "id": "ultrathink", "label": "Ultrathink" }
-                ],
-                "promptInjectedValues": ["ultrathink"]
+                  { "id": "ultracode", "label": "Ultracode" }
+                ]
               },
               { "id": "fastMode", "label": "Fast Mode", "type": "boolean" },
               {
@@ -186,10 +179,8 @@
                   { "id": "medium", "label": "Medium" },
                   { "id": "high", "label": "High" },
                   { "id": "xhigh", "label": "Extra High", "isDefault": true },
-                  { "id": "max", "label": "Max" },
-                  { "id": "ultrathink", "label": "Ultrathink" }
-                ],
-                "promptInjectedValues": ["ultrathink"]
+                  { "id": "max", "label": "Max" }
+                ]
               },
               { "id": "fastMode", "label": "Fast Mode", "type": "boolean" },
               {
@@ -222,10 +213,8 @@
                   { "id": "low", "label": "Low" },
                   { "id": "medium", "label": "Medium" },
                   { "id": "high", "label": "High", "isDefault": true },
-                  { "id": "max", "label": "Max" },
-                  { "id": "ultrathink", "label": "Ultrathink" }
-                ],
-                "promptInjectedValues": ["ultrathink"]
+                  { "id": "max", "label": "Max" }
+                ]
               },
               { "id": "fastMode", "label": "Fast Mode", "type": "boolean" },
               {
@@ -277,10 +266,8 @@
                   { "id": "medium", "label": "Medium" },
                   { "id": "high", "label": "High", "isDefault": true },
                   { "id": "xhigh", "label": "Extra High" },
-                  { "id": "max", "label": "Max" },
-                  { "id": "ultrathink", "label": "Ultrathink" }
-                ],
-                "promptInjectedValues": ["ultrathink"]
+                  { "id": "max", "label": "Max" }
+                ]
               },
               {
                 "id": "contextWindow",
@@ -312,10 +299,8 @@
                   { "id": "low", "label": "Low" },
                   { "id": "medium", "label": "Medium" },
                   { "id": "high", "label": "High", "isDefault": true },
-                  { "id": "max", "label": "Max" },
-                  { "id": "ultrathink", "label": "Ultrathink" }
-                ],
-                "promptInjectedValues": ["ultrathink"]
+                  { "id": "max", "label": "Max" }
+                ]
               },
               {
                 "id": "contextWindow",
