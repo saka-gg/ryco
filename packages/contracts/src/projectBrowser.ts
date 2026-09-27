@@ -12,6 +12,7 @@ export const ProjectBrowserTab = Schema.Struct({
   zoom: Schema.Number,
   presentation: Schema.Literals(["background", "panel", "window"]),
   error: Schema.NullOr(text),
+  signInPopup: Schema.optionalKey(Schema.Literals(["idle", "armed", "open", "blocked", "failed"])),
 });
 export type ProjectBrowserTab = typeof ProjectBrowserTab.Type;
 export const ProjectBrowserState = Schema.Struct({ tabs: Schema.Array(ProjectBrowserTab) });
@@ -28,6 +29,8 @@ export const ProjectBrowserCommand = Schema.Struct({
     "devtools",
     "popout",
     "dock",
+    "allow-sign-in",
+    "cancel-sign-in",
   ]),
   tab: Schema.String,
   url: Schema.optionalKey(text),

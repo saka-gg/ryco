@@ -189,3 +189,35 @@ it("navigates the current web preview instead of creating another tab", async ()
     url: `${location.origin}/second-preview`,
   });
 });
+
+it("offers explicit one-use popup consent, blocked recovery and cancellation", async () => {
+  await page.viewport(1200, 900);
+  const api = setup();
+  const view = await render(<BrowserPanel environmentId={null} cwd="/project" />);
+  await view.getByRole("textbox", { name: "Browser address" }).fill("localhost:3000");
+  await view.getByRole("button", { name: "Go", exact: true }).click();
+  const update = (signInPopup: NonNullable<ProjectBrowserTab["signInPopup"]>) => {
+    const native = useBrowserUi.getState().native;
+    useBrowserUi.setState({
+      native: { tabs: native.tabs.map((tab) => Object.assign({}, tab, { signInPopup })) },
+    });
+  };
+  update("blocked");
+  await expect.element(view.getByRole("status")).toHaveTextContent("Popup blocked");
+  await view.getByRole("button", { name: "Allow sign-in popup" }).click();
+  expect(api.command).toHaveBeenLastCalledWith({ action: "allow-sign-in", tab: "tab-1" });
+  update("armed");
+  await expect.element(view.getByRole("status")).toHaveTextContent("30 seconds");
+  await view.getByRole("button", { name: "Cancel sign-in", exact: true }).click();
+  expect(api.command).toHaveBeenLastCalledWith({ action: "cancel-sign-in", tab: "tab-1" });
+  update("open");
+  await view.getByRole("button", { name: "Close sign-in popup" }).click();
+  expect(api.command).toHaveBeenLastCalledWith({ action: "cancel-sign-in", tab: "tab-1" });
+  update("failed");
+  await expect.element(view.getByRole("status")).toHaveTextContent("could not load");
+  api.command.mockRejectedValueOnce(
+    new Error("Show and focus this browser tab before allowing sign-in."),
+  );
+  await view.getByRole("button", { name: "Allow sign-in popup" }).click();
+  await expect.element(view.getByRole("alert")).toHaveTextContent("Show and focus");
+});

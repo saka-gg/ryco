@@ -300,6 +300,22 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
                   </option>
                 ))}
               </select>
+              <button
+                type="button"
+                onClick={() =>
+                  command(
+                    active.signInPopup === "armed" || active.signInPopup === "open"
+                      ? "cancel-sign-in"
+                      : "allow-sign-in",
+                  )
+                }
+              >
+                {active.signInPopup === "open"
+                  ? "Close sign-in popup"
+                  : active.signInPopup === "armed"
+                    ? "Cancel sign-in"
+                    : "Allow sign-in popup"}
+              </button>
               <button type="button" onClick={() => command("devtools")}>
                 DevTools
               </button>
@@ -329,6 +345,19 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
             External
           </a>
         </div>
+      ) : null}
+      {api &&
+      active &&
+      (active.signInPopup === "armed" ||
+        active.signInPopup === "blocked" ||
+        active.signInPopup === "failed") ? (
+        <p role="status" className="border-b p-2 text-xs text-muted-foreground">
+          {active.signInPopup === "armed"
+            ? "One sign-in popup allowed for 30 seconds. Click the site’s sign-in button again. Switching panels cancels permission."
+            : active.signInPopup === "failed"
+              ? "Sign-in popup could not load. Allow a new sign-in popup and retry the site’s sign-in button."
+              : "Popup blocked. To sign in, choose Allow sign-in popup, then retry the site’s sign-in button."}
+        </p>
       ) : null}
       {error || active?.error ? (
         <p role="alert" className="border-b p-2 text-xs text-destructive">
