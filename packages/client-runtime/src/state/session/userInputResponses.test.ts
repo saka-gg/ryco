@@ -136,3 +136,28 @@ it("renders free-text native questions without inventing a suggested answer", ()
     deriveThreadActivityViewModel([optional]).optionalUserInputs[0]?.questions[0]?.options,
   ).toEqual([]);
 });
+
+it("settles an optional answer without clearing a concurrent blocking permission", () => {
+  const permission = activity(1, "approval.requested", {
+    requestId: "permission",
+    requestKind: "command",
+    detail: "Run fixture command",
+  });
+  const optional = activity(2, "user-input.requested", {
+    ...(requested.payload as object),
+    nonBlocking: true,
+  });
+  const before = deriveThreadActivityViewModel([permission, optional]);
+  expect(before.pendingApprovals).toHaveLength(1);
+  expect(before.optionalUserInputs).toHaveLength(1);
+  const after = deriveThreadActivityViewModel([
+    permission,
+    optional,
+    activity(3, "user-input.resolved", {
+      userInputIdentity: identity,
+      runtimeSessionId: identity.runtimeSessionId,
+    }),
+  ]);
+  expect(after.optionalUserInputs).toEqual([]);
+  expect(after.pendingApprovals).toEqual(before.pendingApprovals);
+});
