@@ -14,6 +14,7 @@ import {
   Path,
   PlatformError,
   Ref,
+  RcMap,
   Result,
   Schema,
   Scope,
@@ -738,6 +739,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const config = yield* ServerConfig;
   const worktreePolicy = yield* makeWorkspaceAccessPolicy(config.workspaceAccessRoot);
   const settingsService = yield* Effect.serviceOption(ServerSettingsService);
+  // Entries live only while callers hold/wait for this canonical destination.
+  const worktreeDestinations = yield* RcMap.make({
+    lookup: (_destination: string) => Semaphore.make(1),
+  });
 
   let executeRaw: GitVcsDriver.GitVcsDriverShape["execute"];
 
@@ -2213,11 +2218,6 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           sanitizedBranch,
         );
       const canonical = yield* validateWorktreeRoot(candidate, worktreePolicy);
-      if (yield* fileSystem.exists(canonical)) {
-        return yield* Effect.fail(
-          new Error("Worktree destination already exists. Choose a different branch or root."),
-        );
-      }
       return canonical;
     }).pipe(
       Effect.mapError(
@@ -2236,9 +2236,39 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ? ["worktree", "add", "-b", input.newRefName, worktreePath, baseRef]
       : ["worktree", "add", worktreePath, baseRef];
 
-    yield* executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
-      fallbackErrorMessage: "git worktree add failed",
-    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const destinationLock = yield* RcMap.get(worktreeDestinations, worktreePath);
+        yield* destinationLock.withPermit(
+          Effect.gen(function* () {
+            // Concurrent Git processes can remove a winner's checkout while cleaning
+            // up a failed add. Serialize only this destination, including the recheck.
+            const exists = yield* fileSystem.exists(worktreePath).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new GitCommandError({
+                    operation: "GitVcsDriver.createWorktree",
+                    command: "git worktree add",
+                    cwd: input.cwd,
+                    detail: cause.message,
+                    cause,
+                  }),
+              ),
+            );
+            if (exists)
+              return yield* createGitCommandError(
+                "GitVcsDriver.createWorktree",
+                input.cwd,
+                args,
+                "Worktree destination already exists. Choose a different branch or root.",
+              );
+            yield* executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
+              fallbackErrorMessage: "git worktree add failed",
+            });
+          }),
+        );
+      }),
+    );
 
     yield* worktreePolicy
       .assertExistingPath({ path: worktreePath, operation: "GitVcsDriver.createWorktree" })
