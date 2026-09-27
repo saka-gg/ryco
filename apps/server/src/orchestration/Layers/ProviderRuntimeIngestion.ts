@@ -1,3 +1,4 @@
+import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { callbackRepositories, pendingCallbackInvalidation } from "../approvalResponses.ts";
 import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
 import { ServerConfig } from "../../config.ts";
@@ -1123,6 +1124,8 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
+  const completionObservationEpoch = crypto.randomUUID();
   const serverSettingsService = yield* ServerSettingsService;
   const attachmentConfig = yield* Effect.serviceOption(ServerConfig);
   const attachmentAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
@@ -2835,6 +2838,9 @@ const make = Effect.gen(function* () {
           yield* rememberTaskDescription(thread.id, event.payload.taskId, description);
         }
       }
+      const previousBackgroundLiveness = threadBackgroundLiveness.getThreadBackgroundLiveness(
+        thread.id,
+      );
       // Sidebar background liveness: fed from the same lifecycle stream,
       // read by the shell query at mapping time (no persistence).
       switch (event.type) {
@@ -2916,6 +2922,46 @@ const make = Effect.gen(function* () {
           createdAt: activity.createdAt,
         }),
       ).pipe(Effect.asVoid);
+
+      // A completed assistant message is not proof of turn completion. Write
+      // the delegation acknowledgement only after accepted lifecycle handling,
+      // all buffered output finalization, and background activity projection.
+      const completionObservationNeeded =
+        event.type === "turn.completed" ||
+        event.type === "turn.aborted" ||
+        previousBackgroundLiveness !==
+          threadBackgroundLiveness.getThreadBackgroundLiveness(thread.id);
+      if (
+        completionObservationNeeded &&
+        Option.isSome(completionReturns) &&
+        event.runtimeSessionId
+      ) {
+        const terminal =
+          shouldApplyThreadLifecycle &&
+          !isSubagentProviderThread &&
+          eventTurnId &&
+          (event.type === "turn.completed" || event.type === "turn.aborted")
+            ? {
+                turnId: eventTurnId,
+                state:
+                  event.type === "turn.aborted" ||
+                  normalizeRuntimeTurnState(event.payload.state) === "interrupted" ||
+                  normalizeRuntimeTurnState(event.payload.state) === "cancelled"
+                    ? ("interrupted" as const)
+                    : normalizeRuntimeTurnState(event.payload.state) === "failed"
+                      ? ("error" as const)
+                      : ("completed" as const),
+              }
+            : undefined;
+        yield* completionReturns.value.observe({
+          childThreadId: thread.id,
+          runtimeSessionId: event.runtimeSessionId,
+          observationEpoch: completionObservationEpoch,
+          backgroundPending:
+            threadBackgroundLiveness.getThreadBackgroundLiveness(thread.id) !== null,
+          ...(terminal ? { terminal } : {}),
+        });
+      }
     });
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;

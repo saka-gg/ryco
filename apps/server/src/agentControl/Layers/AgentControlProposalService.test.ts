@@ -1,4 +1,10 @@
 import {
+  CompletionReturnRepository,
+  CompletionReturnRepositoryLive,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { completionFixture } from "../completionReturnTestSupport.ts";
+import { toAgentControlProposalReceipt } from "../Services/AgentControlProposalService.ts";
+import {
   AgentControlProposalId,
   AgentControlRequestId,
   AgentControlRiskTag,
@@ -60,6 +66,7 @@ const submitInput = (requestIdValue: string, overrides?: { readonly expiresAt?: 
 const makeLayer = (enabled: boolean) =>
   makeAgentControlProposalServiceLive({ disablePeriodicExpirySweep: true }).pipe(
     Layer.provideMerge(AgentControlProposalStoreLive),
+    Layer.provideMerge(CompletionReturnRepositoryLive),
     Layer.provideMerge(AgentControlProposalEventsLive),
     Layer.provideMerge(AgentControlPolicyLive),
     Layer.provideMerge(AgentControlProposalRepositoryLive),
@@ -437,3 +444,42 @@ enabledLayer("AgentControlProposalService", (it) => {
     }),
   );
 });
+
+it.effect(
+  "rehydrates pending returns outside recent dispatch history and exposes bounded separate receipt status",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* AgentControlProposalService;
+      const store = yield* AgentControlProposalStore;
+      const returns = yield* CompletionReturnRepository;
+      const created = yield* service.submit(submitInput("long-running-return"));
+      yield* service.accept({
+        proposalId: created.proposal.proposalId,
+        decidedAt: "2026-08-17T00:01:00.000Z",
+      });
+      yield* store.beginExecution({
+        proposalId: created.proposal.proposalId,
+        actor: "executor",
+        now: "2026-08-17T00:02:00.000Z",
+      });
+      yield* store.settleExecution({
+        proposalId: created.proposal.proposalId,
+        result: { outcome: "completed", completedAt: "2026-08-17T00:03:00.000Z" },
+        now: "2026-08-17T00:03:00.000Z",
+      });
+      yield* returns.insert(completionFixture({ proposalId: created.proposal.proposalId }));
+      const queue = yield* service.getQueue({ activeLimit: 1, recentLimit: 1 });
+      const restored = queue.active.find(
+        (proposal) => proposal.proposalId === created.proposal.proposalId,
+      );
+      assert.equal(restored?.status, "completed");
+      assert.equal(restored?.completionReturns?.[0]?.status, "waiting");
+      const receipt = toAgentControlProposalReceipt(
+        Option.getOrThrow(yield* service.getProposal(created.proposal.proposalId)),
+      );
+      assert.equal(receipt.status, "completed");
+      assert.equal(receipt.completionReturns?.[0]?.status, "waiting");
+      assert.notInclude(JSON.stringify(receipt), "parentRuntimeSessionId");
+      assert.notInclude(JSON.stringify(receipt), "command");
+    }).pipe(Effect.provide(makeLayer(true))),
+);

@@ -360,3 +360,131 @@ describe("turn interrupt decider", () => {
     });
   });
 });
+
+describe("delegation return atomic origin fence", () => {
+  const parent = () =>
+    makeThread({
+      latestTurn: {
+        turnId: TurnId.make("origin-turn"),
+        state: "completed",
+        requestedAt: now,
+        startedAt: now,
+        completedAt: now,
+        assistantMessageId: null,
+      },
+    });
+  const queuedReturn = () =>
+    makeCommand({
+      modelSelection: parent().modelSelection,
+      delegationReturnGuard: {
+        turnMessageId: MessageId.make("message-before"),
+        projectId: parent().projectId,
+        turnId: TurnId.make("origin-turn"),
+        runtimeSessionId: RuntimeSessionId.make("runtime-a1"),
+        providerInstanceId: ProviderInstanceId.make("codex_work"),
+        runtimeMode: "full-access",
+        worktreePath: "/tmp/worktree",
+        latestUserMessageId: MessageId.make("message-before"),
+      },
+    });
+  it("accepts the exact idle origin through normal turn-start processing", async () => {
+    const result = await Effect.runPromise(
+      decideOrchestrationCommand({ command: queuedReturn(), readModel: makeReadModel(parent()) }),
+    );
+    expect(
+      (Array.isArray(result) ? result : [result]).some(
+        (event) => event.type === "thread.turn-start-requested",
+      ),
+    ).toBe(true);
+    expect(
+      (Array.isArray(result) ? result : [result]).find(
+        (event) => event.type === "thread.turn-start-requested",
+      )?.payload,
+    ).toMatchObject({ delegationReturnGuard: queuedReturn().delegationReturnGuard });
+  });
+  for (const change of [
+    "turn",
+    "runtime",
+    "archive",
+    "project",
+    "mode",
+    "worktree",
+    "provider",
+    "pending-user-start",
+    "model",
+  ] as const) {
+    it(`rejects ${change} changed between outbox check and authoritative dispatch`, async () => {
+      let thread = parent();
+      if (change === "turn")
+        thread = {
+          ...thread,
+          latestTurn: { ...thread.latestTurn!, turnId: TurnId.make("new-turn") },
+        };
+      if (change === "runtime")
+        thread = {
+          ...thread,
+          session: { ...thread.session!, runtimeSessionId: RuntimeSessionId.make("new-runtime") },
+        };
+      if (change === "archive") thread = { ...thread, archivedAt: now };
+      if (change === "project") thread = { ...thread, projectId: ProjectId.make("other") };
+      if (change === "mode") thread = { ...thread, runtimeMode: "approval-required" };
+      if (change === "worktree") thread = { ...thread, worktreePath: "/other" };
+      if (change === "provider")
+        thread = {
+          ...thread,
+          session: { ...thread.session!, providerInstanceId: ProviderInstanceId.make("other") },
+        };
+      if (change === "pending-user-start")
+        thread = {
+          ...thread,
+          messages: [
+            ...thread.messages,
+            { ...thread.messages[0]!, id: MessageId.make("new-user-message") },
+          ],
+        };
+      if (change === "model")
+        thread = { ...thread, modelSelection: { ...thread.modelSelection, model: "another" } };
+      const result = await Effect.runPromise(
+        decideOrchestrationCommand({
+          command: queuedReturn(),
+          readModel: makeReadModel(thread),
+        }).pipe(Effect.result),
+      );
+      expect(result._tag).toBe("Failure");
+    });
+  }
+});
+
+it("does not adopt a newer pending user start even if the outbox observed that message before dispatch", async () => {
+  const thread = makeThread({
+    latestTurn: {
+      turnId: TurnId.make("origin-turn"),
+      state: "completed",
+      requestedAt: now,
+      startedAt: now,
+      completedAt: now,
+      assistantMessageId: null,
+    },
+  });
+  const pending = { ...thread.messages[0]!, id: MessageId.make("pending-user-start") };
+  const command = makeCommand({
+    modelSelection: thread.modelSelection,
+    delegationReturnGuard: {
+      projectId: thread.projectId,
+      turnId: TurnId.make("origin-turn"),
+      runtimeSessionId: RuntimeSessionId.make("runtime-a1"),
+      providerInstanceId: ProviderInstanceId.make("codex_work"),
+      runtimeMode: "full-access",
+      worktreePath: "/tmp/worktree",
+      turnMessageId: MessageId.make("message-before"),
+      latestUserMessageId: pending.id,
+    },
+  });
+  const result = await Effect.runPromise(
+    decideOrchestrationCommand({
+      command,
+      readModel: makeReadModel({ ...thread, messages: [...thread.messages, pending] }),
+    }).pipe(Effect.result),
+  );
+  expect(result._tag).toBe("Failure");
+});

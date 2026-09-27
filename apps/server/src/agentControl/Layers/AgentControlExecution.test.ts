@@ -1,3 +1,8 @@
+import {
+  CompletionReturnRepository,
+  CompletionReturnRepositoryLive,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -1393,4 +1398,72 @@ it.effect("restart closes uncertain workspace steps without replay or compensati
     ]);
     assert.isUndefined(settled.result?.execution?.compensation);
   }),
+);
+
+it.effect(
+  "persists exact delegation ownership before child start and leaves dispatch completion separate",
+  () =>
+    Effect.gen(function* () {
+      const returns = yield* CompletionReturnRepository;
+      const nextPlan = {
+        kind: "createThreads" as const,
+        entries: [
+          {
+            projectId,
+            title: "Delegated task",
+            prompt: "Fixture task",
+            envMode: "local" as const,
+            runtimeMode: "auto" as const,
+            modelSelection: target.modelSelection,
+            returnToOrigin: true,
+          },
+        ],
+      };
+      const proposal: AgentControlProposal = {
+        ...approvedProposal,
+        principal: {
+          ...approvedProposal.principal,
+          kind: "provider-session",
+          threadId: ThreadId.make("thread-origin"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-origin"),
+          turnId: TurnId.make("origin-turn"),
+        },
+        plan: nextPlan,
+        planDigest: computeAgentControlPlanDigest(nextPlan),
+      };
+      const stores = yield* makeExecutionStores(proposal);
+      let starts = 0;
+      const executor = yield* makeTestExecution({
+        ...stores,
+        projections: {
+          getShellSnapshot: () =>
+            Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+          getThreadShellById: (id: ThreadId) =>
+            Effect.succeed(id === "thread-origin" ? Option.some({ ...target, id }) : Option.none()),
+        },
+        commandApplication: {
+          apply: (command: ClientOrchestrationCommand) =>
+            Effect.gen(function* () {
+              if (command.type === "thread.turn.start") {
+                const saved = yield* returns.get(command.threadId);
+                assert.equal(saved?.initialMessageId, command.message.messageId);
+                assert.equal(saved?.parentTurnId, "origin-turn");
+                assert.equal(saved?.parentRuntimeSessionId, "runtime-origin");
+                assert.equal(saved?.status, "waiting");
+                starts += 1;
+              }
+              return { sequence: starts + 1 };
+            }),
+        },
+      });
+      yield* executor.executeApproved(proposal.proposalId);
+      assert.equal((yield* Ref.get(stores.proposalRef)).status, "completed");
+      assert.equal((yield* returns.listForProposal(proposal.proposalId))[0]?.status, "waiting");
+      assert.equal(starts, 1);
+    }).pipe(
+      Effect.provide(
+        CompletionReturnRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+      ),
+    ),
 );

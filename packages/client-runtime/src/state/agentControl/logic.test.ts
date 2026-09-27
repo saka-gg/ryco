@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   AgentControlProposalId,
+  MessageId,
+  TurnId,
   AgentControlRequestId,
   ProviderInstanceId,
   ThreadId,
@@ -287,4 +289,62 @@ describe("selectors", () => {
       selectAgentControlProposalsForThread(state, callerThreadId).map((entry) => entry.proposalId),
     ).toEqual(["mine"]);
   });
+});
+
+it("updates child completion after dispatch completes, keeps waiting returns visible, and rejects stale return revisions", () => {
+  const waiting = {
+    revision: 1,
+    childThreadId: ThreadId.make("child"),
+    initialMessageId: MessageId.make("initial"),
+    parentThreadId: callerThreadId,
+    parentTurnId: TurnId.make("origin"),
+    childTurnId: null,
+    status: "waiting" as const,
+    detail: "Waiting",
+    updatedAt: "2026-09-27T00:00:00.000Z",
+  };
+  const proposal = makeProposal("delegated", { status: "completed", completionReturns: [waiting] });
+  let state = applyAgentControlStreamEvent(
+    EMPTY_AGENT_CONTROL_QUEUE_STATE,
+    snapshotEvent({ revision: 8, active: [proposal] }),
+  );
+  expect(selectActiveAgentControlProposals(state)).toHaveLength(1);
+  expect(selectRecentAgentControlProposals(state)).toHaveLength(0);
+  state = applyAgentControlStreamEvent(
+    state,
+    proposalEvent(9, {
+      ...proposal,
+      completionReturns: [
+        {
+          ...waiting,
+          revision: 3,
+          status: "uncertain",
+          detail: "Check parent before manual retry",
+        },
+      ],
+    }),
+  );
+  expect(state.proposalsById[proposal.proposalId]?.status).toBe("completed");
+  expect(state.proposalsById[proposal.proposalId]?.completionReturns?.[0]?.status).toBe(
+    "uncertain",
+  );
+  expect(selectActiveAgentControlProposals(state)).toHaveLength(0);
+  expect(selectAgentControlProposalsForThread(state, callerThreadId)).toHaveLength(1);
+  expect(applyAgentControlStreamEvent(state, proposalEvent(10, proposal))).toBe(state);
+  expect(
+    applyAgentControlStreamEvent(
+      state,
+      proposalEvent(11, {
+        ...proposal,
+        completionReturns: [
+          { ...waiting, revision: 99, parentTurnId: TurnId.make("wrong-origin") },
+        ],
+      }),
+    ),
+  ).toBe(state);
+  const restarted = applyAgentControlStreamEvent(
+    state,
+    snapshotEvent({ revision: 0, recent: Object.values(state.proposalsById) }),
+  );
+  expect(restarted.proposalsById[proposal.proposalId]?.completionReturns?.[0]?.revision).toBe(3);
 });

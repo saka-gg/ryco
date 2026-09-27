@@ -181,3 +181,21 @@ export function resolveMarkdownFileLinkMeta(
     ...(columnNumber !== undefined ? { column: columnNumber } : {}),
   };
 }
+
+/** Server-generated thread references resolve within the viewing environment. */
+export function resolveMarkdownThreadHref(
+  href: string | undefined,
+  environmentId: string | undefined,
+): string | null {
+  if (!environmentId || !href?.startsWith("/ryco/thread/")) return null;
+  const encodedId = href.slice("/ryco/thread/".length);
+  try {
+    const threadId = decodeURIComponent(encodedId);
+    if (!threadId || threadId.length > 256 || threadId.includes("/") || threadId.includes("\\"))
+      return null;
+    for (const char of threadId) if (char.charCodeAt(0) < 32) return null;
+    return `/${encodeURIComponent(environmentId)}/${encodeURIComponent(threadId)}`;
+  } catch {
+    return null;
+  }
+}

@@ -1332,11 +1332,24 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
+/** Optimistic identity fence for delayed delegated-result queue delivery. */
+export const DelegationReturnGuard = Schema.Struct({
+  turnMessageId: MessageId,
+  latestUserMessageId: Schema.NullOr(MessageId),
+  projectId: ProjectId,
+  turnId: TurnId,
+  runtimeSessionId: RuntimeSessionId,
+  providerInstanceId: ProviderInstanceId,
+  runtimeMode: RuntimeMode,
+  worktreePath: Schema.NullOr(Schema.String),
+});
+
 export const ThreadTurnStartCommand = Schema.Struct({
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
+  delegationReturnGuard: Schema.optional(DelegationReturnGuard),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1364,6 +1377,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
+  delegationReturnGuard: Schema.optional(DelegationReturnGuard),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -2060,6 +2074,7 @@ export const ThreadContextHandoffRequestedPayload = Schema.Struct({
 export type ThreadContextHandoffRequestedPayload = typeof ThreadContextHandoffRequestedPayload.Type;
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
+  delegationReturnGuard: Schema.optional(DelegationReturnGuard),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Decode historical records without enabling recall or persisting rendered text.
   projectMemory: Schema.optional(Schema.Unknown),

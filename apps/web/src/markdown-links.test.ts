@@ -87,3 +87,12 @@ describe("resolveMarkdownFileLinkTarget", () => {
     expect(resolveMarkdownFileLinkTarget("/chat/settings")).toBeNull();
   });
 });
+
+it("resolves only bounded, well-formed thread references in the current environment", async () => {
+  const { resolveMarkdownThreadHref } = await import("./markdown-links");
+  expect(resolveMarkdownThreadHref("/ryco/thread/child", "env")).toBe("/env/child");
+  expect(resolveMarkdownThreadHref("/ryco/thread/child", undefined)).toBeNull();
+  expect(resolveMarkdownThreadHref("/ryco/thread/%2fother", "env")).toBeNull();
+  expect(resolveMarkdownThreadHref("/ryco/thread/%", "env")).toBeNull();
+  expect(resolveMarkdownThreadHref("/ryco/thread/" + "a".repeat(257), "env")).toBeNull();
+});

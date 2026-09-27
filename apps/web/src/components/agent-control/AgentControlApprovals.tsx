@@ -180,6 +180,20 @@ export function AgentControlApprovals({
             <ul data-testid="agent-control-recent" className="mt-1 flex flex-col gap-0.5">
               {recent.map((proposal) => {
                 const model = buildAgentControlProposalCardModel(proposal);
+                if (proposal.completionReturns?.length)
+                  return (
+                    <li key={proposal.proposalId}>
+                      <AgentControlProposalCard
+                        model={model}
+                        environmentId={environmentId}
+                        isSubmitting={false}
+                        decisionError={null}
+                        disabledReason={null}
+                        onAccept={() => {}}
+                        onReject={() => {}}
+                      />
+                    </li>
+                  );
                 return (
                   <li
                     key={proposal.proposalId}

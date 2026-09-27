@@ -744,3 +744,21 @@ describe("AgentControl external MCP", () => {
     expect(value).not.toHaveProperty("credentialHash");
   });
 });
+
+it("keeps completion return explicitly opt-in and rejects a caller-selected return target", () => {
+  const optedIn = {
+    ...createThreadsPlan,
+    entries: [{ ...createThreadsPlan.entries[0], returnToOrigin: true }],
+  };
+  const decoded = decodePlan(optedIn);
+  expect(decoded.kind).toBe("createThreads");
+  if (decoded.kind === "createThreads") expect(decoded.entries[0]?.returnToOrigin).toBe(true);
+  const legacy = decodePlan(createThreadsPlan);
+  if (legacy.kind === "createThreads") expect(legacy.entries[0]?.returnToOrigin).toBeUndefined();
+  expect(() =>
+    decodePlan({ ...optedIn, entries: [{ ...optedIn.entries[0], returnToOrigin: "yes" }] }),
+  ).toThrow();
+  expect(() =>
+    decodePlan({ ...optedIn, entries: [{ ...optedIn.entries[0], returnThreadId: "other" }] }),
+  ).toThrow();
+});

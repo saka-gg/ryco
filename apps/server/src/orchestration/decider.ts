@@ -1043,6 +1043,33 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Thread '${command.threadId}' already has active turn '${targetThread.session.activeTurnId}' and cannot start another turn until it finishes.`,
         });
       }
+      const guard = command.delegationReturnGuard;
+      const latestUserMessage = guard
+        ? targetThread.messages.findLast((message) => message.role === "user")
+        : undefined;
+      if (
+        guard &&
+        (targetThread.archivedAt !== null ||
+          !["ready", "idle"].includes(targetThread.session?.status ?? "") ||
+          (latestUserMessage?.id ?? null) !== guard.latestUserMessageId ||
+          (latestUserMessage?.id !== guard.turnMessageId &&
+            latestUserMessage?.turnId !== guard.turnId) ||
+          JSON.stringify(command.modelSelection ?? targetThread.modelSelection) !==
+            JSON.stringify(targetThread.modelSelection) ||
+          targetThread.projectId !== guard.projectId ||
+          targetThread.latestTurn?.turnId !== guard.turnId ||
+          targetThread.latestTurn.state !== "completed" ||
+          targetThread.session?.runtimeSessionId !== guard.runtimeSessionId ||
+          targetThread.session.providerInstanceId !== guard.providerInstanceId ||
+          targetThread.runtimeMode !== guard.runtimeMode ||
+          targetThread.worktreePath !== guard.worktreePath)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Delegated result origin changed. Open the child task and return its result manually.",
+        });
+      }
       const requestedSelection = command.modelSelection ?? targetThread.modelSelection;
       const isStartedThread = targetThread.messages.some((message) => message.role === "user");
       const isContextHandoff =
@@ -1174,6 +1201,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          ...(command.delegationReturnGuard
+            ? { delegationReturnGuard: command.delegationReturnGuard }
+            : {}),
           ...(command.computerUse ? { computerUse: command.computerUse } : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }

@@ -16,6 +16,7 @@ import {
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import {
+  CheckpointRef,
   ApprovalRequestId,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -151,6 +152,7 @@ describe("ProviderCommandReactor", () => {
   });
 
   async function createHarness(input?: {
+    readonly getSession?: ProviderServiceShape["getSession"];
     readonly worktreeBranchPrefix?: string;
     readonly setThreadGoal?: NonNullable<ProviderServiceShape["setThreadGoal"]>;
     readonly getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
@@ -231,7 +233,7 @@ describe("ProviderCommandReactor", () => {
       runtimeSessions.push(session);
       return Effect.succeed(session);
     });
-    const sendTurn = vi.fn((_: unknown) =>
+    const sendTurn = vi.fn((_: unknown, _expectedRuntime?: unknown) =>
       Effect.succeed({
         threadId: ThreadId.make("thread-1"),
         turnId: asTurnId("turn-1"),
@@ -330,7 +332,7 @@ describe("ProviderCommandReactor", () => {
       ...(input?.clearThreadGoal ? { clearThreadGoal: input.clearThreadGoal } : {}),
       startSession: startSession as ProviderServiceShape["startSession"],
       startFreshSession: () => unsupported(),
-      getSession: () => Effect.succeed(Option.none()),
+      getSession: input?.getSession ?? (() => Effect.succeed(Option.none())),
       restoreSessionBinding: () => Effect.succeed(false),
       retireSessionBinding: () => Effect.succeed(false),
       stopSessionBinding: () => Effect.succeed("not-found"),
@@ -532,6 +534,146 @@ describe("ProviderCommandReactor", () => {
       stateDir,
       drain,
     };
+  }
+
+  for (const liveRuntime of [null, "replacement-runtime", "runtime-1"]) {
+    it(`fences delegated provider submission against live runtime ${liveRuntime}`, async () => {
+      let liveSession: ProviderSession | undefined;
+      const harness = await createHarness({
+        getSession: () => Effect.succeed(Option.fromNullishOr(liveSession)),
+      });
+      const createdAt = new Date().toISOString();
+      const threadId = ThreadId.make("thread-1");
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("origin-start"),
+          threadId,
+          message: {
+            messageId: MessageId.make("origin-message"),
+            role: "user",
+            text: "Fixture origin",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt,
+        }),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("origin-running"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "approval-required",
+            activeTurnId: TurnId.make("turn-1"),
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make("origin-complete"),
+          threadId,
+          messageId: MessageId.make("origin-answer"),
+          turnId: TurnId.make("turn-1"),
+          text: "Fixture answer",
+          createdAt,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("origin-idle"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make("origin-settled"),
+          threadId,
+          turnId: TurnId.make("turn-1"),
+          completedAt: createdAt,
+          checkpointRef: CheckpointRef.make("fixture-checkpoint"),
+          status: "ready",
+          files: [],
+          checkpointTurnCount: 1,
+          createdAt,
+        }),
+      );
+      liveSession = liveRuntime
+        ? { ...harness.runtimeSessions[0]!, runtimeSessionId: RuntimeSessionId.make(liveRuntime) }
+        : undefined;
+      harness.sendTurn.mockClear();
+      harness.startSession.mockClear();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("delegated-start"),
+          threadId,
+          message: {
+            messageId: MessageId.make("delegated-message"),
+            role: "user",
+            text: "Fixture result",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt,
+          delegationReturnGuard: {
+            turnMessageId: MessageId.make("origin-message"),
+            latestUserMessageId: MessageId.make("origin-message"),
+            projectId: ProjectId.make("project-1"),
+            turnId: TurnId.make("turn-1"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            worktreePath: null,
+          },
+        }),
+      );
+      if (liveRuntime === "runtime-1") {
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        expect(harness.sendTurn.mock.calls[0]?.[1]).toEqual({
+          provider: "codex",
+          providerInstanceId: "codex",
+          runtimeSessionId: "runtime-1",
+        });
+      } else {
+        await waitFor(
+          async () =>
+            (await harness.readModel()).threads[0]?.activities.some(
+              (entry) => entry.summary === "Delegated return was not submitted",
+            ) ?? false,
+        );
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect((await harness.readModel()).threads[0]?.session?.status).toBe("ready");
+      }
+      expect(harness.startSession).not.toHaveBeenCalled();
+    });
   }
 
   it("recovers pending goal delivery when the reactor starts", async () => {

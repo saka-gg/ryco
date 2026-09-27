@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
 import type { AgentControlProposal, EnvironmentId } from "@ryco/contracts";
@@ -20,6 +21,7 @@ export function AgentControlProposalCard(props: {
   /** Cached/degraded threads render the proposal but cannot decide it. */
   readonly disabled?: boolean;
 }) {
+  const navigation = useNavigation();
   const [pending, setPending] = useState<"accept" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const model = buildAgentControlProposalCardModel(props.proposal);
@@ -78,6 +80,38 @@ export function AgentControlProposalCard(props: {
           {model.outcomeLabel}
         </Text>
       ) : null}
+      {model.completionReturns?.map((result) => (
+        <View key={result.childThreadId} className="mt-2 border-l-2 border-border pl-2">
+          <Text className="font-ryco-bold text-sm text-foreground">
+            Completion return · {result.status}
+          </Text>
+          <Text className="font-sans text-sm text-foreground-muted">{result.detail}</Text>
+          <Pressable
+            accessibilityRole="link"
+            onPress={() =>
+              navigation.navigate("Thread", {
+                environmentId: props.environmentId,
+                threadId: result.childThreadId,
+              })
+            }
+            className="min-h-11 justify-center"
+          >
+            <Text className="text-sm text-primary">Open child task</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="link"
+            onPress={() =>
+              navigation.navigate("Thread", {
+                environmentId: props.environmentId,
+                threadId: result.parentThreadId,
+              })
+            }
+            className="min-h-11 justify-center"
+          >
+            <Text className="text-sm text-primary">Open originating chat</Text>
+          </Pressable>
+        </View>
+      ))}
       {model.detailSections.map((section) => (
         <View key={section.heading} className="mt-2 rounded-xl border border-border p-3">
           <Text className="font-ryco-bold text-sm text-foreground">{section.heading}</Text>

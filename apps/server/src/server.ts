@@ -1,4 +1,6 @@
 import { SessionImportLive } from "./imports/SessionImport.ts";
+import { CompletionReturnRepositoryLive } from "./persistence/Layers/AgentControlCompletionReturns.ts";
+import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Effect, Layer } from "effect";
@@ -262,6 +264,7 @@ const AgentControlLayerLive = Layer.mergeAll(
   AgentControlExternalInstallationLayerLive,
 ).pipe(
   Layer.provideMerge(AgentControlProposalStoreLive),
+  Layer.provideMerge(CompletionReturnRepositoryLive),
   Layer.provideMerge(AgentControlProposalEventsLive),
   Layer.provideMerge(AgentControlPolicyLive),
   Layer.provideMerge(AgentControlProposalRepositoryLive),
@@ -480,6 +483,10 @@ const RuntimeServicesLive = Layer.mergeAll(
         Layer.provideMerge(AgentControlWorkspacesLive),
       ),
     ),
+  ),
+  CompletionReturnDeliveryLive.pipe(
+    Layer.provideMerge(ServerRuntimeStartupLive),
+    Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
   AgentControlExecutionLive.pipe(
     Layer.provideMerge(ServerRuntimeStartupLive),
