@@ -820,6 +820,7 @@ const OrchestrationLatestTurnState = Schema.Literals([
 export type OrchestrationLatestTurnState = typeof OrchestrationLatestTurnState.Type;
 
 export const OrchestrationLatestTurn = Schema.Struct({
+  userMessageId: Schema.optional(MessageId),
   turnId: TurnId,
   state: OrchestrationLatestTurnState,
   requestedAt: IsoDateTime,
@@ -1343,8 +1344,16 @@ export const DelegationReturnGuard = Schema.Struct({
   runtimeMode: RuntimeMode,
   worktreePath: Schema.NullOr(Schema.String),
 });
+export const ClaudeResumeGuard = Schema.Struct({
+  requireReady: Schema.Boolean,
+  runtimeSessionId: RuntimeSessionId,
+  latestTurnId: Schema.NullOr(TurnId),
+  modelSelection: ModelSelection,
+});
+export type ClaudeResumeGuard = typeof ClaudeResumeGuard.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
+  claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
@@ -1373,6 +1382,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
 });
 
 const ClientThreadTurnStartCommand = Schema.Struct({
+  claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),

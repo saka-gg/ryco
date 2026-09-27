@@ -1,3 +1,4 @@
+import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import { stageComputerTurn, computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
@@ -940,9 +941,14 @@ const make = Effect.gen(function* () {
           : requestedModelSelection
         : input.modelSelection;
 
+    const nativeCompaction =
+      activeSession?.provider === "claudeAgent" &&
+      !input.computerUse &&
+      isClaudeNativeCompaction({ input: input.messageText, attachments: normalizedAttachments });
     return {
       threadId: input.threadId,
-      ...(normalizedInput
+      ...(nativeCompaction ? { input: "/compact" } : {}),
+      ...(!nativeCompaction && normalizedInput
         ? {
             input: input.computerUse
               ? `${computerToolInstructions()}\n\n${normalizedInput}`

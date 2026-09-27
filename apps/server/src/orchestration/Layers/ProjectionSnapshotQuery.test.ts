@@ -1476,12 +1476,19 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.equal(threadShell.value.latestTurn?.startedAt, "2026-04-02T00:00:30.000Z");
       }
 
+      const cacheReviewWindow = yield* snapshotQuery.getThreadWindow!({
+        threadId: ThreadId.make("thread-1"),
+        limits: { messages: 1, activities: 1, proposedPlans: 1, checkpoints: 1 },
+      });
+      assert.equal(cacheReviewWindow.thread.latestTurn?.userMessageId, "message-user-2");
+
       const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
         assert.equal(threadDetail.value.latestTurn?.turnId, asTurnId("turn-running"));
         assert.equal(threadDetail.value.latestTurn?.state, "running");
         assert.equal(threadDetail.value.latestTurn?.startedAt, "2026-04-02T00:00:30.000Z");
+        assert.equal(threadDetail.value.latestTurn?.userMessageId, "message-user-2");
       }
     }),
   );

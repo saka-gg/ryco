@@ -137,6 +137,7 @@ type ProjectionPlanRow = Schema.Schema.Type<typeof ProjectionThreadProposedPlanD
 type ProjectionActivityRow = Schema.Schema.Type<typeof ProjectionThreadActivityDbRowSchema>;
 type ProjectionCheckpointRow = Schema.Schema.Type<typeof ProjectionCheckpointDbRowSchema>;
 const ProjectionLatestTurnDbRowSchema = Schema.Struct({
+  userMessageId: Schema.NullOr(MessageId),
   threadId: ProjectionThread.fields.threadId,
   turnId: TurnId,
   state: Schema.String,
@@ -286,6 +287,7 @@ function mapLatestTurn(
 ): OrchestrationLatestTurn {
   return {
     turnId: row.turnId,
+    ...(row.userMessageId !== null ? { userMessageId: row.userMessageId } : {}),
     state:
       row.state === "error"
         ? "error"
@@ -890,6 +892,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           turns.thread_id AS "threadId",
           turns.turn_id AS "turnId",
+          turns.pending_message_id AS "userMessageId",
           turns.state,
           turns.requested_at AS "requestedAt",
           turns.started_at AS "startedAt",
@@ -914,6 +917,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           turns.thread_id AS "threadId",
           turns.turn_id AS "turnId",
+          turns.pending_message_id AS "userMessageId",
           turns.state,
           turns.requested_at AS "requestedAt",
           turns.started_at AS "startedAt",
@@ -1311,6 +1315,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           turns.thread_id AS "threadId",
           turns.turn_id AS "turnId",
+          turns.pending_message_id AS "userMessageId",
           turns.state,
           turns.requested_at AS "requestedAt",
           turns.started_at AS "startedAt",
@@ -2006,6 +2011,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 }
                 latestTurnByThread.set(row.threadId, {
                   turnId: row.turnId,
+                  ...(row.userMessageId !== null ? { userMessageId: row.userMessageId } : {}),
                   state:
                     row.state === "error"
                       ? "error"

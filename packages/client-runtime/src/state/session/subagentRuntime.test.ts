@@ -1078,3 +1078,35 @@ describe("nested agents vs subagent shells", () => {
     expect(agents.map((agent) => agent.id)).toEqual(["nested-1"]);
   });
 });
+
+it("retains distinct observed child direct/read/write/output scopes across sparse terminal updates", () => {
+  const agents = fold([
+    activity("task.started", {
+      taskId: "cache-child",
+      title: "Child fixture",
+      taskType: "local_agent",
+    }),
+    activity("task.progress", {
+      taskId: "cache-child",
+      typedUsage: {
+        totalTokens: 100,
+        inputTokens: 10,
+        directInputTokens: 10,
+        cachedInputTokens: 50,
+        cacheWriteInputTokens: 30,
+        outputTokens: 10,
+      },
+    }),
+    activity("task.completed", {
+      taskId: "cache-child",
+      status: "completed",
+      typedUsage: { totalTokens: 100 },
+    }),
+  ]);
+  expect(agents[0]?.usage).toMatchObject({
+    directInputTokens: 10,
+    cachedInputTokens: 50,
+    cacheWriteInputTokens: 30,
+    outputTokens: 10,
+  });
+});

@@ -1034,6 +1034,23 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const resumeGuard = command.claudeResumeGuard;
+      if (
+        resumeGuard &&
+        (targetThread.session?.providerName !== "claudeAgent" ||
+          (resumeGuard.requireReady && targetThread.session.status !== "ready") ||
+          targetThread.session.activeTurnId !== null ||
+          targetThread.session.runtimeSessionId !== resumeGuard.runtimeSessionId ||
+          (targetThread.latestTurn?.turnId ?? null) !== resumeGuard.latestTurnId ||
+          JSON.stringify(targetThread.modelSelection) !==
+            JSON.stringify(resumeGuard.modelSelection))
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Claude resume review is stale. The session, model, context settings, or latest turn changed. Review and send again.",
+        });
+      }
       if (
         targetThread.session?.status === "running" &&
         targetThread.session.activeTurnId !== null

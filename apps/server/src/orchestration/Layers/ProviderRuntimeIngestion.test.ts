@@ -4471,6 +4471,50 @@ describe("ProviderRuntimeIngestion", () => {
     });
   });
 
+  it("keeps one projected Claude cache observation and its original source timestamp across snapshot reads", async () => {
+    const harness = await createHarness();
+    const observedAt = "2026-01-01T00:00:00.000Z";
+    const claudeCache = {
+      source: "assistant-usage" as const,
+      observedAt,
+      runtimeSessionId: RuntimeSessionId.make("cache-runtime"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "sonnet",
+      messageId: "request-1",
+      directInputTokens: 10,
+      cacheReadInputTokens: 40_000,
+      cacheWriteInputTokens: 1_000,
+    };
+    for (let index = 0; index < 2; index++) {
+      harness.emit({
+        type: "thread.token-usage.updated",
+        eventId: asEventId(`cache-observation-${index}`),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: new Date(Date.now() + index).toISOString(),
+        threadId: asThreadId("thread-1"),
+        payload: { usage: { usedTokens: 41_010, durationMs: index, claudeCache } },
+      });
+    }
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity) =>
+          activity.kind === "context-window.updated" &&
+          (activity.payload as { durationMs?: number }).durationMs === 1,
+      ),
+    );
+    expect(
+      thread.activities.filter((activity) => activity.kind === "context-window.updated"),
+    ).toHaveLength(1);
+    for (let index = 0; index < 2; index++) {
+      const snapshot = await harness.readModel();
+      expect(
+        snapshot.threads[0]?.activities.find(
+          (activity) => activity.kind === "context-window.updated",
+        )?.payload,
+      ).toMatchObject({ claudeCache });
+    }
+  });
+
   it("projects compacted thread state into context compaction activities", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

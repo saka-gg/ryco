@@ -1,0 +1,24 @@
+# Observed Claude cache usage and resume review
+
+The composer exposes **Observed Claude cache usage** after Claude reports a complete main-loop request usage breakdown. Direct input, cache reads, and cache writes remain distinct. The request's original observation time, API model, provider instance, and runtime session are retained. A separate result-usage record carries cumulative main-loop input/read/write/output totals; assistant-message output placeholders are not presented as measured output. Child-agent usage stays on child task records and does not refresh the parent's cache observation.
+
+The latest observation is carried by the existing persisted context-usage activity. Claude context activities use one stable projection key per thread, bounding current-state storage. The orchestration event log remains the normal replay history. Snapshot loading and reconnect do not change the source timestamp. No database migration is needed.
+
+A send to an existing Claude conversation is reviewed when its last observed prompt was at least 32,000 tokens and either the runtime/account/model/context selection changed, an explicitly reported write lifetime has elapsed, or the observation is at least 30 minutes old. **Thirty minutes is a UI review threshold, not a provider cache TTL.** Missing evidence, malformed counters, future timestamps, small prompts, first messages, and non-Claude sends do not trigger this review. Switching provider instances invalidates any assumption that the old account's prefix is available. The runtime cannot observe an account change hidden inside an unchanged external credential source; no cache-validity claim is made in that case.
+
+The choices are **Continue with full context**, **Compact then send**, and **Cancel**. Compaction can consume tokens and summarizes older context. Neither compaction nor a cache observation promises a future hit or billing savings. A lifetime is shown only when the current request explicitly reports its cache-write duration; it is never inferred from account type, reads, or defaults. There are no keepalive requests.
+
+The shared client send engine owns the held original message and attachment references. It dispatches an attachment-free native `/compact` request, then waits for a compaction boundary correlated to that request's authoritative latest-turn user-message ID, a completed turn, and a ready session without an active runtime turn. A successful result without a boundary is not sufficient. Snapshot reads while waiting are local Ryco RPCs; they do not call Claude. The wait is bounded to two minutes. Cancellation stops the held send; a compaction already requested can still finish.
+
+Readiness is checked against the connection owner's captured live-shell generation and again immediately before the original send. Hosted authorization remains with the existing transport/lifecycle owner. Server-side guards reject changed runtime, model/context selection, latest turn, or required readiness. Reconnect, interruption, failed/no-op compaction, replacement, and uncertain results retain the original draft or queue entry. Native outbox entries paused by review have an explicit **Review and retry** action. Upload tokens are not consumed by compaction; an upload that expires while waiting must be reattached through the existing upload recovery UI.
+
+Final send command IDs derive from the original thread/message IDs independently of cache evidence. Concurrent submissions share one in-flight operation, and retries of an existing queued logical message retain the same command ID across reloads and lost acknowledgements. Compaction commands also use a stable ID. Accepted-command receipts provide server deduplication. A rejected guarded command can require restoring/editing the queued message as a new logical send; it must not silently replace an uncertain accepted request with a new identity.
+
+## Implementation references
+
+- [Claude Agent SDK usage accounting](https://code.claude.com/docs/en/agent-sdk/cost-tracking): main-loop versus whole-tree scope, duplicate assistant message IDs, and output placeholders.
+- [Native `/compact`](https://code.claude.com/docs/en/agent-sdk/slash-commands#compact-history-with-compact): successful no-op commands do not emit a compaction boundary.
+- [Claude prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching): observed read/write counters and reported write durations.
+- [Synara v0.9.0](https://github.com/Emanuele-web04/synara/tree/v0.9.0), [v0.9.2](https://github.com/Emanuele-web04/synara/tree/v0.9.2), and [changelog](https://www.trysynara.com/changelog) were inspected as design references. This implementation was written independently; no upstream source was copied.
+
+Validation uses synthetic usage, sessions, attachments, and transport failures. It does not read user transcripts or credentials or make billable Claude calls.

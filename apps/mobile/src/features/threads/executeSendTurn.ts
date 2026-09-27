@@ -1,5 +1,7 @@
+import type { ClaudeCacheReviewPresentation } from "@ryco/client-runtime/state/composer";
 import type {
   AgentTokenMode,
+  ProviderDriverKind,
   EnvironmentApi,
   ModelSelection,
   ProjectId,
@@ -31,6 +33,9 @@ import { isDraftComposerFileAttachment } from "../../lib/composerFiles";
 
 export interface ExecuteSendTurnInput {
   readonly api: EnvironmentApi;
+  readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
+  readonly providerDriver?: ProviderDriverKind | null;
+  readonly assertMutationReady?: () => void;
   readonly thread: {
     readonly threadId: ThreadId;
     readonly isFirstMessage: boolean;
@@ -143,6 +148,9 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
     });
 
     await commitSendTurnDispatch({
+      ...(input.claudeCacheReview ? { claudeCacheReview: input.claudeCacheReview } : {}),
+      providerDriver: input.providerDriver,
+      ...(input.assertMutationReady ? { assertMutationReady: input.assertMutationReady } : {}),
       api: input.api,
       threadId: input.thread.threadId,
       isFirstMessage: input.thread.isFirstMessage,

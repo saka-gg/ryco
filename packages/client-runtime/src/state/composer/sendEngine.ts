@@ -1,9 +1,15 @@
+import {
+  reviewClaudeResumeBeforeSend,
+  revalidateClaudeResumeBeforeCommit,
+  type ClaudeCacheReviewPresentation,
+} from "./claudeCacheReview.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import {
   DEFAULT_MODEL,
   type AgentTokenMode,
-  type CommandId,
+  CommandId,
+  type ProviderDriverKind,
   type ComposerSourceControlContext,
   type EnvironmentApi,
   type ThreadGoalUpdate,
@@ -208,6 +214,9 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 }
 
 export interface CommitSendTurnDispatchInput {
+  readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
+  readonly providerDriver?: ProviderDriverKind | null;
+  readonly assertMutationReady?: () => void;
   readonly computerUse?: ComputerTurnIntent;
   readonly api: EnvironmentApi;
   readonly threadId: ThreadId;
@@ -246,8 +255,23 @@ export interface CommitSendTurnDispatchInput {
  * concerns (optimistic messages, toasts, focus, the undo window, preview URLs)
  * remain in the web caller, which invokes this only once the turn commits.
  */
-export async function commitSendTurnDispatch(input: CommitSendTurnDispatchInput): Promise<void> {
+const pendingSends = new WeakMap<EnvironmentApi, Map<MessageId, Promise<void>>>();
+export function commitSendTurnDispatch(input: CommitSendTurnDispatchInput): Promise<void> {
+  let sends = pendingSends.get(input.api);
+  if (!sends) {
+    sends = new Map();
+    pendingSends.set(input.api, sends);
+  }
+  const pending = sends.get(input.messageId);
+  if (pending) return pending;
+  const result = commitSendTurnDispatchOnce(input).finally(() => sends.delete(input.messageId));
+  sends.set(input.messageId, result);
+  return result;
+}
+
+async function commitSendTurnDispatchOnce(input: CommitSendTurnDispatchInput): Promise<void> {
   rejectRetiredProjectMemory(input);
+  const reviewed = await reviewClaudeResumeBeforeSend(input);
   // Server-side writes derived from this message must only run once the send
   // commits; otherwise an undone first send leaves orphan title/settings.
   if (input.isFirstMessage && input.isServerThread) {
@@ -269,11 +293,16 @@ export async function commitSendTurnDispatch(input: CommitSendTurnDispatchInput)
     });
   }
 
+  if (reviewed) {
+    await revalidateClaudeResumeBeforeCommit(input, reviewed.guard);
+    input.assertMutationReady?.();
+  }
   input.beginLocalDispatch({ preparingWorktree: false });
   await input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",
     ...(input.computerUse ? { computerUse: input.computerUse } : {}),
-    commandId: input.newCommandId(),
+    commandId: CommandId.make(`composer-send:${input.threadId}:${input.messageId}`),
+    ...(reviewed ? { claudeResumeGuard: reviewed.guard } : {}),
     threadId: input.threadId,
     message: {
       messageId: input.messageId,

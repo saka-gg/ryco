@@ -1,3 +1,8 @@
+import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
+import { mobileClaudeCacheReview } from "./claudeCacheReview";
+import { runOutboxDrain } from "../../state/use-thread-outbox-drain";
+import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
+import { captureReviewedSendReadiness } from "@ryco/client-runtime/state/composer";
 import {
   hasRetiredProjectMemory,
   REMOVED_PROJECT_MEMORY_MESSAGE,
@@ -86,6 +91,7 @@ import {
   enqueueThreadOutboxMessage,
   listThreadOutboxMessages,
   removeThreadOutboxMessage,
+  retryThreadOutboxReview,
   subscribeThreadOutbox,
 } from "../../state/threadOutbox";
 import { buildQueuedThreadMessageAttachments } from "../../state/queuedThreadMessageAttachments";
@@ -1013,6 +1019,11 @@ export function ThreadDetailScreen(props: {
           enqueue: enqueueThreadOutboxMessage,
           dispatch: () =>
             executeSendTurn({
+              providerDriver: threadProviderDriver,
+              claudeCacheReview: mobileClaudeCacheReview,
+              assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
+                createMobileConnectionRegistry().driver.supervisor.read(environmentId),
+              ),
               api: ensureEnvironmentApi(environmentId),
               thread: {
                 threadId,
@@ -1216,8 +1227,16 @@ export function ThreadDetailScreen(props: {
         </ScrollView>
       ) : null}
 
+      {canonicalProviderDriver === "claudeAgent" && (
+        <ClaudeCacheDetails activities={thread?.activities ?? []} />
+      )}
+
       <ThreadQueuedMessages
         messages={queuedMessages}
+        onRetryReview={(messageId) => {
+          retryThreadOutboxReview(messageId);
+          runOutboxDrain();
+        }}
         steeringIds={steeringMessageIds}
         getSteerUnavailableReason={getSteerUnavailableReason}
         onSteer={(message) => void steerQueuedMessage(message)}

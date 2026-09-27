@@ -26,6 +26,7 @@ const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
 export type EnvironmentShellStatus = "idle" | "loading" | "live";
 
 export interface QueuedThreadMessage {
+  readonly resumeReviewError?: string;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;

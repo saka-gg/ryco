@@ -36,6 +36,8 @@ export interface SubagentUsage {
   readonly totalTokens: number;
   readonly inputTokens?: number;
   readonly cachedInputTokens?: number;
+  readonly directInputTokens?: number;
+  readonly cacheWriteInputTokens?: number;
   readonly outputTokens?: number;
   readonly reasoningOutputTokens?: number;
   readonly toolUses?: number;
@@ -180,6 +182,8 @@ function asUsage(value: unknown): SubagentUsage | undefined {
     totalTokens: number;
     inputTokens?: number;
     cachedInputTokens?: number;
+    directInputTokens?: number;
+    cacheWriteInputTokens?: number;
     outputTokens?: number;
     reasoningOutputTokens?: number;
     toolUses?: number;
@@ -187,6 +191,10 @@ function asUsage(value: unknown): SubagentUsage | undefined {
   } = { totalTokens };
   const inputTokens = asCount(record.inputTokens);
   if (inputTokens !== undefined) usage.inputTokens = inputTokens;
+  const directInputTokens = asCount(record.directInputTokens);
+  if (directInputTokens !== undefined) usage.directInputTokens = directInputTokens;
+  const cacheWriteInputTokens = asCount(record.cacheWriteInputTokens);
+  if (cacheWriteInputTokens !== undefined) usage.cacheWriteInputTokens = cacheWriteInputTokens;
   const cachedInputTokens = asCount(record.cachedInputTokens);
   if (cachedInputTokens !== undefined) usage.cachedInputTokens = cachedInputTokens;
   const outputTokens = asCount(record.outputTokens);
@@ -226,6 +234,8 @@ function mergeUsageMax(
     totalTokens: number;
     inputTokens?: number;
     cachedInputTokens?: number;
+    directInputTokens?: number;
+    cacheWriteInputTokens?: number;
     outputTokens?: number;
     reasoningOutputTokens?: number;
     toolUses?: number;
@@ -233,6 +243,10 @@ function mergeUsageMax(
   } = { totalTokens: Math.max(current.totalTokens, incoming.totalTokens) };
   const inputTokens = pick(current.inputTokens, incoming.inputTokens);
   if (inputTokens !== undefined) merged.inputTokens = inputTokens;
+  const directInputTokens = pick(current.directInputTokens, incoming.directInputTokens);
+  if (directInputTokens !== undefined) merged.directInputTokens = directInputTokens;
+  const cacheWriteInputTokens = pick(current.cacheWriteInputTokens, incoming.cacheWriteInputTokens);
+  if (cacheWriteInputTokens !== undefined) merged.cacheWriteInputTokens = cacheWriteInputTokens;
   const cachedInputTokens = pick(current.cachedInputTokens, incoming.cachedInputTokens);
   if (cachedInputTokens !== undefined) merged.cachedInputTokens = cachedInputTokens;
   const outputTokens = pick(current.outputTokens, incoming.outputTokens);

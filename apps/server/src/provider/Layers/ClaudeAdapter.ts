@@ -1,3 +1,6 @@
+import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
+import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
+import type { ClaudeCacheObservation, ModelSelection } from "@ryco/contracts";
 /**
  * ClaudeAdapterLive - Scoped live implementation for the Claude Agent provider adapter.
  *
@@ -295,6 +298,8 @@ interface ClaudeSessionContext {
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
+  cacheObservation: ClaudeCacheObservation | undefined;
+  cacheModelSelection: ModelSelection | undefined;
   compactionPolicy: ContextCompactionPolicyState;
   readonly supportsAutomaticCompaction: boolean;
   compactionUnavailableWarningEmitted: boolean;
@@ -491,18 +496,21 @@ function asRuntimeItemId(value: string): RuntimeItemId {
   return RuntimeItemId.make(value);
 }
 
-function maxClaudeContextWindowFromModelUsage(
+function mainClaudeContextWindowFromModelUsage(
   modelUsage: Record<string, ModelUsage> | undefined,
+  mainModel?: string,
 ): number | undefined {
   if (!modelUsage) return undefined;
-
-  let maxContextWindow: number | undefined;
-  for (const value of Object.values(modelUsage)) {
-    const contextWindow = value.contextWindow;
-    maxContextWindow = Math.max(maxContextWindow ?? 0, contextWindow);
-  }
-
-  return maxContextWindow;
+  // modelUsage includes subagents. A child's larger budget is not the parent's.
+  const usage = mainModel
+    ? modelUsage[mainModel]
+    : Object.keys(modelUsage).length === 1
+      ? Object.values(modelUsage)[0]
+      : undefined;
+  const window = usage?.contextWindow;
+  return typeof window === "number" && Number.isSafeInteger(window) && window > 0
+    ? window
+    : undefined;
 }
 
 function normalizeClaudeTokenUsage(
@@ -661,12 +669,14 @@ function normalizeTaskUsage(usage: unknown): RuntimeTaskUsage | undefined {
   }
   const inputTokens = nonNegativeInt(record.input_tokens);
   const cachedInputTokens = nonNegativeInt(record.cache_read_input_tokens);
+  const cacheWriteInputTokens = nonNegativeInt(record.cache_creation_input_tokens);
   const outputTokens = nonNegativeInt(record.output_tokens);
   const toolUses = nonNegativeInt(record.tool_uses);
   const durationMs = nonNegativeInt(record.duration_ms);
   return {
     totalTokens,
-    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(inputTokens !== undefined ? { inputTokens, directInputTokens: inputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(toolUses !== undefined ? { toolUses } : {}),
@@ -1121,6 +1131,7 @@ function buildPromptText(
   input: ProviderSendTurnInput,
   boundInstanceId: ProviderInstanceId,
 ): string {
+  if (isClaudeNativeCompaction(input)) return "/compact";
   const rawEffort =
     input.modelSelection?.instanceId === boundInstanceId
       ? getModelSelectionStringOptionValue(input.modelSelection, "effort")
@@ -2222,7 +2233,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     errorMessage?: string,
     result?: SDKResultMessage,
   ) {
-    const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
+    const resultCounts = readClaudeCacheCounts(result?.usage);
+    if (context.cacheObservation && resultCounts?.outputTokens !== undefined) {
+      context.cacheObservation = {
+        ...context.cacheObservation,
+        mainLoopTotals: {
+          source: "result-usage",
+          observedAt: yield* nowIso,
+          ...resultCounts,
+          outputTokens: resultCounts.outputTokens,
+        },
+      };
+    }
+    const resultContextWindow = mainClaudeContextWindowFromModelUsage(
+      result?.modelUsage,
+      context.cacheObservation?.model ?? context.currentApiModelId,
+    );
     if (resultContextWindow !== undefined) {
       context.lastKnownContextWindow = resultContextWindow;
     }
@@ -2230,8 +2256,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // The SDK result.usage contains *accumulated* totals across all API calls
     // (input_tokens, cache_read_input_tokens, etc. summed over every request).
     // This does NOT represent the current context window size.
-    // Instead, use the last known context-window-accurate usage from task_progress
-    // events and treat the accumulated total as totalProcessedTokens.
+    // Prefer the last main-loop request gauge (legacy main-task telemetry is
+    // a fallback) and keep cumulative totals separate as totalProcessedTokens.
     const accumulatedSnapshot = normalizeClaudeTokenUsage(
       result?.usage,
       resultContextWindow ?? context.lastKnownContextWindow,
@@ -2256,7 +2282,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
       : accumulatedSnapshot;
     const usageSnapshot = rawUsageSnapshot
-      ? withAutomaticCompactionCapability(rawUsageSnapshot, context.supportsAutomaticCompaction)
+      ? withAutomaticCompactionCapability(
+          {
+            ...rawUsageSnapshot,
+            ...(context.cacheObservation ? { claudeCache: context.cacheObservation } : {}),
+          },
+          context.supportsAutomaticCompaction,
+        )
       : undefined;
 
     const turnState = context.turnState;
@@ -2892,6 +2924,44 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    const cacheStamp = yield* makeEventStamp();
+    const previousCache = context.cacheObservation;
+    context.cacheObservation = observeClaudeCache({
+      usage: message.message.usage,
+      messageId: message.message.id,
+      model: message.message.model,
+      ...(context.cacheModelSelection ? { modelSelection: context.cacheModelSelection } : {}),
+      runtimeSessionId: context.session.runtimeSessionId!,
+      providerInstanceId: context.session.providerInstanceId!,
+      observedAt: cacheStamp.createdAt,
+      ...(previousCache ? { previous: previousCache } : {}),
+    });
+    if (context.cacheObservation && context.cacheObservation !== previousCache) {
+      const observation = context.cacheObservation;
+      const usedTokens =
+        observation.directInputTokens +
+        observation.cacheReadInputTokens +
+        observation.cacheWriteInputTokens;
+      const usage: ThreadTokenUsageSnapshot = {
+        usedTokens,
+        inputTokens: usedTokens,
+        cachedInputTokens: observation.cacheReadInputTokens,
+        ...(context.lastKnownContextWindow ? { maxTokens: context.lastKnownContextWindow } : {}),
+        claudeCache: observation,
+      };
+      context.lastKnownTokenUsage = usage;
+      yield* offerRuntimeEventForContext(context, {
+        type: "thread.token-usage.updated",
+        provider: PROVIDER,
+        eventId: cacheStamp.eventId,
+        createdAt: cacheStamp.createdAt,
+        threadId: context.session.threadId,
+        ...(context.turnState ? { turnId: context.turnState.turnId } : {}),
+        payload: { usage },
+        providerRefs: {},
+      });
+    }
+
     // Auto-start a synthetic turn for assistant messages that arrive without
     // an active turn (e.g., background agent/subagent responses between user prompts).
     if (!context.turnState) {
@@ -3289,6 +3359,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context.generation,
         );
         context.lastKnownTokenUsage = undefined;
+        context.cacheObservation = undefined;
         yield* offerRuntimeEventForContext(context, {
           ...base,
           type: "thread.state.changed",
@@ -3445,7 +3516,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
       case "task_progress": {
-        if (message.usage) {
+        if (
+          message.usage &&
+          !context.cacheObservation &&
+          !isClaudeSubagentTaskMessage(message) &&
+          !context.taskAgents.get(message.task_id)?.toolUseId
+        ) {
           const normalizedUsage = normalizeClaudeTokenUsage(
             message.usage,
             context.lastKnownContextWindow,
@@ -3460,7 +3536,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               type: "thread.token-usage.updated",
               payload: {
                 usage: withAutomaticCompactionCapability(
-                  normalizedUsage,
+                  {
+                    ...normalizedUsage,
+                    ...(context.cacheObservation ? { claudeCache: context.cacheObservation } : {}),
+                  },
                   context.supportsAutomaticCompaction,
                 ),
               },
@@ -3568,7 +3647,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "task_notification": {
         context.liveTaskIds.delete(message.task_id);
         context.backgroundedTaskIds.delete(message.task_id);
-        if (message.usage) {
+        if (
+          message.usage &&
+          !context.cacheObservation &&
+          !isClaudeSubagentTaskMessage(message) &&
+          !context.taskAgents.get(message.task_id)?.toolUseId
+        ) {
           const normalizedUsage = normalizeClaudeTokenUsage(
             message.usage,
             context.lastKnownContextWindow,
@@ -3583,7 +3667,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               type: "thread.token-usage.updated",
               payload: {
                 usage: withAutomaticCompactionCapability(
-                  normalizedUsage,
+                  {
+                    ...normalizedUsage,
+                    ...(context.cacheObservation ? { claudeCache: context.cacheObservation } : {}),
+                  },
                   context.supportsAutomaticCompaction,
                 ),
               },
@@ -4555,6 +4642,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         turnState: undefined,
         lastKnownContextWindow: undefined,
         lastKnownTokenUsage: undefined,
+        cacheObservation: undefined,
+        cacheModelSelection: modelSelection,
         compactionPolicy: initialContextCompactionPolicyState(generation),
         supportsAutomaticCompaction,
         compactionUnavailableWarningEmitted: false,
@@ -4660,7 +4749,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
         });
         context.currentApiModelId = apiModelId;
+        context.lastKnownContextWindow = undefined;
+        context.lastKnownTokenUsage = undefined;
       }
+      context.cacheModelSelection = modelSelection;
       context.session = {
         ...context.session,
         model: modelSelection.model,
@@ -4724,7 +4816,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     const hostContextPrefix =
-      context.agentControlHostContextDelivered || context.agentControlHostContext.length === 0
+      isClaudeNativeCompaction(input) ||
+      context.agentControlHostContextDelivered ||
+      context.agentControlHostContext.length === 0
         ? undefined
         : `<ryco_host_context>${context.agentControlHostContext}</ryco_host_context>`;
     if (hostContextPrefix) context.agentControlHostContextDelivered = true;

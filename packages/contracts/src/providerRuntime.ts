@@ -1,3 +1,4 @@
+import { ClaudeCacheObservation } from "./claudeCache.ts";
 import { Effect, Schema } from "effect";
 import { ApprovalResponseIdentity } from "./approvalResponses.ts";
 import {
@@ -335,6 +336,7 @@ const ProviderThreadGoalClearedPayload = Schema.Struct({});
 export type ProviderThreadGoalClearedPayload = typeof ProviderThreadGoalClearedPayload.Type;
 
 export const ThreadTokenUsageSnapshot = Schema.Struct({
+  claudeCache: Schema.optional(ClaudeCacheObservation),
   usedTokens: NonNegativeInt,
   totalProcessedTokens: Schema.optional(NonNegativeInt),
   maxTokens: Schema.optional(PositiveInt),
@@ -505,6 +507,8 @@ export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
  * merge strategy is provider-specific and lives in client-runtime.
  */
 export const RuntimeTaskUsage = Schema.Struct({
+  directInputTokens: Schema.optional(NonNegativeInt),
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
   totalTokens: NonNegativeInt,
   inputTokens: Schema.optional(NonNegativeInt),
   cachedInputTokens: Schema.optional(NonNegativeInt),

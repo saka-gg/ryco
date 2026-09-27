@@ -675,6 +675,42 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession).not.toHaveBeenCalled();
     });
   }
+  it("keeps Claude native compaction exact even with a prompt-managed goal", async () => {
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(
+        ProviderInstanceId.make("claudeAgent"),
+        "claude-sonnet-4-6",
+      ),
+    });
+    const now = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.goal.set",
+        commandId: CommandId.make("compact-goal"),
+        threadId: ThreadId.make("thread-1"),
+        objective: "Keep improving the fixture",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("native-compact"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("native-compact-message"),
+          role: "user",
+          text: "/compact",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "/compact" });
+  });
 
   it("recovers pending goal delivery when the reactor starts", async () => {
     const now = new Date().toISOString();

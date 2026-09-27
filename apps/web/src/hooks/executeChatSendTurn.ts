@@ -1,3 +1,5 @@
+import { readEnvironmentConnection } from "../environments/runtime";
+import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import {
@@ -22,6 +24,7 @@ import {
   buildSendTurnDispatchAttachment,
   buildSendTurnUploadTokenDispatchAttachment,
   commitSendTurnDispatch,
+  captureReviewedSendReadiness,
   isFileUploadTokenUsable,
   resolveThreadCreateModelSelection,
 } from "@ryco/client-runtime/state/composer";
@@ -507,6 +510,11 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     // Provider-independent dispatch assembly (title update, next-turn settings,
     // and `thread.turn.start`).
     await commitSendTurnDispatch({
+      claudeCacheReview: claudeCacheReviewPresentation,
+      providerDriver: composer.selectedProvider,
+      assertMutationReady: captureReviewedSendReadiness(draft.environmentId, () =>
+        readEnvironmentConnection(draft.environmentId),
+      ),
       api,
       threadId: prepared?.threadId ?? thread.threadId,
       isFirstMessage: prepared?.isFirstMessage ?? thread.isFirstMessage,

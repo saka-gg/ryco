@@ -1006,7 +1006,10 @@ export function runtimeEventToActivities(
 
       return [
         {
-          id: event.eventId,
+          id:
+            event.provider === "claudeAgent"
+              ? EventId.make(`claude-context-usage:${event.threadId}`)
+              : event.eventId,
           createdAt: event.createdAt,
           tone: "info",
           kind: "context-window.updated",

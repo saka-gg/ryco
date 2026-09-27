@@ -1,3 +1,4 @@
+import { isClaudeResumeReviewError } from "@ryco/client-runtime/state/composer";
 import { hasRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import { mobileKV } from "../platform/kv";
 import type { DraftComposerFileAttachment } from "../lib/composerFiles";
@@ -182,10 +183,15 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
         removeThreadOutboxMessage(message.messageId);
         continue;
       }
+      if (message.resumeReviewError) break;
       try {
         await deps.sendQueuedMessage(message);
         removeThreadOutboxMessage(message.messageId);
       } catch (error) {
+        if (isClaudeResumeReviewError(error)) {
+          enqueueThreadOutboxMessage({ ...message, resumeReviewError: error.message });
+          break;
+        }
         const failure = resolveThreadOutboxFailureAction({
           stage: "start-turn",
           error,
@@ -199,4 +205,11 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
       }
     }
   }
+}
+
+export function retryThreadOutboxReview(messageId: string): void {
+  const message = messages.find((entry) => entry.messageId === messageId);
+  if (!message) return;
+  const { resumeReviewError: _reason, ...retry } = message;
+  enqueueThreadOutboxMessage(retry);
 }

@@ -1,3 +1,4 @@
+import { ClaudeCacheDetails } from "./ClaudeCacheReview";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
 import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
@@ -2721,6 +2722,10 @@ export const ChatComposer = memo(
               onInterrupt={handleInterruptPrimaryAction}
               onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
             />
+
+            {!isMobileViewport && selectedProvider === "claudeAgent" && (
+              <ClaudeCacheDetails activities={activeThreadActivities ?? []} />
+            )}
 
             {/* Bottom toolbar. During a pending approval the approval card
                 above the editor carries the single action set, so the footer
