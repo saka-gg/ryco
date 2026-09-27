@@ -31,3 +31,7 @@ squashfs-root/
 scripts/**/*.d.ts
 
 /native/resource-monitor/target/
+
+# Locally provisioned Computer Use native artifacts
+/apps/desktop/resources/cua-driver/
+/apps/desktop/resources/ryco-computer-ui-helper*

@@ -1,3 +1,4 @@
+import { ComputerTurnIntent } from "./computerBeta.ts";
 import { ApprovalResponseIdentity } from "./approvalResponses.ts";
 import { Effect, Schema, SchemaIssue, SchemaTransformation, Struct } from "effect";
 import { ProviderOptionSelections } from "./model.ts";
@@ -1330,6 +1331,7 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
+  computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
@@ -1356,6 +1358,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
 });
 
 const ClientThreadTurnStartCommand = Schema.Struct({
+  computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
@@ -2048,6 +2051,7 @@ export const ThreadContextHandoffRequestedPayload = Schema.Struct({
 export type ThreadContextHandoffRequestedPayload = typeof ThreadContextHandoffRequestedPayload.Type;
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
+  computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Decode historical records without enabling recall or persisting rendered text.
   projectMemory: Schema.optional(Schema.Unknown),
   threadId: ThreadId,

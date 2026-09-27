@@ -1,4 +1,14 @@
 import type {
+  ComputerGetAuditHistoryInput,
+  ComputerGetAuditHistoryResult,
+} from "./computerAudit.ts";
+import type {
+  ComputerBetaPreferences,
+  ComputerBetaState,
+  ComputerBetaUpdate,
+  ComputerTurnIntent,
+} from "./computerBeta.ts";
+import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
   GitLocalChangesInput,
@@ -615,6 +625,17 @@ export interface DesktopBridge {
     discover(cwd?: string): Promise<readonly DiscoveredProjectSite[]>;
     onFocusAddress(listener: (tab: string) => void): () => void;
     onState(listener: (state: ProjectBrowserState) => void): () => void;
+  };
+  computerBeta?: {
+    getHistory(input?: ComputerGetAuditHistoryInput): Promise<ComputerGetAuditHistoryResult>;
+    getState(): Promise<ComputerBetaState>;
+    checkPermissions(): Promise<ComputerBetaState>;
+    setup(): Promise<ComputerBetaState>;
+    setPreferences(preferences: ComputerBetaPreferences): Promise<ComputerBetaState>;
+    prepare(threadId: string, explicit: boolean): Promise<ComputerTurnIntent | null>;
+    setPreview(threadId: string, visible: boolean): Promise<void>;
+    stopTask(threadId: string): Promise<void>;
+    onUpdate(listener: (update: ComputerBetaUpdate) => void): () => void;
   };
   computerUse?: {
     getState(): Promise<ComputerUseState>;

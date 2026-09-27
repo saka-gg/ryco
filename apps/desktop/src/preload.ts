@@ -115,6 +115,24 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       return () => ipcRenderer.removeListener("desktop:browser:changed", wrapped);
     },
   },
+  computerBeta: {
+    getHistory: (input) => ipcRenderer.invoke("desktop:computer-use:beta-history", input),
+    getState: () => ipcRenderer.invoke("desktop:computer-use:beta-state"),
+    checkPermissions: () => ipcRenderer.invoke("desktop:computer-use:beta-check"),
+    setup: () => ipcRenderer.invoke("desktop:computer-use:beta-setup"),
+    setPreferences: (value) => ipcRenderer.invoke("desktop:computer-use:beta-preferences", value),
+    prepare: (threadId, explicit) =>
+      ipcRenderer.invoke("desktop:computer-use:beta-prepare", { threadId, explicit }),
+    setPreview: (threadId, visible) =>
+      ipcRenderer.invoke("desktop:computer-use:beta-preview", { threadId, visible }),
+    stopTask: (threadId) => ipcRenderer.invoke("desktop:computer-use:beta-stop", { threadId }),
+    onUpdate: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, update: Parameters<typeof listener>[0]) =>
+        listener(update);
+      ipcRenderer.on("desktop:computer-beta:update", wrapped);
+      return () => ipcRenderer.removeListener("desktop:computer-beta:update", wrapped);
+    },
+  },
   computerUse: {
     getState: () => ipcRenderer.invoke("desktop:computer-use:state"),
     checkPermissions: () => ipcRenderer.invoke("desktop:computer-use:check-permissions"),

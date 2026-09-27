@@ -146,21 +146,24 @@ export function withComputerUseTools(
     url.hash
   )
     return base;
+  const descriptors = COMPUTER_TOOL_DESCRIPTORS.filter(
+    (tool) => !config.native || tool.name !== "ryco_computer",
+  );
   const capability = (name: string) =>
     name === "ryco_computer"
       ? AGENT_CONTROL_CAPABILITIES.controlComputer
       : AGENT_CONTROL_CAPABILITIES.controlBrowser;
-  const isComputer = (name: string) => COMPUTER_TOOL_DESCRIPTORS.some((tool) => tool.name === name);
+  const isComputer = (name: string) => descriptors.some((tool) => tool.name === name);
   return {
     ...base,
-    descriptors: [...base.descriptors, ...COMPUTER_TOOL_DESCRIPTORS],
+    descriptors: [...base.descriptors, ...descriptors],
     descriptorsFor: (session) =>
       base
         .descriptorsFor(session)
         .pipe(
           Effect.map((tools) => [
             ...tools,
-            ...COMPUTER_TOOL_DESCRIPTORS.filter((tool) =>
+            ...descriptors.filter((tool) =>
               session.grantedCapabilities.includes(capability(tool.name)),
             ),
           ]),

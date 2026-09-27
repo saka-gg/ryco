@@ -1,3 +1,7 @@
+import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
+import type { ComputerTurnIntent } from "@ryco/contracts";
+import { stageComputerTurn, computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
+import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import {
   hasRetiredProjectMemory,
   REMOVED_PROJECT_MEMORY_MESSAGE,
@@ -490,6 +494,7 @@ const make = Effect.gen(function* () {
     createdAt: string,
     options?: {
       readonly modelSelection?: ModelSelection;
+      readonly computerCatalogChanged?: boolean;
     },
   ) {
     const thread = yield* resolveThread(threadId);
@@ -667,6 +672,7 @@ const make = Effect.gen(function* () {
         !Equal.equals(previousModelSelection, requestedModelSelection);
 
       if (
+        !options?.computerCatalogChanged &&
         !runtimeModeChanged &&
         !tokenModeChanged &&
         !cwdChanged &&
@@ -836,6 +842,7 @@ const make = Effect.gen(function* () {
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
+    readonly computerUse?: ComputerTurnIntent;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: ProviderInteractionMode;
@@ -848,17 +855,56 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
-    yield* ensureSessionForThread(
+    const previousComputerPlan = computerTurnPlan(input.threadId);
+    const previousAssistantText =
+      input.computerUse && previousComputerPlan?.createdAt
+        ? yield* projectionSnapshotQuery.getThreadDetailById(input.threadId).pipe(
+            Effect.map(
+              Option.match({
+                onNone: () => undefined,
+                onSome: (detail) =>
+                  detail.messages
+                    .filter(
+                      (entry) =>
+                        entry.role === "assistant" &&
+                        !entry.streaming &&
+                        entry.createdAt >= previousComputerPlan.createdAt! &&
+                        entry.createdAt < input.createdAt,
+                    )
+                    .at(-1)?.text,
+              }),
+            ),
+          )
+        : undefined;
+    const computerCatalogChanged =
+      Boolean(computerTurnPlan(input.threadId)) !== Boolean(input.computerUse);
+    stageComputerTurn(
       input.threadId,
-      input.createdAt,
-      input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {},
+      input.computerUse
+        ? {
+            intent: input.computerUse,
+            text: input.messageText,
+            runtimeMode: thread.runtimeMode,
+            label: thread.title,
+            createdAt: input.createdAt,
+            ...(previousAssistantText ? { previousAssistantText } : {}),
+          }
+        : undefined,
     );
+    yield* ensureSessionForThread(input.threadId, input.createdAt, {
+      ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      computerCatalogChanged,
+    });
     const { goal, native } = yield* reconcileThreadGoal(input.threadId);
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = withProviderGoalPrompt({
-      message: toNonEmptyProviderInput(input.messageText),
+      message: toNonEmptyProviderInput(
+        input.computerUse
+          ? (parseComputerInvocation(input.messageText)?.prompt ?? input.messageText)
+          : input.messageText,
+      ),
       goal: native ? null : goal,
     });
     const normalizedAttachments = input.attachments ?? [];
@@ -894,7 +940,13 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
-      ...(normalizedInput ? { input: normalizedInput } : {}),
+      ...(normalizedInput
+        ? {
+            input: input.computerUse
+              ? `${computerToolInstructions()}\n\n${normalizedInput}`
+              : normalizedInput,
+          }
+        : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
@@ -911,6 +963,7 @@ const make = Effect.gen(function* () {
     readonly worktreePath: string | null;
     readonly worktreeId: WorktreeId | null;
     readonly messageText: string;
+    readonly computerUse?: ComputerTurnIntent;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
   }) {
     if (!input.branch || !input.worktreePath) {
@@ -975,6 +1028,7 @@ const make = Effect.gen(function* () {
       readonly threadId: ThreadId;
       readonly cwd: string;
       readonly messageText: string;
+      readonly computerUse?: ComputerTurnIntent;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
       readonly titleSeed?: string;
     }) {
@@ -1103,6 +1157,17 @@ const make = Effect.gen(function* () {
     }
 
     if (event.payload.contextHandoff !== undefined) {
+      // Handoff owns a separate session-start path. Its current human request
+      // must replace (or clear) the previous turn's Computer catalog too.
+      stageComputerTurn(event.payload.threadId, undefined);
+      if (event.payload.computerUse)
+        stageComputerTurn(event.payload.threadId, {
+          intent: event.payload.computerUse,
+          text: message.text,
+          runtimeMode: thread.runtimeMode,
+          label: thread.title,
+          createdAt: event.payload.createdAt,
+        });
       const project = yield* resolveProject(thread.projectId);
       const worktreeReady = yield* ensureRecordedWorktreeAvailable(thread, project).pipe(
         Effect.as(true),
@@ -1118,6 +1183,7 @@ const make = Effect.gen(function* () {
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageText: message.text,
+      ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
         ? { modelSelection: event.payload.modelSelection }

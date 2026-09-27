@@ -1,3 +1,5 @@
+import { stageComputerTurn } from "../../computer/computerTurnLifecycle.ts";
+import type { AgentControlProviderBridge } from "../../agentControl/ProviderInjection.ts";
 import assert from "node:assert/strict";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -10,6 +12,7 @@ import {
   FileSystem,
   Layer,
   Option,
+  Redacted,
   Schema,
   Scope,
   Stream,
@@ -62,6 +65,7 @@ type MessageEntry = {
 
 const runtimeMock = {
   state: {
+    mcpAddCalls: [] as Array<{ name: string; directory: string }>,
     startCalls: [] as string[],
     sessionCreateUrls: [] as string[],
     sessionGetCalls: [] as string[],
@@ -110,6 +114,7 @@ const runtimeMock = {
     startupOrder: [] as string[],
   },
   reset() {
+    this.state.mcpAddCalls.length = 0;
     this.state.startCalls.length = 0;
     this.state.sessionCreateUrls.length = 0;
     this.state.sessionGetCalls.length = 0;
@@ -180,6 +185,12 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
   runOpenCodeCommand: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
   createOpenCodeSdkClient: ({ baseUrl, serverPassword }) =>
     Effect.succeed({
+      mcp: {
+        add: async (input: { name: string; directory: string }) => {
+          runtimeMock.state.mcpAddCalls.push(input);
+          return { data: {} };
+        },
+      },
       global: {
         health: async () => ({ data: { healthy: true, version: "1.18.18" } }),
       },
@@ -1952,3 +1963,87 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 });
+
+it.effect(
+  "isolates Computer MCP in a dedicated managed OpenCode process and retires its lease",
+  () => {
+    const threadId = asThreadId("computer-isolated-opencode");
+    const lifecycle: string[] = [];
+    const bridge: AgentControlProviderBridge = {
+      issueLease: () =>
+        Effect.succeed(
+          Option.some({
+            sessionId: "computer-lease",
+            endpointUrl: "http://127.0.0.1:2222/mcp",
+            credential: Redacted.make("test-only"),
+          }),
+        ),
+      issueStdioBootstrap: () => Effect.succeed(Option.none()),
+      bindTurnAuthority: (input) =>
+        Effect.sync(() => {
+          lifecycle.push("bound");
+          return {
+            sessionId: input.sessionId,
+            threadId,
+            turnId: input.turnId,
+            boundAt: new Date().toISOString(),
+          };
+        }),
+      retireTurnAuthority: () =>
+        Effect.sync(() => {
+          lifecycle.push("retired");
+        }),
+      revokeLease: () =>
+        Effect.sync(() => {
+          lifecycle.push("revoked");
+        }),
+    };
+    const layer = Layer.effect(
+      OpenCodeAdapter,
+      makeOpenCodeAdapter(Schema.decodeSync(OpenCodeSettings)({ binaryPath: "fake-opencode" }), {
+        agentControl: bridge,
+        serverOwner: {
+          acquire: Effect.die(new Error("Computer must never use the shared server")),
+        },
+      }),
+    ).pipe(
+      Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    stageComputerTurn(threadId, {
+      text: "Inspect Calculator",
+      intent: { mode: "request", generation: "test:0" },
+      runtimeMode: "full-access",
+      label: "Calculator",
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("isolated-computer-runtime"),
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      assert.equal(runtimeMock.state.mcpAddCalls.at(-1)?.name, "ryco_computer");
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Inspect Calculator",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "anthropic/claude-sonnet-4-5",
+        ),
+      });
+      assert.ok(lifecycle.includes("bound"));
+      yield* adapter.interruptTurn(threadId);
+      assert.ok(lifecycle.includes("retired"));
+      yield* adapter.stopSession(threadId);
+      assert.ok(lifecycle.includes("revoked"));
+    }).pipe(
+      Effect.provide(layer),
+      Effect.ensuring(Effect.sync(() => stageComputerTurn(threadId, undefined))),
+    );
+  },
+);

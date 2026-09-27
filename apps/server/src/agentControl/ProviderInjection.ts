@@ -192,28 +192,36 @@ const lifecycle = (input: {
 export const installAgentControlNativeHttp = (
   bridge: AgentControlProviderBridge | undefined,
   input: InstallInput & {
-    readonly injectionMode: "codex-http" | "claude-http" | "copilot-http";
+    readonly injectionMode: "codex-http" | "claude-http" | "copilot-http" | "opencode-http";
+    readonly computerOnly?: boolean;
   },
 ): Effect.Effect<Option.Option<AgentControlNativeHttpInjection>> => {
   if (!bridge) return Effect.succeed(Option.none());
-  return bridge.issueLease({ ...input, capabilities: grantedCapabilities }).pipe(
-    Effect.map(
-      Option.map((lease) => ({
-        ...lifecycle({
-          bridge,
-          threadId: input.threadId,
-          sessionId: lease.sessionId,
-          injectionMode: input.injectionMode,
-        }),
-        mcpServer: {
-          type: "http" as const,
-          url: lease.endpointUrl,
-          headers: { Authorization: `Bearer ${Redacted.value(lease.credential)}` },
-        },
-        credential: lease.credential,
-      })),
-    ),
-  );
+  return bridge
+    .issueLease({
+      ...input,
+      capabilities: input.computerOnly
+        ? [AGENT_CONTROL_CAPABILITIES.controlComputer]
+        : grantedCapabilities,
+    })
+    .pipe(
+      Effect.map(
+        Option.map((lease) => ({
+          ...lifecycle({
+            bridge,
+            threadId: input.threadId,
+            sessionId: lease.sessionId,
+            injectionMode: input.injectionMode,
+          }),
+          mcpServer: {
+            type: "http" as const,
+            url: lease.endpointUrl,
+            headers: { Authorization: `Bearer ${Redacted.value(lease.credential)}` },
+          },
+          credential: lease.credential,
+        })),
+      ),
+    );
 };
 
 export const installAgentControlAcp = (

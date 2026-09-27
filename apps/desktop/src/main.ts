@@ -3739,6 +3739,11 @@ async function bootstrap(): Promise<void> {
   try {
     computerUseRuntime = new DesktopComputerUseRuntime({
       stateDir: STATE_DIR,
+      auditLogPath: Path.join(
+        BACKEND_BASE_DIR,
+        isDevelopment ? "dev" : "userdata",
+        "computer-audit.jsonl",
+      ),
       helperPath: Path.join(
         app.isPackaged ? process.resourcesPath : Path.join(__dirname, "../resources"),
         `ryco-computer-use-helper${process.platform === "win32" ? ".exe" : ""}`,

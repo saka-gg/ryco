@@ -1,3 +1,4 @@
+import type { ComputerTurnIntent } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import {
   type AgentTokenMode,
@@ -98,6 +99,7 @@ export interface SendTurnDispatchPreparation {
 }
 
 export interface SendTurnSettings {
+  computerUse?: ComputerTurnIntent;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
   tokenMode: AgentTokenMode;
@@ -491,6 +493,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       runtimeMode: settings.runtimeMode,
       interactionMode: settings.interactionMode,
       tokenMode: settings.tokenMode,
+
       activeThreadBranch: thread.activeThreadBranch,
       worktreePath: thread.worktreePath,
       threadCreatedAt: thread.createdAt,
@@ -516,6 +519,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       runtimeMode: settings.runtimeMode,
       interactionMode: settings.interactionMode,
       tokenMode: settings.tokenMode,
+      ...(settings.computerUse ? { computerUse: settings.computerUse } : {}),
       // A prepared thread already exists server-side, so there is nothing left
       // for the bootstrap to create.
       ...(composer.goal ? { goal: composer.goal } : {}),

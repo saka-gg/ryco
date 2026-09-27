@@ -1,3 +1,6 @@
+import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
+import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
+import { ComputerBetaPreview } from "./chat/ComputerBetaPreview";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import {
   rejectRetiredProjectMemory,
@@ -1041,6 +1044,9 @@ export default function ChatView(props: ChatViewProps) {
   // drive the environment picker in BranchToolbar.
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const localComputerEnvironmentId =
+    desktopWorkspace.localEnvironmentId ??
+    (readPrimaryEnvironmentTarget()?.source === "desktop-managed" ? primaryEnvironmentId : null);
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
   const activeSavedEnvironmentRecord =
@@ -3664,7 +3670,7 @@ export default function ChatView(props: ChatViewProps) {
       }
       return;
     }
-    if (showPlanFollowUpPrompt && activeProposedPlan) {
+    if (showPlanFollowUpPrompt && activeProposedPlan && !parseComputerInvocation(promptForSend)) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
         planMarkdown: activeProposedPlan.planMarkdown,
@@ -3739,6 +3745,62 @@ export default function ChatView(props: ChatViewProps) {
       interactionMode,
       tokenMode,
     };
+    const computerInvocation = parseComputerInvocation(promptForSend);
+    if (computerInvocation && !computerInvocation.prompt) return;
+    const computer = window.desktopBridge?.computerBeta;
+    const localComputer = computer && activeThread.environmentId === localComputerEnvironmentId;
+    if (computerInvocation && !localComputer) {
+      toastManager.add({
+        type: "warning",
+        title: "Computer Use requires the local desktop environment",
+      });
+      return;
+    }
+    if (localComputer) {
+      try {
+        const computerState = await computer.getState();
+        if (computerInvocation || computerState.preferences.defaultEnabled) {
+          if (
+            !["codex", "claudeAgent", "cursor", "copilot", "opencode"].includes(ctxSelectedProvider)
+          )
+            throw new Error(
+              "This provider does not support Computer Use. Select Codex, Claude, Cursor, Copilot or managed OpenCode.",
+            );
+          if (!api.server)
+            throw new Error(
+              "Local desktop settings are unavailable. Reconnect before sending this task.",
+            );
+          const settings = await api.server.getSettings();
+          if (!settings.agentControl.enabled)
+            throw new Error(
+              "Enable Private Agent Control in Settings → Integrations before sending this task.",
+            );
+          const instance = settings.providerInstances[ctxSelectedModelSelection.instanceId];
+          if (
+            ctxSelectedProvider === "opencode" &&
+            instance &&
+            instance.config !== null &&
+            typeof instance.config === "object" &&
+            "serverUrl" in instance.config &&
+            instance.config.serverUrl
+          )
+            throw new Error(
+              "Computer Use requires managed OpenCode. An external OpenCode server cannot receive local desktop access.",
+            );
+        }
+        const intent = await computer.prepare(activeThread.id, computerInvocation !== null);
+        // A permission check may yield to an edited draft or changed selection.
+        if (promptRef.current !== promptForSend) return;
+        if (intent) settingsSnapshot.computerUse = intent;
+      } catch (error) {
+        toastManager.add({
+          type: "warning",
+          title: "Computer Use setup",
+          description: error instanceof Error ? error.message : "Complete setup, then send again.",
+        });
+        return;
+      }
+    }
     if (!canSendModelSelection(composerSnapshot.selectedModelSelection)) {
       notifySelectionBecameIneligible();
       return;
@@ -3778,10 +3840,15 @@ export default function ChatView(props: ChatViewProps) {
 
     await dispatchComposerSnapshotRef.current(composerSnapshot, settingsSnapshot);
   };
+  const composerSubmitPendingRef = useRef(false);
   const runSendRef = useRef(runSend);
   runSendRef.current = runSend;
   const onSend = useCallback((e?: { preventDefault: () => void }) => {
-    void runSendRef.current(e);
+    if (composerSubmitPendingRef.current) return;
+    composerSubmitPendingRef.current = true;
+    void runSendRef.current(e).finally(() => {
+      composerSubmitPendingRef.current = false;
+    });
   }, []);
 
   // Flush the message queue: when the thread is idle, dispatch the next queued
@@ -4416,6 +4483,9 @@ export default function ChatView(props: ChatViewProps) {
       ref={chatShellRef}
       className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
     >
+      {!isPhoneTier && activeThread && activeThread.environmentId === localComputerEnvironmentId ? (
+        <ComputerBetaPreview key={activeThread.id} threadId={activeThread.id} />
+      ) : null}
       {!isPhoneTier && activeThreadRef ? (
         <TranscriptSelectionActions
           key={activeThreadKey}

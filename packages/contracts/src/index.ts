@@ -51,3 +51,10 @@ export * from "./acpRegistry.ts";
 export * from "./approvalResponses.ts";
 
 export * from "./automationCentre.ts";
+
+export * from "./computer.ts";
+export * from "./computerBrowser.ts";
+export * from "./computerSpaces.ts";
+export * from "./computerAudit.ts";
+export * from "./computerPermissions.ts";
+export * from "./computerBeta.ts";

@@ -1330,6 +1330,7 @@ export const AgentControlInjectionMode = Schema.Literals([
   "acp-http",
   "acp-stdio-proxy",
   "copilot-http",
+  "opencode-http",
 ]);
 export type AgentControlInjectionMode = typeof AgentControlInjectionMode.Type;
 

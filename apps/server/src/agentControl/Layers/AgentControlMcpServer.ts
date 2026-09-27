@@ -1,3 +1,4 @@
+import { withComputerBetaTools } from "../Mcp/computerBetaTools.ts";
 import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { WorkspaceFileSystem } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
@@ -101,15 +102,25 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
           engine: engine.value,
         })
       : baseTools;
-  const tools = withCompleteAgentControlCatalog(
-    withComputerUseTools(fileTools, {
-      ...(Option.isSome(config) && config.value.computerUseBridge
-        ? { config: config.value.computerUseBridge }
-        : {}),
-      policy,
-      registry,
-    }),
-  );
+  const legacyComputerTools = withComputerUseTools(fileTools, {
+    ...(Option.isSome(config) && config.value.computerUseBridge
+      ? { config: config.value.computerUseBridge }
+      : {}),
+    policy,
+    registry,
+  });
+  const beta =
+    Option.isSome(config) && config.value.computerUseBridge?.native
+      ? withComputerBetaTools(legacyComputerTools, {
+          config: config.value.computerUseBridge,
+          stateDir: config.value.stateDir,
+          registry,
+          policy,
+          projections,
+        })
+      : undefined;
+  if (beta) yield* Effect.addFinalizer(() => Effect.promise(() => beta.dispose()));
+  const tools = withCompleteAgentControlCatalog(beta?.tools ?? legacyComputerTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

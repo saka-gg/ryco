@@ -1561,7 +1561,11 @@ export const ChatComposer = memo(
             }
             return;
           }
-          if (item.command === "goal" || item.command === "btw") {
+          if (
+            item.command === "computer-use" ||
+            item.command === "goal" ||
+            item.command === "btw"
+          ) {
             const replacement = `/${item.command} `;
             const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
               snapshot.value,
