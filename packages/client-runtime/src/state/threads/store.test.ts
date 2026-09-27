@@ -1603,6 +1603,32 @@ describe("thread settlement state", () => {
     };
   }
 
+  it("refreshes completion recency independently of general thread updates", () => {
+    let state = makeEmptyState();
+    for (const latestCompletedTurnAt of [
+      null,
+      "2026-07-31T01:00:00.000Z",
+      "2026-07-31T01:30:00.000Z",
+      null,
+    ]) {
+      const snapshot = makeShellSnapshot(null, null);
+      state = syncServerShellSnapshot(
+        state,
+        {
+          ...snapshot,
+          threads: snapshot.threads.map((thread) =>
+            Object.assign(thread, { latestCompletedTurnAt }),
+          ),
+        },
+        localEnvironmentId,
+      );
+      expect(
+        localEnvironmentStateOf(state).sidebarThreadSummaryById["thread-settlement"]
+          ?.latestCompletedTurnAt,
+      ).toBe(latestCompletedTurnAt);
+    }
+  });
+
   it("replaces settlement fields with each shell generation", () => {
     const settledAt = "2026-07-31T01:00:00.000Z";
     const settled = syncServerShellSnapshot(

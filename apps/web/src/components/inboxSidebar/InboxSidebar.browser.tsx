@@ -18,7 +18,7 @@ import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
-import { InboxSidebar } from "./InboxSidebar";
+import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-hover-card");
 const PROJECT_ID = ProjectId.make("project-hover-card");
@@ -28,6 +28,57 @@ describe("Inbox sidebar rendering and settlement", () => {
   afterEach(() => {
     __resetEnvironmentApiOverridesForTests();
     document.body.innerHTML = "";
+  });
+
+  it("renders Pinned above Recent and removes the section after unpinning", async () => {
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: ["Pinned task", "Recent task"].map((title) => ({
+        id: ThreadId.make(title),
+        environmentId: ENVIRONMENT_ID,
+        projectId: PROJECT_ID,
+        title,
+        interactionMode: "default",
+        session: null,
+        createdAt: "2026-09-01T00:00:00.000Z",
+        archivedAt: null,
+        latestTurn: null,
+        branch: null,
+        worktreePath: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+      })),
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      aiFocusEnabled: false,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set([`${ENVIRONMENT_ID}:Pinned task`]),
+      onOpenThread: vi.fn(),
+    };
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const sections = () => [
+        ...document.querySelectorAll('[data-testid="inbox-sidebar"] section'),
+      ];
+      expect(sections().map((section) => section.querySelector("h2")?.textContent)).toEqual([
+        "Pinned",
+        "Recent",
+      ]);
+      expect(sections()[0]?.textContent).toContain("Pinned task");
+      expect(sections()[1]?.textContent).not.toContain("Pinned task");
+      await mounted.rerender(<InboxSidebar {...props} pinnedThreadKeys={new Set()} />);
+      expect(sections().map((section) => section.querySelector("h2")?.textContent)).toEqual([
+        "Recent",
+      ]);
+      expect(document.querySelectorAll('[data-testid="inbox-thread-row"]')).toHaveLength(2);
+    } finally {
+      await mounted.unmount();
+    }
   });
 
   it.each([false, true])(

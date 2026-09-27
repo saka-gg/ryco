@@ -367,6 +367,104 @@ describe("buildInboxSidebarSections", () => {
     ]);
   });
 
+  it("orders Recent by creation or finished responses, ignoring live updates and prompts", () => {
+    const newer = thread("newer", { createdAt: "2026-08-23T11:00:00.000Z" });
+    const older = thread("older", {
+      latestCompletedTurnAt: null,
+      updatedAt: "2026-08-23T12:00:00.000Z",
+      latestUserMessageAt: "2026-08-23T12:00:00.000Z",
+    });
+    const order = (value: SidebarThreadSummary) =>
+      build({ threads: [value, newer], autoSettleAfterDays: null }).flatMap((section) =>
+        section.rows.map((row) => row.threadId),
+      );
+    expect(order(older)).toEqual(["newer", "older"]);
+    const completed = { ...older, latestCompletedTurnAt: "2026-08-23T12:01:00.000Z" };
+    expect(order(completed)).toEqual(["older", "newer"]);
+    expect(order({ ...completed, updatedAt: "2026-08-23T13:00:00.000Z" })).toEqual([
+      "older",
+      "newer",
+    ]);
+    expect(build({ threads: [completed], autoSettleAfterDays: null })[0]?.rows[0]?.updatedAt).toBe(
+      completed.latestCompletedTurnAt,
+    );
+  });
+
+  it("keeps active and pinned ordering stable through a subsequent turn's intermediate messages", () => {
+    const oldCompletion = "2026-08-23T10:30:00.000Z";
+    const running = thread("running", {
+      backgroundLiveness: "working",
+      latestCompletedTurnAt: oldCompletion,
+      latestTurn: {
+        turnId: TurnId.make("running-turn"),
+        state: "completed",
+        requestedAt: "2026-08-23T12:00:00.000Z",
+        startedAt: "2026-08-23T12:00:00.000Z",
+        completedAt: "2026-08-23T12:01:00.000Z",
+        assistantMessageId: null,
+      },
+    });
+    const other = thread("other", {
+      backgroundLiveness: "working",
+      createdAt: "2026-08-23T11:00:00.000Z",
+    });
+    for (const pinnedThreadKeys of [
+      new Set<string>(),
+      new Set(["machine-a:running", "machine-a:other"]),
+    ]) {
+      for (const updatedAt of ["2026-08-23T12:01:00.000Z", "2026-08-23T12:02:00.000Z"]) {
+        const rows = build({
+          threads: [{ ...running, updatedAt }, other],
+          pinnedThreadKeys,
+          autoSettleAfterDays: null,
+        })[0]!.rows;
+        expect(rows.map((row) => row.threadId)).toEqual(["other", "running"]);
+        expect(rows[1]?.updatedAt).toBe(oldCompletion);
+      }
+    }
+  });
+
+  it("uses only completed turns as a fallback for older servers", () => {
+    for (const state of ["running", "interrupted", "error", "completed"] as const) {
+      const value = thread("legacy", {
+        latestTurn: {
+          turnId: TurnId.make("legacy-turn"),
+          state,
+          requestedAt: "2026-08-23T11:00:00.000Z",
+          startedAt: "2026-08-23T11:00:00.000Z",
+          completedAt: "2026-08-23T12:00:00.000Z",
+          assistantMessageId: null,
+        },
+      });
+      const row = build({ threads: [value], autoSettleAfterDays: null })[0]!.rows[0]!;
+      expect(row.updatedAt).toBe(
+        state === "completed" ? value.latestTurn!.completedAt : value.createdAt,
+      );
+    }
+  });
+
+  it("puts all pinned threads first without duplicates and supports the Pinned filter", () => {
+    const threads = [
+      thread("pin-idle"),
+      thread("pin-working", { backgroundLiveness: "working" }),
+      thread("pin-input", { hasPendingApprovals: true }),
+      thread("pin-settled", { settledOverride: "settled", settledAt: "2026-08-23T12:00:00.000Z" }),
+      thread("recent"),
+    ];
+    const pinnedThreadKeys = new Set(threads.slice(0, 4).map((value) => `machine-a:${value.id}`));
+    const sections = build({ threads, pinnedThreadKeys });
+    expect(sections.map((section) => section.key)).toEqual(["pinned", "recent"]);
+    expect(sections[0]?.title).toBe("Pinned");
+    expect(sections[0]?.rows).toHaveLength(4);
+    expect(sections.flatMap((section) => section.rows)).toHaveLength(5);
+    expect(
+      build({ threads, pinnedThreadKeys, filters: { ...ALL_FILTERS, status: "pinned" } }),
+    ).toEqual([sections[0]]);
+    expect(
+      build({ threads, pinnedThreadKeys: new Set() }).some((section) => section.key === "pinned"),
+    ).toBe(false);
+  });
+
   it("uses stable scoped-key ordering when timestamps tie", () => {
     const sections = build({
       threads: [thread("z"), thread("a")],
@@ -459,20 +557,21 @@ describe("buildInboxSidebarSections", () => {
       ],
     });
 
-    expect(sections.map((section) => section.key)).toEqual(["focus", "active"]);
-    expect(sections[0]?.rows.map((row) => row.threadId)).toEqual(["pinned", "ai-now"]);
-    expect(sections[1]?.rows.map((row) => row.threadId)).toEqual(["working"]);
+    expect(sections.map((section) => section.key)).toEqual(["pinned", "focus", "active"]);
+    expect(sections[0]?.rows.map((row) => row.threadId)).toEqual(["pinned"]);
+    expect(sections[1]?.rows.map((row) => row.threadId)).toEqual(["ai-now"]);
+    expect(sections[2]?.rows.map((row) => row.threadId)).toEqual(["working"]);
     const allKeys = sections.flatMap((section) => section.rows.map((row) => row.key));
     expect(new Set(allKeys).size).toBe(allKeys.length);
   });
 
-  it("preserves the existing sections exactly when AI Focus is disabled", () => {
+  it("keeps a separate Pinned section when AI Focus is disabled", () => {
     const sections = build({
       aiFocusEnabled: false,
       pinnedThreadKeys: new Set(["machine-a:pinned"]),
       threads: [thread("pinned")],
     });
-    expect(sections.map((section) => section.key)).toEqual(["recent"]);
+    expect(sections.map((section) => section.key)).toEqual(["pinned"]);
     expect(sections[0]?.rows[0]?.focus).toBeNull();
   });
 });
