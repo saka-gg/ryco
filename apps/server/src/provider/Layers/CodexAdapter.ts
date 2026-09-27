@@ -9,6 +9,7 @@
  */
 import {
   isToolLifecycleItemType,
+  UserInputQuestion,
   type AgentTokenMode,
   type CanonicalItemType,
   type CanonicalRequestType,
@@ -85,6 +86,8 @@ import {
   CODEX_AGENT_CONTROL_SERVER_NAME,
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
+  CodexSessionRuntimeInvalidUserInputAnswersError,
+  CodexSessionRuntimePendingUserInputNotFoundError,
   makeCodexSessionRuntime,
   readStoredCodexThread,
   type CodexAgentControlInjection,
@@ -197,7 +200,12 @@ function mapCodexRuntimeError(
   return new ProviderAdapterRequestError({
     provider: PROVIDER,
     method,
-    detail: formatCodexRuntimeErrorDetail(error),
+    detail: Schema.is(CodexSessionRuntimePendingUserInputNotFoundError)(error)
+      ? `Unknown pending user-input request: ${error.requestId}`
+      : formatCodexRuntimeErrorDetail(error),
+    ...(Schema.is(CodexSessionRuntimeInvalidUserInputAnswersError)(error)
+      ? { userInputResponseNotSent: true }
+      : {}),
     cause: error,
   });
 }
@@ -932,6 +940,22 @@ function mapToRuntimeEvents(
         },
       },
     ];
+  }
+
+  if (event.kind === "notification" && event.method === "item/agentMessage/optionalQuestions") {
+    const payload = readPayload(
+      Schema.Struct({ questions: Schema.Array(UserInputQuestion) }),
+      event.payload,
+    );
+    return payload && event.requestId && event.turnId && event.itemId
+      ? [
+          {
+            ...runtimeEventBase(event, canonicalThreadId),
+            type: "user-input.requested",
+            payload: { questions: payload.questions, nonBlocking: true },
+          },
+        ]
+      : [];
   }
 
   if (event.kind === "request") {

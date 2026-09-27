@@ -1613,10 +1613,12 @@ const make = Effect.gen(function* () {
                     (Schema.is(ProviderAdapterSessionNotFoundError)(reason.error) ||
                       Schema.is(ProviderAdapterSessionClosedError)(reason.error)))),
             );
-          // Only approval adapters currently prove non-delivery. An arbitrary
-          // question error remains claimed; reconnect must never replay the answer.
-          const retryable =
-            isApproval && findProviderAdapterRequestError(cause)?.approvalResponseNotSent === true;
+          // Only explicit adapter evidence of non-delivery permits another attempt.
+          // A transport error remains claimed, including optional question steers.
+          const requestError = findProviderAdapterRequestError(cause);
+          const retryable = isApproval
+            ? requestError?.approvalResponseNotSent === true
+            : requestError?.userInputResponseNotSent === true;
           return fail(
             stale ? stalePendingRequestDetail(kind, key.requestId) : Cause.pretty(cause),
             stale ? "invalidated" : retryable ? "retryable" : "uncertain",

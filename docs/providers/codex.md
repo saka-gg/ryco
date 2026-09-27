@@ -167,3 +167,46 @@ Use a totally separate `CODEX_HOME path` only when you want a separate Codex wor
 
 That means separate sessions and less account switching inside old threads. Most dual-account users
 should use the shared-home plus shadow-home setup instead.
+
+## Optional questions while Codex works
+
+When Codex emits a native asynchronous question, Ryco displays an **Optional question** card
+on desktop, web, and the native mobile app. The composer remains available. Open the card,
+choose an option or write an answer, then explicitly submit. Closing the web card preserves
+its draft; suggested options are never submitted automatically. **Dismiss** closes the card
+without sending an answer or granting permission.
+
+Cards are available only while their originating turn is live. Completion, interruption,
+superseding turns, or replacement of the provider process invalidate unanswered cards.
+Late answers never start a new turn. A disconnected client cannot submit; reconnect restores
+the persisted question and delivery state. Draft text is local to the mounted form.
+
+Ryco admits one answer per question generation. Validation failures before dispatch permit
+correction; an unconfirmed delivery remains claimed and is never automatically retried.
+The card explains this state. Starting a new turn does not resend the old answer.
+
+### Protocol and capability boundary
+
+Native `request_user_input_async` emits an `agentMessage` item with `delivery: "async"` and
+structured `questions`, then returns immediately. It does not create a pending JSON-RPC
+answer request. Ryco replies as ordinary user input through `turn/steer`, supplying the
+original provider thread and `expectedTurnId`; the reply text identifies the question item.
+The runtime validates these identities again at dispatch. The existing durable question
+ledger owns client claims and settlement; process-local authority is never restored after
+restart. Only `turn/completed` settles the provider turn.
+
+Support is gated by the explicit native payload, not a model name, version guess, feature
+flag, timeout, or question text. Older versions and other providers retain their blocking
+question behavior. Malformed native metadata falls back to ordinary assistant text.
+Subagent question routing is outside this slice. The generated baseline remains compatible
+with older Codex versions; a narrow protocol extension preserves the newer message fields
+for validation without changing generated schemas.
+
+`item/tool/requestUserInput`, command/file approvals, and permission requests retain their
+existing response semantics. Neither `autoResolutionMs` nor `isBlocking: false` on that
+request is treated as evidence of the separate native async message protocol.
+
+References: [OpenAI app-server documentation](https://developers.openai.com/codex/app-server),
+[Codex native async handler](https://github.com/openai/codex/blob/814de47b69dd63a2660fd14f9af66690888d183e/codex-rs/core/src/tools/handlers/request_user_input_async.rs),
+[Synara v0.9.2 protocol notes](https://github.com/Emanuele-web04/synara/blob/v0.9.2/docs/providers.md#codex-asynchronous-questions).
+Synara was inspected as a protocol reference; this implementation does not copy its code.

@@ -130,10 +130,12 @@ export function derivePendingThreadRequests(
 ): ReadonlyArray<{
   readonly requestId: string;
   readonly kind: "approval" | "user-input";
+  readonly nonBlocking?: boolean;
   readonly turnId: string | null;
 }> {
   const approvalIds = new Map<string, string | null>();
   const userInputIds = new Map<string, string | null>();
+  const optionalIds = new Set<string>();
 
   for (const activity of activities.toSorted(comparePendingRequestActivities)) {
     const requestId = activityRequestId(activity.payload);
@@ -150,6 +152,9 @@ export function derivePendingThreadRequests(
       approvalIds.delete(requestId);
     } else if (activity.kind === "user-input.requested") {
       userInputIds.set(requestId, activity.turnId ?? null);
+      if ((activity.payload as { nonBlocking?: unknown })?.nonBlocking === true)
+        optionalIds.add(requestId);
+      else optionalIds.delete(requestId);
     } else if (activity.kind === "user-input.resolved") {
       userInputIds.delete(requestId);
     } else if (
@@ -170,6 +175,7 @@ export function derivePendingThreadRequests(
       requestId,
       turnId,
       kind: "user-input" as const,
+      ...(optionalIds.has(requestId) ? { nonBlocking: true } : {}),
     })),
   ];
 }
@@ -179,7 +185,9 @@ export function derivePendingThreadRequestState(
 ): PendingThreadRequestState {
   const requests = derivePendingThreadRequests(activities);
   const pendingApprovalCount = requests.filter((request) => request.kind === "approval").length;
-  const pendingUserInputCount = requests.length - pendingApprovalCount;
+  const pendingUserInputCount = requests.filter(
+    (request) => request.kind === "user-input" && !request.nonBlocking,
+  ).length;
   return {
     pendingApprovalCount,
     pendingUserInputCount,

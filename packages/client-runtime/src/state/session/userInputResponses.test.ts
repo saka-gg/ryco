@@ -8,7 +8,7 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { pendingRequestActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
-import { derivePendingUserInputs } from "./session-logic.ts";
+import { derivePendingUserInputs, deriveThreadActivityViewModel } from "./session-logic.ts";
 import { submitApprovalResponse, submitUserInputResponse } from "./approvalResponses.ts";
 
 const identity = {
@@ -112,4 +112,27 @@ describe("question recovery", () => {
     ]);
     expect(submit).toHaveBeenCalledTimes(3);
   });
+});
+
+it("keeps native optional cards outside blocking composer state and retains their identity", () => {
+  const optional = {
+    ...requested,
+    payload: { ...(requested.payload as object), nonBlocking: true },
+  };
+  const model = deriveThreadActivityViewModel([optional]);
+  expect(model.pendingUserInputs).toEqual([]);
+  expect(model.optionalUserInputs).toMatchObject([
+    { nonBlocking: true, userInputIdentity: identity },
+  ]);
+  expect(deriveThreadActivityViewModel([requested]).pendingUserInputs).toHaveLength(1);
+});
+
+it("renders free-text native questions without inventing a suggested answer", () => {
+  const optional = activity(1, "user-input.requested", {
+    nonBlocking: true,
+    questions: [{ id: "0", header: "Question", question: "Any constraints?", options: [] }],
+  });
+  expect(
+    deriveThreadActivityViewModel([optional]).optionalUserInputs[0]?.questions[0]?.options,
+  ).toEqual([]);
 });

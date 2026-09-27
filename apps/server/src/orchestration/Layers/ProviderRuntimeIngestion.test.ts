@@ -3020,6 +3020,71 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("keeps optional questions out of turn completion and expires them at the authoritative end", async () => {
+    const harness = await createHarness({ callbackRuntime: true });
+    const base = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: new Date().toISOString(),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("optional-turn"),
+    };
+    harness.emit({ ...base, type: "turn.started", eventId: asEventId("optional-start") });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === base.turnId,
+    );
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("optional-before"),
+      itemId: asItemId("independent"),
+      payload: { streamKind: "assistant_text", delta: "Still working" },
+    });
+    harness.emit({
+      ...base,
+      type: "user-input.requested",
+      eventId: asEventId("optional-question"),
+      requestId: ApprovalRequestId.make("optional:request"),
+      payload: {
+        nonBlocking: true,
+        questions: [{ id: "0", header: "Audience", question: "Audience?", options: [] }],
+      },
+    });
+    const pending = await waitForThread(harness.readModel, (thread) =>
+      thread.activities.some((activity) => activity.id === "optional-question"),
+    );
+    expect(pending.session?.status).toBe("running");
+    expect(
+      pending.messages.some((message) => !message.streaming && message.text === "Still working"),
+    ).toBe(false);
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("optional-after"),
+      itemId: asItemId("independent"),
+      payload: { streamKind: "assistant_text", delta: " independently" },
+    });
+    harness.emit({
+      ...base,
+      type: "turn.completed",
+      eventId: asEventId("optional-end"),
+      payload: { state: "completed" },
+    });
+    const completed = await waitForThread(harness.readModel, (thread) =>
+      thread.activities.some((activity) => activity.kind === "provider.user-input.respond.failed"),
+    );
+    expect(
+      completed.messages.some(
+        (message) => message.text === "Still working independently" && !message.streaming,
+      ),
+    ).toBe(true);
+    expect(
+      completed.activities.find(
+        (activity) => activity.kind === "provider.user-input.respond.failed",
+      )?.payload,
+    ).toMatchObject({ responseState: "invalidated" });
+  });
+
   it("flushes and completes buffered assistant text when user input is requested", async () => {
     const harness = await createHarness({ callbackRuntime: true });
     const now = new Date().toISOString();

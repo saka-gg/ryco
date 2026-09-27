@@ -372,6 +372,7 @@ export function ThreadDetailScreen(props: {
   const environments = useHomeEnvironments();
   const pendingApprovals = built?.viewModel.pendingApprovals ?? [];
   const pendingUserInputs = built?.viewModel.pendingUserInputs ?? [];
+  const optionalUserInputs = built?.viewModel.optionalUserInputs ?? [];
   // Agent Control proposals share the web runtime state; mobile only syncs
   // while the server-side setting is enabled and renders the same queue.
   const agentControlEnabled = serverConfig?.settings.agentControl.enabled ?? false;
@@ -1116,7 +1117,10 @@ export function ThreadDetailScreen(props: {
     );
   const visibleError = sendError ?? thread?.error ?? null;
   const hasPrompts =
-    pendingApprovals.length > 0 || pendingUserInputs.length > 0 || agentControlProposals.length > 0;
+    pendingApprovals.length > 0 ||
+    pendingUserInputs.length > 0 ||
+    optionalUserInputs.length > 0 ||
+    agentControlProposals.length > 0;
 
   return (
     <KeyboardAvoidingView
@@ -1208,7 +1212,7 @@ export function ThreadDetailScreen(props: {
               disabled={cachedView.promptsDisabled}
             />
           ))}
-          {pendingUserInputs.map((userInput) => (
+          {[...pendingUserInputs, ...optionalUserInputs].map((userInput) => (
             <PendingUserInputCard
               key={userInput.userInputIdentity?.requestEventId ?? userInput.requestId}
               environmentId={environmentId}

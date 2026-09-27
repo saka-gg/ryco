@@ -489,6 +489,8 @@ export const UserInputQuestion = Schema.Struct({
 export type UserInputQuestion = typeof UserInputQuestion.Type;
 
 const UserInputRequestedPayload = Schema.Struct({
+  /** Native optional question; never an authorization request. Missing means blocking. */
+  nonBlocking: Schema.optional(Schema.Boolean),
   questions: Schema.Array(UserInputQuestion),
 });
 export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;

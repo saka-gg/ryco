@@ -2832,6 +2832,33 @@ describe("ProviderCommandReactor", () => {
     return { ...harness, respond, activity, identity };
   }
 
+  it("question safety: proven validation failure permits correction before delivery", async () => {
+    const harness = await prepareQuestion();
+    harness.respondToUserInput.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "respondToUserInput",
+          detail: "Invalid answer",
+          userInputResponseNotSent: true,
+        }),
+      ),
+    );
+    await harness.respond("malformed-answer");
+    await harness.drain();
+    expect(Option.getOrUndefined(await harness.readQuestion("question-safety"))).toMatchObject({
+      isPending: true,
+      responseState: "retryable",
+    });
+    await harness.respond("corrected-answer", "Corrected");
+    await harness.drain();
+    expect(harness.respondToUserInput).toHaveBeenCalledTimes(2);
+    expect(Option.getOrUndefined(await harness.readQuestion("question-safety"))).toMatchObject({
+      isPending: false,
+      responseState: "settled",
+    });
+  });
+
   it("question safety: duplicate commands claim one response and never replay an unknown outcome", async () => {
     const harness = await prepareQuestion();
     harness.respondToUserInput.mockImplementation(() =>

@@ -1,3 +1,4 @@
+import { CodexOptionalQuestions, readCodexOptionalQuestions } from "../codexOptionalQuestions.ts";
 import {
   ApprovalRequestId,
   type AgentTokenMode,
@@ -1068,6 +1069,7 @@ export const makeCodexSessionRuntime = (
     const events = yield* Queue.bounded<ProviderEvent>(2_048);
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
+    const optionalQuestions = new CodexOptionalQuestions();
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
@@ -1621,6 +1623,49 @@ export const makeCodexSessionRuntime = (
           }
           yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
           return;
+        }
+
+        if (
+          notification.method === "turn/started" &&
+          rootId &&
+          !foreignConversation &&
+          (yield* Ref.get(sessionRef)).activeTurnId === notification.params.turn.id
+        ) {
+          optionalQuestions.startTurn(rootId, notification.params.turn.id);
+        }
+        if (notification.method === "turn/completed")
+          optionalQuestions.invalidateTurn(notification.params.turn.id);
+        if (
+          (notification.method === "item/started" || notification.method === "item/completed") &&
+          !foreignConversation &&
+          !childParentTurnId
+        ) {
+          const questions = readCodexOptionalQuestions(notification.params.item);
+          if (questions) {
+            if (
+              notification.method === "item/completed" &&
+              rootId &&
+              (yield* Ref.get(sessionRef)).activeTurnId === notification.params.turnId
+            ) {
+              const question = optionalQuestions.register({
+                providerThreadId: rootId,
+                turnId: notification.params.turnId,
+                itemId: notification.params.item.id,
+                questions,
+              });
+              if (question)
+                yield* emitEvent({
+                  kind: "notification",
+                  threadId: options.threadId,
+                  method: "item/agentMessage/optionalQuestions",
+                  requestId: question.requestId,
+                  turnId: TurnId.make(question.turnId),
+                  itemId: ProviderItemId.make(question.itemId),
+                  payload: { questions, nonBlocking: true, threadId: rootId },
+                });
+            }
+            return;
+          }
         }
 
         let requestId: ApprovalRequestId | undefined;
@@ -2180,6 +2225,7 @@ export const makeCodexSessionRuntime = (
           );
           const effectiveTurnId = turnId ?? session.activeTurnId;
           if (effectiveTurnId) {
+            optionalQuestions.invalidateTurn(effectiveTurnId);
             yield* client.request("turn/interrupt", {
               threadId: providerThreadId,
               turnId: effectiveTurnId,
@@ -2277,6 +2323,40 @@ export const makeCodexSessionRuntime = (
         }),
       respondToUserInput: (requestId, answers) =>
         Effect.gen(function* () {
+          if (requestId.startsWith("optional:")) {
+            const session = yield* Ref.get(sessionRef);
+            const providerThreadId = yield* readProviderThreadId;
+            const claim = yield* Effect.try({
+              try: () =>
+                optionalQuestions.claim(requestId, providerThreadId, session.activeTurnId, answers),
+              catch: () =>
+                new CodexSessionRuntimeInvalidUserInputAnswersError({ questionId: "optional" }),
+            });
+            if (!claim)
+              return yield* new CodexSessionRuntimePendingUserInputNotFoundError({ requestId });
+            const { question, prompt } = claim;
+            if (prompt !== undefined) {
+              const params = yield* buildTurnSteerParams({
+                threadId: providerThreadId,
+                expectedTurnId: TurnId.make(question.turnId),
+                messageId: MessageId.make(requestId),
+                prompt,
+              });
+              const rawResponse = yield* client.raw.request("turn/steer", params);
+              const response = yield* Schema.decodeUnknownEffect(
+                EffectCodexSchema.V2TurnSteerResponse,
+              )(rawResponse).pipe(
+                Effect.mapError((error) =>
+                  toProtocolParseError("Invalid optional answer response", error),
+                ),
+              );
+              if (response.turnId !== question.turnId)
+                return yield* new CodexErrors.CodexAppServerProtocolParseError({
+                  detail: "Optional answer returned a different turn",
+                });
+            }
+            return;
+          }
           const pending = (yield* Ref.get(pendingUserInputsRef)).get(requestId);
           if (!pending) {
             return yield* new CodexSessionRuntimePendingUserInputNotFoundError({

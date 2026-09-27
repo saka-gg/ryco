@@ -119,6 +119,18 @@ rl.on("line", (line) => {
     }
     return;
   }
+  if (method === "turn/steer") {
+    NodeFS.appendFileSync(
+      `${process.env.RYCO_CODEX_COLLAB_SCRIPT}.steers`,
+      `${JSON.stringify(message.params)}\n`,
+    );
+    write(
+      script.failSteer
+        ? { id, error: { code: -32000, message: "Connection lost after accepting steer" } }
+        : { id, result: { turnId: message.params.expectedTurnId } },
+    );
+    return;
+  }
   if (method === "turn/interrupt") {
     // Record which thread/turn was interrupted (append-only sidecar file the
     // test reads) so Stop coverage can assert every live child was reached.

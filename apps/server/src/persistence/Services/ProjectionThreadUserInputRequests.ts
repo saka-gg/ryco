@@ -15,6 +15,7 @@ export const ProjectionThreadUserInputRequest = Schema.Struct({
   requestId: ApprovalRequestId,
   threadId: ThreadId,
   isPending: Schema.Boolean,
+  nonBlocking: Schema.optional(Schema.Boolean),
   updatedAt: IsoDateTime,
   userInputIdentity: Schema.optional(ApprovalResponseIdentity),
   responseAttemptId: Schema.optional(CommandId),

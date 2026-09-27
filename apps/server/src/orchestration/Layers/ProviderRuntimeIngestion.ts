@@ -670,11 +670,16 @@ export function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "user-input.requested",
-          summary: "User input requested",
+          summary: event.payload.nonBlocking
+            ? "Optional question — agent continues working"
+            : "User input requested",
           payload: {
             ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
+            ...(event.payload.nonBlocking
+              ? { nonBlocking: true, itemId: event.itemId, providerRefs: event.providerRefs }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -2461,7 +2466,8 @@ const make = Effect.gen(function* () {
       }
 
       const pauseForUserTurnId =
-        event.type === "request.opened" || event.type === "user-input.requested"
+        event.type === "request.opened" ||
+        (event.type === "user-input.requested" && !event.payload.nonBlocking)
           ? toTurnId(event.turnId)
           : undefined;
       if (pauseForUserTurnId) {

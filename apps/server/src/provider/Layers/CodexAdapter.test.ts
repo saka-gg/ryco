@@ -1444,6 +1444,66 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
   );
 
   it.effect(
+    "maps native optional cards separately from blocking requests while work continues",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+          Effect.forkChild,
+        );
+        yield* runtime.emit({
+          id: asEventId("optional-card"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: new Date().toISOString(),
+          method: "item/agentMessage/optionalQuestions",
+          requestId: ApprovalRequestId.make("optional:1"),
+          turnId: TurnId.make("turn-1"),
+          itemId: ProviderItemId.make("item-1"),
+          payload: {
+            threadId: "native-thread",
+            questions: [
+              {
+                id: "0",
+                header: "Question",
+                question: "Audience?",
+                options: [],
+                multiSelect: false,
+              },
+            ],
+            nonBlocking: true,
+          },
+        });
+        yield* runtime.emit({
+          id: asEventId("optional-work"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: new Date().toISOString(),
+          method: "item/agentMessage/delta",
+          turnId: TurnId.make("turn-1"),
+          itemId: ProviderItemId.make("work"),
+          textDelta: "Continuing",
+          payload: {
+            threadId: "native-thread",
+            turnId: "turn-1",
+            itemId: "work",
+            delta: "Continuing",
+          },
+        });
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(events[0]?.type, "user-input.requested");
+        if (events[0]?.type === "user-input.requested") {
+          assert.equal(events[0].payload.nonBlocking, true);
+          assert.equal(events[0].itemId, "item-1");
+          assert.equal(events[0].turnId, "turn-1");
+        }
+        assert.equal(events[1]?.type, "content.delta");
+      }),
+  );
+
+  it.effect(
     "maps requestUserInput requests and answered notifications to canonical user-input events",
     () =>
       Effect.gen(function* () {
@@ -1461,6 +1521,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           method: "item/tool/requestUserInput",
           requestId: ApprovalRequestId.make("req-user-input-1"),
           payload: {
+            autoResolutionMs: 10,
+            isBlocking: false,
             itemId: "item-user-input-1",
             threadId: "thread-1",
             turnId: "turn-1",
@@ -1500,6 +1562,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(events[0]?.type, "user-input.requested");
         if (events[0]?.type === "user-input.requested") {
           assert.equal(events[0].requestId, "req-user-input-1");
+          assert.equal(events[0].payload.nonBlocking, undefined);
           assert.equal(events[0].payload.questions[0]?.id, "sandbox_mode");
           assert.equal(events[0].payload.questions[0]?.multiSelect, false);
         }

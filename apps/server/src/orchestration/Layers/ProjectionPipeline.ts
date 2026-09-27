@@ -222,10 +222,13 @@ function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
 
 function derivePendingUserInputStatesFromActivities(
   activities: ReadonlyArray<ProjectionThreadActivity>,
-): Map<ApprovalRequestId, { readonly isPending: boolean; readonly updatedAt: string }> {
+): Map<
+  ApprovalRequestId,
+  { readonly isPending: boolean; readonly updatedAt: string; readonly nonBlocking?: boolean }
+> {
   const states = new Map<
     ApprovalRequestId,
-    { readonly isPending: boolean; readonly updatedAt: string }
+    { readonly isPending: boolean; readonly updatedAt: string; readonly nonBlocking?: boolean }
   >();
   const ordered = [...activities].toSorted(
     (left, right) =>
@@ -249,7 +252,14 @@ function derivePendingUserInputStatesFromActivities(
       detail,
     });
     if (isPending !== null) {
-      states.set(requestId, { isPending, updatedAt: activity.createdAt });
+      states.set(requestId, {
+        isPending,
+        updatedAt: activity.createdAt,
+        nonBlocking:
+          activity.kind === "user-input.requested"
+            ? payload?.nonBlocking === true
+            : (states.get(requestId)?.nonBlocking ?? false),
+      });
     }
   }
 
@@ -1521,11 +1531,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 requestId,
                 threadId: event.payload.threadId,
                 isPending: true,
+                nonBlocking: activityPayload?.nonBlocking === true,
                 updatedAt: event.payload.activity.createdAt,
                 ...(identity ? { userInputIdentity: identity } : {}),
                 settlementRequiresIdentity: reused,
               });
-              attachmentSideEffects.pendingUserInputDelta += pendingStateDelta(wasPending, true);
+              attachmentSideEffects.pendingUserInputDelta += pendingStateDelta(
+                wasPending && !row?.nonBlocking,
+                activityPayload?.nonBlocking !== true,
+              );
             } else if (kind !== "user-input.response.submitted" && row) {
               if (!wasPending) return;
               if (identity && !sameApprovalIdentity(row.userInputIdentity, identity)) return;
@@ -1566,8 +1580,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 updatedAt: event.payload.activity.createdAt,
               });
               attachmentSideEffects.pendingUserInputDelta += pendingStateDelta(
-                wasPending,
-                !terminal,
+                wasPending && !row.nonBlocking,
+                !terminal && !row.nonBlocking,
               );
             }
           }
@@ -1628,6 +1642,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 requestId,
                 threadId: event.payload.threadId,
                 isPending: state.isPending,
+                nonBlocking: state.nonBlocking ?? false,
                 updatedAt: state.updatedAt,
               }),
             { concurrency: 1, discard: true },

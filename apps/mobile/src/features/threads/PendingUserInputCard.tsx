@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Pressable, View } from "react-native";
+import { Pressable, TextInput, View } from "react-native";
 
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { PendingUserInput } from "@ryco/client-runtime/state/session";
 import {
   buildPendingUserInputAnswers,
+  setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
 } from "@ryco/client-runtime/state/user-input";
@@ -52,8 +53,16 @@ export function PendingUserInputCard(props: {
     props.userInput.responseState !== "submitting" &&
     props.userInput.responseState !== "uncertain";
 
-  const submit = async () => {
-    if (!answers || !canSubmit) return;
+  const submit = async (dismiss = false) => {
+    if (
+      dismiss
+        ? submitting ||
+          props.disabled ||
+          props.userInput.responseState === "submitting" ||
+          props.userInput.responseState === "uncertain"
+        : !answers || !canSubmit
+    )
+      return;
     setSubmitting(true);
     setError(null);
     try {
@@ -61,7 +70,7 @@ export function PendingUserInputCard(props: {
         api: ensureEnvironmentApi(props.environmentId),
         threadId: props.threadId,
         requestId: props.userInput.requestId,
-        answers,
+        answers: dismiss ? {} : answers!,
         userInputIdentity: props.userInput.userInputIdentity,
       });
     } catch {
@@ -78,15 +87,43 @@ export function PendingUserInputCard(props: {
   return (
     <View className="mx-4 my-2 rounded-2xl border border-accent-border bg-accent-bg p-4">
       <Text className="text-xs font-ryco-bold uppercase tracking-wide text-accent-strong">
-        Input needed
+        {props.userInput.nonBlocking
+          ? "Optional question · agent continues working"
+          : "Input needed"}
       </Text>
       {props.userInput.questions.map((question) => (
         <View key={question.id} className="mt-3">
           <Text className="font-sans text-base text-foreground">{question.question}</Text>
+          {props.userInput.nonBlocking ? (
+            <TextInput
+              accessibilityLabel={`Custom answer: ${question.question}`}
+              editable={
+                !props.disabled &&
+                !submitting &&
+                props.userInput.responseState !== "submitting" &&
+                props.userInput.responseState !== "uncertain"
+              }
+              placeholder="Write an answer"
+              value={drafts[question.id]?.customAnswer ?? ""}
+              onChangeText={(text) =>
+                setDrafts((current) => ({
+                  ...current,
+                  [question.id]: setPendingUserInputCustomAnswer(current[question.id], text),
+                }))
+              }
+              className="mt-2 rounded-xl border border-border px-3 py-2 text-foreground"
+            />
+          ) : null}
           <View className="mt-2 gap-2">
             {question.options.map((option) => (
               <Pressable
                 key={option.label}
+                disabled={
+                  props.disabled ||
+                  submitting ||
+                  props.userInput.responseState === "submitting" ||
+                  props.userInput.responseState === "uncertain"
+                }
                 onPress={() => toggle(question.id, option.label)}
                 className={`min-h-11 justify-center rounded-xl border px-3 py-2.5 active:opacity-70 ${
                   isSelected(question.id, option.label)
@@ -100,6 +137,11 @@ export function PendingUserInputCard(props: {
           </View>
         </View>
       ))}
+      {props.userInput.nonBlocking ? (
+        <Text className="mt-2 text-xs text-foreground-muted">
+          Answer during this turn. This is not an approval request.
+        </Text>
+      ) : null}
       {props.userInput.responseState === "uncertain" ? (
         <Text accessibilityRole="text" className="mt-2 font-sans text-sm text-foreground-muted">
           Answer delivery is unconfirmed. Await provider confirmation or restart the turn; resending
@@ -114,6 +156,20 @@ export function PendingUserInputCard(props: {
       >
         <Text className="text-sm font-ryco-bold text-primary-foreground">Submit</Text>
       </Pressable>
+      {props.userInput.nonBlocking ? (
+        <Pressable
+          disabled={
+            props.disabled ||
+            submitting ||
+            props.userInput.responseState === "submitting" ||
+            props.userInput.responseState === "uncertain"
+          }
+          onPress={() => void submit(true)}
+          className="mt-3 min-h-11 items-center justify-center"
+        >
+          <Text>Dismiss</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }

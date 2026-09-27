@@ -1,5 +1,6 @@
 import Migration0062 from "./Migrations/062_SessionImports.ts";
 import Migration0063 from "./Migrations/063_AgentControlCompletionReturns.ts";
+import Migration0065 from "./Migrations/065_OptionalUserInput.ts";
 import Migration0061 from "./Migrations/061_ProjectionMessageTextFallback.ts";
 import Migration0060 from "./Migrations/060_ProjectionMessageChunks.ts";
 import Migration0059 from "./Migrations/059_RetireProjectMemory.ts";
@@ -153,6 +154,7 @@ export const migrationEntries = [
   [61, "ProjectionMessageTextFallback", Migration0061],
   [62, "SessionImports", Migration0062],
   [63, "AgentControlCompletionReturns", Migration0063],
+  [65, "OptionalUserInput", Migration0065],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

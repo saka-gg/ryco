@@ -62,6 +62,8 @@ export class ProviderAdapterRequestError extends Schema.TaggedError<ProviderAdap
     detail: Schema.String,
     /** Set only when the adapter proves that no approval decision was sent. */
     approvalResponseNotSent: Schema.optional(Schema.Boolean),
+    /** Validation failed before a question answer was dispatched. */
+    userInputResponseNotSent: Schema.optional(Schema.Boolean),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
