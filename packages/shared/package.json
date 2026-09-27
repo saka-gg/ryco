@@ -264,7 +264,57 @@
     "./threadExport": {
       "types": "./src/threadExport.ts",
       "import": "./src/threadExport.ts"
-    }
+    },
+    "./computerFrame": {
+      "types": "./src/computerFrame.ts",
+      "import": "./src/computerFrame.ts"
+    },
+    "./computerGrants": {
+      "types": "./src/computerGrants.ts",
+      "import": "./src/computerGrants.ts"
+    },
+    "./computerInvocation": {
+      "types": "./src/computerInvocation.ts",
+      "import": "./src/computerInvocation.ts"
+    },
+    "./computerKeyNames": {
+      "types": "./src/computerKeyNames.ts",
+      "import": "./src/computerKeyNames.ts"
+    },
+    "./cuaActionDiagnostics": {
+      "types": "./src/cuaActionDiagnostics.ts",
+      "import": "./src/cuaActionDiagnostics.ts"
+    },
+    "./cuaDriverProtocol": {
+      "types": "./src/cuaDriverProtocol.ts",
+      "import": "./src/cuaDriverProtocol.ts"
+    },
+    "./desktopIdentity": {
+      "types": "./src/desktopIdentity.ts",
+      "import": "./src/desktopIdentity.ts"
+    },
+    "./desktopOperationQueue": {
+      "types": "./src/desktopOperationQueue.ts",
+      "import": "./src/desktopOperationQueue.ts"
+    },
+    "./frameTransport": {
+      "types": "./src/frameTransport.ts",
+      "import": "./src/frameTransport.ts"
+    },
+    "./modelImageBudget": {
+      "types": "./src/modelImageBudget.ts",
+      "import": "./src/modelImageBudget.ts"
+    },
+    "./uiTreeTargeting": {
+      "types": "./src/uiTreeTargeting.ts",
+      "import": "./src/uiTreeTargeting.ts"
+    },
+    "./appSnapShortcut": {
+      "types": "./src/appSnapShortcut.ts",
+      "import": "./src/appSnapShortcut.ts"
+    },
+    "./computerAuditFile": "./src/computerAuditFile.ts",
+    "./computerAuditHistory": "./src/computerAuditHistory.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -125,6 +125,17 @@ export function useComposerAttachmentMenus(
     }
     if (composerTrigger.kind === "slash-command") {
       const builtInSlashCommandItems = [
+        ...(window.desktopBridge?.computerBeta && presentationTier !== "phone"
+          ? [
+              {
+                id: "slash:computer-use",
+                type: "slash-command" as const,
+                command: "computer-use" as const,
+                label: "/computer-use",
+                description: "Use this Mac for one task",
+              },
+            ]
+          : []),
         ...(presentationTier !== "phone"
           ? [
               {

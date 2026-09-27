@@ -1,18 +1,41 @@
-# Desktop computer and browser use
+# Desktop Computer Use beta
 
-Ryco desktop can give an agent permission to inspect and operate apps on the local computer. Native control uses a vendored Poracode helper; Ryco owns consent, turn authorization, cancellation, browser connections and the visible cursor. This does not embed or depend on the proprietary Codex or Claude desktop runtime.
+Ryco's macOS Computer Use beta ports Synara 0.9.1's Cua runtime, native input mechanics, isolated browser tools, and view-only chat preview. The source is pinned to Cua 0.28.2 with native revision 39. Attribution and MIT licenses are in `docs/licenses/`.
 
-## Enable it
+## Start a task
 
-1. Open **Settings → Integrations**, enable **Private Agent Control** for the local environment, then enable **Computer Use** on the same page. Configure browsers in its **Browser Use** subsection.
-2. Permission badges refresh automatically on opening settings, returning to the app, and while the panel is visible. **Granted** is green, **Not granted** is red, and unverified states are neutral. You can also click **Check permissions**. On macOS, grant Accessibility and Screen Recording using the buttons and the system settings panes. Restart Ryco if macOS requests it. Development executables and installed/signed builds can have different permission identities.
-3. Find an app and choose **Ask**, **Always allow**, or **Block**. Ask opens a native Ryco consent dialog on first use in each turn. Remembered rules remain editable even when an app is not running.
-4. Enable the desired browsers. **Ryco Browser** uses a separate persistent profile. Chrome, Brave and Edge use the extension setup below.
-5. Start a new provider session after enabling Agent Control. Ask the agent to use `ryco_computer` or `ryco_browser`, inspect the target, perform the task and verify the result.
+1. Enable **Private Agent Control** in **Settings → Integrations** for the local desktop environment.
+2. In **Computer Use Beta**, choose **Set up Computer**. The guide checks Accessibility, Input Monitoring, then Screen Recording against the running app bundle. Grant permissions yourself in System Settings. Setup never sends a queued prompt.
+3. Send `/computer-use` followed by the task. An empty command stays in the composer. For subsequent human tasks, optionally turn on **Enable Computer by default**; this is separate from one-shot invocation.
+4. Use **Stop** in the preview to end Computer authority for the task. Hiding the preview only stops its capture subscription. Physical **Escape** interrupts the current input and requires a fresh observation before another action.
 
-Private tool injection supports the existing audited Agent Control integrations: Codex, Claude, Cursor and GitHub Copilot. OpenCode and Grok do not receive these tools through this integration. A hosted web page, mobile client or separately connected remote backend does not acquire control of the desktop implicitly.
+Codex, Claude, Cursor and Copilot use their private session MCP integration. Managed OpenCode Computer tasks launch a dedicated server process; externally configured OpenCode servers and Grok are unavailable. Remote environments and hosted/mobile clients do not acquire control of the local desktop.
 
-## Existing browser profiles
+A queued task carries a frozen generation. Stop, default-setting changes, desktop/backend restart, and revoked turn authority invalidate older work. Turning a preference back on does not revive stopped tasks. Provider sessions rediscover the catalog when Computer availability changes.
+
+## Interaction and preview
+
+Native actions address an exact process/window and observed element reference. Tools include semantic text editing, selection, clicks, keys, scrolling, drag, window controls, menus, clipboard, bounded batches, and on-demand help. Driver-owned browser tools support navigation, DOM actions, dialogs, uploads and downloads within the thread's workspace. Their isolated profile is separate from Ryco Browser and paired personal profiles.
+
+Approval-required tasks share a routine-action consent dialog. Clipboard access asks separately. Foreground use additionally requires an explicit human visible-use request; full access alone does not grant it. Lock, sleep and user-session changes pause input and clear task consent. Unknown action effects are reported as uncertain and must not be replayed automatically.
+
+The floating preview follows the exact window or browser tab, uses a native JPEG stream when available, and falls back to one-second target stills. You can drag, expand, dock, hide or stop it. Replacement targets clear old pixels; same-target capture gaps keep the last image. Hidden or background app tabs release capture demand. Preview pixels stay local and are never attached to model context.
+
+Settings include automatic preview, preview size, cursor color and on-demand, paginated local activity history. Typed values and clipboard contents are omitted. The desktop and backend share the same bounded, sanitized audit reader.
+
+## Build and validation
+
+`bun run build:desktop` builds the Swift helper and provisions the verified Cua artifact on macOS. Source builds require the Rust version pinned in `packages/shared/src/cuaDriverRelease.json`; install it with `rustup toolchain install 1.97.1`. The build selects that toolchain without changing your default. `RYCO_CUA_ARTIFACT_DIR` can point to an existing checksum/provenance-verified artifact. A stale local artifact fails verification; remove `apps/desktop/resources/cua-driver` to rebuild it. Distribution packages stage and sign both native executables.
+
+Automated host, backend, tool, queue-authority, packaging and browser tests do not prove live macOS TCC behavior. Qualify permissions, Escape, background input and focus restoration using the exact signed app build and disposable targets. Never treat imported upstream results as Ryco qualification.
+
+## Legacy controls and existing browser profiles
+
+The separate browser/legacy section retains the prior Poracode controller for other platforms and the explicit browser-extension pairing flow. On macOS, native model tools use the new beta runtime; legacy paired browser controls retain their own opt-in policy.
+
+The remaining sections describe the legacy controller and paired browser integration, including their separate tool names, permissions and validation commands.
+
+### Existing browser profiles
 
 Enable Chrome, Brave or Edge, then click **Pair**. **Open browser Extensions** opens the selected browser's extension manager. Choose **Show extension folder**, then **Copy folder path** to avoid searching through folders. Enable Developer mode and choose Load unpacked; on macOS use ⌘ + Shift + G in the folder chooser to paste the path. **Copy pairing configuration**, open **Ryco Browser Control** in the browser toolbar, and paste it there.
 
@@ -24,7 +47,7 @@ Chrome's supported app-assisted install flow on macOS/Windows requires a publish
 
 Permission checks use a separate, fresh helper process and do not capture screenshots or interrupt active native input. App-discovery failures are reported separately. In development, the settings panel identifies the current app bundle so permissions can be granted to the correct build. An installed Ryco build and a development launcher may have separate macOS permissions.
 
-## What the agent can do
+### What the agent can do
 
 | Native apps                                                    | Browsers                                                                          |
 | -------------------------------------------------------------- | --------------------------------------------------------------------------------- |
@@ -44,7 +67,7 @@ For uninterrupted use, leave **Allow foreground takeover requests** off. Browser
 
 Background support varies by app and operating system. Refused native operations remain refused; Ryco never silently switches to your physical mouse/keyboard. Foreground use requires enabling **Allow foreground takeover requests** and accepting a separate per-turn dialog. macOS Chromium/Electron native scroll and drag can be refused; use the browser connection for page interactions.
 
-## Boundaries and current limits
+### Boundaries and current limits
 
 - Both observation and input require a current provider turn and local opt-in. App denial is shared between canonical native Chrome/Brave/Edge identities and their extension routes. Ryco and macOS permission-management apps are excluded from native targets.
 - Native window/process identity is rechecked before actions. Browser element references are scoped to the observed document and turn. Navigation invalidates them.
@@ -55,7 +78,7 @@ Background support varies by app and operating system. Refused native operations
 
 Locked use remains a future feature. Native control requires an unlocked desktop; granting Screen Recording and Accessibility does not enable operation through the macOS lock screen.
 
-### Capturing a simulator phone
+#### Capturing a simulator phone
 
 Xcode 27 replaces Simulator with **Device Hub**, under `Xcode.app/Contents/Applications/DeviceHub.app`. Use `apps` with `query: "Device"` (or `query: "Simulator"` for older Xcode), then `windows` and `observe` on the window for the intended device. Installed-app search covers both Xcode directory layouts, including renamed Xcode bundles. In Device Hub, use **Open in New Window** for a phone-only capture. A device window must be open; a booted headless device alone is not a desktop window. Avoid showing the same device in both the main hub and a detached window: Device Hub can expose the other view's accessibility coordinates. If clicks are refused or coordinates fall outside the window, reopen the intended view and list its windows/elements again. Ryco refuses ambiguous targets rather than clicking another window.
 
@@ -67,7 +90,7 @@ Device Hub ignores process-targeted mouse clicks. Ryco routes a single backgroun
 
 Browser element actions check visibility and whether the target is covered or has moved before delivering input. Fill/select also respect disabled and read-only controls. A replaced browser connection requires a fresh observation even if it reuses tab identifiers.
 
-## Development and validation
+### Development and validation
 
 On macOS, a permission toggle applies to a code identity, not just an app name. If permissions remain denied after granting them and restarting, check the app's signature with `codesign --verify --deep --strict /Applications/Ryco.app`. Invalid or unsealed Electron bundles can be attributed to an executable path instead of Ryco's bundle identity. Packaged Ryco diagnoses invalid app/helper signatures without changing the permission result or requesting access.
 

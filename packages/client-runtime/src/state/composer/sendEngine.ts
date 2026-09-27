@@ -1,3 +1,4 @@
+import type { ComputerTurnIntent } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import {
   DEFAULT_MODEL,
@@ -207,6 +208,7 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 }
 
 export interface CommitSendTurnDispatchInput {
+  readonly computerUse?: ComputerTurnIntent;
   readonly api: EnvironmentApi;
   readonly threadId: ThreadId;
   readonly isFirstMessage: boolean;
@@ -270,6 +272,7 @@ export async function commitSendTurnDispatch(input: CommitSendTurnDispatchInput)
   input.beginLocalDispatch({ preparingWorktree: false });
   await input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",
+    ...(input.computerUse ? { computerUse: input.computerUse } : {}),
     commandId: input.newCommandId(),
     threadId: input.threadId,
     message: {

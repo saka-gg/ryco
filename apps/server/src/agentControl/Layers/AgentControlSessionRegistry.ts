@@ -1,3 +1,4 @@
+import { retireComputerTurn, bindComputerTurn } from "../../computer/computerTurnLifecycle.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { Effect, Layer, Option, Redacted } from "effect";
@@ -78,6 +79,8 @@ const makeAgentControlSessionRegistry = Effect.gen(function* () {
   let endpoint: AgentControlMcpEndpoint | null = null;
 
   const dropSession = (session: RegistrySession): void => {
+    if (session.turnAuthority)
+      retireComputerTurn(session.record.threadId, session.turnAuthority.turnId);
     abortRequests(session, () => true);
     session.turnAuthority = null;
     sessionsByDigest.delete(session.digest);
@@ -267,7 +270,9 @@ const makeAgentControlSessionRegistry = Effect.gen(function* () {
       };
       const previous = session.turnAuthority;
       session.turnAuthority = authority;
+      bindComputerTurn(session.record.threadId, input.turnId);
       if (previous !== null && previous.turnId !== authority.turnId) {
+        retireComputerTurn(session.record.threadId, previous.turnId);
         abortRequests(session, (request) => request.turnId === previous.turnId);
       }
       return Effect.succeed(authority);
@@ -281,6 +286,7 @@ const makeAgentControlSessionRegistry = Effect.gen(function* () {
         if (authority === null) continue;
         if (input.turnId !== undefined && authority.turnId !== input.turnId) continue;
         session.turnAuthority = null;
+        retireComputerTurn(session.record.threadId, authority.turnId);
         abortRequests(session, (request) => request.turnId === authority.turnId);
       }
     });

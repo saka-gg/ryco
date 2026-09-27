@@ -1,3 +1,5 @@
+import { Option } from "effect";
+import { computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
 import { createHash } from "node:crypto";
 
 import {
@@ -42,7 +44,12 @@ import { ServerConfig } from "../../config.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
-import { agentControlHostContext } from "../../agentControl/ProviderInjection.ts";
+import {
+  agentControlHostContext,
+  installAgentControlNativeHttp,
+  type AgentControlNativeHttpInjection,
+  type AgentControlProviderBridge,
+} from "../../agentControl/ProviderInjection.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -87,6 +94,7 @@ type OpenCodeSubscribedEvent =
     : never;
 
 interface OpenCodeSessionContext {
+  readonly computerLease?: AgentControlNativeHttpInjection;
   session: ProviderSession;
   readonly client: OpencodeClient;
   readonly server: OpenCodeServerConnection;
@@ -142,6 +150,7 @@ interface OpenCodeSessionContext {
 }
 
 export interface OpenCodeAdapterLiveOptions {
+  readonly agentControl?: AgentControlProviderBridge;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly nativeEventLogPath?: string;
@@ -1837,6 +1846,8 @@ export function makeOpenCodeAdapter(
               context.pendingPrompt.idleEvent = event;
               break;
             }
+            if (context.computerLease && context.activeTurnId)
+              yield* context.computerLease.retireTurn(context.activeTurnId);
             context.activeTurnId = undefined;
             context.activeAgent = undefined;
             context.activeVariant = undefined;
@@ -1892,6 +1903,8 @@ export function makeOpenCodeAdapter(
             context.pendingPrompt = undefined;
             yield* Fiber.interrupt(pendingPrompt.fiber).pipe(Effect.ignore);
           }
+          if (context.computerLease && context.activeTurnId)
+            yield* context.computerLease.retireTurn(context.activeTurnId);
           context.activeTurnId = undefined;
           context.activeAgent = undefined;
           context.activeVariant = undefined;
@@ -2058,6 +2071,14 @@ export function makeOpenCodeAdapter(
         const binaryPath = openCodeSettings.binaryPath;
         const serverUrl = openCodeSettings.serverUrl;
         const serverPassword = openCodeSettings.serverPassword;
+        const computerRequested = computerTurnPlan(input.threadId) !== undefined;
+        if (computerRequested && serverUrl)
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue:
+              "Computer Use needs a managed, isolated OpenCode server. External OpenCode servers cannot receive local desktop authority.",
+          });
         const directory = input.cwd ?? serverConfig.cwd;
         const resumeSessionId =
           input.resumePolicy === "fresh"
@@ -2095,27 +2116,55 @@ export function makeOpenCodeAdapter(
               // The runtime binds the server's lifetime to the Scope.Scope
               // we provide below — closing `sessionScope` kills the child
               // process automatically. No manual `server.close()` needed.
-              const server = options?.serverOwner
-                ? yield* options.serverOwner.acquire.pipe(
-                    Effect.map((process) => ({
-                      url: process.url,
-                      ...(process.serverPassword ? { serverPassword: process.serverPassword } : {}),
-                      exitCode: process.exitCode,
-                      external: false,
-                    })),
-                  )
-                : yield* openCodeRuntime.connectToOpenCodeServer({
-                    binaryPath,
-                    serverUrl,
-                    ...(serverPassword ? { serverPassword } : {}),
-                    ...(options?.environment ? { environment: options.environment } : {}),
-                  });
+              const computerLeaseOption = computerRequested
+                ? yield* installAgentControlNativeHttp(options?.agentControl, {
+                    threadId: input.threadId,
+                    providerInstanceId: boundInstanceId,
+                    runtimeSessionId,
+                    injectionMode: "opencode-http",
+                    computerOnly: true,
+                  })
+                : Option.none();
+              const computerLease = Option.getOrUndefined(computerLeaseOption);
+              if (computerLease) yield* computerLease.addScopeFinalizer(sessionScope);
+              const server =
+                options?.serverOwner && !computerLease
+                  ? yield* options.serverOwner.acquire.pipe(
+                      Effect.map((process) => ({
+                        url: process.url,
+                        ...(process.serverPassword
+                          ? { serverPassword: process.serverPassword }
+                          : {}),
+                        exitCode: process.exitCode,
+                        external: false,
+                      })),
+                    )
+                  : yield* openCodeRuntime.connectToOpenCodeServer({
+                      binaryPath,
+                      serverUrl,
+                      ...(serverPassword ? { serverPassword } : {}),
+                      ...(options?.environment ? { environment: options.environment } : {}),
+                    });
               const client = yield* openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,
                 directory,
                 ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
               });
               yield* verifyOpenCodeServerVersion(client);
+              if (computerLease)
+                yield* runOpenCodeSdk("mcp.add", () =>
+                  client.mcp.add({
+                    directory,
+                    name: "ryco_computer",
+                    config: {
+                      type: "remote",
+                      url: computerLease.mcpServer.url,
+                      headers: { ...computerLease.mcpServer.headers },
+                      oauth: false,
+                      enabled: true,
+                    },
+                  }),
+                );
               if (deviceToolBinding) {
                 yield* runOpenCodeSdk("mcp.add", () =>
                   client.mcp.add({
@@ -2167,6 +2216,7 @@ export function makeOpenCodeAdapter(
                 sessionScope,
                 server,
                 client,
+                ...(computerLease ? { computerLease } : {}),
                 openCodeSession: openCodeSession.data,
                 adopted: adoptedSession !== undefined,
               };
@@ -2201,6 +2251,7 @@ export function makeOpenCodeAdapter(
 
         const context: OpenCodeSessionContext = {
           session,
+          ...(started.computerLease ? { computerLease: started.computerLease } : {}),
           client: started.client,
           server: started.server,
           directory,
@@ -2401,13 +2452,14 @@ export function makeOpenCodeAdapter(
             });
           }
           if (!context.agentControlHostContextDelivered) {
-            text = `<ryco_host_context>${agentControlHostContext(false)}</ryco_host_context>${text ? `\n\n${text}` : ""}`;
+            text = `<ryco_host_context>${context.computerLease ? "Computer Use tools are available through the private ryco_computer MCP server for this task. Start with computer_help and computer_inspect." : agentControlHostContext(false)}</ryco_host_context>${text ? `\n\n${text}` : ""}`;
             context.agentControlHostContextDelivered = true;
           }
 
           const agent = getModelSelectionStringOptionValue(modelSelection, "agent");
           const variant = getModelSelectionStringOptionValue(modelSelection, "variant");
 
+          if (context.computerLease) yield* context.computerLease.bindTurn(turnId);
           context.activeTurnId = turnId;
           // OpenCode has no dedicated ask agent; its "plan" agent is the
           // read-only equivalent, so both plan and ask map onto it.
@@ -2454,6 +2506,8 @@ export function makeOpenCodeAdapter(
             Effect.tapError((requestError) =>
               context.activeTurnId === turnId && context.promptGeneration === generation
                 ? Effect.gen(function* () {
+                    if (context.computerLease && context.activeTurnId)
+                      yield* context.computerLease.retireTurn(context.activeTurnId);
                     context.activeTurnId = undefined;
                     context.activeAgent = undefined;
                     context.activeVariant = undefined;
@@ -2498,6 +2552,8 @@ export function makeOpenCodeAdapter(
 
           const completedDuringAdmission = pendingPrompt.idleEvent !== undefined;
           if (completedDuringAdmission && context.activeTurnId === turnId) {
+            if (context.computerLease && context.activeTurnId)
+              yield* context.computerLease.retireTurn(context.activeTurnId);
             context.activeTurnId = undefined;
             context.activeAgent = undefined;
             context.activeVariant = undefined;
@@ -2567,6 +2623,8 @@ export function makeOpenCodeAdapter(
         }
         if (interruptedTurnId) {
           if (context.activeTurnId === interruptedTurnId) {
+            if (context.computerLease && context.activeTurnId)
+              yield* context.computerLease.retireTurn(context.activeTurnId);
             context.activeTurnId = undefined;
             context.activeAgent = undefined;
             context.activeVariant = undefined;

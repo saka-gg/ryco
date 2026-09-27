@@ -469,6 +469,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           hardenedRuntime: false,
           strictVerify: true,
           binaries: [
+            "Contents/Resources/ryco-computer-ui-helper",
+            "Contents/Resources/cua-driver/cua-driver",
             "Contents/Resources/ryco-computer-use-helper",
             "Contents/Resources/ryco-desktop-security-helper",
           ],
@@ -650,6 +652,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         { from: "apps/desktop/resources/ryco-computer-use-helper", to: "ryco-computer-use-helper" },
         { from: "apps/desktop/resources/browser-extension", to: "browser-extension" },
         { from: "apps/desktop/resources/computer-use-licenses", to: "computer-use-licenses" },
+        { from: "apps/desktop/resources/ryco-computer-ui-helper", to: "ryco-computer-ui-helper" },
+        { from: "apps/desktop/resources/cua-driver", to: "cua-driver" },
+        { from: "docs/licenses/synara-computer-use.txt", to: "computer-use-licenses/synara.txt" },
         {
           from: "apps/desktop/resources/ryco-desktop-security-helper",
           to: "ryco-desktop-security-helper",

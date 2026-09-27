@@ -60,6 +60,7 @@ export type ComputerUsePairing = typeof ComputerUsePairing.Type;
 
 /** Only the backend receives this through its private bootstrap descriptor. */
 export const ComputerUseBridgeConfig = Schema.Struct({
+  native: Schema.optionalKey(Schema.Struct({ endpoint: Schema.String, capability: Schema.String })),
   url: Schema.String,
   token: Schema.String.check(Schema.isMinLength(43), Schema.isMaxLength(43)),
 });

@@ -20,6 +20,35 @@ export function registerComputerUseIpc(
       return run(input);
     });
   };
+  handle("beta-history", (input) => runtime.beta.readHistory(input));
+  handle("beta-state", () => runtime.beta.state());
+  handle("beta-check", () => runtime.beta.check());
+  handle("beta-setup", () => runtime.beta.setup());
+  handle("beta-preferences", (input) => runtime.beta.update(input));
+  const threadInput = (input: unknown) => {
+    const value = input as { threadId?: unknown; explicit?: unknown; visible?: unknown };
+    if (
+      !value ||
+      typeof value.threadId !== "string" ||
+      !value.threadId.length ||
+      value.threadId.length > 256
+    )
+      throw new Error("Invalid Computer thread.");
+    return {
+      threadId: value.threadId,
+      explicit: value.explicit === true,
+      visible: value.visible === true,
+    };
+  };
+  handle("beta-prepare", (input) => {
+    const value = threadInput(input);
+    return runtime.beta.prepare(value.threadId, value.explicit);
+  });
+  handle("beta-preview", (input) => {
+    const value = threadInput(input);
+    return runtime.beta.preview(value.threadId, value.visible);
+  });
+  handle("beta-stop", (input) => runtime.beta.stopTask(threadInput(input).threadId));
   handle("state", () => runtime.state());
   handle("check-permissions", () => runtime.refreshPermissions());
   handle("refresh", (input) => {

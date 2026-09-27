@@ -1,3 +1,4 @@
+import { DesktopComputerBeta } from "./beta.ts";
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -42,6 +43,7 @@ export class DesktopComputerUseRuntime {
   private readonly server: Server;
   private readonly sockets = new WebSocketServer({ noServer: true, maxPayload: 20 * 1024 * 1024 });
   private readonly transports = new Map<ComputerBrowser, BrowserTransport>();
+  readonly beta: DesktopComputerBeta;
   readonly embedded = new EmbeddedComputerBrowser();
   private readonly browser = new BrowserComputerDriver(this.transports);
   private readonly native: NativeComputerDriver;
@@ -59,6 +61,7 @@ export class DesktopComputerUseRuntime {
 
   private readonly options: {
     stateDir: string;
+    auditLogPath?: string;
     helperPath: string;
     extensionPath: string;
     getWindow(): BrowserWindow | null;
@@ -66,12 +69,19 @@ export class DesktopComputerUseRuntime {
   };
   constructor(options: {
     stateDir: string;
+    auditLogPath?: string;
     helperPath: string;
     extensionPath: string;
     getWindow(): BrowserWindow | null;
     changed(state: ComputerUseState): void;
   }) {
     this.options = options;
+    this.beta = new DesktopComputerBeta({
+      stateDir: options.stateDir,
+      ...(options.auditLogPath ? { auditLogPath: options.auditLogPath } : {}),
+      resourcesDir: dirname(options.helperPath),
+      getWindow: options.getWindow,
+    });
     const policyPath = join(options.stateDir, "computer-use-policy.json");
     let policy = DEFAULT_COMPUTER_POLICY;
     try {
@@ -159,7 +169,7 @@ export class DesktopComputerUseRuntime {
         response.setHeader("cache-control", "no-store");
         if (
           request.method !== "POST" ||
-          request.url !== "/control" ||
+          (request.url !== "/control" && request.url !== "/beta") ||
           request.headers.origin !== undefined ||
           !equalSecret(request.headers.authorization ?? "", `Bearer ${this.token}`)
         ) {
@@ -173,7 +183,7 @@ export class DesktopComputerUseRuntime {
         for await (const raw of request) {
           const chunk = Buffer.from(raw);
           size += chunk.length;
-          if (size > 256 * 1024) {
+          if (size > (request.url === "/beta" ? 8 * 1024 * 1024 : 256 * 1024)) {
             response.writeHead(413);
             response.end();
             return;
@@ -183,6 +193,23 @@ export class DesktopComputerUseRuntime {
         if (authorizedToken !== this.token || this.closed || response.destroyed) {
           response.writeHead(403);
           response.end();
+          return;
+        }
+        if (request.url === "/beta") {
+          try {
+            const value = await this.beta.request(
+              JSON.parse(Buffer.concat(chunks).toString("utf8")),
+            );
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(JSON.stringify(value));
+          } catch (error) {
+            response.writeHead(409, { "content-type": "application/json" });
+            response.end(
+              JSON.stringify({
+                error: error instanceof Error ? error.message : "Computer request failed.",
+              }),
+            );
+          }
           return;
         }
         const input = Schema.decodeUnknownSync(ComputerUseRequest)(
@@ -298,6 +325,7 @@ export class DesktopComputerUseRuntime {
   }
 
   async start(): Promise<void> {
+    await this.beta.start();
     await new Promise<void>((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(0, "127.0.0.1", () => {
@@ -313,7 +341,12 @@ export class DesktopComputerUseRuntime {
   backendBinding(): ComputerUseBridgeConfig {
     this.stop();
     this.token = randomBytes(32).toString("base64url");
-    return { url: `http://127.0.0.1:${this.port}/control`, token: this.token };
+    const native = this.beta.binding();
+    return {
+      url: `http://127.0.0.1:${this.port}/control`,
+      token: this.token,
+      ...(native ? { native } : {}),
+    };
   }
   state(): ComputerUseState {
     const permissions = this.permissions.state();
@@ -397,12 +430,14 @@ export class DesktopComputerUseRuntime {
     await openBrowserExtensions(browser);
   }
   stop(): void {
+    this.beta.stop();
     this.policyController.stop();
     this.publish();
   }
   dispose(): void {
     this.closed = true;
     this.stop();
+    void this.beta.dispose();
     this.overlay.dispose();
     this.embedded.dispose();
     this.sockets.close();

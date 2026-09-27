@@ -971,6 +971,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ];
     buildConfig.extraResources = [
       ...(buildConfig.extraResources as ReadonlyArray<unknown>),
+      { from: "apps/desktop/resources/ryco-computer-ui-helper", to: "ryco-computer-ui-helper" },
+      { from: "apps/desktop/resources/cua-driver", to: "cua-driver" },
+      { from: "docs/licenses/synara-computer-use.txt", to: "computer-use-licenses/synara.txt" },
       {
         from: "apps/desktop/resources/ryco-desktop-security-helper",
         to: "ryco-desktop-security-helper",
@@ -1005,6 +1008,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         : {}),
       strictVerify: true,
       binaries: [
+        "Contents/Resources/ryco-computer-ui-helper",
+        "Contents/Resources/cua-driver/cua-driver",
         "Contents/Resources/ryco-computer-use-helper",
         "Contents/Resources/ryco-desktop-security-helper",
       ],

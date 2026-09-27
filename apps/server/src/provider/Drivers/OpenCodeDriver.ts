@@ -1,3 +1,5 @@
+import { Option } from "effect";
+import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 /**
  * OpenCodeDriver — `ProviderDriver` for the OpenCode runtime.
  *
@@ -101,6 +103,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
   defaultConfig: (): OpenCodeSettings => Schema.decodeSync(OpenCodeSettings)({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const agentControl = yield* Effect.serviceOption(AgentControlSessionRegistry);
       const openCodeRuntime = yield* OpenCodeRuntime;
       const serverConfig = yield* ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
@@ -128,6 +131,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
           : undefined;
 
       const adapter = yield* makeOpenCodeAdapter(effectiveConfig, {
+        ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         instanceId,
         environment: processEnv,
         ...(serverOwner ? { serverOwner } : {}),
