@@ -138,6 +138,15 @@ export function SettingsStatisticsRouteScreen() {
                 <MotionReveal>
                   <ProviderLimits
                     providers={node.providers}
+                    onRefresh={data.refresh}
+                    environmentId={node.environment.environmentId}
+                    canRedeem={environments.some(
+                      (environment) =>
+                        environment.environmentId === node.environment.environmentId &&
+                        environment.mutationReady === true &&
+                        environment.role === "owner" &&
+                        environment.connectionState === "connected",
+                    )}
                     connected={
                       node.environment.connectionState === "connected" ||
                       node.environment.connectionState === "read-only"

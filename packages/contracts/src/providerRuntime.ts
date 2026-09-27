@@ -1,3 +1,4 @@
+import { ClaudeCacheObservation } from "./claudeCache.ts";
 import { Effect, Schema } from "effect";
 import { ApprovalResponseIdentity } from "./approvalResponses.ts";
 import {
@@ -335,6 +336,7 @@ const ProviderThreadGoalClearedPayload = Schema.Struct({});
 export type ProviderThreadGoalClearedPayload = typeof ProviderThreadGoalClearedPayload.Type;
 
 export const ThreadTokenUsageSnapshot = Schema.Struct({
+  claudeCache: Schema.optional(ClaudeCacheObservation),
   usedTokens: NonNegativeInt,
   totalProcessedTokens: Schema.optional(NonNegativeInt),
   maxTokens: Schema.optional(PositiveInt),
@@ -487,6 +489,8 @@ export const UserInputQuestion = Schema.Struct({
 export type UserInputQuestion = typeof UserInputQuestion.Type;
 
 const UserInputRequestedPayload = Schema.Struct({
+  /** Native optional question; never an authorization request. Missing means blocking. */
+  nonBlocking: Schema.optional(Schema.Boolean),
   questions: Schema.Array(UserInputQuestion),
 });
 export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
@@ -505,6 +509,8 @@ export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
  * merge strategy is provider-specific and lives in client-runtime.
  */
 export const RuntimeTaskUsage = Schema.Struct({
+  directInputTokens: Schema.optional(NonNegativeInt),
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
   totalTokens: NonNegativeInt,
   inputTokens: Schema.optional(NonNegativeInt),
   cachedInputTokens: Schema.optional(NonNegativeInt),

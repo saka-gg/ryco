@@ -1,3 +1,4 @@
+import { parseResetCredits } from "./CodexResetCredits.ts";
 import { DateTime, Duration, Effect, Layer, Option, Result, Schema, Types } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
@@ -224,7 +225,8 @@ export function parseCodexRateLimits(
       }
     : undefined;
 
-  if (!primary && !secondary && !credits) {
+  const resetCredits = parseResetCredits(response);
+  if (!primary && !secondary && !credits && !resetCredits) {
     return undefined;
   }
 
@@ -235,6 +237,7 @@ export function parseCodexRateLimits(
     ...(primary ? { primary } : {}),
     ...(secondary ? { secondary } : {}),
     ...(credits ? { credits } : {}),
+    ...(resetCredits ? { resetCredits } : {}),
     ...(r.rateLimitReachedType ? { rateLimitReachedType: r.rateLimitReachedType } : {}),
   };
 }

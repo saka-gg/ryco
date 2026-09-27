@@ -67,11 +67,40 @@ const STATUS_PROGRESSION_RANK: Record<AgentControlProposalStatus, number> = {
   cancelled: 3,
 };
 
+const hasPendingReturns = (proposal: AgentControlProposal) =>
+  proposal.completionReturns?.some(
+    (result) =>
+      result.status === "waiting" || result.status === "ready" || result.status === "dispatching",
+  ) ?? false;
+
+function mergeCompletionReturns(
+  current: AgentControlProposal["completionReturns"],
+  incoming: AgentControlProposal["completionReturns"],
+): AgentControlProposal["completionReturns"] {
+  if (!incoming?.length) return current;
+  const byChild = new Map((current ?? []).map((result) => [result.childThreadId, result]));
+  let changed = false;
+  for (const result of incoming) {
+    const previous = byChild.get(result.childThreadId);
+    if (
+      previous &&
+      (result.revision <= previous.revision ||
+        result.parentThreadId !== previous.parentThreadId ||
+        result.parentTurnId !== previous.parentTurnId ||
+        result.initialMessageId !== previous.initialMessageId)
+    )
+      continue;
+    byChild.set(result.childThreadId, result);
+    changed = true;
+  }
+  return changed ? [...byChild.values()] : current;
+}
+
 function pruneTerminalHistory(
   proposalsById: Readonly<Record<string, AgentControlProposal>>,
 ): Readonly<Record<string, AgentControlProposal>> {
-  const terminal = Object.values(proposalsById).filter((proposal) =>
-    isTerminalAgentControlStatus(proposal.status),
+  const terminal = Object.values(proposalsById).filter(
+    (proposal) => isTerminalAgentControlStatus(proposal.status) && !hasPendingReturns(proposal),
   );
   if (terminal.length <= AGENT_CONTROL_CLIENT_HISTORY_LIMIT) {
     return proposalsById;
@@ -107,7 +136,7 @@ export function applyAgentControlStreamEvent(
   if (!state.hydrated) {
     return state;
   }
-  const next = event.proposal;
+  let next = event.proposal;
   const current = state.proposalsById[next.proposalId];
   if (current !== undefined) {
     const currentRank = STATUS_PROGRESSION_RANK[current.status];
@@ -117,10 +146,21 @@ export function applyAgentControlStreamEvent(
     if (nextRank < currentRank) {
       return state;
     }
-    // Same rank means the same document (each status is entered at most
-    // once) — a replay; keep the state identity stable.
+    const completionReturns = mergeCompletionReturns(
+      current.completionReturns,
+      next.completionReturns,
+    );
     if (nextRank === currentRank) {
-      return state;
+      // Dispatch status and child completion are independent lifecycles.
+      // Durable per-child revisions survive reconnect and clock changes.
+      if (completionReturns === current.completionReturns) return state;
+      next = {
+        ...current,
+        completionReturns,
+        updatedAt: next.updatedAt > current.updatedAt ? next.updatedAt : current.updatedAt,
+      };
+    } else if (completionReturns) {
+      next = { ...next, completionReturns };
     }
   }
   return {
@@ -138,7 +178,9 @@ export function selectActiveAgentControlProposals(
   state: AgentControlQueueState,
 ): ReadonlyArray<AgentControlProposal> {
   return Object.values(state.proposalsById)
-    .filter((proposal) => !isTerminalAgentControlStatus(proposal.status))
+    .filter(
+      (proposal) => !isTerminalAgentControlStatus(proposal.status) || hasPendingReturns(proposal),
+    )
     .toSorted(
       (left, right) =>
         left.createdAt.localeCompare(right.createdAt) ||
@@ -151,7 +193,9 @@ export function selectRecentAgentControlProposals(
   state: AgentControlQueueState,
 ): ReadonlyArray<AgentControlProposal> {
   return Object.values(state.proposalsById)
-    .filter((proposal) => isTerminalAgentControlStatus(proposal.status))
+    .filter(
+      (proposal) => isTerminalAgentControlStatus(proposal.status) && !hasPendingReturns(proposal),
+    )
     .toSorted(
       (left, right) =>
         right.updatedAt.localeCompare(left.updatedAt) ||
@@ -167,7 +211,12 @@ export function selectAgentControlProposalsForThread(
   state: AgentControlQueueState,
   threadId: ThreadId,
 ): ReadonlyArray<AgentControlProposal> {
-  return selectActiveAgentControlProposals(state).filter(
+  return [
+    ...selectActiveAgentControlProposals(state),
+    ...selectRecentAgentControlProposals(state).filter(
+      (proposal) => proposal.completionReturns?.length,
+    ),
+  ].filter(
     (proposal) =>
       proposal.principal.kind === "provider-session" && proposal.principal.threadId === threadId,
   );

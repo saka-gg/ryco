@@ -192,3 +192,19 @@ it("keeps pending request ownership by turn and applies resolution in sequence o
     ]),
   ).toEqual([{ kind: "approval", requestId: "new", turnId: "new-turn" }]);
 });
+
+it("counts optional questions for invalidation but never as blocking input", () => {
+  const activities = [
+    {
+      id: "q",
+      createdAt: "2026-09-27T00:00:00.000Z",
+      kind: "user-input.requested",
+      turnId: "turn",
+      payload: { requestId: "optional", nonBlocking: true },
+    },
+  ];
+  expect(derivePendingThreadRequestState(activities).hasPendingUserInput).toBe(false);
+  expect(derivePendingThreadRequests(activities)).toEqual([
+    { requestId: "optional", turnId: "turn", kind: "user-input", nonBlocking: true },
+  ]);
+});

@@ -471,6 +471,64 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.history.import": {
+      const created = yield* decideOrchestrationCommand({
+        readModel,
+        command: { ...command, type: "thread.create" },
+      });
+      const events: PlannedOrchestrationEvent[] = Array.isArray(created) ? [...created] : [created];
+      const base = () =>
+        withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        });
+      for (const message of command.messages) {
+        events.push({
+          ...base(),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: message.id,
+            role: message.role,
+            text: message.text,
+            turnId: message.turnId,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.updatedAt,
+          },
+        });
+      }
+      events.push({
+        ...base(),
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: EventId.make(`import:${command.threadId}`),
+            kind: "history.imported",
+            tone: "info",
+            summary: `Imported ${command.source === "codex" ? "Codex" : "Claude"} history. New turns continue in a separate native session.`,
+            payload: {},
+            turnId: null,
+            createdAt: command.createdAt,
+          },
+        },
+      });
+      if (command.archived)
+        events.push({
+          ...base(),
+          type: "thread.archived",
+          payload: {
+            threadId: command.threadId,
+            archivedAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        });
+      return events;
+    }
+
     case "thread.create": {
       yield* requireProject({
         readModel,
@@ -976,6 +1034,23 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const resumeGuard = command.claudeResumeGuard;
+      if (
+        resumeGuard &&
+        (targetThread.session?.providerName !== "claudeAgent" ||
+          (resumeGuard.requireReady && targetThread.session.status !== "ready") ||
+          targetThread.session.activeTurnId !== null ||
+          targetThread.session.runtimeSessionId !== resumeGuard.runtimeSessionId ||
+          (targetThread.latestTurn?.turnId ?? null) !== resumeGuard.latestTurnId ||
+          JSON.stringify(targetThread.modelSelection) !==
+            JSON.stringify(resumeGuard.modelSelection))
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Claude resume review is stale. The session, model, context settings, or latest turn changed. Review and send again.",
+        });
+      }
       if (
         targetThread.session?.status === "running" &&
         targetThread.session.activeTurnId !== null
@@ -983,6 +1058,33 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: `Thread '${command.threadId}' already has active turn '${targetThread.session.activeTurnId}' and cannot start another turn until it finishes.`,
+        });
+      }
+      const guard = command.delegationReturnGuard;
+      const latestUserMessage = guard
+        ? targetThread.messages.findLast((message) => message.role === "user")
+        : undefined;
+      if (
+        guard &&
+        (targetThread.archivedAt !== null ||
+          !["ready", "idle"].includes(targetThread.session?.status ?? "") ||
+          (latestUserMessage?.id ?? null) !== guard.latestUserMessageId ||
+          (latestUserMessage?.id !== guard.turnMessageId &&
+            latestUserMessage?.turnId !== guard.turnId) ||
+          JSON.stringify(command.modelSelection ?? targetThread.modelSelection) !==
+            JSON.stringify(targetThread.modelSelection) ||
+          targetThread.projectId !== guard.projectId ||
+          targetThread.latestTurn?.turnId !== guard.turnId ||
+          targetThread.latestTurn.state !== "completed" ||
+          targetThread.session?.runtimeSessionId !== guard.runtimeSessionId ||
+          targetThread.session.providerInstanceId !== guard.providerInstanceId ||
+          targetThread.runtimeMode !== guard.runtimeMode ||
+          targetThread.worktreePath !== guard.worktreePath)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Delegated result origin changed. Open the child task and return its result manually.",
         });
       }
       const requestedSelection = command.modelSelection ?? targetThread.modelSelection;
@@ -1116,6 +1218,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          ...(command.delegationReturnGuard
+            ? { delegationReturnGuard: command.delegationReturnGuard }
+            : {}),
           ...(command.computerUse ? { computerUse: command.computerUse } : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }

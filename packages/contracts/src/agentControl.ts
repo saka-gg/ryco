@@ -28,6 +28,7 @@
 import { Effect, Schema } from "effect";
 import {
   CommandId,
+  MessageId,
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -333,6 +334,8 @@ const AgentControlTitle = TrimmedNonEmptyString.check(
 );
 
 export const AgentControlCreateThreadEntry = Schema.Struct({
+  /** Return only this initial run to the exact originating provider turn. */
+  returnToOrigin: Schema.optional(Schema.Boolean),
   projectId: ProjectId,
   title: AgentControlTitle,
   prompt: AgentControlPrompt,
@@ -1001,7 +1004,31 @@ export const AGENT_CONTROL_TERMINAL_PROPOSAL_STATUSES: ReadonlyArray<AgentContro
  * `planDigest` — the plan payload and digest are written once and never
  * updated; a changed plan requires a new request.
  */
+/** Independent of command-dispatch receipts. No provider exactly-once guarantee. */
+export const AgentControlCompletionReturn = Schema.Struct({
+  revision: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  childThreadId: ThreadId,
+  initialMessageId: MessageId,
+  parentThreadId: ThreadId,
+  parentTurnId: TurnId,
+  childTurnId: Schema.NullOr(TurnId),
+  status: Schema.Literals([
+    "waiting",
+    "ready",
+    "dispatching",
+    "delivered",
+    "blocked",
+    "cancelled",
+    "failed",
+    "uncertain",
+  ]),
+  detail: Schema.String.check(Schema.isMaxLength(512)),
+  updatedAt: IsoDateTime,
+});
+export type AgentControlCompletionReturn = typeof AgentControlCompletionReturn.Type;
+
 export const AgentControlProposal = Schema.Struct({
+  completionReturns: Schema.optional(Schema.Array(AgentControlCompletionReturn)),
   proposalId: AgentControlProposalId,
   requestId: AgentControlRequestId,
   principal: AgentControlPrincipal,
@@ -1060,6 +1087,7 @@ export const AGENT_CONTROL_QUEUE_RECENT_LIMIT_DEFAULT = 20;
  * the plan payload or prompt text.
  */
 export const AgentControlProposalReceipt = Schema.Struct({
+  completionReturns: Schema.optional(Schema.Array(AgentControlCompletionReturn)),
   proposalId: AgentControlProposalId,
   requestId: AgentControlRequestId,
   actionKind: AgentControlActionKind,
@@ -1075,7 +1103,7 @@ export const AgentControlProposalReceipt = Schema.Struct({
 export type AgentControlProposalReceipt = typeof AgentControlProposalReceipt.Type;
 
 /**
- * Queue snapshot: non-terminal proposals (oldest first) plus a bounded
+ * Queue snapshot: non-terminal proposals and pending completion returns, plus a bounded
  * terminal history (newest first). `revision` is the server's per-process
  * monotonic change counter at snapshot time — it orders proposal events
  * within one subscription and is NOT durable across server restarts; every

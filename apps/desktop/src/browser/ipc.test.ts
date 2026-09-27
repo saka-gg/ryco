@@ -30,3 +30,20 @@ it("denies guest webContents and subframes access to manual browser control", ()
   expect(state).not.toHaveBeenCalled();
   expect(handler({ sender: contents, senderFrame: frame })).toEqual({ tabs: [] });
 });
+
+it("keeps sign-in authorization behind the trusted shell main frame", () => {
+  const frame = {},
+    contents = { mainFrame: frame };
+  const command = vi.fn();
+  registerProjectBrowserIpc(
+    { command, onState: vi.fn(), onFocusAddress: vi.fn() } as unknown as EmbeddedComputerBrowser,
+    () => ({ isDestroyed: () => false, webContents: contents }) as unknown as BrowserWindow,
+  );
+  const handler = handlers.get("desktop:browser:command")!;
+  const input = { action: "allow-sign-in", tab: "fixture" };
+  expect(() => handler({ sender: {}, senderFrame: frame }, input)).toThrow("only in the Ryco");
+  expect(() => handler({ sender: contents, senderFrame: {} }, input)).toThrow("only in the Ryco");
+  expect(command).not.toHaveBeenCalled();
+  handler({ sender: contents, senderFrame: frame }, input);
+  expect(command).toHaveBeenCalledWith(input);
+});

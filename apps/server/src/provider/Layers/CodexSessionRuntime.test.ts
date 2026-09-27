@@ -309,6 +309,38 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("openCodexThread", () => {
+  it("continues an imported copy with the mapped cwd and its distinct native identity", async () => {
+    const copiedId = "22222222-2222-4222-8222-222222222222";
+    const client = {
+      request: <M extends "thread/start" | "thread/resume">(
+        method: M,
+        payload: CodexRpc.ClientRequestParamsByMethod[M],
+      ) => {
+        assert.equal(method, "thread/resume");
+        assert.equal(
+          (payload as CodexRpc.ClientRequestParamsByMethod["thread/resume"]).threadId,
+          copiedId,
+        );
+        assert.equal(payload.cwd, "/tmp/mapped-import-target");
+        return Effect.succeed(
+          makeThreadOpenResponse(copiedId) as CodexRpc.ClientRequestResponsesByMethod[M],
+        );
+      },
+    };
+    const result = await Effect.runPromise(
+      openCodexThread({
+        client,
+        threadId: ThreadId.make("ryco-import-fixture"),
+        runtimeMode: "approval-required",
+        cwd: "/tmp/mapped-import-target",
+        requestedModel: undefined,
+        serviceTier: undefined,
+        resumeThreadId: copiedId,
+      }),
+    );
+    assert.equal(result.thread.id, copiedId);
+  });
+
   it.each(["inProgress", "completed"] as const)(
     "resumes without historical items while preserving the latest %s turn",
     async (status) => {

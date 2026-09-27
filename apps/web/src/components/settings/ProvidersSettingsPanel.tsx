@@ -1,3 +1,4 @@
+import { CodexResetCredits } from "../usage/CodexResetCredits";
 import { updateInstanceModelFavorites } from "@ryco/client-runtime/state/composer";
 import { LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useRef, useState, type KeyboardEvent } from "react";
@@ -605,6 +606,35 @@ export function ProvidersSettingsPanel() {
             {selectedRow ? (
               <ProviderInstanceCard
                 usageAvailable={settingsTarget?.connected === true}
+                resetCreditsNode={
+                  selectedRow.instance.driver === "codex" ? (
+                    <CodexResetCredits
+                      environmentId={settingsTarget?.environmentId ?? "local"}
+                      instanceId={selectedRow.instanceId}
+                      api={{
+                        readCodexResetCredits: (input) =>
+                          readTargetServer().readCodexResetCredits?.(input) ??
+                          Promise.reject(
+                            new Error("Update this Ryco server to use reset credits."),
+                          ),
+                        consumeCodexResetCredit: (input) =>
+                          readTargetServer().consumeCodexResetCredit?.(input) ??
+                          Promise.reject(new Error("Reset credits unavailable.")),
+                        refreshProviders: async (input) => {
+                          const result = await readTargetServer().refreshProviders(input);
+                          applyProviderSnapshot(result.providers);
+                          return result;
+                        },
+                      }}
+                      allowed={
+                        !settingsBlocked &&
+                        (settingsTarget ? settingsTarget.connected : true) &&
+                        selectedRow.instance.enabled !== false &&
+                        selectedLiveProvider?.auth.status === "authenticated"
+                      }
+                    />
+                  ) : null
+                }
                 key={selectedRow.instanceId}
                 instanceId={selectedRow.instanceId}
                 instance={selectedRow.instance}

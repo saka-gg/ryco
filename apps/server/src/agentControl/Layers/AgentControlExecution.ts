@@ -1,3 +1,4 @@
+import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
@@ -234,6 +235,7 @@ const failedResult = (
 export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOptions) =>
   Effect.gen(function* () {
     const proposals = yield* AgentControlProposalStore;
+    const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
     const operations = yield* AgentControlOperationStore;
     const proposalEvents = yield* AgentControlProposalEvents;
     const validator = yield* AgentControlActionValidator;
@@ -1068,6 +1070,45 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 threadId,
                 worktreeId: worktree.worktreeId,
                 attachedAt: createdAt,
+              });
+            }
+            if ("returnToOrigin" in entry && entry.returnToOrigin) {
+              const origin = proposal.principal;
+              if (
+                origin.kind !== "provider-session" ||
+                !origin.turnId ||
+                !origin.runtimeSessionId ||
+                Option.isNone(completionReturns)
+              ) {
+                return yield* Effect.fail(
+                  new Error(
+                    "Completion return requires an exact provider turn and durable return service.",
+                  ),
+                );
+              }
+              const parent = yield* loadThread(origin.threadId);
+              // Persist before starting the child: even an immediate completion
+              // or a lost start receipt must retain the initial message binding.
+              yield* completionReturns.value.insert({
+                childThreadId: threadId,
+                initialMessageId: messageIdFor(operation.operationId, `create-${index}`),
+                parentThreadId: origin.threadId,
+                parentTurnId: origin.turnId,
+                childTurnId: null,
+                proposalId: proposal.proposalId,
+                projectId: parent.projectId,
+                parentRuntimeSessionId: origin.runtimeSessionId,
+                parentProviderInstanceId: origin.providerInstanceId,
+                parentRuntimeMode: parent.runtimeMode,
+                parentWorktreePath: parent.worktreePath,
+                status: "waiting",
+                detail: "Waiting for the initial child turn and settled output/background work.",
+                revision: 0,
+                createdAt,
+                updatedAt: createdAt,
+                nextCheckAt: createdAt,
+                settled: null,
+                command: null,
               });
             }
             yield* dispatch(`turn-started:${index}`, {

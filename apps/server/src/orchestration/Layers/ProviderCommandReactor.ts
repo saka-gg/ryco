@@ -1,3 +1,4 @@
+import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import { stageComputerTurn, computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
@@ -842,6 +843,7 @@ const make = Effect.gen(function* () {
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
+    readonly preserveRuntime?: boolean;
     readonly computerUse?: ComputerTurnIntent;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -891,10 +893,11 @@ const make = Effect.gen(function* () {
           }
         : undefined,
     );
-    yield* ensureSessionForThread(input.threadId, input.createdAt, {
-      ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-      computerCatalogChanged,
-    });
+    if (!input.preserveRuntime)
+      yield* ensureSessionForThread(input.threadId, input.createdAt, {
+        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+        computerCatalogChanged,
+      });
     const { goal, native } = yield* reconcileThreadGoal(input.threadId);
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -938,9 +941,14 @@ const make = Effect.gen(function* () {
           : requestedModelSelection
         : input.modelSelection;
 
+    const nativeCompaction =
+      activeSession?.provider === "claudeAgent" &&
+      !input.computerUse &&
+      isClaudeNativeCompaction({ input: input.messageText, attachments: normalizedAttachments });
     return {
       threadId: input.threadId,
-      ...(normalizedInput
+      ...(nativeCompaction ? { input: "/compact" } : {}),
+      ...(!nativeCompaction && normalizedInput
         ? {
             input: input.computerUse
               ? `${computerToolInstructions()}\n\n${normalizedInput}`
@@ -1119,11 +1127,15 @@ const make = Effect.gen(function* () {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
-      return setThreadSessionErrorOnTurnStartFailure({
-        threadId: event.payload.threadId,
-        detail,
-        createdAt: event.payload.createdAt,
-      }).pipe(
+      return (
+        event.payload.delegationReturnGuard
+          ? Effect.void
+          : setThreadSessionErrorOnTurnStartFailure({
+              threadId: event.payload.threadId,
+              detail,
+              createdAt: event.payload.createdAt,
+            })
+      ).pipe(
         Effect.flatMap(() =>
           appendProviderFailureActivity({
             threadId: event.payload.threadId,
@@ -1156,6 +1168,43 @@ const make = Effect.gen(function* () {
       );
     }
 
+    const returnGuard = event.payload.delegationReturnGuard;
+    const liveReturnSession = returnGuard
+      ? yield* providerService
+          .getSession(event.payload.threadId)
+          .pipe(
+            Effect.catchCause((cause) =>
+              handleTurnStartFailure(cause).pipe(Effect.as(Option.none())),
+            ),
+          )
+      : Option.none();
+    if (
+      returnGuard &&
+      (Option.isNone(liveReturnSession) ||
+        liveReturnSession.value.runtimeSessionId !== returnGuard.runtimeSessionId ||
+        liveReturnSession.value.providerInstanceId !== returnGuard.providerInstanceId ||
+        event.payload.contextHandoff !== undefined)
+    ) {
+      yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.start.failed",
+        summary: "Delegated return was not submitted",
+        detail:
+          "The originating runtime is no longer live. Inspect this result before sending it manually.",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
+      return;
+    }
+    const expectedReturnRuntime =
+      returnGuard && Option.isSome(liveReturnSession)
+        ? {
+            provider: liveReturnSession.value.provider,
+            providerInstanceId: returnGuard.providerInstanceId,
+            runtimeSessionId: returnGuard.runtimeSessionId,
+          }
+        : undefined;
+
     if (event.payload.contextHandoff !== undefined) {
       // Handoff owns a separate session-start path. Its current human request
       // must replace (or clear) the previous turn's Computer catalog too.
@@ -1183,6 +1232,7 @@ const make = Effect.gen(function* () {
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageText: message.text,
+      ...(returnGuard ? { preserveRuntime: true } : {}),
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
@@ -1241,7 +1291,7 @@ const make = Effect.gen(function* () {
           })
         : Effect.void;
 
-    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+    yield* providerService.sendTurn(sendTurnRequest.value, expectedReturnRuntime).pipe(
       Effect.tap(() => commitAcceptedModelSelection),
       Effect.catchCause(recoverTurnStartFailure),
       Effect.forkScoped,
@@ -1563,10 +1613,12 @@ const make = Effect.gen(function* () {
                     (Schema.is(ProviderAdapterSessionNotFoundError)(reason.error) ||
                       Schema.is(ProviderAdapterSessionClosedError)(reason.error)))),
             );
-          // Only approval adapters currently prove non-delivery. An arbitrary
-          // question error remains claimed; reconnect must never replay the answer.
-          const retryable =
-            isApproval && findProviderAdapterRequestError(cause)?.approvalResponseNotSent === true;
+          // Only explicit adapter evidence of non-delivery permits another attempt.
+          // A transport error remains claimed, including optional question steers.
+          const requestError = findProviderAdapterRequestError(cause);
+          const retryable = isApproval
+            ? requestError?.approvalResponseNotSent === true
+            : requestError?.userInputResponseNotSent === true;
           return fail(
             stale ? stalePendingRequestDetail(kind, key.requestId) : Cause.pretty(cause),
             stale ? "invalidated" : retryable ? "retryable" : "uncertain",

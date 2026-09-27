@@ -82,6 +82,10 @@ export interface WsRpcClient {
     readonly stageFileReference: RpcUnaryMethod<typeof WS_METHODS.projectsStageFileReference>;
     readonly initializeGit: RpcUnaryMethod<typeof WS_METHODS.projectsInitializeGit>;
   };
+  readonly sessionImport: {
+    readonly discover: RpcUnaryMethod<typeof WS_METHODS.sessionImportDiscover>;
+    readonly run: RpcUnaryMethod<typeof WS_METHODS.sessionImportRun>;
+  };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
   };
@@ -231,6 +235,10 @@ export interface WsRpcClient {
      * Refresh provider snapshots. Pass `{ instanceId }` to refresh a single
      * configured instance; pass no argument (or `{}`) to refresh all.
      */
+    readonly readCodexResetCredits: RpcUnaryMethod<typeof WS_METHODS.serverReadCodexResetCredits>;
+    readonly consumeCodexResetCredit: RpcUnaryMethod<
+      typeof WS_METHODS.serverConsumeCodexResetCredit
+    >;
     readonly refreshProviders: (
       input?: RpcInput<typeof WS_METHODS.serverRefreshProviders>,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverRefreshProviders>>;
@@ -401,6 +409,11 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsStageFileReference](input)),
       initializeGit: (input) =>
         transport.request((client) => client[WS_METHODS.projectsInitializeGit](input)),
+    },
+    sessionImport: {
+      discover: (input) =>
+        transport.request((client) => client[WS_METHODS.sessionImportDiscover](input)),
+      run: (input) => transport.request((client) => client[WS_METHODS.sessionImportRun](input)),
     },
     filesystem: {
       browse: (input) => transport.request((client) => client[WS_METHODS.filesystemBrowse](input)),
@@ -613,6 +626,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverGetStatistics]({})),
       getUsageSummary: (input) =>
         transport.request((client) => client[WS_METHODS.serverGetUsageSummary](input)),
+      readCodexResetCredits: (input) =>
+        transport.request((client) => client[WS_METHODS.serverReadCodexResetCredits](input)),
+      consumeCodexResetCredit: (input) =>
+        transport.request((client) => client[WS_METHODS.serverConsumeCodexResetCredit](input)),
       refreshProviders: (input) =>
         transport.request((client) => client[WS_METHODS.serverRefreshProviders](input ?? {})),
       searchAcpRegistry: (input) =>

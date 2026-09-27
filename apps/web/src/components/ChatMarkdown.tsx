@@ -46,7 +46,11 @@ import { useTheme } from "../hooks/useTheme";
 import { useLongPress } from "../hooks/useLongPress";
 import { usePresentationTier } from "../hooks/usePresentationTier";
 import { useSmoothStreamedText } from "../hooks/useSmoothStreamedText";
-import { resolveMarkdownFileLinkMeta, rewriteMarkdownFileUriHref } from "../markdown-links";
+import {
+  resolveMarkdownFileLinkMeta,
+  resolveMarkdownThreadHref,
+  rewriteMarkdownFileUriHref,
+} from "../markdown-links";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
@@ -778,6 +782,13 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
         );
       },
       a({ node: _node, href, ...props }) {
+        const threadHref = resolveMarkdownThreadHref(href, environmentId);
+        if (threadHref)
+          return (
+            <a {...props} href={threadHref}>
+              {props.children}
+            </a>
+          );
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
         const fileLinkMeta = normalizedHref ? markdownFileLinkMetaByHref.get(normalizedHref) : null;
         if (!fileLinkMeta) {

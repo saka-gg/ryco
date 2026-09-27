@@ -1,3 +1,4 @@
+import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { ComputerBetaPreview } from "./chat/ComputerBetaPreview";
@@ -1546,6 +1547,7 @@ export default function ChatView(props: ChatViewProps) {
     contextHandoffEntries,
     pendingApprovals,
     pendingUserInputs,
+    optionalUserInputs,
     activePlan,
   } = threadActivityViewModel;
   // Native subagent fold: memoized by activity-list identity, shared by the
@@ -3358,6 +3360,7 @@ export default function ChatView(props: ChatViewProps) {
         composer: composerSnapshot,
         thread: {
           threadId: threadIdForSend,
+          sourceProviderDriver: activeThread.session?.provider ?? null,
           isFirstMessage,
           isServerThread,
           // A pending source materializes its own thread at commit time, so this
@@ -4924,6 +4927,20 @@ export default function ChatView(props: ChatViewProps) {
                   />
                 </div>
               ) : null}
+              {presentationTier !== "phone"
+                ? optionalUserInputs.map((input) => (
+                    <OptionalQuestionCard
+                      key={input.userInputIdentity?.requestEventId ?? input.requestId}
+                      input={input}
+                      disabled={
+                        !dispatchCapability.allowed ||
+                        activeEnvironmentUnavailable ||
+                        sideChatConnection.phase !== "connected"
+                      }
+                      onRespond={onRespondToUserInput}
+                    />
+                  ))
+                : null}
               <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
               {/* Agent Control approvals stay off the frozen phone tier;
                   apps/mobile owns the native surface. */}

@@ -1,3 +1,5 @@
+import { readEnvironmentServerConfig } from "./environmentServerConfigs";
+import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { useEffect } from "react";
 
 import {
@@ -9,6 +11,7 @@ import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   commitSendTurnDispatch,
+  captureReviewedSendReadiness,
 } from "@ryco/client-runtime/state/composer";
 
 import { ensureEnvironmentApi } from "../connection/environmentApi";
@@ -35,6 +38,23 @@ async function sendQueuedThreadMessage(message: QueuedThreadMessage): Promise<vo
   const api = ensureEnvironmentApi(message.environmentId);
   const turnAttachments = await buildQueuedThreadMessageAttachments(message);
   await commitSendTurnDispatch({
+    claudeCacheReview: {
+      review: async (review) =>
+        (await import("../features/threads/claudeCacheReview")).mobileClaudeCacheReview.review(
+          review,
+        ),
+    },
+    sourceProviderDriver: selectThreadByRef(
+      useStore.getState(),
+      scopeThreadRef(message.environmentId, message.threadId),
+    )?.session?.provider,
+    providerDriver:
+      readEnvironmentServerConfig(message.environmentId)?.providers.find(
+        (provider) => provider.instanceId === message.modelSelection?.instanceId,
+      )?.driver ?? null,
+    assertMutationReady: captureReviewedSendReadiness(message.environmentId, () =>
+      createMobileConnectionRegistry().driver.supervisor.read(message.environmentId),
+    ),
     api,
     threadId: message.threadId,
     isFirstMessage: false,
@@ -91,13 +111,17 @@ export function readThreadDeliveryState(message: QueuedThreadMessage): {
       ? "live"
       : "loading",
     environmentConnected: connected,
-    threadBusy: summary?.latestTurn?.state === "running" || thread?.latestTurn?.state === "running",
+    threadBusy:
+      summary?.latestTurn?.state === "running" ||
+      thread?.latestTurn?.state === "running" ||
+      Boolean(summary?.session?.activeTurnId ?? thread?.session?.activeTurnId) ||
+      thread?.session?.status === "running",
     alreadyDelivered: thread?.messages.some((entry) => entry.id === message.messageId) ?? false,
     deliveryReconciled: thread !== undefined && !cacheProvenance,
   };
 }
 
-function runOutboxDrain(): void {
+export function runOutboxDrain(): void {
   void drainThreadOutbox({
     readThreadDeliveryState,
     sendQueuedMessage: sendQueuedThreadMessage,

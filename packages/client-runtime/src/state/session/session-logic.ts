@@ -142,6 +142,7 @@ export interface PendingApproval {
 }
 
 export interface PendingUserInput {
+  nonBlocking?: boolean;
   requestId: ApprovalRequestId;
   userInputIdentity?: ApprovalResponseIdentity;
   responseState?: ApprovalResponseState;
@@ -167,6 +168,7 @@ export interface ThreadActivityViewModel {
   latestTurnHasToolActivity: boolean;
   pendingApprovals: PendingApproval[];
   pendingUserInputs: PendingUserInput[];
+  optionalUserInputs: PendingUserInput[];
   activePlan: ActivePlanState | null;
 }
 
@@ -485,7 +487,7 @@ function parseUserInputQuestions(
           };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0) {
+      if (options.length === 0 && payload?.nonBlocking !== true) {
         return null;
       }
       return {
@@ -541,6 +543,7 @@ function updatePendingUserInputState(
         ? { userInputIdentity: payload.userInputIdentity }
         : {}),
       createdAt: activity.createdAt,
+      ...(payload?.nonBlocking === true ? { nonBlocking: true } : {}),
       questions,
     });
     return;
@@ -2092,13 +2095,15 @@ export function deriveThreadActivityViewModel(
     }
   }
 
+  const userInputs = pendingUserInputsFromState(pendingUserInputState);
   return {
     workLogEntries: toWorkLogEntries(workLogState),
     contextCompactionEntries,
     contextHandoffEntries,
     latestTurnHasToolActivity,
     pendingApprovals: pendingApprovalsFromState(pendingApprovalState),
-    pendingUserInputs: pendingUserInputsFromState(pendingUserInputState),
+    pendingUserInputs: userInputs.filter((input) => !input.nonBlocking),
+    optionalUserInputs: userInputs.filter((input) => input.nonBlocking),
     activePlan: toActivePlanState(latestPlanActivityForTurn ?? latestPlanActivity),
   };
 }

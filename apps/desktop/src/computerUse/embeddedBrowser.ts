@@ -5,6 +5,7 @@ import type {
   ProjectBrowserSurface,
 } from "@ryco/contracts";
 import { browserUrl, type BrowserTab, type BrowserTransport } from "./browser.ts";
+import { SignInPopups } from "../browser/signInPopups.ts";
 
 interface TabEntry {
   view: WebContentsView;
@@ -17,6 +18,7 @@ interface TabEntry {
 
 /** One tab owner shared by manual preview and the consent-gated agent transport. */
 export class EmbeddedComputerBrowser implements BrowserTransport {
+  private readonly signIn = new SignInPopups(() => this.publish());
   private readonly entries = new Map<string, TabEntry>();
   private readonly listeners = new Set<(state: ProjectBrowserState) => void>();
   private profile: Electron.Session | null = null;
@@ -59,6 +61,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
           zoom: wc.getZoomFactor(),
           presentation: entry.presentation,
           error: entry.error,
+          signInPopup: this.signIn.state(id),
         };
       }),
     };
@@ -120,12 +123,14 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     host.on("close", (event) => {
       // Closing a detached preview returns it to the browser's tab strip.
       event.preventDefault();
+      this.signIn.cancel(id);
       host.hide();
       entry.presentation = "background";
       this.publish();
     });
-    wc.setWindowOpenHandler(() => ({ action: "deny" }));
-    wc.on("did-start-navigation", (_event, url, _inPlace, mainFrame) => {
+    this.signIn.install(id, wc, () => this.foreground(id));
+    wc.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
+      if (mainFrame && !inPlace) this.signIn.cancel(id);
       if (mainFrame && /^https?:/u.test(url)) entry.requestedUrl = url;
     });
     wc.on("before-input-event", (event, input) => {
@@ -166,6 +171,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       }
     });
     wc.on("render-process-gone", () => {
+      this.signIn.fail(id);
       entry.error = "This page stopped responding. Reload to recover.";
       this.publish();
     });
@@ -193,6 +199,17 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       signal.removeEventListener("abort", abort);
     }
   }
+  private foreground(id: string): boolean {
+    const entry = this.entries.get(id);
+    if (!entry) return false;
+    const window =
+      entry.presentation === "panel" && this.mounted?.tab === id
+        ? this.mounted.window
+        : entry.presentation === "window"
+          ? entry.host
+          : null;
+    return Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused());
+  }
   private entry(id: string): TabEntry {
     const entry = this.entries.get(id);
     if (!entry || entry.view.webContents.isDestroyed()) throw new Error("Browser tab closed.");
@@ -202,6 +219,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const mounted = this.mounted;
     this.mounted = null;
     if (!mounted) return;
+    this.signIn.cancel(mounted.tab);
     const entry = this.entries.get(mounted.tab);
     if (!entry) return;
     if (!mounted.window.isDestroyed()) mounted.window.contentView.removeChildView(entry.view);
@@ -283,6 +301,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     // Remove ownership before Electron emits nested close/destroy events. A closing guest
     // must never be reparented or asked to close again from its own destroyed callback.
     this.entries.delete(tab);
+    this.signIn.cancel(tab);
     if (this.mounted?.tab === tab) {
       const { window } = this.mounted;
       this.mounted = null;
@@ -301,6 +320,14 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const entry = this.entry(input.tab),
       wc = entry.view.webContents;
     switch (input.action) {
+      case "allow-sign-in":
+        if (!this.foreground(input.tab))
+          throw new Error("Show and focus this browser tab before allowing sign-in.");
+        this.signIn.arm(input.tab);
+        break;
+      case "cancel-sign-in":
+        this.signIn.cancel(input.tab);
+        break;
       case "navigate":
         await wc.loadURL(browserUrl(input.url ?? ""));
         break;
@@ -334,8 +361,11 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
         entry.host.show();
         break;
       case "dock":
-        entry.host.hide();
-        entry.presentation = "background";
+        this.signIn.cancel(input.tab);
+        if (entry.presentation === "window") {
+          entry.host.hide();
+          entry.presentation = "background";
+        }
         break;
     }
     this.publish();
@@ -351,6 +381,9 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     signal: AbortSignal,
   ): Promise<unknown> {
     signal.throwIfAborted();
+    if (this.signIn.state(tab) === "open")
+      throw new Error("Finish or close the sign-in popup before agent browser control resumes.");
+    if (this.signIn.state(tab) === "armed") this.signIn.cancel(tab);
     const wc = this.entry(tab).view.webContents;
     const debuggerApi = wc.debugger;
     const attaching = !debuggerApi.isAttached();
@@ -388,7 +421,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     }
   }
   stop(): void {
-    for (const { view } of this.entries.values()) {
+    for (const [id, { view }] of this.entries) {
+      this.signIn.cancel(id);
       const wc = view.webContents;
       if (wc.isDestroyed()) continue;
       wc.stop();

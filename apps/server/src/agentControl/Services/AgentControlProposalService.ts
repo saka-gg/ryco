@@ -64,6 +64,9 @@ export interface DecideAgentControlProposalRequest {
 export const toAgentControlProposalReceipt = (
   proposal: AgentControlProposal,
 ): AgentControlProposalReceipt => ({
+  ...(proposal.completionReturns === undefined
+    ? {}
+    : { completionReturns: proposal.completionReturns }),
   proposalId: proposal.proposalId,
   requestId: proposal.requestId,
   actionKind: proposal.plan.kind,

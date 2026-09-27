@@ -419,3 +419,19 @@ it("keeps the frozen phone tier on source", async () => {
     stop();
   }
 });
+
+it("resolves delegated result child and origin links within the current environment", async () => {
+  const screen = await render(
+    <ChatMarkdown
+      text="[Open child](/ryco/thread/child) · [Open origin](/ryco/thread/parent)"
+      cwd="/fixture"
+      environmentId={EnvironmentId.make("fixture-env")}
+    />,
+  );
+  await expect
+    .element(screen.getByRole("link", { name: "Open child" }))
+    .toHaveAttribute("href", "/fixture-env/child");
+  await expect
+    .element(screen.getByRole("link", { name: "Open origin" }))
+    .toHaveAttribute("href", "/fixture-env/parent");
+});

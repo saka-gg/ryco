@@ -1,3 +1,4 @@
+import { preserveAgentMessageExtensions } from "./_internal/agentMessageExtensions.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -152,7 +153,14 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     if (schema) {
       return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
         Effect.flatMap((decoded) =>
-          Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
+          Effect.forEach(
+            handlers,
+            (handler) =>
+              handler(
+                preserveAgentMessageExtensions(notification.method, notification.params, decoded),
+              ),
+            { discard: true },
+          ),
         ),
         Effect.catch(() =>
           Effect.logWarning("Codex notification could not be processed", {

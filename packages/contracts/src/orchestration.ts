@@ -820,6 +820,7 @@ const OrchestrationLatestTurnState = Schema.Literals([
 export type OrchestrationLatestTurnState = typeof OrchestrationLatestTurnState.Type;
 
 export const OrchestrationLatestTurn = Schema.Struct({
+  userMessageId: Schema.optional(MessageId),
   turnId: TurnId,
   state: OrchestrationLatestTurnState,
   requestedAt: IsoDateTime,
@@ -1332,11 +1333,32 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
+/** Optimistic identity fence for delayed delegated-result queue delivery. */
+export const DelegationReturnGuard = Schema.Struct({
+  turnMessageId: MessageId,
+  latestUserMessageId: Schema.NullOr(MessageId),
+  projectId: ProjectId,
+  turnId: TurnId,
+  runtimeSessionId: RuntimeSessionId,
+  providerInstanceId: ProviderInstanceId,
+  runtimeMode: RuntimeMode,
+  worktreePath: Schema.NullOr(Schema.String),
+});
+export const ClaudeResumeGuard = Schema.Struct({
+  requireReady: Schema.Boolean,
+  runtimeSessionId: RuntimeSessionId,
+  latestTurnId: Schema.NullOr(TurnId),
+  modelSelection: ModelSelection,
+});
+export type ClaudeResumeGuard = typeof ClaudeResumeGuard.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
+  claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
+  delegationReturnGuard: Schema.optional(DelegationReturnGuard),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1360,10 +1382,12 @@ export const ThreadTurnStartCommand = Schema.Struct({
 });
 
 const ClientThreadTurnStartCommand = Schema.Struct({
+  claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
+  delegationReturnGuard: Schema.optional(DelegationReturnGuard),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1779,6 +1803,13 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
 
 const InternalOrchestrationCommand = Schema.Union([
   Schema.Struct({
+    ...ThreadCreateCommand.fields,
+    type: Schema.Literal("thread.history.import"),
+    source: Schema.Literals(["codex", "claudeAgent"]),
+    archived: Schema.Boolean,
+    messages: Schema.Array(OrchestrationMessage).check(Schema.isMaxLength(2000)),
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.history.restore"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -2053,6 +2084,7 @@ export const ThreadContextHandoffRequestedPayload = Schema.Struct({
 export type ThreadContextHandoffRequestedPayload = typeof ThreadContextHandoffRequestedPayload.Type;
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
+  delegationReturnGuard: Schema.optional(DelegationReturnGuard),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Decode historical records without enabling recall or persisting rendered text.
   projectMemory: Schema.optional(Schema.Unknown),

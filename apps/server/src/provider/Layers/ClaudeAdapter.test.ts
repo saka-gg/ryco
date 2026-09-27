@@ -884,7 +884,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("treats ultrathink as a prompt keyword instead of a session effort", () => {
+  it.effect("normalizes a retired ultrathink selection without injecting a prompt keyword", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -914,7 +914,7 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.effort, "high");
       const promptText = yield* Effect.promise(() => readFirstPromptText(createInput));
-      assert.equal(promptText, "Ultrathink:\nInvestigate the edge cases");
+      assert.equal(promptText, "Investigate the edge cases");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -3489,6 +3489,31 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("continues an imported native copy in a mapped cwd without resuming the source", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const copiedId = "22222222-2222-4222-8222-222222222222";
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("import-runtime-fixture"),
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd: "/tmp/mapped-import-target",
+        resumeCursor: { threadId: RESUME_THREAD_ID, resume: copiedId, turnCount: 2 },
+        runtimeMode: "approval-required",
+      });
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.resume, copiedId);
+      assert.equal(options?.cwd, "/tmp/mapped-import-target");
+      assert.equal(options?.sessionId, undefined);
+      assert.equal(options?.resumeSessionAt, undefined);
+      assert.equal(session.runtimeSessionId, "import-runtime-fixture");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("passes Claude resume ids without pinning a stale assistant checkpoint", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -5371,6 +5396,163 @@ describe("ClaudeAdapterLive", () => {
           attempt: 1,
         });
         assert.deepEqual(harness.query.stopTaskCalls, ["reused-task"]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+  it.effect(
+    "persists main-loop cache evidence without duplicate freshness or subagent pollution",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "session.exited"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("cache-runtime"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Fixture prompt", attachments: [] });
+        const assistant = {
+          type: "assistant",
+          uuid: "fixture-main",
+          session_id: "fixture-session",
+          parent_tool_use_id: null,
+          message: {
+            id: "fixture-request",
+            model: "claude-sonnet-4-6",
+            content: [],
+            usage: {
+              input_tokens: 12,
+              cache_read_input_tokens: 50_000,
+              cache_creation_input_tokens: 2_000,
+              output_tokens: 1,
+            },
+          },
+        } as unknown as SDKMessage;
+        harness.query.emit(assistant);
+        harness.query.emit(assistant);
+        harness.query.emit({
+          ...assistant,
+          uuid: "fixture-child",
+          parent_tool_use_id: "child-tool",
+          message: {
+            id: "child-request",
+            model: "haiku",
+            content: [],
+            usage: {
+              input_tokens: 9_999,
+              cache_read_input_tokens: 999_999,
+              cache_creation_input_tokens: 8_888,
+              output_tokens: 1,
+            },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "child-task",
+          task_type: "local_agent",
+          tool_use_id: "child-tool",
+          description: "Child fixture",
+          session_id: "fixture-session",
+          uuid: "child-start",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_progress",
+          task_id: "child-task",
+          task_type: "local_agent",
+          description: "Child progress",
+          usage: {
+            total_tokens: 999_999,
+            input_tokens: 9_999,
+            cache_read_input_tokens: 999_999,
+            cache_creation_input_tokens: 8_888,
+            output_tokens: 100,
+          },
+          session_id: "fixture-session",
+          uuid: "child-progress",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          num_turns: 1,
+          result: "done",
+          session_id: "fixture-session",
+          uuid: "fixture-result",
+          modelUsage: {
+            "claude-sonnet-4-6": { contextWindow: 200_000 },
+            "claude-haiku-4-5": { contextWindow: 1_000_000 },
+          },
+          usage: {
+            input_tokens: 120,
+            cache_read_input_tokens: 100_000,
+            cache_creation_input_tokens: 4_000,
+            output_tokens: 600,
+          },
+        } as unknown as SDKMessage);
+        harness.query.finish();
+        const events = yield* Fiber.join(eventsFiber);
+        const usageEvents = events.filter((event) => event.type === "thread.token-usage.updated");
+        assert.equal(usageEvents.length, 2);
+        const first = usageEvents[0]?.payload.usage.claudeCache;
+        const last = usageEvents[1]?.payload.usage.claudeCache;
+        assert.equal(first?.cacheReadInputTokens, 50_000);
+        assert.equal(first?.directInputTokens, 12);
+        assert.equal(first?.cacheWriteInputTokens, 2_000);
+        assert.equal(first?.runtimeSessionId, "cache-runtime");
+        assert.equal(last?.observedAt, first?.observedAt);
+        assert.equal(last?.messageId, "fixture-request");
+        assert.equal(last?.mainLoopTotals?.outputTokens, 600);
+        assert.equal(last?.mainLoopTotals?.cacheWriteInputTokens, 4_000);
+        assert.equal(usageEvents[1]?.payload.usage.usedTokens, 52_012);
+        assert.equal(usageEvents[1]?.payload.usage.maxTokens, 200_000);
+        const childUsage = events.find((event) => event.type === "task.progress")?.payload
+          .typedUsage;
+        assert.equal(childUsage?.directInputTokens, 9_999);
+        assert.equal(childUsage?.cacheWriteInputTokens, 8_888);
+        assert.equal(childUsage?.cachedInputTokens, 999_999);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+  it.effect(
+    "sends an exact native compact command without effort or source-context decoration",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("compact-native"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "/compact",
+          attachments: [],
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-opus-4-6",
+            options: [{ id: "effort", value: "ultrathink" }],
+          },
+        });
+        const prompt = yield* Effect.promise(() =>
+          readFirstPromptText(harness.getLastCreateQueryInput()),
+        );
+        assert.equal(prompt, "/compact");
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),

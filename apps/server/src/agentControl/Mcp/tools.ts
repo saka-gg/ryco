@@ -548,7 +548,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.readControlRequest,
     description:
-      "Read the lifecycle receipt of an Agent Control request this session created (status, decision, terminal result).",
+      "Read the dispatch lifecycle receipt of an Agent Control request this session created. A completed request is not a completed child task; optional completionReturns separately reports initial child-run return status and manual recovery guidance.",
     inputSchema: {
       type: "object",
       properties: { proposalId: { type: "string", maxLength: 256 } },
@@ -559,7 +559,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.waitForControlRequest,
     description:
-      "Wait (bounded) until an Agent Control request this session created is decided or reaches a terminal outcome, then return its receipt.",
+      "Wait (bounded) until an Agent Control request this session created is decided or reaches a terminal dispatch outcome, then return its receipt. This does not wait for child task completion; inspect completionReturns with ryco_read_control_request.",
     inputSchema: {
       type: "object",
       properties: {
@@ -574,7 +574,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.createThreads,
     description:
-      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs.",
+      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs. A completed receipt means dispatch, not task completion. Opt in per entry with returnToOrigin to durably queue a bounded initial-run result to this exact parent turn after settled output/background work. New parent turns/runtime replacement block delivery; inspect completionReturns with ryco_read_control_request. No self-approval or exactly-once provider delivery is implied.",
     inputSchema: {
       type: "object",
       properties: {
@@ -597,6 +597,11 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
               tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
               envMode: { type: "string", enum: ["local", "worktree"] },
               baseRef: { type: "string", maxLength: 256 },
+              returnToOrigin: {
+                type: "boolean",
+                description:
+                  "Queue this initial run result to the exact originating turn; defaults to false.",
+              },
             },
             required: ["projectId", "title", "prompt", "modelSelection", "runtimeMode", "envMode"],
             additionalProperties: false,

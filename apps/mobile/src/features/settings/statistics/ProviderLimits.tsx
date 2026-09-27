@@ -1,3 +1,5 @@
+import { CodexResetCredits } from "./CodexResetCredits";
+import type { EnvironmentId } from "@ryco/contracts";
 import { useEffect, useState } from "react";
 import { AppState, View } from "react-native";
 import type { ServerProvider, ServerProviderRateLimitWindow } from "@ryco/contracts";
@@ -58,9 +60,15 @@ function LimitWindow({
 export function ProviderLimits({
   providers,
   connected,
+  environmentId,
+  canRedeem = false,
+  onRefresh,
 }: {
   providers: readonly ServerProvider[];
   connected: boolean;
+  environmentId?: EnvironmentId;
+  canRedeem?: boolean;
+  onRefresh?: () => void;
 }) {
   const [clock, setNow] = useState(Date.now);
   const now = clock;
@@ -115,6 +123,14 @@ export function ProviderLimits({
                 <Note>Checked {new Date(provider.checkedAt).toLocaleString()}</Note>
               </View>
             </View>
+            {provider.driver === "codex" && environmentId ? (
+              <CodexResetCredits
+                environmentId={environmentId}
+                instanceId={provider.instanceId}
+                onRefresh={onRefresh}
+                allowed={canRedeem && provider.enabled && provider.auth.status === "authenticated"}
+              />
+            ) : null}
             {limits?.primary ? (
               <LimitWindow
                 available={isRateLimitSnapshotAvailable(provider, connected)}

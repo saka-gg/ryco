@@ -1,3 +1,7 @@
+import {
+  CompletionReturnRepository,
+  completionReturnSummary,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { isRoutineAgentControlAction } from "../routineActions.ts";
 import {
   AGENT_CONTROL_ERROR_CODES,
@@ -188,6 +192,24 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
   const proposals = yield* AgentControlProposalRepository;
   const audit = yield* AgentControlAuditRepository;
   const events = yield* AgentControlProposalEvents;
+  const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
+  const decorate = (proposal: AgentControlProposal) =>
+    Option.isNone(completionReturns)
+      ? Effect.succeed(proposal)
+      : completionReturns.value.listForProposal(proposal.proposalId).pipe(
+          Effect.map((records) =>
+            records.length === 0
+              ? proposal
+              : {
+                  ...proposal,
+                  updatedAt: records.reduce(
+                    (latest, record) => (record.updatedAt > latest ? record.updatedAt : latest),
+                    proposal.updatedAt,
+                  ),
+                  completionReturns: records.map(completionReturnSummary),
+                },
+          ),
+        );
 
   /**
    * State changes and their audit rows must land atomically: without the
@@ -324,7 +346,7 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
       }
       // Publish only after the transaction committed: a rolled-back state
       // change must never reach subscribers.
-      yield* events.publish(updated);
+      yield* events.publish(yield* decorate(updated));
       return updated;
     });
 
@@ -427,7 +449,7 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
       if (inserted) {
         // After commit, mirroring transitionTo. An identical-request replay
         // below deliberately does not publish: no state changed.
-        yield* events.publish(proposal);
+        yield* events.publish(yield* decorate(proposal));
         return { proposal, replayed: false };
       }
 
@@ -466,16 +488,49 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
     });
 
   const getById: AgentControlProposalStoreShape["getById"] = (proposalId) =>
-    proposals.getById({ proposalId });
+    proposals
+      .getById({ proposalId })
+      .pipe(
+        Effect.flatMap((value) =>
+          Option.isSome(value)
+            ? decorate(value.value).pipe(Effect.map(Option.some))
+            : Effect.succeed(value),
+        ),
+      );
 
   const listPending: AgentControlProposalStoreShape["listPending"] = (input) =>
-    proposals.listPending({ limit: input.limit });
+    proposals
+      .listPending({ limit: input.limit })
+      .pipe(Effect.flatMap((rows) => Effect.forEach(rows, decorate)));
 
+  const includeReturns = (
+    rows: ReadonlyArray<AgentControlProposal>,
+    pending: boolean,
+    limit: number,
+  ) =>
+    Effect.gen(function* () {
+      const combined = new Map(rows.map((row) => [row.proposalId, row]));
+      if (Option.isSome(completionReturns)) {
+        for (const proposalId of yield* completionReturns.value.listProposalIds(pending, limit)) {
+          if (combined.has(proposalId)) continue;
+          const row = yield* proposals.getById({ proposalId });
+          if (Option.isSome(row)) combined.set(proposalId, row.value);
+        }
+      }
+      const decorated = yield* Effect.forEach([...combined.values()], decorate);
+      return pending
+        ? decorated
+        : decorated.toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit);
+    });
   const listActive: AgentControlProposalStoreShape["listActive"] = (input) =>
-    proposals.listActive({ limit: input.limit });
+    proposals
+      .listActive({ limit: input.limit })
+      .pipe(Effect.flatMap((rows) => includeReturns(rows, true, input.limit)));
 
   const listRecent: AgentControlProposalStoreShape["listRecent"] = (input) =>
-    proposals.listRecent({ limit: input.limit });
+    proposals
+      .listRecent({ limit: input.limit })
+      .pipe(Effect.flatMap((rows) => includeReturns(rows, false, input.limit)));
 
   const expireOverdue: AgentControlProposalStoreShape["expireOverdue"] = (input) =>
     Effect.gen(function* () {

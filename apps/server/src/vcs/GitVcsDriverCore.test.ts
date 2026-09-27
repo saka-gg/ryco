@@ -520,34 +520,74 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect(
-      "lets Git arbitrate concurrent destination collisions without overwriting a winner",
-      () =>
-        Effect.gen(function* () {
-          const cwd = yield* makeTmpDir();
-          const { initialBranch } = yield* initRepoWithCommit(cwd);
-          const destination = `${yield* makeTmpDir("concurrent-worktrees-")}/checkout`;
-          const driver = yield* GitVcsDriver.GitVcsDriver;
-          const results = yield* Effect.all(
-            ["one", "two"].map((name) =>
-              driver
-                .createWorktree({
-                  cwd,
-                  path: destination,
-                  refName: initialBranch,
-                  newRefName: `feature/${name}`,
-                })
-                .pipe(Effect.result),
-            ),
-            { concurrency: 2 },
-          );
-          assert.equal(results.filter((result) => result._tag === "Success").length, 1);
-          assert.equal(results.filter((result) => result._tag === "Failure").length, 1);
-          assert.equal(
-            yield* (yield* FileSystem.FileSystem).readFileString(`${destination}/README.md`),
-            "# test\n",
-          );
-        }),
+    it.effect("rejects concurrent destination collisions without overwriting a winner", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const destination = `${yield* makeTmpDir("concurrent-worktrees-")}/checkout`;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const results = yield* Effect.all(
+          ["one", "two"].map((name) =>
+            driver
+              .createWorktree({
+                cwd,
+                path: destination,
+                refName: initialBranch,
+                newRefName: `feature/${name}`,
+              })
+              .pipe(Effect.result),
+          ),
+          { concurrency: 2 },
+        );
+        assert.equal(results.filter((result) => result._tag === "Success").length, 1);
+        assert.equal(results.filter((result) => result._tag === "Failure").length, 1);
+        assert.equal(
+          yield* (yield* FileSystem.FileSystem).readFileString(`${destination}/README.md`),
+          "# test\n",
+        );
+      }),
+    );
+    it.effect("serializes canonical destination contenders before launching Git", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const root = yield* makeTmpDir("serialized-worktrees-");
+        const destination = `${root}/checkout`;
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        let launches = 0;
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            Effect.gen(function* () {
+              if (input.args[0] === "worktree" && input.args[1] === "add") {
+                launches++;
+                // Keep Git from creating the destination until both callers have
+                // had a chance to pass an unguarded existence check.
+                yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)));
+              }
+              return yield* base.execute(input);
+            }),
+        }).pipe(Effect.provide(ServerConfigLayer));
+        const results = yield* Effect.all(
+          [destination, `${root}/./checkout`].map((target, index) =>
+            driver
+              .createWorktree({
+                cwd,
+                path: target,
+                refName: initialBranch,
+                newRefName: `feature/serialized-${index}`,
+              })
+              .pipe(Effect.result),
+          ),
+          { concurrency: 2 },
+        );
+        assert.equal(launches, 1);
+        assert.equal(results.filter((result) => result._tag === "Success").length, 1);
+        assert.equal(results.filter((result) => result._tag === "Failure").length, 1);
+        assert.equal(
+          yield* (yield* FileSystem.FileSystem).readFileString(`${destination}/README.md`),
+          "# test\n",
+        );
+      }),
     );
     it.effect(
       "fetches origin branches and creates from the fresh remote instead of the local base",

@@ -8,6 +8,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       ? { attachments: { readChunk: rpcClient.chatAttachments.readChunk } }
       : {}),
     server: {
+      readCodexResetCredits: rpcClient.server.readCodexResetCredits,
+      consumeCodexResetCredit: rpcClient.server.consumeCodexResetCredit,
       refreshProviders: rpcClient.server.refreshProviders,
       searchAcpRegistry: rpcClient.server.searchAcpRegistry,
       installAcpRegistry: rpcClient.server.installAcpRegistry,

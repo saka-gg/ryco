@@ -1,3 +1,4 @@
+import { SessionImportSettings } from "./SessionImportSettings";
 import { useAppPreferencesLabel } from "../../deviceName";
 import { settingsRestorePlan } from "./settingsRestore";
 import { selectArchivedSettingsGroups } from "./archivedSettings";
@@ -534,6 +535,7 @@ export function GeneralSettingsPanel({
 
   return (
     <SettingsPageContainer>
+      <SessionImportSettings />
       <SettingsSection title="Behavior" owner="client">
         <OnboardingReplaySetting />
         <SettingsRow

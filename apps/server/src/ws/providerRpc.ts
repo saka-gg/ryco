@@ -1,3 +1,10 @@
+import { CodexSettings, CodexResetCreditError } from "@ryco/contracts";
+import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import {
+  readResetAccount,
+  consumeResetCredit,
+  runtimeBinding,
+} from "../provider/Layers/CodexResetCredits.ts";
 import * as NodePath from "node:path";
 import { AcpRegistryOperationError, AcpRegistrySettings } from "@ryco/contracts";
 import { makeAcpRegistryCatalog } from "../provider/acp/AcpRegistryCatalog.ts";
@@ -88,7 +95,52 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
       };
     });
 
+  const resetRuntime = (instanceId: import("@ryco/contracts").ProviderInstanceId) =>
+    Effect.gen(function* () {
+      const settings = yield* serverSettings.getSettings;
+      const instance = settings.providerInstances[instanceId];
+      if (!instance || instance.driver !== "codex" || !instance.enabled)
+        return yield* Effect.fail(
+          new CodexResetCreditError({ message: "Select an enabled Codex provider." }),
+        );
+      const codex = yield* Schema.decodeUnknownEffect(CodexSettings)(instance.config ?? {});
+      const layout = yield* resolveCodexHomeLayout(codex);
+      return {
+        instanceId,
+        binaryPath: codex.binaryPath,
+        homePath: layout.effectiveHomePath ?? "",
+        environment: mergeProviderInstanceEnvironment(instance.environment),
+      };
+    }).pipe(
+      Effect.mapError(
+        () => new CodexResetCreditError({ message: "The selected Codex provider is unavailable." }),
+      ),
+    );
+
   return defineWsHandlers({
+    [WS_METHODS.serverReadCodexResetCredits]: (input) =>
+      ownerEffect(
+        WS_METHODS.serverReadCodexResetCredits,
+        Effect.gen(function* () {
+          return yield* readResetAccount(yield* resetRuntime(input.instanceId));
+        }),
+      ),
+    [WS_METHODS.serverConsumeCodexResetCredit]: (input) =>
+      ownerEffect(
+        WS_METHODS.serverConsumeCodexResetCredit,
+        Effect.gen(function* () {
+          const runtime = yield* resetRuntime(input.instanceId);
+          const verify = resetRuntime(input.instanceId).pipe(
+            Effect.map((current) => runtimeBinding(current) === runtimeBinding(runtime)),
+            Effect.orElseSucceed(() => false),
+          );
+          const result = yield* consumeResetCredit(runtime, input, verify);
+          yield* providerRegistry
+            .refreshInstance(input.instanceId)
+            .pipe(Effect.timeout(Duration.seconds(3)), Effect.ignoreCause);
+          return result;
+        }),
+      ),
     [WS_METHODS.serverSearchAcpRegistry]: (input) =>
       ownerEffect(
         WS_METHODS.serverSearchAcpRegistry,

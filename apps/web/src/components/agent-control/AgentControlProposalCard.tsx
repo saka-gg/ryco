@@ -108,6 +108,29 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
         {model.executionLabel !== null ? (
           <p className="mt-1 text-xs text-muted-foreground">{model.executionLabel}</p>
         ) : null}
+        {model.completionReturns?.map((result) => (
+          <div
+            key={result.childThreadId}
+            className="mt-2 border-l-2 border-border pl-2 text-xs"
+            data-testid="completion-return-status"
+          >
+            <p className="font-medium">Completion return · {result.status}</p>
+            <p className="text-muted-foreground">{result.detail}</p>
+            <a
+              className="underline"
+              href={`/${encodeURIComponent(environmentId)}/${encodeURIComponent(result.childThreadId)}`}
+            >
+              Open child task
+            </a>
+            {" · "}
+            <a
+              className="underline"
+              href={`/${encodeURIComponent(environmentId)}/${encodeURIComponent(result.parentThreadId)}`}
+            >
+              Open originating chat
+            </a>
+          </div>
+        ))}
         {model.affectedThreadIds.length > 0 ? (
           <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs">
             {model.affectedThreadIds.map((threadId) => (

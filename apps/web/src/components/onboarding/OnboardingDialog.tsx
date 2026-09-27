@@ -249,6 +249,15 @@ export function OnboardingDialog({
               >
                 Add project
               </Button>
+              <Button
+                variant="outline"
+                disabled={!ready}
+                onClick={() =>
+                  useSettingsDialogStore.getState().openSettings("general", environmentId)
+                }
+              >
+                Import Codex or Claude conversations
+              </Button>
             </div>
           )}
           {step === "tour" && (

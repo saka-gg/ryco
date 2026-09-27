@@ -118,6 +118,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.session.set":
     case "thread.message.assistant.delta":
     case "thread.message.assistant.complete":
+    case "thread.history.import":
     case "thread.history.restore":
     case "thread.proposed-plan.upsert":
     case "thread.turn.diff.complete":

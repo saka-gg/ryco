@@ -22,6 +22,7 @@ export function ThreadQueuedMessages(props: {
   readonly steeringIds: ReadonlySet<string>;
   readonly getSteerUnavailableReason: (message: QueuedThreadMessage) => string | null;
   readonly onSteer: (message: QueuedThreadMessage) => void;
+  readonly onRetryReview?: (messageId: string) => void;
   readonly onRemove: (messageId: string) => void;
 }) {
   const iconColor = String(useThemeColor("--color-icon"));
@@ -41,6 +42,18 @@ export function ThreadQueuedMessages(props: {
             <Text className="flex-1 text-sm text-foreground">
               {hasRetiredProjectMemory(message) ? REMOVED_PROJECT_MEMORY_MESSAGE : summary(message)}
             </Text>
+            {message.resumeReviewError && (
+              <View className="flex-1 gap-1">
+                <Text className="text-xs text-foreground-muted">{message.resumeReviewError}</Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Review queued Claude message"
+                  onPress={() => props.onRetryReview?.(message.messageId)}
+                >
+                  <Text className="text-sm font-ryco-bold text-foreground">Review and retry</Text>
+                </Pressable>
+              </View>
+            )}
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={

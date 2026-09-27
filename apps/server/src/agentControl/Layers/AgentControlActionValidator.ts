@@ -602,6 +602,15 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   const validateExternalSubmission: AgentControlActionValidatorShape["validateExternalSubmission"] =
     (input) =>
       Effect.gen(function* () {
+        if (
+          input.plan.kind === "createThreads" &&
+          input.plan.entries.some((entry) => entry.returnToOrigin)
+        ) {
+          return yield* fail(
+            "invalid-plan",
+            "Completion return requires an originating provider turn; external tasks cannot opt in.",
+          );
+        }
         if (isAgentControlDevicePlan(input.plan)) {
           return yield* fail(
             "privilege-escalation",
@@ -712,6 +721,18 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
     options,
   ) =>
     Effect.gen(function* () {
+      if (
+        proposal.plan.kind === "createThreads" &&
+        proposal.plan.entries.some((entry) => entry.returnToOrigin) &&
+        (proposal.principal.kind !== "provider-session" ||
+          !proposal.principal.turnId ||
+          !proposal.principal.runtimeSessionId)
+      ) {
+        return yield* fail(
+          "invalid-plan",
+          "Completion return requires an exact originating provider turn and runtime.",
+        );
+      }
       const originProjectId =
         proposal.principal.kind === "provider-session"
           ? proposal.principal.originProjectId

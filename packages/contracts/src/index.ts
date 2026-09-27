@@ -58,3 +58,7 @@ export * from "./computerSpaces.ts";
 export * from "./computerAudit.ts";
 export * from "./computerPermissions.ts";
 export * from "./computerBeta.ts";
+
+export * from "./codexResetCredits.ts";
+export * from "./sessionImport.ts";
+export * from "./claudeCache.ts";

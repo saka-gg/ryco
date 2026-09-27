@@ -1,3 +1,4 @@
+import { makeSessionImportHandlers } from "./sessionImportRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option } from "effect";
@@ -33,6 +34,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeStatisticsHandlers(ctx),
       ...makeSourceControlHandlers(ctx),
       ...makeProjectHandlers(ctx),
+      ...makeSessionImportHandlers(ctx),
       ...makeGitHandlers(ctx),
       ...makeTerminalHandlers(ctx),
     });

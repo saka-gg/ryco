@@ -1,4 +1,17 @@
 import {
+  CodexResetCreditAccount,
+  CodexResetCreditInput,
+  CodexResetCreditOutcome,
+  CodexResetCreditError,
+} from "./codexResetCredits.ts";
+import {
+  SessionImportDiscoverInput,
+  SessionImportPage,
+  SessionImportInput,
+  SessionImportResult,
+  SessionImportError,
+} from "./sessionImport.ts";
+import {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
   GitLocalChangesInput,
@@ -322,6 +335,8 @@ export const WS_METHODS = {
   shellOpenInEditor: "shell.openInEditor",
 
   // Filesystem methods
+  sessionImportDiscover: "sessionImport.discover",
+  sessionImportRun: "sessionImport.run",
   filesystemBrowse: "filesystem.browse",
 
   // VCS methods
@@ -374,6 +389,8 @@ export const WS_METHODS = {
   serverInstallAcpRegistry: "server.installAcpRegistry",
   serverGetAcpRegistryAuthMethods: "server.getAcpRegistryAuthMethods",
   serverAuthenticateAcpRegistry: "server.authenticateAcpRegistry",
+  serverReadCodexResetCredits: "server.readCodexResetCredits",
+  serverConsumeCodexResetCredit: "server.consumeCodexResetCredit",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
@@ -707,6 +724,20 @@ export const WsServerAuthenticateAcpRegistryRpc = Rpc.make(
     payload: AcpRegistryAuthenticateInput,
     success: AcpRegistryAuthenticationResult,
     error: Schema.Union([AcpRegistryOperationError, AuthRpcError]),
+  },
+);
+
+export const WsServerReadCodexResetCreditsRpc = Rpc.make(WS_METHODS.serverReadCodexResetCredits, {
+  payload: Schema.Struct({ instanceId: ProviderInstanceId }),
+  success: CodexResetCreditAccount,
+  error: Schema.Union([CodexResetCreditError, AuthRpcError]),
+});
+export const WsServerConsumeCodexResetCreditRpc = Rpc.make(
+  WS_METHODS.serverConsumeCodexResetCredit,
+  {
+    payload: CodexResetCreditInput,
+    success: Schema.Struct({ outcome: CodexResetCreditOutcome }),
+    error: Schema.Union([CodexResetCreditError, AuthRpcError]),
   },
 );
 
@@ -1293,6 +1324,16 @@ export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   error: Schema.Union([OpenError, AuthRpcError]),
 });
 
+export const WsSessionImportDiscoverRpc = Rpc.make(WS_METHODS.sessionImportDiscover, {
+  payload: SessionImportDiscoverInput,
+  success: SessionImportPage,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
+export const WsSessionImportRunRpc = Rpc.make(WS_METHODS.sessionImportRun, {
+  payload: SessionImportInput,
+  success: SessionImportResult,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
 export const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   payload: FilesystemBrowseInput,
   success: FilesystemBrowseResult,
@@ -1860,6 +1901,8 @@ export const WsAgentControlDisconnectMcpInstallationRpc = Rpc.make(
 
 /** Keep declaration emit bounded as shared settings and RPC schemas grow. */
 export const WsRpcGroup: RpcGroup.RpcGroup<
+  | typeof WsSessionImportDiscoverRpc
+  | typeof WsSessionImportRunRpc
   | typeof WsServerGetConfigRpc
   | typeof WsServerGetAdvertisedEndpointsRpc
   | typeof WsServerGetDiagnosticsMetricsRpc
@@ -1869,6 +1912,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerInstallAcpRegistryRpc
   | typeof WsServerGetAcpRegistryAuthMethodsRpc
   | typeof WsServerAuthenticateAcpRegistryRpc
+  | typeof WsServerReadCodexResetCreditsRpc
+  | typeof WsServerConsumeCodexResetCreditRpc
   | typeof WsServerRefreshProvidersRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
@@ -2021,6 +2066,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsContextHandoffReadRawPayloadChunkRpc
   | typeof WsContextHandoffReadExportChunkRpc
 > = RpcGroup.make(
+  WsSessionImportDiscoverRpc,
+  WsSessionImportRunRpc,
   WsServerGetConfigRpc,
   WsServerGetAdvertisedEndpointsRpc,
   WsServerGetDiagnosticsMetricsRpc,
@@ -2030,6 +2077,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerInstallAcpRegistryRpc,
   WsServerGetAcpRegistryAuthMethodsRpc,
   WsServerAuthenticateAcpRegistryRpc,
+  WsServerReadCodexResetCreditsRpc,
+  WsServerConsumeCodexResetCreditRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,

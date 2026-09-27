@@ -22,6 +22,7 @@ const ProjectionThreadUserInputRequestDbRow = Schema.Struct({
   requestId: ApprovalRequestId,
   threadId: ThreadId,
   isPending: NonNegativeInt,
+  nonBlocking: NonNegativeInt,
   updatedAt: IsoDateTime,
   identity: Schema.NullOr(Schema.fromJsonString(ApprovalResponseIdentity)),
   responseAttemptId: Schema.NullOr(CommandId),
@@ -38,20 +39,20 @@ const makeProjectionThreadUserInputRequestRepository = Effect.gen(function* () {
       INSERT INTO projection_thread_user_input_requests (
         request_id,
         thread_id,
-        is_pending,
+        is_pending, non_blocking,
         updated_at, identity_json, response_attempt_id, response_state, settlement_requires_identity
       )
       VALUES (
         ${row.requestId},
         ${row.threadId},
-        ${Number(row.isPending)},
+        ${Number(row.isPending)}, ${Number(row.nonBlocking ?? false)},
         ${row.updatedAt}, ${row.userInputIdentity ? JSON.stringify(row.userInputIdentity) : null},
         ${row.responseAttemptId ?? null}, ${row.responseState ?? null}, ${Number(row.settlementRequiresIdentity ?? false)}
       )
       ON CONFLICT (thread_id, request_id)
       DO UPDATE SET
         thread_id = excluded.thread_id,
-        is_pending = excluded.is_pending,
+        is_pending = excluded.is_pending, non_blocking = excluded.non_blocking,
         updated_at = excluded.updated_at,
         identity_json = excluded.identity_json, response_attempt_id = excluded.response_attempt_id,
         response_state = excluded.response_state, settlement_requires_identity = excluded.settlement_requires_identity
@@ -65,7 +66,7 @@ const makeProjectionThreadUserInputRequestRepository = Effect.gen(function* () {
       SELECT
         request_id AS "requestId",
         thread_id AS "threadId",
-        is_pending AS "isPending",
+        is_pending AS "isPending", non_blocking AS "nonBlocking",
         updated_at AS "updatedAt", identity_json AS "identity", response_attempt_id AS "responseAttemptId",
         response_state AS "responseState", settlement_requires_identity AS "settlementRequiresIdentity"
       FROM projection_thread_user_input_requests
@@ -100,6 +101,7 @@ const makeProjectionThreadUserInputRequestRepository = Effect.gen(function* () {
           requestId: row.requestId,
           threadId: row.threadId,
           isPending: row.isPending === 1,
+          nonBlocking: row.nonBlocking === 1,
           updatedAt: row.updatedAt,
           ...(row.identity ? { userInputIdentity: row.identity } : {}),
           ...(row.responseAttemptId ? { responseAttemptId: row.responseAttemptId } : {}),

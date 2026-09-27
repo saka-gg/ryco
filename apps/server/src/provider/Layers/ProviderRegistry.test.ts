@@ -1873,7 +1873,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             effortDescriptor?.type === "select"
               ? effortDescriptor.options.map((option) => option.id)
               : undefined,
-            ["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"],
+            ["low", "medium", "high", "xhigh", "max", "ultracode"],
           );
           assert.deepStrictEqual(
             effortDescriptor?.type === "select"
@@ -1980,7 +1980,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             effortDescriptor?.type === "select"
               ? effortDescriptor.options.map((option) => option.id)
               : undefined,
-            ["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"],
+            ["low", "medium", "high", "xhigh", "max", "ultracode"],
           );
           assert.deepStrictEqual(
             effortDescriptor?.type === "select"

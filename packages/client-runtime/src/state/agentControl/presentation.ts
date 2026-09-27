@@ -42,6 +42,7 @@ export interface AgentControlProposalCardModel {
   readonly isPending: boolean;
   readonly outcomeLabel: string | null;
   readonly executionLabel: string | null;
+  readonly completionReturns?: AgentControlProposal["completionReturns"];
   readonly affectedThreadIds: ReadonlyArray<ThreadId>;
   readonly affectedProjectIds: ReadonlyArray<string>;
   readonly detailSections: ReadonlyArray<AgentControlDetailSection>;
@@ -161,6 +162,11 @@ function planPresentation(proposal: AgentControlProposal): {
             `Project: ${entry.projectId}`,
             `Model: ${entry.modelSelection.instanceId} · ${entry.modelSelection.model}`,
             `Runtime: ${entry.runtimeMode} · ${entry.envMode}`,
+            ...(entry.returnToOrigin
+              ? [
+                  "Completion return: initial run only, queued to the exact originating turn; blocked if that origin changes.",
+                ]
+              : []),
             ...(entry.tokenMode === undefined ? [] : [`Token mode: ${entry.tokenMode}`]),
             ...(entry.baseRef !== undefined ? [`Base ref: ${entry.baseRef}`] : []),
             `Prompt: ${entry.prompt}`,
@@ -596,6 +602,7 @@ export function buildAgentControlProposalCardModel(
     isPending: proposal.status === "pending-user-approval",
     outcomeLabel: outcomeLabel(proposal),
     executionLabel: execution.label,
+    completionReturns: proposal.completionReturns,
     affectedThreadIds: execution.affectedThreadIds,
     affectedProjectIds: execution.affectedProjectIds,
     detailSections: plan.detailSections,
