@@ -884,7 +884,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("treats ultrathink as a prompt keyword instead of a session effort", () => {
+  it.effect("normalizes a retired ultrathink selection without injecting a prompt keyword", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -914,7 +914,7 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.effort, "high");
       const promptText = yield* Effect.promise(() => readFirstPromptText(createInput));
-      assert.equal(promptText, "Ultrathink:\nInvestigate the edge cases");
+      assert.equal(promptText, "Investigate the edge cases");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
