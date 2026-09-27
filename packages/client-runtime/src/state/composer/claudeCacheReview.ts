@@ -98,7 +98,11 @@ function identity(thread: OrchestrationThread): string {
 export async function reviewClaudeResumeBeforeSend(
   input: CommitSendTurnDispatchInput,
 ): Promise<{ guard: ClaudeResumeGuard } | undefined> {
-  if (input.providerDriver !== "claudeAgent") return undefined;
+  if (
+    input.providerDriver !== "claudeAgent" ||
+    (input.sourceProviderDriver !== undefined && input.sourceProviderDriver !== "claudeAgent")
+  )
+    return undefined;
   const getWindow = input.api.orchestration.getThreadWindow;
   if (
     !input.isServerThread ||

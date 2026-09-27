@@ -407,3 +407,56 @@ describe("held send through native compaction", () => {
     expect(f.input.turnAttachments[0]?.uploadToken).toBe("fixture-token");
   });
 });
+
+it("retains a queued draft when a permission-blocked runtime cannot compact", async () => {
+  const f = setup("compact");
+  const thread = fixture();
+  f.setThread({
+    ...thread,
+    session: {
+      ...thread.session!,
+      status: "running",
+      activeTurnId: TurnId.make("permission-turn"),
+    },
+    activities: [
+      ...thread.activities,
+      {
+        id: EventId.make("permission-request"),
+        kind: "approval.requested",
+        tone: "approval",
+        summary: "Permission required",
+        turnId: TurnId.make("permission-turn"),
+        createdAt: new Date(now).toISOString(),
+        payload: { requestId: "permission", requestKind: "command" },
+      },
+    ],
+  });
+  await expect(commitSendTurnDispatch(f.input)).rejects.toThrow("ready before compacting");
+  expect(f.dispatch).not.toHaveBeenCalled();
+  expect(f.input.beginLocalDispatch).not.toHaveBeenCalled();
+  expect(f.input.turnAttachments[0]?.uploadToken).toBe("fixture-token");
+  expect(f.input.outgoingMessageText).toBe("Original prompt");
+});
+
+it("does not preflight Claude cache for a known non-Claude source handoff", async () => {
+  const f = setup();
+  f.read.mockRejectedValue(new Error("Source history is unavailable"));
+  await commitSendTurnDispatch({ ...f.input, sourceProviderDriver: "codex" });
+  expect(f.read).not.toHaveBeenCalled();
+  expect(f.review).not.toHaveBeenCalled();
+  expect(f.dispatch).toHaveBeenCalledTimes(1);
+});
+
+it("still reviews an existing Claude source when its target model changes", async () => {
+  const f = setup("continue");
+  await commitSendTurnDispatch({
+    ...f.input,
+    sourceProviderDriver: "claudeAgent",
+    modelSelection: { ...f.input.modelSelection, model: "opus" },
+  });
+  expect(f.review).toHaveBeenCalledTimes(1);
+  expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+    modelSelection: { model: "opus" },
+    claudeResumeGuard: { runtimeSessionId: "runtime-1" },
+  });
+});

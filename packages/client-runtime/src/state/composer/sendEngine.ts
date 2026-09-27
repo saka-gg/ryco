@@ -216,6 +216,8 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 export interface CommitSendTurnDispatchInput {
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
   readonly providerDriver?: ProviderDriverKind | null;
+  /** Known source session; null means no session, undefined means unavailable. */
+  readonly sourceProviderDriver?: ProviderDriverKind | null | undefined;
   readonly assertMutationReady?: () => void;
   readonly computerUse?: ComputerTurnIntent;
   readonly api: EnvironmentApi;

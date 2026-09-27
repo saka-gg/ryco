@@ -1020,6 +1020,7 @@ export function ThreadDetailScreen(props: {
           dispatch: () =>
             executeSendTurn({
               providerDriver: threadProviderDriver,
+              sourceProviderDriver: currentThread.session?.provider ?? null,
               claudeCacheReview: mobileClaudeCacheReview,
               assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
                 createMobileConnectionRegistry().driver.supervisor.read(environmentId),

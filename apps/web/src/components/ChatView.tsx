@@ -3358,6 +3358,7 @@ export default function ChatView(props: ChatViewProps) {
         composer: composerSnapshot,
         thread: {
           threadId: threadIdForSend,
+          sourceProviderDriver: activeThread.session?.provider ?? null,
           isFirstMessage,
           isServerThread,
           // A pending source materializes its own thread at commit time, so this

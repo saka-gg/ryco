@@ -73,6 +73,7 @@ export interface SendTurnComposerSnapshot {
 }
 
 export interface SendTurnThreadContext {
+  sourceProviderDriver?: ProviderDriverKind | null;
   threadId: ThreadId;
   isFirstMessage: boolean;
   isServerThread: boolean;
@@ -512,6 +513,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     await commitSendTurnDispatch({
       claudeCacheReview: claudeCacheReviewPresentation,
       providerDriver: composer.selectedProvider,
+      sourceProviderDriver: thread.sourceProviderDriver,
       assertMutationReady: captureReviewedSendReadiness(draft.environmentId, () =>
         readEnvironmentConnection(draft.environmentId),
       ),

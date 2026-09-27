@@ -35,6 +35,7 @@ export interface ExecuteSendTurnInput {
   readonly api: EnvironmentApi;
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
   readonly providerDriver?: ProviderDriverKind | null;
+  readonly sourceProviderDriver?: ProviderDriverKind | null;
   readonly assertMutationReady?: () => void;
   readonly thread: {
     readonly threadId: ThreadId;
@@ -150,6 +151,7 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
     await commitSendTurnDispatch({
       ...(input.claudeCacheReview ? { claudeCacheReview: input.claudeCacheReview } : {}),
       providerDriver: input.providerDriver,
+      sourceProviderDriver: input.sourceProviderDriver,
       ...(input.assertMutationReady ? { assertMutationReady: input.assertMutationReady } : {}),
       api: input.api,
       threadId: input.thread.threadId,

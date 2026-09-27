@@ -44,6 +44,10 @@ async function sendQueuedThreadMessage(message: QueuedThreadMessage): Promise<vo
           review,
         ),
     },
+    sourceProviderDriver: selectThreadByRef(
+      useStore.getState(),
+      scopeThreadRef(message.environmentId, message.threadId),
+    )?.session?.provider,
     providerDriver:
       readEnvironmentServerConfig(message.environmentId)?.providers.find(
         (provider) => provider.instanceId === message.modelSelection?.instanceId,
