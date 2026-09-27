@@ -7,7 +7,11 @@ import {
   shortcutLabelForCommand,
 } from "../../keybindings";
 import { isEditorPreferenceEligible, usePreferredEditor } from "../../editorPreferences";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, ExternalLinkIcon } from "lucide-react";
+import {
+  WORKSPACE_SHORTCUT_CLASS_NAME,
+  WORKSPACE_SHORTCUT_LABEL_CLASS_NAME,
+} from "./workspaceShortcutStyles";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "../ui/menu";
 import {
@@ -22,10 +26,12 @@ export const OpenInPicker = memo(function OpenInPicker({
   keybindings,
   availableEditors,
   openInCwd,
+  presentation = "header",
 }: {
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   openInCwd: string | null;
+  presentation?: "header" | "shortcut";
 }) {
   const [preferredEditor, setPreferredEditor] = usePreferredEditor(availableEditors);
   const options = useMemo(
@@ -72,6 +78,39 @@ export const OpenInPicker = memo(function OpenInPicker({
     return () => window.removeEventListener("keydown", handler);
   }, [preferredEditor, keybindings, openInCwd]);
 
+  const menuItems =
+    options.length === 0 ? (
+      <MenuItem disabled>No installed editors found</MenuItem>
+    ) : (
+      options.map(({ label, Icon, value }) => (
+        <MenuItem key={value} disabled={!openInCwd} onClick={() => openInEditor(value)}>
+          <Icon aria-hidden="true" className="text-muted-foreground" />
+          {label}
+          {value === preferredEditor && openFavoriteEditorShortcutLabel && (
+            <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>
+          )}
+        </MenuItem>
+      ))
+    );
+
+  if (presentation === "shortcut") {
+    return (
+      <Menu>
+        <MenuTrigger
+          className={WORKSPACE_SHORTCUT_CLASS_NAME}
+          aria-label="Open in editor"
+          disabled={!openInCwd}
+        >
+          <ExternalLinkIcon aria-hidden="true" />
+          <span className={WORKSPACE_SHORTCUT_LABEL_CLASS_NAME}>Open in…</span>
+        </MenuTrigger>
+        <MenuPopup side="left" align="start">
+          {menuItems}
+        </MenuPopup>
+      </Menu>
+    );
+  }
+
   return (
     <div aria-label="Subscription actions" className={HEADER_CHROME_GROUP_CLASS_NAME} role="group">
       <Button
@@ -99,18 +138,7 @@ export const OpenInPicker = memo(function OpenInPicker({
         >
           <ChevronDownIcon aria-hidden="true" className="size-4" />
         </MenuTrigger>
-        <MenuPopup align="end">
-          {options.length === 0 && <MenuItem disabled>No installed editors found</MenuItem>}
-          {options.map(({ label, Icon, value }) => (
-            <MenuItem key={value} onClick={() => openInEditor(value)}>
-              <Icon aria-hidden="true" className="text-muted-foreground" />
-              {label}
-              {value === preferredEditor && openFavoriteEditorShortcutLabel && (
-                <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>
-              )}
-            </MenuItem>
-          ))}
-        </MenuPopup>
+        <MenuPopup align="end">{menuItems}</MenuPopup>
       </Menu>
     </div>
   );

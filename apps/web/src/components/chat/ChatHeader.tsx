@@ -20,6 +20,8 @@ import { usePerfMark, useDevPropDiff } from "../../perf/tabSwitchInstrumentation
 import { formatLiveAgentCount, LiveAgentCountBadge } from "../LiveAgentCountBadge";
 
 interface ChatHeaderProps {
+  /** The desktop capsule owns overview, scripts and editor controls. */
+  shortcutRailVisible?: boolean;
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadTitle: string;
   activeProjectName: string | undefined;
@@ -87,22 +89,24 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
           workspace header so it can never overlap the other header controls.
           Renders nothing outside hosted-hub sessions. */}
       <HostedNodeMenu />
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Toggle
-              pressed={props.overviewSidebarOpen}
-              onPressedChange={props.onToggleOverviewSidebar}
-              aria-label="Toggle overview panel"
-              className={HEADER_CHROME_ICON_BUTTON_CLASS_NAME}
-              size="sm"
-            >
-              <ListChecksIcon className="size-4" />
-            </Toggle>
-          }
-        />
-        <TooltipPopup side="bottom">Toggle overview panel</TooltipPopup>
-      </Tooltip>
+      {!props.shortcutRailVisible ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                pressed={props.overviewSidebarOpen}
+                onPressedChange={props.onToggleOverviewSidebar}
+                aria-label="Toggle overview panel"
+                className={HEADER_CHROME_ICON_BUTTON_CLASS_NAME}
+                size="sm"
+              >
+                <ListChecksIcon className="size-4" />
+              </Toggle>
+            }
+          />
+          <TooltipPopup side="bottom">Toggle overview panel</TooltipPopup>
+        </Tooltip>
+      ) : null}
       <Tooltip>
         <TooltipTrigger
           render={
@@ -133,7 +137,7 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
             : "Toggle workspace panel"}
         </TooltipPopup>
       </Tooltip>
-      {props.activeProjectScripts ? (
+      {!props.shortcutRailVisible && props.activeProjectScripts ? (
         <ProjectScriptsControl
           scripts={props.activeProjectScripts}
           keybindings={props.keybindings}
@@ -144,7 +148,7 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
           onDeleteScript={props.onDeleteProjectScript}
         />
       ) : null}
-      {showOpenInPicker ? (
+      {!props.shortcutRailVisible && showOpenInPicker ? (
         <OpenInPicker
           keybindings={props.keybindings}
           availableEditors={props.availableEditors}

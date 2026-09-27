@@ -6359,7 +6359,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
-  it("hides the overview panel on an empty thread and restores it on request", async () => {
+  it("keeps the overview collapsed on an empty thread and expands it on request", async () => {
     const draftId = DraftId.make("draft-empty-thread-overview");
     useComposerDraftStore.setState({
       draftThreadsByThreadKey: {
@@ -6393,32 +6393,21 @@ describe("ChatView timeline estimator parity (full app)", () => {
         "Unable to find the new-thread hero.",
       );
 
-      // The overview describes a thread's history, so it stays out of the way
-      // until there is one — or until the user explicitly asks for it.
-      // Visibility, not DOM presence: the sheet presentation keeps the panel
-      // mounted and only toggles whether it is shown, and the inline one plays
-      // an exit transition before unmounting.
-      const overviewShowing = () => {
-        const header = document.querySelector('[data-slot="overview-branch-header"]');
-        return header !== null && header.checkVisibility();
-      };
-      await vi.waitFor(
-        () => {
-          expect(overviewShowing()).toBe(false);
-        },
-        { timeout: 8_000, interval: 16 },
+      const rail = await waitForElement(
+        () => document.querySelector<HTMLElement>('nav[aria-label="Overview"]'),
+        "Unable to find the overview rail.",
       );
+      expect(rail.dataset.expanded).toBe("false");
 
       const overviewToggle = await waitForElement(
-        () =>
-          document.querySelector<HTMLButtonElement>('button[aria-label="Toggle overview panel"]'),
+        () => document.querySelector<HTMLButtonElement>('button[aria-label="Expand overview"]'),
         "Unable to find the overview toggle.",
       );
       overviewToggle.click();
 
       await vi.waitFor(
         () => {
-          expect(overviewShowing()).toBe(true);
+          expect(rail.dataset.expanded).toBe("true");
         },
         { timeout: 8_000, interval: 16 },
       );
@@ -11401,76 +11390,67 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
-  it("gives the floating desktop overview overlay a working close affordance", async () => {
+  it("keeps the overview rail and workspace panel independent", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-user-overview-overlay-close" as MessageId,
+      targetText: "overview rail thread",
+    });
+    const repositoryIdentity = {
+      canonicalKey: "github.com/saka-gg/ryco",
+      locator: {
+        source: "git-remote" as const,
+        remoteName: "origin",
+        remoteUrl: "git@github.com:saka-gg/ryco.git",
+      },
+      remotes: [],
+    };
     const mounted = await mountChatView({
       viewport: WIDE_FOOTER_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-overview-overlay-close" as MessageId,
-        targetText: "overview overlay close thread",
-      }),
+      snapshot: {
+        ...snapshot,
+        projects: snapshot.projects.map((project) => ({ ...project, repositoryIdentity })),
+      },
     });
-
     try {
-      await vi.waitFor(() => {
-        expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
-      });
-      // Open the inline workspace panel, then the overview: this is the
-      // audited floating overlay that previously had no close affordance.
+      const rail = await waitForElement(
+        () => document.querySelector<HTMLElement>('nav[aria-label="Overview"]'),
+        "Unable to find the desktop overview rail.",
+      );
+      expect(rail.getBoundingClientRect().height).toBeLessThan(WIDE_FOOTER_VIEWPORT.height - 100);
+      expect(rail.dataset.expanded).toBe("false");
+      expect(rail.querySelector('button[aria-label="Open repository remote"]')).not.toBeNull();
+      expect(
+        rail.querySelector('button[aria-label="Open repository remote"]')!.textContent,
+      ).toContain("saka-gg/ryco");
+      expect(
+        rail.querySelector('button[aria-label="Open repository remote"]')!.getAttribute("title"),
+      ).toBe("https://github.com/saka-gg/ryco");
       const workspaceToggle = await waitForElement(
         () => document.querySelector<HTMLElement>('button[aria-label="Toggle workspace panel"]'),
         "Unable to find the workspace toggle.",
       );
       workspaceToggle.click();
-      // Wait for the inline panel to actually open (URL-driven) before
-      // toggling the overview, so the toggle takes the floating-overlay path.
       await waitForElement(
         () => document.querySelector<HTMLElement>('button[aria-label="Close workspace panel"]'),
-        "Unable to find the opened inline workspace panel.",
+        "Unable to find the opened workspace panel.",
       );
-      const overviewToggle = await waitForElement(
-        () => document.querySelector<HTMLElement>('button[aria-label="Toggle overview panel"]'),
-        "Unable to find the overview toggle.",
-      );
-      overviewToggle.click();
-
-      const closeOverview = await waitForElement(
-        () => document.querySelector<HTMLElement>('button[aria-label="Close overview"]'),
-        "Unable to find the overview close affordance.",
-      );
-      const branchHeader = await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-slot="overview-branch-header"]'),
-        "Unable to find the overview branch header.",
-      );
-      const branchSelector = await waitForElement(
-        () => branchHeader.querySelector<HTMLElement>('[data-appearance="panelRow"]'),
-        "Unable to find the full-width overview branch selector.",
-      );
-      await waitForLayout();
-      const branchSelectorHeight = Math.round(branchSelector.getBoundingClientRect().height);
-      expect(branchSelectorHeight).toBe(36);
-      expect(Math.round(branchHeader.getBoundingClientRect().height)).toBe(
-        branchSelectorHeight + 1,
-      );
-      expect(branchSelector.getBoundingClientRect().width).toBeGreaterThan(200);
-
-      const branchTrigger = branchSelector.querySelector<HTMLButtonElement>(
-        '[data-slot="combobox-trigger"]',
-      );
-      expect(branchTrigger).not.toBeNull();
-      await vi.waitFor(() => {
-        expect(branchTrigger!.disabled).toBe(false);
-      });
-      branchTrigger!.click();
+      rail.querySelector<HTMLButtonElement>('button[aria-label="Expand overview"]')!.click();
+      await vi.waitFor(() => expect(rail.dataset.expanded).toBe("true"));
+      expect(document.querySelector('[data-slot="overview-branch-header"]')).toBeNull();
+      await vi.waitFor(() => expect(Math.round(rail.getBoundingClientRect().width)).toBe(256));
+      const branchTrigger = rail.querySelector<HTMLButtonElement>(
+        'button[aria-label="Select branch"]',
+      )!;
+      await vi.waitFor(() => expect(branchTrigger.disabled).toBe(false));
+      branchTrigger.click();
       await waitForElement(
         () => document.querySelector<HTMLInputElement>('input[placeholder="Search refs..."]'),
         "Unable to open the overview branch picker.",
       );
       await userEvent.keyboard("{Escape}");
-
-      closeOverview.click();
-      await vi.waitFor(() => {
-        expect(document.querySelector('button[aria-label="Close overview"]')).toBeNull();
-      });
+      rail.querySelector<HTMLButtonElement>('button[aria-label="Collapse overview"]')!.click();
+      await vi.waitFor(() => expect(rail.dataset.expanded).toBe("false"));
+      expect(document.querySelector('button[aria-label="Close workspace panel"]')).not.toBeNull();
     } finally {
       await mounted.cleanup();
     }
@@ -11494,24 +11474,15 @@ describe("ChatView timeline estimator parity (full app)", () => {
         expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
       });
       const overviewToggle = await waitForElement(
-        () => document.querySelector<HTMLElement>('button[aria-label="Toggle overview panel"]'),
+        () => document.querySelector<HTMLElement>('button[aria-label="Expand overview"]'),
         "Unable to find the overview toggle.",
       );
       overviewToggle.click();
-      // Desktop <=980 regression guard: the overview renders as the right
-      // sheet, narrower than the viewport, without the phone surface bar.
-      const desktopSheet = await waitForElement(
-        () =>
-          [...document.querySelectorAll<HTMLElement>('[data-slot="sheet-popup"]')].find(
-            isElementVisible,
-          ) ?? null,
-        "Unable to find the desktop overview sheet.",
+      const desktopRail = await waitForElement(
+        () => document.querySelector<HTMLElement>('nav[aria-label="Overview"]'),
+        "Unable to find the desktop overview rail.",
       );
-      await vi.waitFor(() => {
-        const width = desktopSheet.getBoundingClientRect().width;
-        expect(width).toBeGreaterThan(200);
-        expect(width).toBeLessThan(ROTATED_MID_VIEWPORT.width * 0.7);
-      });
+      await vi.waitFor(() => expect(desktopRail.dataset.expanded).toBe("true"));
       expect(document.querySelector('button[aria-label="Back to thread"]')).toBeNull();
 
       // Rotate across the tier boundary: the open overview re-presents as a
