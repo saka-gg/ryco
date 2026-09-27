@@ -471,6 +471,64 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.history.import": {
+      const created = yield* decideOrchestrationCommand({
+        readModel,
+        command: { ...command, type: "thread.create" },
+      });
+      const events: PlannedOrchestrationEvent[] = Array.isArray(created) ? [...created] : [created];
+      const base = () =>
+        withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        });
+      for (const message of command.messages) {
+        events.push({
+          ...base(),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: message.id,
+            role: message.role,
+            text: message.text,
+            turnId: message.turnId,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.updatedAt,
+          },
+        });
+      }
+      events.push({
+        ...base(),
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: EventId.make(`import:${command.threadId}`),
+            kind: "history.imported",
+            tone: "info",
+            summary: `Imported ${command.source === "codex" ? "Codex" : "Claude"} history. New turns continue in a separate native session.`,
+            payload: {},
+            turnId: null,
+            createdAt: command.createdAt,
+          },
+        },
+      });
+      if (command.archived)
+        events.push({
+          ...base(),
+          type: "thread.archived",
+          payload: {
+            threadId: command.threadId,
+            archivedAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        });
+      return events;
+    }
+
     case "thread.create": {
       yield* requireProject({
         readModel,

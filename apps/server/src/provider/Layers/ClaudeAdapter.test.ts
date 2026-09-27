@@ -3489,6 +3489,31 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("continues an imported native copy in a mapped cwd without resuming the source", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const copiedId = "22222222-2222-4222-8222-222222222222";
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("import-runtime-fixture"),
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd: "/tmp/mapped-import-target",
+        resumeCursor: { threadId: RESUME_THREAD_ID, resume: copiedId, turnCount: 2 },
+        runtimeMode: "approval-required",
+      });
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.resume, copiedId);
+      assert.equal(options?.cwd, "/tmp/mapped-import-target");
+      assert.equal(options?.sessionId, undefined);
+      assert.equal(options?.resumeSessionAt, undefined);
+      assert.equal(session.runtimeSessionId, "import-runtime-fixture");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("passes Claude resume ids without pinning a stale assistant checkpoint", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

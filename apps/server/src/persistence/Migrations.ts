@@ -1,3 +1,4 @@
+import Migration0062 from "./Migrations/062_SessionImports.ts";
 import Migration0061 from "./Migrations/061_ProjectionMessageTextFallback.ts";
 import Migration0060 from "./Migrations/060_ProjectionMessageChunks.ts";
 import Migration0059 from "./Migrations/059_RetireProjectMemory.ts";
@@ -149,6 +150,7 @@ export const migrationEntries = [
   [59, "RetireProjectMemory", Migration0059],
   [60, "ProjectionMessageChunks", Migration0060],
   [61, "ProjectionMessageTextFallback", Migration0061],
+  [62, "SessionImports", Migration0062],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

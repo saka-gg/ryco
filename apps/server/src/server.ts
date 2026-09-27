@@ -1,3 +1,4 @@
+import { SessionImportLive } from "./imports/SessionImport.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Effect, Layer } from "effect";
@@ -454,6 +455,7 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
 // registry from the runtime dependencies, and its endpoint never touches
 // the public HTTP server, router, or any client-visible state.
 const RuntimeServicesLive = Layer.mergeAll(
+  SessionImportLive,
   AutomationCentreLive.pipe(
     Layer.provideMerge(AgentControlActionValidatorLive),
     Layer.provideMerge(AgentControlProjectPlansLive),

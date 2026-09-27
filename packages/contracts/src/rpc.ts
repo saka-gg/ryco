@@ -5,6 +5,13 @@ import {
   CodexResetCreditError,
 } from "./codexResetCredits.ts";
 import {
+  SessionImportDiscoverInput,
+  SessionImportPage,
+  SessionImportInput,
+  SessionImportResult,
+  SessionImportError,
+} from "./sessionImport.ts";
+import {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
   GitLocalChangesInput,
@@ -328,6 +335,8 @@ export const WS_METHODS = {
   shellOpenInEditor: "shell.openInEditor",
 
   // Filesystem methods
+  sessionImportDiscover: "sessionImport.discover",
+  sessionImportRun: "sessionImport.run",
   filesystemBrowse: "filesystem.browse",
 
   // VCS methods
@@ -1315,6 +1324,16 @@ export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   error: Schema.Union([OpenError, AuthRpcError]),
 });
 
+export const WsSessionImportDiscoverRpc = Rpc.make(WS_METHODS.sessionImportDiscover, {
+  payload: SessionImportDiscoverInput,
+  success: SessionImportPage,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
+export const WsSessionImportRunRpc = Rpc.make(WS_METHODS.sessionImportRun, {
+  payload: SessionImportInput,
+  success: SessionImportResult,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
 export const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   payload: FilesystemBrowseInput,
   success: FilesystemBrowseResult,
@@ -1882,6 +1901,8 @@ export const WsAgentControlDisconnectMcpInstallationRpc = Rpc.make(
 
 /** Keep declaration emit bounded as shared settings and RPC schemas grow. */
 export const WsRpcGroup: RpcGroup.RpcGroup<
+  | typeof WsSessionImportDiscoverRpc
+  | typeof WsSessionImportRunRpc
   | typeof WsServerGetConfigRpc
   | typeof WsServerGetAdvertisedEndpointsRpc
   | typeof WsServerGetDiagnosticsMetricsRpc
@@ -2045,6 +2066,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsContextHandoffReadRawPayloadChunkRpc
   | typeof WsContextHandoffReadExportChunkRpc
 > = RpcGroup.make(
+  WsSessionImportDiscoverRpc,
+  WsSessionImportRunRpc,
   WsServerGetConfigRpc,
   WsServerGetAdvertisedEndpointsRpc,
   WsServerGetDiagnosticsMetricsRpc,

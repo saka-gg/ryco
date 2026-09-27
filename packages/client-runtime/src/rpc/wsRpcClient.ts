@@ -82,6 +82,10 @@ export interface WsRpcClient {
     readonly stageFileReference: RpcUnaryMethod<typeof WS_METHODS.projectsStageFileReference>;
     readonly initializeGit: RpcUnaryMethod<typeof WS_METHODS.projectsInitializeGit>;
   };
+  readonly sessionImport: {
+    readonly discover: RpcUnaryMethod<typeof WS_METHODS.sessionImportDiscover>;
+    readonly run: RpcUnaryMethod<typeof WS_METHODS.sessionImportRun>;
+  };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
   };
@@ -405,6 +409,11 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsStageFileReference](input)),
       initializeGit: (input) =>
         transport.request((client) => client[WS_METHODS.projectsInitializeGit](input)),
+    },
+    sessionImport: {
+      discover: (input) =>
+        transport.request((client) => client[WS_METHODS.sessionImportDiscover](input)),
+      run: (input) => transport.request((client) => client[WS_METHODS.sessionImportRun](input)),
     },
     filesystem: {
       browse: (input) => transport.request((client) => client[WS_METHODS.filesystemBrowse](input)),

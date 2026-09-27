@@ -1779,6 +1779,13 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
 
 const InternalOrchestrationCommand = Schema.Union([
   Schema.Struct({
+    ...ThreadCreateCommand.fields,
+    type: Schema.Literal("thread.history.import"),
+    source: Schema.Literals(["codex", "claudeAgent"]),
+    archived: Schema.Boolean,
+    messages: Schema.Array(OrchestrationMessage).check(Schema.isMaxLength(2000)),
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.history.restore"),
     commandId: CommandId,
     threadId: ThreadId,
