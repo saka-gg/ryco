@@ -28,9 +28,6 @@ import {
   ClockIcon,
   MoreHorizontalIcon,
   PinIcon,
-  GitMergeIcon,
-  GitPullRequestClosedIcon,
-  GitPullRequestDraftIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderIcon,
@@ -44,6 +41,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { useGitStatus } from "../../lib/gitStatusState";
+import { useSettings } from "../../hooks/useSettings";
+import { useSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
+import { resolveSourceControlRefreshDelay } from "../../rpc/sourceControlRefreshPolicy";
+import { resolveChangeRequestPresentation } from "../../sourceControlPresentation";
+import { useIsIntersectingViewport } from "../sidebar/hooks/useHasIntersectedViewport";
+import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
+import { resolveInboxPullRequest, resolveInboxPullRequests } from "./inboxPullRequests";
 import { readEnvironmentApi } from "../../environmentApi";
 import { newCommandId } from "../../lib/utils";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
@@ -86,6 +91,7 @@ const STATUS_FILTERS: ReadonlyArray<{
   readonly label: string;
 }> = [
   { value: "all", label: "All status" },
+  { value: "pinned", label: "Pinned" },
   { value: "focus", label: "Focus" },
   { value: "active", label: "Active now" },
   { value: "needs-input", label: "Needs input" },
@@ -122,6 +128,41 @@ function InboxThreadRow(props: {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [setVisibilityNode, isIntersecting] = useIsIntersectingViewport();
+  const sourceControlEnabled = props.row.sourceControlEnabled && (props.active || isIntersecting);
+  const gitStatus = useGitStatus(
+    {
+      environmentId: props.row.environmentId,
+      cwd: props.row.branchLabel ? props.row.gitCwd : null,
+    },
+    { enabled: sourceControlEnabled },
+  );
+  const currentPr = resolveInboxPullRequest(props.row, gitStatus.data);
+  const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
+  const detail = useSourceControlChangeRequestDetail(
+    {
+      environmentId: props.row.environmentId,
+      cwd: props.row.gitCwd,
+      reference: currentPr ? String(currentPr.number) : null,
+      enabled: sourceControlEnabled,
+    },
+    (data) =>
+      resolveSourceControlRefreshDelay({
+        mode: refreshMode,
+        phase:
+          data?.state === "open" || data?.stack?.entries.some((entry) => entry.state === "open")
+            ? "active"
+            : "settled",
+      }),
+  );
+  const pullRequests = resolveInboxPullRequests(currentPr, detail.data);
+  const prBadges = (
+    <InboxPullRequestBadges
+      {...pullRequests}
+      shortName={resolveChangeRequestPresentation(gitStatus.data?.sourceControlProvider).shortName}
+    />
+  );
+
   const ProviderIcon = props.row.providerDriver
     ? (PROVIDER_ICON_BY_PROVIDER[props.row.providerDriver] ?? null)
     : null;
@@ -237,33 +278,12 @@ function InboxThreadRow(props: {
       </MenuItem>
     </>
   );
-  const pr = props.row.pullRequest;
-  const PrIcon =
-    pr?.state === "merged"
-      ? GitMergeIcon
-      : pr?.state === "closed"
-        ? GitPullRequestClosedIcon
-        : pr?.isDraft
-          ? GitPullRequestDraftIcon
-          : GitPullRequestIcon;
-  const prLabel = pr
-    ? `PR #${pr.number} · ${pr.state === "merged" ? "Merged" : pr.state === "closed" ? "Closed" : pr.isDraft ? "Draft" : pr.state === "open" ? "Open" : "Unknown"}`
-    : null;
-  const prBadge = prLabel ? (
-    <span
-      aria-label={prLabel}
-      title={prLabel}
-      className={`inline-flex shrink-0 items-center gap-1 text-[10px] ${pr?.state === "merged" ? "text-violet-500" : pr?.state === "closed" ? "text-destructive" : pr?.state === "open" && !pr.isDraft ? "text-success-foreground" : "text-muted-foreground"}`}
-    >
-      <PrIcon aria-hidden className="size-3" />
-      <span>#{pr?.number}</span>
-    </span>
-  ) : null;
   const navigationButton = (
     <button
+      ref={setVisibilityNode}
       type="button"
       aria-current={props.active ? "page" : undefined}
-      className={`group/row relative flex w-full min-w-0 overflow-hidden rounded-lg border border-transparent text-left outline-hidden ring-ring transition-[background-color,border-color,box-shadow,translate,scale] duration-200 ease-out hover:-translate-y-px hover:border-sidebar-border/60 hover:bg-sidebar-accent hover:shadow-sm/5 focus-visible:ring-2 active:translate-y-0 active:scale-[0.995] motion-reduce:translate-none motion-reduce:scale-100 motion-reduce:transition-colors aria-[current=page]:border-sidebar-border/60 aria-[current=page]:bg-sidebar-accent aria-[current=page]:shadow-xs/5 ${props.row.settled ? "items-center gap-2 px-2.5 py-2 pr-18 text-muted-foreground" : "flex-col gap-1 px-2.5 py-2"}`}
+      className={`group/row relative flex w-full min-w-0 overflow-hidden rounded-lg border border-transparent text-left outline-hidden ring-ring transition-[background-color,border-color,box-shadow,translate,scale] duration-200 ease-out hover:-translate-y-px hover:border-sidebar-border/60 hover:bg-sidebar-accent hover:shadow-sm/5 focus-visible:ring-2 active:translate-y-0 active:scale-[0.995] motion-reduce:translate-none motion-reduce:scale-100 motion-reduce:transition-colors aria-[current=page]:border-sidebar-border/60 aria-[current=page]:bg-sidebar-accent aria-[current=page]:shadow-xs/5 ${props.row.settled ? "flex-wrap items-center gap-2 px-2.5 py-2 pr-18 text-muted-foreground" : "flex-col gap-1 px-2.5 py-2"}`}
       data-testid="inbox-thread-row"
       onClick={props.onOpen}
     >
@@ -274,7 +294,6 @@ function InboxThreadRow(props: {
             <PinIcon aria-label="Pinned thread" className="size-3 shrink-0" />
           ) : null}
           <span className="min-w-0 flex-1 truncate text-[11px] font-medium">{props.row.title}</span>
-          {prBadge}
           {ProviderIcon ? <ProviderIcon className="size-3.5 shrink-0 opacity-65" /> : null}
           <span className="shrink-0 tabular-nums text-[10px] opacity-60 transition-opacity group-hover/inbox-row:opacity-0 group-focus-within/inbox-row:opacity-0">
             {formatRelativeTimeLabel(timestamp)}
@@ -338,7 +357,6 @@ function InboxThreadRow(props: {
               <WorkspaceIcon aria-hidden className="size-3 shrink-0 opacity-70" />
               <span className="truncate">{props.row.workspaceLabel}</span>
             </span>
-            {prBadge}
             {props.row.trustLabel ? (
               <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
                 {props.row.trustLabel}
@@ -365,6 +383,7 @@ function InboxThreadRow(props: {
           </div>
         </>
       )}
+      {prBadges}
     </button>
   );
 
@@ -433,7 +452,9 @@ function InboxThreadRow(props: {
                     </span>
                   </div>
                 ) : null}
-                {props.row.changeRequestLabel ? (
+                {pullRequests.requests.length > 0 ? (
+                  prBadges
+                ) : props.row.changeRequestLabel ? (
                   <div className="flex items-center gap-2">
                     <GitPullRequestIcon aria-hidden className="size-3.5 shrink-0" />
                     <span className="truncate">

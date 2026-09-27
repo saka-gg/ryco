@@ -240,6 +240,8 @@ export interface SidebarThreadSummary {
   manualStatusBucket?: StatusBucket | null | undefined;
   manualPosition?: number | undefined;
   latestUserMessageAt: string | null;
+  /** Stable inbox recency across streaming updates and subsequent turns. */
+  latestCompletedTurnAt?: string | null | undefined;
   hasPendingApprovals: boolean;
   /**
    * Native background work alive after the turn settles: "working" while

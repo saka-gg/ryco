@@ -103,6 +103,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     goal: Schema.NullOr(Schema.fromJsonString(ThreadGoal)),
+    latestCompletedTurnAt: Schema.NullOr(IsoDateTime),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -479,6 +480,22 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const sql = yield* SqlClient.SqlClient;
+  // Walk the thread/requested-at index backwards, keeping prior completion stable
+  // while the current turn emits non-streaming commentary or tool updates.
+  const latestCompletedTurnAt = sql`(
+    SELECT turns.completed_at
+    FROM projection_turns AS turns
+    WHERE turns.thread_id = projection_threads.thread_id
+      AND turns.state = 'completed'
+      AND turns.completed_at IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM projection_thread_sessions AS sessions
+        WHERE sessions.thread_id = turns.thread_id AND sessions.active_turn_id = turns.turn_id
+      )
+    ORDER BY turns.requested_at DESC, turns.turn_id DESC
+    LIMIT 1
+  )`;
+
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
   const repositoryIdentityResolutionConcurrency = 4;
   const listThreadPriorityRows = () => {
@@ -602,6 +619,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           latest_user_message_at AS "latestUserMessageAt",
+          ${latestCompletedTurnAt} AS "latestCompletedTurnAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
@@ -1050,6 +1068,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           latest_user_message_at AS "latestUserMessageAt",
+          ${latestCompletedTurnAt} AS "latestCompletedTurnAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
@@ -2562,6 +2581,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       snoozedAt: row.snoozedAt ?? null,
                       session: sessionByThread.get(row.threadId) ?? null,
                       latestUserMessageAt: row.latestUserMessageAt,
+                      latestCompletedTurnAt: row.latestCompletedTurnAt,
                       hasPendingApprovals: row.pendingApprovalCount > 0,
                       hasPendingUserInput: row.pendingUserInputCount > 0,
                       hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
@@ -2828,6 +2848,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         snoozedAt: threadRow.value.snoozedAt ?? null,
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
+        latestCompletedTurnAt: threadRow.value.latestCompletedTurnAt,
         hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
         hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
         hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,

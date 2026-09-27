@@ -36,6 +36,7 @@ export type InboxSidebarThreadState =
   | "idle";
 
 export type InboxSidebarSectionKey =
+  | "pinned"
   | "focus"
   | "active"
   | "needs-input"
@@ -72,6 +73,8 @@ export interface InboxSidebarRow {
   readonly threadId: ThreadId;
   readonly title: string;
   readonly pinned: boolean;
+  readonly gitCwd: string | null;
+  readonly sourceControlEnabled: boolean;
   readonly mutationEnabled: boolean;
   readonly pullRequest: {
     readonly number: number;
@@ -109,7 +112,14 @@ export interface InboxSidebarRow {
 
 export interface InboxSidebarSection {
   readonly key: InboxSidebarSectionKey;
-  readonly title: "Focus" | "Active now" | "Needs input" | "Recent" | "Settled" | "Snoozed";
+  readonly title:
+    | "Pinned"
+    | "Focus"
+    | "Active now"
+    | "Needs input"
+    | "Recent"
+    | "Settled"
+    | "Snoozed";
   readonly rows: ReadonlyArray<InboxSidebarRow>;
 }
 
@@ -254,7 +264,19 @@ function sectionKey(state: InboxSidebarThreadState): InboxSidebarSectionKey {
 }
 
 function timestamp(thread: SidebarThreadSummary): string {
-  return thread.updatedAt ?? thread.latestUserMessageAt ?? thread.createdAt;
+  if (thread.latestCompletedTurnAt !== undefined) {
+    return thread.latestCompletedTurnAt ?? thread.createdAt;
+  }
+  // Older servers only expose the latest turn. Never use general update times:
+  // they advance for streamed text, tools, user prompts, and metadata changes.
+  const turn = thread.latestTurn;
+  const running =
+    thread.session?.activeTurnId === turn?.turnId ||
+    thread.session?.orchestrationStatus === "running" ||
+    thread.session?.orchestrationStatus === "starting";
+  return turn?.state === "completed" && !running
+    ? (turn.completedAt ?? thread.createdAt)
+    : thread.createdAt;
 }
 
 function compareRecent(left: InboxSidebarRow, right: InboxSidebarRow): number {
@@ -373,13 +395,15 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys);
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
-    const rowSection = snoozed
-      ? "snoozed"
-      : settled
-        ? "settled"
-        : entry.focus
-          ? "focus"
-          : sectionKey(state);
+    const rowSection = entry.pinned
+      ? "pinned"
+      : snoozed
+        ? "snoozed"
+        : settled
+          ? "settled"
+          : entry.focus
+            ? "focus"
+            : sectionKey(state);
     if (input.filters.status !== "all" && input.filters.status !== rowSection) continue;
     const providerDriver = resolveProviderDriver(thread);
     rows.push({
@@ -388,6 +412,12 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       threadId: thread.id,
       title: thread.title || "Untitled task",
       pinned: entry.pinned,
+      gitCwd: thread.worktreePath ?? worktree?.worktreePath ?? project?.cwd ?? null,
+      sourceControlEnabled: Boolean(
+        environment?.connectionState === "connected" &&
+        environment.shellCurrent &&
+        !environment.stale,
+      ),
       mutationEnabled: Boolean(
         environment?.mutationReady &&
         environment.shellCurrent &&
@@ -418,7 +448,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
         null,
       modelLabel: modelDisplayName(thread.modelSelection, environment),
       modelSelection: thread.modelSelection ?? null,
-      branchLabel: worktree?.branch ?? thread.branch ?? null,
+      branchLabel: thread.branch ?? worktree?.branch ?? null,
       changeRequestLabel:
         worktree?.prNumber != null
           ? `#${worktree.prNumber}`
@@ -456,7 +486,9 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     });
   }
 
-  const unsettledRows = rows.filter((row) => !row.settled && !row.snoozedUntil);
+  const pinned = rows.filter((row) => row.pinned).toSorted(compareRecent);
+  const unpinnedRows = rows.filter((row) => !row.pinned);
+  const unsettledRows = unpinnedRows.filter((row) => !row.settled && !row.snoozedUntil);
   const focus = unsettledRows.filter((row) => row.focus !== null);
   const active = unsettledRows
     .filter((row) => row.focus === null && sectionKey(row.state) === "active")
@@ -467,7 +499,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
   const recent = unsettledRows
     .filter((row) => row.focus === null && sectionKey(row.state) === "recent")
     .toSorted(compareRecent);
-  const settled = rows
+  const settled = unpinnedRows
     .filter((row) => row.settled)
     .toSorted((left, right) =>
       (right.effectiveSettlementTimestamp ?? right.updatedAt).localeCompare(
@@ -477,18 +509,19 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
 
   return {
     sections: [
+      ...(pinned.length > 0 ? [{ key: "pinned", title: "Pinned", rows: pinned } as const] : []),
       ...(focus.length > 0 ? [{ key: "focus", title: "Focus", rows: focus } as const] : []),
       ...(active.length > 0 ? [{ key: "active", title: "Active now", rows: active } as const] : []),
       ...(needsInput.length > 0
         ? [{ key: "needs-input", title: "Needs input", rows: needsInput } as const]
         : []),
       ...(recent.length > 0 ? [{ key: "recent", title: "Recent", rows: recent } as const] : []),
-      ...(inbox.snoozed.length > 0 && rows.some((row) => row.snoozedUntil)
+      ...(unpinnedRows.some((row) => row.snoozedUntil)
         ? [
             {
               key: "snoozed",
               title: "Snoozed",
-              rows: rows.filter((row) => row.snoozedUntil),
+              rows: unpinnedRows.filter((row) => row.snoozedUntil),
             } as const,
           ]
         : []),

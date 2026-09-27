@@ -106,6 +106,61 @@ it.effect("loads every project and its history when optional Git identity probes
 });
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect(
+    "keeps inbox completion recency stable during live turns in snapshots and shell updates",
+    () =>
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("inbox-recency-thread");
+        yield* sql`INSERT INTO projection_threads (
+        thread_id, project_id, title, model_selection_json, runtime_mode,
+        interaction_mode, created_at, updated_at
+      ) VALUES (
+        ${threadId}, 'inbox-recency-project', 'Inbox recency',
+        '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+        '2026-09-12T00:00:00.000Z', '2026-09-12T00:00:00.000Z'
+      )`;
+        const assertRecency = (expected: string | null) =>
+          Effect.gen(function* () {
+            const shell = yield* query.getThreadShellById(threadId);
+            assert.isTrue(Option.isSome(shell));
+            if (Option.isSome(shell)) assert.equal(shell.value.latestCompletedTurnAt, expected);
+            const snapshot = yield* query.getShellSnapshot();
+            assert.equal(
+              snapshot.threads.find((thread) => thread.id === threadId)?.latestCompletedTurnAt,
+              expected,
+            );
+          });
+        yield* assertRecency(null);
+        yield* sql`INSERT INTO projection_turns (
+        thread_id, turn_id, state, requested_at, completed_at, checkpoint_files_json
+      ) VALUES
+        (${threadId}, 'inbox-completed', 'completed', '2026-09-12T00:00:00.000Z', '2026-09-12T00:01:00.000Z', '[]'),
+        (${threadId}, 'inbox-current', 'running', '2026-09-12T00:02:00.000Z', NULL, '[]'),
+        ('other-inbox-thread', 'inbox-foreign', 'completed', '2026-09-12T00:03:00.000Z', '2026-09-12T00:04:00.000Z', '[]')`;
+        yield* sql`INSERT INTO projection_thread_sessions (thread_id, status, active_turn_id, updated_at)
+        VALUES (${threadId}, 'running', 'inbox-current', '2026-09-12T00:02:00.000Z')`;
+        yield* assertRecency("2026-09-12T00:01:00.000Z");
+        // Commentary can mark a message/turn completed before the provider is done.
+        yield* sql`UPDATE projection_turns SET state = 'completed', completed_at = '2026-09-12T00:03:00.000Z'
+        WHERE thread_id = ${threadId} AND turn_id = 'inbox-current'`;
+        yield* sql`UPDATE projection_threads SET updated_at = '2026-09-12T00:04:00.000Z' WHERE thread_id = ${threadId}`;
+        yield* assertRecency("2026-09-12T00:01:00.000Z");
+        yield* sql`UPDATE projection_thread_sessions SET status = 'ready', active_turn_id = NULL WHERE thread_id = ${threadId}`;
+        for (const state of ["error", "interrupted"]) {
+          yield* sql`UPDATE projection_turns SET state = ${state} WHERE thread_id = ${threadId} AND turn_id = 'inbox-current'`;
+          yield* assertRecency("2026-09-12T00:01:00.000Z");
+        }
+        yield* sql`UPDATE projection_turns SET state = 'completed', completed_at = '2026-09-12T00:05:00.000Z'
+        WHERE thread_id = ${threadId} AND turn_id = 'inbox-current'`;
+        yield* assertRecency("2026-09-12T00:05:00.000Z");
+        yield* sql`DELETE FROM projection_thread_sessions WHERE thread_id = ${threadId}`;
+        yield* sql`DELETE FROM projection_turns WHERE thread_id IN (${threadId}, 'other-inbox-thread')`;
+        yield* sql`DELETE FROM projection_threads WHERE thread_id = ${threadId}`;
+      }),
+  );
+
   it.effect("side questions use only successful terminal turns scoped to their thread", () =>
     Effect.gen(function* () {
       const query = yield* ProjectionSnapshotQuery;
@@ -587,6 +642,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             updatedAt: "2026-02-24T00:00:07.000Z",
           },
           latestUserMessageAt: "2026-02-24T00:00:04.000Z",
+          latestCompletedTurnAt: null,
           hasPendingApprovals: true,
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,

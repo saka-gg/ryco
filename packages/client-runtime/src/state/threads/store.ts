@@ -423,6 +423,7 @@ function mapThreadShell(
     manualStatusBucket: thread.manualStatusBucket ?? null,
     manualPosition: thread.manualPosition ?? 0,
     latestUserMessageAt: thread.latestUserMessageAt,
+    latestCompletedTurnAt: thread.latestCompletedTurnAt,
     hasPendingApprovals: thread.hasPendingApprovals,
     hasPendingUserInput: thread.hasPendingUserInput,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
@@ -572,6 +573,7 @@ function sidebarThreadSummariesEqual(
     left.manualStatusBucket === right.manualStatusBucket &&
     left.manualPosition === right.manualPosition &&
     left.latestUserMessageAt === right.latestUserMessageAt &&
+    left.latestCompletedTurnAt === right.latestCompletedTurnAt &&
     left.hasPendingApprovals === right.hasPendingApprovals &&
     left.hasPendingUserInput === right.hasPendingUserInput &&
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
