@@ -10,6 +10,17 @@ import {
 import { hostedRoleAllows, RPC_ACCESS_POLICY, rpcAccessFor } from "./rpcAccessPolicy.ts";
 
 describe("shared RPC access policy", () => {
+  it("requires current owner authority to inspect and redeem reset credits", () => {
+    for (const method of [
+      WS_METHODS.serverReadCodexResetCredits,
+      WS_METHODS.serverConsumeCodexResetCredit,
+    ]) {
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(false);
+      expect(hostedRoleAllows("owner", method, false)).toBe(false);
+      expect(hostedRoleAllows("owner", method)).toBe(true);
+    }
+  });
   it("classifies every current and legacy RPC method", () => {
     expect(new Set(Object.keys(RPC_ACCESS_POLICY))).toEqual(
       new Set([

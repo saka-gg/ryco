@@ -231,6 +231,10 @@ export interface WsRpcClient {
      * Refresh provider snapshots. Pass `{ instanceId }` to refresh a single
      * configured instance; pass no argument (or `{}`) to refresh all.
      */
+    readonly readCodexResetCredits: RpcUnaryMethod<typeof WS_METHODS.serverReadCodexResetCredits>;
+    readonly consumeCodexResetCredit: RpcUnaryMethod<
+      typeof WS_METHODS.serverConsumeCodexResetCredit
+    >;
     readonly refreshProviders: (
       input?: RpcInput<typeof WS_METHODS.serverRefreshProviders>,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverRefreshProviders>>;
@@ -613,6 +617,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverGetStatistics]({})),
       getUsageSummary: (input) =>
         transport.request((client) => client[WS_METHODS.serverGetUsageSummary](input)),
+      readCodexResetCredits: (input) =>
+        transport.request((client) => client[WS_METHODS.serverReadCodexResetCredits](input)),
+      consumeCodexResetCredit: (input) =>
+        transport.request((client) => client[WS_METHODS.serverConsumeCodexResetCredit](input)),
       refreshProviders: (input) =>
         transport.request((client) => client[WS_METHODS.serverRefreshProviders](input ?? {})),
       searchAcpRegistry: (input) =>

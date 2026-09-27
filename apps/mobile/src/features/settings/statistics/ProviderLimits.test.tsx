@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ServerProvider } from "@ryco/contracts";
 
+vi.mock("./CodexResetCredits", () => ({ CodexResetCredits: () => null }));
 vi.mock("react-native", () => ({ View: "div", AppState: {} }));
 vi.mock("../../../components/AppText", () => ({ AppText: "span" }));
 vi.mock("../../../components/ProviderIcon", () => ({ ProviderIcon: () => null }));

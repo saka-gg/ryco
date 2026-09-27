@@ -120,6 +120,8 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.serverInstallAcpRegistry]: "owner",
   [WS_METHODS.serverGetAcpRegistryAuthMethods]: "owner",
   [WS_METHODS.serverAuthenticateAcpRegistry]: "owner",
+  [WS_METHODS.serverReadCodexResetCredits]: "owner",
+  [WS_METHODS.serverConsumeCodexResetCredit]: "owner",
   [WS_METHODS.serverRefreshProviders]: "owner",
   [WS_METHODS.serverUpdateProvider]: "owner",
   [WS_METHODS.serverUpdateSettings]: "owner",

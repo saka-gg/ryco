@@ -203,6 +203,14 @@ export function ContextWindowMeter(props: {
             </div>
           </div>
         ) : null}
+        {rateLimits?.resetCredits ? (
+          <div className="phone:hidden mt-2 border-t border-border/60 pt-2 text-xs text-muted-foreground">
+            {props.available
+              ? `${rateLimits.resetCredits.availableCount} banked resets`
+              : "Banked resets unavailable while disconnected"}
+            <div>Review and redeem in Settings → Providers.</div>
+          </div>
+        ) : null}
       </PopoverPopup>
     </Popover>
   );

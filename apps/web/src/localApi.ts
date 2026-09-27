@@ -156,8 +156,18 @@ function createBrowserLocalApi(
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getStatistics()),
       getUsageSummary: (input) =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getUsageSummary(input)),
-      refreshProviders: () =>
-        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.refreshProviders()),
+      readCodexResetCredits: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.readCodexResetCredits(input)),
+      consumeCodexResetCredit: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) =>
+          rpcClient.server.consumeCodexResetCredit(input),
+        ),
+      refreshProviders: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) =>
+          input === undefined
+            ? rpcClient.server.refreshProviders()
+            : rpcClient.server.refreshProviders(input),
+        ),
       searchAcpRegistry: (input) =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.searchAcpRegistry(input)),
       installAcpRegistry: (input) =>

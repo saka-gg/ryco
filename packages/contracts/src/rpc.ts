@@ -1,4 +1,10 @@
 import {
+  CodexResetCreditAccount,
+  CodexResetCreditInput,
+  CodexResetCreditOutcome,
+  CodexResetCreditError,
+} from "./codexResetCredits.ts";
+import {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
   GitLocalChangesInput,
@@ -374,6 +380,8 @@ export const WS_METHODS = {
   serverInstallAcpRegistry: "server.installAcpRegistry",
   serverGetAcpRegistryAuthMethods: "server.getAcpRegistryAuthMethods",
   serverAuthenticateAcpRegistry: "server.authenticateAcpRegistry",
+  serverReadCodexResetCredits: "server.readCodexResetCredits",
+  serverConsumeCodexResetCredit: "server.consumeCodexResetCredit",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
@@ -707,6 +715,20 @@ export const WsServerAuthenticateAcpRegistryRpc = Rpc.make(
     payload: AcpRegistryAuthenticateInput,
     success: AcpRegistryAuthenticationResult,
     error: Schema.Union([AcpRegistryOperationError, AuthRpcError]),
+  },
+);
+
+export const WsServerReadCodexResetCreditsRpc = Rpc.make(WS_METHODS.serverReadCodexResetCredits, {
+  payload: Schema.Struct({ instanceId: ProviderInstanceId }),
+  success: CodexResetCreditAccount,
+  error: Schema.Union([CodexResetCreditError, AuthRpcError]),
+});
+export const WsServerConsumeCodexResetCreditRpc = Rpc.make(
+  WS_METHODS.serverConsumeCodexResetCredit,
+  {
+    payload: CodexResetCreditInput,
+    success: Schema.Struct({ outcome: CodexResetCreditOutcome }),
+    error: Schema.Union([CodexResetCreditError, AuthRpcError]),
   },
 );
 
@@ -1869,6 +1891,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerInstallAcpRegistryRpc
   | typeof WsServerGetAcpRegistryAuthMethodsRpc
   | typeof WsServerAuthenticateAcpRegistryRpc
+  | typeof WsServerReadCodexResetCreditsRpc
+  | typeof WsServerConsumeCodexResetCreditRpc
   | typeof WsServerRefreshProvidersRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
@@ -2030,6 +2054,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerInstallAcpRegistryRpc,
   WsServerGetAcpRegistryAuthMethodsRpc,
   WsServerAuthenticateAcpRegistryRpc,
+  WsServerReadCodexResetCreditsRpc,
+  WsServerConsumeCodexResetCreditRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,

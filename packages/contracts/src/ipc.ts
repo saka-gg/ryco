@@ -1,4 +1,9 @@
 import type {
+  CodexResetCreditAccount,
+  CodexResetCreditInput,
+  CodexResetCreditOutcome,
+} from "./codexResetCredits.ts";
+import type {
   ComputerGetAuditHistoryInput,
   ComputerGetAuditHistoryResult,
 } from "./computerAudit.ts";
@@ -840,6 +845,12 @@ export interface LocalApi {
      * configured instance is probed; otherwise every configured instance is
      * refreshed (legacy untargeted refresh).
      */
+    readCodexResetCredits?: (input: {
+      instanceId: ProviderInstanceId;
+    }) => Promise<CodexResetCreditAccount>;
+    consumeCodexResetCredit?: (
+      input: CodexResetCreditInput,
+    ) => Promise<{ outcome: CodexResetCreditOutcome }>;
     refreshProviders: (input?: {
       readonly instanceId?: ProviderInstanceId;
     }) => Promise<ServerProviderUpdatedPayload>;
@@ -905,6 +916,12 @@ export interface EnvironmentApi {
   };
   /** Node-scoped provider/settings operations, resolved by environment. */
   server?: {
+    readCodexResetCredits?: (input: {
+      instanceId: ProviderInstanceId;
+    }) => Promise<CodexResetCreditAccount>;
+    consumeCodexResetCredit?: (
+      input: CodexResetCreditInput,
+    ) => Promise<{ outcome: CodexResetCreditOutcome }>;
     refreshProviders: (input?: {
       readonly instanceId?: ProviderInstanceId;
     }) => Promise<ServerProviderUpdatedPayload>;

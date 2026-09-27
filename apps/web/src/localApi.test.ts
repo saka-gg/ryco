@@ -93,6 +93,8 @@ const rpcClientMock = {
     getStatistics: vi.fn(),
     getUsageSummary: vi.fn(),
     refreshProviders: vi.fn(),
+    readCodexResetCredits: vi.fn(),
+    consumeCodexResetCredit: vi.fn(),
     updateProvider: vi.fn(),
     upsertKeybinding: vi.fn(),
     getSettings: vi.fn(),
@@ -571,6 +573,26 @@ describe("wsApi", () => {
 
     await expect(api.server.refreshProviders()).resolves.toEqual({ providers: nextProviders });
     expect(rpcClientMock.server.refreshProviders).toHaveBeenCalledWith();
+  });
+
+  it("routes reset-credit reads, attempts and targeted refresh to the selected provider", async () => {
+    const { createLocalApi } = await import("./localApi");
+    const api = createLocalApi(rpcClientMock as never);
+    const instanceId = ProviderInstanceId.make("fixture-codex");
+    const input = { instanceId, accountBinding: "fixture-binding", idempotencyKey: "fixture-key" };
+    rpcClientMock.server.readCodexResetCredits.mockResolvedValue({
+      accountBinding: "fixture-binding",
+      credits: { availableCount: 1 },
+    });
+    rpcClientMock.server.consumeCodexResetCredit.mockResolvedValue({ outcome: "alreadyRedeemed" });
+    await api.server.readCodexResetCredits?.({ instanceId });
+    await expect(api.server.consumeCodexResetCredit?.(input)).resolves.toEqual({
+      outcome: "alreadyRedeemed",
+    });
+    await api.server.refreshProviders({ instanceId });
+    expect(rpcClientMock.server.readCodexResetCredits).toHaveBeenCalledWith({ instanceId });
+    expect(rpcClientMock.server.consumeCodexResetCredit).toHaveBeenCalledWith(input);
+    expect(rpcClientMock.server.refreshProviders).toHaveBeenCalledWith({ instanceId });
   });
 
   it("forwards provider updates directly to the RPC client", async () => {

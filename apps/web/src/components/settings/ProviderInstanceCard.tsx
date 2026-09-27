@@ -460,6 +460,7 @@ interface ProviderInstanceCardProps {
   readonly liveProvider: ServerProvider | undefined;
   readonly isDefault: boolean;
   readonly usageAvailable?: boolean;
+  readonly resetCreditsNode?: ReactNode;
   readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void;
   /**
    * Pass `undefined` to hide the delete button entirely. Built-in default
@@ -515,6 +516,7 @@ export function ProviderInstanceCard({
   liveProvider,
   isDefault,
   usageAvailable = false,
+  resetCreditsNode,
   onUpdate,
   onDelete,
   headerAction,
@@ -821,6 +823,7 @@ export function ProviderInstanceCard({
       </div>
 
       <div className="space-y-0">
+        {resetCreditsNode}
         {liveProvider?.rateLimits ? (
           <ProviderUsageLimitsSection
             rateLimits={liveProvider.rateLimits}

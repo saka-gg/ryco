@@ -1,3 +1,4 @@
+import { CodexResetCredits } from "./codexResetCredits.ts";
 import { Effect, Schema } from "effect";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import { ServerAuthDescriptor } from "./auth.ts";
@@ -158,6 +159,7 @@ export const ServerProviderRateLimits = Schema.Struct({
   // Third window for providers with three usage caps (OpenCode Go monthly).
   tertiary: Schema.optional(ServerProviderRateLimitWindow),
   credits: Schema.optional(ServerProviderRateLimitCredits),
+  resetCredits: Schema.optional(CodexResetCredits),
   rateLimitReachedType: Schema.optional(TrimmedNonEmptyString),
 });
 export type ServerProviderRateLimits = typeof ServerProviderRateLimits.Type;
