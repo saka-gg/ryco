@@ -54,6 +54,9 @@ import {
   wsRequests,
 } from "./ChatView.browser.helpers";
 
+// Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
+vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
+
 describe("ChatView Workspace (full app)", () => {
   setupChatViewBrowserSuite();
 

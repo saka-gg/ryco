@@ -104,7 +104,8 @@ jobs:
     outputs:
       include: ${{ steps.pick.outputs.include }}
       has-tests: ${{ steps.pick.outputs.has-tests }}
-      browser: ${{ steps.pick.outputs.browser }}
+      # No `browser` output: the browser shards resolve the same scope in-job so
+      # they can start without waiting here (see `browser` below).
       desktop: ${{ steps.pick.outputs.desktop }}
       release: ${{ steps.pick.outputs.release }}
     steps:
@@ -210,10 +211,15 @@ jobs:
   # race. That keeps a single runner at roughly 15% CPU for the whole suite, so
   # the way to spend the idle capacity is more runners, not a bigger one. Each
   # shard stays internally serial, preserving the timing invariant.
+  #
+  # These shards are the wall-clock long pole, so they do not wait for the
+  # test-matrix job. Each shard resolves the same validation scope itself right
+  # after setup and skips its remaining steps when browser tests are not
+  # required. A skipped shard costs about 40 seconds of runner time; waiting on
+  # the matrix would cost that on every run where the suite is needed.
   browser:
     name: Browser tests ${{ matrix.shard }}
-    needs: test-matrix
-    if: ${{ inputs['run-browser-tests'] && needs.test-matrix.outputs.browser == 'true' }}
+    if: ${{ inputs['run-browser-tests'] }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -225,6 +231,9 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs['checkout-ref'] != '' && inputs['checkout-ref'] || github.ref }}
+          # Full history when scoping so the in-job scope resolution can diff
+          # against affected-base; shallow otherwise.
+          fetch-depth: ${{ inputs['affected-base'] == '' && 1 || 0 }}
           persist-credentials: false
 
       - name: Setup project
@@ -234,12 +243,16 @@ jobs:
           cache-scope: browser-${{ matrix.shard }}
           install-resource-monitor-toolchain: "false"
 
-      # Browser tests run vitest directly (not through Turbo), so build the web
-      # package and its workspace dependencies first.
-      - name: Build web package
-        run: bun run build --filter=@ryco/web
+      - id: scope
+        name: Resolve validation scope
+        run: bun scripts/ci/test-matrix.ts
 
+      # No build step and no Turbo save: browser tests run Vitest directly, which
+      # serves the app through the Vite dev server, and every `@ryco/*` workspace
+      # export web uses resolves to `src` under the ESM `import` condition. So
+      # neither the `@ryco/web` bundle nor any dependency's `dist/` is read.
       - name: Restore Playwright browsers
+        if: ${{ steps.scope.outputs.browser == 'true' }}
         id: playwright-cache
         uses: actions/cache/restore@v5
         with:
@@ -249,6 +262,7 @@ jobs:
             ${{ runner.os }}-playwright-
 
       - name: Install browser test runtime
+        if: ${{ steps.scope.outputs.browser == 'true' }}
         run: bun run --cwd apps/web test:browser:install
 
       # Saved before the suite runs, and only on a cold key. The browser
@@ -256,17 +270,18 @@ jobs:
       # outcome, so there is no reason to make a red suite re-download Chromium
       # on the next attempt.
       - name: Save Playwright browsers
-        if: ${{ steps.playwright-cache.outputs['cache-hit'] != 'true' }}
+        if: ${{ steps.scope.outputs.browser == 'true' && steps.playwright-cache.outputs['cache-hit'] != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
 
       - name: Browser test
+        if: ${{ steps.scope.outputs.browser == 'true' }}
         run: bun run --cwd apps/web test:browser --shard ${{ matrix.shard }}
 
       - name: Upload browser test reports
-        if: always()
+        if: ${{ always() && steps.scope.outputs.browser == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: browser-test-results-${{ strategy.job-index }}
@@ -277,15 +292,8 @@ jobs:
           retention-days: 14
 
       - name: Summarize browser test timings
-        if: always()
+        if: ${{ always() && steps.scope.outputs.browser == 'true' }}
         run: bun scripts/ci/summarize-tests.ts
-
-      - name: Save Turbo cache
-        if: ${{ always() && steps.setup.outputs['turbo-cache-key'] != '' }}
-        uses: actions/cache/save@v5
-        with:
-          path: .turbo/cache
-          key: ${{ steps.setup.outputs['turbo-cache-key'] }}
 
   desktop:
     name: Desktop build

@@ -47,7 +47,13 @@ bun run --cwd apps/server test --project=pure --sequence.shuffle --sequence.seed
 Browser files stay serial within each of four shards. ChatView's six suites
 share one harness but separate composer, conversation, navigation, workspace,
 phone composer, and phone surface assertions so no single giant file dominates
-one shard.
+one shard. The browser shards are the wall-clock long pole, so they do not wait
+for the test-matrix job: each shard resolves the same validation scope itself
+with `scripts/ci/test-matrix.ts` right after setup and skips its remaining
+steps when browser tests are not required. They run no build at all: Vitest
+browser mode serves the app through the Vite dev server, and every `@ryco/*`
+workspace export web uses resolves to `src` under the ESM `import` condition,
+so neither the `@ryco/web` bundle nor any dependency's `dist/` is read.
 
 ## Affected scoping and caching
 
@@ -69,7 +75,9 @@ run to run instead of freezing at a lockfile-stable key.
 
 `browser`, `desktop`, and `release-smoke` stay gated behind the `run-*` inputs.
 On PRs `validationScope` in the test-matrix script combines changed paths with
-affected dependents. Runtime changes that affect web require browser tests;
+affected dependents. Desktop and release smoke read that decision from the
+test-matrix job's outputs; browser shards evaluate it in-job so they can start
+immediately. Runtime changes that affect web require browser tests;
 changes affecting web, server, or desktop require desktop validation. Unit-only
 and documentation changes skip these expensive jobs. Hosted Hub/PWA test sources
 referenced by browser acceptance tests still trigger the browser suite. Root
