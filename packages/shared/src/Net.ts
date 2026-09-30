@@ -26,7 +26,10 @@ const closeServer = (server: Net.Server) => {
   }
 };
 
-const tryReservePort = (port: number): Effect.Effect<number, NetError> =>
+/** How many ports from the preferred one to try before taking an ephemeral port. */
+const PREFERRED_PORT_ATTEMPTS = 10;
+
+const tryReservePort = (port: number, host?: string): Effect.Effect<number, NetError> =>
   Effect.callback<number, NetError>((resume) => {
     const server = Net.createServer();
     let settled = false;
@@ -43,7 +46,7 @@ const tryReservePort = (port: number): Effect.Effect<number, NetError> =>
       settle(Effect.fail(new NetError({ message: "Could not find an available port.", cause })));
     });
 
-    server.listen(port, () => {
+    server.listen(host === undefined ? { port } : { port, host }, () => {
       const address = server.address();
       const resolved = typeof address === "object" && address !== null ? address.port : 0;
       server.close(() => {
@@ -77,9 +80,14 @@ export interface NetServiceShape {
   readonly reserveLoopbackPort: (host?: string) => Effect.Effect<number, NetError>;
 
   /**
-   * Resolve an available listening port, preferring the provided port first.
+   * Resolve an available listening port for `host`, preferring the provided
+   * port and the next few after it before falling back to an ephemeral one.
+   *
+   * With no host (or a wildcard) the port must also be free on 127.0.0.1: on
+   * macOS a wildcard bind succeeds even while another process holds the same
+   * port on loopback, which made a free-looking port fail at startup.
    */
-  readonly findAvailablePort: (preferred: number) => Effect.Effect<number, NetError>;
+  readonly findAvailablePort: (preferred: number, host?: string) => Effect.Effect<number, NetError>;
 }
 
 /**
@@ -173,8 +181,28 @@ export class NetService extends Context.Service<NetService, NetServiceShape>()(
           (ipv4, ipv6) => ipv4 && ipv6,
         ),
       reserveLoopbackPort,
-      findAvailablePort: (preferred) =>
-        Effect.catch(tryReservePort(preferred), () => tryReservePort(0)),
+      findAvailablePort: (preferred, host) => {
+        const hosts =
+          host === undefined || host === "0.0.0.0" || host === "::" || host === "[::]"
+            ? [undefined, "127.0.0.1"]
+            : [host.replace(/^\[(.*)\]$/u, "$1")];
+        const tryEveryHost = (port: number): Effect.Effect<number, NetError> =>
+          Effect.forEach(hosts, (candidate) => tryReservePort(port, candidate), {
+            discard: true,
+          }).pipe(Effect.as(port));
+        const candidates =
+          preferred > 0
+            ? Array.from(
+                { length: PREFERRED_PORT_ATTEMPTS },
+                (_, index) => preferred + index,
+              ).filter((port) => port <= 65_535)
+            : [];
+        const tryCandidates = (index: number): Effect.Effect<number, NetError> =>
+          index >= candidates.length
+            ? tryReservePort(0, hosts[hosts.length - 1])
+            : Effect.catch(tryEveryHost(candidates[index]!), () => tryCandidates(index + 1));
+        return tryCandidates(0);
+      },
     } satisfies NetServiceShape;
   });
 }
