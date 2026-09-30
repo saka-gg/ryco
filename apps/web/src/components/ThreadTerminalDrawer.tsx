@@ -3,7 +3,9 @@ import "@xterm/xterm/css/xterm.css";
 import {
   createTerminalEventReconciler,
   isTerminalEventAfterSnapshot,
+  bracketedTerminalSnippet,
 } from "@ryco/client-runtime/state/terminal";
+import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 
 import { FitAddon } from "@xterm/addon-fit";
 import { Plus, SquareSplitHorizontal, TerminalSquare, Trash2, XIcon } from "lucide-react";
@@ -430,10 +432,16 @@ export function TerminalViewport({
     const api = readEnvironmentApi(environmentId);
     const localApi = readLocalApi();
     if (!api || !localApi) return;
+    const snippetRequest = terminalSnippetBroker.read({ threadRef, terminalId });
+    let hydratedSnapshot: TerminalSessionSnapshot | null = null;
+    let parsedCursor: TerminalSessionSnapshot["cursor"];
+    const inputBlocked = () =>
+      terminalSnippetBroker.inputBlocked({ threadRef, terminalId }, hydratedSnapshot?.inputEpoch);
 
     const fitAddon = new FitAddon();
     const terminal = new Terminal({
       cursorBlink: true,
+      allowProposedApi: true,
       lineHeight: 1.2,
       fontSize: 12,
       scrollback: 5_000,
@@ -540,6 +548,7 @@ export function TerminalViewport({
     };
 
     const sendTerminalInput = async (data: string, fallbackError: string) => {
+      if (inputBlocked()) return;
       const activeTerminal = terminalRef.current;
       if (!activeTerminal) return;
       try {
@@ -553,6 +562,10 @@ export function TerminalViewport({
     };
 
     terminal.attachCustomKeyEventHandler((event) => {
+      if (inputBlocked()) {
+        event.preventDefault();
+        return false;
+      }
       const currentKeybindings = keybindingsRef.current;
       const options = { context: { terminalFocus: true, terminalOpen: true } };
       if (
@@ -651,6 +664,7 @@ export function TerminalViewport({
     });
 
     const inputDisposable = terminal.onData((data) => {
+      if (inputBlocked()) return;
       void api.terminal
         .write({ threadId, terminalId, data })
         .catch((err) =>
@@ -733,7 +747,13 @@ export function TerminalViewport({
       }
 
       if (event.type === "output") {
-        outputBatcher.writeOutput(event.data);
+        if (terminalSnippetBroker.read({ threadRef, terminalId })) {
+          activeTerminal.write(event.data, () => {
+            parsedCursor = event.cursor;
+          });
+        } else {
+          outputBatcher.writeOutput(event.data);
+        }
         clearSelectionAction();
         recordTerminalApply();
         return;
@@ -742,9 +762,25 @@ export function TerminalViewport({
       outputBatcher.flush();
 
       if (event.type === "started" || event.type === "restarted") {
+        if (
+          snippetRequest &&
+          hydratedSnapshot?.inputEpoch &&
+          event.snapshot.inputEpoch !== hydratedSnapshot.inputEpoch
+        ) {
+          snippetRequest.complete(
+            new Error(
+              "The terminal restarted during insertion. Nothing was sent; insert the snippet again.",
+            ),
+          );
+        }
         hasHandledExitRef.current = false;
         clearSelectionAction();
         writeTerminalSnapshot(activeTerminal, event.snapshot);
+        hydratedSnapshot = event.snapshot;
+        if (snippetRequest)
+          activeTerminal.write("", () => {
+            parsedCursor = event.snapshot.cursor;
+          });
         recordTerminalApply();
         return;
       }
@@ -841,10 +877,16 @@ export function TerminalViewport({
           cols: activeTerminal.cols,
           rows: activeTerminal.rows,
           ...(runtimeEnv ? { env: runtimeEnv } : {}),
+          ...(snippetRequest ? { requireCurrentWorkspace: true } : {}),
         });
         if (disposed) return;
+        hydratedSnapshot = snapshot;
         eventReconciler.reset(snapshot);
         writeTerminalSnapshot(activeTerminal, snapshot);
+        if (snippetRequest)
+          activeTerminal.write("", () => {
+            parsedCursor = snapshot.cursor;
+          });
         const bufferedEntries = selectTerminalEventEntries(
           useTerminalStateStore.getState().terminalEventEntriesByKey,
           threadRef,
@@ -860,6 +902,11 @@ export function TerminalViewport({
         }
         lastAppliedTerminalEventIdRef.current = bufferedEntries.at(-1)?.id ?? 0;
         terminalHydratedRef.current = true;
+        if (!snippetRequest && inputBlocked())
+          writeBufferedSystemMessage(
+            activeTerminal,
+            "Snippet delivery is unconfirmed. Input is blocked; close this pane and open a new terminal to continue.",
+          );
         if (autoFocus) {
           window.requestAnimationFrame(() => {
             activeTerminal.focus();
@@ -867,6 +914,9 @@ export function TerminalViewport({
         }
       } catch (err) {
         if (disposed) return;
+        snippetRequest?.complete(
+          err instanceof Error ? err : new Error("Failed to open the thread terminal."),
+        );
         writeBufferedSystemMessage(
           terminal,
           err instanceof Error ? err.message : "Failed to open terminal",
@@ -894,10 +944,84 @@ export function TerminalViewport({
         .catch(() => undefined);
     }, 30);
     void openTerminal();
+    const snippetTimer = snippetRequest
+      ? window.setInterval(() => {
+          const request = terminalSnippetBroker.read({ threadRef, terminalId });
+          if (!request) {
+            if (snippetTimer !== null) window.clearInterval(snippetTimer);
+            return;
+          }
+          if (
+            disposed ||
+            !request.isCurrent() ||
+            request.target.cwd !== cwd ||
+            request.target.worktreePath !== (worktreePath ?? null)
+          ) {
+            request.complete(
+              new Error(
+                "Insertion cancelled because the thread, connection, or workspace changed. Nothing was sent.",
+              ),
+            );
+            return;
+          }
+          if (request.dispatched) return;
+          const snapshot = hydratedSnapshot;
+          if (!terminalHydratedRef.current || !snapshot) return;
+          if (
+            !snapshot.inputEpoch ||
+            snapshot.status !== "running" ||
+            snapshot.cwd !== cwd ||
+            snapshot.worktreePath !== (worktreePath ?? null)
+          ) {
+            request.complete(
+              new Error(
+                "This terminal cannot guarantee insertion into the current session. Nothing was sent.",
+              ),
+            );
+            return;
+          }
+          // The parser consumes output asynchronously. Wait for the shell's real
+          // bracketed-paste advertisement; never force it on or fall back to raw paste.
+          if (!terminal.modes.bracketedPasteMode || !parsedCursor) return;
+          const inputEpoch = snapshot.inputEpoch;
+          if (terminal.buffer.active.type === "alternate") {
+            request.complete(
+              new Error(
+                "Insertion is unavailable while a full-screen terminal application is active. Nothing was sent.",
+              ),
+            );
+            return;
+          }
+          const outputCursor = parsedCursor;
+          request.dispatch(inputEpoch, (source) =>
+            api.terminal.write({
+              threadId,
+              terminalId,
+              data: bracketedTerminalSnippet(source),
+              guard: { inputEpoch, outputCursor, cwd, worktreePath: worktreePath ?? null },
+            }),
+          );
+        }, 25)
+      : null;
+
+    void snippetRequest?.promise.then(
+      () => {
+        if (!disposed && snippetRequest.isCurrent()) terminal.focus();
+      },
+      (error: Error) => {
+        if (!disposed && snippetRequest.dispatched) {
+          writeBufferedSystemMessage(terminal, error.message);
+        }
+      },
+    );
 
     return () => {
       outputBatcher.dispose();
       disposed = true;
+      if (snippetTimer !== null) window.clearInterval(snippetTimer);
+      snippetRequest?.complete(
+        new Error("Insertion cancelled because the terminal was closed or focus changed."),
+      );
       terminalHydratedRef.current = false;
       lastAppliedTerminalEventIdRef.current = 0;
       unsubscribeTerminalEvents();

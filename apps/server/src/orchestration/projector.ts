@@ -531,6 +531,7 @@ export function projectEvent(
             snoozedUntil: null,
             snoozedAt: null,
             updatedAt: payload.updatedAt,
+            ...payload.restoredSidebarState,
           }),
         })),
       );
@@ -557,6 +558,7 @@ export function projectEvent(
             settledOverride: payload.reason === "user" ? "active" : null,
             settledAt: null,
             updatedAt: payload.updatedAt,
+            ...payload.restoredSidebarState,
           }),
         })),
       );

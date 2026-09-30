@@ -1,3 +1,4 @@
+import { parseProviderSourcePaths } from "./ProviderSourcePaths.ts";
 import type { ProviderInstanceEnvironment } from "@ryco/contracts";
 
 export function mergeProviderInstanceEnvironment(
@@ -13,4 +14,12 @@ export function mergeProviderInstanceEnvironment(
     next[variable.name] = variable.value;
   }
   return next;
+}
+
+// Resolve relative/tilde HOME declarations before starting a provider in a
+// project cwd, so its archive location agrees with backend source discovery.
+export function normalizeProviderHomeEnvironment(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (baseEnv.HOME === undefined) return baseEnv;
+  const home = parseProviderSourcePaths("claudeAgent", {}, baseEnv).home;
+  return home === baseEnv.HOME ? baseEnv : { ...baseEnv, HOME: home };
 }

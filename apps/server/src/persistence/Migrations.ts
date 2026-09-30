@@ -1,3 +1,5 @@
+import Migration0066 from "./Migrations/066_StorageLifecycle.ts";
+import Migration0067 from "./Migrations/067_SessionImportRecovery.ts";
 import Migration0062 from "./Migrations/062_SessionImports.ts";
 import Migration0063 from "./Migrations/063_AgentControlCompletionReturns.ts";
 import Migration0065 from "./Migrations/065_OptionalUserInput.ts";
@@ -155,6 +157,8 @@ export const migrationEntries = [
   [62, "SessionImports", Migration0062],
   [63, "AgentControlCompletionReturns", Migration0063],
   [65, "OptionalUserInput", Migration0065],
+  [66, "StorageLifecycle", Migration0066],
+  [67, "SessionImportRecovery", Migration0067],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

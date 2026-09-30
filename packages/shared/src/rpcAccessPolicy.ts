@@ -17,6 +17,13 @@ export type RpcMethod =
 export type RpcAccess = RelayEffectiveRole | "authenticated" | "direct_owner";
 
 export const RPC_ACCESS_POLICY = {
+  [WS_METHODS.serverGetProjectPreferences]: "viewer",
+  [WS_METHODS.storageScan]: "owner",
+  [WS_METHODS.storagePreview]: "owner",
+  [WS_METHODS.storageExecute]: "owner",
+  [WS_METHODS.sessionImportSources]: "owner",
+  [WS_METHODS.sessionImportReconcile]: "owner",
+  [WS_METHODS.sessionImportAdopt]: "owner",
   [WS_METHODS.sessionImportDiscover]: "owner",
   [WS_METHODS.sessionImportRun]: "owner",
   [AGENT_CONTROL_WS_METHODS.automationCentre]: "owner",

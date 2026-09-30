@@ -15,6 +15,42 @@ import {
 } from "./terminal.ts";
 
 describe("TerminalCursor", () => {
+  it("retains guarded paste evidence while rejecting invalid output cursors", () => {
+    const input = {
+      threadId: "synthetic-thread",
+      terminalId: "fresh",
+      data: "\x1b[200~printf '🌏'\x1b[201~",
+      guard: {
+        inputEpoch: "synthetic-process",
+        outputCursor: { generation: "synthetic-server", sequence: 0 },
+        cwd: "/synthetic/worktree",
+        worktreePath: "/synthetic/worktree",
+      },
+    };
+    expect(decodeSync(TerminalWriteInput, input)).toEqual(input);
+    expect(
+      decodes(TerminalWriteInput, {
+        ...input,
+        guard: { ...input.guard, outputCursor: { generation: "server", sequence: -1 } },
+      }),
+    ).toBe(false);
+    expect(
+      decodes(TerminalWriteInput, { ...input, guard: { ...input.guard, inputEpoch: "" } }),
+    ).toBe(false);
+    expect(
+      decodeSync(TerminalOpenInput, {
+        threadId: "synthetic-thread",
+        terminalId: "fresh",
+        cwd: "/synthetic/worktree",
+        requireCurrentWorkspace: true,
+      }),
+    ).toEqual({
+      threadId: "synthetic-thread",
+      terminalId: "fresh",
+      cwd: "/synthetic/worktree",
+      requireCurrentWorkspace: true,
+    });
+  });
   it("accepts a generation with a nonnegative integer sequence", () => {
     expect(decodes(TerminalCursor, { generation: "server-1", sequence: 0 })).toBe(true);
     expect(decodes(TerminalCursor, { generation: "", sequence: 0 })).toBe(false);

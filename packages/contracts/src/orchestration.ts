@@ -527,7 +527,7 @@ export const ChatImageAttachment = Schema.Struct({
 });
 export type ChatImageAttachment = typeof ChatImageAttachment.Type;
 
-const UploadChatImageAttachment = Schema.Struct({
+export const UploadChatImageAttachment = Schema.Struct({
   type: Schema.Literal("image"),
   name: ChatAttachmentName,
   mimeType: ChatAttachmentMimeType.check(Schema.isPattern(/^image\//i)),
@@ -1225,6 +1225,14 @@ const ThreadArchiveCommand = Schema.Struct({
   threadId: ThreadId,
 });
 
+// Receipts are short-lived and owned by the server; clients cannot supply restoration state.
+const ThreadSidebarUndoCommand = Schema.Struct({
+  type: Schema.Literal("thread.sidebar.undo"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  undoCommandId: CommandId,
+});
+
 const ThreadUnarchiveCommand = Schema.Struct({
   type: Schema.Literal("thread.unarchive"),
   commandId: CommandId,
@@ -1326,6 +1334,8 @@ const ThreadTurnStartBootstrapPrepareWorktree = Schema.Struct({
 });
 
 const ThreadTurnStartBootstrap = Schema.Struct({
+  /** Reject a turn unless this bootstrap creates a fresh isolated Git worktree. */
+  requireWorktree: Schema.optional(Schema.Boolean),
   createThread: Schema.optional(ThreadTurnStartBootstrapCreateThread),
   prepareWorktree: Schema.optional(ThreadTurnStartBootstrapPrepareWorktree),
   runSetupScript: Schema.optional(Schema.Boolean),
@@ -1603,6 +1613,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
+  ThreadSidebarUndoCommand,
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
@@ -1643,6 +1654,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
+  ThreadSidebarUndoCommand,
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
@@ -1959,6 +1971,13 @@ export const ThreadArchivedPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 
+export const ThreadSidebarRestoreState = Schema.Struct({
+  settledOverride: Schema.NullOr(ThreadSettlementOverride),
+  settledAt: Schema.NullOr(IsoDateTime),
+  snoozedUntil: Schema.NullOr(IsoDateTime),
+  snoozedAt: Schema.NullOr(IsoDateTime),
+});
+
 export const ThreadUnarchivedPayload = Schema.Struct({
   threadId: ThreadId,
   updatedAt: IsoDateTime,
@@ -1970,7 +1989,11 @@ export const ThreadSnoozedPayload = Schema.Struct({
   snoozedAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
-export const ThreadUnsnoozedPayload = Schema.Struct({ threadId: ThreadId, updatedAt: IsoDateTime });
+export const ThreadUnsnoozedPayload = Schema.Struct({
+  threadId: ThreadId,
+  updatedAt: IsoDateTime,
+  restoredSidebarState: Schema.optional(ThreadSidebarRestoreState),
+});
 
 export const ThreadSettledPayload = Schema.Struct({
   threadId: ThreadId,
@@ -1982,6 +2005,7 @@ export const ThreadUnsettledPayload = Schema.Struct({
   threadId: ThreadId,
   reason: Schema.Literals(["user", "activity"]),
   updatedAt: IsoDateTime,
+  restoredSidebarState: Schema.optional(ThreadSidebarRestoreState),
 });
 
 export const ThreadMetaUpdatedPayload = Schema.Struct({

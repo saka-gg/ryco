@@ -7,12 +7,12 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 
-export const USAGE_CONTRACT_VERSION = 1 as const;
+export const USAGE_CONTRACT_VERSION = 2 as const;
 
 export const UsageCalendarDate = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/));
 export type UsageCalendarDate = typeof UsageCalendarDate.Type;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex"]);
+export const UsageProviderKind = Schema.Literals(["claude", "codex", "cursor", "opencode"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 export const UsageCostSource = Schema.Literals([
@@ -23,10 +23,20 @@ export const UsageCostSource = Schema.Literals([
 ]);
 export type UsageCostSource = typeof UsageCostSource.Type;
 
-export const UsageSourceStatus = Schema.Literals(["complete", "not-found", "partial", "failed"]);
+export const UsageSourceStatus = Schema.Literals([
+  "complete",
+  "not-found",
+  "partial",
+  "failed",
+  "unsupported",
+]);
 export type UsageSourceStatus = typeof UsageSourceStatus.Type;
 
-export const UsageSourceDeduplicationKind = Schema.Literals(["physical", "environment-only"]);
+export const UsageSourceDeduplicationKind = Schema.Literals([
+  "physical",
+  "environment-only",
+  "declared",
+]);
 export type UsageSourceDeduplicationKind = typeof UsageSourceDeduplicationKind.Type;
 
 export const UsagePricingState = Schema.Literals(["live", "cached", "unavailable"]);
@@ -39,13 +49,16 @@ export const UsageTokenTotals = Schema.Struct({
   cachedInputTokens: NonNegativeFinite,
   cacheCreationInputTokens: NonNegativeFinite,
   outputTokens: NonNegativeFinite,
-  reasoningTokens: NonNegativeFinite,
+  reasoningTokens: Schema.optional(NonNegativeFinite),
   totalTokens: NonNegativeFinite,
 });
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
 
 export const UsageDailyBucket = Schema.Struct({
   sourceId: TrimmedNonEmptyString,
+  // Cursor exports retain only anonymized event/session identity for overlap dedupe.
+  exportRecordId: Schema.optional(TrimmedNonEmptyString),
+  exportSessionId: Schema.optional(TrimmedNonEmptyString),
   date: UsageCalendarDate,
   provider: UsageProviderKind,
   model: Schema.String,
@@ -95,9 +108,23 @@ export const UsageSummaryRequest = Schema.Struct({
   startDate: Schema.optional(UsageCalendarDate),
   endDate: UsageCalendarDate,
   timeZone: TrimmedNonEmptyString,
-  contractVersion: Schema.Literal(USAGE_CONTRACT_VERSION),
+  // Accept older requests so the service can return a friendly update error.
+  contractVersion: NonNegativeInt,
 });
 export type UsageSummaryRequest = typeof UsageSummaryRequest.Type;
+
+/** User-supplied provider export metadata; unavailable token fields are absent. */
+export const UsageImportedMetric = Schema.Struct({
+  sourceId: TrimmedNonEmptyString,
+  recordId: TrimmedNonEmptyString,
+  provider: Schema.Literal("cursor"),
+  date: UsageCalendarDate,
+  model: Schema.optional(Schema.String),
+  metric: Schema.Literals(["requests", "cost"]),
+  value: NonNegativeFinite,
+  currency: Schema.optional(Schema.String.check(Schema.isPattern(/^[A-Z]{3}$/))),
+});
+export type UsageImportedMetric = typeof UsageImportedMetric.Type;
 
 export const UsageSummary = Schema.Struct({
   contractVersion: Schema.Literal(USAGE_CONTRACT_VERSION),
@@ -107,6 +134,7 @@ export const UsageSummary = Schema.Struct({
   generatedAt: IsoDateTime,
   scanDurationMs: NonNegativeInt,
   buckets: Schema.Array(UsageDailyBucket),
+  imports: Schema.optional(Schema.Array(UsageImportedMetric)),
   sources: Schema.Array(UsageSourceCoverage),
   pricing: UsagePricingStatus,
 });

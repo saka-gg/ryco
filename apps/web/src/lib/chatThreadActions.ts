@@ -60,17 +60,21 @@ function buildContextualThreadOptions(context: ChatThreadActionContext): NewThre
   };
 }
 
-function buildDefaultThreadOptions(context: ChatThreadActionContext): NewThreadOptions {
-  return {
-    envMode: context.defaultThreadEnvMode,
-  };
+function buildDefaultThreadOptions(): NewThreadOptions {
+  // The owning node resolves the project's current default, including overrides.
+  return {};
 }
 
 export async function startNewThreadInProjectFromContext(
   context: ChatThreadActionContext,
   projectRef: ScopedProjectRef,
 ): Promise<void> {
-  await context.handleNewThread(projectRef, buildContextualThreadOptions(context));
+  await context.handleNewThread(
+    projectRef,
+    context.activeThread || context.activeDraftThread
+      ? buildContextualThreadOptions(context)
+      : buildDefaultThreadOptions(),
+  );
 }
 
 export async function startNewThreadFromContext(
@@ -93,6 +97,6 @@ export async function startNewLocalThreadFromContext(
     return false;
   }
 
-  await context.handleNewThread(projectRef, buildDefaultThreadOptions(context));
+  await context.handleNewThread(projectRef, buildDefaultThreadOptions());
   return true;
 }

@@ -74,7 +74,7 @@ describe("chatThreadActions", () => {
     });
   });
 
-  it("starts a local thread with the configured default env mode", async () => {
+  it("lets the target node resolve project defaults for a plain new thread", async () => {
     const handleNewThread = vi.fn<ChatThreadActionContext["handleNewThread"]>(async () => {});
 
     const didStart = await startNewLocalThreadFromContext(
@@ -86,9 +86,18 @@ describe("chatThreadActions", () => {
     );
 
     expect(didStart).toBe(true);
-    expect(handleNewThread).toHaveBeenCalledWith(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID), {
-      envMode: "worktree",
-    });
+    expect(handleNewThread).toHaveBeenCalledWith(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID), {});
+  });
+
+  it("inherits the project's defaults when the contextual action has no active thread", async () => {
+    const handleNewThread = vi.fn<ChatThreadActionContext["handleNewThread"]>(async () => {});
+    await startNewThreadFromContext(
+      createContext({
+        defaultProjectRef: scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID),
+        handleNewThread,
+      }),
+    );
+    expect(handleNewThread).toHaveBeenCalledWith(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID), {});
   });
 
   it("does not start a thread when there is no project context", async () => {

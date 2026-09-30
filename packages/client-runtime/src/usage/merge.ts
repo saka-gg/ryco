@@ -4,6 +4,7 @@ import {
   type UsageCalendarDate,
   type UsageCostSource,
   type UsageDailyBucket,
+  type UsageImportedMetric,
   type UsageSourceCoverage,
   type UsageSummary,
   type UsageTokenTotals,
@@ -33,6 +34,7 @@ export interface MergedUsageSource extends UsageSourceCoverage {
 
 export interface MergedUsageBucket extends Omit<UsageDailyBucket, "sourceId"> {
   readonly sourceIds: readonly string[];
+  readonly exportSessionIds?: readonly string[];
 }
 
 export interface MergedUsageSummary {
@@ -40,6 +42,7 @@ export interface MergedUsageSummary {
   readonly endDate: UsageCalendarDate;
   readonly timeZone: string;
   readonly buckets: readonly MergedUsageBucket[];
+  readonly imports?: readonly UsageImportedMetric[];
   readonly sources: readonly MergedUsageSource[];
   readonly environments: readonly UsageEnvironmentResult[];
   readonly duplicateSourceCount: number;
@@ -56,6 +59,8 @@ function coverageRank(status: UsageSourceCoverage["status"]): number {
       return 2;
     case "failed":
       return 1;
+    case "unsupported":
+      return 0;
   }
 }
 
@@ -79,7 +84,9 @@ function addTokens(left: UsageTokenTotals, right: UsageTokenTotals): UsageTokenT
     cachedInputTokens: left.cachedInputTokens + right.cachedInputTokens,
     cacheCreationInputTokens: left.cacheCreationInputTokens + right.cacheCreationInputTokens,
     outputTokens: left.outputTokens + right.outputTokens,
-    reasoningTokens: left.reasoningTokens + right.reasoningTokens,
+    ...(left.reasoningTokens === undefined || right.reasoningTokens === undefined
+      ? {}
+      : { reasoningTokens: left.reasoningTokens + right.reasoningTokens }),
     totalTokens: left.totalTokens + right.totalTokens,
   };
 }
@@ -102,6 +109,7 @@ interface MutableMergedBucket {
   tokens: UsageTokenTotals;
   responseCount: number;
   sessionCount: number;
+  exportSessionIds: Set<string>;
   estimatedCostUsd: number;
   estimatedCacheSavingsUsd: number;
   hasCost: boolean;
@@ -139,7 +147,8 @@ export function mergeUsageEnvironmentResults(
     const isPhysical = candidate.source.deduplicationKind === "physical";
     const duplicate = isPhysical && physicalClaims.has(candidate.source.sourceId);
     if (isPhysical && !duplicate) physicalClaims.add(candidate.source.sourceId);
-    if (!isPhysical) environmentOnlyDeduplicationWarning = true;
+    if (candidate.source.deduplicationKind === "environment-only")
+      environmentOnlyDeduplicationWarning = true;
     if (!duplicate) includedByEnvironmentSource.add(key);
     else duplicateSourceCount += 1;
     mergedSources.push({
@@ -152,10 +161,18 @@ export function mergeUsageEnvironmentResults(
   }
 
   const mutableBuckets = new Map<string, MutableMergedBucket>();
-  for (const environment of usable) {
+  const exportRecords = new Set<string>();
+  for (const environment of [...usable].toSorted((left, right) =>
+    right.summary.generatedAt.localeCompare(left.summary.generatedAt),
+  )) {
     for (const bucket of environment.summary.buckets) {
       const sourceKey = `${environment.environmentId}\0${bucket.sourceId}`;
       if (!includedByEnvironmentSource.has(sourceKey)) continue;
+      if (bucket.provider === "cursor" && bucket.exportRecordId !== undefined) {
+        const key = `${bucket.sourceId}\0${bucket.exportRecordId}`;
+        if (exportRecords.has(key)) continue;
+        exportRecords.add(key);
+      }
       const bucketKey = `${bucket.date}\0${bucket.provider}\0${bucket.model}`;
       let merged = mutableBuckets.get(bucketKey);
       if (merged === undefined) {
@@ -174,6 +191,7 @@ export function mergeUsageEnvironmentResults(
           },
           responseCount: 0,
           sessionCount: 0,
+          exportSessionIds: new Set(),
           estimatedCostUsd: 0,
           estimatedCacheSavingsUsd: 0,
           hasCost: false,
@@ -187,7 +205,10 @@ export function mergeUsageEnvironmentResults(
       }
       merged.tokens = addTokens(merged.tokens, bucket.tokens);
       merged.responseCount += bucket.responseCount;
-      merged.sessionCount += bucket.sessionCount;
+      if (bucket.provider === "cursor" && bucket.exportRecordId !== undefined) {
+        if (bucket.exportSessionId !== undefined)
+          merged.exportSessionIds.add(`${bucket.sourceId}\0${bucket.exportSessionId}`);
+      } else merged.sessionCount += bucket.sessionCount;
       if (bucket.estimatedCostUsd !== undefined) {
         merged.estimatedCostUsd += bucket.estimatedCostUsd;
         merged.hasCost = true;
@@ -212,11 +233,14 @@ export function mergeUsageEnvironmentResults(
           model: bucket.model,
           tokens: bucket.tokens,
           responseCount: bucket.responseCount,
-          sessionCount: bucket.sessionCount,
+          sessionCount: bucket.sessionCount + bucket.exportSessionIds.size,
           pricedTokenCount: bucket.pricedTokenCount,
           unpricedTokenCount: bucket.unpricedTokenCount,
           costSource: resolveMergedCostSource(bucket.costSources, bucket.unpricedTokenCount),
           sourceIds: [...bucket.sourceIds].toSorted(),
+          ...(bucket.exportSessionIds.size
+            ? { exportSessionIds: [...bucket.exportSessionIds] }
+            : {}),
         },
         bucket.rawModel === undefined ? {} : { rawModel: bucket.rawModel },
         bucket.hasCost ? { estimatedCostUsd: bucket.estimatedCostUsd } : {},
@@ -230,6 +254,21 @@ export function mergeUsageEnvironmentResults(
         left.model.localeCompare(right.model),
     );
 
+  const imports = new Map<string, UsageImportedMetric>();
+  // Identical documented events are counted once across copies/overlapping pages.
+  // There is no public event ID: changed values form a new fingerprint, with
+  // ambiguity disclosed by source coverage. Distinct account scopes stay separate.
+  for (const environment of [...usable].toSorted((left, right) =>
+    left.summary.generatedAt.localeCompare(right.summary.generatedAt),
+  )) {
+    const validSources = new Set(
+      environment.summary.sources
+        .filter((source) => source.provider === "cursor" && source.status === "partial")
+        .map((source) => source.sourceId),
+    );
+    for (const row of environment.summary.imports ?? [])
+      if (validSources.has(row.sourceId)) imports.set(`${row.sourceId}\0${row.recordId}`, row);
+  }
   const first = usable[0]?.summary;
   if (!first) return null;
   return {
@@ -237,6 +276,7 @@ export function mergeUsageEnvironmentResults(
     endDate: first.endDate,
     timeZone: first.timeZone,
     buckets,
+    imports: [...imports.values()],
     sources: mergedSources.toSorted(
       (left, right) =>
         Number(right.included) - Number(left.included) ||

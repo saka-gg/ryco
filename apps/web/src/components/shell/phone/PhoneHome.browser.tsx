@@ -3,20 +3,34 @@
 import "../../../index.css";
 
 import {
+  DEFAULT_PROJECT_METADATA_DIR,
+  type DispatchableClientOrchestrationCommand,
   EnvironmentId,
   ProviderInstanceId,
   type EnvironmentApi,
+  type OrchestrationShellSnapshot,
   type ProjectId,
   type ThreadId,
   type WorktreeId,
 } from "@ryco/contracts";
+import {
+  createEnvironmentConnection,
+  type EnvironmentConnection,
+} from "@ryco/client-runtime/connection";
+import {
+  recordWsConnectionAttempt,
+  recordWsConnectionOpened,
+  resetWsConnectionStateForTests,
+  type WsRpcClient,
+} from "@ryco/client-runtime/rpc";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 const navigate = vi.fn(async () => undefined);
-const routerStub = { navigate, state: { matches: [] } };
+const routerStub = { navigate, state: { matches: [], location: { href: "/" } } };
+vi.mock("../../../environments/runtime", { spy: true });
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
   useNavigate: () => navigate,
@@ -50,6 +64,13 @@ import { syncDocumentPresentationTier } from "../../../lib/presentationTier";
 import { useStore, type EnvironmentState } from "../../../store";
 import type { SidebarThreadSummary } from "../../../types";
 import { useUiStateStore } from "../../../uiStateStore";
+import { readEnvironmentConnection } from "../../../environments/runtime";
+import {
+  resetPrimaryEnvironmentDescriptorForTests,
+  writePrimaryEnvironmentDescriptor,
+} from "../../../environments/primary";
+import { sidebarUndo } from "../../../sidebarUndo";
+import { toastManager } from "../../ui/toast";
 import { SidebarProvider } from "../../ui/sidebar";
 import { ContextMenuActionSheetHost } from "./ContextMenuActionSheetHost";
 import { PhoneHome } from "./PhoneHome";
@@ -240,6 +261,92 @@ function seedStores() {
   useUiStateStore.setState({ pinnedThreadKeys: { [THREAD_A_KEY]: true } });
 }
 
+function installActionConnection(
+  sidebarUndoCapability: boolean | undefined,
+  acceptSnapshot = true,
+) {
+  const dispatchCommand = vi.fn(async (_command: DispatchableClientOrchestrationCommand) => ({
+    sequence: 1,
+  }));
+  const state = environmentState();
+  const snapshot: OrchestrationShellSnapshot = {
+    snapshotSequence: 1,
+    updatedAt: NOW_ISO,
+    projects: Object.values(state.projectById).map((project) => ({
+      id: project.id,
+      title: project.name,
+      workspaceRoot: project.cwd,
+      projectMetadataDir: DEFAULT_PROJECT_METADATA_DIR,
+      defaultModelSelection: null,
+      customAvatarContentHash: null,
+      preferredRemoteName: null,
+      scripts: [],
+      createdAt: NOW_ISO,
+      updatedAt: NOW_ISO,
+    })),
+    threads: Object.values(state.sidebarThreadSummaryById).map((thread) =>
+      Object.assign({}, thread, {
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        runtimeMode: "full-access" as const,
+        updatedAt: NOW_ISO,
+        goal: null,
+        settledOverride: null,
+        settledAt: null,
+        worktreeId: null,
+        session: null,
+      }),
+    ),
+  };
+  const client = {
+    orchestration: {
+      dispatchCommand,
+      subscribeShell: (listener: Parameters<WsRpcClient["orchestration"]["subscribeShell"]>[0]) => {
+        if (acceptSnapshot) listener({ kind: "snapshot", snapshot });
+        return () => {};
+      },
+    },
+    terminal: { onEvent: () => () => {} },
+    dispose: async () => {},
+  } as unknown as WsRpcClient;
+  recordWsConnectionAttempt("ws://example.test", { environmentId: ENV_ID });
+  recordWsConnectionOpened({ environmentId: ENV_ID });
+  connectionFixture.connection = createEnvironmentConnection({
+    kind: "primary",
+    knownEnvironment: {
+      id: "phone-home-fixture",
+      environmentId: ENV_ID,
+      label: "Synthetic node",
+      source: "configured",
+      target: { httpBaseUrl: "http://example.test", wsBaseUrl: "ws://example.test" },
+    },
+    client,
+    pushSequenceMonitor: { recordEvent: () => {}, recordSnapshot: () => {} },
+    resetShellProjection: () => {},
+    applyShellEvent: (event, environmentId) =>
+      useStore.getState().applyShellEvent(event, environmentId),
+    syncShellSnapshot: (shell, environmentId) =>
+      useStore.getState().syncServerShellSnapshot(shell, environmentId),
+    applyTerminalEvent: () => {},
+  });
+  writePrimaryEnvironmentDescriptor({
+    environmentId: ENV_ID,
+    label: "Synthetic node",
+    platform: { os: "linux", arch: "x64" },
+    serverVersion: "0.0.0-test",
+    capabilities: {
+      repositoryIdentity: false,
+      threadSettlement: false,
+      threadPriorityRanking: false,
+      ...(sidebarUndoCapability === undefined ? {} : { threadSidebarUndo: sidebarUndoCapability }),
+    },
+  });
+  __setEnvironmentApiOverrideForTests(ENV_ID, {
+    orchestration: { dispatchCommand },
+  } as unknown as EnvironmentApi);
+  return dispatchCommand;
+}
+
+const connectionFixture = { connection: null as EnvironmentConnection | null };
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
 describe("PhoneHome", () => {
@@ -248,16 +355,31 @@ describe("PhoneHome", () => {
   });
 
   beforeEach(async () => {
+    const original = await vi.importActual<typeof import("../../../environments/runtime")>(
+      "../../../environments/runtime",
+    );
+    vi.mocked(readEnvironmentConnection).mockImplementation((environmentId) =>
+      connectionFixture.connection?.environmentId === environmentId
+        ? connectionFixture.connection
+        : original.readEnvironmentConnection(environmentId),
+    );
     await page.viewport(390, 844);
     localStorage.clear();
     navigate.mockClear();
+    routerStub.state.matches = [];
+    routerStub.state.location.href = "/";
     seedStores();
   });
 
   afterEach(async () => {
+    sidebarUndo.dispose();
     __resetContextMenuSheetForTests();
     await mounted?.unmount();
     mounted = null;
+    await connectionFixture.connection?.dispose();
+    connectionFixture.connection = null;
+    resetWsConnectionStateForTests();
+    resetPrimaryEnvironmentDescriptorForTests();
     hostedHubController.resetForTests();
     resetHubRoutesForTests();
     // Module state, not store state: `resetForTests()` does not reach the §13
@@ -461,65 +583,105 @@ describe("PhoneHome", () => {
     );
   });
 
-  it("exposes the full shared action inventory in the kebab sheet and dispatches through the shared handlers", async () => {
-    const dispatchCommand = vi.fn(async () => undefined);
-    __setEnvironmentApiOverrideForTests(ENV_ID, {
-      orchestration: { dispatchCommand },
-    } as unknown as EnvironmentApi);
+  it.each([false, undefined])(
+    "exposes the full shared action inventory and dispatches with Undo capability %s",
+    async (capability) => {
+      const dispatchCommand = installActionConnection(capability);
+      const addedToasts = vi.spyOn(toastManager, "add");
+      const generation = connectionFixture.connection!.shellSnapshotReadiness.read();
+      expect(generation).not.toBeNull();
+      expect(connectionFixture.connection!.shellSnapshotReadiness.read()).toBe(generation);
 
+      mounted = await render(
+        <SidebarProvider>
+          <PhoneHome />
+        </SidebarProvider>,
+      );
+
+      // Full inventory for a pinned, archivable thread.
+      await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
+      for (const label of [
+        "Unpin thread",
+        "Rename thread",
+        "Mark unread",
+        "Copy Path",
+        "Copy Thread ID",
+        "Archive session",
+        "Delete thread",
+      ]) {
+        await expect.element(page.getByRole("button", { name: label })).toBeVisible();
+      }
+
+      // Pin round-trip through the live uiState store.
+      await page.getByRole("button", { name: "Unpin thread" }).click();
+      await vi.waitFor(() => {
+        expect(useUiStateStore.getState().pinnedThreadKeys[THREAD_A_KEY]).toBeUndefined();
+      });
+
+      // Rename round-trip through the existing environment-api mock.
+      await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
+      await page.getByRole("button", { name: "Pin thread" }).click();
+      await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
+      await page.getByRole("button", { name: "Rename thread" }).click();
+      const renameInput = page.getByLabelText("Thread title");
+      await expect.element(renameInput).toBeVisible();
+      await renameInput.fill("Alpha thread renamed");
+      await page.getByRole("button", { name: "Rename", exact: true }).click();
+      await vi.waitFor(() => {
+        expect(dispatchCommand).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "thread.meta.update",
+            threadId: THREAD_A,
+            title: "Alpha thread renamed",
+          }),
+        );
+      });
+
+      // Archive round-trip through the same shared handler.
+      await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
+      await page.getByRole("button", { name: "Archive session" }).click();
+      await vi.waitFor(() => {
+        expect(dispatchCommand).toHaveBeenCalledWith(
+          expect.objectContaining({ type: "thread.archive", threadId: THREAD_A }),
+        );
+      });
+      expect(
+        dispatchCommand.mock.calls.filter(([command]) => command.type === "thread.archive"),
+      ).toHaveLength(1);
+      expect(dispatchCommand).toHaveBeenCalledTimes(2);
+      expect(
+        addedToasts.mock.calls.some(([toast]) =>
+          toast.actionProps?.["aria-label"]?.startsWith("Undo archive"),
+        ),
+      ).toBe(false);
+      expect(dispatchCommand).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "thread.sidebar.undo" }),
+      );
+    },
+  );
+
+  it("refuses Archive without an accepted owning shell attempt even when the API exists", async () => {
+    const dispatchCommand = installActionConnection(false, false);
+    const addedToasts = vi.spyOn(toastManager, "add");
+    expect(connectionFixture.connection!.shellSnapshotReadiness.read()).toBeNull();
     mounted = await render(
       <SidebarProvider>
         <PhoneHome />
       </SidebarProvider>,
     );
-
-    // Full inventory for a pinned, archivable thread.
-    await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
-    for (const label of [
-      "Unpin thread",
-      "Rename thread",
-      "Mark unread",
-      "Copy Path",
-      "Copy Thread ID",
-      "Archive session",
-      "Delete thread",
-    ]) {
-      await expect.element(page.getByRole("button", { name: label })).toBeVisible();
-    }
-
-    // Pin round-trip through the live uiState store.
-    await page.getByRole("button", { name: "Unpin thread" }).click();
-    await vi.waitFor(() => {
-      expect(useUiStateStore.getState().pinnedThreadKeys[THREAD_A_KEY]).toBeUndefined();
-    });
-
-    // Rename round-trip through the existing environment-api mock.
-    await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
-    await page.getByRole("button", { name: "Pin thread" }).click();
-    await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
-    await page.getByRole("button", { name: "Rename thread" }).click();
-    const renameInput = page.getByLabelText("Thread title");
-    await expect.element(renameInput).toBeVisible();
-    await renameInput.fill("Alpha thread renamed");
-    await page.getByRole("button", { name: "Rename", exact: true }).click();
-    await vi.waitFor(() => {
-      expect(dispatchCommand).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: "thread.meta.update",
-          threadId: THREAD_A,
-          title: "Alpha thread renamed",
-        }),
-      );
-    });
-
-    // Archive round-trip through the same shared handler.
     await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
     await page.getByRole("button", { name: "Archive session" }).click();
     await vi.waitFor(() => {
-      expect(dispatchCommand).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "thread.archive", threadId: THREAD_A }),
+      expect(addedToasts).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "error",
+          title: "Failed to archive thread",
+          description: "The owning node is not ready for this action.",
+        }),
       );
     });
+    expect(dispatchCommand).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("supports the keyboard flow from a thread row through the kebab action sheet", async () => {

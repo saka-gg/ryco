@@ -2285,6 +2285,7 @@ function applyEnvironmentOrchestrationEvent(
         snoozedUntil: null,
         snoozedAt: null,
         updatedAt: event.payload.updatedAt,
+        ...event.payload.restoredSidebarState,
       });
     case "thread.settled":
       return updateThreadSettlementState(state, event.payload.threadId, {
@@ -2300,6 +2301,7 @@ function applyEnvironmentOrchestrationEvent(
         settledOverride: event.payload.reason === "user" ? "active" : null,
         settledAt: null,
         updatedAt: event.payload.updatedAt,
+        ...event.payload.restoredSidebarState,
       });
 
     case "thread.meta-updated":

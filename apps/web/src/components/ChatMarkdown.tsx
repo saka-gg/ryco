@@ -4,6 +4,12 @@ import {
   type SupportedLanguages,
 } from "@pierre/diffs";
 import { CheckIcon, CopyIcon } from "lucide-react";
+import {
+  isTerminalSnippetLanguage,
+  terminalSnippetError,
+} from "@ryco/client-runtime/state/terminal";
+import { useTerminalSnippetAction } from "./chat/CodeBlockActions";
+import { terminalFenceSource } from "../lib/terminalFenceSource";
 import type { EnvironmentId, ServerProviderSkill } from "@ryco/contracts";
 import React, {
   Children,
@@ -82,6 +88,7 @@ class CodeHighlightErrorBoundary extends React.Component<
 }
 
 interface ChatMarkdownProps {
+  allowTerminalInsertion?: boolean;
   text: string;
   cwd: string | undefined;
   environmentId?: EnvironmentId;
@@ -233,7 +240,19 @@ function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
   return promise;
 }
 
-function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNode }) {
+function MarkdownCodeBlock({
+  code,
+  children,
+  terminalSource,
+}: {
+  code: string;
+  children: ReactNode;
+  terminalSource?: string | undefined;
+}) {
+  const insert = useTerminalSnippetAction();
+  const isPhone = usePresentationTier() === "phone";
+  const [inserting, setInserting] = useState(false);
+  const insertionError = terminalSource === undefined ? null : terminalSnippetError(terminalSource);
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopy = useCallback(() => {
@@ -267,6 +286,43 @@ function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNo
 
   return (
     <div className="chat-markdown-codeblock leading-snug">
+      {insert && !isPhone && terminalSource !== undefined ? (
+        <button
+          type="button"
+          className="chat-markdown-insert-button"
+          disabled={inserting || insertionError !== null}
+          title={
+            insertionError ??
+            "Insert in a new terminal for this thread. Review, then press Enter to execute."
+          }
+          onClick={() => {
+            setInserting(true);
+            void insert(terminalSource)
+              .then(
+                () => {
+                  toastManager.add({
+                    type: "success",
+                    title: "Inserted in terminal",
+                    description: "Review the snippet, then press Enter in the terminal to execute.",
+                  });
+                },
+                (error: unknown) => {
+                  toastManager.add(
+                    stackedThreadToast({
+                      type: "error",
+                      title: "Unable to insert in terminal",
+                      description:
+                        error instanceof Error ? error.message : "Terminal insertion failed.",
+                    }),
+                  );
+                },
+              )
+              .finally(() => setInserting(false));
+          }}
+        >
+          {inserting ? "Inserting…" : "Insert in terminal"}
+        </button>
+      ) : null}
       <button
         type="button"
         className="chat-markdown-copy-button"
@@ -668,6 +724,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
   searchHighlight,
+  allowTerminalInsertion = false,
 }: ChatMarkdownProps) {
   usePerfMark("ChatMarkdown");
   const completedText = isStreaming ? "" : text;
@@ -926,7 +983,21 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
           );
         }
 
-        return <MarkdownCodeBlock code={codeBlock.code}>{highlightedCode}</MarkdownCodeBlock>;
+        const terminalSource =
+          allowTerminalInsertion &&
+          isTerminalSnippetLanguage(extractFenceLanguage(codeBlock.className))
+            ? terminalFenceSource(
+                completedText,
+                node?.position?.start.offset,
+                node?.position?.end.offset,
+                codeBlock.code,
+              )
+            : undefined;
+        return (
+          <MarkdownCodeBlock code={codeBlock.code} terminalSource={terminalSource}>
+            {highlightedCode}
+          </MarkdownCodeBlock>
+        );
       },
     }),
     [
@@ -939,6 +1010,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       markdownFileLinkMetaByHref,
       resolvedTheme,
       skills,
+      allowTerminalInsertion,
     ],
   );
 

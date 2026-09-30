@@ -466,6 +466,38 @@ const makeBrowserOtlpPayload = (spanName: string) =>
     return JSON.parse(request.body) as OtlpTracer.TraceData;
   });
 
+/** Bootstrap mutation tests use matching projects inside an authorized, scoped fixture root. */
+const makeAuthorizedBootstrapFixture = () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const accessRoot = yield* fs
+      .makeTempDirectoryScoped({ prefix: "ryco-bootstrap-fixture-" })
+      .pipe(Effect.flatMap((root) => fs.realPath(root)));
+    const projectCwd = path.join(accessRoot, "project");
+    const baseDir = path.join(accessRoot, "state");
+    const worktreePath = path.join(accessRoot, "checkout");
+    yield* Effect.all(
+      [projectCwd, baseDir, worktreePath].map((directory) => fs.makeDirectory(directory)),
+    );
+    const project = {
+      ...makeDefaultOrchestrationReadModel().projects[0]!,
+      workspaceRoot: projectCwd,
+    };
+    const projectionSnapshotQuery = {
+      getProjectShellById: (id: ProjectId) =>
+        Effect.succeed(id === project.id ? Option.some(project) : Option.none()),
+      getActiveProjectByWorkspaceRoot: (cwd: string) =>
+        Effect.succeed(cwd === projectCwd ? Option.some(project) : Option.none()),
+    } satisfies Partial<ProjectionSnapshotQueryShape>;
+    return {
+      projectCwd,
+      worktreePath,
+      config: { baseDir, workspaceAccessRoot: accessRoot },
+      projectionSnapshotQuery,
+    };
+  });
+
 const buildAppUnderTest = (options?: {
   config?: Partial<ServerConfigShape>;
   layers?: {
@@ -1064,6 +1096,19 @@ const getHttpServerUrl = (pathname = "") =>
     return `http://127.0.0.1:${address.port}${pathname}`;
   });
 
+const readAuthFixtureJson = (response: Response, requestUrl: string) =>
+  Effect.gen(function* () {
+    const request = new URL(requestUrl);
+    const received = new URL(response.url);
+    const contentType = response.headers.get("content-type") ?? "";
+    assert.include(
+      contentType,
+      "application/json",
+      `Auth fixture POST ${request.origin}${request.pathname} received ${response.status} ${contentType} from ${received.origin}${received.pathname}; redirected=${response.redirected}`,
+    );
+    return yield* Effect.promise(() => response.json());
+  });
+
 const bootstrapBrowserSession = (
   credential = defaultDesktopBootstrapToken,
   options?: {
@@ -1084,7 +1129,7 @@ const bootstrapBrowserSession = (
         }),
       }),
     );
-    const body = (yield* Effect.promise(() => response.json())) as {
+    const body = (yield* readAuthFixtureJson(response, bootstrapUrl)) as {
       readonly authenticated: boolean;
       readonly sessionMethod: string;
       readonly expiresAt: string;
@@ -1110,7 +1155,7 @@ const bootstrapBearerSession = (credential = defaultDesktopBootstrapToken) =>
         }),
       }),
     );
-    const body = (yield* Effect.promise(() => response.json())) as {
+    const body = (yield* readAuthFixtureJson(response, bootstrapUrl)) as {
       readonly authenticated: boolean;
       readonly sessionMethod: string;
       readonly expiresAt: string;
@@ -1174,7 +1219,7 @@ const getAuthenticatedWebSocketToken = (credential = defaultDesktopBootstrapToke
         new Error(`Expected websocket token response to succeed, got ${response.status}`),
       );
     }
-    const body = (yield* Effect.promise(() => response.json())) as {
+    const body = (yield* readAuthFixtureJson(response, wsTokenUrl)) as {
       readonly token?: string;
     };
     if (!body.token) {
@@ -3781,6 +3826,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
           const createdWorktreeInput = createWorktree.mock.calls[0]?.[0];
           assert.equal(createdWorktreeInput?.cwd, "/tmp/project");
+          assert.equal(createdWorktreeInput?.projectId, defaultProjectId);
+          assert.strictEqual(createdWorktreeInput?.settingsSnapshot, settings);
           assert.equal(createdWorktreeInput?.refName, "main");
           assert.match(createdWorktreeInput?.newRefName ?? "", /^ryco\/[0-9a-f]{8}$/);
           const expectedRoot =
@@ -3946,14 +3993,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         }),
       );
 
+      const settings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        worktreeRoot: `${root}/environment`,
+        projectWorktreeRoots: { [defaultProjectId]: `${root}/project` },
+      };
       yield* buildAppUnderTest({
         layers: {
           serverSettings: {
-            getSettings: Effect.succeed({
-              ...DEFAULT_SERVER_SETTINGS,
-              worktreeRoot: `${root}/environment`,
-              projectWorktreeRoots: { [defaultProjectId]: `${root}/project` },
-            }),
+            getSettings: Effect.succeed(settings),
           },
           gitManager: {
             preparePullRequestThread,
@@ -4010,6 +4058,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(createWorktree.mock.calls.length, 0);
       assert.deepEqual(preparePullRequestThread.mock.calls[0]?.[0], {
+        settingsSnapshot: settings,
         cwd: "/tmp/project",
         reference: "42",
         mode: "worktree",
@@ -6421,10 +6470,188 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  for (const scenario of [
+    "success",
+    "inherited-preferences",
+    "missing-worktree",
+    "wrong-project",
+    "shared-result",
+    "cancelled-setup",
+    "replacement-task",
+  ] as const) {
+    it.effect(`required batch worktree: ${scenario}`, () =>
+      Effect.gen(function* () {
+        const commands: Array<OrchestrationCommand> = [];
+        const createdAt = "2026-09-30T00:00:00.000Z";
+        const threadId = ThreadId.make("fixture-batch-destination");
+        let cancelled = false;
+        let worktreeId: WorktreeId | null = null;
+        const inherited = scenario === "inherited-preferences";
+        const settings = {
+          ...DEFAULT_SERVER_SETTINGS,
+          worktreeRoot: "/tmp/fixture-node-batch-root",
+          projectWorktreeRoots: { [defaultProjectId]: "/tmp/fixture-project-batch-root" },
+          worktreeSubmodules: "recursive" as const,
+          projectWorktreeSubmodules: { [defaultProjectId]: "none" as const },
+          runSetupScript: true,
+          projectPreferences: {
+            [defaultProjectId]: { runSetupScript: false, worktreeBranchPrefix: "project/batch" },
+          },
+        };
+        const createWorktree = vi.fn(
+          (_input: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
+            Effect.succeed({
+              worktree: {
+                refName: "fixture/batch",
+                path: scenario === "shared-result" ? "/tmp/project" : "/tmp/fixture-batch-worktree",
+              },
+            }),
+        );
+        const runForThread = vi.fn(() =>
+          Effect.sync(() => {
+            if (scenario === "cancelled-setup" || scenario === "replacement-task") cancelled = true;
+            return { status: "no-script" as const };
+          }),
+        );
+        const project = {
+          id: scenario === "wrong-project" ? ProjectId.make("other") : defaultProjectId,
+          title: "Fixture",
+          workspaceRoot: "/tmp/project",
+          projectMetadataDir: ".ryco",
+          repositoryIdentity: null,
+          defaultModelSelection,
+          customSystemPrompt: null,
+          customAvatarContentHash: null,
+          preferredRemoteName: null,
+          scripts: [],
+          createdAt,
+          updatedAt: createdAt,
+          deletedAt: null,
+        };
+        yield* buildAppUnderTest({
+          layers: {
+            ...(inherited ? { serverSettings: { getSettings: Effect.succeed(settings) } } : {}),
+            gitVcsDriver: { createWorktree },
+            projectSetupScriptRunner: { runForThread },
+            orchestrationEngine: {
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  commands.push(command);
+                  if (command.type === "thread.attach-to-worktree") worktreeId = command.worktreeId;
+                  return { sequence: commands.length };
+                }),
+            },
+            projectionSnapshotQuery: {
+              getProjectShellById: () => Effect.succeed(Option.some(project)),
+              getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.some(project)),
+              getThreadShellById: () =>
+                Effect.succeed(
+                  cancelled && scenario !== "replacement-task"
+                    ? Option.none()
+                    : Option.some({
+                        ...makeDefaultOrchestrationReadModel().threads[0]!,
+                        id: threadId,
+                        projectId: defaultProjectId,
+                        createdAt:
+                          scenario === "replacement-task" && cancelled
+                            ? "2026-09-30T00:01:00.000Z"
+                            : createdAt,
+                        worktreeId,
+                        worktreePath: "/tmp/fixture-batch-worktree",
+                        latestUserMessageAt: null,
+                        hasPendingApprovals: false,
+                        hasPendingUserInput: false,
+                        hasActionableProposedPlan: false,
+                      }),
+                ),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const dispatch = Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              type: "thread.turn.start",
+              commandId: CommandId.make(`fixture-batch-${scenario}`),
+              threadId,
+              message: {
+                messageId: MessageId.make("fixture-batch-message"),
+                role: "user",
+                text: "Fixture prompt",
+                attachments: [],
+              },
+              modelSelection: defaultModelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt,
+              bootstrap: {
+                requireWorktree: true,
+                createThread: {
+                  projectId: defaultProjectId,
+                  title: "Fixture",
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  branch: null,
+                  worktreePath: null,
+                  createdAt,
+                },
+                ...(scenario === "missing-worktree"
+                  ? {}
+                  : {
+                      prepareWorktree: {
+                        projectCwd: "/tmp/project",
+                        baseBranch: "main",
+                        branch: "fixture/batch",
+                      },
+                    }),
+                ...(inherited ? {} : { runSetupScript: true }),
+              },
+            }),
+          ),
+        );
+        if (scenario === "success" || inherited) {
+          yield* dispatch;
+          assert.equal(commands.at(-1)?.type, "thread.turn.start");
+          assert.isTrue(
+            commands.findIndex((command) => command.type === "thread.attach-to-worktree") <
+              commands.length - 1,
+          );
+          assert.equal(runForThread.mock.calls.length, inherited ? 0 : 1);
+          if (inherited) {
+            assert.equal(createWorktree.mock.calls.length, 1);
+            const created = createWorktree.mock.calls[0]![0];
+            assert.equal(created.projectId, defaultProjectId);
+            assert.strictEqual(created.settingsSnapshot, settings);
+            assert.equal(
+              created.settingsSnapshot?.projectWorktreeSubmodules[defaultProjectId],
+              "none",
+            );
+            assert.isTrue(
+              created.path!.startsWith("/private/tmp/fixture-project-batch-root/") ||
+                created.path!.startsWith("/tmp/fixture-project-batch-root/"),
+            );
+          }
+        } else {
+          yield* Effect.flip(dispatch);
+          assert.isFalse(commands.some((command) => command.type === "thread.turn.start"));
+          if (scenario === "missing-worktree" || scenario === "wrong-project") {
+            assert.equal(commands.length, 0);
+            assert.equal(createWorktree.mock.calls.length, 0);
+          }
+          if (scenario === "shared-result") assert.equal(runForThread.mock.calls.length, 0);
+          if (scenario === "replacement-task")
+            assert.isFalse(commands.some((command) => command.type === "thread.delete"));
+        }
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
+
   it.effect(
     "bootstraps first-send worktree turns on the server before dispatching turn start",
     () =>
       Effect.gen(function* () {
+        const fixture = yield* makeAuthorizedBootstrapFixture();
         const dispatchedCommands: Array<OrchestrationCommand> = [];
         const refreshStatus = vi.fn((_: string) =>
           Effect.succeed({
@@ -6449,7 +6676,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             Effect.succeed({
               worktree: {
                 refName: "ryco/bootstrap-refName",
-                path: "/tmp/bootstrap-worktree",
+                path: fixture.worktreePath,
               },
             }),
         );
@@ -6460,12 +6687,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               scriptId: "setup",
               scriptName: "Setup",
               terminalId: "setup-setup",
-              cwd: "/tmp/bootstrap-worktree",
+              cwd: fixture.worktreePath,
             }),
         );
 
         const config = yield* buildAppUnderTest({
+          config: fixture.config,
           layers: {
+            projectionSnapshotQuery: fixture.projectionSnapshotQuery,
             gitVcsDriver: {
               createWorktree,
             },
@@ -6516,7 +6745,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   createdAt,
                 },
                 prepareWorktree: {
-                  projectCwd: "/tmp/project",
+                  projectCwd: fixture.projectCwd,
                   baseBranch: "main",
                   branch: "ryco/bootstrap-refName",
                 },
@@ -6545,22 +6774,22 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           tokenMode: "aggressive",
         });
         const createdWorktreeInput = createWorktree.mock.calls[0]?.[0];
-        assert.equal(createdWorktreeInput?.cwd, "/tmp/project");
+        assert.equal(createdWorktreeInput?.cwd, fixture.projectCwd);
         assert.equal(createdWorktreeInput?.refName, "main");
         assert.equal(createdWorktreeInput?.newRefName, "ryco/bootstrap-refName");
         assert.match(
           createdWorktreeInput?.path ?? "",
           new RegExp(
-            `^${(yield* Path.Path).join(yield* (yield* FileSystem.FileSystem).realPath(config.baseDir), "worktrees").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/project-default/ryco-bootstrap-refname__[a-z]{5}$`,
+            `^${resolveManagedWorktreesRoot(config).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/project-default/ryco-bootstrap-refname__[a-z]{5}$`,
           ),
         );
         assert.deepEqual(runForThread.mock.calls[0]?.[0], {
           threadId: ThreadId.make("thread-bootstrap"),
           projectId: defaultProjectId,
-          projectCwd: "/tmp/project",
-          worktreePath: "/tmp/bootstrap-worktree",
+          projectCwd: fixture.projectCwd,
+          worktreePath: fixture.worktreePath,
         });
-        assert.deepEqual(refreshStatus.mock.calls[0]?.[0], "/tmp/bootstrap-worktree");
+        assert.deepEqual(refreshStatus.mock.calls[0]?.[0], fixture.worktreePath);
 
         const setupActivities = dispatchedCommands.filter(
           (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
@@ -6574,7 +6803,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assertTrue(worktreeCommand?.type === "worktree.create");
         if (worktreeCommand?.type === "worktree.create") {
           assert.equal(worktreeCommand.branch, "ryco/bootstrap-refName");
-          assert.equal(worktreeCommand.worktreePath, "/tmp/bootstrap-worktree");
+          assert.equal(worktreeCommand.worktreePath, fixture.worktreePath);
           assert.equal(worktreeCommand.projectId, defaultProjectId);
           assert.equal(dispatchedCommands[3]?.type, "thread.attach-to-worktree");
         }
@@ -6588,13 +6817,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("records setup-script failures without aborting bootstrap turn start", () =>
     Effect.gen(function* () {
+      const fixture = yield* makeAuthorizedBootstrapFixture();
       const dispatchedCommands: Array<OrchestrationCommand> = [];
       const createWorktree = vi.fn(
         (_: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
           Effect.succeed({
             worktree: {
               refName: "ryco/bootstrap-refName",
-              path: "/tmp/bootstrap-worktree",
+              path: fixture.worktreePath,
             },
           }),
       );
@@ -6604,7 +6834,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       yield* buildAppUnderTest({
+        config: fixture.config,
         layers: {
+          projectionSnapshotQuery: fixture.projectionSnapshotQuery,
           gitVcsDriver: {
             createWorktree,
           },
@@ -6651,7 +6883,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 createdAt,
               },
               prepareWorktree: {
-                projectCwd: "/tmp/project",
+                projectCwd: fixture.projectCwd,
                 baseBranch: "main",
                 branch: "ryco/bootstrap-refName",
               },
@@ -6681,7 +6913,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(setupFailureActivity?.activity.kind, "setup-script.failed");
       assert.deepEqual(setupFailureActivity?.activity.payload, {
         detail: "pty unavailable",
-        worktreePath: "/tmp/bootstrap-worktree",
+        worktreePath: fixture.worktreePath,
       });
       assertTrue(dispatchedCommands.every((command) => command.type !== "thread.delete"));
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -6689,13 +6921,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("does not misattribute setup activity dispatch failures as setup launch failures", () =>
     Effect.gen(function* () {
+      const fixture = yield* makeAuthorizedBootstrapFixture();
       const dispatchedCommands: Array<OrchestrationCommand> = [];
       const createWorktree = vi.fn(
         (_: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
           Effect.succeed({
             worktree: {
               refName: "ryco/bootstrap-refName",
-              path: "/tmp/bootstrap-worktree",
+              path: fixture.worktreePath,
             },
           }),
       );
@@ -6706,13 +6939,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             scriptId: "setup",
             scriptName: "Setup",
             terminalId: "setup-setup",
-            cwd: "/tmp/bootstrap-worktree",
+            cwd: fixture.worktreePath,
           }),
       );
       let setupActivityAppendAttempt = 0;
 
       yield* buildAppUnderTest({
+        config: fixture.config,
         layers: {
+          projectionSnapshotQuery: fixture.projectionSnapshotQuery,
           gitVcsDriver: {
             createWorktree,
           },
@@ -6775,7 +7010,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 createdAt,
               },
               prepareWorktree: {
-                projectCwd: "/tmp/project",
+                projectCwd: fixture.projectCwd,
                 baseBranch: "main",
                 branch: "ryco/bootstrap-refName",
               },
@@ -6815,10 +7050,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("fences deletion cleanup before a recreated thread can own resources", () =>
     Effect.gen(function* () {
+      const fixture = yield* makeAuthorizedBootstrapFixture();
       const trace: string[] = [];
       let nextSequence = 1;
       yield* buildAppUnderTest({
+        config: fixture.config,
         layers: {
+          projectionSnapshotQuery: fixture.projectionSnapshotQuery,
           orchestrationEngine: {
             dispatch: (command) =>
               Effect.sync(() => {
@@ -6893,12 +7131,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("retries first send with the same thread id after partial bootstrap failure", () =>
     Effect.gen(function* () {
+      const fixture = yield* makeAuthorizedBootstrapFixture();
       const threadId = ThreadId.make("thread-bootstrap-partial-retry");
       const dispatched: OrchestrationCommand[] = [];
       let failFirstTurnStart = true;
       let nextSequence = 1;
       yield* buildAppUnderTest({
+        config: fixture.config,
         layers: {
+          projectionSnapshotQuery: fixture.projectionSnapshotQuery,
           orchestrationEngine: {
             dispatch: (command) => {
               dispatched.push(command);
@@ -6984,6 +7225,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("cleans up created bootstrap threads when worktree creation defects", () =>
     Effect.gen(function* () {
+      const fixture = yield* makeAuthorizedBootstrapFixture();
       const dispatchedCommands: Array<OrchestrationCommand> = [];
       const createWorktree = vi.fn(
         (_: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
@@ -6991,7 +7233,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       yield* buildAppUnderTest({
+        config: fixture.config,
         layers: {
+          projectionSnapshotQuery: fixture.projectionSnapshotQuery,
           gitVcsDriver: {
             createWorktree,
           },
@@ -7035,7 +7279,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 createdAt,
               },
               prepareWorktree: {
-                projectCwd: "/tmp/project",
+                projectCwd: fixture.projectCwd,
                 baseBranch: "main",
                 branch: "ryco/bootstrap-refName",
               },

@@ -1,3 +1,4 @@
+import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert, live } from "@effect/vitest";
 import {
@@ -344,13 +345,14 @@ function makeMutableServerSettingsService(
     const changes = yield* PubSub.unbounded<ContractServerSettings>();
 
     return {
+      withSettingsSnapshot: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
       start: Effect.void,
       ready: Effect.void,
       getSettings: Ref.get(settingsRef),
       updateSettings: (patch) =>
         Effect.gen(function* () {
           const current = yield* Ref.get(settingsRef);
-          const next = Schema.decodeSync(ServerSettings)(deepMerge(current, patch));
+          const next = Schema.decodeSync(ServerSettings)(applyServerSettingsPatch(current, patch));
           yield* Ref.set(settingsRef, next);
           yield* PubSub.publish(changes, next);
           return next;

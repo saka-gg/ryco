@@ -82,7 +82,10 @@ export interface TerminalManagerShape {
   /**
    * Write input bytes to a terminal session.
    */
-  readonly write: (input: TerminalWriteInput) => Effect.Effect<void, TerminalError>;
+  readonly write: (
+    input: TerminalWriteInput,
+    canCommit?: () => boolean,
+  ) => Effect.Effect<void, TerminalError>;
 
   /**
    * Resize the PTY backing a terminal session.

@@ -1,9 +1,28 @@
+import {
+  initialDraftModelSelection,
+  readEffectiveProjectPreferences,
+} from "@ryco/client-runtime/state/settings";
+import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
 import { StackActions, type StaticScreenProps, useNavigation } from "@react-navigation/native";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, TextInput, View } from "react-native";
 
-import { normalizeInteractionModeForProviderTarget } from "@ryco/client-runtime/state/composer";
+import {
+  normalizeInteractionModeForProviderTarget,
+  batchSelectionKey,
+  createBatchLaunch,
+  prepareBatchDestination,
+  captureBatchLaunchReadiness,
+  completeBatchSourceReset,
+  BATCH_LAUNCH_MAX_TARGETS,
+  type BatchLaunchPorts,
+  type BatchSourceDraft,
+  type BatchLaunch,
+} from "@ryco/client-runtime/state/composer";
+import { batchLaunchStore, batchSourceDraftStore } from "../../state/batchLaunchStore";
+import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
+import { BatchResults } from "./BatchResults";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   EnvironmentId,
@@ -122,6 +141,11 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     threads,
   ]);
   const initialized = useRef(false);
+  const modelEdited = useRef(false);
+  const locationEdited = useRef(false);
+  const [preferencesRevision, setPreferencesRevision] = useState(0);
+  const [preferencesReady, setPreferencesReady] = useState(false);
+  const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [environmentId, setEnvironmentId] = useState<EnvironmentId | null>(null);
   const [projectId, setProjectId] = useState<ProjectId | null>(null);
   const [worktreeSelection, setWorktreeSelection] = useState<NewTaskWorktreeSelection>({
@@ -134,6 +158,52 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerImageAttachment>>([]);
   const [modelSelection, setModelSelection] = useState<ModelSelection>(defaults.modelSelection);
+  const [batchSelections, setBatchSelections] = useState<readonly ModelSelection[]>([]);
+  const batchState = batchLaunchStore.useStore();
+  const [persistedBatchSource, setBatchSource] = useState<BatchSourceDraft | null>(null);
+  const batchSource =
+    persistedBatchSource?.environmentId === environmentId &&
+    persistedBatchSource?.projectId === projectId
+      ? persistedBatchSource
+      : null;
+  const batchDraftTarget = JSON.stringify([environmentId, projectId]);
+  const [readyBatchDraftTarget, setReadyBatchDraftTarget] = useState<string | null>(null);
+  const batchDraftReady = readyBatchDraftTarget === batchDraftTarget;
+  const batchOwnerKey = batchSource?.id ?? `native-new-task:${environmentId}:${projectId}`;
+  const batch = batchState.batches.find(
+    (item) =>
+      item.ownerKey === batchOwnerKey &&
+      item.environmentId === environmentId &&
+      item.projectId === projectId,
+  );
+  const batchTargetRef = useRef({
+    environmentId,
+    projectId,
+    sourceId: batchSource?.id,
+    prompt,
+    attachments,
+    selections: batchSelections,
+  });
+  const environmentsRef = useRef(environments);
+  useLayoutEffect(() => {
+    batchTargetRef.current = {
+      environmentId,
+      projectId,
+      sourceId: batchSource?.id,
+      prompt,
+      attachments,
+      selections: batchSelections,
+    };
+    environmentsRef.current = environments;
+  }, [
+    environmentId,
+    projectId,
+    environments,
+    batchSource?.id,
+    prompt,
+    attachments,
+    batchSelections,
+  ]);
   const [selectedInteractionMode, setInteractionMode] =
     useState<ProviderInteractionMode>("default");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(defaults.runtimeMode);
@@ -152,6 +222,49 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const serverConfig = environmentId ? serverConfigs.get(environmentId) : null;
   const tokenModeReady = serverConfig !== null && serverConfig !== undefined;
   const tokenMode = serverConfig?.settings.defaultAgentTokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
+
+  useEffect(() => {
+    let current = true;
+    if (!environmentId || !projectId) {
+      void Promise.resolve().then(() => {
+        if (!current) return;
+        setBatchSource(null);
+        setBatchSelections([]);
+        setReadyBatchDraftTarget(batchDraftTarget);
+      });
+      return () => {
+        current = false;
+      };
+    }
+    void batchSourceDraftStore
+      .load(environmentId, projectId)
+      .then((draft) => {
+        if (!current) return;
+        setBatchSource(draft);
+        setBatchSelections(draft?.selections ?? []);
+        if (draft) {
+          setPrompt(draft.prompt);
+          setBaseBranch(draft.baseBranch);
+          setRuntimeMode(draft.runtimeMode);
+          setInteractionMode(draft.interactionMode);
+          setAttachments(
+            draft.attachments.map((image, index) => ({
+              ...image,
+              id: `${draft.id}:${index}`,
+              previewUri: image.dataUrl,
+            })),
+          );
+        }
+        setReadyBatchDraftTarget(batchDraftTarget);
+      })
+      .catch((error) => {
+        if (current)
+          setFailure({ message: String(error), step: "batch", deliveryUncertain: false });
+      });
+    return () => {
+      current = false;
+    };
+  }, [environmentId, projectId, batchDraftTarget]);
 
   useEffect(() => {
     if (initialized.current || !defaults.environment) return;
@@ -187,6 +300,61 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             candidate.archivedAt === null,
         )
       : null;
+  useEffect(() => {
+    let current = true;
+    setPreferencesReady(false);
+    setPreferencesError(null);
+    if (!environmentId || !serverConfig || environment?.connectionState !== "connected") return;
+    void Promise.resolve()
+      .then(() =>
+        readEffectiveProjectPreferences({
+          api: ensureEnvironmentApi(environmentId),
+          config: serverConfig,
+          ...(projectId ? { projectId } : {}),
+        }),
+      )
+      .then((effective) => {
+        if (!current) return;
+        if (!modelEdited.current)
+          setModelSelection(
+            initialDraftModelSelection({ effective, fallback: defaults.modelSelection }),
+          );
+        if (effective) {
+          if (
+            !locationEdited.current &&
+            !(
+              defaults.worktree &&
+              defaults.worktree.projectId === projectId &&
+              defaults.worktree.environmentId === environmentId
+            )
+          ) {
+            setWorktreeSelection({
+              kind: effective.defaultThreadEnvMode.value === "worktree" ? "new" : "local",
+            });
+            setNewBranch(buildTemporaryWorktreeBranchName(effective.worktreeBranchPrefix.value));
+          }
+        }
+        setPreferencesReady(true);
+      })
+      .catch(() => {
+        if (current)
+          setPreferencesError(
+            "Could not load this node's project defaults. Reconnect and try again.",
+          );
+      });
+    return () => {
+      current = false;
+    };
+  }, [
+    environmentId,
+    projectId,
+    serverConfig,
+    environment?.connectionState,
+    defaults.worktree,
+    defaults.modelSelection,
+    preferencesRevision,
+  ]);
+
   const modelOptions = buildModelOptions(serverConfig, modelSelection);
   const selectedModelOption = modelOptions.find(
     (option) =>
@@ -255,6 +423,12 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
               candidate.id === target.target.projectId,
           )
         : projects.find((candidate) => candidate.environmentId === nextEnvironmentId);
+    modelEdited.current = false;
+    locationEdited.current = false;
+    setPreferencesReady(false);
+    setModelSelection(
+      initialDraftModelSelection({ effective: null, fallback: defaults.modelSelection }),
+    );
     setEnvironmentId(nextEnvironmentId);
     setProjectId(nextProject?.id ?? null);
     setWorktreeSelection({ kind: "local" });
@@ -280,6 +454,12 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       ? resolveNewTaskProjectChoice({ target, projects, environments })
       : null;
     if (target && !nextProject) return;
+    modelEdited.current = false;
+    locationEdited.current = false;
+    setPreferencesReady(false);
+    setModelSelection(
+      initialDraftModelSelection({ effective: null, fallback: defaults.modelSelection }),
+    );
     setEnvironmentId(nextEnvironmentId);
     setProjectId(nextProjectId);
     setWorktreeSelection({ kind: "local" });
@@ -289,16 +469,25 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   };
 
   const canSend =
+    batchDraftReady &&
+    !batch &&
     tokenModeReady &&
+    preferencesReady &&
     prompt.trim().length > 0 &&
     environment?.connectionState === "connected" &&
     (project !== undefined || newProjectPath.trim().length > 0) &&
-    (worktreeSelection.kind !== "new" || newBranch.trim().length > 0);
-  const sendDisabledReason = !tokenModeReady
-    ? "Loading node settings"
-    : environments.some((candidate) => candidate.connectionState === "connected")
-      ? null
-      : "No verified machine available";
+    (batchSelections.length >= 2 ||
+      worktreeSelection.kind !== "new" ||
+      newBranch.trim().length > 0);
+  const sendDisabledReason = !batchDraftReady
+    ? "Restoring draft"
+    : batch
+      ? "Use the comparison results to retry safe failures"
+      : !tokenModeReady || !preferencesReady
+        ? "Loading node settings"
+        : environments.some((candidate) => candidate.connectionState === "connected")
+          ? null
+          : "No verified machine available";
 
   const createAttempt = (): NewTaskAttempt => {
     if (!environment) throw new Error("Choose a connected node.");
@@ -429,6 +618,146 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     }
   };
 
+  const makeBatchPorts = (retained: BatchLaunch, source: BatchSourceDraft): BatchLaunchPorts => {
+    const captureMutationReadiness = () => {
+      const guard = captureBatchLaunchReadiness(source.environmentId, () =>
+        createMobileConnectionRegistry().driver.supervisor.read(source.environmentId),
+      );
+      return () => {
+        guard();
+        if (
+          !environmentsRef.current.some(
+            (item) =>
+              item.environmentId === source.environmentId &&
+              item.connectionState === "connected" &&
+              item.mutationReady === true &&
+              item.shellCurrent === true &&
+              !item.deliveryUnknown,
+          )
+        )
+          throw new Error("The selected machine is no longer mutation ready.");
+      };
+    };
+    return {
+      assertMutationReady: captureMutationReadiness(),
+      captureMutationReadiness,
+      prepare: async (destination, _signal, assertMutationReady) => {
+        assertMutationReady();
+        const api = ensureEnvironmentApi(source.environmentId);
+        return prepareBatchDestination({
+          readProjectPreferences: readEffectiveProjectPreferences,
+          api,
+          batch: retained,
+          destination,
+          providers: [],
+          prompt: source.prompt,
+          projectCwd: source.projectCwd,
+          baseBranch: source.baseBranch,
+          fetchOrigin: true,
+          runtimeMode: source.runtimeMode,
+          interactionMode: source.interactionMode,
+          tokenMode: source.tokenMode,
+          sourceControlContexts: [],
+          attachments: source.attachments,
+          assertMutationReady,
+        });
+      },
+    };
+  };
+  const retryBatch = async () => {
+    if (busy || !batch || !batchSource || !batchDraftReady) return;
+    setBusy(true);
+    try {
+      await batchLaunchStore.run(batch.id, makeBatchPorts(batch, batchSource));
+    } catch (error) {
+      if (
+        batchTargetRef.current.environmentId !== batchSource.environmentId ||
+        batchTargetRef.current.projectId !== batchSource.projectId
+      )
+        return;
+      setFailure({
+        message: error instanceof Error ? error.message : "Retry unavailable",
+        step: "batch",
+        deliveryUncertain: false,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const runBatch = async () => {
+    if (busy || batch || !batchDraftReady || !canSend || !environment || !project || !serverConfig)
+      return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      if (attempt || failure?.deliveryUncertain)
+        throw new Error("Resolve the existing task attempt before launching a comparison.");
+      if (worktreeSelection.kind === "existing")
+        throw new Error("Choose the Git project or a new branch for batch launch.");
+      const sourceBranch = baseBranch.trim() || repository?.refName || null;
+      // Validate before retaining anything. Claim a stable source ID independently
+      // of the launch ledger, so process restart can reconstruct safe retry ports.
+      const id = batchSource?.id ?? newThreadId();
+      createBatchLaunch({
+        id,
+        ownerKey: id,
+        environmentId: environment.environmentId,
+        projectId: project.id,
+        selections: batchSelections,
+        providers: serverConfig.providers,
+        prompt,
+        isGitRepo: repository?.isRepo === true,
+        baseBranch: sourceBranch,
+        createdAt: new Date().toISOString(),
+      });
+      const source = await batchSourceDraftStore.claim({
+        id,
+        environmentId: environment.environmentId,
+        projectId: project.id,
+        selections: batchSelections,
+        prompt,
+        projectCwd: project.cwd,
+        baseBranch: sourceBranch!,
+        runtimeMode,
+        interactionMode: selectedInteractionMode,
+        tokenMode,
+        attachments: toUploadChatImageAttachments(attachments),
+      });
+      if (
+        batchTargetRef.current.environmentId === source.environmentId &&
+        batchTargetRef.current.projectId === source.projectId
+      )
+        setBatchSource(source);
+      const created = createBatchLaunch({
+        id: source.id,
+        ownerKey: source.id,
+        environmentId: source.environmentId,
+        projectId: source.projectId,
+        selections: source.selections,
+        providers: serverConfig.providers,
+        prompt: source.prompt,
+        isGitRepo: repository?.isRepo === true,
+        baseBranch: source.baseBranch,
+        createdAt: new Date().toISOString(),
+      });
+      const retained = await batchLaunchStore.add(created);
+      await batchLaunchStore.run(retained.id, makeBatchPorts(retained, source));
+    } catch (error) {
+      if (
+        batchTargetRef.current.environmentId !== environment.environmentId ||
+        batchTargetRef.current.projectId !== project.id
+      )
+        return;
+      setFailure({
+        message: error instanceof Error ? error.message : "The comparison could not be started.",
+        step: "batch",
+        deliveryUncertain: false,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const pickAttachments = async () => {
     setAttachmentError(null);
     const result = await pickComposerImages({ existingCount: attachments.length });
@@ -473,6 +802,17 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             paddingBottom: 12,
           }}
         >
+          {preferencesError && (
+            <View className="mb-4 gap-2">
+              <ErrorBanner message={preferencesError} />
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setPreferencesRevision((value) => value + 1)}
+              >
+                <Text>Reload project defaults</Text>
+              </Pressable>
+            </View>
+          )}
           {failure ? (
             <View className="mb-4 gap-2">
               <ErrorBanner message={failure.message} />
@@ -480,7 +820,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
                 <Pressable
                   accessibilityRole="button"
                   disabled={busy}
-                  onPress={() => void run(attempt)}
+                  onPress={() => void (failure.step === "batch" ? runBatch() : run(attempt))}
                   className="h-11 items-center justify-center rounded-full bg-primary px-5 disabled:opacity-40"
                 >
                   <Text className="text-sm font-ryco-bold text-primary-foreground">
@@ -547,6 +887,106 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             </View>
           ) : null}
 
+          {batch ? (
+            <BatchResults
+              batch={batch}
+              error={batchState.storageError}
+              connected={!batchState.storageError && environment?.connectionState === "connected"}
+              onOpen={(threadId) =>
+                navigation.navigate("Thread", { environmentId: batch.environmentId, threadId })
+              }
+              onRetry={batchSource && batchDraftReady ? () => void retryBatch() : undefined}
+              onNew={() => {
+                if (!batchSource) return;
+                const sourceContent = batchTargetRef.current;
+                void completeBatchSourceReset(sourceContent, {
+                  releaseSource: () => batchLaunchStore.releaseSource(batch.id),
+                  removeSource: () => batchSourceDraftStore.remove(batchSource),
+                  readCurrent: () => batchTargetRef.current,
+                  clearSource: () => {
+                    setBatchSource(null);
+                    setPrompt("");
+                    setAttachments([]);
+                    setBatchSelections([]);
+                    resetAttempt();
+                  },
+                }).catch((error) => {
+                  if (
+                    batchTargetRef.current.environmentId === batchSource.environmentId &&
+                    batchTargetRef.current.projectId === batchSource.projectId &&
+                    batchTargetRef.current.sourceId === batchSource.id
+                  )
+                    setFailure({
+                      message: error instanceof Error ? error.message : "Draft storage unavailable",
+                      step: "batch",
+                      deliveryUncertain: false,
+                    });
+                });
+              }}
+            />
+          ) : (
+            <View className="mb-3 gap-2">
+              <Pressable
+                accessibilityRole="button"
+                disabled={
+                  busy ||
+                  !batchDraftReady ||
+                  serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true ||
+                  !project ||
+                  repository?.isRepo !== true ||
+                  !batchState.hydrated ||
+                  !!batchState.storageError ||
+                  batchSelections.length >= BATCH_LAUNCH_MAX_TARGETS
+                }
+                onPress={() =>
+                  setBatchSelections((previous) =>
+                    previous.some(
+                      (item) => batchSelectionKey(item) === batchSelectionKey(modelSelection),
+                    )
+                      ? previous
+                      : [...previous, modelSelection],
+                  )
+                }
+                className="min-h-11 justify-center disabled:opacity-40"
+              >
+                <Text>
+                  {batchSelections.length === 0 ? "Compare models…" : "Add current selection"}
+                </Text>
+              </Pressable>
+              {batchSelections.map((selection) => (
+                <Pressable
+                  key={batchSelectionKey(selection)}
+                  accessibilityRole="button"
+                  disabled={busy}
+                  accessibilityLabel={`Remove ${selection.instanceId} ${selection.model}`}
+                  onPress={() =>
+                    setBatchSelections((previous) =>
+                      previous.filter(
+                        (item) => batchSelectionKey(item) !== batchSelectionKey(selection),
+                      ),
+                    )
+                  }
+                  className="min-h-11 justify-center rounded-xl bg-subtle px-3"
+                >
+                  <Text className="text-xs">
+                    {selection.instanceId} · {selection.model}{" "}
+                    {selection.options
+                      ?.map((option) => `${option.id}: ${option.value}`)
+                      .join(" · ")}{" "}
+                    ×
+                  </Text>
+                </Pressable>
+              ))}
+              {batchSelections.length > 0 && (
+                <Text className="text-xs text-foreground-muted">
+                  {batchState.storageError ??
+                    (batchSelections.length < 2
+                      ? "Choose another model or effort in the picker, then add it."
+                      : `Send launches ${batchSelections.length} isolated worktrees with the same prompt and attachments.`)}
+                </Text>
+              )}
+            </View>
+          )}
           <NewTaskComposer
             environmentId={environmentId}
             prompt={prompt}
@@ -590,6 +1030,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             modelOptions={modelOptions}
             modelSelection={modelSelection}
             onSelectModel={(selection) => {
+              modelEdited.current = true;
               setModelSelection(selection);
               resetAttempt();
             }}
@@ -597,7 +1038,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
               setRuntimeMode(mode);
               resetAttempt();
             }}
-            onSend={() => void run(null)}
+            onSend={() => void (batch || batchSelections.length >= 2 ? runBatch() : run(null))}
           />
         </ScrollView>
       </KeyboardAvoidingView>
@@ -616,10 +1057,12 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
         worktree={worktreeSelection}
         newBranch={newBranch}
         onSelectWorktree={(selection) => {
+          locationEdited.current = true;
           setWorktreeSelection(selection);
           resetAttempt();
         }}
         onChangeNewBranch={(branch) => {
+          locationEdited.current = true;
           setNewBranch(branch);
           resetAttempt();
         }}

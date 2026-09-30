@@ -1,9 +1,15 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import {
+  storageLifecycleLock,
+  isStoragePathBlocked,
+  canonicalStoragePath,
+} from "../../storage/lifecycle.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as NodeFsConstants, type BigIntStats } from "node:fs";
 import * as NodeFs from "node:fs/promises";
 import * as NodePath from "node:path";
 
-import { Data, Effect, FileSystem, Layer, Path, Schema } from "effect";
+import { Data, Effect, FileSystem, Layer, Path, Schema, Option } from "effect";
 import { PROJECT_READ_FILE_BINARY_MAX_BYTES, PROJECT_STAGE_FILE_MAX_BYTES } from "@ryco/contracts";
 
 import {
@@ -356,6 +362,41 @@ function isEnoentError(cause: unknown): cause is NodeJS.ErrnoException {
 }
 
 export const makeWorkspaceFileSystem = Effect.gen(function* () {
+  const storageSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const assertStorageWritable = (cwd: string) =>
+    Effect.gen(function* () {
+      if (Option.isNone(storageSql)) return;
+      const canonical = yield* Effect.tryPromise(() => canonicalStoragePath(cwd)).pipe(
+        Effect.mapError(
+          (cause) =>
+            new WorkspaceFileSystemError({
+              cwd,
+              operation: "write",
+              detail: "Cannot establish checkout readiness.",
+              cause,
+            }),
+        ),
+      );
+      if (
+        yield* isStoragePathBlocked(storageSql.value, canonical).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WorkspaceFileSystemError({
+                cwd,
+                operation: "write",
+                detail: "Cannot establish checkout readiness.",
+                cause,
+              }),
+          ),
+        )
+      ) {
+        return yield* new WorkspaceFileSystemError({
+          cwd,
+          operation: "write",
+          detail: "Checkout cleanup is pending or complete. Restore it before editing.",
+        });
+      }
+    });
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths;
@@ -532,6 +573,7 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
       input,
       target.absolutePath,
     );
+    yield* assertStorageWritable(realTargetPath);
     const guarded = input.expectedVersion !== undefined;
     if (
       guarded &&
@@ -621,13 +663,14 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
       relativePath,
     });
 
-    yield* ensureResolvedPathStaysWithinWorkspace(
+    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
       { cwd: input.cwd, relativePath },
       target.absolutePath,
     );
+    yield* assertStorageWritable(realTargetPath);
 
     yield* fileSystem
-      .makeDirectory(path.dirname(target.absolutePath), { recursive: true })
+      .makeDirectory(path.dirname(realTargetPath), { recursive: true })
       .pipe(
         Effect.mapError(
           toWorkspaceFileSystemError(
@@ -637,7 +680,7 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
         ),
       );
     yield* fileSystem
-      .writeFile(target.absolutePath, bytes)
+      .writeFile(realTargetPath, bytes)
       .pipe(
         Effect.mapError(
           toWorkspaceFileSystemError(
@@ -654,8 +697,14 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
   return {
     readFile,
     readFileBinary,
-    writeFile,
-    stageFileReference,
+    writeFile: (input) =>
+      storageLifecycleLock.withPermit(
+        assertStorageWritable(input.cwd).pipe(Effect.andThen(writeFile(input))),
+      ),
+    stageFileReference: (input) =>
+      storageLifecycleLock.withPermit(
+        assertStorageWritable(input.cwd).pipe(Effect.andThen(stageFileReference(input))),
+      ),
   } satisfies WorkspaceFileSystemShape;
 });
 

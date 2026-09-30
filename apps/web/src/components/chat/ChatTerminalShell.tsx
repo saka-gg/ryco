@@ -1,3 +1,4 @@
+import { terminalSnippetBroker } from "../../terminalSnippetInsertion";
 import type { EnvironmentId, ResolvedKeybindingsConfig, ThreadId } from "@ryco/contracts";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
@@ -125,28 +126,14 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
       const api = readEnvironmentApi(threadRef.environmentId);
       if (!api) return;
       const isFinalTerminal = terminalState.terminalIds.length <= 1;
-      const fallbackExitWrite = () =>
-        api.terminal.write({ threadId, terminalId, data: "exit\n" }).catch(() => undefined);
-
-      if ("close" in api.terminal && typeof api.terminal.close === "function") {
-        void (async () => {
-          if (isFinalTerminal) {
-            await api.terminal.clear({ threadId, terminalId }).catch(() => undefined);
-          }
-          await api.terminal.close({
-            threadId,
-            terminalId,
-            deleteHistory: true,
-          });
-        })().catch(() => fallbackExitWrite());
-      } else {
-        void fallbackExitWrite();
-      }
+      void terminalSnippetBroker
+        .close({ threadRef, terminalId }, api.terminal, isFinalTerminal)
+        .catch(() => undefined);
 
       storeCloseTerminal(threadRef, terminalId);
       bumpFocusRequestId();
     },
-    [bumpFocusRequestId, storeCloseTerminal, terminalState.terminalIds.length, threadId, threadRef],
+    [bumpFocusRequestId, storeCloseTerminal, terminalState.terminalIds.length, threadRef],
   );
 
   const handleAddTerminalContext = useCallback(

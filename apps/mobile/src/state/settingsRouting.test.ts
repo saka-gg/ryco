@@ -28,6 +28,14 @@ describe("settings patch routing", () => {
     expect(persistClientSettings).toHaveBeenCalledWith({ diffIgnoreWhitespace: false });
   });
 
+  it("keeps worktree submodule policy node-owned on native", () => {
+    const patch = {
+      worktreeSubmodules: "top-level" as const,
+      projectWorktreeSubmodules: { p: "none" as const },
+    };
+    expect(splitUnifiedSettingsPatch(patch)).toEqual({ serverPatch: patch, clientPatch: {} });
+  });
+
   it("does not touch the server when only client keys change", () => {
     const applyServerOptimistic = vi.fn();
     const updateServerSettings = vi.fn();

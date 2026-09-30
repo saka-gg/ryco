@@ -1,3 +1,5 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { acquireStoragePathUseLease } from "../../storage/lifecycle.ts";
 import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
@@ -224,6 +226,27 @@ function stalePendingRequestDetail(
 }
 
 const make = Effect.gen(function* () {
+  const storageSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const leaseThreadPath = (
+    thread: OrchestrationThreadShell,
+    project: OrchestrationProjectShell | undefined,
+  ) =>
+    Effect.gen(function* () {
+      const candidate = thread.worktreePath ?? project?.workspaceRoot;
+      if (!candidate || Option.isNone(storageSql)) return;
+      const release = yield* acquireStoragePathUseLease(storageSql.value, candidate).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabel(String(thread.modelSelection.instanceId)),
+              method: "session.start",
+              detail:
+                cause instanceof Error ? cause.message : "Cannot establish checkout readiness.",
+            }),
+        ),
+      );
+      yield* Effect.addFinalizer(() => release);
+    });
   const approvals = yield* ProjectionPendingApprovalRepository;
   const questions = yield* ProjectionThreadUserInputRequestRepository;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -389,6 +412,7 @@ const make = Effect.gen(function* () {
     thread: OrchestrationThreadShell,
     project: OrchestrationProjectShell | undefined,
   ) {
+    yield* leaseThreadPath(thread, project);
     if (thread.worktreePath === null) {
       return;
     }
@@ -402,6 +426,7 @@ const make = Effect.gen(function* () {
 
     const repositoryRoot = nodePath.resolve(project.workspaceRoot);
     const worktreePath = nodePath.resolve(thread.worktreePath);
+    if (pathEntryExists(worktreePath)) yield* gitWorkflow.assertWorktreeSetupComplete(worktreePath);
     if (worktreeIdentity(worktreePath) === worktreeIdentity(repositoryRoot)) {
       return;
     }
@@ -447,6 +472,7 @@ const make = Effect.gen(function* () {
     if (pathEntryExists(worktreePath)) {
       const registeredPaths = yield* registeredWorktreePaths();
       if (registeredPaths.includes(worktreeIdentity(worktreePath))) {
+        yield* gitWorkflow.assertWorktreeSetupComplete(worktreePath);
         return;
       }
       return yield* failRecovery(
@@ -455,6 +481,7 @@ const make = Effect.gen(function* () {
     }
 
     const recreated = yield* gitWorkflow.createWorktree({
+      projectId: project.id,
       cwd: repositoryRoot,
       path: worktreePath,
       refName: branch,
@@ -488,7 +515,7 @@ const make = Effect.gen(function* () {
     }
     yield* gitWorkflow.invalidateStatus(worktreePath);
     yield* vcsStatusBroadcaster.refreshStatus(worktreePath).pipe(Effect.ignoreCause({ log: true }));
-  });
+  }, Effect.scoped);
 
   const ensureSessionForThread = Effect.fn("ensureSessionForThread")(function* (
     threadId: ThreadId,
@@ -504,6 +531,7 @@ const make = Effect.gen(function* () {
     }
 
     const project = yield* resolveProject(thread.projectId);
+    yield* leaseThreadPath(thread, project);
     yield* ensureRecordedWorktreeAvailable(thread, project);
 
     const desiredRuntimeMode = thread.runtimeMode;
@@ -729,7 +757,7 @@ const make = Effect.gen(function* () {
     const startedSession = yield* startProviderSession(undefined);
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
-  });
+  }, Effect.scoped);
 
   const reconcileThreadGoal = Effect.fn("reconcileThreadGoal")(function* (threadId: ThreadId) {
     const thread = yield* resolveThread(threadId);
@@ -1225,7 +1253,11 @@ const make = Effect.gen(function* () {
       if (!worktreeReady) {
         return;
       }
-      yield* contextHandoffCoordinator.processTurnStart(event);
+      yield* Effect.scoped(
+        leaseThreadPath(thread, project).pipe(
+          Effect.andThen(contextHandoffCoordinator.processTurnStart(event)),
+        ),
+      );
       return;
     }
 

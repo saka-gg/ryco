@@ -1,3 +1,5 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import fsPromises from "node:fs/promises";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -40,6 +42,7 @@ const TestLayer = Layer.empty.pipe(
       prefix: "ryco-workspace-files-test-",
     }),
   ),
+  Layer.provideMerge(SqlitePersistenceMemory),
   Layer.provideMerge(NodeServices.layer),
 );
 
@@ -140,6 +143,58 @@ const writeDirectorySymlink = Effect.fn("writeDirectorySymlink")(function* (
 });
 
 it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
+  it.effect(
+    "refuses parent-cwd writes into a removing checkout, aliases and removed descendants",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const files = yield* WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "managed-checkout/src/keep.txt", "keep");
+        const checkout = yield* Effect.promise(() =>
+          fsPromises.realpath(path.join(cwd, "managed-checkout")),
+        );
+        yield* sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('editor-guard', ${checkout}, 'worktree', '{}', ${new Date().toISOString()}, 'removing')`;
+        yield* Effect.promise(() => fsPromises.symlink(checkout, path.join(cwd, "alias"), "dir"));
+        for (const relativePath of [
+          "managed-checkout/src/keep.txt",
+          "managed-checkout/new/file.txt",
+          "alias/src/keep.txt",
+        ]) {
+          const result = yield* files
+            .writeFile({ cwd, relativePath, contents: "overwrite" })
+            .pipe(Effect.result);
+          expect(result._tag).toBe("Failure");
+        }
+        expect(yield* fileSystem.readFileString(path.join(checkout, "src/keep.txt"))).toBe("keep");
+        yield* fileSystem.makeDirectory(path.join(cwd, ".ryco"));
+        yield* Effect.promise(() =>
+          fsPromises.symlink(checkout, path.join(cwd, ".ryco/attachments"), "dir"),
+        );
+        expect(
+          (yield* files
+            .stageFileReference({
+              cwd,
+              scopeId: "fixture",
+              name: "staged.txt",
+              dataBase64: Buffer.from("keep").toString("base64"),
+              sizeBytes: 4,
+            })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        yield* fileSystem.remove(checkout, { recursive: true });
+        yield* sql`UPDATE storage_owned_entries SET state = 'removed' WHERE id = 'editor-guard'`;
+        expect(
+          (yield* files
+            .writeFile({ cwd, relativePath: "managed-checkout/new/file.txt", contents: "recreate" })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect(yield* fileSystem.exists(checkout)).toBe(false);
+        yield* sql`DELETE FROM storage_owned_entries WHERE id = 'editor-guard'`;
+      }),
+  );
   describe("readFile", () => {
     it.effect("reads files relative to the workspace root", () =>
       Effect.gen(function* () {

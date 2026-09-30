@@ -1,3 +1,6 @@
+import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
+import { getSavedEnvironmentRuntimeState } from "../environments/runtime";
+import { getServerConfig } from "../rpc/serverState";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
 import type { ComputerTurnIntent } from "@ryco/contracts";
@@ -474,6 +477,14 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     );
 
     // Resolve the node-owned default at creation time, including for queued drafts.
+    const primaryConfig = getServerConfig();
+    const config =
+      primaryConfig?.environment.environmentId === draft.environmentId
+        ? primaryConfig
+        : getSavedEnvironmentRuntimeState(draft.environmentId)?.serverConfig;
+    const effective = worktree.baseBranchForWorktree
+      ? await readEffectiveProjectPreferences({ api, config, projectId: project.projectId })
+      : null;
     let worktreeBranchPrefix: string | undefined;
     if (
       worktree.baseBranchForWorktree &&
@@ -481,7 +492,9 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       !worktree.worktreeBranchName
     ) {
       if (!api.server) throw new Error("Server settings are unavailable for worktree creation.");
-      worktreeBranchPrefix = (await api.server.getSettings()).worktreeBranchPrefix;
+      worktreeBranchPrefix =
+        effective?.worktreeBranchPrefix.value ??
+        (await api.server.getSettings()).worktreeBranchPrefix;
     }
     const bootstrap = buildSendTurnBootstrap({
       isLocalDraftThread: thread.isLocalDraftThread,
@@ -489,6 +502,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       fetchOrigin: worktree.fetchOrigin,
       worktreeBranchName: worktree.worktreeBranchName,
       worktreeBranchPrefix,
+      runSetupScript: effective?.runSetupScript.value ?? true,
       shouldMaterializeLegacyBranchWorktree: worktree.shouldMaterializeLegacyBranchWorktree,
       projectId: project.projectId,
       projectCwd: project.projectCwd,

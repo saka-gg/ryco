@@ -840,6 +840,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             snoozedUntil: null,
             snoozedAt: null,
             updatedAt: event.payload.updatedAt,
+            ...event.payload.restoredSidebarState,
           });
           return;
         }
@@ -874,6 +875,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             settledOverride: event.payload.reason === "user" ? "active" : null,
             settledAt: null,
             updatedAt: event.payload.updatedAt,
+            ...event.payload.restoredSidebarState,
           });
           return;
         }

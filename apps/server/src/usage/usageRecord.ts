@@ -50,13 +50,16 @@ export function addUsageTokenTotals(
   left: UsageTokenTotals,
   right: UsageTokenTotals,
 ): UsageTokenTotals {
-  return withTokenTotal({
+  return {
     uncachedInputTokens: left.uncachedInputTokens + right.uncachedInputTokens,
     cachedInputTokens: left.cachedInputTokens + right.cachedInputTokens,
     cacheCreationInputTokens: left.cacheCreationInputTokens + right.cacheCreationInputTokens,
     outputTokens: left.outputTokens + right.outputTokens,
-    reasoningTokens: left.reasoningTokens + right.reasoningTokens,
-  });
+    ...(left.reasoningTokens === undefined || right.reasoningTokens === undefined
+      ? {}
+      : { reasoningTokens: left.reasoningTokens + right.reasoningTokens }),
+    totalTokens: left.totalTokens + right.totalTokens,
+  };
 }
 
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {

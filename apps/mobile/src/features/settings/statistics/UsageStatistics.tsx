@@ -9,6 +9,11 @@ import {
   IconAlertCircle,
 } from "@tabler/icons-react-native";
 import {
+  filterUsageImports,
+  sumUsageImports,
+  USAGE_PROVIDERS,
+  USAGE_PROVIDER_COLORS,
+  USAGE_PROVIDER_LABELS,
   buildUsageBreakdown,
   buildUsageDaySeries,
   filterUsageBuckets,
@@ -27,16 +32,22 @@ import {
   dayLabel,
   useStatisticsPalette,
 } from "./StatisticsParts";
-import { StatisticsChart } from "./StatisticsCharts";
+import { UsageProviderChart } from "./UsageProviderChart";
+import type { UsageProviderKind } from "@ryco/contracts";
 
 export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
   const colors = useStatisticsPalette();
-  const [providers, setProviders] = useState(["claude", "codex"]);
+  const [providers, setProviders] = useState<readonly UsageProviderKind[]>(USAGE_PROVIDERS);
   const [metric, setMetric] = useState("cost");
   const [breakdown, setBreakdown] = useState("model");
   const buckets = filterUsageBuckets(summary, providers);
   const totals = sumUsageTotals(summary, buckets);
   const series = buildUsageDaySeries(summary, buckets);
+  const imports = filterUsageImports(summary, providers);
+  const importTotals = sumUsageImports(imports);
+  const [importPage, setImportPage] = useState(0);
+  const importPages = Math.ceil(imports.length / 20);
+  const currentImportPage = Math.min(importPage, Math.max(0, importPages - 1));
   const rows = buildUsageBreakdown(buckets, breakdown === "day" ? "day" : "model");
   const pricedCoverage =
     totals.pricedTokenCount + totals.unpricedTokenCount
@@ -46,7 +57,9 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
       : 0;
   const cacheInput =
     totals.cachedInputTokens + totals.uncachedInputTokens + totals.cacheCreationInputTokens;
-  const included = summary.sources.filter((source) => source.included);
+  const included = summary.sources.filter(
+    (source) => source.included && providers.includes(source.provider),
+  );
   const issues = included.filter((source) => source.status !== "complete");
   const pricingStates = summary.environments.flatMap((environment) =>
     environment.summary ? [environment.summary.pricing.state] : [],
@@ -76,6 +89,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
         <View
           style={{
             alignSelf: "flex-start",
+            flexWrap: "wrap",
             flexDirection: "row",
             padding: 2,
             borderWidth: 1,
@@ -84,7 +98,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
             backgroundColor: colors.card,
           }}
         >
-          {["claude", "codex"].map((provider) => (
+          {USAGE_PROVIDERS.map((provider) => (
             <Pressable
               key={provider}
               accessibilityRole="button"
@@ -113,7 +127,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
                   width: 6,
                   height: 6,
                   borderRadius: 3,
-                  backgroundColor: provider === "claude" ? "#d97757" : colors.foreground,
+                  backgroundColor: USAGE_PROVIDER_COLORS[provider],
                 }}
               />
               <Text
@@ -122,20 +136,85 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
                   color: providers.includes(provider) ? colors.foreground : colors.muted,
                 }}
               >
-                {provider === "claude" ? "Claude" : "Codex"}
+                {USAGE_PROVIDER_LABELS[provider]}
               </Text>
             </Pressable>
           ))}
         </View>
         <Text style={{ fontSize: 14, lineHeight: 22.75, color: colors.muted }}>
-          Provider-recorded usage from Claude Code and Codex transcripts on the selected machines.
-          This includes sessions run outside Ryco and is intentionally not attributed to projects.
+          Provider-recorded usage from supported local histories on the selected machines. This
+          includes sessions run outside Ryco and is intentionally not attributed to projects.
         </Text>
       </View>
+      {issues.map((source) => (
+        <Note key={`${source.environmentId}:${source.sourceId}`}>
+          {USAGE_PROVIDER_LABELS[source.provider]} · {source.environmentLabel}:{" "}
+          {source.message ?? source.diagnosticCode ?? source.status}
+        </Note>
+      ))}
+      {imports.length ? (
+        <Panel title="Cursor exported events and billed cost">
+          <Note>
+            Saved Cursor Admin API exports. Billed costs include Cursor fees and remain separate
+            from model costs. Events missing token fields do not contribute tokens.
+          </Note>
+          <Text>
+            {importTotals.requests === null
+              ? "Requests unavailable"
+              : `${integer(importTotals.requests)} exported events`}
+          </Text>
+          {importTotals.costs.map((cost) => (
+            <Text key={cost.currency}>
+              {cost.value.toLocaleString()} {cost.currency} billed cost
+            </Text>
+          ))}
+          {[...imports]
+            .toSorted((left, right) => right.date.localeCompare(left.date))
+            .slice(currentImportPage * 20, (currentImportPage + 1) * 20)
+            .map((row) => (
+              <View
+                key={row.recordId}
+                style={{ flexDirection: "row", justifyContent: "space-between", gap: 12 }}
+              >
+                <Text style={{ flex: 1, fontSize: 12 }}>
+                  {dayLabel(row.date)}
+                  {row.model ? ` · ${prettyModel(row.model)}` : ""}
+                </Text>
+                <Text style={{ fontSize: 12 }}>
+                  {row.metric === "requests"
+                    ? `${integer(row.value)} events`
+                    : `${row.value.toLocaleString()} ${row.currency}`}
+                </Text>
+              </View>
+            ))}
+          {importPages > 1 ? (
+            <View style={{ flexDirection: "row", gap: 16, alignItems: "center" }}>
+              <Pressable
+                accessibilityRole="button"
+                disabled={currentImportPage === 0}
+                onPress={() => setImportPage(currentImportPage - 1)}
+              >
+                <Text>Previous</Text>
+              </Pressable>
+              <Text>
+                {currentImportPage + 1} / {importPages}
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                disabled={currentImportPage >= importPages - 1}
+                onPress={() => setImportPage(currentImportPage + 1)}
+              >
+                <Text>Next</Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </Panel>
+      ) : null}
       {!buckets.length ? (
         <Panel title="No usage in this range">
           <Note>
-            The transcript sources were found, but no provider-recorded usage matched these filters.
+            No provider-recorded usage matched these filters. See source coverage below for
+            unavailable history.
           </Note>
         </Panel>
       ) : (
@@ -248,18 +327,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
                   ]}
                 />
               </View>
-              <StatisticsChart
-                kind="usage"
-                points={series.map((day) => ({
-                  date: day.date,
-                  first: metric === "cost" ? day.claudeCost : day.claudeTokens,
-                  second: metric === "cost" ? day.codexCost : day.codexTokens,
-                }))}
-                format={metric === "cost" ? money : integer}
-                axisFormat={
-                  metric === "cost" ? (value) => `$${value.toFixed(value < 10 ? 1 : 0)}` : compact
-                }
-              />
+              <UsageProviderChart points={series} metric={metric} />
             </View>
           </View>
           <View
@@ -279,7 +347,11 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
                 "Cache read",
                 `${cacheInput ? Math.round((totals.cachedInputTokens / cacheInput) * 100) : 0}%`,
               ],
-              ["Reasoning", compact(totals.reasoningTokens), "included in output"],
+              [
+                "Reasoning",
+                totals.reasoningTokens === null ? "Unavailable" : compact(totals.reasoningTokens),
+                "included in output",
+              ],
             ].map(([label, value, detail]) => (
               <View
                 key={label}
@@ -330,9 +402,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
                   </Text>
                   <Text style={{ fontSize: 11, marginTop: 2, color: colors.muted }}>
                     {row.provider
-                      ? row.provider === "claude"
-                        ? "Claude"
-                        : "Codex"
+                      ? USAGE_PROVIDER_LABELS[row.provider]
                       : `${row.responses} responses`}
                   </Text>
                 </View>

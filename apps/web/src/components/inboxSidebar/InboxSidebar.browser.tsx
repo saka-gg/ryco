@@ -20,6 +20,15 @@ import {
 } from "../../environmentApi";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
+vi.mock("../../sidebarUndo", () => ({
+  sidebarUndo: {
+    dispatch: (target: { environmentId: EnvironmentId }, command: unknown) =>
+      import("../../environmentApi").then(({ readEnvironmentApi }) =>
+        readEnvironmentApi(target.environmentId)!.orchestration.dispatchCommand(command as never),
+      ),
+  },
+}));
+
 const ENVIRONMENT_ID = EnvironmentId.make("environment-hover-card");
 const PROJECT_ID = ProjectId.make("project-hover-card");
 const THREAD_ID = ThreadId.make("thread-hover-card");

@@ -36,6 +36,7 @@ import type {
   IssueStateFilter,
 } from "../projectExplorer/StateFilterButtons";
 import { Button } from "../ui/button";
+import { notifyWorktreeSubmoduleSetup } from "./worktreeCreationNotifications";
 import {
   Combobox,
   ComboboxEmpty,
@@ -746,6 +747,7 @@ export function NewWorktreeDialog(props: NewWorktreeDialogProps) {
         projectId: props.projectId,
         intent,
       });
+      notifyWorktreeSubmoduleSetup(result.submoduleInitialization);
       props.onCreated?.(result);
       props.onOpenChange(false);
     } catch (error) {

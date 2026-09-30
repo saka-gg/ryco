@@ -1,3 +1,5 @@
+import type { UsageProviderKind } from "@ryco/contracts";
+import { USAGE_PROVIDERS } from "@ryco/client-runtime/usage";
 export type StatisticsView = "usage" | "activity";
 export type StatisticsRange = "7d" | "30d" | "90d" | "all";
 export type UsageMetric = "cost" | "tokens";
@@ -8,7 +10,7 @@ export interface StatisticsSearch {
   readonly view: StatisticsView;
   readonly range: StatisticsRange;
   readonly environmentIds?: readonly string[] | undefined;
-  readonly providers?: readonly ("claude" | "codex")[] | undefined;
+  readonly providers?: readonly UsageProviderKind[] | undefined;
   readonly projectId?: string | undefined;
   readonly model?: string | undefined;
   readonly modelProvider?: string | undefined;
@@ -38,7 +40,8 @@ function stringArray(value: unknown): string[] | undefined {
 export function parseStatisticsSearch(raw: Record<string, unknown>): StatisticsSearch {
   const environmentIds = stringArray(raw["environmentIds"]);
   const providers = stringArray(raw["providers"])?.filter(
-    (provider): provider is "claude" | "codex" => provider === "claude" || provider === "codex",
+    (provider): provider is UsageProviderKind =>
+      (USAGE_PROVIDERS as readonly string[]).includes(provider),
   );
   const projectId = optionalString(raw["projectId"]);
   const model = optionalString(raw["model"]);

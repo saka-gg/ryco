@@ -14,13 +14,20 @@ import type { OrchestrationCommand, OrchestrationEvent } from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect, PubSub, Scope, Stream } from "effect";
 
-import type { OrchestrationDispatchError } from "../Errors.ts";
+import type { OrchestrationCommandAdmissionError, OrchestrationDispatchError } from "../Errors.ts";
 import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
 
 /**
  * OrchestrationEngineShape - Service API for orchestration command and event flow.
  */
 export interface OrchestrationEngineShape {
+  /** Fail closed without synchronous authority; the returned fence must be checked in the PTY commit. */
+  readonly captureThreadWorkspace?: (input: {
+    readonly threadId: string;
+    readonly cwd: string;
+    readonly worktreePath: string | null;
+  }) => (() => boolean) | undefined;
+
   /**
    * Replay persisted orchestration events from an exclusive sequence cursor.
    *
@@ -69,6 +76,15 @@ export interface OrchestrationEngineShape {
    */
   readonly dispatch: (
     command: OrchestrationCommand,
+    options?: {
+      /** Acquire settings or other admission leases before the shared storage
+       * lifecycle lock. Runs in the engine fiber; must not dispatch recursively. */
+      readonly withCommitLease?: <A, E>(commit: Effect.Effect<A, E>) => Effect.Effect<A, E>;
+      /** Server-owned wrapper for serialized commit admission. Accepted receipts bypass it. */
+      readonly admit: <A, E>(
+        commit: Effect.Effect<A, E>,
+      ) => Effect.Effect<A, E | OrchestrationCommandAdmissionError>;
+    },
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
 
   /**

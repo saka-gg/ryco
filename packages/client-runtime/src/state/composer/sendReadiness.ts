@@ -7,6 +7,7 @@ import { getWsConnectionStatusForEnvironment } from "../../rpc/wsConnectionState
 export function captureReviewedSendReadiness(
   environmentId: EnvironmentId,
   readConnection: () => EnvironmentConnection | null,
+  message = "The connection changed during Claude resume review. Reconnect and review again; your draft is retained.",
 ): () => void {
   const connection = readConnection();
   const generation = connection?.shellSnapshotReadiness.read();
@@ -18,9 +19,7 @@ export function captureReviewedSendReadiness(
       connection.shellSnapshotReadiness.read() !== generation ||
       getWsConnectionStatusForEnvironment(environmentId).phase !== "connected"
     ) {
-      throw new ClaudeResumeReviewError(
-        "The connection changed during Claude resume review. Reconnect and review again; your draft is retained.",
-      );
+      throw new ClaudeResumeReviewError(message);
     }
   };
 }

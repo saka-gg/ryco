@@ -60,3 +60,26 @@ describe("ExecutionEnvironmentCapabilities.fileAttachments", () => {
     ).toThrow();
   });
 });
+
+describe("ExecutionEnvironmentCapabilities.worktreeSubmoduleSettings", () => {
+  it("does not infer support from older nodes or schema defaults", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.worktreeSubmoduleSettings).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ worktreeSubmoduleSettings: false })).capabilities
+        .worktreeSubmoduleSettings,
+    ).toBe(false);
+    expect(
+      decodeDescriptor(descriptor({ worktreeSubmoduleSettings: true })).capabilities
+        .worktreeSubmoduleSettings,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ worktreeSubmoduleSettings: "true" }))).toThrow();
+  });
+});
+
+it("requires explicit required-worktree bootstrap support from the node", () => {
+  expect(decodeDescriptor(descriptor({})).capabilities.requiredWorktreeBootstrap).toBeUndefined();
+  expect(
+    decodeDescriptor(descriptor({ requiredWorktreeBootstrap: true })).capabilities
+      .requiredWorktreeBootstrap,
+  ).toBe(true);
+});

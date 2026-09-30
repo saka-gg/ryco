@@ -1,0 +1,10 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "duration_ms": 5234,
+  "duration_api_ms": 5234,
+  "is_error": false,
+  "result": "PRIVATE_FIXTURE_CONTENT",
+  "session_id": "fixture-cursor-session",
+  "request_id": "fixture-cursor-request"
+}

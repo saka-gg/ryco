@@ -1,5 +1,5 @@
+import { sidebarUndo } from "../../state/sidebarUndo";
 import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
-import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { newCommandId } from "../../lib/ids";
 import { MenuView } from "@react-native-menu/menu";
 import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
@@ -151,7 +151,8 @@ export function InboxScreen(props: {
                         commandId: newCommandId(),
                         reason: "user" as const,
                       };
-                await ensureEnvironmentApi(row.environmentId).orchestration.dispatchCommand(
+                await sidebarUndo.dispatch(
+                  { environmentId: row.environmentId, threadId: row.threadId },
                   command,
                 );
               } catch (error) {
@@ -171,7 +172,8 @@ export function InboxScreen(props: {
           if (until === undefined || !(until ? row.canSnooze : row.canUnsnooze)) return;
           void (async () => {
             try {
-              await ensureEnvironmentApi(row.environmentId).orchestration.dispatchCommand(
+              await sidebarUndo.dispatch(
+                { environmentId: row.environmentId, threadId: row.threadId },
                 until
                   ? {
                       type: "thread.snooze",

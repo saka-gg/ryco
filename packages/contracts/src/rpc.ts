@@ -1,3 +1,13 @@
+import { EffectiveProjectPreferences } from "./settings.ts";
+import {
+  StorageScanInput,
+  StoragePreviewInput,
+  StorageExecuteInput,
+  StorageSnapshot,
+  StorageCleanupPreview,
+  StorageCleanupResult,
+  StorageError,
+} from "./storage.ts";
 import {
   CodexResetCreditAccount,
   CodexResetCreditInput,
@@ -7,6 +17,11 @@ import {
 import {
   SessionImportDiscoverInput,
   SessionImportPage,
+  SessionImportSourcesInput,
+  SessionImportStores,
+  SessionImportReconcileInput,
+  SessionImportRecovery,
+  SessionImportAdoptInput,
   SessionImportInput,
   SessionImportResult,
   SessionImportError,
@@ -120,6 +135,7 @@ import {
   VcsCreateRefResult,
   VcsCreateWorktreeInput,
   VcsCreateWorktreeResult,
+  WorktreeSubmoduleInitialization,
   VcsInitInput,
   VcsListRefsInput,
   VcsListRefsResult,
@@ -315,6 +331,9 @@ import {
 } from "./worktree.ts";
 
 export const WS_METHODS = {
+  storageScan: "storage.scan",
+  storagePreview: "storage.preview",
+  storageExecute: "storage.execute",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -337,6 +356,9 @@ export const WS_METHODS = {
   // Filesystem methods
   sessionImportDiscover: "sessionImport.discover",
   sessionImportRun: "sessionImport.run",
+  sessionImportSources: "sessionImport.sources",
+  sessionImportReconcile: "sessionImport.reconcile",
+  sessionImportAdopt: "sessionImport.adopt",
   filesystemBrowse: "filesystem.browse",
 
   // VCS methods
@@ -396,6 +418,7 @@ export const WS_METHODS = {
   serverUpsertKeybinding: "server.upsertKeybinding",
   keybindingsReplaceCustom: "keybindings.replaceCustom",
   serverGetSettings: "server.getSettings",
+  serverGetProjectPreferences: "server.getProjectPreferences",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverListOpinionatedPlugins: "server.listOpinionatedPlugins",
@@ -493,6 +516,7 @@ export type GitCreateWorktreeForProjectInput = typeof GitCreateWorktreeForProjec
 export const GitCreateWorktreeForProjectOutput = Schema.Struct({
   worktreeId: WorktreeId,
   sessionId: ThreadId,
+  submoduleInitialization: Schema.optional(WorktreeSubmoduleInitialization),
 });
 export type GitCreateWorktreeForProjectOutput = typeof GitCreateWorktreeForProjectOutput.Type;
 
@@ -765,6 +789,12 @@ export const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
   payload: Schema.Struct({}),
   success: ServerSettings,
   error: ServerSettingsError,
+});
+
+export const WsServerGetProjectPreferencesRpc = Rpc.make(WS_METHODS.serverGetProjectPreferences, {
+  payload: Schema.Struct({ projectId: Schema.optionalKey(ProjectId) }),
+  success: EffectiveProjectPreferences,
+  error: Schema.Union([ServerSettingsError, AuthRpcError]),
 });
 
 export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1324,6 +1354,21 @@ export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   error: Schema.Union([OpenError, AuthRpcError]),
 });
 
+export const WsSessionImportSourcesRpc = Rpc.make(WS_METHODS.sessionImportSources, {
+  payload: SessionImportSourcesInput,
+  success: SessionImportStores,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
+export const WsSessionImportReconcileRpc = Rpc.make(WS_METHODS.sessionImportReconcile, {
+  payload: SessionImportReconcileInput,
+  success: SessionImportRecovery,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
+export const WsSessionImportAdoptRpc = Rpc.make(WS_METHODS.sessionImportAdopt, {
+  payload: SessionImportAdoptInput,
+  success: SessionImportResult,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
 export const WsSessionImportDiscoverRpc = Rpc.make(WS_METHODS.sessionImportDiscover, {
   payload: SessionImportDiscoverInput,
   success: SessionImportPage,
@@ -1413,6 +1458,22 @@ export const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePu
   payload: GitPreparePullRequestThreadInput,
   success: GitPreparePullRequestThreadResult,
   error: Schema.Union([GitManagerServiceError, AuthRpcError]),
+});
+
+export const WsStorageScanRpc = Rpc.make(WS_METHODS.storageScan, {
+  payload: StorageScanInput,
+  success: StorageSnapshot,
+  error: Schema.Union([StorageError, AuthRpcError]),
+});
+export const WsStoragePreviewRpc = Rpc.make(WS_METHODS.storagePreview, {
+  payload: StoragePreviewInput,
+  success: StorageCleanupPreview,
+  error: Schema.Union([StorageError, AuthRpcError]),
+});
+export const WsStorageExecuteRpc = Rpc.make(WS_METHODS.storageExecute, {
+  payload: StorageExecuteInput,
+  success: StorageCleanupResult,
+  error: Schema.Union([StorageError, AuthRpcError]),
 });
 
 export const WsGitCreateWorktreeForProjectRpc = Rpc.make(WS_METHODS.gitCreateWorktreeForProject, {
@@ -1901,6 +1962,9 @@ export const WsAgentControlDisconnectMcpInstallationRpc = Rpc.make(
 
 /** Keep declaration emit bounded as shared settings and RPC schemas grow. */
 export const WsRpcGroup: RpcGroup.RpcGroup<
+  | typeof WsSessionImportSourcesRpc
+  | typeof WsSessionImportReconcileRpc
+  | typeof WsSessionImportAdoptRpc
   | typeof WsSessionImportDiscoverRpc
   | typeof WsSessionImportRunRpc
   | typeof WsServerGetConfigRpc
@@ -1918,6 +1982,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
   | typeof WsKeybindingsReplaceCustomRpc
+  | typeof WsServerGetProjectPreferencesRpc
   | typeof WsServerGetSettingsRpc
   | typeof WsServerUpdateSettingsRpc
   | typeof WsServerGetDiagnosticsSnapshotRpc
@@ -1999,6 +2064,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsGitRunStackedActionRpc
   | typeof WsGitResolvePullRequestRpc
   | typeof WsGitPreparePullRequestThreadRpc
+  | typeof WsStorageScanRpc
+  | typeof WsStoragePreviewRpc
+  | typeof WsStorageExecuteRpc
   | typeof WsGitCreateWorktreeForProjectRpc
   | typeof WsGitFindWorktreeForOriginRpc
   | typeof WsGitArchiveWorktreeRpc
@@ -2066,6 +2134,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsContextHandoffReadRawPayloadChunkRpc
   | typeof WsContextHandoffReadExportChunkRpc
 > = RpcGroup.make(
+  WsSessionImportSourcesRpc,
+  WsSessionImportReconcileRpc,
+  WsSessionImportAdoptRpc,
   WsSessionImportDiscoverRpc,
   WsSessionImportRunRpc,
   WsServerGetConfigRpc,
@@ -2083,6 +2154,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,
   WsKeybindingsReplaceCustomRpc,
+  WsServerGetProjectPreferencesRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
   WsServerGetDiagnosticsSnapshotRpc,
@@ -2164,6 +2236,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsGitRunStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
+  WsStorageScanRpc,
+  WsStoragePreviewRpc,
+  WsStorageExecuteRpc,
   WsGitCreateWorktreeForProjectRpc,
   WsGitFindWorktreeForOriginRpc,
   WsGitArchiveWorktreeRpc,

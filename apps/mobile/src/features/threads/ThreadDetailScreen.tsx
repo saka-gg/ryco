@@ -1,3 +1,4 @@
+import { sidebarUndo } from "../../state/sidebarUndo";
 import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
 import { runOutboxDrain } from "../../state/use-thread-outbox-drain";
@@ -21,7 +22,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { Pressable, ScrollView, View } from "react-native";
+import { Alert, Pressable, ScrollView, View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 
 import { serverConfigAtom } from "@ryco/client-runtime/rpc";
@@ -115,9 +116,9 @@ import {
   interruptThreadTurn,
   renameThread,
   setThreadArchived,
+  setThreadSettled,
   setThreadInteractionMode,
   setThreadRuntimeMode,
-  setThreadSettled,
 } from "./sessionActions";
 import { useThreadChecks } from "./useThreadChecks";
 import { buildThreadTimelineRows, toggleFold, type ThreadTimelineRow } from "./threadActivityFold";
@@ -1084,6 +1085,21 @@ export function ThreadDetailScreen(props: {
     }
   };
 
+  const runSidebarAction = (action: () => Promise<void>) => {
+    setActionsVisible(false);
+    return runAction(async () => {
+      try {
+        await action();
+      } catch (error) {
+        Alert.alert(
+          "Could not update task",
+          error instanceof Error ? error.message : "The request failed.",
+        );
+        throw error;
+      }
+    }, false);
+  };
+
   // Gated the same way the header is: a snapshot captured mid-turn preserves a
   // "running" latestTurn, and a cached thread rendering a live "Working…" fold
   // would contradict the Offline header two rows above it.
@@ -1352,19 +1368,40 @@ export function ThreadDetailScreen(props: {
           onToggleSettlement={() => {
             const action = headerModel.settlementAction;
             if (!action || action.disabled) return;
-            void runAction(() =>
+            void runSidebarAction(() =>
               setThreadSettled(
                 ensureEnvironmentApi(environmentId),
                 threadId,
                 action.kind === "settle",
+                (command) => sidebarUndo.dispatch({ environmentId, threadId }, command),
               ),
             );
           }}
           onToggleArchive={() =>
-            void runAction(async () => {
+            void runSidebarAction(async () => {
               const shouldArchive = thread?.archivedAt === null;
-              await setThreadArchived(ensureEnvironmentApi(environmentId), threadId, shouldArchive);
-              if (shouldArchive && navigation.canGoBack()) navigation.goBack();
+              await setThreadArchived(
+                ensureEnvironmentApi(environmentId),
+                threadId,
+                shouldArchive,
+                (command) =>
+                  command.type === "thread.archive"
+                    ? sidebarUndo.archive({ environmentId, threadId }, command.commandId, {
+                        currentRoute: () => {
+                          const state = navigation.getState();
+                          return state?.routes[state.index]?.key ?? null;
+                        },
+                        shouldLeave: () => navigation.canGoBack(),
+                        leave: async () => {
+                          const state = navigation.getState();
+                          const fallbackKey = state?.routes[state.index - 1]?.key ?? null;
+                          navigation.goBack();
+                          return fallbackKey;
+                        },
+                        reopen: () => navigation.navigate("Thread", { environmentId, threadId }),
+                      })
+                    : sidebarUndo.dispatch({ environmentId, threadId }, command),
+              );
             })
           }
           onReview={() => {

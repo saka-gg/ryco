@@ -24,6 +24,7 @@ export interface UsageAggregationOptions {
   readonly startDate?: UsageCalendarDate;
   readonly endDate: UsageCalendarDate;
   readonly price?: UsageRecordPricer;
+  readonly retainExportIdentity?: boolean;
 }
 
 export interface UsageAggregationResult {
@@ -34,6 +35,8 @@ export interface UsageAggregationResult {
 }
 
 interface MutableBucket {
+  exportRecordId?: string;
+  exportSessionId?: string;
   tokens: UsageTokenTotals;
   responseCount: number;
   sessions: Set<string>;
@@ -114,10 +117,15 @@ export class UsageAggregator {
       return false;
     }
 
-    const key = `${date}\0${record.provider}\0${record.model}`;
+    const exportRecordId =
+      this.#options.retainExportIdentity && record.provider === "cursor" ? record.dedupeKey : null;
+    const key = `${date}\0${record.provider}\0${record.model}${exportRecordId === null ? "" : `\0${exportRecordId}`}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
+        ...(exportRecordId === null
+          ? {}
+          : { exportRecordId, ...(record.sessionId ? { exportSessionId: record.sessionId } : {}) }),
         tokens: EMPTY_USAGE_TOKEN_TOTALS,
         responseCount: 0,
         sessions: new Set<string>(),
@@ -133,7 +141,10 @@ export class UsageAggregator {
     }
 
     const pricing = (this.#options.price ?? defaultPrice)(record);
-    bucket.tokens = addUsageTokenTotals(bucket.tokens, record.totals);
+    bucket.tokens =
+      bucket.responseCount === 0
+        ? record.totals
+        : addUsageTokenTotals(bucket.tokens, record.totals);
     bucket.responseCount += 1;
     if (record.sessionId.length > 0) bucket.sessions.add(record.sessionId);
     if (pricing.estimatedCostUsd !== null) {
@@ -157,6 +168,10 @@ export class UsageAggregator {
       const [date = "", provider = "", model = ""] = key.split("\0");
       buckets.push({
         sourceId: this.#options.sourceId,
+        ...(bucket.exportRecordId === undefined ? {} : { exportRecordId: bucket.exportRecordId }),
+        ...(bucket.exportSessionId === undefined
+          ? {}
+          : { exportSessionId: bucket.exportSessionId }),
         date: date as UsageCalendarDate,
         provider: provider as UsageDailyBucket["provider"],
         model,
