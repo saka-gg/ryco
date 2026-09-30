@@ -5601,10 +5601,40 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       payload: { threadId, deletedAt: "2026-04-05T00:00:00.000Z" },
     }) satisfies Extract<OrchestrationEvent, { type: "thread.deleted" }>;
 
-  const buildShellResumeApp = (storedSequences: ReadonlyArray<number>) =>
+  const makeResumeActivityEvent = (sequence: number, threadId: ThreadId) =>
+    ({
+      sequence,
+      eventId: EventId.make(`event-thread-resume-${sequence}`),
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt: "2026-04-05T00:00:00.000Z",
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.activity-appended",
+      payload: {
+        threadId,
+        activity: {
+          id: EventId.make(`activity-thread-resume-${sequence}`),
+          tone: "info",
+          kind: "resume.test",
+          summary: `resume event ${sequence}`,
+          payload: {},
+          turnId: null,
+          sequence,
+          createdAt: "2026-04-05T00:00:00.000Z",
+        },
+      },
+    }) satisfies Extract<OrchestrationEvent, { type: "thread.activity-appended" }>;
+
+  const buildShellResumeApp = (
+    storedSequences: ReadonlyArray<number>,
+    makeEvent: (sequence: number, threadId: ThreadId) => OrchestrationEvent = makeShellDeletedEvent,
+  ) =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread-shell-resume");
-      const stored = storedSequences.map((sequence) => makeShellDeletedEvent(sequence, threadId));
+      const stored = storedSequences.map((sequence) => makeEvent(sequence, threadId));
       const livePubSub = yield* PubSub.unbounded<OrchestrationEvent>();
       let snapshotLoads = 0;
       yield* buildAppUnderTest({
@@ -5658,6 +5688,30 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         [11, 12],
       );
       assert.equal(app.snapshotLoads(), 0);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("resumes a thread subscription with only that thread's missed events", () =>
+    Effect.gen(function* () {
+      yield* buildShellResumeApp([9, 10, 11, 12], makeResumeActivityEvent);
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: ThreadId.make("thread-shell-resume"),
+            resumeFromSequence: 10,
+          }).pipe(
+            Stream.take(3),
+            Stream.runCollect,
+            Effect.map((items) => Array.from(items)),
+          ),
+        ),
+      );
+
+      assert.deepEqual(
+        result.map((item) => (item.kind === "event" ? item.event.sequence : item.kind)),
+        ["resumed", 11, 12],
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -5868,7 +5922,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(
-        result.map((item) => (item.kind === "snapshot" ? "snapshot" : item.event.sequence)),
+        result.map((item) => (item.kind === "event" ? item.event.sequence : item.kind)),
         ["snapshot", 11, 12],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -5940,7 +5994,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
             Stream.tap((item) => {
-              const next = item.kind === "snapshot" ? 11 : item.event.sequence + 1;
+              const next = item.kind === "event" ? item.event.sequence + 1 : 11;
               return next <= 22 ? PubSub.publish(livePubSub, makeActivityEvent(next)) : Effect.void;
             }),
             Stream.take(13),
@@ -5951,7 +6005,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(
-        result.map((item) => (item.kind === "snapshot" ? "snapshot" : item.event.sequence)),
+        result.map((item) => (item.kind === "event" ? item.event.sequence : item.kind)),
         ["snapshot", ...Array.from({ length: 12 }, (_, index) => index + 11)],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),

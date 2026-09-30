@@ -348,24 +348,36 @@ export function createEnvironmentConnectionSupervisor<
       environmentId: entry.environmentId,
       threadId: entry.threadId,
     };
+    // The last sequence this subscription applied. A replacement subscription
+    // after a reconnect resumes after it instead of reloading the thread. Hosted
+    // and Hub-relayed connections always take a fresh snapshot.
+    let appliedSequence: number | null = null;
+    const resumable =
+      !input.isHostedMode() && connection.knownEnvironment.source !== "hub-hosted";
+    const resumeOptions = resumable ? { resumeFromSequence: () => appliedSequence } : {};
     const subscribeLegacy = () => {
       if (!active) return;
       entry.protocol = "legacy";
       unsubscribeCurrent();
+      appliedSequence = null;
       unsubscribeCurrent = connection.client.orchestration.subscribeThread(
         { threadId: entry.threadId },
         (item) => {
+          if (item.kind === "resumed") return;
           if (item.kind === "snapshot") {
+            appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
             recordRetainedSnapshot(entry, item.snapshot);
             evictToCapacity();
             input.syncThreadDetailSnapshot(entry.environmentId, item.snapshot);
             return;
           }
+          appliedSequence = Math.max(appliedSequence ?? 0, item.event.sequence);
           recordRetainedEvent(entry, item.event);
           evictToCapacity();
           input.applyThreadDetailEvent(entry.environmentId, item.event);
         },
+        resumeOptions,
       );
     };
     entry.unsubscribe = () => {
@@ -393,7 +405,9 @@ export function createEnvironmentConnectionSupervisor<
         },
       },
       (item) => {
+        if (item.kind === "resumed") return;
         if (item.kind === "snapshot") {
+          appliedSequence = item.snapshot.snapshotSequence;
           historyPagination.beginSnapshot(scope);
           recordRetainedSnapshot(entry, item.snapshot);
           evictToCapacity();
@@ -404,11 +418,12 @@ export function createEnvironmentConnectionSupervisor<
           }
           return;
         }
+        appliedSequence = Math.max(appliedSequence ?? 0, item.event.sequence);
         recordRetainedEvent(entry, item.event);
         evictToCapacity();
         input.applyThreadDetailEvent(entry.environmentId, item.event);
       },
-      { onError: requestLegacy },
+      { ...resumeOptions, onError: requestLegacy },
     );
     if (fallbackRequested) subscribeLegacy();
     return true;

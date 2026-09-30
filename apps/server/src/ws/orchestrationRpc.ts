@@ -564,6 +564,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               return snapshot;
             }),
             input.threadId,
+            { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
             (stream) => withHistoryRecovery(input.threadId, stream),
             Stream.tap((item) =>
@@ -598,6 +599,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               return snapshot;
             }),
             input.threadId,
+            { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
             (stream) => withHistoryRecovery(input.threadId, stream),
             Stream.tap((item) =>

@@ -1,6 +1,7 @@
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import type { ResumableSubscriptionOptions } from "../rpc/wsRpcClient.ts";
 import type { EnvironmentConnection } from "./connection.ts";
 import {
   createEnvironmentConnectionSupervisor,
@@ -13,10 +14,17 @@ type Record = { readonly environmentId: EnvironmentId };
 
 const remote = "env-remote" as EnvironmentId;
 
-function makeSupervisor(connect: (record: Record) => Promise<EnvironmentConnection>) {
+function makeSupervisor(
+  connect: (record: Record) => Promise<EnvironmentConnection>,
+  overrides: { readonly isHostedMode?: boolean } = {},
+) {
   let resume: ((reason: string) => void) | null = null;
   const input = {
-    isHostedMode: () => false,
+    isHostedMode: () => overrides.isHostedMode ?? false,
+    syncThreadDetailSnapshot: () => undefined,
+    syncThreadWindowSnapshot: () => undefined,
+    applyThreadDetailEvent: () => undefined,
+    isThreadDetailSubscriptionNonIdle: () => true,
     now: () => Date.now(),
     setTimeout: (callback: () => void, delayMs: number) => setTimeout(callback, delayMs),
     clearTimeout: (timeoutId: ReturnType<typeof setTimeout>) => clearTimeout(timeoutId),
@@ -121,5 +129,75 @@ describe("saved environment retry", () => {
     stop();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(attempts).toBe(1);
+  });
+});
+
+describe("thread subscription resume", () => {
+  function threadConnection(source: string) {
+    let listener: ((item: any) => void) | undefined;
+    let options: ResumableSubscriptionOptions | undefined;
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source },
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (
+            _input: unknown,
+            next: (item: any) => void,
+            nextOptions?: ResumableSubscriptionOptions,
+          ) => {
+            listener = next;
+            options = nextOptions;
+            return () => undefined;
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    return {
+      connection,
+      emit: (item: unknown) => listener?.(item),
+      resumeFrom: () => options?.resumeFromSequence?.() ?? null,
+    };
+  }
+
+  const windowSnapshot = (snapshotSequence: number) => ({
+    kind: "snapshot",
+    snapshot: { snapshotSequence, thread: {}, history: {} },
+  });
+
+  it("resumes an open thread after the last event it applied", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const thread = threadConnection("manual");
+    supervisor.register(thread.connection);
+    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
+
+    expect(thread.resumeFrom()).toBeNull();
+    thread.emit(windowSnapshot(5));
+    thread.emit({ kind: "event", event: { sequence: 7 } });
+    expect(thread.resumeFrom()).toBe(7);
+    thread.emit({ kind: "resumed", fromSequence: 7 });
+    expect(thread.resumeFrom()).toBe(7);
+  });
+
+  it("always takes a fresh snapshot over the Hub relay", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const thread = threadConnection("hub-hosted");
+    supervisor.register(thread.connection);
+    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
+    thread.emit(windowSnapshot(5));
+    expect(thread.resumeFrom()).toBeNull();
+  });
+
+  it("always takes a fresh snapshot in hosted mode", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      isHostedMode: true,
+    });
+    const thread = threadConnection("manual");
+    supervisor.register(thread.connection);
+    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
+    thread.emit(windowSnapshot(5));
+    expect(thread.resumeFrom()).toBeNull();
   });
 });
