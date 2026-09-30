@@ -114,6 +114,9 @@ it("keeps portrait and landscape user thumbnails proportional without stretching
   const dimensions = [
     [1600, 900],
     [900, 1600],
+    // Wide, short screenshot: the frame must hug the capped image instead of
+    // stretching to the row width.
+    [1438, 210],
   ] as const;
   const attachments = dimensions.map(([width, height], index) => ({
     type: "image" as const,
@@ -141,6 +144,8 @@ it("keeps portrait and landscape user thumbnails proportional without stretching
     expect(rect.height).toBeLessThanOrEqual(260);
     expect(rect.width).toBeLessThanOrEqual(360);
     expect(image.closest("button")!.getBoundingClientRect().height).toBeCloseTo(rect.height, 0);
+    const frame = image.closest(".rounded-lg")!.getBoundingClientRect();
+    expect(frame.width - rect.width).toBeLessThanOrEqual(2);
   }
   await page.getByRole("button", { name: "Preview shape-1.svg" }).click();
   expect(expand).toHaveBeenCalledOnce();

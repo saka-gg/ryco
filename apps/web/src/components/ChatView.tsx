@@ -160,7 +160,7 @@ import {
   shouldIgnoreGlobalNavigationShortcut,
   shortcutLabelForCommand,
 } from "../keybindings";
-import { ChevronDownIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
+import { ChevronDownIcon, CircleAlertIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
 import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { cn, randomUUID } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -230,7 +230,11 @@ import { markTabSwitchClick, usePerfMark } from "../perf/tabSwitchInstrumentatio
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import { resolveEffectiveEnvMode, resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
-import { ProviderStatusBanner } from "./chat/ProviderStatusBanner";
+import {
+  dismissProviderStatusNotice,
+  isProviderStatusNoticeDismissed,
+  resolveProviderStatusNotice,
+} from "./chat/providerStatusNotice";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { AgentControlApprovals } from "./agent-control/AgentControlApprovals";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
@@ -2091,6 +2095,41 @@ export default function ChatView(props: ChatViewProps) {
     const defaultInstanceId = defaultInstanceIdForDriver(selectedProvider);
     return providerStatuses.find((status) => status.instanceId === defaultInstanceId) ?? null;
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
+  const providerStatusNotice = resolveProviderStatusNotice(activeProviderStatus);
+  const [dismissedProviderStatusKey, setDismissedProviderStatusKey] = useState<string | null>(null);
+  const visibleProviderStatusNotice =
+    providerStatusNotice &&
+    providerStatusNotice.key !== dismissedProviderStatusKey &&
+    !isProviderStatusNoticeDismissed(providerStatusNotice.key)
+      ? providerStatusNotice
+      : null;
+  // Provider status joins the composer banner stack (lowest priority) instead
+  // of floating over the transcript, so it stays opaque and dismissible.
+  const composerBannerStackItems = useMemo<ComposerBannerStackItem[]>(() => {
+    if (!visibleProviderStatusNotice) {
+      return composerBannerItems;
+    }
+    const { key, variant, title, description } = visibleProviderStatusNotice;
+    return [
+      ...composerBannerItems,
+      {
+        id: `provider-status:${key}`,
+        variant,
+        icon: <CircleAlertIcon />,
+        title,
+        description: (
+          <span className="line-clamp-3" title={description}>
+            {description}
+          </span>
+        ),
+        dismissLabel: "Dismiss provider status",
+        onDismiss: () => {
+          dismissProviderStatusNotice(key);
+          setDismissedProviderStatusKey(key);
+        },
+      },
+    ];
+  }, [composerBannerItems, visibleProviderStatusNotice]);
 
   useEffect(() => {
     if (routeKind !== "server" || !gitCwd) return;
@@ -4837,16 +4876,9 @@ export default function ChatView(props: ChatViewProps) {
         onOpenChange={handleHeaderLinkedItemDialogOpenChange}
       />
 
-      {/* Provider status remains contextual to the composer. Thread errors use
+      {/* Provider status lives in the composer banner stack. Thread errors use
           the global liquid-glass notification surface instead of obscuring the
           transcript with a full-width inline strip. */}
-      <div
-        className={cn(
-          headerOverlayActive && "absolute inset-x-0 top-(--chat-header-clearance,0px) z-20",
-        )}
-      >
-        <ProviderStatusBanner status={activeProviderStatus} />
-      </div>
       <ThreadErrorBanner
         error={activeThread.error}
         threadRef={activeThreadRef}
@@ -5105,7 +5137,7 @@ export default function ChatView(props: ChatViewProps) {
                     />
                   ))
                 : null}
-              <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
+              <ComposerBannerStack className="relative z-0" items={composerBannerStackItems} />
               {presentationTier !== "phone" && batch ? (
                 <BatchResultSummary
                   batch={batch}
