@@ -241,7 +241,7 @@ export function createEnvironmentConnectionSupervisor<
     savedRetries.delete(environmentId);
   };
   const clearAllSavedRetries = () => {
-    for (const environmentId of [...savedRetries.keys()]) clearSavedRetry(environmentId);
+    for (const environmentId of savedRetries.keys()) clearSavedRetry(environmentId);
   };
   const scheduleSavedRetry = (environmentId: EnvironmentId) => {
     const retry = savedRetries.get(environmentId) ?? { failedAttempts: 0, timeoutId: null };
@@ -681,7 +681,7 @@ export function createEnvironmentConnectionSupervisor<
       stale.map((environmentId) => input.disconnectSavedEnvironment(environmentId)),
     );
     await input.waitForPrimaryShellSnapshotApplied(SAVED_ENVIRONMENT_STARTUP_DELAY_MS);
-    for (const environmentId of [...savedRetries.keys()]) {
+    for (const environmentId of savedRetries.keys()) {
       if (!expected.has(environmentId)) clearSavedRetry(environmentId);
     }
     await runSavedEnvironmentConnectionQueue(orderSavedEnvironmentConnectionQueue(records), {

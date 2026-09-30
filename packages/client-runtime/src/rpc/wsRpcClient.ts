@@ -72,15 +72,6 @@ type RpcStreamMethod<TTag extends RpcTag> =
     ? (listener: (event: TEvent) => void, options?: StreamSubscriptionOptions) => () => void
     : never;
 
-type RpcInputStreamMethod<TTag extends RpcTag> =
-  RpcMethod<TTag> extends (input: any, options?: any) => Stream.Stream<infer TEvent, any, any>
-    ? (
-        input: RpcInput<TTag>,
-        listener: (event: TEvent) => void,
-        options?: StreamSubscriptionOptions,
-      ) => () => void
-    : never;
-
 interface GitRunStackedActionOptions {
   readonly onProgress?: (event: GitActionProgressEvent) => void;
 }
