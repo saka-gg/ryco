@@ -17,7 +17,7 @@ import {
   NonNegativeInt,
 } from "@ryco/contracts";
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
-import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import { threadSettlementInput } from "./threadSettlementInput.ts";
 import { canSettleThread, type ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
 import { Effect } from "effect";
 
@@ -25,7 +25,6 @@ import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
   listThreadsByProjectId,
   listThreadsByWorktree,
-  findWorktreeById,
   requireProject,
   requireProjectAbsent,
   requireThread,
@@ -37,39 +36,6 @@ import {
   requireWorktree,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
-
-function threadSettlementInput(
-  readModel: OrchestrationReadModel,
-  thread: OrchestrationReadModel["threads"][number],
-  occurredAt: string,
-) {
-  const pendingRequests = derivePendingThreadRequestState(thread.activities);
-  const worktree = threadWorktree(readModel, thread);
-  return {
-    threadSettlementSupported: true,
-    archivedAt: thread.archivedAt,
-    deletedAt: thread.deletedAt,
-    worktreeArchivedAt: worktree?.archivedAt ?? null,
-    settledOverride: thread.settledOverride,
-    settledAt: thread.settledAt,
-    sessionStatus: thread.session?.status ?? null,
-    latestTurnState: thread.latestTurn?.state ?? null,
-    latestTurnRequestedAt: thread.latestTurn?.requestedAt ?? null,
-    latestTurnStartedAt: thread.latestTurn?.startedAt ?? null,
-    latestTurnCompletedAt: thread.latestTurn?.completedAt ?? null,
-    latestUserMessageAt: latestUserMessageAt(thread),
-    hasPendingApprovals: pendingRequests.hasPendingApprovals,
-    hasPendingUserInput: pendingRequests.hasPendingUserInput,
-    hasLocalQueuedMessage: false,
-    deliveryUnknown: false,
-    prState: worktree?.prState ?? null,
-    worktreeUpdatedAt: worktree?.updatedAt ?? null,
-    updatedAt: thread.updatedAt,
-    createdAt: thread.createdAt,
-    autoSettleAfterDays: null,
-    nowMs: Date.parse(occurredAt),
-  } satisfies import("@ryco/shared/threadSettlement").ThreadSettlementInput;
-}
 
 const nowIso = () => new Date().toISOString();
 const defaultMetadata: Omit<OrchestrationEvent, "sequence" | "type" | "payload"> = {
@@ -107,32 +73,6 @@ type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
 
 const normalizeTokenMode = (mode: AgentTokenMode | undefined): AgentTokenMode =>
   mode ?? DEFAULT_AGENT_TOKEN_MODE;
-
-function threadWorktree(
-  readModel: OrchestrationReadModel,
-  thread: OrchestrationReadModel["threads"][number],
-) {
-  if (thread.worktreeId !== null && thread.worktreeId !== undefined) {
-    return findWorktreeById(readModel, thread.worktreeId);
-  }
-  if (thread.worktreePath === null) {
-    return undefined;
-  }
-  return readModel.worktrees?.find(
-    (worktree) =>
-      worktree.projectId === thread.projectId && worktree.worktreePath === thread.worktreePath,
-  );
-}
-
-function latestUserMessageAt(thread: OrchestrationReadModel["threads"][number]): string | null {
-  return (
-    thread.messages
-      .filter((message) => message.role === "user")
-      .map((message) => message.createdAt)
-      .toSorted()
-      .at(-1) ?? null
-  );
-}
 
 function settlementBlockerDetail(blocker: ThreadSettlementBlocker): string {
   switch (blocker) {
@@ -587,6 +527,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.sidebar.undo":
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Undo requires a current server-owned sidebar receipt.",
+      });
     case "thread.archive": {
       yield* requireThreadNotArchived({
         readModel,

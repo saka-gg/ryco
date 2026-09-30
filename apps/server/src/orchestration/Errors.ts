@@ -26,6 +26,16 @@ export class OrchestrationCommandDecodeError extends Schema.TaggedError<Orchestr
   }
 }
 
+/** Retryable admission failure: no command receipt is rejected or consumed. */
+export class OrchestrationCommandAdmissionError extends Schema.TaggedError<OrchestrationCommandAdmissionError>()(
+  "OrchestrationCommandAdmissionError",
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export class OrchestrationCommandInvariantError extends Schema.TaggedError<OrchestrationCommandInvariantError>()(
   "OrchestrationCommandInvariantError",
   {
@@ -79,6 +89,7 @@ export class OrchestrationListenerCallbackError extends Schema.TaggedError<Orche
 }
 
 export type OrchestrationDispatchError =
+  | OrchestrationCommandAdmissionError
   | ProjectionRepositoryError
   | OrchestrationCommandInvariantError
   | OrchestrationCommandPreviouslyRejectedError

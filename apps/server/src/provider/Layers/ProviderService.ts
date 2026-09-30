@@ -1,3 +1,6 @@
+import { readPersistedCwd } from "../runtimeCwd.ts";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { acquireStoragePathUseLease } from "../../storage/lifecycle.ts";
 /**
  * ProviderServiceLive - Cross-provider orchestration layer.
  *
@@ -220,18 +223,6 @@ function readPersistedModelSelection(
   return Schema.is(ModelSelection)(raw) ? raw : undefined;
 }
 
-function readPersistedCwd(
-  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
-): string | undefined {
-  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
-    return undefined;
-  }
-  const rawCwd = "cwd" in runtimePayload ? runtimePayload.cwd : undefined;
-  if (typeof rawCwd !== "string") return undefined;
-  const trimmed = rawCwd.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
 const dieOnMissingBindingInstanceId = (
   operation: string,
   payload: {
@@ -272,6 +263,7 @@ const correlateRuntimeEventWithInstance = (
 const makeProviderService = Effect.fn("makeProviderService")(function* (
   options?: ProviderServiceLiveOptions,
 ) {
+  const storageSql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const analytics = yield* Effect.service(AnalyticsService);
   const eventLoggers = yield* ProviderEventLoggers;
   // Options-provided logger wins (test overrides); otherwise we take whatever
@@ -987,6 +979,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             (persistedBinding?.providerInstanceId === resolvedInstanceId
               ? readPersistedCwd(persistedBinding.runtimePayload)
               : undefined);
+          if (effectiveCwd && Option.isSome(storageSql)) {
+            const release = yield* acquireStoragePathUseLease(storageSql.value, effectiveCwd).pipe(
+              Effect.mapError((cause) =>
+                toValidationError(
+                  "ProviderService.startSession",
+                  cause instanceof Error ? cause.message : "Cannot establish checkout readiness.",
+                ),
+              ),
+            );
+            yield* Effect.addFinalizer(() => release);
+          }
           yield* Effect.annotateCurrentSpan({
             "provider.kind": resolvedProvider,
             "provider.resume_cursor.source":
@@ -1065,6 +1068,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
           return sessionWithInstance;
         }).pipe(
+          Effect.scoped,
           withMetrics({
             counter: providerSessionsTotal,
             attributes: () =>

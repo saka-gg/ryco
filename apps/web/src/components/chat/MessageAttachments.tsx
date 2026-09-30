@@ -11,6 +11,26 @@ import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
 import { formatAttachmentBytes } from "./attachmentPreview";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 
+const USER_IMAGE_MAX_WIDTH_PX = 360;
+const USER_IMAGE_MAX_HEIGHT_PX = 260;
+
+// User images sit in a shrink-to-fit card. Percentage max-widths are ignored
+// when the card measures its content, so an intrinsic 1438px-wide image would
+// stretch the card to the container while the image itself renders capped —
+// leaving an empty tinted strip. Resolve the displayed width in px up front so
+// the card hugs the image.
+function userImageStyle(width: number | undefined, height: number | undefined) {
+  if (width === undefined || height === undefined || width <= 0 || height <= 0) {
+    return { maxWidth: `${USER_IMAGE_MAX_WIDTH_PX}px` };
+  }
+  const displayWidth = Math.min(
+    USER_IMAGE_MAX_WIDTH_PX,
+    width,
+    (width * USER_IMAGE_MAX_HEIGHT_PX) / height,
+  );
+  return { width: `${Math.round(displayWidth)}px`, maxWidth: "100%" };
+}
+
 const AttachmentAudio = memo(function AttachmentAudio({
   attachment,
 }: {
@@ -126,7 +146,9 @@ export const MessageAttachments = memo(function MessageAttachments(
                         ? { width: attachment.width, height: attachment.height }
                         : {})}
                       style={
-                        props.variant === "user" ? { maxWidth: "min(100%, 360px)" } : undefined
+                        props.variant === "user"
+                          ? userImageStyle(attachment.width, attachment.height)
+                          : undefined
                       }
                       loading="lazy"
                       decoding="async"

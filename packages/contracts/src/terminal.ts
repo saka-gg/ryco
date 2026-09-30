@@ -38,6 +38,13 @@ const TerminalSessionInput = Schema.Struct({
 });
 export type TerminalSessionInput = Schema.Codec.Encoded<typeof TerminalSessionInput>;
 
+/** Ordering within one manager lifetime; never persisted across server restarts. */
+export const TerminalCursor = Schema.Struct({
+  generation: TrimmedNonEmptyString,
+  sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type TerminalCursor = typeof TerminalCursor.Type;
+
 export const TerminalOpenInput = Schema.Struct({
   ...TerminalSessionInput.fields,
   cwd: TrimmedNonEmptyStringSchema,
@@ -45,12 +52,21 @@ export const TerminalOpenInput = Schema.Struct({
   cols: Schema.optional(TerminalColsSchema),
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
+  requireCurrentWorkspace: Schema.optional(Schema.Boolean),
 });
 export type TerminalOpenInput = Schema.Codec.Encoded<typeof TerminalOpenInput>;
 
 export const TerminalWriteInput = Schema.Struct({
   ...TerminalSessionInput.fields,
   data: Schema.String.check(Schema.isNonEmpty()).check(Schema.isMaxLength(65_536)),
+  guard: Schema.optional(
+    Schema.Struct({
+      inputEpoch: TrimmedNonEmptyStringSchema,
+      outputCursor: TerminalCursor,
+      cwd: TrimmedNonEmptyStringSchema,
+      worktreePath: Schema.NullOr(TrimmedNonEmptyStringSchema),
+    }),
+  ),
 });
 export type TerminalWriteInput = Schema.Codec.Encoded<typeof TerminalWriteInput>;
 
@@ -84,13 +100,6 @@ export type TerminalCloseInput = typeof TerminalCloseInput.Type;
 export const TerminalSessionStatus = Schema.Literals(["starting", "running", "exited", "error"]);
 export type TerminalSessionStatus = typeof TerminalSessionStatus.Type;
 
-/** Ordering within one manager lifetime; never persisted across server restarts. */
-export const TerminalCursor = Schema.Struct({
-  generation: TrimmedNonEmptyString,
-  sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-});
-export type TerminalCursor = typeof TerminalCursor.Type;
-
 export const TerminalSessionSnapshot = Schema.Struct({
   threadId: Schema.String.check(Schema.isNonEmpty()),
   terminalId: Schema.String.check(Schema.isNonEmpty()),
@@ -103,6 +112,8 @@ export const TerminalSessionSnapshot = Schema.Struct({
   exitSignal: Schema.NullOr(Schema.Int),
   updatedAt: Schema.String,
   cursor: Schema.optional(TerminalCursor),
+  /** Changes on every PTY start. Required for guarded input; absent on older servers. */
+  inputEpoch: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 
@@ -180,10 +191,18 @@ export class TerminalSubscriptionResyncError extends Schema.TaggedError<Terminal
 
 export class TerminalCwdError extends Schema.TaggedError<TerminalCwdError>()("TerminalCwdError", {
   cwd: Schema.String,
-  reason: Schema.Literals(["notFound", "notDirectory", "outsideWorkspace", "statFailed"]),
+  reason: Schema.Literals([
+    "notFound",
+    "notDirectory",
+    "outsideWorkspace",
+    "statFailed",
+    "cleanupPending",
+  ]),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message() {
+    if (this.reason === "cleanupPending")
+      return "Checkout cleanup is pending or complete. Restore it before opening a terminal.";
     if (this.reason === "notDirectory") {
       return `Terminal cwd is not a directory: ${this.cwd}`;
     }
@@ -241,10 +260,16 @@ export class TerminalNotRunningError extends Schema.TaggedError<TerminalNotRunni
   }
 }
 
+export class TerminalInputRejectedError extends Schema.TaggedError<TerminalInputRejectedError>()(
+  "TerminalInputRejectedError",
+  { message: Schema.String },
+) {}
+
 export const TerminalError = Schema.Union([
   TerminalCwdError,
   TerminalHistoryError,
   TerminalSessionLookupError,
   TerminalNotRunningError,
+  TerminalInputRejectedError,
 ]);
 export type TerminalError = typeof TerminalError.Type;

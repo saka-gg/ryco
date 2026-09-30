@@ -90,6 +90,7 @@ import * as GitVcsDriver from "../src/vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../src/vcs/VcsDriverRegistry.ts";
 import { VcsStatusBroadcaster } from "../src/vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
+import { assertWorktreeSetupComplete } from "../src/project/worktreeSetupState.ts";
 import { LocalDiagnosticsMetricsLive } from "../src/observability/Services/LocalDiagnosticsMetrics.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 
@@ -338,6 +339,8 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(serverSettingsLayer),
     );
     const gitWorkflowLayer = Layer.mock(GitWorkflowService)({
+      assertWorktreeSetupComplete: (checkoutPath) =>
+        assertWorktreeSetupComplete(stateDir, checkoutPath),
       renameBranch: (input: Parameters<GitVcsDriver.GitVcsDriverShape["renameBranch"]>[0]) =>
         Effect.succeed({ branch: input.newBranch }),
     });

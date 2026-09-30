@@ -22,17 +22,17 @@ export class WorktreeRootError extends Schema.TaggedError<WorktreeRootError>()(
  * Do not turn permission errors or dangling symlinks into nonexistent ancestors.
  * No directories are created while validating a preference.
  */
-export async function canonicalizeWorktreeDirectory(candidate: string): Promise<string> {
-  let ancestor = candidate;
+async function resolveWorktreePath(candidate: string) {
+  const absoluteCandidate = path.resolve(candidate);
+  let ancestor = absoluteCandidate;
   while (true) {
     try {
       await lstat(ancestor);
       const canonical = await realpath(ancestor);
-      if (!(await lstat(canonical)).isDirectory()) {
-        throw new Error("Worktree root must be a directory.");
-      }
-      await access(canonical, constants.W_OK | constants.X_OK);
-      return path.join(canonical, path.relative(ancestor, candidate));
+      return {
+        canonicalPath: path.join(canonical, path.relative(ancestor, absoluteCandidate)),
+        existingAncestor: canonical,
+      };
     } catch (cause) {
       // A dangling link exists, so realpath's ENOENT must not walk past it.
       if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
@@ -46,6 +46,20 @@ export async function canonicalizeWorktreeDirectory(candidate: string): Promise<
       ancestor = parent;
     }
   }
+}
+
+/** One identity for existing and missing worktree paths; no writable-access requirement.
+ * Shared by destination locks, journal lookup and Git-registration comparisons.
+ */
+export const canonicalizeWorktreePath = async (candidate: string): Promise<string> =>
+  (await resolveWorktreePath(candidate)).canonicalPath;
+
+export async function canonicalizeWorktreeDirectory(candidate: string): Promise<string> {
+  const resolved = await resolveWorktreePath(candidate);
+  if (!(await lstat(resolved.existingAncestor)).isDirectory())
+    throw new Error("Worktree root must be a directory.");
+  await access(resolved.existingAncestor, constants.W_OK | constants.X_OK);
+  return resolved.canonicalPath;
 }
 
 export const validateWorktreeRoot = (value: string, policy: WorkspaceAccessPolicyShape) =>

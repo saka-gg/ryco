@@ -6,7 +6,7 @@ import type { UsageProviderKind } from "@ryco/contracts";
 import type { UsageRecord } from "./usageRecord.ts";
 import { withTokenTotal } from "./usageRecord.ts";
 
-export const USAGE_SCAN_CACHE_VERSION = 2 as const;
+export const USAGE_SCAN_CACHE_VERSION = 3 as const;
 
 export interface CachedUsageFile {
   readonly rootKey: string;
@@ -14,6 +14,7 @@ export interface CachedUsageFile {
   readonly mtimeMs: number;
   readonly provider: UsageProviderKind;
   readonly records: readonly UsageRecord[];
+  readonly fingerprint?: string;
 }
 
 export type UsageScanCache = Map<string, CachedUsageFile>;
@@ -26,12 +27,14 @@ type SerializedRecord = readonly [
   cachedInputTokens: number,
   cacheCreationInputTokens: number,
   outputTokens: number,
-  reasoningTokens: number,
+  reasoningTokens: number | null,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  authoritativeTotal?: number,
 ];
 
 interface SerializedFile {
+  readonly f?: string;
   readonly o: string;
   readonly s: number;
   readonly m: number;
@@ -106,6 +109,7 @@ export function encodeUsageScanCache(cache: UsageScanCache): SerializedCache {
   for (const [fileKey, entry] of cache) {
     files[fileKey] = {
       o: entry.rootKey,
+      ...(entry.fingerprint === undefined ? {} : { f: entry.fingerprint }),
       s: entry.size,
       m: entry.mtimeMs,
       p: entry.provider,
@@ -117,9 +121,10 @@ export function encodeUsageScanCache(cache: UsageScanCache): SerializedCache {
         record.totals.cachedInputTokens,
         record.totals.cacheCreationInputTokens,
         record.totals.outputTokens,
-        record.totals.reasoningTokens,
+        record.totals.reasoningTokens ?? null,
         record.dedupeKey,
         record.reportedCostUsd,
+        record.totals.totalTokens,
       ]),
     };
   }
@@ -135,7 +140,7 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
   if (typeof document !== "object" || document === null) return cache;
   const root = document as Partial<SerializedCache>;
   if (
-    root.version !== USAGE_SCAN_CACHE_VERSION ||
+    (root.version !== USAGE_SCAN_CACHE_VERSION && root.version !== 2) ||
     !isArray(root.models) ||
     !root.models.every((value) => typeof value === "string") ||
     !isArray(root.sessions) ||
@@ -146,6 +151,13 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
     return cache;
   }
 
+  if (
+    root.models.length > 50_000 ||
+    root.sessions.length > 250_000 ||
+    Object.keys(root.files).length > 10_000
+  )
+    return cache;
+  let decodedRecordCount = 0;
   const models = root.models as readonly string[];
   const sessions = root.sessions as readonly string[];
   for (const [fileKey, rawEntry] of Object.entries(root.files)) {
@@ -158,12 +170,14 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
       !Number.isFinite(entry.s) ||
       typeof entry.m !== "number" ||
       !Number.isFinite(entry.m) ||
-      (entry.p !== "claude" && entry.p !== "codex") ||
+      !["claude", "codex", "cursor", "opencode"].includes(entry.p ?? "") ||
       !isArray(entry.r)
     ) {
       continue;
     }
 
+    if (entry.r.length > 100_000 || decodedRecordCount + entry.r.length > 250_000) continue;
+    decodedRecordCount += entry.r.length;
     const records: UsageRecord[] = [];
     let corrupt = false;
     for (const rawRow of entry.r) {
@@ -182,36 +196,50 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        authoritativeTotal,
       ] = rawRow as SerializedRecord;
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
       const sessionId = typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined;
-      const tokens = [uncached, cached, cacheCreation, output, reasoning];
+      const tokens = [uncached, cached, cacheCreation, output];
       if (
         typeof timestampMs !== "number" ||
         !Number.isFinite(timestampMs) ||
+        timestampMs < 0 ||
+        timestampMs > 8.64e15 ||
+        (authoritativeTotal !== undefined &&
+          (typeof authoritativeTotal !== "number" ||
+            !Number.isFinite(authoritativeTotal) ||
+            authoritativeTotal < 0)) ||
         model === undefined ||
         sessionId === undefined ||
+        (reasoning !== null &&
+          (typeof reasoning !== "number" || !Number.isFinite(reasoning) || reasoning < 0)) ||
         tokens.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0) ||
         (dedupeKey !== null && typeof dedupeKey !== "string") ||
         (reportedCostUsd !== null &&
-          (typeof reportedCostUsd !== "number" || !Number.isFinite(reportedCostUsd)))
+          (typeof reportedCostUsd !== "number" ||
+            !Number.isFinite(reportedCostUsd) ||
+            reportedCostUsd < 0))
       ) {
         corrupt = true;
         break;
       }
 
       records.push({
-        provider: entry.p,
+        provider: entry.p as UsageProviderKind,
         timestampMs,
         model,
         sessionId,
-        totals: withTokenTotal({
-          uncachedInputTokens: uncached,
-          cachedInputTokens: cached,
-          cacheCreationInputTokens: cacheCreation,
-          outputTokens: output,
-          reasoningTokens: reasoning,
-        }),
+        totals: {
+          ...withTokenTotal({
+            uncachedInputTokens: uncached,
+            cachedInputTokens: cached,
+            cacheCreationInputTokens: cacheCreation,
+            outputTokens: output,
+            ...(reasoning === null ? {} : { reasoningTokens: reasoning }),
+          }),
+          ...(authoritativeTotal === undefined ? {} : { totalTokens: authoritativeTotal }),
+        },
         dedupeKey,
         reportedCostUsd,
       });
@@ -219,9 +247,10 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
     if (!corrupt) {
       cache.set(fileKey, {
         rootKey: entry.o,
+        ...(typeof entry.f === "string" ? { fingerprint: entry.f } : {}),
         size: entry.s,
         mtimeMs: entry.m,
-        provider: entry.p,
+        provider: entry.p as UsageProviderKind,
         records,
       });
     }

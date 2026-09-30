@@ -1,5 +1,5 @@
 import { ServerSettings, type ServerSettingsPatch } from "@ryco/contracts";
-import { Schema } from "effect";
+import { Equal, Schema } from "effect";
 import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
 import { createModelSelection } from "./model.ts";
@@ -75,7 +75,56 @@ export function applyServerSettingsPatch(
   patch: ServerSettingsPatch,
 ): ServerSettings {
   const selectionPatch = patch.textGenerationModelSelection;
-  let next = deepMerge(current, patch);
+  for (const [field, value] of Object.entries(patch.expectedNodePreferences ?? {})) {
+    if (!Equal.equals(current[field as keyof typeof current] ?? null, value))
+      throw new Error("Node preferences changed elsewhere. Reload before saving.");
+  }
+  for (const [projectId, expected] of Object.entries(patch.expectedProjectPreferences ?? {})) {
+    const currentPreferences = current.projectPreferences[projectId] ?? {};
+    for (const [field, value] of Object.entries(expected)) {
+      const actual =
+        field === "initialModelSelection" && !Object.hasOwn(currentPreferences, field)
+          ? "absent"
+          : (currentPreferences[field as keyof typeof currentPreferences] ?? null);
+      if (!Equal.equals(actual, value))
+        throw new Error("Project preferences changed elsewhere. Reload before saving.");
+    }
+  }
+  const {
+    expectedProjectPreferences: _expected,
+    expectedNodePreferences: _expectedNode,
+    projectPreferences: _projects,
+    ...persistedPatch
+  } = patch;
+  let next = deepMerge(current, persistedPatch);
+  if (patch.initialModelSelection !== undefined)
+    next = { ...next, initialModelSelection: patch.initialModelSelection };
+  if (patch.projectPreferences !== undefined) {
+    const projects = new Map(Object.entries(current.projectPreferences));
+    for (const [projectId, preferencesPatch] of Object.entries(patch.projectPreferences)) {
+      if (preferencesPatch === null) {
+        projects.delete(projectId);
+        continue;
+      }
+      const preferences = { ...projects.get(projectId) };
+      for (const [field, value] of Object.entries(preferencesPatch)) {
+        if (value === null && field !== "initialModelSelection")
+          delete preferences[field as keyof typeof preferences];
+        else Object.assign(preferences, { [field]: value });
+      }
+      if (Object.keys(preferences).length) projects.set(projectId, preferences);
+      else projects.delete(projectId);
+    }
+    next = { ...next, projectPreferences: Object.fromEntries(projects) };
+  }
+  if (patch.projectWorktreeSubmodules !== undefined) {
+    const modes = new Map(Object.entries(current.projectWorktreeSubmodules));
+    for (const [projectId, mode] of Object.entries(patch.projectWorktreeSubmodules)) {
+      if (mode === null) modes.delete(projectId);
+      else modes.set(projectId, mode);
+    }
+    next = { ...next, projectWorktreeSubmodules: Object.fromEntries(modes) };
+  }
   if (patch.projectWorktreeRoots !== undefined) {
     const roots = new Map(Object.entries(current.projectWorktreeRoots));
     for (const [projectId, root] of Object.entries(patch.projectWorktreeRoots)) {
@@ -83,6 +132,14 @@ export function applyServerSettingsPatch(
       else roots.set(projectId, root);
     }
     next = { ...next, projectWorktreeRoots: Object.fromEntries(roots) };
+  }
+  if (patch.projectStorageRetention !== undefined) {
+    const policies = new Map(Object.entries(current.projectStorageRetention));
+    for (const [projectId, policy] of Object.entries(patch.projectStorageRetention)) {
+      if (policy === null) policies.delete(projectId);
+      else policies.set(projectId, policy);
+    }
+    next = { ...next, projectStorageRetention: Object.fromEntries(policies) };
   }
   const nextWithReplacements =
     patch.providerInstances !== undefined

@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./worktreeSubmodules": "./src/worktreeSubmodules.ts",
+    "./terminalPaste": "./src/terminalPaste.ts",
     "./retiredFeatures": "./src/retiredFeatures.ts",
     "./backgroundWork": {
       "types": "./src/backgroundWork.ts",
@@ -318,7 +320,8 @@
     "./pairingUrl": {
       "types": "./src/pairingUrl.ts",
       "import": "./src/pairingUrl.ts"
-    }
+    },
+    "./storageRetention": "./src/storageRetention.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -1,3 +1,5 @@
+import { workspaceSessionActive } from "../workspace/lifecycleSafety.ts";
+export { workspaceSessionActive } from "../workspace/lifecycleSafety.ts";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
@@ -30,13 +32,6 @@ const syntheticId = (projectId: string, directory: string) =>
   `synthetic-${createHash("sha256")
     .update(`${projectId}:${normalized(directory)}`)
     .digest("hex")}`;
-
-export const workspaceSessionActive = (thread: OrchestrationShellSnapshot["threads"][number]) =>
-  thread.session?.status === "running" ||
-  thread.session?.status === "starting" ||
-  thread.session?.activeTurnId != null ||
-  Boolean(thread.backgroundLiveness) ||
-  thread.latestTurn?.state === "running";
 
 export const workspacePlanBlockers = (
   plan: AgentControlWorkspaceLifecyclePlan,

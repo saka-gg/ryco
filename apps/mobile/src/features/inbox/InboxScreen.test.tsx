@@ -14,7 +14,12 @@ vi.mock("react-native", () => ({
 }));
 vi.mock("@react-native-menu/menu", () => ({ MenuView: "MenuView" }));
 vi.mock("@legendapp/list/react-native", () => ({ LegendList: "LegendList" }));
-vi.mock("../../connection/environmentApi", () => ({ ensureEnvironmentApi: rpc.lookup }));
+vi.mock("../../state/sidebarUndo", () => ({
+  sidebarUndo: {
+    dispatch: (target: { environmentId: string }, command: unknown) =>
+      rpc.lookup(target.environmentId).orchestration.dispatchCommand(command),
+  },
+}));
 vi.mock("../../lib/ids", () => ({ newCommandId: () => "command" }));
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));

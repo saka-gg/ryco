@@ -37,6 +37,7 @@ import { ProvidersSettingsPanel } from "./ProvidersSettingsPanel";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { useState } from "react";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
+import { WorktreeSubmoduleEditor } from "./WorktreeSubmoduleSettings";
 import { WorktreeRootEditor } from "./WorktreeRootSettings";
 import { GeneralSettingsPanel } from "./SettingsPanels";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
@@ -594,9 +595,22 @@ describe("GeneralSettingsPanel observability", () => {
     useTierOverrideStore.setState({ override: null });
   });
 
-  function WorktreeSettingsHarness({ disabled = false }: { disabled?: boolean }) {
+  function WorktreeSettingsHarness({
+    disabled = false,
+    olderNode = false,
+  }: {
+    disabled?: boolean;
+    olderNode?: boolean;
+  }) {
     const [config, setConfig] = useState<ServerConfig>(() => ({
       ...createBaseServerConfig(),
+      environment: {
+        ...createBaseServerConfig().environment,
+        capabilities: {
+          ...createBaseServerConfig().environment.capabilities,
+          ...(olderNode ? {} : { worktreeSubmoduleSettings: true }),
+        },
+      },
       settings: {
         ...DEFAULT_SERVER_SETTINGS,
         worktreeRoot: "/volumes/default",
@@ -625,6 +639,13 @@ describe("GeneralSettingsPanel observability", () => {
             canManage: !disabled,
           }}
         >
+          <WorktreeSubmoduleEditor
+            projects={[
+              { id: "projectA", title: "Project A" },
+              { id: "projectB", title: "Project B" },
+            ]}
+            disabled={disabled}
+          />
           <WorktreeRootEditor
             projects={[
               { id: "projectA", title: "Project A" },
@@ -636,6 +657,80 @@ describe("GeneralSettingsPanel observability", () => {
       </AppAtomRegistryProvider>
     );
   }
+
+  it("saves all submodule choices to the selected node and resets project inheritance", async () => {
+    await page.viewport(1280, 800);
+    mounted = await render(<WorktreeSettingsHarness />);
+    const mode = page.getByRole("combobox", { name: "Worktree submodule initialization" });
+    for (const [label, value] of [
+      ["Top-level only", "top-level"],
+      ["None", "none"],
+      ["Recursive", "recursive"],
+    ] as const) {
+      await mode.click();
+      await page.getByRole("option", { name: label, exact: true }).click();
+      await expect
+        .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
+        .toEqual(["environment-local", { worktreeSubmodules: value }]);
+      await expect.element(mode).toHaveTextContent(label);
+    }
+    await page.getByRole("combobox", { name: "Worktree submodules scope" }).click();
+    await page.getByRole("option", { name: "Project A", exact: true }).click();
+    await expect.element(mode).toHaveTextContent("Inherit");
+    await mode.click();
+    await page.getByRole("option", { name: "None", exact: true }).click();
+    await expect
+      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
+      .toEqual(["environment-local", { projectWorktreeSubmodules: { projectA: "none" } }]);
+    await mode.click();
+    await page.getByRole("option", { name: "Inherit", exact: true }).click();
+    await expect
+      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
+      .toEqual(["environment-local", { projectWorktreeSubmodules: { projectA: null } }]);
+    await expect.element(mode).toHaveTextContent("Inherit");
+  });
+
+  it("keeps submodule settings disabled for unavailable mutation authority", async () => {
+    mounted = await render(<WorktreeSettingsHarness disabled />);
+    await expect
+      .element(page.getByRole("combobox", { name: "Worktree submodule initialization" }))
+      .toBeDisabled();
+    await expect
+      .element(page.getByRole("combobox", { name: "Worktree submodules scope" }))
+      .toBeDisabled();
+    expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
+  });
+
+  it("guards submodule settings when an older node would ignore the patch", async () => {
+    mounted = await render(<WorktreeSettingsHarness olderNode />);
+    mockUpdateEnvironmentServerSettings.mockImplementation(async () => DEFAULT_SERVER_SETTINGS);
+    await expect
+      .element(page.getByRole("combobox", { name: "Worktree submodule initialization" }))
+      .toBeDisabled();
+    await expect
+      .element(page.getByRole("combobox", { name: "Worktree submodules scope" }))
+      .toBeDisabled();
+    await expect
+      .element(
+        page.getByText("This node does not support configurable submodules.", { exact: false }),
+      )
+      .toBeVisible();
+    expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
+  });
+
+  it("shows submodule save failures while retaining the saved selection", async () => {
+    mounted = await render(<WorktreeSettingsHarness />);
+    mockUpdateEnvironmentServerSettings.mockRejectedValueOnce(
+      new Error("Reconnect before changing node settings."),
+    );
+    const mode = page.getByRole("combobox", { name: "Worktree submodule initialization" });
+    await mode.click();
+    await page.getByRole("option", { name: "None", exact: true }).click();
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Reconnect before changing node settings.");
+    await expect.element(mode).toHaveTextContent("Recursive");
+  });
 
   it("saves worktree roots to the selected environment and resets project inheritance", async () => {
     mockUpdateEnvironmentServerSettings.mockClear();

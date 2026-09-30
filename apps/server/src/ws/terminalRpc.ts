@@ -1,5 +1,11 @@
-import { Cause, Effect, Queue, Stream } from "effect";
-import { type TerminalEvent, TerminalSubscriptionResyncError, WS_METHODS } from "@ryco/contracts";
+import { Cause, Effect, Option, Queue, Stream } from "effect";
+import {
+  ThreadId,
+  TerminalInputRejectedError,
+  type TerminalEvent,
+  TerminalSubscriptionResyncError,
+  WS_METHODS,
+} from "@ryco/contracts";
 
 import {
   approximateJsonBytes,
@@ -72,12 +78,59 @@ export function makeTerminalSubscriberOffer(
 
 export const makeTerminalHandlers = (ctx: WsRpcContext) => {
   const { ownerEffect, ownerStream, terminalManager } = ctx;
+  const assertCurrentWorkspace = (input: {
+    threadId: string;
+    cwd: string;
+    worktreePath?: string | null | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const thread = yield* ctx.projectionSnapshotQuery
+        .getThreadShellById(ThreadId.make(input.threadId))
+        .pipe(
+          Effect.mapError(
+            () =>
+              new TerminalInputRejectedError({
+                message: "Current thread workspace is unavailable.",
+              }),
+          ),
+        );
+      if (Option.isNone(thread)) {
+        return yield* new TerminalInputRejectedError({
+          message: "Current thread workspace is unavailable.",
+        });
+      }
+      const project = yield* ctx.projectionSnapshotQuery
+        .getProjectShellById(thread.value.projectId)
+        .pipe(
+          Effect.mapError(
+            () =>
+              new TerminalInputRejectedError({
+                message: "Current thread workspace is unavailable.",
+              }),
+          ),
+        );
+      if (
+        Option.isNone(project) ||
+        (thread.value.worktreePath ?? project.value.workspaceRoot) !== input.cwd ||
+        thread.value.worktreePath !== (input.worktreePath ?? null)
+      ) {
+        return yield* new TerminalInputRejectedError({
+          message: "Thread workspace changed or is unavailable. Insert the snippet again.",
+        });
+      }
+    });
 
   return defineWsHandlers({
     [WS_METHODS.terminalOpen]: (input) =>
       observeRpcEffect(
         WS_METHODS.terminalOpen,
-        ownerEffect(WS_METHODS.terminalOpen, terminalManager.open(input)),
+        ownerEffect(
+          WS_METHODS.terminalOpen,
+          Effect.gen(function* () {
+            if (input.requireCurrentWorkspace) yield* assertCurrentWorkspace(input);
+            return yield* terminalManager.open(input);
+          }),
+        ),
         {
           "rpc.aggregate": "terminal",
         },
@@ -85,7 +138,21 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
     [WS_METHODS.terminalWrite]: (input) =>
       observeRpcEffect(
         WS_METHODS.terminalWrite,
-        ownerEffect(WS_METHODS.terminalWrite, terminalManager.write(input)),
+        ownerEffect(
+          WS_METHODS.terminalWrite,
+          Effect.gen(function* () {
+            if (!input.guard) return yield* terminalManager.write(input);
+            const canCommit = ctx.orchestrationEngine.captureThreadWorkspace?.({
+              threadId: input.threadId,
+              ...input.guard,
+            });
+            if (!canCommit)
+              return yield* new TerminalInputRejectedError({
+                message: "Current thread workspace authority is unavailable. Nothing was sent.",
+              });
+            return yield* terminalManager.write(input, canCommit);
+          }),
+        ),
         {
           "rpc.aggregate": "terminal",
         },

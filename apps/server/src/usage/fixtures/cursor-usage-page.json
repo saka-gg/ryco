@@ -1,0 +1,57 @@
+{
+  "totalUsageEventsCount": 3,
+  "pagination": {
+    "numPages": 1,
+    "currentPage": 1,
+    "pageSize": 100,
+    "hasNextPage": false,
+    "hasPreviousPage": false
+  },
+  "period": { "startDate": 1786060800000, "endDate": 1786147199999 },
+  "usageEvents": [
+    {
+      "timestamp": "1786060800000",
+      "userEmail": "personal@example.invalid",
+      "conversationId": "fixture-conversation",
+      "model": "claude-4.5-sonnet",
+      "kind": "Usage-based",
+      "requestsCosts": 5,
+      "isTokenBasedCall": true,
+      "isChargeable": true,
+      "isHeadless": true,
+      "tokenUsage": {
+        "inputTokens": 126,
+        "outputTokens": 450,
+        "cacheWriteTokens": 6112,
+        "cacheReadTokens": 11964,
+        "totalCents": 20.18232
+      },
+      "chargedCents": 21.36232,
+      "cursorTokenFee": 1.18
+    },
+    {
+      "timestamp": "1786060801000",
+      "userEmail": "personal@example.invalid",
+      "model": "claude-4-sonnet-thinking",
+      "kind": "Included in Business",
+      "requestsCosts": 1.4,
+      "isTokenBasedCall": false,
+      "chargedCents": 8
+    },
+    {
+      "timestamp": "1786060802000",
+      "userEmail": "work@example.invalid",
+      "conversationId": "fixture-work",
+      "model": "unknown-model",
+      "isTokenBasedCall": true,
+      "tokenUsage": {
+        "inputTokens": 900,
+        "outputTokens": 100,
+        "cacheWriteTokens": 0,
+        "cacheReadTokens": 0,
+        "totalCents": 50
+      },
+      "chargedCents": 60
+    }
+  ]
+}

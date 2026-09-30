@@ -1,3 +1,6 @@
+import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
+import { sidebarUndo } from "./sidebarUndo";
+import { stackedThreadToast, toastManager } from "./components/ui/toast";
 import { readLocalApi } from "./localApi";
 import { useUiStateStore } from "./uiStateStore";
 
@@ -38,7 +41,20 @@ interface ThreadPinDependencies {
 
 const defaultDependencies: ThreadPinDependencies = {
   isPinned: (threadKey) => useUiStateStore.getState().pinnedThreadKeys[threadKey] === true,
-  setPinned: (threadKey, pinned) => useUiStateStore.getState().setThreadPinned(threadKey, pinned),
+  setPinned: (threadKey, pinned) => {
+    const target = parseScopedThreadKey(threadKey);
+    if (!target) return;
+    if (pinned) {
+      sidebarUndo.supersede(target);
+      useUiStateStore.getState().setThreadPinned(threadKey, true);
+    } else {
+      sidebarUndo.unpin(target, {
+        read: () => useUiStateStore.getState().pinnedThreadKeys[threadKey] === true,
+        write: (next) => useUiStateStore.getState().setThreadPinned(threadKey, next),
+        subscribe: (listener) => useUiStateStore.subscribe(listener),
+      });
+    }
+  },
   confirm: async (message) => {
     const localApi = readLocalApi();
     return localApi ? localApi.dialogs.confirm(message) : window.confirm(message);
@@ -66,7 +82,18 @@ export async function requestThreadPinChange(
   ) {
     return "cancelled";
   }
-  dependencies.setPinned(input.threadKey, input.pinned);
+  try {
+    dependencies.setPinned(input.threadKey, input.pinned);
+  } catch (error) {
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Could not update pin",
+        description: error instanceof Error ? error.message : "The request failed.",
+      }),
+    );
+    return "unchanged";
+  }
   return "changed";
 }
 

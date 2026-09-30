@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { Cause, Effect, Exit, Fiber, Queue, Stream } from "effect";
+import { Cause, Effect, Exit, Fiber, Option, Queue, Stream } from "effect";
 import {
   type TerminalEvent,
   type TerminalSessionSnapshot,
@@ -26,6 +26,100 @@ const snapshot: TerminalSessionSnapshot = {
   exitSignal: null,
   updatedAt: "2026-08-12T00:00:00.000Z",
 };
+
+describe("guarded terminal workspace admission", () => {
+  it.effect("uses the owning thread's current canonical workspace for creation and insertion", () =>
+    Effect.gen(function* () {
+      const writes: unknown[] = [];
+      const opens: unknown[] = [];
+      let worktreePath: string | null = "/synthetic/worktree";
+      const handlers = makeTerminalHandlers({
+        ownerEffect: (_method: string, effect: Effect.Effect<unknown>) => effect,
+        terminalManager: {
+          open: (input: unknown) =>
+            Effect.sync(() => {
+              opens.push(input);
+              return snapshot;
+            }),
+          write: (input: unknown) =>
+            Effect.sync(() => {
+              writes.push(input);
+            }),
+        },
+        orchestrationEngine: {
+          captureThreadWorkspace: (input: { cwd: string; worktreePath: string | null }) =>
+            input.cwd === worktreePath && input.worktreePath === worktreePath
+              ? () => input.cwd === worktreePath
+              : undefined,
+        },
+        projectionSnapshotQuery: {
+          getThreadShellById: (threadId: string) =>
+            Effect.succeed(
+              threadId === "thread-1"
+                ? Option.some({ projectId: "project-1", worktreePath })
+                : Option.none(),
+            ),
+          getProjectShellById: () =>
+            Effect.succeed(Option.some({ workspaceRoot: "/synthetic/project" })),
+        },
+      } as unknown as WsRpcContext);
+      const input = {
+        threadId: "thread-1",
+        terminalId: "fresh",
+        cwd: worktreePath!,
+        worktreePath,
+        requireCurrentWorkspace: true,
+      };
+      yield* handlers[WS_METHODS.terminalOpen](input);
+      const write = {
+        threadId: "thread-1",
+        terminalId: "fresh",
+        data: "\x1b[200~printf 'a'\x1b[201~",
+        guard: {
+          inputEpoch: "process",
+          outputCursor: { generation: "server", sequence: 1 },
+          cwd: input.cwd,
+          worktreePath,
+        },
+      };
+      yield* handlers[WS_METHODS.terminalWrite](write);
+      worktreePath = "/synthetic/new-worktree";
+      const failedWrite = yield* handlers[WS_METHODS.terminalWrite](write).pipe(Effect.exit);
+      const failedOpen = yield* handlers[WS_METHODS.terminalOpen](input).pipe(Effect.exit);
+      const absent = yield* handlers[WS_METHODS.terminalOpen]({
+        ...input,
+        threadId: "other-thread",
+      }).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(failedWrite));
+      assert.isTrue(Exit.isFailure(failedOpen));
+      assert.isTrue(Exit.isFailure(absent));
+      assert.equal(writes.length, 1);
+      assert.equal(opens.length, 1);
+    }),
+  );
+  it.effect("runs owner authorization before any guarded workspace lookup or terminal write", () =>
+    Effect.gen(function* () {
+      const handlers = makeTerminalHandlers({
+        ownerEffect: () => Effect.fail(new Error("owner required")),
+        terminalManager: { write: () => Effect.die("must not write") },
+        projectionSnapshotQuery: { getThreadShellById: () => Effect.die("must not read") },
+      } as unknown as WsRpcContext);
+      const result = yield* handlers[WS_METHODS.terminalWrite]({
+        threadId: "thread-1",
+        terminalId: "fresh",
+        data: "paste",
+        guard: {
+          inputEpoch: "process",
+          outputCursor: { generation: "server", sequence: 1 },
+          cwd: "/synthetic",
+          worktreePath: null,
+        },
+      }).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
+      if (Exit.isFailure(result)) assert.match(result.cause.toString(), /owner required/);
+    }),
+  );
+});
 
 describe("terminal subscription bootstrap", () => {
   const fixture = (

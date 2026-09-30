@@ -87,7 +87,22 @@ export function parseDesktopResourceTelemetry(
     )
       return null;
   }
-  return value as unknown as DesktopResourceTelemetrySnapshot;
+  const snapshot = value as unknown as DesktopResourceTelemetrySnapshot;
+  // Electron exposes fractional milliseconds; the native monitor and public
+  // telemetry contracts use whole milliseconds for identities and CPU counters.
+  return {
+    ...snapshot,
+    processes: snapshot.processes.map((entry) => ({
+      pid: entry.pid,
+      startTimeMs: Math.trunc(entry.startTimeMs),
+      type: entry.type,
+      cpuPercent: entry.cpuPercent,
+      cpuTimeMs: Math.trunc(entry.cpuTimeMs),
+      residentBytes: entry.residentBytes,
+      privateBytes: entry.privateBytes,
+      idleWakeupsPerSecond: entry.idleWakeupsPerSecond,
+    })),
+  };
 }
 
 /** Reject oversized frames before parsing and bound unterminated input. */

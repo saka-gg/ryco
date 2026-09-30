@@ -42,7 +42,7 @@ describe("Usage contracts", () => {
       Schema.decodeUnknownSync(UsageSummaryRequest)({
         endDate: "2026-08-10",
         timeZone: "UTC",
-        contractVersion: 99,
+        contractVersion: -1,
       }),
     ).toThrow();
   });
@@ -124,4 +124,29 @@ describe("Usage contracts", () => {
     expect(decoded.buckets[0]?.tokens.reasoningTokens).toBe(15);
     expect(decoded.sources[0]?.distinctSessionCount).toBe(1);
   });
+});
+
+it("accepts anonymous export buckets and keeps unavailable reasoning absent", () => {
+  const decoded = Schema.decodeUnknownSync(UsageDailyBucket)({
+    sourceId: "hash",
+    exportRecordId: "event-hash",
+    exportSessionId: "session-hash",
+    date: "2026-08-10",
+    provider: "cursor",
+    model: "unknown",
+    tokens: {
+      uncachedInputTokens: 1,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      outputTokens: 1,
+      totalTokens: 2,
+    },
+    responseCount: 1,
+    sessionCount: 1,
+    pricedTokenCount: 0,
+    unpricedTokenCount: 2,
+    costSource: "unpriced",
+  });
+  expect(decoded.tokens.reasoningTokens).toBeUndefined();
+  expect(decoded.exportRecordId).toBe("event-hash");
 });

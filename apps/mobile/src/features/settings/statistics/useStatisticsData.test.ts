@@ -58,3 +58,11 @@ describe("mobile statistics loading", () => {
     );
   });
 });
+
+it("shows stale-contract update instructions returned by the shared transport", async () => {
+  const { UsageContractMismatchError } = await import("@ryco/client-runtime/usage");
+  rpc.server.getUsageSummary.mockRejectedValue(new UsageContractMismatchError());
+  const result = await loadNodeStatistics(environment, "usage", "30d");
+  expect(result.usage?.status).toBe("stale-contract");
+  expect(result.error).toContain("Update Ryco");
+});

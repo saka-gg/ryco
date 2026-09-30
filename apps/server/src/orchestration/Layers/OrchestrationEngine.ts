@@ -1,3 +1,8 @@
+import {
+  storageLifecycleLock,
+  isStoragePathBlocked,
+  canonicalStoragePath,
+} from "../../storage/lifecycle.ts";
 import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import { ApprovalRequestId } from "@ryco/contracts";
@@ -44,12 +49,16 @@ import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
+  OrchestrationCommandAdmissionError,
   OrchestrationCommandInvariantError,
   OrchestrationCommandPreviouslyRejectedError,
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
+import { findThreadWorktree } from "../commandInvariants.ts";
+import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
+import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -62,6 +71,7 @@ interface CommandEnvelope {
   command: OrchestrationCommand;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   startedAtMs: number;
+  admission?: Parameters<OrchestrationEngineShape["dispatch"]>[1];
 }
 
 function commandToAggregateRef(command: OrchestrationCommand): {
@@ -90,6 +100,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
       };
     case "thread.create":
     case "thread.delete":
+    case "thread.sidebar.undo":
     case "thread.archive":
     case "thread.unarchive":
     case "thread.snooze":
@@ -140,7 +151,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
 
+  const sidebarUndo = createSidebarUndoReceipts();
   let commandReadModel = createEmptyReadModel(new Date().toISOString());
+
+  let workspaceAuthorityHealthy = true;
+  const workspaceCommitFence = createWorkspaceCommitFence(() => commandReadModel);
 
   const commandQueue = yield* Queue.bounded<CommandEnvelope>(1_024);
   const commandQueueMetrics = yield* makeServerQueueMetrics({
@@ -174,10 +189,14 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         eventStore.readFromSequence(dispatchStartSequence),
       ).pipe(Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)));
       if (persistedEvents.length === 0) {
+        workspaceCommitFence.publish();
+        workspaceAuthorityHealthy = true;
         return;
       }
 
       commandReadModel = yield* projectEventsOntoReadModel(commandReadModel, persistedEvents);
+      workspaceCommitFence.publish();
+      workspaceAuthorityHealthy = true;
 
       for (const persistedEvent of persistedEvents) {
         yield* PubSub.publish(eventPubSub, persistedEvent);
@@ -206,6 +225,74 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             commandId: envelope.command.commandId,
             detail: existingReceipt.value.error ?? "Previously rejected.",
           });
+        }
+
+        const storageCommand = envelope.command;
+        const storageReadinessError = (detail: string, cause?: unknown) =>
+          storageCommand.type === "thread.history.import"
+            ? new OrchestrationCommandAdmissionError({ detail })
+            : new OrchestrationCommandInvariantError({
+                commandType: storageCommand.type,
+                detail,
+                cause,
+              });
+        const storageThread =
+          "threadId" in storageCommand
+            ? commandReadModel.threads.find((thread) => thread.id === storageCommand.threadId)
+            : undefined;
+        const storageThreadPaths = storageThread
+          ? [
+              storageThread.worktreePath,
+              findThreadWorktree(commandReadModel, storageThread)?.worktreePath,
+              storageThread.worktreePath ??
+                commandReadModel.projects.find((project) => project.id === storageThread.projectId)
+                  ?.workspaceRoot,
+            ]
+          : [];
+        const storagePaths =
+          storageCommand.type === "thread.history.import"
+            ? [
+                commandReadModel.projects.find((project) => project.id === storageCommand.projectId)
+                  ?.workspaceRoot,
+              ]
+            : "worktreePath" in storageCommand
+              ? [storageCommand.worktreePath]
+              : storageCommand.type === "thread.attach-to-worktree"
+                ? [
+                    commandReadModel.worktrees?.find(
+                      (worktree) => worktree.worktreeId === storageCommand.worktreeId,
+                    )?.worktreePath,
+                  ]
+                : storageCommand.type === "thread.sidebar.undo" ||
+                    storageCommand.type === "thread.turn.start" ||
+                    storageCommand.type === "thread.turn.steer" ||
+                    storageCommand.type === "thread.goal.set"
+                  ? storageThreadPaths
+                  : [];
+        // ID attachment and legacy path metadata can coexist. Neither may
+        // replace the other's admission guard; providers still use the legacy
+        // path (or project cwd). Resolve aliases and check their complete union.
+        const canonicalPaths = new Set<string>();
+        for (const storagePath of new Set(storagePaths)) {
+          if (!storagePath) continue;
+          const canonicalPath = yield* Effect.tryPromise(() =>
+            canonicalStoragePath(storagePath),
+          ).pipe(
+            Effect.mapError((cause) =>
+              storageReadinessError("Cannot establish checkout readiness.", cause),
+            ),
+          );
+          if (canonicalPaths.has(canonicalPath)) continue;
+          canonicalPaths.add(canonicalPath);
+          if (
+            yield* isStoragePathBlocked(sql, canonicalPath).pipe(
+              Effect.mapError(toPersistenceSqlError("storage.readiness")),
+            )
+          ) {
+            return yield* storageReadinessError(
+              "Checkout cleanup is pending or complete. Restore/recreate the checkout before starting work.",
+            );
+          }
         }
 
         if (
@@ -252,86 +339,114 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             isQuestion ? "user-input" : "approval",
           );
         }
-        const eventBase = yield* decideOrchestrationCommand({
-          command: envelope.command,
-          readModel: commandReadModel,
-        });
-        const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
-        const committedCommand = yield* sql
-          .withTransaction(
-            Effect.gen(function* () {
-              if (envelope.command.type === "thread.approval.respond") {
-                const command = envelope.command;
-                yield* requireApprovalClaim({
-                  command,
-                  row: yield* approvals.getByRequestId({
-                    threadId: command.threadId,
-                    requestId: command.requestId,
-                  }),
-                  session: commandReadModel.threads.find((thread) => thread.id === command.threadId)
-                    ?.session,
+        const beforeCommand = commandReadModel;
+        const commit = Effect.gen(function* () {
+          const restored =
+            envelope.command.type === "thread.sidebar.undo"
+              ? sidebarUndo.restore(envelope.command, commandReadModel)
+              : null;
+          if (envelope.command.type === "thread.sidebar.undo" && restored === null) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: envelope.command.type,
+              detail: "Undo expired or the thread changed. Its current state was kept.",
+            });
+          }
+          const eventBase =
+            restored ??
+            (yield* decideOrchestrationCommand({
+              command: envelope.command,
+              readModel: commandReadModel,
+            }));
+
+          const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
+          workspaceCommitFence.begin(eventBases);
+          return yield* sql
+            .withTransaction(
+              Effect.gen(function* () {
+                if (envelope.command.type === "thread.approval.respond") {
+                  const command = envelope.command;
+                  yield* requireApprovalClaim({
+                    command,
+                    row: yield* approvals.getByRequestId({
+                      threadId: command.threadId,
+                      requestId: command.requestId,
+                    }),
+                    session: commandReadModel.threads.find(
+                      (thread) => thread.id === command.threadId,
+                    )?.session,
+                  });
+                }
+                if (envelope.command.type === "thread.user-input.respond") {
+                  const command = envelope.command;
+                  yield* requireUserInputClaim({
+                    command,
+                    row: yield* questions.getByRequestId({
+                      threadId: command.threadId,
+                      requestId: command.requestId,
+                    }),
+                    session: commandReadModel.threads.find(
+                      (thread) => thread.id === command.threadId,
+                    )?.session,
+                  });
+                }
+                const committedEvents: OrchestrationEvent[] = [];
+                const postCommitEffects: Array<Effect.Effect<void>> = [];
+                let nextCommandReadModel = commandReadModel;
+
+                for (const nextEvent of eventBases) {
+                  const savedEvent = yield* eventStore.append(nextEvent);
+                  nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
+                  postCommitEffects.push(
+                    yield* projectionPipeline.projectEventInTransaction(savedEvent),
+                  );
+                  committedEvents.push(savedEvent);
+                }
+
+                const lastSavedEvent = committedEvents.at(-1) ?? null;
+                if (lastSavedEvent === null) {
+                  return yield* new OrchestrationCommandInvariantError({
+                    commandType: envelope.command.type,
+                    detail: "Command produced no events.",
+                  });
+                }
+
+                yield* commandReceiptRepository.upsert({
+                  commandId: envelope.command.commandId,
+                  aggregateKind: lastSavedEvent.aggregateKind,
+                  aggregateId: lastSavedEvent.aggregateId,
+                  acceptedAt: lastSavedEvent.occurredAt,
+                  resultSequence: lastSavedEvent.sequence,
+                  status: "accepted",
+                  error: null,
                 });
-              }
-              if (envelope.command.type === "thread.user-input.respond") {
-                const command = envelope.command;
-                yield* requireUserInputClaim({
-                  command,
-                  row: yield* questions.getByRequestId({
-                    threadId: command.threadId,
-                    requestId: command.requestId,
-                  }),
-                  session: commandReadModel.threads.find((thread) => thread.id === command.threadId)
-                    ?.session,
-                });
-              }
-              const committedEvents: OrchestrationEvent[] = [];
-              const postCommitEffects: Array<Effect.Effect<void>> = [];
-              let nextCommandReadModel = commandReadModel;
 
-              for (const nextEvent of eventBases) {
-                const savedEvent = yield* eventStore.append(nextEvent);
-                nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
-                postCommitEffects.push(
-                  yield* projectionPipeline.projectEventInTransaction(savedEvent),
-                );
-                committedEvents.push(savedEvent);
-              }
-
-              const lastSavedEvent = committedEvents.at(-1) ?? null;
-              if (lastSavedEvent === null) {
-                return yield* new OrchestrationCommandInvariantError({
-                  commandType: envelope.command.type,
-                  detail: "Command produced no events.",
-                });
-              }
-
-              yield* commandReceiptRepository.upsert({
-                commandId: envelope.command.commandId,
-                aggregateKind: lastSavedEvent.aggregateKind,
-                aggregateId: lastSavedEvent.aggregateId,
-                acceptedAt: lastSavedEvent.occurredAt,
-                resultSequence: lastSavedEvent.sequence,
-                status: "accepted",
-                error: null,
-              });
-
-              return {
-                committedEvents,
-                lastSequence: lastSavedEvent.sequence,
-                nextCommandReadModel,
-                postCommitEffects,
-              } as const;
-            }),
-          )
-          .pipe(
-            Effect.catchTag("SqlError", (sqlError) =>
-              Effect.fail(
-                toPersistenceSqlError("OrchestrationEngine.processEnvelope:transaction")(sqlError),
+                return {
+                  committedEvents,
+                  lastSequence: lastSavedEvent.sequence,
+                  nextCommandReadModel,
+                  postCommitEffects,
+                } as const;
+              }),
+            )
+            .pipe(
+              Effect.catchTag("SqlError", (sqlError) =>
+                Effect.fail(
+                  toPersistenceSqlError("OrchestrationEngine.processEnvelope:transaction")(
+                    sqlError,
+                  ),
+                ),
               ),
-            ),
-          );
+            );
+        });
+        const committedCommand = yield* envelope.admission
+          ? envelope.admission.admit(commit)
+          : commit;
 
         commandReadModel = committedCommand.nextCommandReadModel;
+        sidebarUndo.record(envelope.command, beforeCommand, commandReadModel);
+        if (envelope.command.type === "thread.sidebar.undo")
+          sidebarUndo.consume(envelope.command.undoCommandId);
+        workspaceCommitFence.publish();
         yield* Effect.forEach(committedCommand.postCommitEffects, (effect) => effect, {
           concurrency: 1,
           discard: true,
@@ -387,16 +502,17 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           const error = Cause.squash(exit.cause) as OrchestrationDispatchError;
           if (!Schema.is(OrchestrationCommandPreviouslyRejectedError)(error)) {
             yield* reconcileReadModelAfterDispatchFailure.pipe(
-              Effect.catch(() =>
-                Effect.logWarning(
+              Effect.catch(() => {
+                workspaceAuthorityHealthy = false;
+                return Effect.logWarning(
                   "failed to reconcile orchestration read model after dispatch failure",
                 ).pipe(
                   Effect.annotateLogs({
                     commandId: envelope.command.commandId,
                     snapshotSequence: commandReadModel.snapshotSequence,
                   }),
-                ),
-              ),
+                );
+              }),
             );
 
             if (Schema.is(OrchestrationCommandInvariantError)(error)) {
@@ -426,7 +542,14 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const worker = Effect.forever(
     Queue.take(commandQueue).pipe(
       Effect.tap(() => commandQueueMetrics.recordDequeued()),
-      Effect.flatMap(processEnvelope),
+      Effect.flatMap((envelope) => {
+        const processing = storageLifecycleLock.withPermit(processEnvelope(envelope));
+        // Settings writers take their semaphore before storage admission. Match
+        // that order, before any import SQL transaction, to avoid lock inversion.
+        return envelope.admission?.withCommitLease
+          ? envelope.admission.withCommitLease(processing)
+          : processing;
+      }),
     ),
   );
   yield* Effect.forkScoped(worker);
@@ -446,17 +569,27 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const readRecentEvents: OrchestrationEngineShape["readRecentEvents"] = (input) =>
     eventStore.readRecent === undefined ? Effect.succeed([]) : eventStore.readRecent(input);
 
-  const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
+  const dispatch: OrchestrationEngineShape["dispatch"] = (command, options) =>
     Effect.gen(function* () {
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
       const admissionStartedAtMs = Date.now();
-      yield* Queue.offer(commandQueue, { command, result, startedAtMs: Date.now() });
+      yield* Queue.offer(commandQueue, {
+        command,
+        result,
+        startedAtMs: Date.now(),
+        ...(options ? { admission: options } : {}),
+      });
       yield* commandQueueMetrics.recordBlocked(Date.now() - admissionStartedAtMs);
       yield* commandQueueMetrics.recordEnqueued();
       return yield* Deferred.await(result);
     });
 
   return {
+    captureThreadWorkspace: (input) => {
+      if (!workspaceAuthorityHealthy) return undefined;
+      const captured = workspaceCommitFence.capture(input);
+      return captured ? () => workspaceAuthorityHealthy && captured() : undefined;
+    },
     readEvents,
     readEventsPage,
     readRecentEvents,

@@ -416,3 +416,38 @@ describe("older favorite reader compatibility", () => {
     expect(decodeClientSettings({ favorites: oldFavorites }).favorites).toEqual(oldFavorites);
   });
 });
+
+describe("worktree submodule settings", () => {
+  it("preserves recursive defaults for old settings", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      worktreeSubmodules: "recursive",
+      projectWorktreeSubmodules: {},
+    });
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("worktreeSubmodules");
+  });
+  it.each(["recursive", "top-level", "none"])("accepts %s at node and project scopes", (mode) => {
+    expect(
+      decodeServerSettingsPatch({
+        worktreeSubmodules: mode,
+        projectWorktreeSubmodules: { a: mode, b: null },
+      }),
+    ).toEqual({ worktreeSubmodules: mode, projectWorktreeSubmodules: { a: mode, b: null } });
+  });
+  it.each(["disabled", "topLevel", "", false, 0, null, {}])("rejects invalid mode %j", (mode) => {
+    expect(() => decodeServerSettings({ worktreeSubmodules: mode })).toThrow();
+    expect(() => decodeServerSettingsPatch({ worktreeSubmodules: mode })).toThrow();
+    if (mode !== null)
+      expect(() => decodeServerSettingsPatch({ projectWorktreeSubmodules: { a: mode } })).toThrow();
+  });
+});
+
+it("preserves explicit Cursor export settings through node settings patches", () => {
+  const cursor = {
+    usageExportPath: "/fixture/exports",
+    usageExportAccountKey: "synthetic-team",
+    usageExportUserEmail: "fixture@example.invalid",
+  };
+  expect(decodeServerSettingsPatch({ providers: { cursor } }).providers?.cursor).toEqual(cursor);
+  expect(decodeServerSettings({ providers: { cursor } }).providers.cursor).toMatchObject(cursor);
+  expect(decodeServerSettings({}).providers.cursor.usageExportPath).toBeUndefined();
+});

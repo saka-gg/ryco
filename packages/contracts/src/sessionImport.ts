@@ -1,11 +1,23 @@
 import { Schema } from "effect";
 import { ProjectId, ThreadId } from "./baseSchemas.ts";
+import { ProviderInstanceId } from "./providerInstance.ts";
 import { ModelSelection } from "./orchestration.ts";
 
 export const SessionImportSource = Schema.Literals(["codex", "claudeAgent"]);
 export type SessionImportSource = typeof SessionImportSource.Type;
+const ImportKey = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
+export const SessionImportSourcesInput = Schema.Struct({ source: SessionImportSource });
+export const SessionImportStore = Schema.Struct({
+  key: ImportKey,
+  label: Schema.String,
+  isDefault: Schema.Boolean,
+  instanceIds: Schema.Array(ProviderInstanceId),
+});
+export const SessionImportStores = Schema.Array(SessionImportStore);
+export type SessionImportStore = typeof SessionImportStore.Type;
 export const SessionImportDiscoverInput = Schema.Struct({
   source: SessionImportSource,
+  storeKey: Schema.optional(ImportKey),
   search: Schema.String.check(Schema.isMaxLength(200)),
   offset: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10_000 })),
   includeArchived: Schema.Boolean,
@@ -30,7 +42,8 @@ export const SessionImportPage = Schema.Struct({
 export type SessionImportPage = typeof SessionImportPage.Type;
 export const SessionImportInput = Schema.Struct({
   source: SessionImportSource,
-  key: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  key: ImportKey,
+  storeKey: Schema.optional(ImportKey),
   projectId: ProjectId,
   modelSelection: ModelSelection,
 });
@@ -46,3 +59,24 @@ export class SessionImportError extends Schema.TaggedError<SessionImportError>()
     message: Schema.String,
   },
 ) {}
+
+export const SessionImportReconcileInput = Schema.Struct({
+  source: SessionImportSource,
+  key: ImportKey,
+  cursor: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+});
+export type SessionImportReconcileInput = typeof SessionImportReconcileInput.Type;
+export const SessionImportRecovery = Schema.Struct({
+  state: Schema.Literals(["scanning", "missing", "unique", "multiple", "mismatched", "unknown"]),
+  candidates: Schema.Array(Schema.Struct({ id: Schema.String, messageCount: Schema.Int })),
+  nextCursor: Schema.NullOr(Schema.String),
+  adoptionToken: Schema.NullOr(Schema.String),
+  notice: Schema.String,
+});
+export type SessionImportRecovery = typeof SessionImportRecovery.Type;
+export const SessionImportAdoptInput = Schema.Struct({
+  source: SessionImportSource,
+  key: ImportKey,
+  adoptionToken: Schema.String.check(Schema.isMaxLength(64)),
+});
+export type SessionImportAdoptInput = typeof SessionImportAdoptInput.Type;

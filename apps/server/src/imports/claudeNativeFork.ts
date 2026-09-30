@@ -33,16 +33,22 @@ process.stdout.write(JSON.stringify({ sessionId: fork.sessionId }));
 `;
 export async function forkClaudeNative(input: {
   root: string;
+  environment?: NodeJS.ProcessEnv;
   sourceFile: string;
   sourceId: string;
   lastMessageId: string;
   cwd: string;
   key: string;
 }): Promise<string> {
+  const { environment, ...request } = input;
   const sdk = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk");
   const result = await runProcess(process.execPath, ["--input-type=module", "-e", script], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", CLAUDE_CONFIG_DIR: input.root },
-    stdin: JSON.stringify({ ...input, sdk: pathToFileURL(sdk).href }),
+    env: {
+      ...(environment ?? process.env),
+      ELECTRON_RUN_AS_NODE: "1",
+      CLAUDE_CONFIG_DIR: input.root,
+    },
+    stdin: JSON.stringify({ ...request, sdk: pathToFileURL(sdk).href }),
     timeoutMs: 30000,
     maxBufferBytes: 4096,
   });
@@ -55,4 +61,60 @@ export async function forkClaudeNative(input: {
   )
     throw new Error("Invalid native fork response.");
   return response.sessionId;
+}
+
+// Recovery never relocates/deletes files. A copy interrupted before relocation
+// is retained and reported as incompatible until the native target is complete.
+export async function verifyClaudeNative(input: {
+  root: string;
+  environment?: NodeJS.ProcessEnv;
+  cwd: string;
+  candidateId: string;
+  candidateFile: string;
+}): Promise<boolean> {
+  const { environment, ...request } = input;
+  const sdk = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk");
+  const result = await runProcess(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
+let input = ''; for await (const chunk of process.stdin) input += chunk;
+const request = JSON.parse(input);
+const sdk = await import(request.sdk);
+let projectKey;
+await sdk.listSessions({ dir: request.cwd, sessionStore: {
+ append: async () => {}, load: async () => null,
+ listSessions: async key => { projectKey = key; return []; }
+} });
+if (typeof projectKey !== 'string' || !/^[a-zA-Z0-9-]+$/.test(projectKey)) throw new Error('unsupported project key');
+const expected = path.join(await realpath(request.root), 'projects', projectKey, request.candidateId + '.jsonl');
+if (request.candidateFile !== expected || await realpath(expected) !== expected) { process.stdout.write(JSON.stringify({ compatible: false })); process.exit(0); }
+const messages = await sdk.getSessionMessages(request.candidateId, { dir: request.cwd });
+process.stdout.write(JSON.stringify({ compatible: messages.length > 0 && messages.every(message => message.session_id === request.candidateId) }));
+`,
+    ],
+    {
+      env: {
+        ...(environment ?? process.env),
+        ELECTRON_RUN_AS_NODE: "1",
+        CLAUDE_CONFIG_DIR: input.root,
+      },
+      stdin: JSON.stringify({ ...request, sdk: pathToFileURL(sdk).href }),
+      timeoutMs: 30000,
+      maxBufferBytes: 4096,
+    },
+  );
+  const response: unknown = JSON.parse(result.stdout);
+  if (
+    !response ||
+    typeof response !== "object" ||
+    !("compatible" in response) ||
+    typeof response.compatible !== "boolean"
+  )
+    throw new Error("Invalid native verification response.");
+  return response.compatible;
 }

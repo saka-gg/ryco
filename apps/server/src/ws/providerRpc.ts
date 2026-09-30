@@ -1,3 +1,5 @@
+import { ProjectId, ServerSettingsError } from "@ryco/contracts";
+import { resolveProjectPreferences } from "../project/projectPreferences.ts";
 import { CodexSettings, CodexResetCreditError } from "@ryco/contracts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import {
@@ -47,6 +49,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     providerMaintenanceRunner,
     keybindings,
     serverSettings,
+    projectionSnapshotQuery,
     sourceControlDiscovery,
     config,
     mcpRegistry,
@@ -142,7 +145,8 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         }),
       ),
     [WS_METHODS.serverSearchAcpRegistry]: (input) =>
-      ownerEffect(
+      ctx.withAccess(
+        "viewer",
         WS_METHODS.serverSearchAcpRegistry,
         Effect.tryPromise({ try: () => registry.search(input.query), catch: registryError }).pipe(
           Effect.map((agents) => ({ agents })),
@@ -288,6 +292,31 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "server" },
       ),
+    [WS_METHODS.serverGetProjectPreferences]: ({ projectId }) =>
+      ctx.withAccess(
+        "viewer",
+        WS_METHODS.serverGetProjectPreferences,
+        Effect.gen(function* () {
+          const settings = yield* serverSettings.getSettings;
+          if (projectId === undefined) return resolveProjectPreferences({ settings });
+          const project = yield* projectionSnapshotQuery.getProjectShellById(projectId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath: "<project>",
+                  detail: "Could not load project preferences.",
+                  cause,
+                }),
+            ),
+          );
+          if (Option.isNone(project))
+            return yield* new ServerSettingsError({
+              settingsPath: "<project>",
+              detail: "Project no longer exists.",
+            });
+          return resolveProjectPreferences({ settings, project: project.value });
+        }),
+      ),
     [WS_METHODS.serverGetSettings]: (_input) =>
       observeRpcEffect(
         WS_METHODS.serverGetSettings,
@@ -301,7 +330,30 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.serverUpdateSettings,
         ownerEffect(
           WS_METHODS.serverUpdateSettings,
-          serverSettings.updateSettings(patch).pipe(Effect.map(redactServerSettingsForClient)),
+          Effect.gen(function* () {
+            for (const projectId of Object.keys(patch.projectPreferences ?? {})) {
+              const project = yield* projectionSnapshotQuery
+                .getProjectShellById(ProjectId.make(projectId))
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ServerSettingsError({
+                        settingsPath: "<project>",
+                        detail: "Could not validate project preferences.",
+                        cause,
+                      }),
+                  ),
+                );
+              if (Option.isNone(project))
+                return yield* new ServerSettingsError({
+                  settingsPath: "<project>",
+                  detail: "Project no longer exists.",
+                });
+            }
+            return yield* serverSettings
+              .updateSettings(patch)
+              .pipe(Effect.map(redactServerSettingsForClient));
+          }),
         ),
         {
           "rpc.aggregate": "server",

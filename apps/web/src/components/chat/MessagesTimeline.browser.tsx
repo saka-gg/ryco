@@ -14,6 +14,8 @@ import type { ContextHandoffTimelineEntry } from "../../session-logic";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
+import { useTierOverrideStore } from "../../tierOverrideStore";
+import { syncDocumentPresentationTier } from "../../lib/presentationTier";
 
 import { cdpSession } from "../../../test/browserPointer";
 
@@ -194,6 +196,39 @@ function buildProps() {
 }
 
 describe("MessagesTimeline", () => {
+  it("reuses message code-block insertion actions for both user and assistant messages", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    const stopTier = syncDocumentPresentationTier();
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={(["user", "assistant"] as const).map((role) => ({
+          id: `synthetic-${role}`,
+          kind: "message",
+          createdAt: "2026-09-01T00:00:00.000Z",
+          message: {
+            id: MessageId.make(`synthetic-${role}`),
+            role,
+            text: "```sh\nprintf 'héllo 🌏'\n```",
+            createdAt: "2026-09-01T00:00:00.000Z",
+            streaming: false,
+          },
+        }))}
+      />,
+    );
+    try {
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll(".chat-markdown-insert-button")).toHaveLength(2),
+      );
+      await expect
+        .element(page.getByText("héllo 🌏", { exact: false }).first())
+        .toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+      useTierOverrideStore.setState({ override: null });
+      stopTier();
+    }
+  });
   afterEach(() => {
     scrollToEndSpy.mockReset();
     scrollToIndexSpy.mockReset();

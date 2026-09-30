@@ -108,3 +108,34 @@ describe("read-only bounded filesystem discovery", () => {
     await expect(readSource(dir, path.join(dir, "link"))).rejects.toThrow(/regular files/);
   });
 });
+
+it("refuses conflicting native identities/provenance and never traverses linked archive roots", async () => {
+  const otherId = "22222222-2222-4222-8222-222222222222";
+  expect(() =>
+    parseHistory(
+      "codex",
+      codexFixture() + "\n" + JSON.stringify({ type: "session_meta", payload: { id: otherId } }),
+    ),
+  ).toThrow(/identity/);
+  expect(() =>
+    parseHistory(
+      "codex",
+      codexFixture().replace('"payload":{', '"payload":{"forked_from_id":"invalid",'),
+    ),
+  ).toThrow(/provenance/);
+  expect(() =>
+    parseHistory("claudeAgent", claudeFixture() + "\n" + JSON.stringify({ sessionId: otherId })),
+  ).toThrow(/identity/);
+  expect(() =>
+    parseHistory(
+      "claudeAgent",
+      claudeFixture() + "\n" + JSON.stringify({ forkedFrom: { sessionId: "invalid" } }),
+    ),
+  ).toThrow(/provenance/);
+  const dir = await root(),
+    unrelated = await root();
+  await mkdir(path.join(unrelated, "sessions"));
+  await writeFile(path.join(unrelated, "sessions", `rollout-${id}.jsonl`), codexFixture());
+  await symlink(path.join(unrelated, "sessions"), path.join(dir, "sessions"));
+  expect((await discoverFiles("codex", dir, true)).files).toEqual([]);
+});

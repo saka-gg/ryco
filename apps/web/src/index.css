@@ -1766,6 +1766,22 @@ label:has(> select#reasoning-effort) select {
   border-color: color-mix(in srgb, var(--border) 70%, var(--foreground));
 }
 
+.chat-markdown .chat-markdown-insert-button {
+  display: block;
+  margin: 0 2.3rem 0.3rem auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.chat-markdown .chat-markdown-insert-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .chat-markdown .chat-markdown-shiki .shiki {
   background: color-mix(in srgb, var(--muted) 78%, var(--background)) !important;
 }

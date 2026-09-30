@@ -1,5 +1,6 @@
 import { ResourceTelemetrySnapshot, ResourceTelemetryHistory } from "@ryco/contracts";
 import { Schema } from "effect";
+import { parseDesktopResourceTelemetry } from "@ryco/shared/desktopResourceTelemetry";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 const mocks = vi.hoisted(() => ({
   sample: vi.fn(),
@@ -113,6 +114,59 @@ it("keeps Electron and power available when native sampling fails", async () => 
   expect(snapshot.processes[0]?.ioSemantics).toBe("unavailable");
   expect(snapshot.power?.onBattery).toBe(true);
   expect(snapshot.speedLimitPercent).toBe(80);
+});
+
+it("serializes fractional Electron millisecond metrics in snapshots and history", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-09-07T00:00:00Z"));
+  mocks.sample.mockRejectedValue(new Error("unavailable"));
+  mocks.history.mockResolvedValue([]);
+  const desktop = (cpuTimeMs: number) =>
+    parseDesktopResourceTelemetry({
+      sampledAt: new Date().toISOString(),
+      processSample: true,
+      electronPid: 2,
+      power: {
+        idleState: "active",
+        idleSeconds: 0,
+        onBattery: false,
+        thermalState: "nominal",
+        speedLimitPercent: null,
+        suspended: false,
+        locked: false,
+        lowPowerMode: false,
+        updatedAt: new Date().toISOString(),
+        stale: false,
+      },
+      processes: [
+        {
+          pid: 2,
+          startTimeMs: Date.parse("2026-09-06T23:59:00Z") + 0.75,
+          type: "Browser",
+          cpuPercent: 4.5,
+          cpuTimeMs,
+          residentBytes: 100,
+          privateBytes: 0,
+          idleWakeupsPerSecond: 3.5,
+        },
+      ],
+    });
+  mocks.desktop.mockResolvedValue(desktop(12.999));
+  const { readResourceTelemetry, readResourceTelemetryHistory } =
+    await import("./ResourceTelemetry.ts");
+  const first = await readResourceTelemetry();
+  Schema.decodeUnknownSync(ResourceTelemetrySnapshot)(first);
+  vi.setSystemTime(new Date("2026-09-07T00:00:02Z"));
+  mocks.desktop.mockResolvedValue(desktop(17.001));
+  const second = await readResourceTelemetry();
+  Schema.decodeUnknownSync(ResourceTelemetrySnapshot)(second);
+  expect(second.groups.electron.cpuTimeMs).toBe(5);
+  expect(second.groups.electron.processStarts).toBe(1);
+  expect(second.processes[0]?.cpuPercent).toBe(4.5);
+  const history = await readResourceTelemetryHistory({ windowMs: 60_000, bucketMs: 10_000 });
+  Schema.decodeUnknownSync(ResourceTelemetryHistory)(history);
+  expect(history.totalCpuTimeMs).toBe(5);
+  expect(history.topProcesses[0]?.cpuTimeMs).toBe(5);
 });
 
 it("hydrates native history and preserves IO from exited process identities", async () => {

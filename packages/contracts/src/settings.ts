@@ -1,3 +1,4 @@
+import { StorageRetentionPolicy } from "./storage.ts";
 import { Effect } from "effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -311,13 +312,46 @@ export const CursorSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    usageExportPath: Schema.optionalKey(
+      TrimmedString.pipe(
+        Schema.annotateKey({
+          title: "Usage export path",
+          description:
+            "Absolute local file or directory containing saved Cursor Admin API filtered-usage-events JSON responses. Ryco never retrieves account data.",
+        }),
+      ),
+    ),
+    usageExportAccountKey: Schema.optionalKey(
+      TrimmedString.pipe(
+        Schema.annotateKey({
+          title: "Usage export account key",
+          description:
+            "Non-secret team/account label. Use the same key for overlapping exports across machines, and different keys for distinct accounts.",
+        }),
+      ),
+    ),
+    usageExportUserEmail: Schema.optionalKey(
+      TrimmedString.pipe(
+        Schema.annotateKey({
+          title: "Usage export user email",
+          description:
+            "Import only this user's events from the configured exports. Email and conversation IDs are hashed before ingestion.",
+        }),
+      ),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "apiEndpoint"],
+    order: [
+      "binaryPath",
+      "apiEndpoint",
+      "usageExportPath",
+      "usageExportAccountKey",
+      "usageExportUserEmail",
+    ],
   },
 );
 export type CursorSettings = typeof CursorSettings.Type;
@@ -456,7 +490,92 @@ export const WorktreeBranchPrefix = TrimmedString.check(
 /** Server-local filesystem input; platform and filesystem validation belongs to the server. */
 export const WorktreeRoot = TrimmedString.check(Schema.isMaxLength(4096));
 
+/** Initialization applies only to newly created Git worktree checkouts. */
+export const WorktreeSubmodules = Schema.Literals(["recursive", "top-level", "none"]);
+export type WorktreeSubmodules = typeof WorktreeSubmodules.Type;
+
+/** Narrow repository-owned policy; unrelated JSON keys remain forward compatible. */
+export const WorktreeSubmoduleRepositoryConfig = Schema.Struct({
+  worktreeSubmodules: Schema.optionalKey(WorktreeSubmodules),
+});
+export const INITIAL_MODEL_OPTION_IDS = [
+  "reasoningEffort",
+  "effort",
+  "fastMode",
+  "variant",
+  "reasoning",
+  "thinking",
+  "contextWindow",
+] as const;
+/** Creation presets can select model traits, never arbitrary provider configuration. */
+export const InitialModelSelection = ModelSelection.check(
+  Schema.makeFilter((selection) => {
+    if (selection.model.length > 256 || (selection.options?.length ?? 0) > 16)
+      return "Initial model preset is too large";
+    const ids = new Set<string>();
+    for (const option of selection.options ?? []) {
+      if (
+        !(INITIAL_MODEL_OPTION_IDS as readonly string[]).includes(option.id) ||
+        ids.has(option.id) ||
+        (typeof option.value === "string" && option.value.length > 128)
+      )
+        return "Initial model presets allow only bounded model traits";
+      ids.add(option.id);
+    }
+    return undefined;
+  }),
+);
+
+/** Deliberately bounded: these are creation preferences, never execution authority. */
+export const ProjectPreferences = Schema.Struct({
+  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
+  defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
+  worktreeBranchPrefix: Schema.optionalKey(WorktreeBranchPrefix),
+  runSetupScript: Schema.optionalKey(Schema.Boolean),
+});
+export type ProjectPreferences = typeof ProjectPreferences.Type;
+
+/** Null resets a single field to inheritance. Model null also masks a legacy project preset. */
+export const ProjectPreferencesPatch = Schema.Struct({
+  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
+  defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
+  worktreeBranchPrefix: Schema.optionalKey(Schema.NullOr(WorktreeBranchPrefix)),
+  runSetupScript: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type ProjectPreferencesPatch = typeof ProjectPreferencesPatch.Type;
+
+/** Model absence is distinct from a persisted inheritance mask for legacy presets. */
+export const ProjectPreferencesExpected = Schema.Struct({
+  ...ProjectPreferencesPatch.fields,
+  initialModelSelection: Schema.optionalKey(
+    Schema.Union([Schema.Literal("absent"), Schema.NullOr(InitialModelSelection)]),
+  ),
+});
+export type ProjectPreferencesExpected = typeof ProjectPreferencesExpected.Type;
+
+export const PreferenceSource = Schema.Literals(["project", "legacy-project", "node", "builtin"]);
+export type PreferenceSource = typeof PreferenceSource.Type;
+const sourced = <S extends Schema.Top>(value: S) =>
+  Schema.Struct({ value, source: PreferenceSource });
+export const EffectiveProjectPreferences = Schema.Struct({
+  initialModelSelection: sourced(ModelSelection),
+  defaultThreadEnvMode: sourced(ThreadEnvMode),
+  worktreeBranchPrefix: sourced(WorktreeBranchPrefix),
+  runSetupScript: sourced(Schema.Boolean),
+  worktreeRoot: sourced(WorktreeRoot),
+  overrides: ProjectPreferences.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+});
+export type EffectiveProjectPreferences = typeof EffectiveProjectPreferences.Type;
+
 export const ServerSettings = Schema.Struct({
+  initialModelSelection: Schema.NullOr(InitialModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  runSetupScript: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  projectPreferences: Schema.Record(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+    ProjectPreferences,
+  ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   environmentIcon: EnvironmentMachineHint.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   // Legacy token-by-token assistant output. This is deliberately a fresh key
   // (formerly `enableAssistantStreaming`): decoding drops the old key so all
@@ -468,7 +587,21 @@ export const ServerSettings = Schema.Struct({
   // entirely (no npm registry contact) instead of merely hiding the update
   // notification — for users who install providers via Nix/nixpkgs/etc.
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  storageRetention: StorageRetentionPolicy.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed({ automatic: false, completedWorktreeDays: null, temporaryDataDays: null }),
+    ),
+  ),
+  projectStorageRetention: Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicy)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   worktreeRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  worktreeSubmodules: WorktreeSubmodules.pipe(
+    Schema.withDecodingDefault(Effect.succeed("recursive" as const)),
+  ),
+  projectWorktreeSubmodules: Schema.Record(Schema.String, Schema.NullOr(WorktreeSubmodules)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   // Null entries inherit. Patch entries independently so concurrent project edits do not collide.
   projectWorktreeRoots: Schema.Record(Schema.String, Schema.NullOr(WorktreeRoot)).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -571,6 +704,9 @@ const ClaudeSettingsPatch = Schema.Struct({
 });
 
 const CursorSettingsPatch = Schema.Struct({
+  usageExportPath: Schema.optionalKey(Schema.String),
+  usageExportAccountKey: Schema.optionalKey(Schema.String),
+  usageExportUserEmail: Schema.optionalKey(Schema.String),
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(Schema.String),
   apiEndpoint: Schema.optionalKey(Schema.String),
@@ -598,11 +734,36 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
+  runSetupScript: Schema.optionalKey(Schema.Boolean),
+  projectPreferences: Schema.optionalKey(
+    Schema.Record(
+      TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+      Schema.NullOr(ProjectPreferencesPatch),
+    ).check(
+      Schema.makeFilter((entries) =>
+        Object.keys(entries).length <= 1000 ? undefined : "Too many project preference patches",
+      ),
+    ),
+  ),
+  /** Compare only the fields being edited; unrelated concurrent edits remain independent. */
+  expectedNodePreferences: Schema.optionalKey(ProjectPreferencesPatch),
+  expectedProjectPreferences: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString.check(Schema.isMaxLength(256)), ProjectPreferencesExpected),
+  ),
   environmentIcon: Schema.optionalKey(Schema.NullOr(EnvironmentMachineKind)),
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  storageRetention: Schema.optionalKey(StorageRetentionPolicy),
+  projectStorageRetention: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicy)),
+  ),
   worktreeRoot: Schema.optionalKey(WorktreeRoot),
+  worktreeSubmodules: Schema.optionalKey(WorktreeSubmodules),
+  projectWorktreeSubmodules: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(WorktreeSubmodules)),
+  ),
   projectWorktreeRoots: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(WorktreeRoot)),
   ),

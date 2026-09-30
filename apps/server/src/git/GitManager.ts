@@ -31,6 +31,8 @@ import {
   type VcsStatusRemoteResult,
   VcsStatusResult,
   ModelSelection,
+  type OrchestrationProjectShell,
+  type ServerSettings,
 } from "@ryco/contracts";
 import {
   prefixWorktreeBranch,
@@ -47,10 +49,16 @@ import {
 import { GitManagerError } from "@ryco/contracts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { resolveProjectPreferences } from "../project/projectPreferences.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@ryco/contracts";
-import { GitVcsDriver, type GitStatusDetails } from "../vcs/GitVcsDriver.ts";
+import {
+  GitVcsDriver,
+  type GitStatusDetails,
+  type GitWorktreeCreationContext,
+} from "../vcs/GitVcsDriver.ts";
 import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
 import type { ChangeRequest } from "@ryco/contracts";
 
@@ -61,6 +69,14 @@ export interface GitActionProgressReporter {
 export interface GitRunStackedActionOptions {
   readonly actionId?: string;
   readonly progressReporter?: GitActionProgressReporter;
+}
+
+/** Server-only creation snapshot; RPC callers cannot supply settings or project authority. */
+export interface GitPreparePullRequestThreadOptions {
+  readonly preferencesSnapshot?: {
+    readonly settings: ServerSettings;
+    readonly project: OrchestrationProjectShell | null;
+  };
 }
 
 export interface GitManagerShape {
@@ -80,7 +96,8 @@ export interface GitManagerShape {
     input: GitPullRequestRefInput,
   ) => Effect.Effect<GitResolvePullRequestResult, GitManagerServiceError>;
   readonly preparePullRequestThread: (
-    input: GitPreparePullRequestThreadInput,
+    input: GitPreparePullRequestThreadInput & GitWorktreeCreationContext,
+    options?: GitPreparePullRequestThreadOptions,
   ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
   readonly runStackedAction: (
     input: GitRunStackedActionInput,
@@ -576,6 +593,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   const sourceControlProviders = yield* SourceControlProviderRegistry;
   const textGeneration = yield* TextGeneration;
   const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
+  const projectQueries = yield* Effect.serviceOption(ProjectionSnapshotQuery);
 
   const sourceControlProvider = (cwd: string) => sourceControlProviders.resolve({ cwd });
   const serverSettingsService = yield* ServerSettingsService;
@@ -1488,28 +1506,52 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
 
   const preparePullRequestThread: GitManagerShape["preparePullRequestThread"] = Effect.fn(
     "preparePullRequestThread",
-  )(function* (input) {
-    const maybeRunSetupScript = (worktreePath: string) => {
-      if (!input.threadId) {
-        return Effect.void;
-      }
-      return projectSetupScriptRunner
-        .runForThread({
-          threadId: input.threadId,
-          projectCwd: input.cwd,
-          worktreePath,
-        })
-        .pipe(
-          Effect.catch((error) =>
-            Effect.logWarning(
-              `GitManager.preparePullRequestThread: failed to launch worktree setup script for thread ${input.threadId} in ${worktreePath}: ${error.message}`,
-            ).pipe(Effect.asVoid),
-          ),
-        );
-    };
+  )(function* (input, options) {
     return yield* Effect.gen(function* () {
       const normalizedReference = normalizePullRequestReference(input.reference);
       const rootWorktreePath = yield* canonicalizeExistingPath(input.cwd);
+      const snapshot = options?.preferencesSnapshot;
+      const project = snapshot
+        ? snapshot.project
+        : Option.isSome(projectQueries)
+          ? yield* (
+              input.projectId
+                ? projectQueries.value.getProjectShellById(input.projectId)
+                : projectQueries.value.getActiveProjectByWorkspaceRoot(rootWorktreePath)
+            ).pipe(
+              Effect.map(Option.getOrNull),
+              Effect.mapError((cause) =>
+                gitManagerError(
+                  "preparePullRequestThread",
+                  "Failed to load project preferences.",
+                  cause,
+                ),
+              ),
+            )
+          : null;
+      if (input.projectId && (!project || project.id !== input.projectId))
+        return yield* gitManagerError(
+          "preparePullRequestThread",
+          "Requested project is unavailable.",
+        );
+      if (project) {
+        const canonicalProjectRoot = yield* fileSystem
+          .realPath(project.workspaceRoot)
+          .pipe(
+            Effect.mapError((cause) =>
+              gitManagerError(
+                "preparePullRequestThread",
+                "Project workspace is unavailable.",
+                cause,
+              ),
+            ),
+          );
+        if (canonicalProjectRoot !== rootWorktreePath)
+          return yield* gitManagerError(
+            "preparePullRequestThread",
+            "PR checkout does not match the selected project's workspace.",
+          );
+      }
       const pullRequestSummary = yield* (yield* sourceControlProvider(input.cwd)).getChangeRequest({
         cwd: input.cwd,
         reference: normalizedReference,
@@ -1538,9 +1580,37 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         };
       }
 
+      const settings =
+        snapshot?.settings ??
+        input.settingsSnapshot ??
+        (yield* serverSettingsService.getSettings.pipe(
+          Effect.mapError((cause) =>
+            gitManagerError("preparePullRequestThread", "Failed to get server settings.", cause),
+          ),
+        ));
+      const effective = resolveProjectPreferences({ settings, ...(project ? { project } : {}) });
+      const maybeRunSetupScript = (worktreePath: string) => {
+        if (!input.threadId || !effective.runSetupScript.value) return Effect.void;
+        return projectSetupScriptRunner
+          .runForThread({
+            threadId: input.threadId,
+            ...(project ? { projectId: project.id } : {}),
+            projectCwd: input.cwd,
+            worktreePath,
+          })
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning(
+                `GitManager.preparePullRequestThread: failed to launch worktree setup script for thread ${input.threadId} in ${worktreePath}: ${error.message}`,
+              ).pipe(Effect.asVoid),
+            ),
+          );
+      };
+
       const ensureExistingWorktreeUpstream = Effect.fn("ensureExistingWorktreeUpstream")(function* (
         worktreePath: string,
       ) {
+        yield* gitCore.assertWorktreeSetupComplete(worktreePath);
         const details = yield* gitCore.statusDetails(worktreePath);
         yield* configurePullRequestHeadUpstream(
           worktreePath,
@@ -1556,11 +1626,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         ...pullRequest,
         ...toPullRequestHeadRemoteInfo(pullRequestSummary),
       } as const;
-      const { worktreeBranchPrefix } = yield* serverSettingsService.getSettings.pipe(
-        Effect.mapError((cause) =>
-          gitManagerError("preparePullRequestThread", "Failed to get server settings.", cause),
-        ),
-      );
+      const worktreeBranchPrefix = effective.worktreeBranchPrefix.value;
       const legacyPullRequestBranch = resolvePullRequestWorktreeLocalBranchName(
         pullRequestWithRemoteInfo,
         "ryco",
@@ -1657,6 +1723,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       }
 
       const worktree = yield* gitCore.createWorktree({
+        settingsSnapshot: settings,
+        projectId: project?.id,
         cwd: input.cwd,
         refName: localPullRequestBranch,
         path: input.worktreesDir
@@ -1673,6 +1741,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         pullRequest,
         branch: worktree.worktree.refName,
         worktreePath: worktree.worktree.path,
+        submoduleInitialization: worktree.submoduleInitialization,
       };
     }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
   });

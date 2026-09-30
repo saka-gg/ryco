@@ -7,6 +7,7 @@ import { DarkTheme, DefaultTheme } from "@react-navigation/native";
 
 import { applyResolvedAppColorScheme, resolveAppColorScheme } from "./lib/appScheme";
 
+import { SidebarUndoNoticeHost } from "./components/SidebarUndoNoticeHost";
 import { ConfirmDialogHost } from "./components/ConfirmDialogHost";
 import { OverlayPortalHost } from "./components/OverlayPortal";
 import {
@@ -94,6 +95,7 @@ export default function App() {
               theme={colorScheme === "dark" ? DarkTheme : DefaultTheme}
             />
             <ConfirmDialogHost />
+            <SidebarUndoNoticeHost />
           </BlurTargetView>
           {/* Anchored-menu overlays render here — in-window, so the keyboard
               stays up while a dropdown is open. */}

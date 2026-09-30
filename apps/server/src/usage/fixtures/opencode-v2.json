@@ -1,0 +1,11 @@
+{
+  "id": "msg_v2",
+  "type": "assistant",
+  "agent": "build",
+  "model": { "id": "claude-sonnet-4-5", "providerID": "anthropic" },
+  "content": [{ "type": "text", "id": "text_fixture", "text": "PRIVATE_FIXTURE_CONTENT" }],
+  "finish": "stop",
+  "cost": 0.012,
+  "tokens": { "input": 100, "output": 20, "reasoning": 5, "cache": { "read": 50, "write": 10 } },
+  "time": { "created": 1786060800000, "completed": 1786060801000 }
+}
