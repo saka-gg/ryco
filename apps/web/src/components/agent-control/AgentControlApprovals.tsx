@@ -6,9 +6,9 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 import {
-  buildAgentControlProposalCardModel,
-  selectActiveAgentControlProposals,
-  selectRecentAgentControlProposals,
+  EMPTY_AGENT_CONTROL_QUEUE_STATE,
+  selectAgentControlExternalActivity,
+  selectAgentControlThreadActivity,
   startAgentControlProposalSync,
   useAgentControlStore,
 } from "@ryco/client-runtime/state/agentControl";
@@ -19,9 +19,8 @@ import {
   readEnvironmentConnection,
 } from "../../environments/runtime";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
-import { formatRelativeTimeLabel } from "../../timestampFormat";
-import { Button } from "../ui/button";
-import { AgentControlProposalCard } from "./AgentControlProposalCard";
+import { useStore } from "../../store";
+import { AgentControlThreadActivity } from "./AgentControlThreadActivity";
 
 export interface AgentControlApprovalsProps {
   readonly environmentId: EnvironmentId;
@@ -29,10 +28,10 @@ export interface AgentControlApprovalsProps {
 }
 
 /**
- * The Agent Control approval surface for one environment: every live
- * proposal as a decidable card — proposals raised from the active thread
- * first — plus a collapsed history of recent terminal decisions raised
- * from the active thread.
+ * Thread-scoped approvals and compact activity. The environment-wide
+ * subscription remains authoritative, but other provider threads' proposals
+ * never render in this chat. External clients have no caller thread; their
+ * live requests remain reachable in a separate environment-wide section.
  *
  * The Agent Control setting is enforced by the TARGET environment's server
  * (which may not be the primary node whose settings the web client
@@ -52,7 +51,6 @@ export function AgentControlApprovals({
   const [decisionErrorsById, setDecisionErrorsById] = useState<Readonly<Record<string, string>>>(
     {},
   );
-  const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => {
     let currentClient: unknown = null;
@@ -90,31 +88,25 @@ export function AgentControlApprovals({
   const queueState = useAgentControlStore(
     (state) => state.queueByEnvironmentId[environmentId] ?? null,
   );
-  const active = useMemo(
-    () => (queueState === null ? [] : selectActiveAgentControlProposals(queueState)),
-    [queueState],
-  );
-  const recent = useMemo(
+  const selection = useMemo(
     () =>
-      queueState === null || activeThreadId === null
-        ? []
-        : selectRecentAgentControlProposals(queueState).filter(
-            (proposal) =>
-              proposal.principal.kind === "provider-session" &&
-              proposal.principal.threadId === activeThreadId,
-          ),
+      selectAgentControlThreadActivity(
+        queueState ?? EMPTY_AGENT_CONTROL_QUEUE_STATE,
+        activeThreadId,
+      ),
     [queueState, activeThreadId],
   );
-  const orderedActive = useMemo(() => {
-    if (activeThreadId === null) return active;
-    return active.toSorted((left, right) => {
-      const leftLocal =
-        left.principal.kind === "provider-session" && left.principal.threadId === activeThreadId;
-      const rightLocal =
-        right.principal.kind === "provider-session" && right.principal.threadId === activeThreadId;
-      return Number(rightLocal) - Number(leftLocal);
-    });
-  }, [active, activeThreadId]);
+  const externalSelection = useMemo(
+    () => selectAgentControlExternalActivity(queueState ?? EMPTY_AGENT_CONTROL_QUEUE_STATE),
+    [queueState],
+  );
+  const threadShells = useStore(
+    (state) => state.environmentStateById[environmentId]?.threadShellById,
+  );
+  const getThreadTitle = useCallback(
+    (threadId: ThreadId) => threadShells?.[threadId]?.title,
+    [threadShells],
+  );
 
   const decide = useCallback(
     async (proposalId: AgentControlProposalId, decision: "accept" | "reject") => {
@@ -147,84 +139,28 @@ export function AgentControlApprovals({
     [environmentId],
   );
 
-  if (orderedActive.length === 0 && recent.length === 0) {
-    return null;
-  }
-
+  const activityProps = {
+    environmentId,
+    getThreadTitle,
+    submittingIds,
+    decisionErrorsById,
+    disabledReason: decisionCapability.allowed ? null : (decisionCapability.reason ?? null),
+    onDecide: (proposalId: AgentControlProposalId, decision: "accept" | "reject") =>
+      void decide(proposalId, decision),
+  };
   return (
-    <div className="mx-auto w-full min-w-0 max-w-208" data-testid="agent-control-approvals">
-      {orderedActive.map((proposal) => (
-        <AgentControlProposalCard
-          key={proposal.proposalId}
-          model={buildAgentControlProposalCardModel(proposal)}
-          environmentId={environmentId}
-          isSubmitting={submittingIds.includes(proposal.proposalId)}
-          decisionError={decisionErrorsById[proposal.proposalId] ?? null}
-          disabledReason={decisionCapability.allowed ? null : (decisionCapability.reason ?? null)}
-          onAccept={() => void decide(proposal.proposalId, "accept")}
-          onReject={() => void decide(proposal.proposalId, "reject")}
-        />
-      ))}
-      {recent.length > 0 ? (
-        <div className="mb-2">
-          <Button
-            size="xs"
-            variant="ghost"
-            className="text-muted-foreground"
-            aria-expanded={historyOpen}
-            onClick={() => setHistoryOpen((current) => !current)}
-          >
-            Recent Agent Control decisions · {recent.length}
-          </Button>
-          {historyOpen ? (
-            <ul data-testid="agent-control-recent" className="mt-1 flex flex-col gap-0.5">
-              {recent.map((proposal) => {
-                const model = buildAgentControlProposalCardModel(proposal);
-                if (proposal.completionReturns?.length)
-                  return (
-                    <li key={proposal.proposalId}>
-                      <AgentControlProposalCard
-                        model={model}
-                        environmentId={environmentId}
-                        isSubmitting={false}
-                        decisionError={null}
-                        disabledReason={null}
-                        onAccept={() => {}}
-                        onReject={() => {}}
-                      />
-                    </li>
-                  );
-                return (
-                  <li
-                    key={proposal.proposalId}
-                    className="flex min-w-0 items-baseline gap-2 px-2 text-xs text-muted-foreground"
-                  >
-                    <span className="shrink-0 font-medium text-foreground/80">
-                      {model.statusLabel}
-                    </span>
-                    <span className="min-w-0 truncate">
-                      {model.actionLabel} · {model.targetLabel} · {model.originLabel}
-                      {model.executionLabel !== null ? ` · ${model.executionLabel}` : null}
-                    </span>
-                    {model.affectedThreadIds.map((threadId) => (
-                      <a
-                        key={threadId}
-                        className="shrink-0 text-primary underline-offset-2 hover:underline"
-                        href={`/${encodeURIComponent(environmentId)}/${encodeURIComponent(threadId)}`}
-                      >
-                        Open {threadId.length > 10 ? `${threadId.slice(0, 8)}…` : threadId}
-                      </a>
-                    ))}
-                    <span className="ml-auto shrink-0">
-                      {formatRelativeTimeLabel(proposal.updatedAt)}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+    <>
+      <AgentControlThreadActivity
+        key={`thread:${environmentId}:${activeThreadId ?? ""}`}
+        {...activityProps}
+        selection={selection}
+      />
+      <AgentControlThreadActivity
+        key={`external:${environmentId}`}
+        {...activityProps}
+        scope="external"
+        selection={externalSelection}
+      />
+    </>
   );
 }

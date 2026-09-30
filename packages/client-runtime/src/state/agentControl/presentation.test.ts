@@ -42,6 +42,19 @@ function makeProposal(overrides: Partial<AgentControlProposal> = {}): AgentContr
 }
 
 describe("buildAgentControlProposalCardModel", () => {
+  it("resolves origin and target titles while preserving exact IDs in plan details", () => {
+    const titles: Record<string, string> = {
+      "thread-caller-1234": "Coordinator",
+      "thread-target-5678": "Fix the flaky test",
+    };
+    const model = buildAgentControlProposalCardModel(makeProposal(), (id) => titles[id]);
+    expect(model.originLabel).toBe("Agent in Coordinator (codex)");
+    expect(model.targetLabel).toBe("Fix the flaky test");
+    expect(model.detailSections[0]?.lines).toContain("Thread: thread-target-5678");
+    expect(buildAgentControlProposalCardModel(makeProposal(), () => undefined).targetLabel).toBe(
+      "thread thread-t…",
+    );
+  });
   it("summarizes a multi-entry createThreads batch with runtime and worktree info", () => {
     const model = buildAgentControlProposalCardModel(
       makeProposal({
