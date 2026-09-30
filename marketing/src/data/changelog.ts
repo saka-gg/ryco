@@ -21,6 +21,46 @@ const RELEASE_BASE = "https://github.com/saka-gg/ryco/releases/tag";
  */
 export const CHANGELOG_RELEASES: ChangelogRelease[] = [
   {
+    version: "0.1.28",
+    date: "September 30, 2026",
+    dateTime: "2026-09-30",
+    summary:
+      "Compare models side by side, keep worktrees tidy, and undo sidebar actions, with beta computer use and steadier long-running sessions.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.28`,
+    highlights: [
+      {
+        title: "Compare models on the same prompt",
+        summary:
+          "Send one prompt to two to four models at once. Each runs in its own thread, branch, and worktree, so you can review the results side by side and keep the best one.",
+      },
+      {
+        title: "Worktrees and project settings under control",
+        summary:
+          "See what worktrees use on disk, preview cleanup before anything is removed, and opt into retention rules. Submodule setup is configurable, and projects can set default models, environments, and branch prefixes for new threads.",
+      },
+      {
+        title: "Undo, snippets, and imported history",
+        summary:
+          "Archive, settle, snooze, and unpin offer a five-second Undo. Completed shell code blocks can be pasted into a fresh terminal pane without running them, and existing Codex and Claude histories can be imported into Ryco.",
+      },
+      {
+        title: "Beta computer use and optional questions",
+        summary:
+          "Agents can use your desktop in a beta with approvals and safety controls. Codex can ask non-blocking questions while it keeps working, and the in-app browser allows one-time sign-in popups.",
+      },
+      {
+        title: "A calmer inbox and timeline",
+        summary:
+          "Inbox order stays put while turns stream, with a Pinned section and live pull request badges and stacks. Tool runs collapse into one summary row, Agent Control activity stays with its thread, and provider notices sit dismissibly above the composer.",
+      },
+      {
+        title: "Steadier sessions and model choices",
+        summary:
+          "Long Codex threads resume without reloading their entire history, streaming replies are stored incrementally, and failed uploads retry after reconnecting. Claude Opus 5.5 and Sonnet 5.5 are available, favorites remember reasoning effort, and usage history covers OpenCode and Cursor.",
+      },
+    ],
+  },
+  {
     version: "0.1.27",
     date: "September 16, 2026",
     dateTime: "2026-09-16",
