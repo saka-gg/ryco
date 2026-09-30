@@ -215,33 +215,37 @@ function ComposerBannerStackAlert({
 }) {
   const dismissOnly = item.onDismiss && !item.actions;
 
+  // The alert tint is translucent; back it with the page surface so transcript
+  // text scrolling under the floating composer never shows through.
   return (
-    <Alert variant={item.variant}>
-      {item.icon}
-      <AlertTitle>{item.title}</AlertTitle>
-      {item.description ? <AlertDescription>{item.description}</AlertDescription> : null}
-      {item.actions || item.onDismiss ? (
-        <AlertAction
-          className={
-            dismissOnly
-              ? "phone:col-start-3 phone:row-start-1 phone:mt-0 phone:self-start"
-              : undefined
-          }
-        >
-          {item.actions}
-          {item.onDismiss ? (
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              aria-label={item.dismissLabel ?? "Dismiss warning"}
-              disabled={exiting}
-              onClick={onDismissRequest}
-            >
-              <XIcon className="size-3.5" />
-            </Button>
-          ) : null}
-        </AlertAction>
-      ) : null}
-    </Alert>
+    <div className="rounded-xl bg-background">
+      <Alert variant={item.variant}>
+        {item.icon}
+        <AlertTitle>{item.title}</AlertTitle>
+        {item.description ? <AlertDescription>{item.description}</AlertDescription> : null}
+        {item.actions || item.onDismiss ? (
+          <AlertAction
+            className={
+              dismissOnly
+                ? "phone:col-start-3 phone:row-start-1 phone:mt-0 phone:self-start"
+                : undefined
+            }
+          >
+            {item.actions}
+            {item.onDismiss ? (
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label={item.dismissLabel ?? "Dismiss warning"}
+                disabled={exiting}
+                onClick={onDismissRequest}
+              >
+                <XIcon className="size-3.5" />
+              </Button>
+            ) : null}
+          </AlertAction>
+        ) : null}
+      </Alert>
+    </div>
   );
 }
