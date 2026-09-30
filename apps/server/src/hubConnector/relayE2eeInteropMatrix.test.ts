@@ -205,7 +205,7 @@ describe("§16 endpoint interoperability matrix (same runtime)", () => {
         expect(new TextDecoder().decode(node.deliveredToParser[before]!)).toBe('{"_tag":"Ping"}');
 
         const sentBefore = node.dataPayloads().length;
-        expect(await node.session().emit(utf8('{"_tag":"Pong"}'))).toBe(true);
+        expect(await node.session().emit(utf8('{"_tag":"Pong"}'))).toBe("sent");
         node.flush();
         const emitted = node.dataPayloads().slice(sentBefore);
         expect(emitted).toHaveLength(1);

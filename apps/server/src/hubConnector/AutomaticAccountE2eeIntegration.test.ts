@@ -434,7 +434,7 @@ describe("automatic account-enrolled E2EE", () => {
     expect(new TextDecoder().decode(first.node.deliveredToParser[0]!)).toBe('{"_tag":"Ping"}');
 
     const beforePong = first.node.dataPayloads().length;
-    expect(await first.node.session().emit(utf8('{"_tag":"Pong"}'))).toBe(true);
+    expect(await first.node.session().emit(utf8('{"_tag":"Pong"}'))).toBe("sent");
     first.node.flush();
     const pong = await first.machine.intercept(
       stripPrelude(first.node.dataPayloads()[beforePong]!),
