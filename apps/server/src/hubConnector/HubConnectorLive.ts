@@ -417,6 +417,7 @@ export const HubConnectorLive = Layer.effect(
               // "false". The proposal is the operator's statement for this run,
               // and a narrowing one runs the full §12.6 procedure.
               e2eePolicy: {
+                mode: config.hubE2eePolicy?.mode,
                 requireE2EE: config.hubE2eePolicy?.requireE2EE,
                 requireApprovedClientE2EE: config.hubE2eePolicy?.requireApprovedClientE2EE,
               },

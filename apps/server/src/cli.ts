@@ -1,3 +1,4 @@
+import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import { NetService } from "@ryco/shared/Net";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
 import {
@@ -123,6 +124,7 @@ const BootstrapEnvelopeSchema = Schema.Struct({
   hubAllowFileSecretStore: Schema.optional(Schema.Boolean),
   hubRequireE2EE: Schema.optional(Schema.Boolean),
   hubRequireApprovedClientE2EE: Schema.optional(Schema.Boolean),
+  hubE2eePolicy: Schema.optional(Schema.String),
   otlpTracesUrl: Schema.optional(Schema.String),
   otlpMetricsUrl: Schema.optional(Schema.String),
 });
@@ -178,11 +180,16 @@ const logWebSocketEventsFlag = Flag.boolean("log-websocket-events").pipe(
   Flag.optional,
 );
 const hubConnectorEnabledFlag = Flag.boolean("hub-connector-enabled").pipe(
-  Flag.withDescription("Enable the outbound Hub connector (overrides RYCO_HUB_CONNECTOR_ENABLED)."),
+  Flag.withDescription(
+    "Enable the outbound Hub connector so this node is reachable through the Hub relay (overrides RYCO_HUB_CONNECTOR_ENABLED).",
+  ),
+  Flag.withAlias("hub"),
   Flag.optional,
 );
 const hubOriginFlag = Flag.string("hub-origin").pipe(
-  Flag.withDescription("Canonical Hub HTTPS origin (overrides RYCO_HUB_ORIGIN)."),
+  Flag.withDescription(
+    `Canonical Hub HTTPS origin (overrides RYCO_HUB_ORIGIN; defaults to ${DEFAULT_HOSTED_APP_ORIGIN} when the connector is enabled).`,
+  ),
   Flag.optional,
 );
 const hubNodeNameFlag = Flag.string("hub-node-name").pipe(
@@ -204,6 +211,12 @@ const hubRequireE2EEFlag = Flag.boolean("hub-require-e2ee").pipe(
 const hubRequireApprovedClientE2EEFlag = Flag.boolean("hub-require-approved-client-e2ee").pipe(
   Flag.withDescription(
     "Accept only approved native clients over the relay. Disables web and legacy access entirely, closes the live channels it no longer admits, and can strand remote access if every approved client key is lost (overrides RYCO_HUB_REQUIRE_APPROVED_CLIENT_E2EE).",
+  ),
+  Flag.optional,
+);
+const hubE2eePolicyFlag = Flag.choice("hub-e2ee-policy", NodeE2eeAdmissionPolicy.literals).pipe(
+  Flag.withDescription(
+    "Relay E2EE admission policy committed to this node (overrides RYCO_HUB_E2EE_POLICY). `require-locally-approved-native-e2ee` disables web and legacy access entirely.",
   ),
   Flag.optional,
 );
@@ -316,6 +329,10 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  hubE2eePolicy: Config.string("RYCO_HUB_E2EE_POLICY").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
 });
 
 interface CliServerFlags {
@@ -336,6 +353,7 @@ interface CliServerFlags {
   readonly hubAllowFileSecretStore?: Option.Option<boolean>;
   readonly hubRequireE2EE?: Option.Option<boolean>;
   readonly hubRequireApprovedClientE2EE?: Option.Option<boolean>;
+  readonly hubE2eePolicy?: Option.Option<string>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
 }
@@ -392,6 +410,7 @@ export const resolveServerConfig = (
       hubAllowFileSecretStore: flags.hubAllowFileSecretStore ?? Option.none(),
       hubRequireE2EE: flags.hubRequireE2EE ?? Option.none(),
       hubRequireApprovedClientE2EE: flags.hubRequireApprovedClientE2EE ?? Option.none(),
+      hubE2eePolicy: flags.hubE2eePolicy ?? Option.none(),
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
     } satisfies CliServerFlags;
@@ -547,11 +566,14 @@ export const resolveServerConfig = (
           Option.map(Option.fromUndefinedOr(bootstrap?.hubConnectorEnabled), String),
         ),
       ),
+      // The hosted Hub is the default, so `ryco serve --hub` is enough on its
+      // own. Enrollment still needs an owner's explicit approval at that Hub.
       origin: Option.getOrUndefined(
         resolveOptionPrecedence(
           normalizedFlags.hubOrigin,
           Option.fromUndefinedOr(env.hubOrigin),
           Option.fromUndefinedOr(bootstrap?.hubOrigin),
+          Option.some(DEFAULT_HOSTED_APP_ORIGIN),
         ),
       ),
       nodeName: Option.getOrUndefined(
@@ -578,6 +600,13 @@ export const resolveServerConfig = (
     // `NodeE2eePolicyStore`, where it means "leave the committed policy alone" —
     // never "false" (§12.4).
     const hubE2eePolicy = resolveNodeE2eePolicyConfig({
+      mode: Option.getOrUndefined(
+        resolveOptionPrecedence(
+          normalizedFlags.hubE2eePolicy,
+          Option.fromUndefinedOr(env.hubE2eePolicy),
+          Option.fromUndefinedOr(bootstrap?.hubE2eePolicy),
+        ),
+      ),
       requireE2EE: Option.getOrUndefined(
         resolveOptionPrecedence(
           Option.map(normalizedFlags.hubRequireE2EE, String),
@@ -1260,6 +1289,7 @@ const sharedServerCommandFlags = {
   hubAllowFileSecretStore: hubAllowFileSecretStoreFlag,
   hubRequireE2EE: hubRequireE2EEFlag,
   hubRequireApprovedClientE2EE: hubRequireApprovedClientE2EEFlag,
+  hubE2eePolicy: hubE2eePolicyFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
 } as const;

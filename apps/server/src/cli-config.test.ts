@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { assert, expect, it } from "@effect/vitest";
 import { ConfigProvider, Effect, FileSystem, Layer, Option, Path } from "effect";
 
+import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import { NetService } from "@ryco/shared/Net";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -241,6 +242,55 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         ...DEFAULT_HUB_CONNECTOR_CONFIG,
         enabled: true,
         origin: "https://cli.example",
+      });
+    }),
+  );
+
+  it.effect("defaults an enabled connector to the hosted Hub origin", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveHubServerConfig(
+        "default-origin",
+        { hubConnectorEnabled: Option.some(true) },
+        {},
+      );
+
+      expect(resolved.hubConnector).toEqual({
+        ...DEFAULT_HUB_CONNECTOR_CONFIG,
+        enabled: true,
+        origin: DEFAULT_HOSTED_APP_ORIGIN,
+      });
+    }),
+  );
+
+  it.effect("resolves the E2EE admission mode from the flag before the environment", () =>
+    Effect.gen(function* () {
+      const fromFlag = yield* resolveHubServerConfig(
+        "e2ee-policy-flag",
+        { hubE2eePolicy: Option.some("require-native-e2ee") },
+        { RYCO_HUB_E2EE_POLICY: "require-e2ee" },
+      );
+      expect(fromFlag.hubE2eePolicy).toMatchObject({
+        mode: "require-native-e2ee",
+        configurationIssue: undefined,
+      });
+
+      const fromEnv = yield* resolveHubServerConfig(
+        "e2ee-policy-env",
+        {},
+        { RYCO_HUB_E2EE_POLICY: "require-e2ee" },
+      );
+      expect(fromEnv.hubE2eePolicy?.mode).toBe("require-e2ee");
+
+      // An unknown mode never becomes a policy: it stays unset, which can only
+      // leave the committed policy as it was, and is reported.
+      const invalid = yield* resolveHubServerConfig(
+        "e2ee-policy-invalid",
+        {},
+        { RYCO_HUB_E2EE_POLICY: "require-everything" },
+      );
+      expect(invalid.hubE2eePolicy).toMatchObject({
+        mode: undefined,
+        configurationIssue: "configuration_invalid",
       });
     }),
   );
