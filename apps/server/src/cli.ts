@@ -78,6 +78,16 @@ import { expandHomePath, resolveBaseDir } from "./os-jank.ts";
 import { runServer } from "./server.ts";
 import { renderTerminalQrCode } from "./startupAccess.ts";
 import {
+  CliRemoteError,
+  cliRemotesPath,
+  connectCliRemote,
+  findCliRemote,
+  pairCliRemote,
+  readCliRemotes,
+  writeCliRemotes,
+} from "./cliRemote/remotes.ts";
+import { formatRemoteThreads, loadRemoteShell, sendToRemoteThread } from "./cliRemote/threads.ts";
+import {
   approveOwnEnrollment,
   createCliHubAccount,
   describeAccountLinkFailure,
@@ -3435,6 +3445,206 @@ const serviceCommand = Command.make("service").pipe(
   ]),
 );
 
+// ─── ryco remote ──────────────────────────────────────────────────────────────
+
+const remoteLocationFlags = { baseDir: baseDirFlag } as const;
+
+const remotesFilePath = (baseDir: Option.Option<string>) =>
+  Effect.gen(function* () {
+    const logLevel = yield* GlobalFlag.LogLevel;
+    const config = yield* resolveCliAuthConfig({ baseDir }, logLevel);
+    return cliRemotesPath(config.stateDir);
+  });
+
+const remoteStep = <A>(run: () => Promise<A>) =>
+  Effect.tryPromise({
+    try: run,
+    catch: (cause) =>
+      cause instanceof CliRemoteError
+        ? cause
+        : new CliRemoteError({
+            message:
+              cause instanceof Error && cause.message.length > 0
+                ? cause.message
+                : "The remote could not be reached.",
+            cause,
+          }),
+  });
+
+const remoteNameArgument = Argument.string("name").pipe(
+  Argument.withDescription("The name you gave the remote with `ryco remote add`."),
+);
+
+const remoteAddCommand = Command.make("add", {
+  ...remoteLocationFlags,
+  name: Argument.string("name").pipe(
+    Argument.withDescription("A short name for the remote, for example `mac-mini`."),
+  ),
+  pairingUrl: Argument.string("pairing-url").pipe(
+    Argument.withDescription(
+      "A pairing link from the remote (`ryco auth pairing create --base-url …` there), or `-` to read it from stdin.",
+    ),
+  ),
+}).pipe(
+  Command.withDescription("Pair with another Ryco node so this CLI can reach it."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const filePath = yield* remotesFilePath(flags.baseDir);
+      const pairingUrl =
+        flags.pairingUrl === "-"
+          ? (yield* remoteStep(async () => {
+              const chunks: Buffer[] = [];
+              for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+              return Buffer.concat(chunks).toString("utf8");
+            })).trim()
+          : flags.pairingUrl;
+      const remote = yield* remoteStep(() => pairCliRemote({ name: flags.name, pairingUrl }));
+      const existing = yield* remoteStep(() => readCliRemotes(filePath));
+      yield* remoteStep(() =>
+        writeCliRemotes(filePath, [...existing.filter((entry) => entry.name !== remote.name), remote]),
+      );
+      yield* Console.log(
+        `Added "${remote.name}": ${remote.label} at ${remote.httpBaseUrl} (${remote.role} access).\nTry \`ryco remote threads ${remote.name}\`.\n`,
+      );
+    }),
+  ),
+);
+
+const remoteListCommand = Command.make("list", { ...remoteLocationFlags, json: jsonFlag }).pipe(
+  Command.withDescription("List the remotes this CLI is paired with."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const filePath = yield* remotesFilePath(flags.baseDir);
+      const remotes = yield* remoteStep(() => readCliRemotes(filePath));
+      if (flags.json) {
+        yield* Console.log(
+          JSON.stringify(remotes.map(({ token: _token, ...remote }) => remote)),
+        );
+        return;
+      }
+      yield* Console.log(
+        remotes.length === 0
+          ? "No remotes. Add one with `ryco remote add <name> <pairing-url>`.\n"
+          : `${remotes
+              .map((remote) => `${remote.name}  ${remote.label}  ${remote.httpBaseUrl}  (${remote.role})`)
+              .join("\n")}\n`,
+      );
+    }),
+  ),
+);
+
+const remoteRemoveCommand = Command.make("remove", {
+  ...remoteLocationFlags,
+  name: remoteNameArgument,
+}).pipe(
+  Command.withDescription("Forget a remote. Revoke its session on the remote from Settings → Connections."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const filePath = yield* remotesFilePath(flags.baseDir);
+      const remotes = yield* remoteStep(() => readCliRemotes(filePath));
+      yield* Effect.try({
+        try: () => findCliRemote(remotes, flags.name),
+        catch: (cause) => cause as CliRemoteError,
+      });
+      yield* remoteStep(() =>
+        writeCliRemotes(filePath, remotes.filter((entry) => entry.name !== flags.name)),
+      );
+      yield* Console.log(`Removed "${flags.name}".\n`);
+    }),
+  ),
+);
+
+const loadRemote = (baseDir: Option.Option<string>, name: string) =>
+  Effect.gen(function* () {
+    const filePath = yield* remotesFilePath(baseDir);
+    const remotes = yield* remoteStep(() => readCliRemotes(filePath));
+    return yield* Effect.try({
+      try: () => findCliRemote(remotes, name),
+      catch: (cause) => cause as CliRemoteError,
+    });
+  });
+
+const remoteThreadsCommand = Command.make("threads", {
+  ...remoteLocationFlags,
+  name: remoteNameArgument,
+  all: Flag.boolean("all").pipe(
+    Flag.withDescription("Include archived threads."),
+    Flag.optional,
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("List a remote's threads, most recently updated first."),
+  Command.withHandler((flags) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const remote = yield* loadRemote(flags.baseDir, flags.name);
+        const client = yield* connectCliRemote(remote);
+        const snapshot = yield* loadRemoteShell(client);
+        if (flags.json) {
+          yield* Console.log(JSON.stringify(snapshot.threads));
+          return;
+        }
+        yield* Console.log(
+          `${formatRemoteThreads(snapshot, { includeArchived: Option.getOrElse(flags.all, () => false) })}\n`,
+        );
+      }),
+    ),
+  ),
+);
+
+const remoteSendCommand = Command.make("send", {
+  ...remoteLocationFlags,
+  name: remoteNameArgument,
+  threadId: Argument.string("thread-id").pipe(
+    Argument.withDescription("The thread to continue (see `ryco remote threads`)."),
+  ),
+  message: Argument.string("message").pipe(
+    Argument.withDescription("The message to send."),
+    Argument.variadic({ min: 1 }),
+  ),
+  wait: Flag.boolean("wait").pipe(
+    Flag.withDescription(
+      "Print the assistant's reply as it streams until the turn ends (default; --no-wait returns at once).",
+    ),
+    Flag.optional,
+  ),
+}).pipe(
+  Command.withDescription("Send a message to a thread on a remote, with the thread's own model."),
+  Command.withHandler((flags) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const remote = yield* loadRemote(flags.baseDir, flags.name);
+        const client = yield* connectCliRemote(remote);
+        const wait = Option.getOrElse(flags.wait, () => true);
+        const text = flags.message.join(" ");
+        const error = yield* sendToRemoteThread(client, {
+          threadId: flags.threadId,
+          text,
+          ...(wait ? { onAssistantText: (chunk: string) => process.stdout.write(chunk) } : {}),
+        });
+        if (wait) process.stdout.write("\n");
+        if (error) {
+          return yield* new CliRemoteError({ message: `The turn ended with an error: ${error}` });
+        }
+        if (!wait) yield* Console.log("Sent.\n");
+      }),
+    ),
+  ),
+);
+
+const remoteCommand = Command.make("remote").pipe(
+  Command.withDescription(
+    "Use this CLI as a client of another Ryco node: pair with it, list its threads, and send messages.",
+  ),
+  Command.withSubcommands([
+    remoteAddCommand,
+    remoteListCommand,
+    remoteRemoveCommand,
+    remoteThreadsCommand,
+    remoteSendCommand,
+  ]),
+);
+
 const startCommand = Command.make("start", { ...sharedServerCommandFlags }).pipe(
   Command.withDescription("Run the Ryco server."),
   Command.withHandler((flags) => runServerCommand(flags)),
@@ -3463,5 +3673,6 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     e2eeCommand,
     projectCommand,
     serviceCommand,
+    remoteCommand,
   ]),
 );
