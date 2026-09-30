@@ -104,7 +104,8 @@
     "./state/pull-request-review": {
       "types": "./src/state/pull-request-review/index.ts",
       "import": "./src/state/pull-request-review/index.ts"
-    }
+    },
+    "./state/storage": "./src/state/storage/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

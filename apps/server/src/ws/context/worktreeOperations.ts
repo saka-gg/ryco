@@ -1,3 +1,4 @@
+import { resolveProjectPreferences } from "../../project/projectPreferences.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
@@ -9,6 +10,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationDispatchCommandError,
   type ProjectId,
+  type WorktreeSubmoduleInitialization,
   ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
@@ -272,13 +274,17 @@ export const makeWorktreeOperations = (deps: {
                 );
         if (existing !== null) {
           const existingWorktree = yield* loadWorktreeForGitWorkflow(operation, existing);
-          yield* loadProjectForGitWorkflow(operation, input.projectId);
-          const { defaultAgentTokenMode, textGenerationModelSelection: modelSelection } =
-            yield* serverSettings.getSettings.pipe(
-              Effect.mapError((cause) =>
-                toGitManagerError(operation, "Failed to load server settings.", cause),
-              ),
-            );
+          if (existingWorktree.worktreePath !== null)
+            yield* gitWorkflow.assertWorktreeSetupComplete(existingWorktree.worktreePath);
+          const project = yield* loadProjectForGitWorkflow(operation, input.projectId);
+          const settings = yield* serverSettings.getSettings.pipe(
+            Effect.mapError((cause) =>
+              toGitManagerError(operation, "Failed to load server settings.", cause),
+            ),
+          );
+          const defaultAgentTokenMode = settings.defaultAgentTokenMode;
+          const modelSelection = resolveProjectPreferences({ settings, project })
+            .initialModelSelection.value;
           const now = new Date().toISOString();
           const threadId = ThreadId.make(`thread-${crypto.randomUUID()}`);
           yield* dispatchWorktreeCommand(
@@ -323,7 +329,9 @@ export const makeWorktreeOperations = (deps: {
         ),
       );
 
-      const { worktreeBranchPrefix, textGenerationModelSelection: modelSelection } = settings;
+      const effective = resolveProjectPreferences({ settings, project });
+      const worktreeBranchPrefix = effective.worktreeBranchPrefix.value;
+      const modelSelection = effective.initialModelSelection.value;
       // Resolve lazily: reusing an existing registered PR checkout must not depend on
       // the availability of the root configured for future checkouts.
       const resolveRoot = () =>
@@ -351,6 +359,7 @@ export const makeWorktreeOperations = (deps: {
       let workItemState: "open" | "in_progress" | "done" | "closed" | "unknown" | null = null;
       let workItemStateName: string | null = null;
       let workItemUrl: string | null = null;
+      let submoduleInitialization: WorktreeSubmoduleInitialization | undefined;
       let preparedWorktreePath: string | null = null;
       let ownedWorktreePath: string | null = null;
       let ownedBranchName: string | null = null;
@@ -381,20 +390,29 @@ export const makeWorktreeOperations = (deps: {
             ],
             { concurrency: 2 },
           );
-          const prepared = yield* gitWorkflow.preparePullRequestThread({
-            cwd: project.workspaceRoot,
-            reference: String(number),
-            mode: "worktree",
-            projectId: input.projectId,
-            worktreeLocation: input.worktreeLocation,
-            worktreesDir:
-              input.worktreeLocation === "projectMetadata"
-                ? resolveProjectWorktreesDir(project.workspaceRoot, project.projectMetadataDir)
-                : path.join(
-                    selectConfiguredWorktreeRoot({ settings, projectId: input.projectId, config }),
-                    input.projectId,
-                  ),
-          });
+          const prepared = yield* gitWorkflow.preparePullRequestThread(
+            {
+              settingsSnapshot: settings,
+              cwd: project.workspaceRoot,
+              reference: String(number),
+              mode: "worktree",
+              projectId: input.projectId,
+              worktreeLocation: input.worktreeLocation,
+              worktreesDir:
+                input.worktreeLocation === "projectMetadata"
+                  ? resolveProjectWorktreesDir(project.workspaceRoot, project.projectMetadataDir)
+                  : path.join(
+                      selectConfiguredWorktreeRoot({
+                        settings,
+                        projectId: input.projectId,
+                        config,
+                      }),
+                      input.projectId,
+                    ),
+            },
+            { preferencesSnapshot: { settings, project } },
+          );
+          submoduleInitialization = prepared.submoduleInitialization;
           if (prepared.worktreePath === null) {
             return yield* failGitWorkflow(
               operation,
@@ -433,7 +451,7 @@ export const makeWorktreeOperations = (deps: {
                   title: input.intent.title,
                   body: input.intent.body,
                 }),
-                modelSelection,
+                modelSelection: settings.textGenerationModelSelection,
               })
               .pipe(
                 Effect.map(({ branch: generatedBranch }) => {
@@ -477,7 +495,7 @@ export const makeWorktreeOperations = (deps: {
                     title: input.intent.title,
                     body: input.intent.body,
                   }),
-                  modelSelection,
+                  modelSelection: settings.textGenerationModelSelection,
                 })
                 .pipe(
                   Effect.map(({ branch: generatedBranch }) => generatedBranch),
@@ -525,13 +543,17 @@ export const makeWorktreeOperations = (deps: {
           return yield* failGitWorkflow(operation, "Cannot create a worktree at the project root.");
         }
         const authorizedTargetPath = yield* authorizeWorktreePath(operation, targetPath, false);
-        worktreePath = (yield* gitWorkflow.createWorktree({
+        const created = yield* gitWorkflow.createWorktree({
+          settingsSnapshot: settings,
+          projectId: input.projectId,
           fetchOrigin: input.fetchOrigin,
           cwd: project.workspaceRoot,
           refName,
           ...(newRefName !== undefined ? { newRefName } : {}),
           path: authorizedTargetPath,
-        })).worktree.path;
+        });
+        worktreePath = created.worktree.path;
+        submoduleInitialization = created.submoduleInitialization;
         worktreePath = yield* authorizeWorktreePath(operation, worktreePath, true);
         if (isProjectRootPath(worktreePath, project.workspaceRoot)) {
           return yield* failGitWorkflow(
@@ -647,17 +669,18 @@ export const makeWorktreeOperations = (deps: {
           operation,
         );
 
-        yield* launchSetupScriptForWorktreeInBackground({
-          threadId,
-          projectId: input.projectId,
-          projectCwd: project.workspaceRoot,
-          worktreePath,
-        });
+        if (effective.runSetupScript.value)
+          yield* launchSetupScriptForWorktreeInBackground({
+            threadId,
+            projectId: input.projectId,
+            projectCwd: project.workspaceRoot,
+            worktreePath,
+          });
         yield* refreshGitStatus(worktreePath);
       }).pipe(
         Effect.catch((error) => cleanupOwnedCheckout.pipe(Effect.andThen(Effect.fail(error)))),
       );
-      return { worktreeId, sessionId: threadId };
+      return { worktreeId, sessionId: threadId, submoduleInitialization };
     });
 
   /**
@@ -937,6 +960,7 @@ export const makeWorktreeOperations = (deps: {
         worktree.origin === "main"
           ? null
           : yield* gitWorkflow.createWorktree({
+              projectId: worktree.projectId,
               cwd: project.workspaceRoot,
               refName: worktree.branch,
               path: worktree.worktreePath,

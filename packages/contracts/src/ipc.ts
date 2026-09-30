@@ -1,3 +1,4 @@
+import type { EffectiveProjectPreferences } from "./settings.ts";
 import type {
   CodexResetCreditAccount,
   CodexResetCreditInput,
@@ -206,7 +207,7 @@ import type {
   OrchestrationSubscribeThreadInput,
   OrchestrationThreadStreamItem,
 } from "./orchestration.ts";
-import type { EnvironmentId, ThreadId } from "./baseSchemas.ts";
+import type { EnvironmentId, ProjectId, ThreadId } from "./baseSchemas.ts";
 import type {
   DiagnosticsSnapshot,
   DiagnosticsSignalProcessInput,
@@ -867,6 +868,9 @@ export interface LocalApi {
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
     upsertKeybinding: (input: ServerUpsertKeybindingInput) => Promise<ServerUpsertKeybindingResult>;
     getSettings: () => Promise<ServerSettings>;
+    getProjectPreferences?: (input: {
+      readonly projectId?: ProjectId;
+    }) => Promise<EffectiveProjectPreferences>;
     updateSettings: (patch: ServerSettingsPatch) => Promise<ServerSettings>;
     getDiagnosticsSnapshot: () => Promise<DiagnosticsSnapshot>;
     getResourceTelemetryHistory?: (
@@ -916,6 +920,7 @@ export interface EnvironmentApi {
   };
   /** Node-scoped provider/settings operations, resolved by environment. */
   server?: {
+    getConfig?: () => Promise<ServerConfig>;
     readCodexResetCredits?: (input: {
       instanceId: ProviderInstanceId;
     }) => Promise<CodexResetCreditAccount>;
@@ -937,6 +942,9 @@ export interface EnvironmentApi {
     ) => Promise<AcpRegistryAuthenticationResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
     getSettings: () => Promise<ServerSettings>;
+    getProjectPreferences?: (input: {
+      readonly projectId?: ProjectId;
+    }) => Promise<EffectiveProjectPreferences>;
     updateSettings: (patch: ServerSettingsPatch) => Promise<ServerSettings>;
     upsertKeybinding: (input: ServerUpsertKeybindingInput) => Promise<ServerUpsertKeybindingResult>;
     getDiagnosticsSnapshot: () => Promise<DiagnosticsSnapshot>;

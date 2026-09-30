@@ -1,4 +1,5 @@
 import path from "node:path";
+import { realpath } from "node:fs/promises";
 
 import { Duration, Effect, Option, Queue, Stream } from "effect";
 import {
@@ -36,6 +37,7 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
     initializeGitForProject,
     config,
     serverSettings,
+    workspaceAccessPolicy,
   } = ctx;
 
   return defineWsHandlers({
@@ -155,50 +157,72 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.gitPreparePullRequestThread,
         ownerEffect(
           WS_METHODS.gitPreparePullRequestThread,
-          (input.projectId
-            ? projectionSnapshotQuery.getProjectShellById(input.projectId)
-            : projectionSnapshotQuery.getActiveProjectByWorkspaceRoot(input.cwd)
-          )
-            .pipe(
-              Effect.mapError((cause) =>
-                toGitManagerError(
-                  "git.preparePullRequestThread",
-                  `Failed to load project ${input.projectId}.`,
-                  cause,
-                ),
-              ),
-              Effect.map(Option.getOrNull),
-              Effect.flatMap((project) =>
-                serverSettings.getSettings.pipe(
+          Effect.gen(function* () {
+            const operation = "git.preparePullRequestThread";
+            const authorizedCwd = yield* workspaceAccessPolicy
+              .assertExistingPath({ path: input.cwd, operation })
+              .pipe(Effect.mapError((cause) => toGitManagerError(operation, cause.message, cause)));
+            const canonicalPath = (value: string) =>
+              Effect.tryPromise({
+                try: () =>
+                  realpath(value).catch((cause: NodeJS.ErrnoException) => {
+                    // Git reports missing repositories; path identity still must never
+                    // fall back to an unrelated caller-supplied project ID.
+                    if (cause.code === "ENOENT") return path.resolve(value);
+                    throw cause;
+                  }),
+                catch: (cause) =>
+                  toGitManagerError(operation, "Cannot resolve repository path.", cause),
+              });
+            const canonicalCwd = yield* canonicalPath(authorizedCwd);
+            const lookupProject = (cwd: string) =>
+              projectionSnapshotQuery
+                .getActiveProjectByWorkspaceRoot(cwd)
+                .pipe(
                   Effect.mapError((cause) =>
                     toGitManagerError(
-                      "git.preparePullRequestThread",
-                      "Failed to load worktree settings.",
+                      operation,
+                      "Failed to load the project owning this repository.",
                       cause,
                     ),
                   ),
-                  Effect.map((settings) => ({
-                    ...input,
-                    worktreesDir:
-                      input.worktreesDir ??
-                      (input.worktreeLocation === "projectMetadata"
-                        ? resolveProjectWorktreesDir(input.cwd, project?.projectMetadataDir)
-                        : path.join(
-                            selectConfiguredWorktreeRoot({
-                              settings,
-                              config,
-                              projectId: project?.id ?? input.projectId,
-                            }),
-                            project?.id ?? input.projectId ?? ProjectId.make("project-unknown"),
-                          )),
-                  })),
-                ),
+                );
+            let projectOption = yield* lookupProject(canonicalCwd);
+            if (Option.isNone(projectOption) && canonicalCwd !== input.cwd)
+              projectOption = yield* lookupProject(input.cwd);
+            const project = Option.getOrNull(projectOption);
+            if (project && (yield* canonicalPath(project.workspaceRoot)) !== canonicalCwd)
+              return yield* toGitManagerError(
+                operation,
+                "The registered project does not own this repository.",
+              );
+            if (input.projectId !== undefined && input.projectId !== project?.id)
+              return yield* toGitManagerError(
+                operation,
+                "The requested project does not match the registered project owning this repository. Refresh the project selection and try again.",
+              );
+            const settings = yield* serverSettings.getSettings.pipe(
+              Effect.mapError((cause) =>
+                toGitManagerError(operation, "Failed to load worktree settings.", cause),
               ),
-              Effect.flatMap((normalizedInput) =>
-                gitWorkflow.preparePullRequestThread(normalizedInput),
-              ),
-            )
-            .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            );
+            return yield* gitWorkflow.preparePullRequestThread(
+              {
+                ...input,
+                projectId: project?.id,
+                settingsSnapshot: settings,
+                worktreesDir:
+                  input.worktreesDir ??
+                  (input.worktreeLocation === "projectMetadata"
+                    ? resolveProjectWorktreesDir(input.cwd, project?.projectMetadataDir)
+                    : path.join(
+                        selectConfiguredWorktreeRoot({ settings, config, projectId: project?.id }),
+                        project?.id ?? ProjectId.make("project-unknown"),
+                      )),
+              },
+              { preferencesSnapshot: { settings, project } },
+            );
+          }).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         ),
         { "rpc.aggregate": "git" },
       ),
@@ -320,7 +344,6 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         ownerEffect(
           WS_METHODS.vcsCreateWorktree,
           Effect.gen(function* () {
-            if (input.path !== null) return yield* gitWorkflow.createWorktree(input);
             const project = yield* projectionSnapshotQuery
               .getActiveProjectByWorkspaceRoot(input.cwd)
               .pipe(
@@ -335,8 +358,16 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
                 toGitManagerError("git.createWorktree", "Failed to load worktree settings.", cause),
               ),
             );
+            if (input.path !== null)
+              return yield* gitWorkflow.createWorktree({
+                ...input,
+                projectId: project.id,
+                settingsSnapshot: settings,
+              });
             return yield* gitWorkflow.createWorktree({
               ...input,
+              settingsSnapshot: settings,
+              projectId: project.id,
               path: path.join(
                 selectConfiguredWorktreeRoot({ settings, config, projectId: project.id }),
                 project.id,

@@ -9,6 +9,8 @@ import {
   type VcsCreateRefInput,
   type VcsCreateRefResult,
   type VcsCreateWorktreeInput,
+  type ProjectId,
+  type ServerSettings,
   type VcsCreateWorktreeResult,
   type VcsInitInput,
   type VcsListRefsInput,
@@ -18,9 +20,16 @@ import {
   type VcsStatusInput,
   type VcsStatusResult,
 } from "@ryco/contracts";
+import type { VerifiedWorktreeCleanup } from "../storage/filesystem.ts";
 import * as GitVcsDriverCore from "./GitVcsDriverCore.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
+
+/** Server-derived context only; deliberately absent from public RPC schemas. */
+export interface GitWorktreeCreationContext {
+  readonly projectId?: ProjectId | undefined;
+  readonly settingsSnapshot?: ServerSettings | undefined;
+}
 
 export interface ExecuteGitInput {
   readonly operation: string;
@@ -185,8 +194,11 @@ export interface GitVcsDriverShape {
   ) => Effect.Effect<string | null, GitCommandError>;
   readonly listRefs: (input: VcsListRefsInput) => Effect.Effect<VcsListRefsResult, GitCommandError>;
   readonly pullCurrentBranch: (cwd: string) => Effect.Effect<VcsPullResult, GitCommandError>;
+  readonly assertWorktreeSetupComplete: (
+    checkoutPath: string,
+  ) => Effect.Effect<void, GitCommandError>;
   readonly createWorktree: (
-    input: VcsCreateWorktreeInput,
+    input: VcsCreateWorktreeInput & GitWorktreeCreationContext,
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
   readonly fetchPullRequestBranch: (
     input: GitFetchPullRequestBranchInput,
@@ -202,7 +214,9 @@ export interface GitVcsDriverShape {
   readonly setBranchUpstream: (
     input: GitSetBranchUpstreamInput,
   ) => Effect.Effect<void, GitCommandError>;
-  readonly removeWorktree: (input: VcsRemoveWorktreeInput) => Effect.Effect<void, GitCommandError>;
+  readonly removeWorktree: (
+    input: VcsRemoveWorktreeInput & { readonly cleanup?: VerifiedWorktreeCleanup },
+  ) => Effect.Effect<void, GitCommandError>;
   readonly pruneWorktrees: (cwd: string) => Effect.Effect<void, GitCommandError>;
   readonly renameBranch: (
     input: GitRenameBranchInput,

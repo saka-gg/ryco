@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, PlatformError, Scope } from "effect";
+import { Effect, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { expect } from "vite-plus/test";
 import type {
@@ -12,9 +12,17 @@ import type {
   GitPreparePullRequestThreadInput,
   ModelSelection,
   ThreadId,
+  OrchestrationProjectShell,
+  ServerSettingsPatch,
 } from "@ryco/contracts";
 
-import { GitCommandError, TextGenerationError } from "@ryco/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  GitCommandError,
+  ProjectId,
+  TextGenerationError,
+} from "@ryco/contracts";
+import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { type GitManagerShape } from "./GitManager.ts";
 import {
   GitHubCliError,
@@ -33,6 +41,7 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import { makeGitManager } from "./GitManager.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { configureTestGitCommitIdentity } from "../vcs/testing/GitTestRepo.ts";
 import {
   ProjectSetupScriptRunner,
@@ -720,8 +729,9 @@ function resolvePullRequest(manager: GitManagerShape, input: { cwd: string; refe
 function preparePullRequestThread(
   manager: GitManagerShape,
   input: GitPreparePullRequestThreadInput,
+  options?: Parameters<GitManagerShape["preparePullRequestThread"]>[1],
 ) {
-  return manager.preparePullRequestThread(input);
+  return manager.preparePullRequestThread(input, options);
 }
 
 function makeManager(input?: {
@@ -729,6 +739,8 @@ function makeManager(input?: {
   ghScenario?: FakeGhScenario;
   textGeneration?: Partial<FakeGitTextGeneration>;
   setupScriptRunner?: ProjectSetupScriptRunnerShape;
+  settingsPatch?: ServerSettingsPatch;
+  project?: OrchestrationProjectShell;
 }) {
   const {
     service: gitHubCli,
@@ -740,8 +752,44 @@ function makeManager(input?: {
     prefix: "ryco-git-manager-test-",
   });
 
-  const serverSettingsLayer = ServerSettingsService.layerTest({
-    worktreeBranchPrefix: input?.worktreeBranchPrefix ?? "ryco",
+  let settingsReads = 0;
+  const projectLookups: Array<string> = [];
+  const serverSettingsLayer = Layer.effect(
+    ServerSettingsService,
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      return {
+        ...settings,
+        getSettings: settings.getSettings.pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              settingsReads++;
+            }),
+          ),
+        ),
+      };
+    }),
+  ).pipe(
+    Layer.provide(
+      ServerSettingsService.layerTest({
+        worktreeBranchPrefix: input?.worktreeBranchPrefix ?? "ryco",
+        ...input?.settingsPatch,
+      }),
+    ),
+  );
+  const projectLayer = Layer.mock(ProjectionSnapshotQuery)({
+    getProjectShellById: (id) =>
+      Effect.sync(() => {
+        projectLookups.push(id);
+        return input?.project?.id === id ? Option.some(input.project) : Option.none();
+      }),
+    getActiveProjectByWorkspaceRoot: (cwd) =>
+      Effect.sync(() => {
+        projectLookups.push(cwd);
+        return input?.project?.workspaceRoot === cwd
+          ? Option.some({ ...input.project, deletedAt: null })
+          : Option.none();
+      }),
   });
 
   const vcsDriverLayer = GitVcsDriver.layer.pipe(
@@ -775,15 +823,89 @@ function makeManager(input?: {
     ),
     vcsDriverLayer,
     serverSettingsLayer,
+    projectLayer,
   ).pipe(Layer.provideMerge(sourceControlRegistryLayer), Layer.provideMerge(NodeServices.layer));
 
   return makeGitManager().pipe(
     Effect.provide(managerLayer),
-    Effect.map((manager) => ({ manager, ghCalls, createdPrBodies })),
+    Effect.map((manager) => ({
+      manager,
+      ghCalls,
+      createdPrBodies,
+      projectLookups,
+      settingsReadCount: () => settingsReads,
+    })),
   );
 }
 
 const asThreadId = (threadId: string) => threadId as ThreadId;
+
+function preferenceProject(workspaceRoot: string): OrchestrationProjectShell {
+  return {
+    id: ProjectId.make("pr-preferences"),
+    title: "PR preferences",
+    workspaceRoot,
+    projectMetadataDir: ".ryco",
+    repositoryIdentity: null,
+    defaultModelSelection: null,
+    customSystemPrompt: null,
+    customAvatarContentHash: null,
+    preferredRemoteName: null,
+    scripts: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function makePreferencePullRequestFixture(repositorySubmodules?: "top-level") {
+  return Effect.gen(function* () {
+    const repoDir = yield* makeTempDir("ryco-pr-preferences-");
+    yield* initRepo(repoDir);
+    const originDir = yield* createBareRemote();
+    const forkDir = yield* createBareRemote();
+    yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+    yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+    yield* runGit(repoDir, ["remote", "add", "fork-seed", forkDir]);
+    yield* runGit(repoDir, ["checkout", "-b", "preference-source"]);
+    fs.writeFileSync(path.join(repoDir, "preference.txt"), "fixture checkout\n");
+    if (repositorySubmodules) {
+      fs.writeFileSync(
+        path.join(repoDir, "ryco.json"),
+        JSON.stringify({ worktreeSubmodules: repositorySubmodules }),
+      );
+      fs.writeFileSync(
+        path.join(repoDir, ".gitmodules"),
+        '[submodule "fixture"]\npath = modules/fixture\nurl = /nonexistent/fixture\n',
+      );
+      yield* runGit(repoDir, ["add", "ryco.json", ".gitmodules"]);
+    }
+    yield* runGit(repoDir, ["add", "preference.txt"]);
+    yield* runGit(repoDir, ["commit", "-m", "Preference fixture"]);
+    yield* runGit(repoDir, ["push", "fork-seed", "HEAD:main"]);
+    yield* runGit(repoDir, ["checkout", "main"]);
+    const project = preferenceProject(fs.realpathSync(repoDir));
+    const ghScenario: FakeGhScenario = {
+      pullRequest: {
+        number: 991,
+        title: "Preference PR",
+        url: "https://example.com/pull/991",
+        baseRefName: "main",
+        headRefName: "main",
+        state: "open",
+        isCrossRepository: true,
+        headRepositoryNameWithOwner: "fixture/repo",
+        headRepositoryOwnerLogin: "fixture",
+      },
+      repositoryCloneUrls: { "fixture/repo": { url: forkDir, sshUrl: forkDir } },
+    };
+    return {
+      repoDir: project.workspaceRoot,
+      project,
+      ghScenario,
+      worktreesDir: path.join(project.workspaceRoot, ".ryco", "worktrees"),
+    };
+  });
+}
 
 const GitManagerTestLayer = GitVcsDriver.layer.pipe(
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-git-manager-test-" })),
@@ -792,6 +914,247 @@ const GitManagerTestLayer = GitVcsDriver.layer.pipe(
 );
 
 it.layer(GitManagerTestLayer)("GitManager", (it) => {
+  it.effect(
+    "PR preferences: resolved project submodule policy survives by-root and explicit creation",
+    () =>
+      Effect.gen(function* () {
+        for (const byRoot of [true, false]) {
+          const fixture = yield* makePreferencePullRequestFixture("top-level");
+          const setupCalls: ProjectSetupScriptRunnerInput[] = [];
+          const { manager, settingsReadCount, projectLookups } = yield* makeManager({
+            ghScenario: fixture.ghScenario,
+            project: fixture.project,
+            settingsPatch: {
+              worktreeSubmodules: "recursive",
+              projectWorktreeSubmodules: { [fixture.project.id]: "none" },
+              runSetupScript: true,
+              projectPreferences: {
+                [fixture.project.id]: {
+                  worktreeBranchPrefix: "project/policy",
+                  runSetupScript: false,
+                },
+              },
+            },
+            setupScriptRunner: {
+              runForThread: (input) =>
+                Effect.sync(() => {
+                  setupCalls.push(input);
+                  return { status: "no-script" as const };
+                }),
+            },
+          });
+          const result = yield* preparePullRequestThread(manager, {
+            cwd: fixture.repoDir,
+            reference: "991",
+            mode: "worktree",
+            worktreesDir: fixture.worktreesDir,
+            threadId: asThreadId("pr-policy-worker"),
+            ...(byRoot ? {} : { projectId: fixture.project.id }),
+          });
+          expect(result.branch).toBe("project/policy/pr-991/main");
+          expect(result.submoduleInitialization).toMatchObject({
+            mode: "none",
+            source: "project",
+            status: "skipped",
+          });
+          expect(
+            JSON.parse(fs.readFileSync(path.join(result.worktreePath!, "ryco.json"), "utf8")),
+          ).toEqual({ worktreeSubmodules: "top-level" });
+          expect(setupCalls).toHaveLength(0);
+          expect(settingsReadCount()).toBe(1);
+          expect(projectLookups).toEqual([byRoot ? fixture.repoDir : fixture.project.id]);
+        }
+      }),
+  );
+  for (const test of [
+    {
+      name: "inherited enabled",
+      nodeSetup: true,
+      overrides: {},
+      prefix: "node/tasks",
+      setup: true,
+      byRoot: false,
+    },
+    {
+      name: "inherited disabled by root",
+      nodeSetup: false,
+      overrides: {},
+      prefix: "node/tasks",
+      setup: false,
+      byRoot: true,
+    },
+    {
+      name: "project disabled",
+      nodeSetup: true,
+      overrides: { worktreeBranchPrefix: "project/tasks", runSetupScript: false },
+      prefix: "project/tasks",
+      setup: false,
+      byRoot: false,
+    },
+    {
+      name: "project enabled",
+      nodeSetup: false,
+      overrides: { worktreeBranchPrefix: "project/tasks", runSetupScript: true },
+      prefix: "project/tasks",
+      setup: true,
+      byRoot: false,
+    },
+    {
+      name: "explicit empty project prefix",
+      nodeSetup: true,
+      overrides: { worktreeBranchPrefix: "", runSetupScript: true },
+      prefix: "",
+      setup: true,
+      byRoot: false,
+    },
+  ]) {
+    it.effect(
+      `PR preferences: ${test.name} uses effective prefix/setup and preserves existing attachments`,
+      () =>
+        Effect.gen(function* () {
+          const fixture = yield* makePreferencePullRequestFixture();
+          const setupCalls: ProjectSetupScriptRunnerInput[] = [];
+          const { manager, settingsReadCount, projectLookups } = yield* makeManager({
+            ghScenario: fixture.ghScenario,
+            project: fixture.project,
+            settingsPatch: {
+              worktreeBranchPrefix: "node/tasks",
+              runSetupScript: test.nodeSetup,
+              projectPreferences: { [fixture.project.id]: test.overrides },
+            },
+            setupScriptRunner: {
+              runForThread: (input) =>
+                Effect.sync(() => {
+                  expect(
+                    fs.readFileSync(path.join(input.worktreePath, "preference.txt"), "utf8"),
+                  ).toBe("fixture checkout\n");
+                  setupCalls.push(input);
+                  return { status: "no-script" as const };
+                }),
+            },
+          });
+          const input: GitPreparePullRequestThreadInput = {
+            cwd: fixture.repoDir,
+            reference: "991",
+            mode: "worktree",
+            worktreesDir: fixture.worktreesDir,
+            threadId: asThreadId("pr-worker"),
+            ...(test.byRoot ? {} : { projectId: fixture.project.id }),
+          };
+          const result = yield* preparePullRequestThread(manager, input);
+          expect(result.branch).toBe(`${test.prefix ? `${test.prefix}/` : ""}pr-991/main`);
+          expect(result.worktreePath).toBe(
+            fs.realpathSync(path.join(fixture.worktreesDir, result.branch.replace(/\//g, "-"))),
+          );
+          expect(setupCalls).toHaveLength(test.setup ? 1 : 0);
+          if (test.setup)
+            expect(setupCalls[0]).toEqual({
+              threadId: "pr-worker",
+              projectId: fixture.project.id,
+              projectCwd: fixture.repoDir,
+              worktreePath: result.worktreePath,
+            });
+          expect(settingsReadCount()).toBe(1);
+          expect(projectLookups).toEqual([test.byRoot ? fixture.repoDir : fixture.project.id]);
+          const reused = yield* preparePullRequestThread(manager, input);
+          expect(reused.branch).toBe(result.branch);
+          expect(reused.worktreePath).toBe(result.worktreePath);
+          expect(setupCalls).toHaveLength(test.setup ? 1 : 0);
+          expect((yield* runGit(fixture.repoDir, ["branch", "--show-current"])).stdout.trim()).toBe(
+            "main",
+          );
+        }),
+    );
+  }
+
+  it.effect(
+    "PR preferences: uses one server-owned snapshot and preserves explicit setup destination/path choices",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makePreferencePullRequestFixture();
+        const setupCalls: ProjectSetupScriptRunnerInput[] = [];
+        const { manager, settingsReadCount, projectLookups } = yield* makeManager({
+          ghScenario: fixture.ghScenario,
+          project: preferenceProject("/unavailable-ambient-project"),
+          settingsPatch: { worktreeBranchPrefix: "ambient", runSetupScript: false },
+          setupScriptRunner: {
+            runForThread: (input) =>
+              Effect.sync(() => {
+                setupCalls.push(input);
+                return { status: "no-script" as const };
+              }),
+          },
+        });
+        const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+          projectPreferences: {
+            [fixture.project.id]: { worktreeBranchPrefix: "snapshot", runSetupScript: true },
+          },
+        });
+        const options = { preferencesSnapshot: { project: fixture.project, settings } };
+        const result = yield* preparePullRequestThread(
+          manager,
+          {
+            cwd: fixture.repoDir,
+            projectId: fixture.project.id,
+            reference: "991",
+            mode: "worktree",
+            worktreesDir: fixture.worktreesDir,
+          },
+          options,
+        );
+        expect(result.branch).toBe("snapshot/pr-991/main");
+        expect(result.worktreePath?.startsWith(fixture.worktreesDir)).toBe(true);
+        // No supplied thread ID means no setup terminal owner, even when setup inherits true.
+        expect(setupCalls).toHaveLength(0);
+        expect(settingsReadCount()).toBe(0);
+        expect(projectLookups).toEqual([]);
+        const local = yield* preparePullRequestThread(
+          manager,
+          {
+            cwd: fixture.repoDir,
+            projectId: fixture.project.id,
+            reference: "991",
+            mode: "local",
+            threadId: asThreadId("explicit-local-thread"),
+          },
+          options,
+        );
+        expect(local.worktreePath).toBeNull();
+        expect(setupCalls).toHaveLength(0);
+        expect(settingsReadCount()).toBe(0);
+        expect(projectLookups).toEqual([]);
+      }),
+  );
+
+  it.effect(
+    "PR preferences: rejects deleted or mismatched explicit projects before provider/Git mutation",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-pr-preferences-authority-");
+        const otherRepoDir = yield* makeTempDir("ryco-pr-preferences-other-");
+        yield* initRepo(repoDir);
+        for (const project of [undefined, preferenceProject(fs.realpathSync(otherRepoDir))]) {
+          const { manager, ghCalls } = yield* makeManager(project ? { project } : {});
+          const result = yield* preparePullRequestThread(manager, {
+            cwd: repoDir,
+            projectId: ProjectId.make("pr-preferences"),
+            reference: "991",
+            mode: "worktree",
+            threadId: asThreadId("pr-worker"),
+          }).pipe(Effect.result);
+          expect(result._tag).toBe("Failure");
+          if (result._tag === "Failure")
+            expect(result.failure.message).toMatch(/project is unavailable|does not match/);
+          expect(ghCalls).toEqual([]);
+          expect(
+            (yield* runGit(repoDir, ["worktree", "list", "--porcelain"])).stdout.match(
+              /^worktree /gm,
+            ),
+          ).toHaveLength(1);
+        }
+      }),
+  );
+
   it.effect("status includes PR metadata when branch already has an open PR", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("ryco-git-manager-");

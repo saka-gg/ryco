@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 
 import { makeWorkspaceAccessPolicy } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
-import { resolveConfiguredWorktreeRoot, validateWorktreeRoot } from "./worktreeRoot.ts";
+import {
+  canonicalizeWorktreePath,
+  resolveConfiguredWorktreeRoot,
+  validateWorktreeRoot,
+} from "./worktreeRoot.ts";
 
 let root: string;
 beforeEach(async () => {
@@ -29,6 +33,9 @@ describe("worktree root policy", () => {
     await mkdir(path.join(root, "real"));
     await symlink(path.join(root, "real"), path.join(root, "alias"));
     expect(await validate(path.join(root, "alias", "new", "checkouts"))).toBe(
+      path.join(root, "real", "new", "checkouts"),
+    );
+    expect(await canonicalizeWorktreePath(path.join(root, "alias", "new", "checkouts"))).toBe(
       path.join(root, "real", "new", "checkouts"),
     );
     await expect(lstat(path.join(root, "real", "new"))).rejects.toMatchObject({ code: "ENOENT" });

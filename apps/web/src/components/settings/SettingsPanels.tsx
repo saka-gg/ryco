@@ -1,9 +1,14 @@
+import { Schema } from "effect";
+import { useServerConfig } from "../../rpc/serverState";
+import { ProjectPreferenceSettings } from "./ProjectPreferenceSettings";
+import { StorageSettings } from "./StorageSettings";
 import { SessionImportSettings } from "./SessionImportSettings";
 import { useAppPreferencesLabel } from "../../deviceName";
 import { settingsRestorePlan } from "./settingsRestore";
 import { selectArchivedSettingsGroups } from "./archivedSettings";
 import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { WorktreeRootSettings } from "./WorktreeRootSettings";
+import { WorktreeSubmoduleSettings } from "./WorktreeSubmoduleSettings";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
@@ -18,7 +23,6 @@ import {
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { DEFAULT_UNIFIED_SETTINGS, WorktreeBranchPrefix } from "@ryco/contracts/settings";
-import { Schema } from "effect";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
   canCheckForUpdate,
@@ -455,6 +459,8 @@ export function GeneralSettingsPanel({
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const isPhoneTier = usePresentationTier() === "phone";
+  const supportsProjectPreferences =
+    useServerConfig()?.environment.capabilities.projectPreferences === true;
   const settingsTarget = useSettingsTarget();
   const editingScope = useSettingsEditingScope();
   const appLabel = useAppPreferencesLabel();
@@ -710,94 +716,102 @@ export function GeneralSettingsPanel({
           }
         />
 
-        <SettingsRow
-          title="New threads"
-          description="Pick the default workspace mode for newly created draft threads."
-          owner="node"
-          scope={nodeScopeLabel}
-          resetAction={
-            settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
-              <SettingResetButton
-                label="new threads"
-                onClick={() =>
-                  updateSettings({
-                    defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.defaultThreadEnvMode}
-              onValueChange={(value) => {
-                if (value === "local" || value === "worktree") {
-                  updateSettings({ defaultThreadEnvMode: value });
-                }
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-44" aria-label="Default thread mode">
-                <SelectValue>
-                  {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="local">
-                  Local
-                </SelectItem>
-                <SelectItem hideIndicator value="worktree">
-                  New worktree
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
+        {(!supportsProjectPreferences || isPhoneTier) && (
+          <>
+            <SettingsRow
+              title="New threads"
+              description="Pick the default workspace mode for newly created draft threads."
+              owner="node"
+              scope={nodeScopeLabel}
+              resetAction={
+                settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
+                  <SettingResetButton
+                    label="new threads"
+                    onClick={() =>
+                      updateSettings({
+                        defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <Select
+                  value={settings.defaultThreadEnvMode}
+                  onValueChange={(value) => {
+                    if (value === "local" || value === "worktree") {
+                      updateSettings({ defaultThreadEnvMode: value });
+                    }
+                  }}
+                >
+                  <SelectTrigger className="w-full sm:w-44" aria-label="Default thread mode">
+                    <SelectValue>
+                      {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    <SelectItem hideIndicator value="local">
+                      Local
+                    </SelectItem>
+                    <SelectItem hideIndicator value="worktree">
+                      New worktree
+                    </SelectItem>
+                  </SelectPopup>
+                </Select>
+              }
+            />
 
-        {!isPhoneTier && (
-          <SettingsRow
-            title="Worktree branch prefix"
-            description="Prefix for generated branches on this device. Use a Git namespace such as team/agent, without a trailing slash. Leave empty for no prefix. Existing branches keep their names."
-            owner="node"
-            scope={nodeScopeLabel}
-            resetAction={
-              settings.worktreeBranchPrefix !== DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix ? (
-                <SettingResetButton
-                  label="worktree branch prefix"
-                  onClick={() =>
-                    updateSettings({
-                      worktreeBranchPrefix: DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <DraftInput
-                className="w-full sm:w-72"
-                value={settings.worktreeBranchPrefix}
-                onCommit={(next) => {
-                  const prefix = next.trim();
-                  if (!Schema.is(WorktreeBranchPrefix)(prefix)) {
-                    toastManager.add({
-                      type: "error",
-                      title: "Invalid worktree branch prefix",
-                      description:
-                        "Use a valid Git namespace of up to 128 characters without a trailing slash, or leave it empty.",
-                    });
-                    return;
-                  }
-                  updateSettings({ worktreeBranchPrefix: prefix });
-                }}
-                placeholder="ryco"
-                spellCheck={false}
-                autoCapitalize="none"
-                aria-label="Worktree branch prefix"
+            {!isPhoneTier && (
+              <SettingsRow
+                title="Worktree branch prefix"
+                description="Prefix for generated branches on this device. Use a Git namespace such as team/agent, without a trailing slash. Leave empty for no prefix. Existing branches keep their names."
+                owner="node"
+                scope={nodeScopeLabel}
+                resetAction={
+                  settings.worktreeBranchPrefix !==
+                  DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix ? (
+                    <SettingResetButton
+                      label="worktree branch prefix"
+                      onClick={() =>
+                        updateSettings({
+                          worktreeBranchPrefix: DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix,
+                        })
+                      }
+                    />
+                  ) : null
+                }
+                control={
+                  <DraftInput
+                    className="w-full sm:w-72"
+                    value={settings.worktreeBranchPrefix}
+                    onCommit={(next) => {
+                      const prefix = next.trim();
+                      if (!Schema.is(WorktreeBranchPrefix)(prefix)) {
+                        toastManager.add({
+                          type: "error",
+                          title: "Invalid worktree branch prefix",
+                          description:
+                            "Use a valid Git namespace of up to 128 characters without a trailing slash, or leave it empty.",
+                        });
+                        return;
+                      }
+                      updateSettings({ worktreeBranchPrefix: prefix });
+                    }}
+                    placeholder="ryco"
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    aria-label="Worktree branch prefix"
+                  />
+                }
               />
-            }
-          />
+            )}
+          </>
         )}
+        {supportsProjectPreferences && !isPhoneTier && <ProjectPreferenceSettings />}
 
         {!isPhoneTier && <WorktreeRootSettings />}
+        {!isPhoneTier && <WorktreeSubmoduleSettings />}
+        {!isPhoneTier && <StorageSettings />}
 
         <SettingsRow
           title="Add project starts in"

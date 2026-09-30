@@ -1,3 +1,12 @@
+import { nodeMutationLeaseIsCurrent } from "@ryco/client-runtime/authorization";
+import { toastManager } from "../components/ui/toast";
+import {
+  initialDraftModelSelection,
+  readEffectiveProjectPreferences,
+} from "@ryco/client-runtime/state/settings";
+import { ensureEnvironmentApi } from "../environmentApi";
+import { getSavedEnvironmentRuntimeState } from "../environments/runtime";
+import { getServerConfig } from "../rpc/serverState";
 import { useDeviceName } from "../deviceName";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import {
@@ -42,6 +51,7 @@ import { useHostedHubStore } from "../hostedHub/state";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 
 export interface NewThreadOptions {
+  modelSelection?: ModelSelection;
   branch?: string | null;
   worktreePath?: string | null;
   envMode?: DraftThreadEnvMode;
@@ -71,7 +81,6 @@ function useNewThreadState() {
   const projectGroupingSettings = useSettings((settings) => ({
     sidebarProjectGroupingMode: settings.sidebarProjectGroupingMode,
     sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
-    defaultAgentTokenMode: settings.defaultAgentTokenMode,
   }));
   const router = useRouter();
   const adoptHostedTarget = useCallback((environmentId: ScopedProjectRef["environmentId"]) => {
@@ -87,7 +96,10 @@ function useNewThreadState() {
     projectRef: ScopedProjectRef,
     options?: NewThreadOptions,
   ) => Promise<void> = useCallback(
-    (projectRef: ScopedProjectRef, options?: NewThreadOptions): Promise<void> => {
+    function handleNewThread(
+      projectRef: ScopedProjectRef,
+      options?: NewThreadOptions,
+    ): Promise<void> {
       const hostedNodeId = nodeIdForHostedEnvironment(projectRef.environmentId);
       if (hostedNodeId !== null) {
         adoptHostedTarget(projectRef.environmentId);
@@ -248,23 +260,69 @@ function useNewThreadState() {
       const threadId = newThreadId();
       const createdAt = new Date().toISOString();
       return (async () => {
+        const leaseBefore =
+          hostedNodeId !== null ? readHostedNodeMutationLease(projectRef.environmentId) : null;
+        const primaryConfig = getServerConfig();
+        const config =
+          primaryConfig?.environment.environmentId === projectRef.environmentId
+            ? primaryConfig
+            : getSavedEnvironmentRuntimeState(projectRef.environmentId)?.serverConfig;
+        if (!config)
+          throw new Error("Node settings are still loading. Try creating the draft again.");
+        const effective = await readEffectiveProjectPreferences({
+          api: ensureEnvironmentApi(projectRef.environmentId),
+          config,
+          projectId: projectRef.projectId,
+        });
+        const leaseAfter =
+          hostedNodeId !== null ? readHostedNodeMutationLease(projectRef.environmentId) : null;
+        if (
+          hostedNodeId !== null &&
+          (!leaseBefore ||
+            !leaseAfter ||
+            !nodeMutationLeaseIsCurrent(leaseBefore, projectRef.environmentId, leaseAfter))
+        )
+          throw new Error("The workspace connection changed. Try creating the draft again.");
+        // Another creation may have won while the defaults RPC was in flight.
+        if (getDraftSessionByLogicalProjectKey(logicalProjectKey))
+          return handleNewThread(projectRef, options);
         setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
           threadId,
           createdAt,
           branch: options?.branch ?? null,
           worktreePath: options?.worktreePath ?? null,
-          envMode: options?.envMode ?? "local",
+          envMode:
+            options?.envMode ??
+            effective?.defaultThreadEnvMode.value ??
+            config.settings.defaultThreadEnvMode,
           runtimeMode: DEFAULT_RUNTIME_MODE,
-          tokenMode: projectGroupingSettings.defaultAgentTokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+          tokenMode: config.settings.defaultAgentTokenMode,
         });
         applyStickyState(draftId);
+        const initialModel = options?.modelSelection ?? effective?.initialModelSelection.value;
+        if (initialModel)
+          useComposerDraftStore.getState().setModelSelection(
+            draftId,
+            initialDraftModelSelection({
+              effective,
+              fallback: initialModel,
+              explicit: options?.modelSelection,
+            }),
+          );
 
         adoptHostedTarget(projectRef.environmentId);
         await router.navigate({
           to: "/draft/$draftId",
           params: { draftId },
         });
-      })();
+      })().catch((cause) => {
+        toastManager.add({
+          type: "error",
+          title: "Could not create a draft",
+          description:
+            cause instanceof Error ? cause.message : "Reconnect to this node and try again.",
+        });
+      });
     },
     [adoptHostedTarget, getCurrentRouteTarget, projectGroupingSettings, router, projects],
   );

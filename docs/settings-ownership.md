@@ -30,6 +30,15 @@ desktop, and native mobile using the shared settings schema. Mobile retains its
 own native screens and the same persistence ownership. The legacy web phone
 presentation remains frozen.
 
+## Project inheritance
+
+Node General settings expose initial model/effort, thread location, generated
+branch prefix and setup behavior with independent project overrides. Each field
+shows its effective source and can reset to the node default. The server owns
+resolution and atomic patching; native New Task consumes the same contract and
+shared runtime. See [project defaults and inheritance](project-preferences.md)
+for precedence, compatibility and the feature-specific policy boundary.
+
 ## Device icons
 
 Open the named device's settings on web or desktop and choose **Device icon**.

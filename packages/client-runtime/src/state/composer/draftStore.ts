@@ -1456,7 +1456,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
               const nextMap = { ...base.modelSelectionByProvider };
               if (normalized) {
                 const current = nextMap[normalized.instanceId];
-                if (normalized.options !== undefined) {
+                if (modelSelection?.options !== undefined) {
                   // Explicit options provided → use them
                   nextMap[normalized.instanceId] = normalized as ModelSelection;
                 } else {

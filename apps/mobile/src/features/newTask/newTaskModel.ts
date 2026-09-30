@@ -12,6 +12,11 @@ import {
 
 import type { ProjectEnvironment } from "../projects/projectsModel";
 
+const LEGACY_INITIAL_MODEL: ModelSelection = {
+  instanceId: ProviderInstanceId.make("codex"),
+  model: DEFAULT_MODEL,
+};
+
 export interface NewTaskLaunchContext {
   readonly environmentId?: EnvironmentId | null;
   readonly projectId?: ProjectId | null;
@@ -71,10 +76,7 @@ export function deriveNewTaskDefaults(input: {
     environment,
     project,
     worktree: launchedWorktree ?? null,
-    modelSelection: {
-      instanceId: ProviderInstanceId.make("codex"),
-      model: DEFAULT_MODEL,
-    },
+    modelSelection: LEGACY_INITIAL_MODEL,
     runtimeMode: "full-access",
     interactionMode: "default",
     tokenMode: DEFAULT_AGENT_TOKEN_MODE,

@@ -25,8 +25,10 @@ import { createModelSelection } from "@ryco/shared/model";
 import type { ComposerAttachment } from "../../platform/index.ts";
 
 export interface SendTurnBootstrapInput {
+  readonly requireWorktree?: boolean;
   readonly isLocalDraftThread: boolean;
   readonly fetchOrigin?: boolean | undefined;
+  readonly runSetupScript?: boolean | undefined;
   readonly worktreeBranchName?: string | null | undefined;
   readonly worktreeBranchPrefix?: string | undefined;
   readonly baseBranchForWorktree: string | null;
@@ -45,6 +47,7 @@ export interface SendTurnBootstrapInput {
 
 export type SendTurnBootstrap =
   | {
+      readonly requireWorktree?: boolean;
       readonly createThread?: {
         readonly projectId: ProjectId;
         readonly title: string;
@@ -72,9 +75,13 @@ export type SendTurnBootstrap =
  * web caller around this deterministic send-engine step.
  */
 export function buildSendTurnBootstrap(input: SendTurnBootstrapInput): SendTurnBootstrap {
+  if (input.requireWorktree && (!input.isLocalDraftThread || !input.baseBranchForWorktree)) {
+    throw new Error("This launch requires a new thread and an isolated Git worktree.");
+  }
   if (!input.isLocalDraftThread && !input.baseBranchForWorktree) return undefined;
 
   return {
+    ...(input.requireWorktree ? { requireWorktree: true } : {}),
     ...(input.isLocalDraftThread
       ? {
           createThread: {
@@ -104,7 +111,7 @@ export function buildSendTurnBootstrap(input: SendTurnBootstrapInput): SendTurnB
                     buildTemporaryWorktreeBranchName(input.worktreeBranchPrefix),
                 }),
           },
-          runSetupScript: true,
+          ...(input.runSetupScript === undefined ? {} : { runSetupScript: input.runSetupScript }),
         }
       : {}),
   };
@@ -297,8 +304,8 @@ async function commitSendTurnDispatchOnce(input: CommitSendTurnDispatchInput): P
 
   if (reviewed) {
     await revalidateClaudeResumeBeforeCommit(input, reviewed.guard);
-    input.assertMutationReady?.();
   }
+  if (reviewed || input.bootstrap?.requireWorktree) input.assertMutationReady?.();
   input.beginLocalDispatch({ preparingWorktree: false });
   await input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",

@@ -1,3 +1,4 @@
+import { makeStorageHandlers } from "./storageRpc.ts";
 import { makeSessionImportHandlers } from "./sessionImportRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
@@ -35,6 +36,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeSourceControlHandlers(ctx),
       ...makeProjectHandlers(ctx),
       ...makeSessionImportHandlers(ctx),
+      ...makeStorageHandlers(ctx),
       ...makeGitHandlers(ctx),
       ...makeTerminalHandlers(ctx),
     });

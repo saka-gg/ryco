@@ -1,0 +1,20 @@
+{
+  "id": "msg_v1",
+  "sessionID": "ses_personal",
+  "role": "assistant",
+  "time": { "created": 1786060800000, "completed": 1786060801000 },
+  "parentID": "msg_user",
+  "modelID": "unknown-private-model",
+  "providerID": "custom-provider",
+  "mode": "build",
+  "agent": "build",
+  "path": { "cwd": "/fixture/project", "root": "/fixture/project" },
+  "cost": 0,
+  "tokens": {
+    "total": 1001,
+    "input": 100,
+    "output": 20,
+    "reasoning": 5,
+    "cache": { "read": 50, "write": 10 }
+  }
+}

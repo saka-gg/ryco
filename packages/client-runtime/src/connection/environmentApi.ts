@@ -8,6 +8,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       ? { attachments: { readChunk: rpcClient.chatAttachments.readChunk } }
       : {}),
     server: {
+      getConfig: rpcClient.server.getConfig,
       readCodexResetCredits: rpcClient.server.readCodexResetCredits,
       consumeCodexResetCredit: rpcClient.server.consumeCodexResetCredit,
       refreshProviders: rpcClient.server.refreshProviders,
@@ -17,6 +18,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       authenticateAcpRegistry: rpcClient.server.authenticateAcpRegistry,
       updateProvider: rpcClient.server.updateProvider,
       getSettings: rpcClient.server.getSettings,
+      getProjectPreferences: rpcClient.server.getProjectPreferences,
       updateSettings: rpcClient.server.updateSettings,
       upsertKeybinding: rpcClient.server.upsertKeybinding,
       getResourceTelemetryHistory: rpcClient.server.getResourceTelemetryHistory,

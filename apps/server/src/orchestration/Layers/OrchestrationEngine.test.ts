@@ -1,3 +1,11 @@
+import { makeStorageService } from "../../storage/StorageService.ts";
+import { recordCreatedWorktree } from "../../storage/lifecycle.ts";
+import { makeWorkspaceAccessPolicy } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
+import { runProcess } from "../../processRunner.ts";
+import type { ServerConfigShape } from "../../config.ts";
+import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { storageLifecycleLock } from "../../storage/lifecycle.ts";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -73,7 +81,9 @@ async function createOrchestrationSystem(databasePath?: string) {
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolverLive),
-    Layer.provide(databasePath ? makeSqlitePersistenceLive(databasePath) : SqlitePersistenceMemory),
+    Layer.provideMerge(
+      databasePath ? makeSqlitePersistenceLive(databasePath) : SqlitePersistenceMemory,
+    ),
     Layer.provideMerge(ServerConfigLayer),
     Layer.provideMerge(NodeServices.layer),
   );
@@ -82,6 +92,7 @@ async function createOrchestrationSystem(databasePath?: string) {
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
   return {
     engine,
+    sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     readShell: () => runtime.runPromise(snapshotQuery.getShellSnapshot()),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
@@ -94,6 +105,241 @@ function now() {
 }
 
 describe("OrchestrationEngine", () => {
+  it("refuses queued turn activation beneath a checkout claimed by cleanup", async () => {
+    const root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "ryco-storage-admission-")),
+    );
+    const checkout = path.join(root, "checkout");
+    const nested = path.join(checkout, "src");
+    await fs.mkdir(nested, { recursive: true });
+    const system = await createOrchestrationSystem();
+    const projectId = ProjectId.make("storage-project");
+    const threadId = ThreadId.make("storage-thread");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "fixture" };
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("storage-project-create"),
+          projectId,
+          title: "Fixture",
+          workspaceRoot: root,
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("storage-thread-create"),
+          threadId,
+          projectId,
+          title: "Fixture",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "fixture",
+          worktreePath: nested,
+          createdAt,
+        }),
+      );
+      await system.run(storageLifecycleLock.take(1));
+      const activated = system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("storage-turn-race"),
+          threadId,
+          message: {
+            messageId: MessageId.make("storage-message"),
+            role: "user",
+            text: "fixture",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt,
+        }),
+      );
+      try {
+        await system.run(
+          system.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('fixture', ${checkout}, 'worktree', '{}', ${createdAt}, 'removing')`,
+        );
+      } finally {
+        await system.run(storageLifecycleLock.release(1));
+      }
+      await expect(activated).rejects.toThrow("Checkout cleanup is pending or complete");
+      expect((await system.readShell()).threads[0]?.latestTurn).toBeNull();
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.make("storage-meta-race"),
+            threadId,
+            worktreePath: nested,
+          }),
+        ),
+      ).rejects.toThrow("Checkout cleanup is pending or complete");
+    } finally {
+      await system.dispose();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("protects an accepted archived turn before a paused reactor makes it visible in the shell", async () => {
+    const root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "ryco-storage-pending-")),
+    );
+    const repo = path.join(root, "repository");
+    const checkout = path.join(root, "checkout");
+    await fs.mkdir(repo);
+    const git = (cwd: string, args: readonly string[]) =>
+      runProcess("git", args, {
+        cwd,
+        timeoutMs: 10_000,
+        maxBufferBytes: 256 * 1024,
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: path.join(root, "empty-config"),
+          GIT_CONFIG_NOSYSTEM: "1",
+        },
+      });
+    await git(repo, ["init", "--initial-branch=main"]);
+    await git(repo, ["config", "user.name", "Fixture"]);
+    await git(repo, ["config", "user.email", "fixture@example.invalid"]);
+    await fs.writeFile(path.join(repo, "tracked.txt"), "fixture");
+    await git(repo, ["add", "tracked.txt"]);
+    await git(repo, ["commit", "-m", "fixture"]);
+    await git(repo, ["worktree", "add", "-b", "fixture", checkout]);
+    // No ProviderCommandReactor is started: accepted intent remains durably queued.
+    const system = await createOrchestrationSystem();
+    const projectId = ProjectId.make("pending-project");
+    const threadId = ThreadId.make("pending-thread");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "fixture" };
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("pending-project-create"),
+          projectId,
+          title: "Fixture",
+          workspaceRoot: repo,
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("pending-thread-create"),
+          threadId,
+          projectId,
+          title: "Fixture",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "fixture",
+          worktreePath: checkout,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("pending-initial-message"),
+          threadId,
+          message: {
+            messageId: MessageId.make("initial-message"),
+            role: "user",
+            text: "completed fixture history",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt,
+        }),
+      );
+      // Simulate the already-finished historical intent, before the delayed new acceptance.
+      await system.run(
+        system.sql`DELETE FROM projection_turns WHERE thread_id = ${threadId} AND state = 'pending'`,
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("pending-thread-archive"),
+          threadId,
+        }),
+      );
+      await system.run(recordCreatedWorktree(system.sql, repo, checkout));
+      const policy = await Effect.runPromise(
+        makeWorkspaceAccessPolicy(undefined).pipe(Effect.provide(NodeServices.layer)),
+      );
+      let removals = 0;
+      const storage = makeStorageService({
+        sql: system.sql,
+        config: {
+          stateDir: root,
+          dbPath: path.join(root, "node.db"),
+          attachmentsDir: path.join(root, "attachments"),
+          logsDir: path.join(root, "logs"),
+        } as ServerConfigShape,
+        providerProtection: { resolve: () => [] },
+        settings: { getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS) },
+        snapshots: { getShellSnapshot: () => Effect.tryPromise(() => system.readShell()) as never },
+        providers: { listBindings: () => Effect.succeed([]) },
+        terminals: { listDiagnostics: Effect.succeed([]) },
+        policy,
+        git: {
+          listWorktreePaths: () => Effect.succeed([repo, checkout]),
+          removeWorktree: () =>
+            Effect.sync(() => {
+              removals++;
+            }),
+        },
+      });
+      const entry = (await system.run(storage.scan())).entries.find(
+        (item) => item.path === checkout,
+      )!;
+      expect(entry.eligible).toBe(true);
+      const preview = await system.run(storage.preview("fixture-owner", [entry.id]));
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("pending-turn-accept"),
+          threadId,
+          message: {
+            messageId: MessageId.make("pending-message"),
+            role: "user",
+            text: "resume archived work",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt,
+        }),
+      );
+      const shellThread = (await system.readShell()).threads.find(
+        (thread) => thread.id === threadId,
+      )!;
+      expect(shellThread.archivedAt).not.toBeNull();
+      expect(shellThread.latestTurn).toBeNull();
+      expect(
+        await system.run(
+          system.sql`SELECT thread_id FROM projection_turns WHERE state = 'pending'`,
+        ),
+      ).toHaveLength(1);
+      const result = await system.run(storage.execute("fixture-owner", preview.token));
+      expect(result.results[0]?.status).toBe("protected");
+      expect(result.results[0]?.detail).toContain("accepted turn start");
+      expect(removals).toBe(0);
+      expect(await fs.readFile(path.join(checkout, "tracked.txt"), "utf8")).toBe("fixture");
+    } finally {
+      await system.dispose();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("restores durable approval claims after closing and reopening the database", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-approval-restart-"));
     const database = path.join(directory, "state.sqlite");

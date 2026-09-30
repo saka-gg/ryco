@@ -177,3 +177,78 @@ describe("UsageRequestGeneration", () => {
     expect(generations.isCurrent(second)).toBe(true);
   });
 });
+
+describe("Cursor export merging", () => {
+  const cursorSource = (id: string) =>
+    source(id, { provider: "cursor", status: "partial", deduplicationKind: "declared" });
+  const event = (id: string, recordId: string, sessionId = "anonymous-session") =>
+    bucket(id, {
+      provider: "cursor",
+      exportRecordId: recordId,
+      exportSessionId: sessionId,
+      tokens: {
+        uncachedInputTokens: 100,
+        cachedInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 777,
+      },
+    });
+  it("unions partially overlapping exports across instances/environments without losing unique events", () => {
+    const merged = mergeUsageEnvironmentResults([
+      environment(
+        "a",
+        [cursorSource("account")],
+        [event("account", "event-a"), event("account", "shared")],
+      ),
+      environment(
+        "b",
+        [cursorSource("account")],
+        [event("account", "shared"), event("account", "event-b")],
+      ),
+    ]);
+    expect(merged?.buckets[0]?.tokens.totalTokens).toBe(2331);
+    expect(merged?.buckets[0]?.tokens.reasoningTokens).toBeUndefined();
+    expect(merged?.buckets[0]?.responseCount).toBe(3);
+    expect(merged?.buckets[0]?.sessionCount).toBe(1);
+    expect(merged?.environmentOnlyDeduplicationWarning).toBe(false);
+  });
+  it("isolates account scopes and deduplicates billed/request metadata without fabricating tokens", () => {
+    const row = {
+      sourceId: "account-a",
+      recordId: "event:billed",
+      provider: "cursor" as const,
+      date: "2026-08-10",
+      model: "unknown",
+      metric: "cost" as const,
+      value: 0.25,
+      currency: "USD",
+    };
+    const merged = mergeUsageEnvironmentResults([
+      environment("a", [cursorSource("account-a")], [], { imports: [row] }),
+      environment("b", [cursorSource("account-a"), cursorSource("account-b")], [], {
+        imports: [row, { ...row, sourceId: "account-b" }],
+      }),
+    ]);
+    expect(merged?.imports).toHaveLength(2);
+    expect(merged?.buckets).toHaveLength(0);
+  });
+});
+
+it("counts an OpenCode store once across implicit/explicit configurations and environments", () => {
+  const store = "same-physical-opencode-database";
+  const merged = mergeUsageEnvironmentResults([
+    environment(
+      "implicit",
+      [source(store, { provider: "opencode" })],
+      [bucket(store, { provider: "opencode" })],
+    ),
+    environment(
+      "explicit",
+      [source(store, { provider: "opencode" })],
+      [bucket(store, { provider: "opencode" })],
+    ),
+  ]);
+  expect(merged?.duplicateSourceCount).toBe(1);
+  expect(merged?.buckets[0]?.tokens.totalTokens).toBe(1160);
+});

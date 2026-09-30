@@ -23,6 +23,15 @@ export interface SettingsSearchEntry {
 export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
     section: "general",
+    owner: "node",
+    title: "Project defaults",
+    description:
+      "Inherited initial model, effort, thread location, branch prefix, and worktree setup.",
+    keywords: "inherit override reset scope project model effort setup",
+  },
+
+  {
+    section: "general",
     owner: "client",
     title: "Welcome tour",
     description: "Replay provider setup, add a project, and learn the essentials.",
@@ -175,6 +184,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     description:
       "Environment worktree directory and project overrides. Existing checkouts keep their paths.",
     keywords: "folder path location inherit reset",
+  },
+  {
+    section: "general",
+    title: "Worktree submodules",
+    owner: "node",
+    description:
+      "Initialization for new worktrees, with project overrides and repository configuration.",
+    keywords: "git recursive top-level none initialize inherit",
   },
   {
     section: "general",

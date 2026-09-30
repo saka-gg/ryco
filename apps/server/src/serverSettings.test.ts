@@ -1,3 +1,8 @@
+import {
+  ServerSecretStore,
+  type ServerSecretStoreShape,
+} from "./auth/Services/ServerSecretStore.ts";
+import { acquireStorageSettingsLease, storageLifecycleLock } from "./storage/lifecycle.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -8,12 +13,17 @@ import {
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import { assert, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Schema } from "effect";
+import { Effect, FileSystem, Layer, Schema, Deferred, Fiber } from "effect";
 import { ServerConfig } from "./config.ts";
-import { ServerSettingsLive, ServerSettingsService } from "./serverSettings.ts";
+import { ServerSettingsLive, ServerSettingsService, makeServerSettings } from "./serverSettings.ts";
 
-const makeServerSettingsLayer = () =>
-  ServerSettingsLive.pipe(
+const makeServerSettingsLayer = (store?: ServerSecretStoreShape) =>
+  (store
+    ? Layer.effect(ServerSettingsService, makeServerSettings).pipe(
+        Layer.provide(Layer.succeed(ServerSecretStore, store)),
+      )
+    : ServerSettingsLive
+  ).pipe(
     Layer.provideMerge(
       Layer.fresh(
         ServerConfig.layerTest(process.cwd(), {
@@ -23,7 +33,60 @@ const makeServerSettingsLayer = () =>
     ),
   );
 
+const syntheticSecretStore = () => {
+  const values = new Map<string, Uint8Array>();
+  const mutations: string[] = [];
+  let beforeSet: Effect.Effect<void> = Effect.void;
+  const store: ServerSecretStoreShape = {
+    get: (name) => Effect.sync(() => values.get(name) ?? null),
+    set: (name, value) =>
+      Effect.gen(function* () {
+        yield* beforeSet;
+        mutations.push("set:" + name);
+        values.set(name, value.slice());
+      }),
+    remove: (name) =>
+      Effect.sync(() => {
+        mutations.push("remove:" + name);
+        values.delete(name);
+      }),
+    getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
+  };
+  return {
+    store,
+    values,
+    mutations,
+    pauseSet: (effect: Effect.Effect<void>) => {
+      beforeSet = effect;
+    },
+  };
+};
+
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("persists concurrent submodule project patches and reloads inheritance resets", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      yield* settings.updateSettings({ worktreeSubmodules: "top-level" });
+      yield* Effect.all(
+        [
+          settings.updateSettings({ projectWorktreeSubmodules: { a: "none" } }),
+          settings.updateSettings({ projectWorktreeSubmodules: { b: "recursive" } }),
+        ],
+        { concurrency: 2 },
+      );
+      assert.deepEqual((yield* settings.getSettings).projectWorktreeSubmodules, {
+        a: "none",
+        b: "recursive",
+      });
+      yield* settings.updateSettings({ projectWorktreeSubmodules: { a: null } });
+      const reloaded = yield* Effect.gen(function* () {
+        return yield* (yield* ServerSettingsService).getSettings;
+      }).pipe(Effect.provide(Layer.fresh(ServerSettingsLive)));
+      assert.equal(reloaded.worktreeSubmodules, "top-level");
+      assert.deepEqual(reloaded.projectWorktreeSubmodules, { b: "recursive" });
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("canonicalizes root saves and persists independent project resets", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -49,6 +112,189 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.equal(yield* fs.readFileString(settingsPath), before);
       assert.equal((yield* settings.getSettings).worktreeRoot, canonical);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("refuses provider and retention publication during a cleanup settings lease", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      const lease = yield* storageLifecycleLock.withPermit(
+        Effect.sync(acquireStorageSettingsLease),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(() => lease.release()));
+      const before = yield* settings.getSettings;
+      const provider = yield* settings
+        .updateSettings({
+          providerInstances: {
+            [ProviderInstanceId.make("late-source")]: {
+              driver: ProviderDriverKind.make("cursor"),
+              enabled: false,
+              config: { usageExportPath: "/fixture/export.json" },
+            },
+          },
+        })
+        .pipe(Effect.result);
+      assert.equal(provider._tag, "Failure");
+      const retention = yield* settings
+        .updateSettings({
+          storageRetention: { automatic: true, completedWorktreeDays: 30, temporaryDataDays: 7 },
+        })
+        .pipe(Effect.result);
+      assert.equal(retention._tag, "Failure");
+      assert.deepEqual(yield* settings.getSettings, before);
+      lease.release();
+      const after = yield* settings.updateSettings({
+        storageRetention: { automatic: true, completedWorktreeDays: 30, temporaryDataDays: 7 },
+      });
+      assert.isTrue(after.storageRetention.automatic);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect(
+    "refuses raw sensitive path updates and structural changes before any secret mutations",
+    () =>
+      Effect.gen(function* () {
+        const fake = syntheticSecretStore();
+        yield* Effect.gen(function* () {
+          const settings = yield* ServerSettingsService;
+          const fs = yield* FileSystem.FileSystem;
+          const config = yield* ServerConfig;
+          const id = ProviderInstanceId.make("synthetic-sensitive-home");
+          const instance = {
+            driver: ProviderDriverKind.make("codex"),
+            config: {},
+            environment: [
+              { name: "CODEX_HOME", value: "/fixture/current-home", sensitive: true },
+              { name: "USAGE_EXPORT_PATH", value: "/fixture/current-export.json", sensitive: true },
+            ],
+          };
+          yield* settings.updateSettings({ providerInstances: { [id]: instance } });
+          const before = yield* settings.getSettings;
+          const persisted = yield* fs.readFileString(config.settingsPath);
+          const secrets = Array.from(fake.values, ([name, value]) => [name, Array.from(value)]);
+          fake.mutations.length = 0;
+          const lease = yield* storageLifecycleLock.withPermit(
+            Effect.sync(acquireStorageSettingsLease),
+          );
+          yield* Effect.addFinalizer(() => Effect.sync(lease.release));
+          for (const environment of [
+            [
+              { name: "CODEX_HOME", value: "/fixture/new-home", sensitive: true },
+              { name: "USAGE_EXPORT_PATH", value: "/fixture/new-export.json", sensitive: true },
+            ],
+            [{ name: "CODEX_HOME", value: "/fixture/new-home", sensitive: false }],
+            [],
+          ]) {
+            const rejected = yield* settings
+              .updateSettings({ providerInstances: { [id]: { ...instance, environment } } })
+              .pipe(Effect.result);
+            assert.equal(rejected._tag, "Failure");
+            assert.deepEqual(fake.mutations, []);
+            assert.deepEqual(
+              Array.from(fake.values, ([name, value]) => [name, Array.from(value)]),
+              secrets,
+            );
+            assert.equal(yield* fs.readFileString(config.settingsPath), persisted);
+            assert.deepEqual(yield* settings.getSettings, before);
+            lease.assertValid();
+          }
+        }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+      }),
+  );
+  it.effect("blocks new cleanup admission while an admitted sensitive-path writer is paused", () =>
+    Effect.gen(function* () {
+      const fake = syntheticSecretStore();
+      yield* Effect.gen(function* () {
+        const settings = yield* ServerSettingsService;
+        const id = ProviderInstanceId.make("synthetic-paused-writer");
+        const instance = {
+          driver: ProviderDriverKind.make("codex"),
+          config: {},
+          environment: [{ name: "CODEX_HOME", value: "/fixture/old-home", sensitive: true }],
+        };
+        yield* settings.updateSettings({ providerInstances: { [id]: instance } });
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        fake.pauseSet(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        );
+        const writer = yield* Effect.forkChild(
+          settings.updateSettings({
+            providerInstances: {
+              [id]: {
+                ...instance,
+                environment: [{ name: "CODEX_HOME", value: "/fixture/new-home", sensitive: true }],
+              },
+            },
+          }),
+        );
+        yield* Deferred.await(entered);
+        const refused = yield* storageLifecycleLock
+          .withPermit(Effect.sync(acquireStorageSettingsLease))
+          .pipe(Effect.exit);
+        assert.equal(refused._tag, "Failure");
+        assert.equal(
+          (yield* settings.getSettings).providerInstances[id]!.environment![0]!.value,
+          "/fixture/old-home",
+        );
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(writer);
+        const lease = yield* storageLifecycleLock.withPermit(
+          Effect.sync(acquireStorageSettingsLease),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(lease.release));
+        const current = yield* settings.getSettings;
+        assert.equal(current.providerInstances[id]!.environment![0]!.value, "/fixture/new-home");
+        lease.assertValid();
+      }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+    }),
+  );
+
+  it.effect("keeps settings mutation admission until a cancelled secret write fully settles", () =>
+    Effect.gen(function* () {
+      const fake = syntheticSecretStore();
+      yield* Effect.gen(function* () {
+        const settings = yield* ServerSettingsService;
+        const id = ProviderInstanceId.make("synthetic-cancelled-writer");
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        fake.pauseSet(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        );
+        const writer = yield* Effect.forkChild(
+          settings.updateSettings({
+            providerInstances: {
+              [id]: {
+                driver: ProviderDriverKind.make("codex"),
+                config: {},
+                environment: [
+                  { name: "CODEX_HOME", value: "/fixture/settled-home", sensitive: true },
+                ],
+              },
+            },
+          }),
+        );
+        yield* Deferred.await(entered);
+        const cancellation = yield* Effect.forkChild(Fiber.interrupt(writer));
+        yield* Effect.yieldNow;
+        assert.equal(
+          (yield* storageLifecycleLock
+            .withPermit(Effect.sync(acquireStorageSettingsLease))
+            .pipe(Effect.exit))._tag,
+          "Failure",
+        );
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(cancellation);
+        const lease = yield* storageLifecycleLock.withPermit(
+          Effect.sync(acquireStorageSettingsLease),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(lease.release));
+        assert.equal(
+          (yield* settings.getSettings).providerInstances[id]!.environment![0]!.value,
+          "/fixture/settled-home",
+        );
+        lease.assertValid();
+      }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+    }),
   );
 
   it.effect("decodes nested settings patches", () =>

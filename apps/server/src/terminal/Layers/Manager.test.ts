@@ -1,3 +1,5 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import path from "node:path";
 import { writeFileSync } from "node:fs";
 
@@ -291,6 +293,29 @@ const createManager = (
   );
 
 it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (it) => {
+  it.effect("refuses terminal admission in a nested checkout after cleanup claims it", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const f = yield* createManager();
+      const fileSystem = yield* FileSystem.FileSystem;
+      const nested = path.join(f.baseDir, "checkout", "src");
+      yield* fileSystem.makeDirectory(nested, { recursive: true });
+      const checkout = yield* Effect.promise(() =>
+        import("node:fs/promises").then((fs) => fs.realpath(path.dirname(nested))),
+      );
+      yield* sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('terminal-guard', ${checkout}, 'worktree', '{}', ${new Date().toISOString()}, 'removing')`;
+      const result = yield* f.manager
+        .open({ threadId: "fixture-thread", cwd: nested, cols: 80, rows: 24 })
+        .pipe(Effect.result);
+      assert.strictEqual(result._tag, "Failure");
+      assert.strictEqual(f.ptyAdapter.spawnInputs.length, 0);
+      const parentResult = yield* f.manager
+        .open({ threadId: "parent-thread", cwd: f.baseDir, cols: 80, rows: 24 })
+        .pipe(Effect.result);
+      assert.strictEqual(parentResult._tag, "Failure");
+      assert.strictEqual(f.ptyAdapter.spawnInputs.length, 0);
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
   it.effect(
     "orders restart behind in-flight output and rejects old PTY callbacks through exit",
     () =>

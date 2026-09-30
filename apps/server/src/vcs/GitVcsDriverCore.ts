@@ -1,3 +1,6 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { acquireWorktreeCreationLease, recordCreatedWorktree } from "../storage/lifecycle.ts";
+import { removeVerifiedWorktree } from "../storage/filesystem.ts";
 import type { Dirent } from "node:fs";
 import fsPromises from "node:fs/promises";
 import nodePath from "node:path";
@@ -23,7 +26,7 @@ import {
 } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { GitCommandError, type VcsRef } from "@ryco/contracts";
+import { DEFAULT_SERVER_SETTINGS, GitCommandError, type VcsRef } from "@ryco/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@ryco/shared/git";
 import { compactTraceAttributes } from "../observability/Attributes.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
@@ -35,7 +38,15 @@ import {
 } from "../git/remoteRefs.ts";
 import { ServerConfig, resolveManagedWorktreesRoot } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { validateWorktreeRoot } from "../project/worktreeRoot.ts";
+import { canonicalizeWorktreePath, validateWorktreeRoot } from "../project/worktreeRoot.ts";
+import {
+  assertWorktreeSetupComplete,
+  beginWorktreeSetup,
+  finishWorktreeSetup,
+  recoverOrphanedWorktreeSetup,
+  withWorktreeSetupOwnership,
+} from "../project/worktreeSetupState.ts";
+import { resolveWorktreeSubmodules } from "../project/worktreeSubmodules.ts";
 import { makeWorkspaceAccessPolicy } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
 
@@ -739,6 +750,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const config = yield* ServerConfig;
   const worktreePolicy = yield* makeWorkspaceAccessPolicy(config.workspaceAccessRoot);
   const settingsService = yield* Effect.serviceOption(ServerSettingsService);
+  const storageSql = yield* Effect.serviceOption(SqlClient.SqlClient);
   // Entries live only while callers hold/wait for this canonical destination.
   const worktreeDestinations = yield* RcMap.make({
     lookup: (_destination: string) => Semaphore.make(1),
@@ -2175,9 +2187,83 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     },
   );
 
+  const worktreePathIdentity = (candidate: string) =>
+    Effect.tryPromise({
+      try: () => canonicalizeWorktreePath(candidate),
+      catch: (cause) =>
+        createGitCommandError(
+          "GitVcsDriver.worktreeSetup",
+          candidate,
+          [],
+          "Cannot resolve the canonical worktree path.",
+          cause,
+        ),
+    });
+
+  // Recovery needs proof of absence. The ordinary discovery method tolerates
+  // non-repositories; never use its empty-list fallback for journal recovery.
+  const registeredWorktreePathsForRecovery = (cwd: string) =>
+    Effect.gen(function* () {
+      const args = ["worktree", "list", "--porcelain", "-z"];
+      const result = yield* executeGit("GitVcsDriver.worktreeSetup.registration", cwd, args, {
+        timeoutMs: 5_000,
+      });
+      if (result.stdoutTruncated || !result.stdout.endsWith("\0\0"))
+        return yield* createGitCommandError(
+          "GitVcsDriver.worktreeSetup.registration",
+          cwd,
+          args,
+          "Cannot prove worktree registration is absent: incomplete Git worktree listing.",
+        );
+      const paths: string[] = [];
+      for (const record of result.stdout.slice(0, -2).split("\0\0")) {
+        const field = record.split("\0")[0];
+        const candidate = field?.startsWith("worktree ")
+          ? field.slice("worktree ".length)
+          : undefined;
+        if (!candidate || !nodePath.isAbsolute(candidate))
+          return yield* createGitCommandError(
+            "GitVcsDriver.worktreeSetup.registration",
+            cwd,
+            args,
+            "Cannot prove worktree registration is absent: invalid Git worktree listing.",
+          );
+        paths.push(yield* worktreePathIdentity(candidate));
+      }
+      return paths;
+    });
+
+  const worktreeRepositoryIdentity = (cwd: string) =>
+    resolveGitCommonDir(cwd).pipe(Effect.flatMap(worktreePathIdentity));
+
+  const recoverSetup = (cwd: string, checkoutPath: string) =>
+    Effect.gen(function* () {
+      return yield* recoverOrphanedWorktreeSetup({
+        stateDir: config.stateDir,
+        checkoutPath,
+        repositoryPath: worktreeRepositoryIdentity(cwd),
+        registeredWorktreePaths: registeredWorktreePathsForRecovery(cwd),
+      });
+    });
+
   const createWorktree: GitVcsDriver.GitVcsDriverShape["createWorktree"] = Effect.fn(
     "createWorktree",
   )(function* (input) {
+    const settings =
+      input.settingsSnapshot ??
+      (Option.isSome(settingsService)
+        ? yield* settingsService.value.getSettings.pipe(
+            Effect.mapError((cause) =>
+              createGitCommandError(
+                "GitVcsDriver.createWorktree.settings",
+                input.cwd,
+                ["worktree", "add"],
+                `Cannot load worktree settings: ${cause.message}`,
+                cause,
+              ),
+            ),
+          )
+        : DEFAULT_SERVER_SETTINGS);
     let baseRef = input.refName;
     if (input.fetchOrigin) {
       yield* fetchOrigin(input.cwd);
@@ -2206,10 +2292,6 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const sanitizedBranch = targetBranch.replace(/\//g, "-");
     const repoName = path.basename(input.cwd);
     const worktreePath = yield* Effect.gen(function* () {
-      const settings =
-        input.path == null && Option.isSome(settingsService)
-          ? yield* settingsService.value.getSettings
-          : null;
       const candidate =
         input.path ??
         path.join(
@@ -2232,106 +2314,191 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ),
     );
 
+    if (Option.isSome(storageSql)) {
+      const release = yield* acquireWorktreeCreationLease(storageSql.value, worktreePath).pipe(
+        Effect.mapError((cause) =>
+          createGitCommandError(
+            "GitVcsDriver.createWorktree",
+            input.cwd,
+            ["worktree", "add"],
+            cause instanceof Error ? cause.message : "Storage admission failed.",
+            cause,
+          ),
+        ),
+      );
+      yield* Effect.addFinalizer(() => release);
+    }
+
     const args = input.newRefName
       ? ["worktree", "add", "-b", input.newRefName, worktreePath, baseRef]
       : ["worktree", "add", worktreePath, baseRef];
 
-    yield* Effect.scoped(
+    return yield* Effect.scoped(
       Effect.gen(function* () {
         const destinationLock = yield* RcMap.get(worktreeDestinations, worktreePath);
-        yield* destinationLock.withPermit(
-          Effect.gen(function* () {
-            // Concurrent Git processes can remove a winner's checkout while cleaning
-            // up a failed add. Serialize only this destination, including the recheck.
-            const exists = yield* fileSystem.exists(worktreePath).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new GitCommandError({
-                    operation: "GitVcsDriver.createWorktree",
-                    command: "git worktree add",
-                    cwd: input.cwd,
-                    detail: cause.message,
-                    cause,
-                  }),
-              ),
-            );
-            if (exists)
-              return yield* createGitCommandError(
-                "GitVcsDriver.createWorktree",
-                input.cwd,
-                args,
-                "Worktree destination already exists. Choose a different branch or root.",
+        return yield* destinationLock.withPermit(
+          withWorktreeSetupOwnership(config.stateDir, worktreePath, (mutation, ownerToken) =>
+            Effect.gen(function* () {
+              // Concurrent Git processes can remove a winner's checkout while cleaning
+              // up a failed add. Hold this destination through setup and explicit removal
+              // so an older completion cannot clear a newer attempt's journal.
+              const exists = yield* fileSystem.exists(worktreePath).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new GitCommandError({
+                      operation: "GitVcsDriver.createWorktree",
+                      command: "git worktree add",
+                      cwd: input.cwd,
+                      detail: cause.message,
+                      cause,
+                    }),
+                ),
               );
-            yield* executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
-              fallbackErrorMessage: "git worktree add failed",
-            });
-          }),
+              if (exists) {
+                yield* assertWorktreeSetupComplete(config.stateDir, worktreePath, ownerToken);
+                return yield* createGitCommandError(
+                  "GitVcsDriver.createWorktree",
+                  input.cwd,
+                  args,
+                  "Worktree destination already exists. Choose a different branch or root.",
+                );
+              }
+              yield* recoverSetup(input.cwd, worktreePath);
+              const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
+              // Persist journal and mutation ownership before Git can register a
+              // checkout. A cancelled child leaves an uncertain guard for inspection.
+              yield* Effect.uninterruptibleMask((restore) =>
+                beginWorktreeSetup(config.stateDir, worktreePath, repositoryPath).pipe(
+                  Effect.andThen(mutation),
+                  Effect.andThen(
+                    restore(
+                      executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
+                        fallbackErrorMessage: "git worktree add failed",
+                      }),
+                    ),
+                  ),
+                ),
+              );
+
+              yield* worktreePolicy
+                .assertExistingPath({
+                  path: worktreePath,
+                  operation: "GitVcsDriver.createWorktree",
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new GitCommandError({
+                        operation: "GitVcsDriver.createWorktree",
+                        command: "git worktree add",
+                        cwd: input.cwd,
+                        detail: cause.message,
+                        cause,
+                      }),
+                  ),
+                );
+              const submodules = yield* resolveWorktreeSubmodules({
+                checkoutPath: worktreePath,
+                settings,
+                projectId: input.projectId,
+                policy: worktreePolicy,
+              }).pipe(
+                Effect.mapError((cause) =>
+                  createGitCommandError(
+                    "GitVcsDriver.createWorktree.resolveSubmodules",
+                    worktreePath,
+                    ["worktree", "add"],
+                    `The worktree was created at ${worktreePath}, but submodule setup could not start: ${cause.message}`,
+                    cause,
+                  ),
+                ),
+              );
+              const gitmodulesPath = path.join(worktreePath, ".gitmodules");
+              const hasGitmodules = yield* fileSystem.exists(gitmodulesPath).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new GitCommandError({
+                      operation: "GitVcsDriver.createWorktree.inspectSubmodules",
+                      command: "inspect .gitmodules",
+                      cwd: worktreePath,
+                      detail: `Failed to inspect ${gitmodulesPath} after creating the worktree.`,
+                      cause,
+                    }),
+                ),
+              );
+
+              if (hasGitmodules && submodules.mode !== "none") {
+                const submoduleArgs = [
+                  "submodule",
+                  "update",
+                  "--init",
+                  ...(submodules.mode === "recursive" ? ["--recursive"] : []),
+                ];
+                yield* executeGit(
+                  "GitVcsDriver.createWorktree.initializeSubmodules",
+                  worktreePath,
+                  submoduleArgs,
+                  {
+                    timeoutMs: 120_000,
+                    fallbackErrorMessage: "git submodule initialization failed",
+                  },
+                ).pipe(
+                  Effect.mapError((error) =>
+                    createGitCommandError(
+                      "GitVcsDriver.createWorktree.initializeSubmodules",
+                      worktreePath,
+                      submoduleArgs,
+                      `The worktree was created at ${worktreePath}, but its submodules could not be initialized (${submodules.mode}): ${error.detail}. Check submodule URLs and credentials, then remove this incomplete checkout through source control and recreate it using its existing branch (preserve any work first).`,
+                      error,
+                    ),
+                  ),
+                );
+              }
+
+              if (input.dependencyHydration === "copyInstallDirs") {
+                yield* copyWorktreeDependencyInstallDirs({ cwd: input.cwd, worktreePath });
+              }
+
+              yield* finishWorktreeSetup(config.stateDir, worktreePath);
+              // Only completed setup becomes cleanup-owned. A retained failed
+              // checkout keeps its incomplete journal and remains protected.
+              if (Option.isSome(storageSql)) {
+                yield* recordCreatedWorktree(storageSql.value, input.cwd, worktreePath).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning(
+                      "Worktree ownership could not be persisted; storage cleanup will protect it",
+                      { detail: String(cause) },
+                    ),
+                  ),
+                );
+              }
+
+              return {
+                worktree: {
+                  path: worktreePath,
+                  refName: targetBranch,
+                },
+                submoduleInitialization: {
+                  ...submodules,
+                  status:
+                    hasGitmodules && submodules.mode !== "none"
+                      ? ("initialized" as const)
+                      : ("skipped" as const),
+                  reason: !hasGitmodules
+                    ? "No .gitmodules file in this checkout."
+                    : submodules.mode === "none"
+                      ? `Submodule initialization disabled by ${submodules.source} settings.`
+                      : submodules.mode === "top-level"
+                        ? "Initialized top-level submodules; nested submodules were left uninitialized."
+                        : "Initialized submodules recursively.",
+                },
+              };
+            }),
+          ),
         );
       }),
     );
-
-    yield* worktreePolicy
-      .assertExistingPath({ path: worktreePath, operation: "GitVcsDriver.createWorktree" })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new GitCommandError({
-              operation: "GitVcsDriver.createWorktree",
-              command: "git worktree add",
-              cwd: input.cwd,
-              detail: cause.message,
-              cause,
-            }),
-        ),
-      );
-    const gitmodulesPath = path.join(worktreePath, ".gitmodules");
-    const hasGitmodules = yield* fileSystem.exists(gitmodulesPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new GitCommandError({
-            operation: "GitVcsDriver.createWorktree.inspectSubmodules",
-            command: "inspect .gitmodules",
-            cwd: worktreePath,
-            detail: `Failed to inspect ${gitmodulesPath} after creating the worktree.`,
-            cause,
-          }),
-      ),
-    );
-
-    if (hasGitmodules) {
-      const submoduleArgs = ["submodule", "update", "--init", "--recursive"];
-      yield* executeGit(
-        "GitVcsDriver.createWorktree.initializeSubmodules",
-        worktreePath,
-        submoduleArgs,
-        {
-          timeoutMs: 120_000,
-          fallbackErrorMessage: "git submodule initialization failed",
-        },
-      ).pipe(
-        Effect.mapError((error) =>
-          createGitCommandError(
-            "GitVcsDriver.createWorktree.initializeSubmodules",
-            worktreePath,
-            submoduleArgs,
-            `The worktree was created, but its submodules could not be initialized: ${error.detail}`,
-            error,
-          ),
-        ),
-      );
-    }
-
-    if (input.dependencyHydration === "copyInstallDirs") {
-      yield* copyWorktreeDependencyInstallDirs({ cwd: input.cwd, worktreePath });
-    }
-
-    return {
-      worktree: {
-        path: worktreePath,
-        refName: targetBranch,
-      },
-    };
-  });
+  }, Effect.scoped);
 
   const fetchPullRequestBranch: GitVcsDriver.GitVcsDriverShape["fetchPullRequestBranch"] =
     Effect.fn("fetchPullRequestBranch")(function* (input) {
@@ -2396,24 +2563,88 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const removeWorktree: GitVcsDriver.GitVcsDriverShape["removeWorktree"] = Effect.fn(
     "removeWorktree",
   )(function* (input) {
+    if (input.cleanup) {
+      if (input.force)
+        return yield* createGitCommandError(
+          "GitVcsDriver.removeWorktree",
+          input.cwd,
+          [],
+          "Verified cleanup cannot force removal.",
+        );
+      const markerPath = yield* worktreePathIdentity(input.path);
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const destinationLock = yield* RcMap.get(worktreeDestinations, markerPath);
+          yield* destinationLock.withPermit(
+            withWorktreeSetupOwnership(config.stateDir, markerPath, (mutation, ownerToken) =>
+              Effect.gen(function* () {
+                yield* assertWorktreeSetupComplete(config.stateDir, markerPath, ownerToken);
+                yield* mutation;
+                yield* Effect.tryPromise({
+                  try: () => removeVerifiedWorktree(input.cwd, markerPath, input.cleanup!),
+                  catch: (cause) =>
+                    createGitCommandError(
+                      "GitVcsDriver.removeWorktree",
+                      input.cwd,
+                      [],
+                      cause instanceof Error ? cause.message : "Verified cleanup failed",
+                      cause,
+                    ),
+                }).pipe(Effect.uninterruptible);
+              }),
+            ),
+          );
+        }),
+      );
+      return;
+    }
     const args = ["worktree", "remove"];
     if (input.force) {
       args.push("--force");
     }
     args.push(input.path);
-    yield* executeGit("GitVcsDriver.removeWorktree", input.cwd, args, {
-      timeoutMs: 15_000,
-      fallbackErrorMessage: "git worktree remove failed",
-    }).pipe(
-      Effect.mapError((error) =>
-        createGitCommandError(
-          "GitVcsDriver.removeWorktree",
-          input.cwd,
-          args,
-          `${commandLabel(args)} failed (cwd: ${input.cwd}): ${error.message}`,
-          error,
+    const removedPath = yield* worktreePolicy
+      .assertPath({ path: input.path, operation: "GitVcsDriver.removeWorktree" })
+      .pipe(
+        Effect.mapError((cause) =>
+          createGitCommandError(
+            "GitVcsDriver.removeWorktree",
+            input.cwd,
+            args,
+            cause.message,
+            cause,
+          ),
         ),
-      ),
+      );
+    const markerPath = yield* worktreePathIdentity(removedPath);
+    args[args.length - 1] = markerPath;
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const destinationLock = yield* RcMap.get(worktreeDestinations, markerPath);
+        yield* destinationLock.withPermit(
+          withWorktreeSetupOwnership(config.stateDir, markerPath, (mutation) =>
+            Effect.gen(function* () {
+              if (yield* recoverSetup(input.cwd, markerPath)) return;
+              yield* mutation;
+              yield* executeGit("GitVcsDriver.removeWorktree", input.cwd, args, {
+                timeoutMs: 15_000,
+                fallbackErrorMessage: "git worktree remove failed",
+              }).pipe(
+                Effect.mapError((error) =>
+                  createGitCommandError(
+                    "GitVcsDriver.removeWorktree",
+                    input.cwd,
+                    args,
+                    `${commandLabel(args)} failed (cwd: ${input.cwd}): ${error.message}`,
+                    error,
+                  ),
+                ),
+              );
+              yield* finishWorktreeSetup(config.stateDir, markerPath);
+            }),
+          ),
+        );
+      }),
     );
   });
 
@@ -2607,6 +2838,21 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     readConfigValue,
     listRefs,
     createWorktree,
+    assertWorktreeSetupComplete: (checkoutPath) =>
+      worktreePolicy
+        .assertExistingPath({ path: checkoutPath, operation: "GitVcsDriver.worktreeSetup" })
+        .pipe(
+          Effect.mapError((cause) =>
+            createGitCommandError(
+              "GitVcsDriver.worktreeSetup",
+              checkoutPath,
+              [],
+              cause.message,
+              cause,
+            ),
+          ),
+          Effect.flatMap((authorized) => assertWorktreeSetupComplete(config.stateDir, authorized)),
+        ),
     fetchPullRequestBranch,
     ensureRemote,
     resolvePrimaryRemoteName,

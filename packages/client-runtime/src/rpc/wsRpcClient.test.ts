@@ -136,3 +136,36 @@ describe("wsRpcClient", () => {
     expect(client.isHeartbeatFresh()).toBe(true);
   });
 });
+
+it("negotiates usage capability before sending a literal version request to an old node", async () => {
+  const usage = vi.fn(() => Effect.die("v1 schema should never receive a v2 request"));
+  const config = vi.fn(() => Effect.succeed({}));
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(
+        invoke({ [WS_METHODS.serverGetConfig]: config, [WS_METHODS.serverGetUsageSummary]: usage }),
+      ),
+  };
+  const client = createWsRpcClient(transport as unknown as WsTransport);
+  await expect(
+    client.server.getUsageSummary({ contractVersion: 2, endDate: "2026-08-10", timeZone: "UTC" }),
+  ).rejects.toThrow("Update Ryco");
+  expect(config).toHaveBeenCalledOnce();
+  expect(usage).not.toHaveBeenCalled();
+});
+it("turns response version decoding failures into an update instruction without a schema dump", async () => {
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(
+        invoke({
+          [WS_METHODS.serverGetConfig]: () => Effect.succeed({ usageContractVersion: 2 }),
+          [WS_METHODS.serverGetUsageSummary]: () =>
+            Effect.fail(new Error("Schema decode: contractVersion expected 2, actual 1")),
+        }),
+      ),
+  };
+  const client = createWsRpcClient(transport as unknown as WsTransport);
+  await expect(
+    client.server.getUsageSummary({ contractVersion: 2, endDate: "2026-08-10", timeZone: "UTC" }),
+  ).rejects.toThrow("Update Ryco");
+});

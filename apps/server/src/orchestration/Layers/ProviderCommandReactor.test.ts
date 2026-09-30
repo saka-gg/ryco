@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
+import { canonicalStoragePath } from "../../storage/lifecycle.ts";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
@@ -20,6 +24,7 @@ import {
   ApprovalRequestId,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_SERVER_SETTINGS,
   EventId,
   MessageId,
   ProjectId,
@@ -101,7 +106,8 @@ describe("ProviderCommandReactor", () => {
     | ProviderCommandReactor
     | ProjectionSnapshotQuery
     | ProjectionThreadUserInputRequestRepository
-    | ProjectionPendingApprovalRepository,
+    | ProjectionPendingApprovalRepository
+    | SqlClient.SqlClient,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -158,7 +164,9 @@ describe("ProviderCommandReactor", () => {
     readonly getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
     readonly clearThreadGoal?: NonNullable<ProviderServiceShape["clearThreadGoal"]>;
     readonly pendingGoal?: boolean;
+    readonly startReactor?: boolean;
     readonly baseDir?: string;
+    readonly workspaceRoot?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
@@ -272,12 +280,14 @@ describe("ProviderCommandReactor", () => {
             : "renamed-branch",
       }),
     );
-    const listWorktreePaths = vi.fn(() => Effect.succeed<readonly string[]>([]));
-    const listLocalBranchNames = vi.fn(() =>
+    const listWorktreePaths = vi.fn<GitWorkflowServiceShape["listWorktreePaths"]>(() =>
+      Effect.succeed<readonly string[]>([]),
+    );
+    const listLocalBranchNames = vi.fn<GitWorkflowServiceShape["listLocalBranchNames"]>(() =>
       Effect.succeed(["ryco/1234abcd", "feature/workspace", "feature/recovered"]),
     );
-    const pruneWorktrees = vi.fn(() => Effect.void);
-    const createWorktree = vi.fn(
+    const pruneWorktrees = vi.fn<GitWorkflowServiceShape["pruneWorktrees"]>(() => Effect.void);
+    const createWorktree = vi.fn<GitWorkflowServiceShape["createWorktree"]>(
       (input: Parameters<GitWorkflowServiceShape["createWorktree"]>[0]) =>
         Effect.succeed({
           worktree: {
@@ -286,6 +296,9 @@ describe("ProviderCommandReactor", () => {
           },
         }),
     );
+    const assertWorktreeSetupComplete = vi.fn<
+      GitWorkflowServiceShape["assertWorktreeSetupComplete"]
+    >((_checkoutPath: string) => Effect.void);
     const invalidateStatus = vi.fn(() => Effect.void);
     const refreshStatus = vi.fn((_: string) =>
       Effect.succeed({
@@ -402,7 +415,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(
         ProjectionPendingApprovalRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
       ),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -415,6 +428,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(
         Layer.mock(GitWorkflowService)({
           createWorktree,
+          assertWorktreeSetupComplete,
           invalidateStatus,
           listLocalBranchNames,
           listWorktreePaths,
@@ -460,7 +474,7 @@ describe("ProviderCommandReactor", () => {
         commandId: CommandId.make("cmd-project-create"),
         projectId: asProjectId("project-1"),
         title: "Provider Project",
-        workspaceRoot: "/tmp/provider-project",
+        workspaceRoot: input?.workspaceRoot ?? "/tmp/provider-project",
         defaultModelSelection: modelSelection,
         createdAt: now,
       }),
@@ -492,10 +506,14 @@ describe("ProviderCommandReactor", () => {
         }),
       );
     }
-    await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
+    const startReactor = () => Effect.runPromise(reactor.start().pipe(Scope.provide(scope!)));
+    if (input?.startReactor !== false) await startReactor();
 
     return {
       engine,
+      sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
+      run: <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect),
+      startReactor,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
       readQuestion: (requestId: string) =>
@@ -521,6 +539,7 @@ describe("ProviderCommandReactor", () => {
       respondToUserInput,
       stopSession,
       createWorktree,
+      assertWorktreeSetupComplete,
       invalidateStatus,
       listLocalBranchNames,
       listWorktreePaths,
@@ -946,6 +965,56 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("refuses delayed goal recovery after cleanup claims or removes a checkout", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const checkout = await canonicalStoragePath(path.join(harness.stateDir, "missing-checkout"));
+    const createdAt = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("goal-storage-path"),
+        threadId: ThreadId.make("thread-1"),
+        branch: "feature",
+        worktreePath: checkout,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.goal.set",
+        commandId: CommandId.make("goal-before-cleanup"),
+        threadId: ThreadId.make("thread-1"),
+        objective: "Keep real work",
+        startTurn: false,
+        createdAt,
+      }),
+    );
+    await harness.run(
+      harness.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('goal-guard', ${checkout}, 'worktree', '{}', ${createdAt}, 'removing')`,
+    );
+    await harness.startReactor();
+    await harness.drain();
+    expect(harness.createWorktree).not.toHaveBeenCalled();
+    expect(harness.listLocalBranchNames).not.toHaveBeenCalled();
+    expect(harness.startSession).not.toHaveBeenCalled();
+    for (const state of ["removing", "removed"]) {
+      await harness.run(
+        harness.sql`UPDATE storage_owned_entries SET state = ${state} WHERE id = 'goal-guard'`,
+      );
+      await expect(
+        Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.set",
+            commandId: CommandId.make(`goal-after-${state}`),
+            threadId: ThreadId.make("thread-1"),
+            objective: "Keep real work",
+            startTurn: false,
+            createdAt,
+          }),
+        ),
+      ).rejects.toThrow("Checkout cleanup is pending or complete");
+    }
+  });
+
   it("recreates a missing recorded worktree before starting the provider session", async () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-worktree-recovery-"));
     const harness = await createHarness({ baseDir });
@@ -983,6 +1052,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.listLocalBranchNames).toHaveBeenCalledWith("/tmp/provider-project");
     expect(harness.pruneWorktrees).toHaveBeenCalledWith("/tmp/provider-project");
     expect(harness.createWorktree).toHaveBeenCalledWith({
+      projectId: ProjectId.make("project-1"),
       cwd: "/tmp/provider-project",
       path: worktreePath,
       refName: "feature/recovered",
@@ -995,6 +1065,132 @@ describe("ProviderCommandReactor", () => {
     expect(
       harness.createWorktree.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     ).toBeLessThan(harness.startSession.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER);
+  });
+
+  it("refuses a retained incomplete worktree checkout on the second provider turn, including after driver restart", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-incomplete-recovery-"));
+    const repo = path.join(baseDir, "repo");
+    fs.mkdirSync(repo);
+    const localGit = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repo,
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      });
+    localGit("init");
+    fs.writeFileSync(path.join(repo, "ryco.json"), "malformed JSON");
+    localGit("add", "ryco.json");
+    localGit(
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-m",
+      "invalid branch config",
+    );
+    localGit("branch", "feature/recovered");
+    const h = await createHarness({ baseDir, workspaceRoot: repo });
+    const worktreePath = path.join(baseDir, "worktrees", "recovered");
+    const makeGitRuntime = () =>
+      ManagedRuntime.make(
+        GitVcsDriver.layer.pipe(
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      );
+    const gitRuntime = makeGitRuntime();
+    const restartedRuntime = makeGitRuntime();
+    try {
+      const driver = await gitRuntime.runPromise(Effect.service(GitVcsDriver.GitVcsDriver));
+      h.createWorktree.mockImplementation(driver.createWorktree);
+      h.listWorktreePaths.mockImplementation(() => driver.listWorktreePaths(repo));
+      h.listLocalBranchNames.mockImplementation(() => driver.listLocalBranchNames(repo));
+      h.pruneWorktrees.mockImplementation(() => driver.pruneWorktrees(repo));
+      h.assertWorktreeSetupComplete.mockImplementation(driver.assertWorktreeSetupComplete);
+      await Effect.runPromise(
+        h.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("record-incomplete"),
+          threadId: ThreadId.make("thread-1"),
+          branch: "feature/recovered",
+          worktreePath,
+        }),
+      );
+      const start = (attempt: number) =>
+        Effect.runPromise(
+          h.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`incomplete-turn-${attempt}`),
+            threadId: ThreadId.make("thread-1"),
+            message: {
+              messageId: asMessageId(`incomplete-message-${attempt}`),
+              role: "user",
+              text: "continue",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+      const failures = async () =>
+        (await h.readModel()).threads[0]?.activities.filter((a) =>
+          a.summary.includes("Provider turn start failed"),
+        ).length ?? 0;
+      await start(1);
+      await waitFor(async () => (await failures()) === 1);
+      expect(h.createWorktree).toHaveBeenCalledTimes(1);
+      expect(h.startSession).not.toHaveBeenCalled();
+      expect(await Effect.runPromise(driver.listWorktreePaths(repo))).toContain(
+        fs.realpathSync(worktreePath),
+      );
+      // A new core instance must observe durable state, not an in-memory flag.
+      const restartedDriver = await restartedRuntime.runPromise(
+        Effect.service(GitVcsDriver.GitVcsDriver),
+      );
+      h.assertWorktreeSetupComplete.mockImplementation(restartedDriver.assertWorktreeSetupComplete);
+      await start(2);
+      await waitFor(async () => (await failures()) === 2);
+      expect(h.createWorktree).toHaveBeenCalledTimes(1);
+      expect(h.startSession).not.toHaveBeenCalled();
+      expect(h.sendTurn).not.toHaveBeenCalled();
+      await expect(
+        Effect.runPromise(
+          restartedDriver.createWorktree({
+            cwd: repo,
+            path: worktreePath,
+            refName: "feature/recovered",
+          }),
+        ),
+      ).rejects.toThrow("incomplete setup");
+      // Fixing configuration alone does not silently adopt the retained checkout.
+      fs.writeFileSync(path.join(worktreePath, "ryco.json"), "{}");
+      await expect(
+        Effect.runPromise(restartedDriver.assertWorktreeSetupComplete(worktreePath)),
+      ).rejects.toThrow("incomplete setup");
+      // Explicit removal preserves the branch. Recreate with an explicit project
+      // policy after fixing the invalid branch file; no ordinary checkout is hydrated.
+      await Effect.runPromise(
+        restartedDriver.removeWorktree({ cwd: repo, path: worktreePath, force: true }),
+      );
+      const completed = await Effect.runPromise(
+        restartedDriver.createWorktree({
+          cwd: repo,
+          path: worktreePath,
+          refName: "feature/recovered",
+          projectId: ProjectId.make("project-1"),
+          settingsSnapshot: {
+            ...DEFAULT_SERVER_SETTINGS,
+            projectWorktreeSubmodules: { "project-1": "none" },
+          },
+        }),
+      );
+      expect(completed.submoduleInitialization?.mode).toBe("none");
+      await Effect.runPromise(restartedDriver.assertWorktreeSetupComplete(worktreePath));
+    } finally {
+      await restartedRuntime.dispose();
+      await gitRuntime.dispose();
+    }
   });
 
   it("accepts a registered worktree through a symlinked parent directory", async () => {
