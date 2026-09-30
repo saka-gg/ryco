@@ -585,6 +585,19 @@ export const resolveServerConfig = (
       () => process.cwd(),
     );
     const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
+    if (Option.isSome(normalizedFlags.cwd) && !(yield* fs.exists(cwd))) {
+      // A bare word that is not an existing folder is almost always a command
+      // this CLI does not have — an older `ryco` given `setup`, or a typo —
+      // not a request to create a folder by that name and serve from it.
+      const requested = normalizedFlags.cwd.value.trim();
+      if (isBareCommandWord(requested)) {
+        return yield* new UnknownCommandError({
+          message: `Unknown command "${requested}". Run \`ryco --help\` to see the commands${
+            process.argv[1]?.includes("_npx") ? " (npx runs the version published on npm)" : ""
+          }; to start in a new folder by that name, pass ./${requested}.`,
+        });
+      }
+    }
     yield* fs.makeDirectory(cwd, { recursive: true });
     const workspaceAccessRoot = Option.getOrElse(
       resolveOptionPrecedence(
@@ -802,6 +815,14 @@ const adminCommandLogLevel = (
   requested: Option.Option<LogLevel.LogLevel>,
   configured: LogLevel.LogLevel,
 ): LogLevel.LogLevel => (Option.isSome(requested) ? configured : "Warn");
+
+class UnknownCommandError extends Data.TaggedError("UnknownCommandError")<{
+  readonly message: string;
+}> {}
+
+/** A single word — no path separator, no `.` or `~` prefix — as a command would be. */
+export const isBareCommandWord = (value: string) =>
+  /^[A-Za-z][A-Za-z0-9_-]*$/u.test(value) && !value.includes("/");
 
 class NodeConfigLoadError extends Data.TaggedError("NodeConfigLoadError")<{
   readonly message: string;

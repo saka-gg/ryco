@@ -302,6 +302,38 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("refuses an unknown command word instead of creating a folder for it", () =>
+    Effect.gen(function* () {
+      const baseDir = join(os.tmpdir(), `ryco-cli-config-word-${process.pid}`);
+      const word = `notacommand${process.pid}`;
+      const result = yield* resolveServerConfig(
+        makeServerFlags(baseDir, { cwd: Option.some(word) }),
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })), NetService.layer),
+        ),
+        Effect.result,
+      );
+      assert.isTrue(result._tag === "Failure");
+      if (result._tag === "Failure") assert.include(String(result.failure), `Unknown command "${word}"`);
+      const fs = yield* FileSystem.FileSystem;
+      assert.isFalse(yield* fs.exists(join(process.cwd(), word)));
+
+      // An explicit path still creates the folder, as before.
+      const folder = join(baseDir, "new-project");
+      const created = yield* resolveServerConfig(
+        makeServerFlags(baseDir, { cwd: Option.some(folder) }),
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })), NetService.layer),
+        ),
+      );
+      expect(created.cwd).toBe(folder);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("defaults an enabled connector to the hosted Hub origin", () =>
     Effect.gen(function* () {
       const resolved = yield* resolveHubServerConfig(
