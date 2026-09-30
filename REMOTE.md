@@ -59,20 +59,25 @@ For `https://app.ryco.space`, prefer an HTTPS Tailnet or other HTTPS endpoint. A
 
 ### Option 2: Headless Server (CLI)
 
-Use this when you want to run the server without a GUI, for example on a remote machine over SSH.
+Use this when you want to run the server without a GUI, for example on a second Mac or a remote
+machine over SSH.
 
-Run the server with `ryco serve`.
+Run the server with `ryco serve`. The CLI is published as `ryco-cli`; install it globally when the
+server should keep running (see [Keep a node running](#keep-a-node-running)).
 
 ```bash
-npx ryco serve --host "$(tailscale ip -4)"
+npm install -g ryco-cli
+ryco serve --host "$(tailscale ip -4)"
 ```
 
 `ryco serve` starts the server without opening a browser and prints:
 
-- a connection string
-- a pairing token
-- a pairing URL
-- a QR code for the pairing URL
+- a connection string for its primary address — the LAN address when it listens on every
+  interface, or the Tailscale HTTPS URL for a loopback server behind Tailscale Serve
+- a one-time pairing token and how long it stays valid
+- a pairing URL, plus pairing links for its other addresses (Tailscale IP, Tailscale HTTPS, and a
+  hosted-app link for HTTPS endpoints)
+- a QR code for the primary pairing URL
 
 From there, connect from another device in either of these ways:
 
@@ -86,20 +91,74 @@ Use `ryco serve --help` for the full flag reference. It supports the same genera
 For hosted web pairing over Tailscale HTTPS, opt in to Tailscale Serve:
 
 ```bash
-npx ryco serve --tailscale-serve
+ryco serve --tailscale-serve
 ```
 
 By default this configures Tailscale Serve on HTTPS port 443 and advertises
 `https://machine.tailnet.ts.net/`. Advanced users can choose a different HTTPS port:
 
 ```bash
-npx ryco serve --tailscale-serve --tailscale-serve-port 8443
+ryco serve --tailscale-serve --tailscale-serve-port 8443
 ```
 
-> Note
-> The GUIs do not currently support adding projects on remote environments.
-> For now, use `ryco project ...` on the server machine instead.
-> Full GUI support for remote project management is coming soon.
+The one-time token `ryco serve` prints expires after five minutes. Mint another whenever you pair a
+new device:
+
+```bash
+ryco auth pairing create --ttl 1h --base-url https://machine.tailnet.ts.net
+```
+
+### Keep a node running
+
+`ryco service install` runs `ryco serve` in the background as a per-user LaunchAgent on macOS or a
+systemd user unit on Linux. It starts at login, restarts the server if it stops, and — unless you
+pass `--no-prevent-sleep` — keeps the machine from idle-sleeping while on AC power. It takes the same
+network and Hub flags as `ryco serve`:
+
+```bash
+npm install -g ryco-cli            # a service cannot rely on an npx cache
+ryco service install --tailscale-serve --hub ~/code
+ryco service status
+ryco service logs -f
+```
+
+`ryco service restart` picks up an upgraded `ryco-cli`; `ryco service uninstall` removes the service
+and keeps the node's state and pairings. A background service does not print pairing tokens into
+its log; use `ryco auth pairing create` to pair devices. On Linux, run
+`sudo loginctl enable-linger $USER` so the unit also runs at boot without a login.
+
+`ryco serve --prevent-sleep` holds the same sleep assertion for a foreground server.
+
+### Reach a node through your Ryco account
+
+A node can also be reached from anywhere through the hosted Hub relay, without Tailscale or an open
+port. Start it with `--hub` (the hosted Hub at `https://app.ryco.space` is the default origin) and
+link it to your account:
+
+```bash
+ryco serve --hub                   # or: ryco service install --hub
+ryco hub login                     # sign in with your password and second factor
+```
+
+`ryco hub login` approves this node's own enrollment after checking that the Hub's enrollment key
+matches the node's, then signs out; no account credential stays on the machine. Accounts that sign
+in only with a passkey or GitHub use `ryco hub enroll` and approve the printed code in the Ryco web
+app instead. See [Outbound Hub connector](./docs/hub-connector.md).
+
+### Use the CLI as a client
+
+`ryco remote` pairs this machine's CLI with another node and talks to it over the same WebSocket
+RPC the apps use:
+
+```bash
+ryco remote add mini "https://mini.tailnet.ts.net/pair#token=…"
+ryco remote threads mini
+ryco remote send mini <thread-id> "Run the tests and fix what fails"
+```
+
+`send` continues a thread with its own model and prints the reply as it streams (`--no-wait` returns
+at once). The session is stored in `~/.ryco/userdata/cli-remotes.json`, readable only by you;
+`ryco remote remove mini` forgets it.
 
 ### Option 3: Desktop-Managed SSH Launch
 
@@ -110,6 +169,11 @@ Use this when you want the desktop app to start or reuse Ryco on another machine
 3. Select the SSH launch flow.
 4. Enter the SSH target, such as `user@example.com`.
 5. Confirm the launch. The desktop app probes the host, starts or reuses a remote Ryco server, opens a local port forward, and saves the environment.
+
+The remote host needs Node.js on the non-interactive SSH `PATH`. The launcher uses an installed
+`ryco` when it finds one and otherwise runs `ryco-cli` through `npx`. If the tunnel drops — after
+sleep or a network change — the next reconnect attempt rebuilds it, relaunching the remote server
+if needed.
 
 After setup, the renderer connects to a local forwarded HTTP/WebSocket endpoint. The remote host still owns the actual Ryco server, projects, files, git state, terminals, and provider sessions.
 
@@ -126,6 +190,14 @@ Instead:
 3. The server creates an authenticated session for that device.
 
 After pairing, future access is session-based. You do not need to keep reusing the original token unless you are pairing a new device.
+
+## Staying Connected
+
+A saved remote environment reconnects on its own after sleep, a network change, or a restart of the
+remote server: it keeps retrying on a backoff capped at one minute, and retries at once when the
+device wakes or regains the network. An environment that was unreachable when the app started is
+retried the same way. On reconnect the app resumes from what it already has — only the events it
+missed are sent — rather than downloading every thread again.
 
 ## Hosted Web App Pairing
 

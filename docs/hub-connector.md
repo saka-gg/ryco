@@ -27,12 +27,12 @@ The connector is disabled by default. Configure it through the server process en
 
 The four ordinary startup settings also have shared server CLI flags:
 
-| CLI flag                        | Environment fallback               |
-| ------------------------------- | ---------------------------------- |
-| `--hub-connector-enabled`       | `RYCO_HUB_CONNECTOR_ENABLED`       |
-| `--hub-origin <origin>`         | `RYCO_HUB_ORIGIN`                  |
-| `--hub-node-name <name>`        | `RYCO_HUB_NODE_NAME`               |
-| `--hub-allow-file-secret-store` | `RYCO_HUB_ALLOW_FILE_SECRET_STORE` |
+| CLI flag                                  | Environment fallback               |
+| ----------------------------------------- | ---------------------------------- |
+| `--hub-connector-enabled` (alias `--hub`) | `RYCO_HUB_CONNECTOR_ENABLED`       |
+| `--hub-origin <origin>`                   | `RYCO_HUB_ORIGIN`                  |
+| `--hub-node-name <name>`                  | `RYCO_HUB_NODE_NAME`               |
+| `--hub-allow-file-secret-store`           | `RYCO_HUB_ALLOW_FILE_SECRET_STORE` |
 
 Startup values resolve in this order: an explicit CLI flag, its corresponding environment variable,
 the private desktop bootstrap envelope, then the default. A headless `ryco serve` process has no
@@ -207,9 +207,11 @@ state. It is not the accessible workspace root. This application-level restricti
 commands after a terminal or coding-agent process starts: use a container or operating-system
 sandbox when processes must be unable to read paths outside `/allowed/workspace`.
 
-An invalid enabled configuration fails closed with `configuration_invalid`. There is no implicit
-production origin. Credentials, keys, challenges, signatures, and polling secrets are never
-accepted through command-line arguments, URLs, or exported server settings.
+An invalid enabled configuration fails closed with `configuration_invalid`. When the connector is
+enabled from the CLI or environment without an origin, it uses the hosted Hub at
+`https://app.ryco.space`; enrollment still needs an owner's explicit approval there. Credentials,
+keys, challenges, signatures, and polling secrets are never accepted through command-line
+arguments, URLs, or exported server settings.
 
 Enabling the connector starts no listener. It uses the existing Ryco HTTP server only for
 authenticated local status and enrollment controls.
@@ -290,6 +292,7 @@ directory:
 
 ```bash
 ryco hub status
+ryco hub login
 ryco hub enroll
 ryco hub pending
 ryco hub cancel
@@ -297,7 +300,16 @@ ryco hub resume
 ryco hub leave
 ```
 
-Add `--json` for bounded machine-readable output. The server must be running. The CLI obtains a
+Add `--json` for bounded machine-readable output. The server must be running.
+
+`ryco hub login` links the node without leaving the terminal. It signs in to the Hub with the
+native password login — the account's password and its second factor, prompted for and never taken
+from arguments — under a DPoP key that exists only for the command. It then starts (or reuses) this
+node's device-code enrollment, looks the enrollment up at the Hub, approves it only when the Hub's
+public-key fingerprint equals the one the local node reported over its authenticated loopback API,
+signs out, and waits for the connector to come online. No account credential remains on the node.
+Accounts without a password — passkey- or GitHub-only — use `ryco hub enroll` and approve the code
+in the Hub web app. The CLI obtains a
 short-lived owner credential from the local auth control plane, uses it only in an Authorization
 header to the existing local server, and revokes it after the operation. That credential is never a
 Hub credential and never enters a Hub WebSocket.
@@ -379,7 +391,7 @@ Local status exposes only these bounded states:
 | `awaiting_approval`    | A protected enrollment ceremony is being polled.                           |
 | `connecting`           | Proof preflight or network connection is in progress.                      |
 | `authenticating`       | The auth frame was sent and Ryco is waiting for `ready`.                   |
-| `online`               | Protocol 1.2 is negotiated; bounded channel and queue counts are included. |
+| `online`               | Protocol 1.2 or 1.3 is negotiated; bounded channel and queue counts are included. |
 | `degraded`             | Backing off automatically or waiting for operator action.                  |
 | `revoked`              | The node was revoked; automatic reconnect is stopped.                      |
 | `version_incompatible` | The peer version is unsupported; automatic reconnect is stopped.           |
@@ -393,7 +405,16 @@ Only one connection generation and one reconnect timer can exist for the configu
 
 Configuration, key custody, origin mismatch, enrollment failure, authentication rejection,
 connection replacement, revocation, version incompatibility, and repeated early protocol failure
-require operator action. Restarting the process does not make a revoked identity retry.
+require operator action. Restarting the process does not make a revoked identity retry. A proof
+preflight answered with a status a proxy gives while a Hub deploys — 404, 405, 408, 409, 421, or
+425 — retries like a network failure; 400, 401, and 403 still require operator action.
+
+The connector also watches for the two events that silently kill an outbound socket: the machine
+waking from sleep (its wall clock jumps past its timers) and its external addresses changing. An
+online connector then sends its own `ping` and reconnects if the matching `pong` does not arrive
+within five seconds; a connector backing off retries at once with a fresh backoff. Only the answer
+to the connector's own outstanding probe is accepted; an unsolicited `pong` remains a protocol
+violation.
 
 `ryco hub leave` erases this node's local Hub identity: the active signing key, any staged rotation
 key, a pending ceremony's key, and any polling secret still awaiting cleanup. It is the only exit
@@ -433,7 +454,16 @@ an explicit classification fail closed.
 Application bytes remain opaque to the relay adapter and are copied byte-for-byte in sequence.
 Per-channel sequence violations, transfer limits, slow consumers, or application session closure
 close only that channel. They do not close the connector, local clients, or unrelated channels
-unless a bounded connector control frame can no longer be retained safely.
+unless a bounded connector control frame can no longer be retained safely. Frames the Hub forwarded
+before it learned that the node closed a channel are ignored for a bounded set of recently closed
+channels; a frame naming a channel that never existed remains a protocol violation.
+
+An RPC response the send path refuses is never dropped silently: a dropped stream chunk would stall
+its subscription forever, since streams wait for each chunk's acknowledgement. Backpressure is
+waited out in order for up to 30 seconds; a response too large for the channel fails only its own
+request (and interrupts a stream that produced it); anything else — or backpressure that outlasts
+the wait — ends the channel, with §10's authenticated close when it can still be sent, so the client
+reconnects with fresh state.
 
 Negotiated `maxChannels`, `maxDataChunkBytes`, `maxQueuedBytes`, and control-frame limits are
 enforced on both directions. Connector queues and RPC input queues are bounded. Control frames have

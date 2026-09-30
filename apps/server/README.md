@@ -56,6 +56,19 @@ Run in headless mode and print pairing details for remote clients:
 ryco serve --host 0.0.0.0 --port 3773
 ```
 
+Keep it running in the background — started at login, restarted if it stops, awake on AC power:
+
+```bash
+ryco service install --tailscale-serve --hub ~/code
+ryco service status
+```
+
+Link the node to your Ryco account so the apps reach it from anywhere through the Hub relay:
+
+```bash
+ryco hub login
+```
+
 Common options:
 
 - `--host <host>`: host/interface to bind, for example `127.0.0.1` or `0.0.0.0`
@@ -65,6 +78,8 @@ Common options:
 - `--no-browser`: disable automatic browser opening
 - `--auto-bootstrap-project-from-cwd`: create a project for the current working directory on startup when missing
 - `--tailscale-serve`: expose this backend over HTTPS on the Tailnet through Tailscale Serve
+- `--hub`: reach this node through the hosted Hub relay (`--hub-origin` selects another Hub)
+- `--prevent-sleep`: keep the machine from idle-sleeping while the server runs
 - `--log-websocket-events`: emit server-side WebSocket traffic logs for debugging
 
 Useful commands:
@@ -84,7 +99,19 @@ ryco auth pairing revoke <id>
 ryco auth session issue [--ttl 30d] [--role owner|client]
 ryco auth session list
 ryco auth session revoke <session-id>
+
+ryco service install [serve flags] [cwd]
+ryco service status | logs [-f] | restart | stop | start | uninstall
+
+ryco hub login | enroll | status | pending | cancel | resume | leave
+
+ryco remote add <name> <pairing-url>
+ryco remote list | remove <name>
+ryco remote threads <name>
+ryco remote send <name> <thread-id> <message>
 ```
+
+See [REMOTE.md](../../REMOTE.md) for remote access setups.
 
 Run `ryco --help` or `ryco <command> --help` for the full command reference.
 
