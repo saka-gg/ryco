@@ -574,20 +574,32 @@ function executionPresentation(proposal: AgentControlProposal): {
 
 export function buildAgentControlProposalCardModel(
   proposal: AgentControlProposal,
+  getThreadTitle?: (threadId: ThreadId) => string | undefined,
 ): AgentControlProposalCardModel {
   const status = STATUS_PRESENTATION[proposal.status];
   const origin = originPresentation(proposal);
   const plan = planPresentation(proposal);
   const execution = executionPresentation(proposal);
+  const originTitle = origin.threadId === null ? undefined : getThreadTitle?.(origin.threadId);
+  const targetTitle =
+    "threadId" in proposal.plan ? getThreadTitle?.(proposal.plan.threadId) : undefined;
   return {
     proposalId: proposal.proposalId,
     status: proposal.status,
     statusLabel: status.label,
     statusTone: status.tone,
-    originLabel: origin.label,
+    originLabel:
+      originTitle && proposal.principal.kind === "provider-session"
+        ? `Agent in ${originTitle} (${proposal.principal.providerInstanceId})`
+        : origin.label,
     originThreadId: origin.threadId,
     actionLabel: plan.actionLabel,
-    targetLabel: plan.targetLabel,
+    targetLabel:
+      targetTitle &&
+      "threadId" in proposal.plan &&
+      plan.targetLabel === `thread ${shortId(proposal.plan.threadId)}`
+        ? targetTitle
+        : plan.targetLabel,
     runtimeLabel: plan.runtimeLabel,
     riskLabels: proposal.riskTags.map((tag) => riskLabelFromTag(String(tag))),
     isDestructive:

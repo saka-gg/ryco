@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import { formatExpiresInLabel } from "../../timestampFormat";
 import { Badge } from "../ui/badge";
@@ -23,6 +23,7 @@ const TONE_BADGE_VARIANT: Record<
 export interface AgentControlProposalCardProps {
   readonly model: AgentControlProposalCardModel;
   readonly environmentId: EnvironmentId;
+  readonly getThreadTitle?: (threadId: ThreadId) => string | undefined;
   readonly isSubmitting: boolean;
   readonly decisionError: string | null;
   /** Non-null when decisions are unavailable (e.g. hosted role too low). */
@@ -41,6 +42,7 @@ export interface AgentControlProposalCardProps {
 export const AgentControlProposalCard = memo(function AgentControlProposalCard({
   model,
   environmentId,
+  getThreadTitle,
   isSubmitting,
   decisionError,
   disabledReason,
@@ -120,14 +122,18 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
               className="underline"
               href={`/${encodeURIComponent(environmentId)}/${encodeURIComponent(result.childThreadId)}`}
             >
-              Open child task
+              {getThreadTitle?.(result.childThreadId)
+                ? `Open ${getThreadTitle(result.childThreadId)}`
+                : "Open child task"}
             </a>
             {" · "}
             <a
               className="underline"
               href={`/${encodeURIComponent(environmentId)}/${encodeURIComponent(result.parentThreadId)}`}
             >
-              Open originating chat
+              {getThreadTitle?.(result.parentThreadId)
+                ? `Open ${getThreadTitle(result.parentThreadId)}`
+                : "Open originating chat"}
             </a>
           </div>
         ))}
@@ -139,7 +145,9 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
                 className="text-primary underline-offset-2 hover:underline"
                 href={`/${encodeURIComponent(environmentId)}/${encodeURIComponent(threadId)}`}
               >
-                Open thread {threadId.length > 10 ? `${threadId.slice(0, 8)}…` : threadId}
+                Open{" "}
+                {getThreadTitle?.(threadId) ||
+                  `thread ${threadId.length > 10 ? `${threadId.slice(0, 8)}…` : threadId}`}
               </a>
             ))}
           </div>

@@ -221,3 +221,58 @@ export function selectAgentControlProposalsForThread(
       proposal.principal.kind === "provider-session" && proposal.principal.threadId === threadId,
   );
 }
+
+export interface AgentControlThreadActivity {
+  readonly pending: ReadonlyArray<AgentControlProposal>;
+  /** Latest first, including running actions and terminal history. */
+  readonly activity: ReadonlyArray<AgentControlProposal>;
+  readonly managerThreadId: ThreadId | null;
+}
+
+/** Thread presentation only; never grants authority or changes server policy. */
+export function selectAgentControlThreadActivity(
+  state: AgentControlQueueState,
+  threadId: ThreadId | null,
+): AgentControlThreadActivity {
+  if (threadId === null) return { pending: [], activity: [], managerThreadId: null };
+  const proposals = Object.values(state.proposalsById).toSorted(
+    (left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt) ||
+      right.proposalId.localeCompare(left.proposalId),
+  );
+  const local = proposals.filter(
+    (proposal) =>
+      proposal.principal.kind === "provider-session" && proposal.principal.threadId === threadId,
+  );
+  // Infer the last known manager only from accepted thread-management work.
+  // Device/project operations and unaccepted requests do not establish a manager.
+  const manager = proposals.find((proposal) => {
+    if (
+      proposal.principal.kind !== "provider-session" ||
+      proposal.principal.threadId === threadId ||
+      !["approved", "executing", "completed"].includes(proposal.status)
+    )
+      return false;
+    switch (proposal.plan.kind) {
+      case "createThreads":
+        return (
+          proposal.completionReturns?.some((result) => result.childThreadId === threadId) ||
+          (proposal.result?.outcome === "completed" &&
+            proposal.result.createdThreadIds?.includes(threadId)) ||
+          proposal.result?.execution?.affectedThreadIds.includes(threadId)
+        );
+      case "sendMessage":
+      case "interruptThread":
+      case "updateThread":
+        return proposal.plan.threadId === threadId;
+      default:
+        return false;
+    }
+  });
+  return {
+    pending: local.filter((proposal) => proposal.status === "pending-user-approval").toReversed(),
+    activity: local.filter((proposal) => proposal.status !== "pending-user-approval"),
+    managerThreadId:
+      manager?.principal.kind === "provider-session" ? manager.principal.threadId : null,
+  };
+}

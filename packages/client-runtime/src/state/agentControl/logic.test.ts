@@ -4,6 +4,7 @@ import {
   MessageId,
   TurnId,
   AgentControlRequestId,
+  ProjectId,
   ProviderInstanceId,
   ThreadId,
   type AgentControlProposal,
@@ -18,6 +19,7 @@ import {
   selectActiveAgentControlProposals,
   selectAgentControlProposalsForThread,
   selectRecentAgentControlProposals,
+  selectAgentControlThreadActivity,
 } from "./logic.ts";
 
 const callerThreadId = ThreadId.make("thread-caller");
@@ -288,6 +290,164 @@ describe("selectors", () => {
     expect(
       selectAgentControlProposalsForThread(state, callerThreadId).map((entry) => entry.proposalId),
     ).toEqual(["mine"]);
+  });
+});
+
+describe("thread activity", () => {
+  const target = ThreadId.make("thread-target");
+  const queue = (...proposals: AgentControlProposal[]) =>
+    applyAgentControlStreamEvent(
+      EMPTY_AGENT_CONTROL_QUEUE_STATE,
+      snapshotEvent({ revision: 0, active: proposals }),
+    );
+
+  it("only shows the originating thread's approvals and latest activity", () => {
+    const state = queue(
+      makeProposal("pending"),
+      makeProposal("completed", { status: "completed" }),
+      makeProposal("latest", { status: "executing", updatedAt: "2026-09-30T00:00:00.000Z" }),
+      makeProposal("other", {
+        principal: {
+          kind: "provider-session",
+          threadId: target,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+      }),
+      makeProposal("external", {
+        principal: { kind: "external-integration", integrationId: "external" as never },
+      }),
+    );
+    const selection = selectAgentControlThreadActivity(state, callerThreadId);
+    expect(selection.pending.map((proposal) => proposal.proposalId)).toEqual(["pending"]);
+    expect(selection.activity.map((proposal) => proposal.proposalId)).toEqual([
+      "latest",
+      "completed",
+    ]);
+    expect(selection.managerThreadId).toBeNull();
+    expect(selectAgentControlThreadActivity(state, ThreadId.make("unrelated"))).toEqual({
+      pending: [],
+      activity: [],
+      managerThreadId: null,
+    });
+    expect(selectAgentControlThreadActivity(state, null)).toEqual({
+      pending: [],
+      activity: [],
+      managerThreadId: null,
+    });
+  });
+
+  it("shows only a manager notice in the target and preserves it across a snapshot", () => {
+    const state = queue(makeProposal("accepted", { status: "completed" }));
+    const expected = { pending: [], activity: [], managerThreadId: callerThreadId };
+    expect(selectAgentControlThreadActivity(state, target)).toEqual(expected);
+    const reconnected = applyAgentControlStreamEvent(
+      state,
+      snapshotEvent({ revision: 0, recent: Object.values(state.proposalsById) }),
+    );
+    expect(selectAgentControlThreadActivity(reconnected, target)).toEqual(expected);
+  });
+
+  it("does not infer management from unaccepted, failed, or self-directed work", () => {
+    for (const status of [
+      "pending-user-approval",
+      "rejected",
+      "expired",
+      "failed",
+      "cancelled",
+    ] as const) {
+      expect(
+        selectAgentControlThreadActivity(queue(makeProposal("request", { status })), target)
+          .managerThreadId,
+      ).toBeNull();
+    }
+    const self = makeProposal("self", {
+      status: "completed",
+      plan: { kind: "sendMessage", threadId: callerThreadId, text: "self", delivery: "queue" },
+    });
+    expect(
+      selectAgentControlThreadActivity(queue(self), callerThreadId).managerThreadId,
+    ).toBeNull();
+  });
+
+  it("uses creation receipts for delegated children and selects the latest manager", () => {
+    const created = makeProposal("created", {
+      status: "completed",
+      plan: {
+        kind: "createThreads",
+        entries: [
+          {
+            projectId: ProjectId.make("project"),
+            title: "Child task",
+            prompt: "Work on the task",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture" },
+            runtimeMode: "approval-required",
+            envMode: "local",
+          },
+        ],
+      },
+      result: {
+        outcome: "completed",
+        createdThreadIds: [target],
+        completedAt: "2026-08-17T00:00:00.000Z",
+      },
+    });
+    expect(selectAgentControlThreadActivity(queue(created), target).managerThreadId).toBe(
+      callerThreadId,
+    );
+    const withReturn = {
+      ...created,
+      result: null,
+      completionReturns: [
+        {
+          revision: 1,
+          childThreadId: target,
+          initialMessageId: MessageId.make("initial"),
+          parentThreadId: callerThreadId,
+          parentTurnId: TurnId.make("turn"),
+          childTurnId: null,
+          status: "waiting" as const,
+          detail: "Waiting",
+          updatedAt: created.updatedAt,
+        },
+      ],
+    };
+    expect(selectAgentControlThreadActivity(queue(withReturn), target).managerThreadId).toBe(
+      callerThreadId,
+    );
+    const newManager = ThreadId.make("new-manager");
+    const newer = makeProposal("newer", {
+      status: "executing",
+      updatedAt: "2026-09-30T00:00:00.000Z",
+      principal: {
+        kind: "provider-session",
+        threadId: newManager,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      },
+    });
+    expect(selectAgentControlThreadActivity(queue(created, newer), target).managerThreadId).toBe(
+      newManager,
+    );
+  });
+
+  it("does not treat affected threads of a project operation as managed children", () => {
+    const projectOperation = makeProposal("project-operation", {
+      status: "completed",
+      plan: {
+        kind: "removeProject",
+        projectId: ProjectId.make("project"),
+        expected: {
+          title: "Project",
+          workspaceRoot: "/workspace/project",
+          repositoryIdentityKey: null,
+          updatedAt: "2026-08-17T00:00:00.000Z",
+        },
+        expectedThreadIds: [target],
+        force: false,
+      },
+    });
+    expect(
+      selectAgentControlThreadActivity(queue(projectOperation), target).managerThreadId,
+    ).toBeNull();
   });
 });
 
