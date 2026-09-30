@@ -1,16 +1,7 @@
-import {
-  type EnvironmentId,
-  type EditorId,
-  type ProjectScript,
-  type ResolvedKeybindingsConfig,
-} from "@ryco/contracts";
 import { memo } from "react";
-import { ListChecksIcon, PanelRightIcon } from "lucide-react";
+import { PanelRightIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
 import { Toggle } from "../ui/toggle";
-import { OpenInPicker } from "./OpenInPicker";
-import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { HostedNodeMenu } from "../hostedHub/HostedConnectionControls";
 import { ChatHeaderBar } from "./ChatHeaderBar";
 import type { WorktreeOriginLike } from "./ChatHeaderBreadcrumb.logic";
@@ -19,16 +10,13 @@ import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
 import { usePerfMark, useDevPropDiff } from "../../perf/tabSwitchInstrumentation";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "../LiveAgentCountBadge";
 
+// Overview, project scripts, and "Open in editor" live in the overview rail on
+// the conversation's right edge; the header keeps navigation and the
+// workspace panel toggle.
 interface ChatHeaderProps {
-  activeThreadEnvironmentId: EnvironmentId;
   activeThreadTitle: string;
   activeProjectName: string | undefined;
   isGitRepo: boolean;
-  openInCwd: string | null;
-  activeProjectScripts: ProjectScript[] | undefined;
-  preferredScriptId: string | null;
-  keybindings: ResolvedKeybindingsConfig;
-  availableEditors: ReadonlyArray<EditorId>;
   // New, optional props for the breadcrumb. When omitted the header still
   // renders correctly with degraded info (no worktree segment, no
   // source-control counts).
@@ -51,35 +39,11 @@ interface ChatHeaderProps {
   /** Running/pending + waiting agents; pass zero while the roster is visible. */
   liveAgentCount: number;
   onToggleWorkspacePanel: () => void;
-  overviewSidebarOpen: boolean;
-  onToggleOverviewSidebar: (open?: boolean) => void;
-  onRunProjectScript: (script: ProjectScript) => void;
-  onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
-  onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
-  onDeleteProjectScript: (scriptId: string) => Promise<void>;
-}
-
-export function shouldShowOpenInPicker(input: {
-  readonly activeProjectName: string | undefined;
-  readonly activeThreadEnvironmentId: EnvironmentId;
-  readonly primaryEnvironmentId: EnvironmentId | null;
-}): boolean {
-  return (
-    Boolean(input.activeProjectName) &&
-    input.primaryEnvironmentId !== null &&
-    input.activeThreadEnvironmentId === input.primaryEnvironmentId
-  );
 }
 
 export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
   usePerfMark("ChatHeader");
   useDevPropDiff(props as unknown as Record<string, unknown>, "ChatHeader");
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const showOpenInPicker = shouldShowOpenInPicker({
-    activeProjectName: props.activeProjectName,
-    activeThreadEnvironmentId: props.activeThreadEnvironmentId,
-    primaryEnvironmentId,
-  });
 
   const inlineActions = (
     <>
@@ -87,22 +51,6 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
           workspace header so it can never overlap the other header controls.
           Renders nothing outside hosted-hub sessions. */}
       <HostedNodeMenu />
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Toggle
-              pressed={props.overviewSidebarOpen}
-              onPressedChange={props.onToggleOverviewSidebar}
-              aria-label="Toggle overview panel"
-              className={HEADER_CHROME_ICON_BUTTON_CLASS_NAME}
-              size="sm"
-            >
-              <ListChecksIcon className="size-4" />
-            </Toggle>
-          }
-        />
-        <TooltipPopup side="bottom">Toggle overview panel</TooltipPopup>
-      </Tooltip>
       <Tooltip>
         <TooltipTrigger
           render={
@@ -133,24 +81,6 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
             : "Toggle workspace panel"}
         </TooltipPopup>
       </Tooltip>
-      {props.activeProjectScripts ? (
-        <ProjectScriptsControl
-          scripts={props.activeProjectScripts}
-          keybindings={props.keybindings}
-          preferredScriptId={props.preferredScriptId}
-          onRunScript={props.onRunProjectScript}
-          onAddScript={props.onAddProjectScript}
-          onUpdateScript={props.onUpdateProjectScript}
-          onDeleteScript={props.onDeleteProjectScript}
-        />
-      ) : null}
-      {showOpenInPicker ? (
-        <OpenInPicker
-          keybindings={props.keybindings}
-          availableEditors={props.availableEditors}
-          openInCwd={props.openInCwd}
-        />
-      ) : null}
     </>
   );
 

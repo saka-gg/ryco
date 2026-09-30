@@ -1618,6 +1618,48 @@ async function waitForElement<T extends Element>(
   return element;
 }
 
+/** A desktop overview rail item, matched on its accessible name or visible label. */
+function queryOverviewRailItem(namePrefix: string): HTMLButtonElement | null {
+  return (
+    Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-slot="overview-rail"] [data-overview-rail-item]',
+      ),
+    ).find((item) =>
+      (item.getAttribute("aria-label") ?? item.textContent ?? "").trim().startsWith(namePrefix),
+    ) ?? null
+  );
+}
+
+async function waitForOverviewRailItem(namePrefix: string): Promise<HTMLButtonElement> {
+  const item = await waitForElement(
+    () => queryOverviewRailItem(namePrefix),
+    `Unable to find the overview rail item "${namePrefix}".`,
+  );
+  await vi.waitFor(() => {
+    expect(item.disabled, `Overview rail item "${namePrefix}" stays disabled.`).toBe(false);
+  });
+  return item;
+}
+
+/**
+ * The overview rail's "Open in editor" item names the preferred editor; its
+ * primary action opens the workspace in it without opening a menu.
+ */
+async function openInEditorFromRail(editorLabel: string): Promise<void> {
+  const trigger = await waitForOverviewRailItem("Open in");
+  expect(trigger.textContent).toContain(`Open in ${editorLabel}`);
+  trigger.click();
+  expect(document.querySelector('[data-slot="menu-popup"]')).toBeNull();
+}
+
+/** Runs the preferred project script directly from the overview rail. */
+async function runProjectScriptFromRail(scriptName: string): Promise<void> {
+  const trigger = await waitForOverviewRailItem(`Run ${scriptName}`);
+  trigger.click();
+  expect(document.querySelector('[data-slot="menu-popup"]')).toBeNull();
+}
+
 async function clickEnabledButton(button: HTMLButtonElement, errorMessage: string): Promise<void> {
   await vi.waitFor(
     () => {
@@ -4551,17 +4593,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
-      );
-      await vi.waitFor(() => {
-        expect(openButton.disabled).toBe(false);
-      });
-      openButton.click();
+      await openInEditorFromRail("VS Code");
 
       await vi.waitFor(
         () => {
@@ -4665,17 +4697,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
-      );
-      await vi.waitFor(() => {
-        expect(openButton.disabled).toBe(false);
-      });
-      openButton.click();
+      await openInEditorFromRail("VS Code Insiders");
 
       await vi.waitFor(
         () => {
@@ -4711,17 +4733,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
-      );
-      await vi.waitFor(() => {
-        expect(openButton.disabled).toBe(false);
-      });
-      openButton.click();
+      await openInEditorFromRail("Trae");
 
       await vi.waitFor(
         () => {
@@ -4758,7 +4770,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     try {
       await waitForServerConfigToApply();
       const menuButton = await waitForElement(
-        () => document.querySelector('button[aria-label="Copy options"]'),
+        () => queryOverviewRailItem("Choose editor"),
         "Unable to find Open picker button.",
       );
       (menuButton as HTMLButtonElement).click();
@@ -4808,7 +4820,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     try {
       await waitForServerConfigToApply();
       const menuButton = await waitForElement(
-        () => document.querySelector('button[aria-label="Copy options"]'),
+        () => queryOverviewRailItem("Choose editor"),
         "Unable to find Open picker button.",
       );
       (menuButton as HTMLButtonElement).click();
@@ -4929,7 +4941,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     try {
       await waitForServerConfigToApply();
       const menuButton = await waitForElement(
-        () => document.querySelector('button[aria-label="Copy options"]'),
+        () => queryOverviewRailItem("Choose editor"),
         "Unable to find Open picker button.",
       );
       (menuButton as HTMLButtonElement).click();
@@ -4992,17 +5004,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
-      );
-      await vi.waitFor(() => {
-        expect(openButton.disabled).toBe(false);
-      });
-      openButton.click();
+      await openInEditorFromRail("VS Code Insiders");
 
       await vi.waitFor(
         () => {
@@ -5057,14 +5059,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     });
 
     try {
-      const runButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.title === "Run Lint",
-          ) as HTMLButtonElement | null,
-        "Unable to find Run Lint button.",
-      );
-      runButton.click();
+      await runProjectScriptFromRail("Lint");
 
       await vi.waitFor(
         () => {
@@ -5136,14 +5131,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     });
 
     try {
-      const runButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.title === "Run Test",
-          ) as HTMLButtonElement | null,
-        "Unable to find Run Test button.",
-      );
-      runButton.click();
+      await runProjectScriptFromRail("Test");
 
       await vi.waitFor(
         () => {
@@ -6359,7 +6347,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
-  it("hides the overview panel on an empty thread and restores it on request", async () => {
+  it("keeps the overview rail on an empty thread with only what applies", async () => {
     const draftId = DraftId.make("draft-empty-thread-overview");
     useComposerDraftStore.setState({
       draftThreadsByThreadKey: {
@@ -6392,36 +6380,26 @@ describe("ChatView timeline estimator parity (full app)", () => {
         () => document.querySelector<HTMLElement>('[data-testid="new-thread-hero"]'),
         "Unable to find the new-thread hero.",
       );
-
-      // The overview describes a thread's history, so it stays out of the way
-      // until there is one — or until the user explicitly asks for it.
-      // Visibility, not DOM presence: the sheet presentation keeps the panel
-      // mounted and only toggles whether it is shown, and the inline one plays
-      // an exit transition before unmounting.
-      const overviewShowing = () => {
-        const header = document.querySelector('[data-slot="overview-branch-header"]');
-        return header !== null && header.checkVisibility();
-      };
-      await vi.waitFor(
-        () => {
-          expect(overviewShowing()).toBe(false);
-        },
-        { timeout: 8_000, interval: 16 },
+      // The rail carries the workspace tools the header used to, so it stays
+      // on the new-thread page — collapsed, and without thread-history items.
+      const rail = await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-slot="overview-rail"]'),
+        "Unable to find the overview rail.",
       );
-
-      const overviewToggle = await waitForElement(
-        () =>
-          document.querySelector<HTMLButtonElement>('button[aria-label="Toggle overview panel"]'),
-        "Unable to find the overview toggle.",
-      );
-      overviewToggle.click();
-
-      await vi.waitFor(
-        () => {
-          expect(overviewShowing()).toBe(true);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
+      expect(rail.dataset.expanded).toBe("false");
+      expect(Math.round(rail.getBoundingClientRect().width)).toBe(44);
+      await waitForOverviewRailItem("Terminal");
+      await waitForOverviewRailItem("Browser");
+      for (const historyItem of ["Changes", "Checks", "Plan", "Agents"]) {
+        expect(queryOverviewRailItem(historyItem)).toBeNull();
+      }
+      // The old header controls are gone; the rail's explicit toggle pins it.
+      expect(document.querySelector('button[aria-label="Toggle overview panel"]')).toBeNull();
+      (await waitForOverviewRailItem("Expand overview")).click();
+      await vi.waitFor(() => {
+        expect(rail.dataset.pinned).toBe("true");
+        expect(Math.round(rail.getBoundingClientRect().width)).toBe(256);
+      });
     } finally {
       await mounted.cleanup();
     }
@@ -11401,12 +11379,12 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
-  it("gives the floating desktop overview overlay a working close affordance", async () => {
+  it("keeps the overview rail beside an open workspace panel without either taking over", async () => {
     const mounted = await mountChatView({
       viewport: WIDE_FOOTER_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-overview-overlay-close" as MessageId,
-        targetText: "overview overlay close thread",
+        targetMessageId: "msg-user-overview-rail-workspace" as MessageId,
+        targetText: "overview rail workspace thread",
       }),
     });
 
@@ -11414,63 +11392,84 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await vi.waitFor(() => {
         expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
       });
-      // Open the inline workspace panel, then the overview: this is the
-      // audited floating overlay that previously had no close affordance.
+      const rail = await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-slot="overview-rail"]'),
+        "Unable to find the overview rail.",
+      );
+      const transcriptRoot = await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-timeline-root="true"]'),
+        "Unable to find a transcript row.",
+      );
+
+      // Open the workspace panel: the rail stays at the conversation's right
+      // edge, left of the panel, and nothing opens as a floating overview.
       const workspaceToggle = await waitForElement(
         () => document.querySelector<HTMLElement>('button[aria-label="Toggle workspace panel"]'),
         "Unable to find the workspace toggle.",
       );
       workspaceToggle.click();
-      // Wait for the inline panel to actually open (URL-driven) before
-      // toggling the overview, so the toggle takes the floating-overlay path.
       await waitForElement(
         () => document.querySelector<HTMLElement>('button[aria-label="Close workspace panel"]'),
         "Unable to find the opened inline workspace panel.",
       );
-      const overviewToggle = await waitForElement(
-        () => document.querySelector<HTMLElement>('button[aria-label="Toggle overview panel"]'),
-        "Unable to find the overview toggle.",
-      );
-      overviewToggle.click();
-
-      const closeOverview = await waitForElement(
-        () => document.querySelector<HTMLElement>('button[aria-label="Close overview"]'),
-        "Unable to find the overview close affordance.",
-      );
-      const branchHeader = await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-slot="overview-branch-header"]'),
-        "Unable to find the overview branch header.",
-      );
-      const branchSelector = await waitForElement(
-        () => branchHeader.querySelector<HTMLElement>('[data-appearance="panelRow"]'),
-        "Unable to find the full-width overview branch selector.",
+      const workspaceTabs = await waitForElement(
+        () => document.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]'),
+        "Unable to find the workspace tabs.",
       );
       await waitForLayout();
-      const branchSelectorHeight = Math.round(branchSelector.getBoundingClientRect().height);
-      expect(branchSelectorHeight).toBe(36);
-      expect(Math.round(branchHeader.getBoundingClientRect().height)).toBe(
-        branchSelectorHeight + 1,
-      );
-      expect(branchSelector.getBoundingClientRect().width).toBeGreaterThan(200);
-
-      const branchTrigger = branchSelector.querySelector<HTMLButtonElement>(
-        '[data-slot="combobox-trigger"]',
-      );
-      expect(branchTrigger).not.toBeNull();
       await vi.waitFor(() => {
-        expect(branchTrigger!.disabled).toBe(false);
+        const panelLeft = workspaceTabs.getBoundingClientRect().left;
+        const railRect = rail.getBoundingClientRect();
+        expect(railRect.width).toBeGreaterThan(0);
+        expect(railRect.right).toBeLessThanOrEqual(panelLeft);
+        // The transcript keeps its text clear of the collapsed rail.
+        const rowContentRight =
+          transcriptRoot.getBoundingClientRect().right -
+          Number.parseFloat(getComputedStyle(transcriptRoot).paddingRight);
+        expect(rowContentRight).toBeLessThanOrEqual(railRect.left);
       });
-      branchTrigger!.click();
+      expect(document.querySelector('button[aria-label="Close overview"]')).toBeNull();
+
+      // The rail's branch picker opens beside the rail, and closing it leaves
+      // the workspace panel exactly where it was.
+      const branchItem = await waitForOverviewRailItem("Branch");
+      branchItem.click();
       await waitForElement(
         () => document.querySelector<HTMLInputElement>('input[placeholder="Search refs..."]'),
-        "Unable to open the overview branch picker.",
+        "Unable to open the rail's branch picker.",
       );
       await userEvent.keyboard("{Escape}");
+      expect(document.querySelector('button[aria-label="Close workspace panel"]')).not.toBeNull();
 
-      closeOverview.click();
+      // Rail tools drive the workspace panel through its own routing.
+      (await waitForOverviewRailItem("Browser")).click();
       await vi.waitFor(() => {
-        expect(document.querySelector('button[aria-label="Close overview"]')).toBeNull();
+        expect(mounted.router.state.location.search).toMatchObject({
+          workspaceOpen: "1",
+          workspaceTab: "browser",
+        });
       });
+      await vi.waitFor(() => {
+        expect(queryOverviewRailItem("Browser")?.dataset.active).toBe("true");
+      });
+
+      // Pinning the rail does not touch the panel; closing the panel keeps the rail.
+      (await waitForOverviewRailItem("Expand overview")).click();
+      await vi.waitFor(() => {
+        expect(rail.dataset.pinned).toBe("true");
+      });
+      expect(document.querySelector('button[aria-label="Close workspace panel"]')).not.toBeNull();
+      (
+        await waitForElement(
+          () => document.querySelector<HTMLElement>('button[aria-label="Close workspace panel"]'),
+          "Unable to find the workspace close control.",
+        )
+      ).click();
+      await vi.waitFor(() => {
+        expect(document.querySelector('button[aria-label="Close workspace panel"]')).toBeNull();
+      });
+      expect(rail.isConnected).toBe(true);
+      expect(rail.dataset.pinned).toBe("true");
     } finally {
       await mounted.cleanup();
     }
@@ -11493,25 +11492,19 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await vi.waitFor(() => {
         expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
       });
-      const overviewToggle = await waitForElement(
-        () => document.querySelector<HTMLElement>('button[aria-label="Toggle overview panel"]'),
-        "Unable to find the overview toggle.",
-      );
-      overviewToggle.click();
-      // Desktop <=980 regression guard: the overview renders as the right
-      // sheet, narrower than the viewport, without the phone surface bar.
-      const desktopSheet = await waitForElement(
-        () =>
-          [...document.querySelectorAll<HTMLElement>('[data-slot="sheet-popup"]')].find(
-            isElementVisible,
-          ) ?? null,
-        "Unable to find the desktop overview sheet.",
-      );
+      // Desktop <=980: the overview is the rail, opened by pinning it — no
+      // sheet and no phone surface bar.
+      (await waitForOverviewRailItem("Expand overview")).click();
       await vi.waitFor(() => {
-        const width = desktopSheet.getBoundingClientRect().width;
-        expect(width).toBeGreaterThan(200);
-        expect(width).toBeLessThan(ROTATED_MID_VIEWPORT.width * 0.7);
+        const rail = document.querySelector<HTMLElement>('[data-slot="overview-rail"]');
+        expect(rail?.dataset.pinned).toBe("true");
+        expect(Math.round(rail!.getBoundingClientRect().width)).toBe(256);
       });
+      expect(
+        [...document.querySelectorAll<HTMLElement>('[data-slot="sheet-popup"]')].some(
+          isElementVisible,
+        ),
+      ).toBe(false);
       expect(document.querySelector('button[aria-label="Back to thread"]')).toBeNull();
 
       // Rotate across the tier boundary: the open overview re-presents as a

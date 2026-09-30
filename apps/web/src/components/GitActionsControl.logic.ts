@@ -337,6 +337,32 @@ export function resolveQuickAction(
   };
 }
 
+/** Entries of the overview's commit-actions menu (commit variants + pull). */
+export type GitCommitMenuEntry = "commit" | "commit_push" | "commit_push_pr" | "pull";
+
+/**
+ * The commit-actions menu entry that already runs the suggested quick action,
+ * so the menu can mark it instead of listing the same action twice. `null`
+ * when the quick action has no enabled twin there (view/create PR, publish,
+ * push-only, hints) and must be offered on its own.
+ */
+export function resolveQuickActionMenuEntry(
+  quickAction: GitQuickAction,
+  hasWorkingTreeChanges: boolean,
+): GitCommitMenuEntry | null {
+  if (quickAction.disabled) return null;
+  if (quickAction.kind === "run_pull") return "pull";
+  if (quickAction.kind !== "run_action" || !hasWorkingTreeChanges) return null;
+  if (
+    quickAction.action === "commit" ||
+    quickAction.action === "commit_push" ||
+    quickAction.action === "commit_push_pr"
+  ) {
+    return quickAction.action;
+  }
+  return null;
+}
+
 export function requiresDefaultBranchConfirmation(
   action: GitStackedAction,
   isDefaultRef: boolean,

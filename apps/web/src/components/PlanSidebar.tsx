@@ -1,10 +1,15 @@
-import { RotateCwIcon, TriangleAlertIcon, XIcon } from "lucide-react";
+import { TriangleAlertIcon, XIcon } from "lucide-react";
 import { memo } from "react";
 
 import { cn } from "~/lib/utils";
 
 import { StatusBoardLayout } from "./overview/overviewLayouts";
-import { isOverviewEmpty, OverviewBadge, OverviewEmptyState } from "./overview/overviewSections";
+import {
+  isOverviewEmpty,
+  OverviewBadge,
+  OverviewEmptyState,
+  OverviewRefreshButton,
+} from "./overview/overviewSections";
 import type { OverviewLayoutProps, OverviewPanelMode } from "./overview/overviewTypes";
 import { Button } from "./ui/button";
 import { ScrollArea } from "./ui/scroll-area";
@@ -22,22 +27,16 @@ export interface PlanSidebarProps extends OverviewLayoutProps {
   mode?: OverviewPanelMode;
   /**
    * Renders a visible close affordance in the panel header. Passed for
-   * overlay presentations (the floating desktop overlay had no close button
-   * and could trap the user); inline and sheet presentations keep their
-   * existing dismissal paths.
+   * overlay presentations (the floating overlay had no close button and could
+   * trap the user); the sheet presentation keeps its own dismissal path.
    */
   onClose?: (() => void) | undefined;
 }
 
 function HeaderTrailing({ layoutProps }: { layoutProps: OverviewLayoutProps }) {
   const showConflict = Boolean(layoutProps.pullRequest?.hasMergeConflicts);
-  const showRefresh = Boolean(layoutProps.onRefreshPullRequest);
-  if (!showConflict && !showRefresh) return null;
-
-  // A lingering source-control fetch error is surfaced loudly once (via toast);
-  // afterwards this quiet dot on the refresh control is the only persistent cue
-  // that the panel data may be stale and a retry is worthwhile.
-  const hasSourceControlError = Boolean(layoutProps.pullRequest?.checksError);
+  const onRefresh = layoutProps.onRefreshPullRequest;
+  if (!showConflict && !onRefresh) return null;
 
   return (
     <div className="flex shrink-0 items-center gap-1.5">
@@ -46,39 +45,19 @@ function HeaderTrailing({ layoutProps }: { layoutProps: OverviewLayoutProps }) {
           <TriangleAlertIcon /> conflict
         </OverviewBadge>
       ) : null}
-      {showRefresh ? (
-        <div className="relative shrink-0">
-          <Button
-            type="button"
-            size="icon-xs"
-            variant="ghost"
-            className="text-muted-foreground hover:text-foreground"
-            onClick={layoutProps.onRefreshPullRequest}
-            disabled={layoutProps.isRefreshingPullRequest}
-            aria-label={
-              hasSourceControlError
-                ? "Retry loading source control (last refresh failed)"
-                : "Refresh source control"
-            }
-          >
-            <RotateCwIcon
-              className={cn("size-3.5", layoutProps.isRefreshingPullRequest && "animate-spin")}
-            />
-          </Button>
-          {hasSourceControlError && !layoutProps.isRefreshingPullRequest ? (
-            <span
-              aria-hidden
-              className="pointer-events-none absolute -top-0.5 -right-0.5 size-2 rounded-full bg-warning ring-2 ring-card"
-            />
-          ) : null}
-        </div>
+      {onRefresh ? (
+        <OverviewRefreshButton
+          onRefresh={onRefresh}
+          isRefreshing={Boolean(layoutProps.isRefreshingPullRequest)}
+          hasError={Boolean(layoutProps.pullRequest?.checksError)}
+        />
       ) : null}
     </div>
   );
 }
 
 const PlanSidebar = memo(function PlanSidebar({
-  mode = "sidebar",
+  mode = "sheet",
   onClose,
   ...layoutProps
 }: PlanSidebarProps) {
@@ -102,8 +81,6 @@ const PlanSidebar = memo(function PlanSidebar({
     <div
       className={cn(
         "flex min-h-0 flex-col",
-        mode === "sidebar" &&
-          "my-3 mr-3 w-[340px] shrink-0 self-start overflow-hidden rounded-lg border border-border/70 bg-card/90 shadow-xl backdrop-blur supports-[backdrop-filter]:bg-card/75",
         mode === "sheet" &&
           "h-full w-full bg-card/90 backdrop-blur supports-[backdrop-filter]:bg-card/75",
         // Floating mode overlaps the transcript — it joins the shared glass
@@ -112,7 +89,6 @@ const PlanSidebar = memo(function PlanSidebar({
         mode === "floating" &&
           "selection-glass-surface pointer-events-auto max-h-[min(72vh,42rem)] w-[min(360px,calc(100vw_-_1.5rem))] rounded-lg border",
       )}
-      style={mode === "sidebar" ? { maxHeight: "calc(100% - 1.5rem)" } : undefined}
     >
       {!empty && layoutProps.branchControl ? (
         <div
@@ -139,18 +115,9 @@ const PlanSidebar = memo(function PlanSidebar({
         </div>
       ) : null}
 
-      {mode === "sidebar" ? (
-        <div
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
-          data-slot="scroll-area-viewport"
-        >
-          {body}
-        </div>
-      ) : (
-        <ScrollArea className="min-h-0 flex-1" scrollbarGutter>
-          {body}
-        </ScrollArea>
-      )}
+      <ScrollArea className="min-h-0 flex-1" scrollbarGutter>
+        {body}
+      </ScrollArea>
 
       {!empty && layoutProps.sourceControlActions ? (
         <div className="flex shrink-0 items-center gap-2 border-t border-border/60 bg-card/50 px-3 py-2.5">

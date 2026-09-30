@@ -10,6 +10,7 @@ import {
   resolveDefaultBranchActionDialogCopy,
   resolveLiveThreadBranchUpdate,
   resolveQuickAction,
+  resolveQuickActionMenuEntry,
   resolveThreadBranchUpdate,
 } from "./GitActionsControl.logic";
 
@@ -913,6 +914,54 @@ describe("when: ref has no upstream configured", () => {
         dialogAction: "create_pr",
       },
     ]);
+  });
+});
+
+describe("resolveQuickActionMenuEntry", () => {
+  it("marks the commit-menu twin of a commit quick action", () => {
+    for (const action of ["commit", "commit_push", "commit_push_pr"] as const) {
+      assert.equal(
+        resolveQuickActionMenuEntry(
+          { label: "Commit", disabled: false, kind: "run_action", action },
+          true,
+        ),
+        action,
+      );
+    }
+    assert.equal(
+      resolveQuickActionMenuEntry({ label: "Pull", disabled: false, kind: "run_pull" }, false),
+      "pull",
+    );
+  });
+
+  it("keeps quick actions without an enabled twin separate", () => {
+    // A clean default-branch "Push" runs commit_push, but the menu's
+    // Commit & Push entry is disabled without working-tree changes.
+    assert.equal(
+      resolveQuickActionMenuEntry(
+        { label: "Push", disabled: false, kind: "run_action", action: "commit_push" },
+        false,
+      ),
+      null,
+    );
+    assert.equal(
+      resolveQuickActionMenuEntry(
+        { label: "Push & create PR", disabled: false, kind: "run_action", action: "create_pr" },
+        false,
+      ),
+      null,
+    );
+    assert.equal(
+      resolveQuickActionMenuEntry({ label: "View PR", disabled: false, kind: "open_pr" }, false),
+      null,
+    );
+    assert.equal(
+      resolveQuickActionMenuEntry(
+        { label: "Sync ref", disabled: true, kind: "show_hint", hint: "Diverged." },
+        true,
+      ),
+      null,
+    );
   });
 });
 

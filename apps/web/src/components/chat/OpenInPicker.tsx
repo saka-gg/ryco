@@ -1,5 +1,5 @@
 import { usePaneEffect } from "./PaneFocus";
-import { EditorId, type ResolvedKeybindingsConfig } from "@ryco/contracts";
+import type { EditorId, EnvironmentId, ResolvedKeybindingsConfig } from "@ryco/contracts";
 import { memo, useCallback, useMemo } from "react";
 import {
   isOpenFavoriteEditorShortcut,
@@ -7,17 +7,31 @@ import {
   shortcutLabelForCommand,
 } from "../../keybindings";
 import { isEditorPreferenceEligible, usePreferredEditor } from "../../editorPreferences";
-import { ChevronDownIcon } from "lucide-react";
-import { Button } from "../ui/button";
+import { CodeIcon } from "lucide-react";
 import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "../ui/menu";
-import {
-  HEADER_CHROME_BUTTON_CLASS_NAME,
-  HEADER_CHROME_GROUP_CLASS_NAME,
-  HEADER_CHROME_ICON_BUTTON_CLASS_NAME,
-} from "./headerChrome";
+import { OverviewRailButton, OverviewRailMenuAction } from "../overview/OverviewRail";
 import { resolveEditorOptions } from "../settings/SettingsPanels.editor";
 import { readLocalApi } from "~/localApi";
 
+/** Editors open local paths, so the picker only applies to this machine's threads. */
+export function shouldShowOpenInPicker(input: {
+  readonly activeProjectName: string | undefined;
+  readonly activeThreadEnvironmentId: EnvironmentId;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+}): boolean {
+  return (
+    Boolean(input.activeProjectName) &&
+    input.primaryEnvironmentId !== null &&
+    input.activeThreadEnvironmentId === input.primaryEnvironmentId
+  );
+}
+
+/**
+ * "Open in editor" as a desktop overview rail item. The row names the
+ * preferred editor and opens it directly; its options menu opens the workspace
+ * in any installed editor. The
+ * favorite-editor shortcut stays live while the rail is mounted.
+ */
 export const OpenInPicker = memo(function OpenInPicker({
   keybindings,
   availableEditors,
@@ -72,46 +86,48 @@ export const OpenInPicker = memo(function OpenInPicker({
     return () => window.removeEventListener("keydown", handler);
   }, [preferredEditor, keybindings, openInCwd]);
 
-  return (
-    <div aria-label="Subscription actions" className={HEADER_CHROME_GROUP_CLASS_NAME} role="group">
-      <Button
-        size="xs"
-        variant="ghost"
-        className={HEADER_CHROME_BUTTON_CLASS_NAME}
-        disabled={!preferredEditor || !openInCwd}
-        onClick={() => openInEditor(preferredEditor)}
-      >
-        {primaryOption?.Icon && <primaryOption.Icon aria-hidden="true" className="size-3.5" />}
-        <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
-          Open
-        </span>
-      </Button>
+  const menuItems = (
+    <>
+      {options.length === 0 && <MenuItem disabled>No installed editors found</MenuItem>}
+      {options.map(({ label, Icon, value }) => (
+        <MenuItem key={value} onClick={() => openInEditor(value)}>
+          <Icon aria-hidden="true" className="text-muted-foreground" />
+          {label}
+          {value === preferredEditor && openFavoriteEditorShortcutLabel && (
+            <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>
+          )}
+        </MenuItem>
+      ))}
+    </>
+  );
+
+  if (!primaryOption) {
+    return (
       <Menu>
         <MenuTrigger
           render={
-            <Button
-              aria-label="Copy options"
-              className={HEADER_CHROME_ICON_BUTTON_CLASS_NAME}
-              size="icon-xs"
-              variant="ghost"
-            />
+            <OverviewRailButton icon={<CodeIcon />} label="Open in editor" disabled={!openInCwd} />
           }
-        >
-          <ChevronDownIcon aria-hidden="true" className="size-4" />
-        </MenuTrigger>
-        <MenuPopup align="end">
-          {options.length === 0 && <MenuItem disabled>No installed editors found</MenuItem>}
-          {options.map(({ label, Icon, value }) => (
-            <MenuItem key={value} onClick={() => openInEditor(value)}>
-              <Icon aria-hidden="true" className="text-muted-foreground" />
-              {label}
-              {value === preferredEditor && openFavoriteEditorShortcutLabel && (
-                <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>
-              )}
-            </MenuItem>
-          ))}
+        />
+        <MenuPopup side="left" align="start" sideOffset={10}>
+          {menuItems}
         </MenuPopup>
       </Menu>
-    </div>
+    );
+  }
+
+  const PrimaryIcon = primaryOption.Icon;
+  return (
+    <OverviewRailMenuAction
+      icon={<PrimaryIcon aria-hidden="true" />}
+      label={`Open in ${primaryOption.label}`}
+      value={openFavoriteEditorShortcutLabel ?? undefined}
+      disabled={!openInCwd}
+      onClick={() => openInEditor(null)}
+      optionsLabel="Choose editor"
+      optionsDisabled={!openInCwd}
+    >
+      {menuItems}
+    </OverviewRailMenuAction>
   );
 });

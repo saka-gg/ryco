@@ -11,54 +11,7 @@ describe("PlanSidebar overview panel", () => {
   beforeEach(() => {
     localStorage.clear();
   });
-  it("keeps the sidebar content-sized when overview content is short", async () => {
-    const host = document.createElement("div");
-    host.style.width = "380px";
-    host.style.height = "640px";
-    document.body.append(host);
-
-    const mounted = await render(
-      <PlanSidebar
-        activePlan={null}
-        activeProposedPlan={null}
-        subagents={[
-          {
-            key: "subagent:researcher",
-            name: "Researcher",
-            status: "running",
-            origin: null,
-            capability: null,
-            tool: "spawnAgent",
-            detail: "Inspect one task.",
-            providerThreadIds: ["child-thread-1"],
-            providerSessionIds: [],
-            startedAt: "2026-06-04T10:00:00.000Z",
-            updatedAt: "2026-06-04T10:00:00.000Z",
-            entries: [],
-            messages: [],
-          },
-        ]}
-        environmentId={EnvironmentId.make("environment-local")}
-        markdownCwd={undefined}
-        workspaceRoot={undefined}
-        mode="sidebar"
-      />,
-      { container: host },
-    );
-
-    try {
-      const sidebar = host.firstElementChild as HTMLElement | null;
-
-      expect(sidebar).not.toBeNull();
-      expect(sidebar!.getBoundingClientRect().height).toBeGreaterThan(40);
-      expect(sidebar!.getBoundingClientRect().height).toBeLessThan(260);
-    } finally {
-      await mounted.unmount();
-      host.remove();
-    }
-  });
-
-  it("scrolls the overview sidebar when many subagents are visible", async () => {
+  it("scrolls the phone overview surface when many subagents are visible", async () => {
     const host = document.createElement("div");
     host.style.width = "380px";
     host.style.height = "360px";
@@ -88,7 +41,7 @@ describe("PlanSidebar overview panel", () => {
         environmentId={EnvironmentId.make("environment-local")}
         markdownCwd={undefined}
         workspaceRoot={undefined}
-        mode="sidebar"
+        mode="sheet"
       />,
       { container: host },
     );
@@ -238,7 +191,7 @@ describe("PlanSidebar overview panel", () => {
         environmentId={EnvironmentId.make("environment-local")}
         markdownCwd={undefined}
         workspaceRoot={undefined}
-        mode="sidebar"
+        mode="sheet"
       />,
       { container: host },
     );

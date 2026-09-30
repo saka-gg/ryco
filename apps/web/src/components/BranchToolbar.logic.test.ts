@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
+  deriveRepositoryDisplayName,
   deriveRepositoryWebUrl,
   normalizeGitRemoteToWebUrl,
   resolveEnvironmentOptionLabel,
@@ -75,6 +76,62 @@ describe("deriveRepositoryWebUrl", () => {
   it("returns null when no identity or remote is usable", () => {
     expect(deriveRepositoryWebUrl(null)).toBeNull();
     expect(deriveRepositoryWebUrl(undefined)).toBeNull();
+  });
+});
+
+describe("deriveRepositoryDisplayName", () => {
+  const locator = {
+    source: "git-remote" as const,
+    remoteName: "origin",
+    remoteUrl: "git@github.com:saka-gg/ryco.git",
+  };
+
+  it("prefers the identity owner and name", () => {
+    expect(
+      deriveRepositoryDisplayName({
+        canonicalKey: "k",
+        locator,
+        owner: "saka-gg",
+        name: "ryco",
+        remotes: [],
+      }),
+    ).toBe("saka-gg/ryco");
+  });
+
+  it("uses the locator remote's owner/repo, then the browsable remote path", () => {
+    expect(
+      deriveRepositoryDisplayName({
+        canonicalKey: "k",
+        locator,
+        remotes: [
+          { name: "upstream", url: "https://github.com/other/repo.git", ownerRepo: "other/repo" },
+          { name: "origin", url: locator.remoteUrl, ownerRepo: "saka-gg/ryco" },
+        ],
+      }),
+    ).toBe("saka-gg/ryco");
+    expect(
+      deriveRepositoryDisplayName({
+        canonicalKey: "k",
+        locator: {
+          source: "git-remote",
+          remoteName: "origin",
+          remoteUrl: "ssh://git@gitlab.com/group/sub/proj.git",
+        },
+        remotes: [],
+      }),
+    ).toBe("group/sub/proj");
+  });
+
+  it("falls back to the display name and handles a missing identity", () => {
+    expect(
+      deriveRepositoryDisplayName({
+        canonicalKey: "k",
+        locator: { source: "git-remote", remoteName: "origin", remoteUrl: "/srv/mirror/ryco" },
+        displayName: "ryco",
+        remotes: [],
+      }),
+    ).toBe("ryco");
+    expect(deriveRepositoryDisplayName(null)).toBeNull();
   });
 });
 

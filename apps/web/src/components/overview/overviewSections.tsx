@@ -12,6 +12,7 @@ import {
   GitPullRequestIcon,
   LoaderIcon,
   MessageSquareIcon,
+  RotateCwIcon,
   SparklesIcon,
   TerminalIcon,
   TriangleAlertIcon,
@@ -325,6 +326,46 @@ export function AvatarStack({ subagents }: { subagents: ReadonlyArray<ThreadSuba
 /** A running status dot (`.dot.running`). */
 function StatusDot({ className, title }: { className?: string; title?: string }) {
   return <span className={cn("size-2 shrink-0 rounded-full", className)} title={title} />;
+}
+
+/**
+ * Refresh for the source-control data behind the overview. A lingering fetch
+ * error is surfaced loudly once (via toast); afterwards the quiet dot on this
+ * control is the only persistent cue that the data may be stale and a retry is
+ * worthwhile.
+ */
+export function OverviewRefreshButton({
+  onRefresh,
+  isRefreshing,
+  hasError,
+}: {
+  onRefresh: () => void;
+  isRefreshing: boolean;
+  hasError: boolean;
+}) {
+  return (
+    <div className="relative shrink-0">
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        className="text-muted-foreground hover:text-foreground"
+        onClick={onRefresh}
+        disabled={isRefreshing}
+        aria-label={
+          hasError ? "Retry loading source control (last refresh failed)" : "Refresh source control"
+        }
+      >
+        <RotateCwIcon className={cn("size-3.5", isRefreshing && "animate-spin")} />
+      </Button>
+      {hasError && !isRefreshing ? (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute -top-0.5 -right-0.5 size-2 rounded-full bg-warning ring-2 ring-card"
+        />
+      ) : null}
+    </div>
+  );
 }
 
 export function SectionMiniLabel({ children }: { children: ReactNode }) {

@@ -51,9 +51,12 @@ import {
   resolveDefaultBranchActionDialogCopy,
   resolveLiveThreadBranchUpdate,
   resolveQuickAction,
+  resolveQuickActionMenuEntry,
   resolveThreadBranchUpdate,
+  type GitCommitMenuEntry,
 } from "./GitActionsControl.logic";
 import { AnimatedHeight } from "./AnimatedHeight";
+import { OverviewRailButton, OverviewRailMenuAction } from "./overview/OverviewRail";
 import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
 import {
@@ -115,10 +118,12 @@ interface GitActionsControlProps {
   draftId?: DraftId;
   showLabels?: boolean;
   /**
-   * Render as a full-width split button (primary quick action + caret menu),
-   * matching the overview panel footer. Defaults to the compact toolbar group.
+   * "toolbar" (default) is the compact quick action + menu group. "block" is
+   * the phone overview footer's full-width split button. "rail" is a single
+   * desktop overview rail item whose menu offers the suggested action first,
+   * then the same commit actions as the block footer.
    */
-  block?: boolean;
+  appearance?: "toolbar" | "block" | "rail";
   detectedChangeRequest?: ChangeRequest | null;
   onPostPush?: (event: GitActionPostPushEvent) => void;
 }
@@ -1037,7 +1042,7 @@ export default function GitActionsControl({
   activeThreadRef,
   draftId,
   showLabels = false,
-  block = false,
+  appearance = "toolbar",
   detectedChangeRequest = null,
   onPostPush,
 }: GitActionsControlProps) {
@@ -1830,20 +1835,155 @@ export default function GitActionsControl({
   // overview footer can't offer actions the compact menu guards.
   const blockHasBranch = gitStatusForActions?.refName != null;
   const blockCanPush = blockHasBranch && (blockHasUpstream || hasPrimaryRemote);
+  const block = appearance === "block";
+  const railQuickActionEntry =
+    appearance === "rail" ? resolveQuickActionMenuEntry(quickAction, blockHasChanges) : null;
+  const refreshGitStatusOnMenuOpen = (open: boolean) => {
+    if (open) {
+      void refreshGitStatus({
+        environmentId: activeEnvironmentId,
+        cwd: gitCwd,
+      }).catch(() => undefined);
+    }
+  };
+  const suggestedMarker = (entry: GitCommitMenuEntry) =>
+    railQuickActionEntry === entry ? (
+      <span className="ms-auto self-center ps-3 text-[10.5px] font-normal text-muted-foreground">
+        Suggested
+      </span>
+    ) : null;
+  const commitActionMenuContent = (
+    <>
+      <MenuGroup>
+        <MenuGroupLabel className="text-[10.5px] tracking-wider uppercase">
+          Commit actions
+        </MenuGroupLabel>
+        <MenuItem
+          disabled={isGitActionRunning || !blockHasChanges}
+          onClick={() => void runGitActionWithToast({ action: "commit" })}
+        >
+          <GitCommitIcon className="text-muted-foreground" />
+          <div className="flex min-w-0 flex-col">
+            <span className="font-medium">Commit only</span>
+            <span className="truncate text-[11.5px] font-normal text-muted-foreground">
+              {blockFileCount} {blockFileCount === 1 ? "file" : "files"}
+            </span>
+          </div>
+          {suggestedMarker("commit")}
+        </MenuItem>
+        <MenuItem
+          disabled={isGitActionRunning || !blockHasChanges || !blockCanPush}
+          onClick={() => void runGitActionWithToast({ action: "commit_push" })}
+        >
+          <CloudUploadIcon className="text-muted-foreground" />
+          <div className="flex min-w-0 flex-col">
+            <span className="font-medium">Commit &amp; Push</span>
+            <span className="truncate text-[11.5px] font-normal text-muted-foreground">
+              to origin/{blockBranchName}
+            </span>
+          </div>
+          {suggestedMarker("commit_push")}
+        </MenuItem>
+        <MenuItem
+          disabled={isGitActionRunning || !blockHasChanges || blockHasOpenPr || !blockCanPush}
+          onClick={() => void runGitActionWithToast({ action: "commit_push_pr" })}
+        >
+          <SourceControlIcon className="text-muted-foreground" />
+          <div className="flex min-w-0 flex-col">
+            <span className="font-medium">Commit, Push &amp; open {blockPrShortLabel}</span>
+            <span className="truncate text-[11.5px] font-normal text-muted-foreground">
+              from {blockBranchName}
+            </span>
+          </div>
+          {suggestedMarker("commit_push_pr")}
+        </MenuItem>
+      </MenuGroup>
+      <MenuSeparator />
+      <MenuItem
+        disabled={isGitActionRunning || !blockHasUpstream || blockBehind === 0}
+        onClick={runPull}
+      >
+        <ArrowDownIcon className="text-muted-foreground" />
+        <div className="flex min-w-0 flex-col">
+          <span className="font-medium">Pull</span>
+          <span className="truncate text-[11.5px] font-normal text-muted-foreground">
+            {!blockHasUpstream
+              ? "No upstream"
+              : blockBehind > 0
+                ? `${blockBehind} behind upstream`
+                : "Up to date"}
+          </span>
+        </div>
+        {suggestedMarker("pull")}
+      </MenuItem>
+    </>
+  );
 
   if (!gitCwd) return null;
 
   return (
     <>
       {!isRepo ? (
-        <Button
-          variant="outline"
-          size="xs"
-          disabled={initMutation.isPending}
-          onClick={() => initMutation.mutate()}
+        appearance === "rail" ? (
+          <OverviewRailButton
+            icon={<GitCommitIcon />}
+            label={initMutation.isPending ? "Initializing…" : "Initialize Git"}
+            disabled={initMutation.isPending}
+            onClick={() => initMutation.mutate()}
+          />
+        ) : (
+          <Button
+            variant="outline"
+            size="xs"
+            disabled={initMutation.isPending}
+            onClick={() => initMutation.mutate()}
+          >
+            {initMutation.isPending ? "Initializing..." : "Initialize Git"}
+          </Button>
+        )
+      ) : appearance === "rail" ? (
+        <OverviewRailMenuAction
+          icon={<BlockQuickActionIcon quickAction={quickAction} />}
+          label={isGitActionRunning ? "Git action running…" : quickAction.label}
+          tone={isGitActionRunning ? "running" : null}
+          aria-label={
+            isGitActionRunning
+              ? "Git actions, action running"
+              : `Git actions, suggested: ${quickAction.label}`
+          }
+          disabled={isGitActionRunning || quickAction.disabled}
+          title={quickActionDisabledReason ?? undefined}
+          onClick={runQuickAction}
+          optionsLabel="Git action options"
+          menuProps={{ onOpenChange: refreshGitStatusOnMenuOpen }}
+          popupClassName="min-w-[248px]"
         >
-          {initMutation.isPending ? "Initializing..." : "Initialize Git"}
-        </Button>
+          {railQuickActionEntry === null ? (
+            <>
+              <MenuGroup>
+                <MenuGroupLabel className="text-[10.5px] tracking-wider uppercase">
+                  Suggested
+                </MenuGroupLabel>
+                <MenuItem
+                  disabled={isGitActionRunning || quickAction.disabled}
+                  onClick={runQuickAction}
+                >
+                  <BlockQuickActionIcon quickAction={quickAction} />
+                  <div className="flex min-w-0 flex-col">
+                    <span className="font-medium">{quickAction.label}</span>
+                    {quickActionDisabledReason ? (
+                      <span className="text-[11.5px] font-normal text-muted-foreground">
+                        {quickActionDisabledReason}
+                      </span>
+                    ) : null}
+                  </div>
+                </MenuItem>
+              </MenuGroup>
+              <MenuSeparator />
+            </>
+          ) : null}
+          {commitActionMenuContent}
+        </OverviewRailMenuAction>
       ) : (
         <Group aria-label="Git actions" className={cn("shrink-0", block && "flex w-full")}>
           {block ? (
@@ -1904,16 +2044,7 @@ export default function GitActionsControl({
             </Button>
           )}
           <GroupSeparator className={block ? "hidden" : groupSeparatorClassName} />
-          <Menu
-            onOpenChange={(open) => {
-              if (open) {
-                void refreshGitStatus({
-                  environmentId: activeEnvironmentId,
-                  cwd: gitCwd,
-                }).catch(() => undefined);
-              }
-            }}
-          >
+          <Menu onOpenChange={refreshGitStatusOnMenuOpen}>
             <MenuTrigger
               render={
                 <Button
@@ -1933,70 +2064,7 @@ export default function GitActionsControl({
             </MenuTrigger>
             <MenuPopup align="end" className={block ? "min-w-[248px]" : "w-full"}>
               {block ? (
-                <>
-                  <MenuGroup>
-                    <MenuGroupLabel className="text-[10.5px] tracking-wider uppercase">
-                      Commit actions
-                    </MenuGroupLabel>
-                    <MenuItem
-                      disabled={isGitActionRunning || !blockHasChanges}
-                      onClick={() => void runGitActionWithToast({ action: "commit" })}
-                    >
-                      <GitCommitIcon className="text-muted-foreground" />
-                      <div className="flex min-w-0 flex-col">
-                        <span className="font-medium">Commit only</span>
-                        <span className="truncate text-[11.5px] font-normal text-muted-foreground">
-                          {blockFileCount} {blockFileCount === 1 ? "file" : "files"}
-                        </span>
-                      </div>
-                    </MenuItem>
-                    <MenuItem
-                      disabled={isGitActionRunning || !blockHasChanges || !blockCanPush}
-                      onClick={() => void runGitActionWithToast({ action: "commit_push" })}
-                    >
-                      <CloudUploadIcon className="text-muted-foreground" />
-                      <div className="flex min-w-0 flex-col">
-                        <span className="font-medium">Commit &amp; Push</span>
-                        <span className="truncate text-[11.5px] font-normal text-muted-foreground">
-                          to origin/{blockBranchName}
-                        </span>
-                      </div>
-                    </MenuItem>
-                    <MenuItem
-                      disabled={
-                        isGitActionRunning || !blockHasChanges || blockHasOpenPr || !blockCanPush
-                      }
-                      onClick={() => void runGitActionWithToast({ action: "commit_push_pr" })}
-                    >
-                      <SourceControlIcon className="text-muted-foreground" />
-                      <div className="flex min-w-0 flex-col">
-                        <span className="font-medium">
-                          Commit, Push &amp; open {blockPrShortLabel}
-                        </span>
-                        <span className="truncate text-[11.5px] font-normal text-muted-foreground">
-                          from {blockBranchName}
-                        </span>
-                      </div>
-                    </MenuItem>
-                  </MenuGroup>
-                  <MenuSeparator />
-                  <MenuItem
-                    disabled={isGitActionRunning || !blockHasUpstream || blockBehind === 0}
-                    onClick={runPull}
-                  >
-                    <ArrowDownIcon className="text-muted-foreground" />
-                    <div className="flex min-w-0 flex-col">
-                      <span className="font-medium">Pull</span>
-                      <span className="truncate text-[11.5px] font-normal text-muted-foreground">
-                        {!blockHasUpstream
-                          ? "No upstream"
-                          : blockBehind > 0
-                            ? `${blockBehind} behind upstream`
-                            : "Up to date"}
-                      </span>
-                    </div>
-                  </MenuItem>
-                </>
+                commitActionMenuContent
               ) : (
                 <>
                   {gitActionMenuItems.map((item) => {
