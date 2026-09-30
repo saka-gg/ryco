@@ -53,6 +53,10 @@ import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "./ui/menu"
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
+import {
+  WORKSPACE_SHORTCUT_CLASS_NAME,
+  WORKSPACE_SHORTCUT_LABEL_CLASS_NAME,
+} from "./chat/workspaceShortcutStyles";
 
 const SCRIPT_ICONS: Array<{ id: ProjectScriptIcon; label: string }> = [
   { id: "play", label: "Play" },
@@ -87,6 +91,7 @@ export interface NewProjectScriptInput {
 }
 
 interface ProjectScriptsControlProps {
+  presentation?: "header" | "shortcut";
   scripts: ProjectScript[];
   keybindings: ResolvedKeybindingsConfig;
   preferredScriptId?: string | null;
@@ -148,6 +153,7 @@ function keybindingFromEvent(event: KeyboardEvent<HTMLInputElement>): string | n
 }
 
 export default function ProjectScriptsControl({
+  presentation = "header",
   scripts,
   keybindings,
   preferredScriptId = null,
@@ -269,33 +275,53 @@ export default function ProjectScriptsControl({
   return (
     <>
       {primaryScript ? (
-        <div aria-label="Project scripts" className={HEADER_CHROME_GROUP_CLASS_NAME} role="group">
-          <Button
-            size="xs"
-            variant="ghost"
-            className={HEADER_CHROME_BUTTON_CLASS_NAME}
-            onClick={() => onRunScript(primaryScript)}
-            title={`Run ${primaryScript.name}`}
-          >
-            <ScriptIcon icon={primaryScript.icon} />
-            <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
-              {primaryScript.name}
-            </span>
-          </Button>
+        <div
+          aria-label="Project scripts"
+          className={presentation === "shortcut" ? "w-full" : HEADER_CHROME_GROUP_CLASS_NAME}
+          role="group"
+        >
+          {presentation === "header" ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              className={HEADER_CHROME_BUTTON_CLASS_NAME}
+              onClick={() => onRunScript(primaryScript)}
+              title={`Run ${primaryScript.name}`}
+            >
+              <ScriptIcon icon={primaryScript.icon} />
+              <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
+                {primaryScript.name}
+              </span>
+            </Button>
+          ) : null}
           <Menu highlightItemOnHover={false}>
             <MenuTrigger
               render={
                 <Button
-                  size="icon-xs"
+                  size={presentation === "shortcut" ? "default" : "icon-xs"}
                   variant="ghost"
-                  className={HEADER_CHROME_ICON_BUTTON_CLASS_NAME}
+                  className={
+                    presentation === "shortcut"
+                      ? WORKSPACE_SHORTCUT_CLASS_NAME
+                      : HEADER_CHROME_ICON_BUTTON_CLASS_NAME
+                  }
                   aria-label="Script actions"
                 />
               }
             >
-              <ChevronDownIcon className="size-4" />
+              {presentation === "shortcut" ? (
+                <>
+                  <PlayIcon aria-hidden="true" />
+                  <span className={WORKSPACE_SHORTCUT_LABEL_CLASS_NAME}>Run</span>
+                </>
+              ) : (
+                <ChevronDownIcon className="size-4" />
+              )}
             </MenuTrigger>
-            <MenuPopup align="end">
+            <MenuPopup
+              align={presentation === "shortcut" ? "start" : "end"}
+              side={presentation === "shortcut" ? "left" : "bottom"}
+            >
               {scripts.map((script) => {
                 const shortcutLabel = shortcutLabelForCommand(
                   keybindings,
@@ -350,12 +376,22 @@ export default function ProjectScriptsControl({
         <Button
           size="xs"
           variant="ghost"
-          className={HEADER_CHROME_BUTTON_CLASS_NAME}
+          className={
+            presentation === "shortcut"
+              ? WORKSPACE_SHORTCUT_CLASS_NAME
+              : HEADER_CHROME_BUTTON_CLASS_NAME
+          }
           onClick={openAddDialog}
           title="Add action"
         >
           <PlusIcon className="size-3.5" />
-          <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
+          <span
+            className={
+              presentation === "shortcut"
+                ? WORKSPACE_SHORTCUT_LABEL_CLASS_NAME
+                : "sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5"
+            }
+          >
             Add action
           </span>
         </Button>
@@ -384,7 +420,8 @@ export default function ProjectScriptsControl({
           <DialogHeader>
             <DialogTitle>{isEditing ? "Edit Action" : "Add Action"}</DialogTitle>
             <DialogDescription>
-              Actions are project-scoped commands you can run from the top bar or keybindings.
+              Actions are project-scoped commands you can run from workspace shortcuts or
+              keybindings.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>

@@ -37,6 +37,7 @@ import type { DraftId } from "../../composerDraftStore";
 import { BranchToolbarBranchSelector } from "../BranchToolbarBranchSelector";
 import { buildOverviewChangedFiles } from "../overviewChanges.logic";
 import { classifyOverviewError } from "../overview/overviewErrors.logic";
+import type { OverviewLayoutProps } from "../overview/overviewTypes";
 import { toastManager, stackedThreadToast } from "../ui/toast";
 import GitActionsControl, { type GitActionPostPushEvent } from "../GitActionsControl";
 import {
@@ -163,6 +164,8 @@ export function FloatingOverviewMotionFrame(props: {
 }
 
 export interface ChatOverviewPanelProps {
+  /** Desktop rail and phone overview share this data owner. */
+  renderContent?: (overview: OverviewLayoutProps) => ReactNode;
   environmentId: EnvironmentId;
   gitCwd: string | null;
   activeWorktreeBranch: string | null;
@@ -228,6 +231,7 @@ export function usePostPushWorkflowWatch() {
 }
 
 export interface OverviewPanelControlsInput {
+  rail?: boolean;
   gitCwd: string | null;
   activeThreadRef: ScopedThreadRef | null;
   routeKind: "server" | "draft";
@@ -251,6 +255,7 @@ export interface OverviewPanelControls {
 
 export function useOverviewPanelControls(input: OverviewPanelControlsInput): OverviewPanelControls {
   const {
+    rail = false,
     gitCwd,
     activeThreadRef,
     routeKind,
@@ -287,7 +292,7 @@ export function useOverviewPanelControls(input: OverviewPanelControlsInput): Ove
     () =>
       branchControlThread && isGitRepo ? (
         <BranchToolbarBranchSelector
-          appearance="panelRow"
+          appearance={rail ? "rail" : "panelRow"}
           className="w-full"
           environmentId={branchControlThread.environmentId}
           threadId={branchControlThread.id}
@@ -304,6 +309,7 @@ export function useOverviewPanelControls(input: OverviewPanelControlsInput): Ove
         />
       ) : null,
     [
+      rail,
       branchControlThread,
       isGitRepo,
       routeKind,
@@ -787,27 +793,28 @@ export function ChatOverviewPanel(
 
   const detectedChangeRequest = overviewPullRequestDetail.data ?? overviewBranchPullRequest ?? null;
 
-  return (
-    <PlanSidebar
-      activePlan={activePlan}
-      activeProposedPlan={sidebarProposedPlan}
-      changes={overviewChanges}
-      overviewItems={overviewItems}
-      pullRequest={overviewPullRequest}
-      onRefreshPullRequest={handleRefreshPullRequest}
-      isRefreshingPullRequest={isRefreshingPullRequest}
-      subagents={threadSubagents}
-      sourceControlActions={sourceControlActions(detectedChangeRequest)}
-      branchControl={branchControl}
-      environmentId={environmentId}
-      markdownCwd={markdownCwd}
-      workspaceRoot={workspaceRoot}
-      mode={mode}
-      onClose={onClose}
-      onOpenFiles={onOpenFiles}
-      onOpenReview={onOpenReview}
-      onOpenSubagent={onOpenSubagent}
-    />
+  const overview: OverviewLayoutProps = {
+    activePlan,
+    activeProposedPlan: sidebarProposedPlan,
+    changes: overviewChanges,
+    overviewItems,
+    pullRequest: overviewPullRequest,
+    onRefreshPullRequest: handleRefreshPullRequest,
+    isRefreshingPullRequest,
+    subagents: threadSubagents,
+    sourceControlActions: sourceControlActions(detectedChangeRequest),
+    branchControl,
+    environmentId,
+    markdownCwd,
+    workspaceRoot,
+    onOpenFiles,
+    onOpenReview,
+    onOpenSubagent,
+  };
+  return props.renderContent ? (
+    props.renderContent(overview)
+  ) : (
+    <PlanSidebar {...overview} mode={mode} onClose={onClose} />
   );
 }
 

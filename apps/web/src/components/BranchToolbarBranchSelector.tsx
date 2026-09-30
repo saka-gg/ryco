@@ -7,7 +7,11 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { ArrowDownIcon, ArrowUpIcon, ChevronDownIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ChevronDownIcon, GitBranchIcon } from "lucide-react";
+import {
+  WORKSPACE_SHORTCUT_CLASS_NAME,
+  WORKSPACE_SHORTCUT_LABEL_CLASS_NAME,
+} from "./chat/workspaceShortcutStyles";
 import {
   useCallback,
   useDeferredValue,
@@ -62,8 +66,9 @@ interface BranchToolbarBranchSelectorProps {
    * "pill" renders the legacy inset branch pill.
    * "panelRow" renders the full-width overview-panel row (branch icon + mono
    * name + ahead/behind + chevron) — see {@link OverviewLayoutProps}.
+   * "rail" separates the remote and branch into expandable icon rows.
    */
-  appearance?: "default" | "pill" | "panelRow";
+  appearance?: "default" | "pill" | "panelRow" | "rail";
   environmentId: EnvironmentId;
   threadId: ThreadId;
   draftId?: DraftId;
@@ -701,7 +706,45 @@ export function BranchToolbarBranchSelector({
       open={isBranchMenuOpen}
       value={resolvedActiveBranch}
     >
-      {appearance === "pill" || appearance === "panelRow" ? (
+      {appearance === "rail" ? (
+        <div className="flex flex-col gap-1" data-appearance="rail">
+          <button
+            type="button"
+            className={WORKSPACE_SHORTCUT_CLASS_NAME}
+            aria-label="Open repository remote"
+            disabled={!repositoryWebUrl}
+            title={repositoryWebUrl ?? "Local repository"}
+            onClick={openRepositoryRemote}
+          >
+            <PillIcon className="size-4 shrink-0" />
+            <span className={WORKSPACE_SHORTCUT_LABEL_CLASS_NAME}>
+              {repositoryWebUrl
+                ? new URL(repositoryWebUrl).pathname.replace(/^\//, "")
+                : "Local repository"}
+            </span>
+          </button>
+          <ComboboxTrigger
+            className={WORKSPACE_SHORTCUT_CLASS_NAME}
+            aria-label="Select branch"
+            disabled={(isBranchesSearchPending && refs.length === 0) || isBranchActionPending}
+          >
+            <GitBranchIcon aria-hidden="true" />
+            <span className={cn(WORKSPACE_SHORTCUT_LABEL_CLASS_NAME, "font-mono")}>
+              {triggerLabel}
+              {resolvedActiveBranch === currentGitBranch ? (
+                <>
+                  {(branchStatusQuery.data?.aheadCount ?? 0) > 0
+                    ? ` ↑${branchStatusQuery.data?.aheadCount}`
+                    : ""}
+                  {(branchStatusQuery.data?.behindCount ?? 0) > 0
+                    ? ` ↓${branchStatusQuery.data?.behindCount}`
+                    : ""}
+                </>
+              ) : null}
+            </span>
+          </ComboboxTrigger>
+        </div>
+      ) : appearance === "pill" || appearance === "panelRow" ? (
         <div
           data-appearance={appearance}
           className={cn(
@@ -814,7 +857,7 @@ export function BranchToolbarBranchSelector({
       )}
       <ComboboxPopup
         align="end"
-        side="top"
+        side={appearance === "rail" ? "left" : "top"}
         className="w-80 data-ending-style:translate-y-1 data-starting-style:translate-y-1"
       >
         <div className="border-b p-1">
