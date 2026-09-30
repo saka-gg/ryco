@@ -270,22 +270,35 @@ it.each(["delete", "symlink"] as const)(
     insert(db, "session_message", "msg_a", await fixture("opencode-v2"));
     db.close();
     expect((await readOpenCodeUsage(input)).status).toBe("complete");
+    const cachedSize = (await stat(input.databasePath)).size;
     const edit = new DatabaseSync(input.databasePath);
-    insert(edit, "session_message", "msg_b", await fixture("opencode-v2"));
+    // Grow the real store so this read must scan even when both writes share
+    // one filesystem timestamp tick. The old cache entry must remain present
+    // until the final identity check rejects and invalidates it.
+    insert(edit, "session_message", "msg_b", {
+      ...(await fixture("opencode-v2")),
+      fixturePadding: "x".repeat(16 * 1024),
+    });
     edit.close();
-    afterYield.hook = async () => {
+    expect((await stat(input.databasePath)).size).toBeGreaterThan(cachedSize);
+    expect(input.cache.size).toBe(1);
+    const changeDatabase = vi.fn(async () => {
       await rm(input.databasePath);
       if (kind === "symlink") {
         const target = join(input.root, "replacement.db");
         await writeFile(target, "synthetic");
         await symlink(target, input.databasePath);
       }
-    };
+    });
+    afterYield.hook = changeDatabase;
     const result = await readOpenCodeUsage(input);
+    expect(changeDatabase).toHaveBeenCalledExactlyOnceWith();
     expect(result).toMatchObject({
       status: "failed",
       records: [],
       diagnosticCode: "history-changed-during-scan",
+      parsedFileCount: 1,
+      reusedCacheFileCount: 0,
     });
     expect(input.cache.size).toBe(0);
   },
