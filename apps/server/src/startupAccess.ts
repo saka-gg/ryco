@@ -196,7 +196,7 @@ export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): 
       ? []
       : [
           "",
-          `Hub relay: enabled via ${accessInfo.hubOrigin}. Link this node to your account with \`ryco hub enroll\`; check it with \`ryco hub status\`.`,
+          `Hub relay: enabled via ${accessInfo.hubOrigin}. Link this node to your account with \`ryco hub login\` (or \`ryco hub enroll\`); check it with \`ryco hub status\`.`,
         ]),
     "",
     renderTerminalQrCode(accessInfo.pairingUrl),
