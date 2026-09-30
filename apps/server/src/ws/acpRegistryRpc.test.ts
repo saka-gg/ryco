@@ -7,9 +7,9 @@ import {
   ServerSettings,
   WS_METHODS,
 } from "@ryco/contracts";
-import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
+import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization.ts";
 import { rpcAccessFor } from "./RpcAccessPolicy.ts";
-import type { RpcPrincipal } from "./RpcPrincipal.ts";
+import { relayRpcPrincipal } from "./RpcPrincipal.ts";
 import type { WsRpcContext } from "./context.ts";
 import { makeProviderHandlers } from "./providerRpc.ts";
 import { ServerConfig } from "../config.ts";
@@ -40,15 +40,16 @@ const settings = Schema.decodeSync(ServerSettings)({
 });
 const config = { stateDir: "/test-state" } as ServerConfig["Service"];
 function handlers(role: "owner" | "operator" | "viewer", value = settings) {
-  const principal = {
-    role,
-    transport: "hosted",
-    canManageLocalAccess: false,
-  } as unknown as RpcPrincipal;
+  const principal = relayRpcPrincipal(role, "test-channel");
   return makeProviderHandlers({
     config,
-    ownerEffect: <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) =>
-      authorizeRpcPrincipal(principal, rpcAccessFor(method), method).pipe(Effect.andThen(effect)),
+    ownerEffect: <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) => {
+      const access = rpcAccessFor(method);
+      expect(["operator", "owner"]).toContain(access);
+      return authorizeRpcPrincipal(principal, access, method).pipe(Effect.andThen(effect));
+    },
+    withAccess: <A, E, R>(access: WsRpcAccess, method: string, effect: Effect.Effect<A, E, R>) =>
+      authorizeRpcPrincipal(principal, access, method).pipe(Effect.andThen(effect)),
     serverSettings: { getSettings: Effect.succeed(value) },
     providerRegistry: { refreshInstance: () => Effect.succeed([]) },
   } as unknown as WsRpcContext);
@@ -68,15 +69,18 @@ beforeEach(() => {
   mocks.authenticate.mockReturnValue(Effect.void);
 });
 describe("ACP registry RPC boundaries", () => {
-  it("allows read-only discovery and performs no installation or auth", async () => {
-    await expect(
-      run(handlers("viewer")[WS_METHODS.serverSearchAcpRegistry]({ query: "test" })),
-    ).resolves.toEqual({ agents: [] });
-    expect(mocks.search).toHaveBeenCalledWith("test");
-    expect(mocks.install).not.toHaveBeenCalled();
-    expect(mocks.methods).not.toHaveBeenCalled();
-    expect(mocks.authenticate).not.toHaveBeenCalled();
-  });
+  it.each(["viewer", "operator", "owner"] as const)(
+    "allows %s discovery without installation or auth",
+    async (role) => {
+      await expect(
+        run(handlers(role)[WS_METHODS.serverSearchAcpRegistry]({ query: "test" })),
+      ).resolves.toEqual({ agents: [] });
+      expect(mocks.search).toHaveBeenCalledWith("test");
+      expect(mocks.install).not.toHaveBeenCalled();
+      expect(mocks.methods).not.toHaveBeenCalled();
+      expect(mocks.authenticate).not.toHaveBeenCalled();
+    },
+  );
   it.each(["viewer", "operator"] as const)(
     "denies %s execution before touching the catalog or provider settings",
     async (role) => {

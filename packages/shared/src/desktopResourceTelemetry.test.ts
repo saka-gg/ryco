@@ -37,6 +37,18 @@ describe("private desktop telemetry protocol", () => {
       ],
     };
     expect(parseDesktopResourceTelemetry(value)).toEqual(value);
+    const fractional = {
+      ...value,
+      processes: [
+        { ...value.processes[0], startTimeMs: 100.75, cpuTimeMs: 30.25, cpuPercent: 12.5 },
+      ],
+    };
+    expect(parseDesktopResourceTelemetry(fractional)?.processes[0]).toEqual({
+      ...fractional.processes[0],
+      startTimeMs: 100,
+      cpuTimeMs: 30,
+    });
+    expect(fractional.processes[0]?.startTimeMs).toBe(100.75);
     expect(
       parseDesktopResourceTelemetry({
         ...value,
