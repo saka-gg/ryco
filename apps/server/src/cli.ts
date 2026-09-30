@@ -1,5 +1,4 @@
 import { spawn as spawnChild } from "node:child_process";
-import NodeOs from "node:os";
 import NodePath from "node:path";
 
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
@@ -22,6 +21,7 @@ import {
 import {
   Config,
   Console,
+  type Context,
   Data,
   Duration,
   Effect,
@@ -40,6 +40,7 @@ import {
 // oxlint-disable-next-line no-unused-vars -- TS needs the symbol in scope to name exported CLI types.
 import type { NodeInspectSymbol } from "effect/Inspectable";
 import { Argument, Command, Flag, GlobalFlag, Prompt } from "effect/unstable/cli";
+import type * as Terminal from "effect/Terminal";
 import {
   FetchHttpClient,
   HttpClient,
@@ -78,6 +79,37 @@ import { expandHomePath, resolveBaseDir } from "./os-jank.ts";
 import { runServer } from "./server.ts";
 import { renderTerminalQrCode } from "./startupAccess.ts";
 import {
+  EMPTY_NODE_CONFIG,
+  nodeConfigAsServeArgs,
+  nodeConfigPath,
+  readNodeConfig,
+  writeNodeConfig,
+} from "./cliSetup/nodeConfig.ts";
+import { applyNodeSettings, installServiceForNode } from "./cliSetup/nodeSetup.ts";
+import {
+  formatNodeConfig,
+  lookupConfigKey,
+  NODE_CONFIG_KEYS,
+  setConfigKey,
+  unsetConfigKey,
+} from "./cliSetup/configKeys.ts";
+import {
+  cliPreferencesPath,
+  readCliPreferences,
+  writeCliPreferences,
+} from "./cliSetup/preferences.ts";
+import {
+  editNodeConfigFile,
+  runFirstTimeSetup,
+  runNodeManager,
+  runSetup,
+  SetupError,
+  type SetupContext,
+  type SetupOperations,
+} from "./cliSetup/setupFlow.ts";
+import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
+import packageJson from "../package.json" with { type: "json" };
+import {
   CliRemoteError,
   cliRemotesPath,
   connectCliRemote,
@@ -94,12 +126,9 @@ import {
   startPasswordSignIn,
 } from "./hubConnector/cliAccountLink.ts";
 import {
-  installNodeService,
-  isEphemeralCliInstall,
   nodeServiceLabel,
   nodeServicePlatform,
   readNodeServiceStatus,
-  resolveCliEntryScript,
   restartNodeService,
   startNodeService,
   stopNodeService,
@@ -430,6 +459,11 @@ export const resolveServerConfig = (
   options?: {
     readonly startupPresentation?: StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
+    /**
+     * Read `<state dir>/node.json` as the layer between environment variables
+     * and defaults. Server commands only; never for a Desktop-spawned backend.
+     */
+    readonly useNodeConfig?: boolean;
   },
 ) =>
   Effect.gen(function* () {
@@ -480,27 +514,6 @@ export const resolveServerConfig = (
       () => "web",
     );
 
-    const port = yield* Option.match(
-      resolveOptionPrecedence(
-        normalizedFlags.port,
-        Option.fromUndefinedOr(env.port),
-        Option.fromUndefinedOr(bootstrap?.port),
-      ),
-      {
-        onSome: (value) => Effect.succeed(value),
-        onNone: () => {
-          if (mode === "desktop") {
-            return Effect.succeed(DEFAULT_PORT);
-          }
-          return findAvailablePort(DEFAULT_PORT);
-        },
-      },
-    );
-    yield* Effect.logDebug("startup config phase resolved port", {
-      durationMs: Date.now() - startedAt,
-      mode,
-      port,
-    });
     const devUrl = Option.getOrElse(
       resolveOptionPrecedence(
         normalizedFlags.devUrl,
@@ -518,21 +531,73 @@ export const resolveServerConfig = (
         ),
       ),
     );
-    const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
-    const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
-    yield* fs.makeDirectory(cwd, { recursive: true });
-    const workspaceAccessRoot = Option.getOrElse(normalizedFlags.restrictToCwd, () => false)
-      ? yield* fs.realPath(cwd)
-      : undefined;
-    yield* Effect.logDebug("startup config phase prepared cwd", {
-      durationMs: Date.now() - startedAt,
-      cwd,
-    });
     const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
     yield* ensureServerDirectories(derivedPaths);
     yield* Effect.logDebug("startup config phase ensured directories", {
       durationMs: Date.now() - startedAt,
       baseDir,
+    });
+    const nodeConfig =
+      options?.useNodeConfig === true && bootstrap === undefined && mode !== "desktop"
+        ? yield* Effect.tryPromise({
+            try: () => readNodeConfig(nodeConfigPath(derivedPaths.stateDir)),
+            catch: (cause) =>
+              new NodeConfigLoadError({
+                message: cause instanceof Error ? cause.message : String(cause),
+                cause,
+              }),
+          })
+        : null;
+    const fromNodeConfig = <A>(value: A | undefined) => Option.fromUndefinedOr(value);
+    const port = yield* Option.match(
+      resolveOptionPrecedence(
+        normalizedFlags.port,
+        Option.fromUndefinedOr(env.port),
+        fromNodeConfig(nodeConfig?.port),
+        Option.fromUndefinedOr(bootstrap?.port),
+      ),
+      {
+        onSome: (value) => Effect.succeed(value),
+        onNone: () => {
+          if (mode === "desktop") {
+            return Effect.succeed(DEFAULT_PORT);
+          }
+          // Check the interface the server will actually bind.
+          const bindHost = Option.getOrUndefined(
+            resolveOptionPrecedence(
+              normalizedFlags.host,
+              Option.fromUndefinedOr(env.host),
+              fromNodeConfig(nodeConfig?.host),
+              Option.fromUndefinedOr(bootstrap?.host),
+            ),
+          );
+          return findAvailablePort(DEFAULT_PORT, bindHost);
+        },
+      },
+    );
+    yield* Effect.logDebug("startup config phase resolved port", {
+      durationMs: Date.now() - startedAt,
+      mode,
+      port,
+    });
+    const rawCwd = Option.getOrElse(
+      resolveOptionPrecedence(normalizedFlags.cwd, fromNodeConfig(nodeConfig?.workspace)),
+      () => process.cwd(),
+    );
+    const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
+    yield* fs.makeDirectory(cwd, { recursive: true });
+    const workspaceAccessRoot = Option.getOrElse(
+      resolveOptionPrecedence(
+        normalizedFlags.restrictToCwd,
+        fromNodeConfig(nodeConfig?.restrictToWorkspace),
+      ),
+      () => false,
+    )
+      ? yield* fs.realPath(cwd)
+      : undefined;
+    yield* Effect.logDebug("startup config phase prepared cwd", {
+      durationMs: Date.now() - startedAt,
+      cwd,
     });
     const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
       derivedPaths.settingsPath,
@@ -574,6 +639,7 @@ export const resolveServerConfig = (
       resolveOptionPrecedence(
         normalizedFlags.tailscaleServeEnabled,
         Option.fromUndefinedOr(env.tailscaleServeEnabled),
+        fromNodeConfig(nodeConfig?.tailscaleServe),
         Option.fromUndefinedOr(bootstrap?.tailscaleServeEnabled),
       ),
       () => false,
@@ -582,6 +648,7 @@ export const resolveServerConfig = (
       resolveOptionPrecedence(
         normalizedFlags.tailscaleServePort,
         Option.fromUndefinedOr(env.tailscaleServePort),
+        fromNodeConfig(nodeConfig?.tailscaleServePort),
         Option.fromUndefinedOr(bootstrap?.tailscaleServePort),
       ),
       () => 443,
@@ -596,6 +663,7 @@ export const resolveServerConfig = (
       resolveOptionPrecedence(
         normalizedFlags.host,
         Option.fromUndefinedOr(env.host),
+        fromNodeConfig(nodeConfig?.host),
         Option.fromUndefinedOr(bootstrap?.host),
       ),
       () => (mode === "desktop" ? "127.0.0.1" : undefined),
@@ -610,6 +678,7 @@ export const resolveServerConfig = (
         resolveOptionPrecedence(
           Option.map(normalizedFlags.hubConnectorEnabled, String),
           Option.fromUndefinedOr(env.hubConnectorEnabled),
+          Option.map(fromNodeConfig(nodeConfig?.hub?.enabled), String),
           Option.map(Option.fromUndefinedOr(bootstrap?.hubConnectorEnabled), String),
         ),
       ),
@@ -619,6 +688,7 @@ export const resolveServerConfig = (
         resolveOptionPrecedence(
           normalizedFlags.hubOrigin,
           Option.fromUndefinedOr(env.hubOrigin),
+          fromNodeConfig(nodeConfig?.hub?.origin),
           Option.fromUndefinedOr(bootstrap?.hubOrigin),
           Option.some(DEFAULT_HOSTED_APP_ORIGIN),
         ),
@@ -627,6 +697,7 @@ export const resolveServerConfig = (
         resolveOptionPrecedence(
           normalizedFlags.hubNodeName,
           Option.fromUndefinedOr(env.hubNodeName),
+          fromNodeConfig(nodeConfig?.hub?.nodeName),
           Option.fromUndefinedOr(bootstrap?.hubNodeName),
         ),
       ),
@@ -638,6 +709,7 @@ export const resolveServerConfig = (
         resolveOptionPrecedence(
           Option.map(normalizedFlags.hubAllowFileSecretStore, String),
           Option.fromUndefinedOr(env.hubAllowFileSecretStore),
+          Option.map(fromNodeConfig(nodeConfig?.hub?.allowFileSecretStore), String),
           Option.map(Option.fromUndefinedOr(bootstrap?.hubAllowFileSecretStore), String),
         ),
       ),
@@ -651,6 +723,7 @@ export const resolveServerConfig = (
         resolveOptionPrecedence(
           normalizedFlags.hubE2eePolicy,
           Option.fromUndefinedOr(env.hubE2eePolicy),
+          fromNodeConfig(nodeConfig?.hub?.e2eePolicy),
           Option.fromUndefinedOr(bootstrap?.hubE2eePolicy),
         ),
       ),
@@ -709,7 +782,10 @@ export const resolveServerConfig = (
       tailscaleServeEnabled,
       tailscaleServePort,
       preventSleep:
-        Option.getOrUndefined(normalizedFlags.preventSleep) ?? env.preventSleep ?? false,
+        Option.getOrUndefined(normalizedFlags.preventSleep) ??
+        env.preventSleep ??
+        nodeConfig?.preventSleep ??
+        false,
       hubConnector,
       hubE2eePolicy,
     };
@@ -726,6 +802,11 @@ const adminCommandLogLevel = (
   requested: Option.Option<LogLevel.LogLevel>,
   configured: LogLevel.LogLevel,
 ): LogLevel.LogLevel => (Option.isSome(requested) ? configured : "Warn");
+
+class NodeConfigLoadError extends Data.TaggedError("NodeConfigLoadError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
 
 const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
@@ -1758,6 +1839,94 @@ const waitForHubOnline = (flags: CliAuthLocationFlags) =>
     return null;
   });
 
+/**
+ * The `ryco hub login` flow: sign in here, approve this node's own enrollment,
+ * sign out. Resolves whether the node ended up linked. Shared with `ryco setup`.
+ */
+const runHubLoginFlow = (
+  flags: CliAuthLocationFlags,
+  input: { readonly hubOrigin: string; readonly username: Option.Option<string> },
+) =>
+  Effect.gen(function* () {
+    const hubOrigin = input.hubOrigin;
+    const local = yield* runHubCommand(
+      flags,
+      (origin, token) =>
+        Effect.all({
+          status: requestHubStatus(origin, token),
+          identity: requestHubIdentitySummary(origin, token),
+        }),
+      { quietLogs: true },
+    );
+    if (local.status.state === "disabled") {
+      return yield* new HubLoginError({
+        message:
+          "This node's Hub connector is off. Turn it on with `ryco config set hub true` and restart (or `ryco serve --hub`), then link again.",
+      });
+    }
+    if (local.identity.enrolled === "active") {
+      yield* Console.log(
+        `This node is already linked to a Ryco account${local.identity.fingerprint ? ` (${local.identity.fingerprint})` : ""}.\n`,
+      );
+      return true;
+    }
+
+    const username = Option.isSome(input.username)
+      ? input.username.value
+      : yield* Prompt.run(Prompt.text({ message: "Ryco username" }));
+    const password = yield* Prompt.run(Prompt.password({ message: "Password" }));
+    const account = yield* hubLoginStep(() => createCliHubAccount(hubOrigin));
+    const signIn = yield* hubLoginStep(() =>
+      startPasswordSignIn(account, { username, password: Redacted.value(password) }),
+    );
+    const code = yield* Prompt.run(
+      Prompt.text({
+        message:
+          signIn.factor === "totp"
+            ? "Code from your authenticator app"
+            : "Code from the email the Hub just sent",
+      }),
+    );
+    yield* hubLoginStep(() => signIn.finish(code));
+
+    yield* Effect.gen(function* () {
+      const ceremony = yield* runHubCommand(
+        flags,
+        (origin, token) =>
+          local.identity.enrolled === "pending"
+            ? requestHubPendingEnrollment(origin, token)
+            : requestHubEnrollment(origin, token),
+        { quietLogs: true },
+      );
+      if (ceremony === null) {
+        return yield* new HubLoginError({
+          message: "No enrollment is pending on this node. Try linking again.",
+        });
+      }
+      yield* Console.log(
+        `Approving "${ceremony.label}" (${ceremony.fingerprint}) on ${hubOrigin}…`,
+      );
+      yield* hubLoginStep(() => approveOwnEnrollment(account.api, ceremony));
+    }).pipe(
+      // The account session only ever exists to approve this node.
+      Effect.ensuring(Effect.promise(() => account.api.signOut().catch(() => undefined))),
+    );
+
+    const online = yield* waitForHubOnline(flags);
+    yield* Console.log(
+      online
+        ? "Linked. This node is online through the Hub and appears under your machines in Ryco.\n"
+        : "Approved. The node will come online once it next polls the Hub; check with `ryco hub status`.\n",
+    );
+    return true;
+  });
+
+const parseHubOrigin = (value: Option.Option<string>) =>
+  Effect.try({
+    try: () => canonicalizeHubOrigin(Option.getOrElse(value, () => DEFAULT_HOSTED_APP_ORIGIN)),
+    catch: () => new HubLoginError({ message: "--hub-origin must be an https:// origin." }),
+  });
+
 const hubLoginCommand = Command.make("login", {
   ...authLocationFlags,
   hubOrigin: Flag.string("hub-origin").pipe(
@@ -1775,82 +1944,12 @@ const hubLoginCommand = Command.make("login", {
     "Link this node to your Ryco account by signing in here: no device code to compare or approve in a browser. Needs an account with a password and a second factor; otherwise use `ryco hub enroll`.",
   ),
   Command.withHandler((flags) =>
-    Effect.gen(function* () {
-      const hubOrigin = yield* Effect.try({
-        try: () =>
-          canonicalizeHubOrigin(Option.getOrElse(flags.hubOrigin, () => DEFAULT_HOSTED_APP_ORIGIN)),
-        catch: () => new HubLoginError({ message: "--hub-origin must be an https:// origin." }),
-      });
-      const local = yield* runHubCommand(
-        flags,
-        (origin, token) =>
-          Effect.all({
-            status: requestHubStatus(origin, token),
-            identity: requestHubIdentitySummary(origin, token),
-          }),
-        { quietLogs: true },
-      );
-      if (local.status.state === "disabled") {
-        return yield* new HubLoginError({
-          message:
-            "This node's Hub connector is off. Start it with `ryco serve --hub` (or `ryco service install --hub`), then run `ryco hub login` again.",
-        });
-      }
-      if (local.identity.enrolled === "active") {
-        yield* Console.log(
-          `This node is already linked to a Ryco account${local.identity.fingerprint ? ` (${local.identity.fingerprint})` : ""}.\n`,
-        );
-        return;
-      }
-
-      const username = Option.isSome(flags.username)
-        ? flags.username.value
-        : yield* Prompt.run(Prompt.text({ message: "Ryco username" }));
-      const password = yield* Prompt.run(Prompt.password({ message: "Password" }));
-      const account = yield* hubLoginStep(() => createCliHubAccount(hubOrigin));
-      const signIn = yield* hubLoginStep(() =>
-        startPasswordSignIn(account, { username, password: Redacted.value(password) }),
-      );
-      const code = yield* Prompt.run(
-        Prompt.text({
-          message:
-            signIn.factor === "totp"
-              ? "Code from your authenticator app"
-              : "Code from the email the Hub just sent",
-        }),
-      );
-      yield* hubLoginStep(() => signIn.finish(code));
-
-      yield* Effect.gen(function* () {
-        const ceremony = yield* runHubCommand(
-          flags,
-          (origin, token) =>
-            local.identity.enrolled === "pending"
-              ? requestHubPendingEnrollment(origin, token)
-              : requestHubEnrollment(origin, token),
-          { quietLogs: true },
-        );
-        if (ceremony === null) {
-          return yield* new HubLoginError({
-            message: "No enrollment is pending on this node. Run `ryco hub login` again.",
-          });
-        }
-        yield* Console.log(
-          `Approving "${ceremony.label}" (${ceremony.fingerprint}) on ${hubOrigin}…`,
-        );
-        yield* hubLoginStep(() => approveOwnEnrollment(account.api, ceremony));
-      }).pipe(
-        // The account session only ever exists to approve this node.
-        Effect.ensuring(Effect.promise(() => account.api.signOut().catch(() => undefined))),
-      );
-
-      const online = yield* waitForHubOnline(flags);
-      yield* Console.log(
-        online
-          ? "Linked. This node is online through the Hub and appears under your machines in Ryco.\n"
-          : "Approved. The node will come online once it next polls the Hub; check with `ryco hub status`.\n",
-      );
-    }),
+    parseHubOrigin(flags.hubOrigin).pipe(
+      Effect.flatMap((hubOrigin) =>
+        runHubLoginFlow(flags, { hubOrigin, username: flags.username }),
+      ),
+      Effect.asVoid,
+    ),
   ),
 );
 
@@ -3138,7 +3237,7 @@ const runServerCommand = (
 ) =>
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
-    const config = yield* resolveServerConfig(flags, logLevel, options);
+    const config = yield* resolveServerConfig(flags, logLevel, { ...options, useNodeConfig: true });
     return yield* runServer.pipe(Effect.provideService(ServerConfig, config));
   });
 
@@ -3183,47 +3282,6 @@ const serviceProcess = <A>(run: () => Promise<A>) =>
       }),
   });
 
-/** The `serve` arguments a service runs with, from the flags `service install` was given. */
-export function buildServiceServeArgs(input: {
-  readonly baseDir: string;
-  readonly cwd: string;
-  readonly host: Option.Option<string>;
-  readonly port: Option.Option<number>;
-  readonly hubConnectorEnabled: Option.Option<boolean>;
-  readonly hubOrigin: Option.Option<string>;
-  readonly hubNodeName: Option.Option<string>;
-  readonly hubAllowFileSecretStore: Option.Option<boolean>;
-  readonly hubE2eePolicy: Option.Option<string>;
-  readonly tailscaleServeEnabled: Option.Option<boolean>;
-  readonly tailscaleServePort: Option.Option<number>;
-  readonly restrictToCwd: Option.Option<boolean>;
-  readonly preventSleep: Option.Option<boolean>;
-}): string[] {
-  const args = ["serve", "--base-dir", input.baseDir];
-  const value = (flag: string, option: Option.Option<string | number>) => {
-    if (Option.isSome(option)) args.push(flag, String(option.value));
-  };
-  const toggle = (flag: string, option: Option.Option<boolean>, fallback?: boolean) => {
-    const enabled = Option.getOrUndefined(option) ?? fallback;
-    if (enabled === true) args.push(`--${flag}`);
-    else if (enabled === false && Option.isSome(option)) args.push(`--no-${flag}`);
-  };
-  value("--host", input.host);
-  value("--port", input.port);
-  toggle("hub-connector-enabled", input.hubConnectorEnabled);
-  value("--hub-origin", input.hubOrigin);
-  value("--hub-node-name", input.hubNodeName);
-  toggle("hub-allow-file-secret-store", input.hubAllowFileSecretStore);
-  value("--hub-e2ee-policy", input.hubE2eePolicy);
-  toggle("tailscale-serve", input.tailscaleServeEnabled);
-  value("--tailscale-serve-port", input.tailscaleServePort);
-  toggle("restrict-to-cwd", input.restrictToCwd);
-  // A node installed to stay reachable should not idle-sleep; opt out explicitly.
-  toggle("prevent-sleep", input.preventSleep, true);
-  args.push(input.cwd);
-  return args;
-}
-
 const serviceInstallCommand = Command.make("install", {
   ...serviceLocationFlags,
   host: hostFlag,
@@ -3250,42 +3308,42 @@ const serviceInstallCommand = Command.make("install", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
-      const scriptPath = yield* serviceProcess(() => resolveCliEntryScript());
-      if (isEphemeralCliInstall(scriptPath)) {
-        return yield* Effect.fail(
-          new Error(
-            "This ryco was started through npx/bunx, which a service cannot rely on after a reboot. Install it first with `npm install -g ryco-cli`, then run `ryco service install` again.",
-          ),
-        );
-      }
-      const cwd = NodePath.resolve(Option.getOrElse(flags.cwd, () => process.cwd()));
-      const args = buildServiceServeArgs({ ...flags, baseDir: config.baseDir, cwd });
-      const environment: Record<string, string> = {
-        // The providers (claude, codex, ...) and tools like tailscale are found
-        // through the PATH of the shell that installed the service.
-        PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
-        HOME: NodeOs.homedir(),
-        RYCO_SERVICE_LABEL: label,
-        ...(process.env.LANG ? { LANG: process.env.LANG } : {}),
-      };
-      const definitionPath = yield* serviceProcess(() =>
-        installNodeService(platform, {
+      const configPath = nodeConfigPath(config.stateDir);
+      const saved = yield* serviceProcess(() => readNodeConfig(configPath));
+      const settings = applyNodeSettings(saved ?? EMPTY_NODE_CONFIG, {
+        workspace: Option.isSome(flags.cwd)
+          ? NodePath.resolve(flags.cwd.value)
+          : (saved?.workspace ?? process.cwd()),
+        host: Option.getOrUndefined(flags.host),
+        port: Option.getOrUndefined(flags.port),
+        tailscaleServe: Option.getOrUndefined(flags.tailscaleServeEnabled),
+        tailscaleServePort: Option.getOrUndefined(flags.tailscaleServePort),
+        hubEnabled: Option.getOrUndefined(flags.hubConnectorEnabled),
+        hubOrigin: Option.getOrUndefined(flags.hubOrigin),
+        hubNodeName: Option.getOrUndefined(flags.hubNodeName),
+        hubAllowFileSecretStore: Option.getOrUndefined(flags.hubAllowFileSecretStore),
+        hubE2eePolicy: Option.getOrUndefined(flags.hubE2eePolicy),
+        restrictToWorkspace: Option.getOrUndefined(flags.restrictToCwd),
+        // A node installed to stay reachable should not idle-sleep; opt out explicitly.
+        preventSleep: Option.getOrUndefined(flags.preventSleep) ?? saved?.preventSleep ?? true,
+      });
+      yield* serviceProcess(() => writeNodeConfig(configPath, settings));
+      const { definitionPath } = yield* serviceProcess(() =>
+        installServiceForNode({
+          platform,
           label,
-          execPath: process.execPath,
-          scriptPath,
-          args,
-          workingDirectory: cwd,
+          baseDir: config.baseDir,
           logPath,
-          environment,
+          workspace: settings.workspace,
         }),
       );
       const status = yield* serviceProcess(() => readNodeServiceStatus(platform, label));
-      const hubEnabled = args.includes("--hub-connector-enabled");
       yield* Console.log(
         [
           `Installed Ryco as a background service (${label}).`,
+          `  Settings:   ${configPath}  (ryco config)`,
+          `  Runs:       ryco serve ${nodeConfigAsServeArgs(settings).join(" ")}`,
           `  Definition: ${definitionPath}`,
-          `  Runs:       ryco ${args.join(" ")}`,
           `  Logs:       ${logPath}  (ryco service logs -f)`,
           `  State:      ${status.running ? `running (pid ${status.pid ?? "?"})` : "starting"}`,
           "",
@@ -3295,10 +3353,10 @@ const serviceInstallCommand = Command.make("install", {
             : []),
           "Next:",
           "  ryco auth pairing create --ttl 1h   # pair a desktop, browser, or phone",
-          ...(hubEnabled
-            ? ["  ryco hub enroll                     # link this node to your Ryco account"]
+          ...(settings.hub?.enabled
+            ? ["  ryco hub login                      # link this node to your Ryco account"]
             : []),
-          "  ryco service status",
+          "  ryco setup                          # status, pairing, logs, and settings in one place",
           "",
         ].join("\n"),
       );
@@ -3652,6 +3710,401 @@ const remoteCommand = Command.make("remote").pipe(
   ]),
 );
 
+// ─── ryco setup / ryco config ─────────────────────────────────────────────────
+
+const resolveSetupContext = (baseDir: Option.Option<string>) =>
+  Effect.gen(function* () {
+    const logLevel = yield* GlobalFlag.LogLevel;
+    const config = yield* resolveCliAuthConfig({ baseDir }, logLevel);
+    const defaultBaseDir = yield* resolveBaseDir(undefined);
+    const context: SetupContext = {
+      version: packageJson.version,
+      baseDir: config.baseDir,
+      configPath: nodeConfigPath(config.stateDir),
+      logPath: NodePath.join(config.logsDir, "service.log"),
+      platform: nodeServicePlatform(),
+      serviceLabel: nodeServiceLabel(config.baseDir, defaultBaseDir),
+      commandPrefix: cliCommandPrefix(),
+    };
+    return { config, context };
+  });
+
+/** The running node's origin, when a server recorded one and actually answers there. */
+const probeLocalServer = (serverRuntimeStatePath: string) =>
+  readPersistedServerRuntimeState(serverRuntimeStatePath).pipe(
+    Effect.flatMap((state) =>
+      Option.isNone(state)
+        ? Effect.succeed<string | null>(null)
+        : Effect.tryPromise(async () => {
+            const response = await fetch(
+              new URL("/.well-known/ryco/environment", state.value.origin),
+              { signal: AbortSignal.timeout(1_500) },
+            );
+            return response.ok ? state.value.origin : null;
+          }),
+    ),
+    Effect.orElseSucceed(() => null),
+  );
+
+const emptyServerFlags = (baseDir: Option.Option<string>): CliServerFlags => ({
+  mode: Option.none(),
+  port: Option.none(),
+  host: Option.none(),
+  baseDir,
+  cwd: Option.none(),
+  devUrl: Option.none(),
+  noBrowser: Option.none(),
+  bootstrapFd: Option.none(),
+  autoBootstrapProjectFromCwd: Option.none(),
+  logWebSocketEvents: Option.none(),
+  tailscaleServeEnabled: Option.none(),
+  tailscaleServePort: Option.none(),
+});
+
+const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
+
+/**
+ * The setup flow's view of the running node. Built inside a command handler and
+ * bound to that handler's services, so the flow itself needs none.
+ */
+const makeSetupOperations = (flags: CliAuthLocationFlags, serverRuntimeStatePath: string) =>
+  Effect.gen(function* () {
+    const services = yield* Effect.context<never>();
+    const bind = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E> =>
+      effect.pipe(Effect.provideContext(services as Context.Context<R>));
+    return bindSetupOperations(flags, serverRuntimeStatePath, bind);
+  });
+
+const bindSetupOperations = (
+  flags: CliAuthLocationFlags,
+  serverRuntimeStatePath: string,
+  bind: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E>,
+): SetupOperations => ({
+  serverOrigin: bind(probeLocalServer(serverRuntimeStatePath)),
+  hubState: bind(
+    runHubCommand(
+      flags,
+      (origin, token) =>
+        Effect.all({
+          status: requestHubStatus(origin, token),
+          identity: requestHubIdentitySummary(origin, token),
+        }),
+      { quietLogs: true },
+    ).pipe(
+      Effect.map(({ status, identity }) => ({
+        connector: status.state,
+        enrolled: identity.enrolled,
+      })),
+      Effect.orElseSucceed(() => null),
+    ),
+  ),
+  startHubEnrollment: bind(
+    runHubCommand(
+      flags,
+      (origin, token) =>
+        requestHubPendingEnrollment(origin, token).pipe(
+          Effect.flatMap((pending) =>
+            pending === null ? requestHubEnrollment(origin, token) : Effect.succeed(pending),
+          ),
+        ),
+      { quietLogs: true },
+    ).pipe(Effect.mapError(asError)),
+  ),
+  createOwnerPairingCredential: (ttlMinutes) =>
+    bind(
+      runWithAuthControlPlane(
+        flags,
+        (authControlPlane) =>
+          authControlPlane
+            .createPairingLink({
+              role: "owner",
+              ttl: Duration.minutes(ttlMinutes),
+              label: "ryco setup",
+            })
+            .pipe(Effect.map((issued) => issued.credential)),
+        { quietLogs: true },
+      ).pipe(Effect.mapError(asError)),
+    ),
+  hubLogin: (hubOrigin) =>
+    // A cancelled prompt stays a QuitError at runtime; `asError` keeps it as is.
+    bind(runHubLoginFlow(flags, { hubOrigin, username: Option.none() })).pipe(
+      Effect.mapError(asError),
+    ),
+  runInForeground: bind(
+    runServerCommand(emptyServerFlags(flags.baseDir), {
+      startupPresentation: "headless",
+      forceAutoBootstrapProjectFromCwd: false,
+    }),
+  ).pipe(Effect.asVoid, Effect.mapError(asError)),
+});
+
+const setupClosed = <A, E, R>(effect: Effect.Effect<A, E | Terminal.QuitError, R>) =>
+  effect.pipe(
+    Effect.catchIf(
+      (error): error is Terminal.QuitError =>
+        typeof error === "object" &&
+        error !== null &&
+        "_tag" in error &&
+        error._tag === "QuitError",
+      () => Console.log(dim("\nClosed.")),
+    ),
+  );
+
+const setupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe(
+  Command.withDescription(
+    "Set this computer up as a Ryco node for your other devices — then come back here for status, pairing, logs, and settings.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      if (!isInteractiveTerminal()) {
+        return yield* new SetupError({
+          message:
+            "`ryco setup` is interactive. From a script, use `ryco config set <key> <value>` and `ryco service install`.",
+        });
+      }
+      const { config, context } = yield* resolveSetupContext(flags.baseDir);
+      const operations = yield* makeSetupOperations(flags, config.serverRuntimeStatePath);
+      yield* setupClosed(runSetup(context, operations));
+    }),
+  ),
+);
+
+const configLocationFlags = { baseDir: baseDirFlag } as const;
+
+const readConfigFor = (baseDir: Option.Option<string>) =>
+  Effect.gen(function* () {
+    const { config, context } = yield* resolveSetupContext(baseDir);
+    const saved = yield* Effect.tryPromise({
+      try: () => readNodeConfig(context.configPath),
+      catch: (cause) => new SetupError({ message: asError(cause).message, cause }),
+    });
+    return { config, context, saved };
+  });
+
+/** After a change: restart a running service, or say how the change takes effect. */
+const settingsChangedHint = (context: SetupContext) =>
+  Effect.gen(function* () {
+    const status =
+      context.platform === null
+        ? null
+        : yield* Effect.tryPromise(() =>
+            readNodeServiceStatus(context.platform!, context.serviceLabel),
+          ).pipe(Effect.orElseSucceed(() => null));
+    yield* Console.log(
+      status?.running
+        ? `Restart Ryco to use it: ${context.commandPrefix} service restart\n`
+        : `Ryco uses it the next time it starts (${context.commandPrefix} serve, or the background service).\n`,
+    );
+  });
+
+const configShowCommand = Command.make("show", { ...configLocationFlags, json: jsonFlag }).pipe(
+  Command.withDescription("Show this node's saved settings."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { context, saved } = yield* readConfigFor(flags.baseDir);
+      if (flags.json) {
+        yield* Console.log(JSON.stringify(saved ?? EMPTY_NODE_CONFIG));
+        return;
+      }
+      yield* Console.log(
+        [
+          dim(`# ${context.configPath}${saved === null ? " (not created yet)" : ""}`),
+          formatNodeConfig(saved ?? EMPTY_NODE_CONFIG),
+          "",
+          dim(
+            `Change one with \`${context.commandPrefix} config set <key> <value>\`, or all of them with \`${context.commandPrefix} setup\`.`,
+          ),
+          "",
+        ].join("\n"),
+      );
+    }),
+  ),
+);
+
+const configPathCommand = Command.make("path", { ...configLocationFlags }).pipe(
+  Command.withDescription("Print where this node's settings are saved."),
+  Command.withHandler((flags) =>
+    readConfigFor(flags.baseDir).pipe(
+      Effect.flatMap(({ context }) => Console.log(context.configPath)),
+    ),
+  ),
+);
+
+const configSetCommand = Command.make("set", {
+  ...configLocationFlags,
+  key: Argument.string("key").pipe(
+    Argument.withDescription(`One of: ${Object.keys(NODE_CONFIG_KEYS).join(", ")}.`),
+  ),
+  value: Argument.string("value"),
+}).pipe(
+  Command.withDescription("Change one saved setting, named like its `ryco serve` flag."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { context, saved } = yield* readConfigFor(flags.baseDir);
+      const next = yield* Effect.try({
+        try: () => setConfigKey(saved ?? EMPTY_NODE_CONFIG, flags.key, flags.value),
+        catch: (cause) => new SetupError({ message: asError(cause).message, cause }),
+      });
+      yield* Effect.tryPromise({
+        try: () => writeNodeConfig(context.configPath, next),
+        catch: (cause) => new SetupError({ message: asError(cause).message, cause }),
+      });
+      yield* Console.log(`${flags.key} = ${lookupConfigKey(flags.key).read(next) ?? "(default)"}`);
+      yield* settingsChangedHint(context);
+    }),
+  ),
+);
+
+const configUnsetCommand = Command.make("unset", {
+  ...configLocationFlags,
+  key: Argument.string("key").pipe(
+    Argument.withDescription(`One of: ${Object.keys(NODE_CONFIG_KEYS).join(", ")}.`),
+  ),
+}).pipe(
+  Command.withDescription("Return one setting to its default."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { context, saved } = yield* readConfigFor(flags.baseDir);
+      const next = yield* Effect.try({
+        try: () => unsetConfigKey(saved ?? EMPTY_NODE_CONFIG, flags.key),
+        catch: (cause) => new SetupError({ message: asError(cause).message, cause }),
+      });
+      yield* Effect.tryPromise({
+        try: () => writeNodeConfig(context.configPath, next),
+        catch: (cause) => new SetupError({ message: asError(cause).message, cause }),
+      });
+      yield* Console.log(`${flags.key} = (default)`);
+      yield* settingsChangedHint(context);
+    }),
+  ),
+);
+
+const configEditCommand = Command.make("edit", { ...configLocationFlags }).pipe(
+  Command.withDescription("Open this node's settings in $EDITOR, checking them when you save."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      if (!isInteractiveTerminal()) {
+        return yield* new SetupError({
+          message: "`ryco config edit` needs a terminal. Use `ryco config set` from a script.",
+        });
+      }
+      const { context } = yield* resolveSetupContext(flags.baseDir);
+      const changed = yield* editNodeConfigFile(context).pipe(
+        Effect.catchIf(
+          (error) => error._tag === "QuitError",
+          () => Effect.succeed(false),
+        ),
+      );
+      if (changed) yield* settingsChangedHint(context);
+    }),
+  ),
+);
+
+const configCommand = Command.make("config", { ...configLocationFlags, json: jsonFlag }).pipe(
+  Command.withDescription(
+    "Show or change this node's saved settings (read by `ryco serve` and the background service).",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { context, saved } = yield* readConfigFor(flags.baseDir);
+      if (flags.json) {
+        yield* Console.log(JSON.stringify(saved ?? EMPTY_NODE_CONFIG));
+        return;
+      }
+      yield* Console.log(
+        [
+          dim(`# ${context.configPath}${saved === null ? " (not created yet)" : ""}`),
+          formatNodeConfig(saved ?? EMPTY_NODE_CONFIG),
+          "",
+          dim(
+            `Change one with \`${context.commandPrefix} config set <key> <value>\`, edit them with \`${context.commandPrefix} config edit\`, or rerun \`${context.commandPrefix} setup\`.`,
+          ),
+          "",
+        ].join("\n"),
+      );
+    }),
+  ),
+  Command.withSubcommands([
+    configShowCommand,
+    configPathCommand,
+    configSetCommand,
+    configUnsetCommand,
+    configEditCommand,
+  ]),
+);
+
+/**
+ * A bare `ryco` / `npx ryco-cli` in a terminal is where a first-time user
+ * starts, so it offers the setup guide once — unless dismissed for good — and on
+ * a machine that already runs a node, opens the manager instead of starting a
+ * second server beside it. Anything scripted, desktop-spawned, or given
+ * arguments starts the server exactly as before.
+ */
+const runBareCommand = (flags: CliServerFlags) =>
+  Effect.gen(function* () {
+    const offerSetup =
+      process.argv.length <= 2 &&
+      isInteractiveTerminal() &&
+      process.env.CI === undefined &&
+      process.env.RYCO_NO_SETUP_PROMPT !== "1";
+    if (!offerSetup) return yield* runServerCommand(flags);
+
+    const { config, context } = yield* resolveSetupContext(Option.none());
+    const operations = yield* makeSetupOperations(
+      { baseDir: Option.none() },
+      config.serverRuntimeStatePath,
+    );
+    const saved = yield* Effect.tryPromise(() => readNodeConfig(context.configPath)).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+    if (saved !== null) {
+      const running = (yield* operations.serverOrigin) !== null;
+      const service =
+        context.platform === null
+          ? null
+          : yield* Effect.tryPromise(() =>
+              readNodeServiceStatus(context.platform!, context.serviceLabel),
+            ).pipe(Effect.orElseSucceed(() => null));
+      if (running || service?.installed) {
+        return yield* setupClosed(runNodeManager(context, operations));
+      }
+      return yield* runServerCommand(flags);
+    }
+
+    const preferencesPath = cliPreferencesPath(config.stateDir);
+    const preferences = yield* Effect.promise(() => readCliPreferences(preferencesPath));
+    if (preferences.skipLaunchChooser) return yield* runServerCommand(flags);
+
+    const choice = yield* Prompt.run(
+      Prompt.select<"open" | "setup" | "always-open">({
+        message: "Welcome to Ryco",
+        choices: [
+          {
+            title: "Open Ryco on this computer",
+            description: "Starts Ryco here and opens it in your browser",
+            value: "open",
+          },
+          {
+            title: "Set up this computer for your other devices",
+            description: "Runs in the background; reach it from your laptop, phone, or anywhere",
+            value: "setup",
+          },
+          { title: "Open Ryco here, and don't ask again", value: "always-open" },
+        ],
+      }),
+    ).pipe(Effect.catchTag("QuitError", () => Effect.succeed("quit" as const)));
+    if (choice === "quit") return;
+    if (choice === "setup") {
+      return yield* setupClosed(runFirstTimeSetup(context, operations));
+    }
+    if (choice === "always-open") {
+      yield* Effect.promise(() =>
+        writeCliPreferences(preferencesPath, { ...preferences, skipLaunchChooser: true }),
+      );
+    }
+    return yield* runServerCommand(flags);
+  });
+
 const startCommand = Command.make("start", { ...sharedServerCommandFlags }).pipe(
   Command.withDescription("Run the Ryco server."),
   Command.withHandler((flags) => runServerCommand(flags)),
@@ -3670,8 +4123,10 @@ const serveCommand = Command.make("serve", { ...sharedServerCommandFlags }).pipe
 );
 
 export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
-  Command.withDescription("Run the Ryco server."),
-  Command.withHandler((flags) => runServerCommand(flags)),
+  Command.withDescription(
+    "Run the Ryco server. In a terminal with no arguments, first offers `ryco setup`.",
+  ),
+  Command.withHandler((flags) => runBareCommand(flags)),
   Command.withSubcommands([
     startCommand,
     serveCommand,
@@ -3679,6 +4134,8 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     hubCommand,
     e2eeCommand,
     projectCommand,
+    setupCommand,
+    configCommand,
     serviceCommand,
     remoteCommand,
   ]),

@@ -15,7 +15,7 @@ import {
   resolveHubConnectorConfig,
   resolveNodeE2eePolicyConfig,
 } from "./config.ts";
-import { buildServiceServeArgs, resolveServerConfig } from "./cli.ts";
+import { resolveServerConfig } from "./cli.ts";
 
 it("resolves bounded connector defaults and invalid enabled configuration without reflecting input", () => {
   expect(resolveHubConnectorConfig({})).toEqual(DEFAULT_HUB_CONNECTOR_CONFIG);
@@ -244,6 +244,62 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         origin: "https://cli.example",
       });
     }),
+  );
+
+  it.effect("reads saved node settings between the environment and defaults", () =>
+    Effect.gen(function* () {
+      const baseDir = join(os.tmpdir(), `ryco-cli-config-node-${process.pid}`);
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.makeDirectory(join(baseDir, "userdata"), { recursive: true });
+      const workspace = join(baseDir, "workspace");
+      yield* fs.writeFileString(
+        join(baseDir, "userdata", "node.json"),
+        JSON.stringify({
+          version: 1,
+          workspace,
+          host: "0.0.0.0",
+          port: 4123,
+          tailscaleServe: true,
+          hub: { enabled: true, nodeName: "Saved node" },
+          preventSleep: true,
+        }),
+      );
+      const resolve = (overrides: Partial<ResolveServerFlags>, env: Record<string, string>) =>
+        resolveServerConfig(
+          {
+            ...makeServerFlags(baseDir, overrides),
+            port: overrides.port ?? Option.none(),
+            host: overrides.host ?? Option.none(),
+          },
+          Option.none(),
+          { useNodeConfig: true },
+        ).pipe(
+          Effect.provide(
+            Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env })), NetService.layer),
+          ),
+        );
+
+      const fromFile = yield* resolve({}, {});
+      expect(fromFile).toMatchObject({
+        cwd: workspace,
+        host: "0.0.0.0",
+        port: 4123,
+        tailscaleServeEnabled: true,
+        preventSleep: true,
+        hubConnector: { enabled: true, nodeName: "Saved node", origin: DEFAULT_HOSTED_APP_ORIGIN },
+      });
+
+      // A flag beats the environment, and the environment beats the file.
+      const overridden = yield* resolve(
+        { port: Option.some(5000) },
+        { RYCO_PORT: "6000", RYCO_HOST: "127.0.0.1", RYCO_HUB_NODE_NAME: "From env" },
+      );
+      expect(overridden).toMatchObject({
+        port: 5000,
+        host: "127.0.0.1",
+        hubConnector: { nodeName: "From env" },
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("defaults an enabled connector to the hosted Hub origin", () =>
@@ -971,54 +1027,4 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       });
     }),
   );
-});
-
-it("builds the serve arguments a background service runs with", () => {
-  const none = Option.none();
-  expect(
-    buildServiceServeArgs({
-      baseDir: "/Users/me/.ryco",
-      cwd: "/Users/me/code",
-      host: Option.some("127.0.0.1"),
-      port: none,
-      hubConnectorEnabled: Option.some(true),
-      hubOrigin: none,
-      hubNodeName: Option.some("Mac mini"),
-      hubAllowFileSecretStore: none,
-      hubE2eePolicy: none,
-      tailscaleServeEnabled: Option.some(true),
-      tailscaleServePort: none,
-      restrictToCwd: none,
-      preventSleep: none,
-    }),
-  ).toEqual([
-    "serve",
-    "--base-dir",
-    "/Users/me/.ryco",
-    "--host",
-    "127.0.0.1",
-    "--hub-connector-enabled",
-    "--hub-node-name",
-    "Mac mini",
-    "--tailscale-serve",
-    "--prevent-sleep",
-    "/Users/me/code",
-  ]);
-  expect(
-    buildServiceServeArgs({
-      baseDir: "/b",
-      cwd: "/c",
-      host: none,
-      port: Option.some(4000),
-      hubConnectorEnabled: none,
-      hubOrigin: none,
-      hubNodeName: none,
-      hubAllowFileSecretStore: none,
-      hubE2eePolicy: none,
-      tailscaleServeEnabled: none,
-      tailscaleServePort: none,
-      restrictToCwd: none,
-      preventSleep: Option.some(false),
-    }),
-  ).toEqual(["serve", "--base-dir", "/b", "--port", "4000", "--no-prevent-sleep", "/c"]);
 });
