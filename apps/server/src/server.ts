@@ -88,6 +88,7 @@ import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment.ts";
 import { UsageServiceLive } from "./usage/UsageService.ts";
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
+import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import {
   authBearerBootstrapRouteLayer,
   authBootstrapRouteLayer,
@@ -635,6 +636,7 @@ export const makeServerLayer = Layer.unwrap(
       httpListeningLayer,
       runtimeStateLayer,
       tailscaleServeLayer,
+      SleepInhibitorLive,
     );
 
     return serverApplicationLayer.pipe(

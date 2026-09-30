@@ -19,8 +19,13 @@ export interface HeadlessServeAccessLink {
 
 export interface HeadlessServeAccessInfo {
   readonly connectionString: string;
-  readonly token: string;
-  readonly pairingUrl: string;
+  /**
+   * Absent when running as a background service: a fresh owner token on every
+   * restart would pile up in its log file. Pairing then goes through
+   * `ryco auth pairing create`.
+   */
+  readonly token?: string;
+  readonly pairingUrl?: string;
   /** Minutes until the one-time token expires, when known. */
   readonly tokenExpiresInMinutes?: number;
   /** Further ways to reach this server, beyond `pairingUrl`. */
@@ -158,6 +163,17 @@ export const renderTerminalQrCode = (value: string, margin = 2): string => {
 };
 
 export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): string => {
+  if (accessInfo.token === undefined || accessInfo.pairingUrl === undefined) {
+    return [
+      "Ryco server is ready.",
+      `Connection string: ${accessInfo.connectionString}`,
+      `Pair a device with \`ryco auth pairing create --base-url ${accessInfo.connectionString}\`.`,
+      ...(accessInfo.hubOrigin === undefined
+        ? []
+        : [`Hub relay: enabled via ${accessInfo.hubOrigin}.`]),
+      "",
+    ].join("\n");
+  }
   const alternatives = accessInfo.alternativeLinks ?? [];
   const labelWidth = Math.max(0, ...alternatives.map((link) => link.label.length));
   const expiry =
@@ -240,7 +256,9 @@ export const resolveHeadlessServeLinks = (input: {
   };
 };
 
-export const issueHeadlessServeAccessInfo = Effect.fn("issueHeadlessServeAccessInfo")(function* () {
+export const issueHeadlessServeAccessInfo = Effect.fn("issueHeadlessServeAccessInfo")(function* (
+  options: { readonly mintToken?: boolean } = {},
+) {
   const serverConfig = yield* ServerConfig;
   const httpServer = yield* HttpServer.HttpServer;
   const serverAuth = yield* ServerAuth;
@@ -249,6 +267,20 @@ export const issueHeadlessServeAccessInfo = Effect.fn("issueHeadlessServeAccessI
     serverConfig.host,
     resolveListeningPort(httpServer.address, serverConfig.port),
   );
+  const hub = serverConfig.hubConnector;
+  const hubHint =
+    hub?.enabled && hub.origin !== undefined && hub.configurationIssue === undefined
+      ? { hubOrigin: hub.origin }
+      : {};
+  if (options.mintToken === false) {
+    const endpoints = yield* registry.list;
+    const { connectionString } = resolveHeadlessServeLinks({
+      endpoints,
+      credential: "",
+      fallbackConnectionString,
+    });
+    return { connectionString, ...hubHint } satisfies HeadlessServeAccessInfo;
+  }
   const issued = yield* serverAuth.issuePairingCredential({ role: "owner" });
   const endpoints = yield* registry.list;
   const links = resolveHeadlessServeLinks({
@@ -261,14 +293,11 @@ export const issueHeadlessServeAccessInfo = Effect.fn("issueHeadlessServeAccessI
     1,
     Math.round((DateTime.toEpochMillis(issued.expiresAt) - DateTime.toEpochMillis(now)) / 60_000),
   );
-  const hub = serverConfig.hubConnector;
 
   return {
     ...links,
     token: issued.credential,
     tokenExpiresInMinutes,
-    ...(hub?.enabled && hub.origin !== undefined && hub.configurationIssue === undefined
-      ? { hubOrigin: hub.origin }
-      : {}),
+    ...hubHint,
   } satisfies HeadlessServeAccessInfo;
 });

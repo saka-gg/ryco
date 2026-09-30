@@ -1,3 +1,7 @@
+import { spawn as spawnChild } from "node:child_process";
+import NodeOs from "node:os";
+import NodePath from "node:path";
+
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import { NetService } from "@ryco/shared/Net";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
@@ -17,6 +21,7 @@ import {
 import {
   Config,
   Console,
+  Data,
   Duration,
   Effect,
   Exit,
@@ -70,6 +75,18 @@ import {
 import { expandHomePath, resolveBaseDir } from "./os-jank.ts";
 import { runServer } from "./server.ts";
 import { renderTerminalQrCode } from "./startupAccess.ts";
+import {
+  installNodeService,
+  isEphemeralCliInstall,
+  nodeServiceLabel,
+  nodeServicePlatform,
+  readNodeServiceStatus,
+  resolveCliEntryScript,
+  restartNodeService,
+  startNodeService,
+  stopNodeService,
+  uninstallNodeService,
+} from "./service/nodeService.ts";
 import { AuthControlPlaneRuntimeLive } from "./auth/Layers/AuthControlPlane.ts";
 import {
   formatIssuedPairingCredential,
@@ -220,6 +237,12 @@ const hubE2eePolicyFlag = Flag.choice("hub-e2ee-policy", NodeE2eeAdmissionPolicy
   ),
   Flag.optional,
 );
+const preventSleepFlag = Flag.boolean("prevent-sleep").pipe(
+  Flag.withDescription(
+    "Keep the machine from idle-sleeping while this server runs (macOS: only on AC power) so it stays reachable (equivalent to RYCO_PREVENT_SLEEP).",
+  ),
+  Flag.optional,
+);
 const tailscaleServeFlag = Flag.boolean("tailscale-serve").pipe(
   Flag.withDescription(
     "Configure Tailscale Serve to expose this backend over HTTPS on the Tailnet.",
@@ -274,6 +297,10 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
   logWebSocketEvents: Config.boolean("RYCO_LOG_WS_EVENTS").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  preventSleep: Config.boolean("RYCO_PREVENT_SLEEP").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
@@ -354,6 +381,7 @@ interface CliServerFlags {
   readonly hubRequireE2EE?: Option.Option<boolean>;
   readonly hubRequireApprovedClientE2EE?: Option.Option<boolean>;
   readonly hubE2eePolicy?: Option.Option<string>;
+  readonly preventSleep?: Option.Option<boolean>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
 }
@@ -411,6 +439,7 @@ export const resolveServerConfig = (
       hubRequireE2EE: flags.hubRequireE2EE ?? Option.none(),
       hubRequireApprovedClientE2EE: flags.hubRequireApprovedClientE2EE ?? Option.none(),
       hubE2eePolicy: flags.hubE2eePolicy ?? Option.none(),
+      preventSleep: flags.preventSleep ?? Option.none(),
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
     } satisfies CliServerFlags;
@@ -661,6 +690,7 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
+      preventSleep: Option.getOrUndefined(normalizedFlags.preventSleep) ?? env.preventSleep ?? false,
       hubConnector,
       hubE2eePolicy,
     };
@@ -1290,6 +1320,7 @@ const sharedServerCommandFlags = {
   hubRequireE2EE: hubRequireE2EEFlag,
   hubRequireApprovedClientE2EE: hubRequireApprovedClientE2EEFlag,
   hubE2eePolicy: hubE2eePolicyFlag,
+  preventSleep: preventSleepFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
 } as const;
@@ -2961,6 +2992,313 @@ const runServerCommand = (
     return yield* runServer.pipe(Effect.provideService(ServerConfig, config));
   });
 
+
+// ─── ryco service ─────────────────────────────────────────────────────────────
+
+const serviceLocationFlags = { baseDir: baseDirFlag } as const;
+
+const resolveServiceContext = Effect.fn("resolveServiceContext")(function* (
+  baseDir: Option.Option<string>,
+) {
+  const platform = nodeServicePlatform();
+  if (platform === null) {
+    return yield* Effect.fail(
+      new Error(
+        "Background services are supported on macOS (launchd) and Linux (systemd). On other systems, run `ryco serve` under your own process manager.",
+      ),
+    );
+  }
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveCliAuthConfig({ baseDir }, logLevel);
+  const defaultBaseDir = yield* resolveBaseDir(undefined);
+  return {
+    platform,
+    config,
+    label: nodeServiceLabel(config.baseDir, defaultBaseDir),
+    logPath: NodePath.join(config.logsDir, "service.log"),
+  };
+});
+
+class ServiceCommandError extends Data.TaggedError("ServiceCommandError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+const serviceProcess = <A>(run: () => Promise<A>) =>
+  Effect.tryPromise({
+    try: run,
+    catch: (cause) =>
+      new ServiceCommandError({
+        message: cause instanceof Error ? cause.message : String(cause),
+        cause,
+      }),
+  });
+
+/** The `serve` arguments a service runs with, from the flags `service install` was given. */
+export function buildServiceServeArgs(input: {
+  readonly baseDir: string;
+  readonly cwd: string;
+  readonly host: Option.Option<string>;
+  readonly port: Option.Option<number>;
+  readonly hubConnectorEnabled: Option.Option<boolean>;
+  readonly hubOrigin: Option.Option<string>;
+  readonly hubNodeName: Option.Option<string>;
+  readonly hubAllowFileSecretStore: Option.Option<boolean>;
+  readonly hubE2eePolicy: Option.Option<string>;
+  readonly tailscaleServeEnabled: Option.Option<boolean>;
+  readonly tailscaleServePort: Option.Option<number>;
+  readonly restrictToCwd: Option.Option<boolean>;
+  readonly preventSleep: Option.Option<boolean>;
+}): string[] {
+  const args = ["serve", "--base-dir", input.baseDir];
+  const value = (flag: string, option: Option.Option<string | number>) => {
+    if (Option.isSome(option)) args.push(flag, String(option.value));
+  };
+  const toggle = (flag: string, option: Option.Option<boolean>, fallback?: boolean) => {
+    const enabled = Option.getOrUndefined(option) ?? fallback;
+    if (enabled === true) args.push(`--${flag}`);
+    else if (enabled === false && Option.isSome(option)) args.push(`--no-${flag}`);
+  };
+  value("--host", input.host);
+  value("--port", input.port);
+  toggle("hub-connector-enabled", input.hubConnectorEnabled);
+  value("--hub-origin", input.hubOrigin);
+  value("--hub-node-name", input.hubNodeName);
+  toggle("hub-allow-file-secret-store", input.hubAllowFileSecretStore);
+  value("--hub-e2ee-policy", input.hubE2eePolicy);
+  toggle("tailscale-serve", input.tailscaleServeEnabled);
+  value("--tailscale-serve-port", input.tailscaleServePort);
+  toggle("restrict-to-cwd", input.restrictToCwd);
+  // A node installed to stay reachable should not idle-sleep; opt out explicitly.
+  toggle("prevent-sleep", input.preventSleep, true);
+  args.push(input.cwd);
+  return args;
+}
+
+const serviceInstallCommand = Command.make("install", {
+  ...serviceLocationFlags,
+  host: hostFlag,
+  port: portFlag,
+  hubConnectorEnabled: hubConnectorEnabledFlag,
+  hubOrigin: hubOriginFlag,
+  hubNodeName: hubNodeNameFlag,
+  hubAllowFileSecretStore: hubAllowFileSecretStoreFlag,
+  hubE2eePolicy: hubE2eePolicyFlag,
+  tailscaleServeEnabled: tailscaleServeFlag,
+  tailscaleServePort: tailscaleServePortFlag,
+  restrictToCwd: restrictToCwdFlag,
+  preventSleep: preventSleepFlag,
+  cwd: Argument.string("cwd").pipe(
+    Argument.withDescription(
+      "Working directory for provider sessions (defaults to the current directory).",
+    ),
+    Argument.optional,
+  ),
+}).pipe(
+  Command.withDescription(
+    "Run `ryco serve` as a background service that starts at login, restarts if it stops, and keeps the machine awake on AC power (disable with --no-prevent-sleep).",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
+      const scriptPath = yield* serviceProcess(() => resolveCliEntryScript());
+      if (isEphemeralCliInstall(scriptPath)) {
+        return yield* Effect.fail(
+          new Error(
+            "This ryco was started through npx/bunx, which a service cannot rely on after a reboot. Install it first with `npm install -g ryco-cli`, then run `ryco service install` again.",
+          ),
+        );
+      }
+      const cwd = NodePath.resolve(Option.getOrElse(flags.cwd, () => process.cwd()));
+      const args = buildServiceServeArgs({ ...flags, baseDir: config.baseDir, cwd });
+      const environment: Record<string, string> = {
+        // The providers (claude, codex, ...) and tools like tailscale are found
+        // through the PATH of the shell that installed the service.
+        PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+        HOME: NodeOs.homedir(),
+        RYCO_SERVICE_LABEL: label,
+        ...(process.env.LANG ? { LANG: process.env.LANG } : {}),
+      };
+      const definitionPath = yield* serviceProcess(() =>
+        installNodeService(platform, {
+          label,
+          execPath: process.execPath,
+          scriptPath,
+          args,
+          workingDirectory: cwd,
+          logPath,
+          environment,
+        }),
+      );
+      const status = yield* serviceProcess(() => readNodeServiceStatus(platform, label));
+      const hubEnabled = args.includes("--hub-connector-enabled");
+      yield* Console.log(
+        [
+          `Installed Ryco as a background service (${label}).`,
+          `  Definition: ${definitionPath}`,
+          `  Runs:       ryco ${args.join(" ")}`,
+          `  Logs:       ${logPath}  (ryco service logs -f)`,
+          `  State:      ${status.running ? `running (pid ${status.pid ?? "?"})` : "starting"}`,
+          "",
+          "It starts at login and restarts if it stops.",
+          ...(platform === "systemd" && status.lingering === false
+            ? [
+                "Run `sudo loginctl enable-linger $USER` so it also runs at boot without a login.",
+              ]
+            : []),
+          "Next:",
+          "  ryco auth pairing create --ttl 1h   # pair a desktop, browser, or phone",
+          ...(hubEnabled
+            ? ["  ryco hub enroll                     # link this node to your Ryco account"]
+            : []),
+          "  ryco service status",
+          "",
+        ].join("\n"),
+      );
+    }),
+  ),
+);
+
+const serviceUninstallCommand = Command.make("uninstall", { ...serviceLocationFlags }).pipe(
+  Command.withDescription("Stop the background service and remove its definition."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { platform, label } = yield* resolveServiceContext(flags.baseDir);
+      const result = yield* serviceProcess(() => uninstallNodeService(platform, label));
+      yield* Console.log(
+        result.removed
+          ? `Removed the Ryco service (${label}). Node state and pairings are kept.\n`
+          : `No Ryco service (${label}) was installed.\n`,
+      );
+    }),
+  ),
+);
+
+const serviceStartCommand = Command.make("start", { ...serviceLocationFlags }).pipe(
+  Command.withDescription("Start the installed background service."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { platform, label } = yield* resolveServiceContext(flags.baseDir);
+      yield* serviceProcess(() => startNodeService(platform, label));
+      yield* Console.log(`Started ${label}.\n`);
+    }),
+  ),
+);
+
+const serviceStopCommand = Command.make("stop", { ...serviceLocationFlags }).pipe(
+  Command.withDescription("Stop the background service until the next start, login, or boot."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { platform, label } = yield* resolveServiceContext(flags.baseDir);
+      yield* serviceProcess(() => stopNodeService(platform, label));
+      yield* Console.log(`Stopped ${label}.\n`);
+    }),
+  ),
+);
+
+const serviceRestartCommand = Command.make("restart", { ...serviceLocationFlags }).pipe(
+  Command.withDescription("Restart the background service, for example after upgrading ryco-cli."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { platform, label } = yield* resolveServiceContext(flags.baseDir);
+      yield* serviceProcess(() => restartNodeService(platform, label));
+      yield* Console.log(`Restarted ${label}.\n`);
+    }),
+  ),
+);
+
+const serviceStatusCommand = Command.make("status", {
+  ...serviceLocationFlags,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Show whether the background service is installed and running."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
+      const status = yield* serviceProcess(() => readNodeServiceStatus(platform, label));
+      const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+        Effect.map(Option.getOrUndefined),
+        Effect.orElseSucceed(() => undefined),
+      );
+      const origin = status.running ? runtime?.origin : undefined;
+      if (flags.json) {
+        yield* Console.log(JSON.stringify({ ...status, logPath, origin: origin ?? null }));
+        return;
+      }
+      yield* Console.log(
+        [
+          `Service:    ${label} (${platform})`,
+          `Installed:  ${status.installed ? status.definitionPath : "no — run `ryco service install`"}`,
+          `State:      ${
+            status.running
+              ? `running (pid ${status.pid ?? "?"})`
+              : status.loaded
+                ? "loaded, not running"
+                : "not running"
+          }`,
+          ...(origin ? [`Listening:  ${origin}`] : []),
+          ...(status.lingering === false
+            ? ["Linger:     off — it stops at logout (`sudo loginctl enable-linger $USER`)"]
+            : []),
+          `Logs:       ${logPath}`,
+          "",
+        ].join("\n"),
+      );
+    }),
+  ),
+);
+
+const serviceLogsCommand = Command.make("logs", {
+  ...serviceLocationFlags,
+  lines: Flag.integer("lines").pipe(
+    Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100_000 }))),
+    Flag.withAlias("n"),
+    Flag.withDescription("How many trailing lines to print (default 80)."),
+    Flag.optional,
+  ),
+  follow: Flag.boolean("follow").pipe(
+    Flag.withAlias("f"),
+    Flag.withDescription("Keep printing new lines as they are written."),
+    Flag.optional,
+  ),
+}).pipe(
+  Command.withDescription("Print the background service's log."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const { logPath } = yield* resolveServiceContext(flags.baseDir);
+      const lines = Option.getOrElse(flags.lines, () => 80);
+      const follow = Option.getOrElse(flags.follow, () => false);
+      yield* serviceProcess(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            const child = spawnChild(
+              "tail",
+              ["-n", String(lines), ...(follow ? ["-F"] : []), logPath],
+              { stdio: "inherit" },
+            );
+            child.on("error", reject);
+            child.on("exit", () => resolve());
+          }),
+      );
+    }),
+  ),
+);
+
+const serviceCommand = Command.make("service").pipe(
+  Command.withDescription(
+    "Keep this node running in the background: start at login, restart on failure, stay awake.",
+  ),
+  Command.withSubcommands([
+    serviceInstallCommand,
+    serviceUninstallCommand,
+    serviceStartCommand,
+    serviceStopCommand,
+    serviceRestartCommand,
+    serviceStatusCommand,
+    serviceLogsCommand,
+  ]),
+);
+
 const startCommand = Command.make("start", { ...sharedServerCommandFlags }).pipe(
   Command.withDescription("Run the Ryco server."),
   Command.withHandler((flags) => runServerCommand(flags)),
@@ -2988,5 +3326,6 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     hubCommand,
     e2eeCommand,
     projectCommand,
+    serviceCommand,
   ]),
 );

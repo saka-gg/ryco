@@ -279,6 +279,8 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly logWebSocketEvents: boolean;
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
+  /** Hold an OS sleep assertion for the life of this process (`--prevent-sleep`). */
+  readonly preventSleep?: boolean;
   readonly hubConnector?: HubConnectorConfig;
   /**
    * Kept beside `hubConnector` rather than inside it: `resolveHubConnectorConfig`

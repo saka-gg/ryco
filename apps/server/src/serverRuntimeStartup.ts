@@ -897,7 +897,10 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       yield* launchStartupHeartbeat;
       if (serverConfig.startupPresentation === "headless") {
         yield* Effect.logDebug("startup phase: headless access info");
-        const accessInfo = yield* issueHeadlessServeAccessInfo();
+        // A background service restarts unattended; see `HeadlessServeAccessInfo.token`.
+        const accessInfo = yield* issueHeadlessServeAccessInfo({
+          mintToken: process.env.RYCO_SERVICE_LABEL === undefined,
+        });
         yield* runStartupPhase(
           "headless.output",
           Console.log(formatHeadlessServeOutput(accessInfo)),
