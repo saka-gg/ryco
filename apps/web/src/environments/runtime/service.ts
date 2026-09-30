@@ -25,6 +25,7 @@ import {
   createDeviceFrameSource,
   type ReleaseThreadDetailSubscription,
   SavedEnvironmentConnectionCancelledError,
+  SavedEnvironmentCredentialError,
 } from "@ryco/client-runtime/connection";
 export {
   classifyProjectionSnapshot,
@@ -890,6 +891,10 @@ function createSavedEnvironmentClient(
     new WsTransport(() => resolveSavedEnvironmentSocketUrl(environmentId, bearerToken, "/ws"), {
       getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
       getEnvironmentId: () => environmentId,
+      // A remote machine can be asleep or offline for hours; keep trying on a
+      // capped backoff, and keep its status out of the primary's.
+      persistentReconnect: true,
+      recordGlobalConnectionState: false,
       getVersionMismatchHint: () =>
         resolveServerConfigVersionMismatch(
           useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
@@ -1139,7 +1144,9 @@ async function connectSavedEnvironment(
           lastError: "Saved environment is missing its saved credential. Pair it again.",
           lastErrorAt: isoNow(),
         });
-        throw new Error("Saved environment is missing its saved credential.");
+        throw new SavedEnvironmentCredentialError(
+          "Saved environment is missing its saved credential.",
+        );
       }
     }
     const prepared = await prepareSavedEnvironmentRecordForConnection(activeRecord);
@@ -1211,9 +1218,10 @@ async function connectSavedEnvironment(
         }
         if (!activeRecord.desktopSsh) {
           await removeSavedEnvironmentBearerToken(activeRecord.environmentId);
-          throw new Error("Saved environment credential expired. Pair it again.", {
-            cause: error,
-          });
+          throw new SavedEnvironmentCredentialError(
+            "Saved environment credential expired. Pair it again.",
+            { cause: error },
+          );
         }
 
         const issued = await issueDesktopSshBearerSession(activeRecord);
@@ -1267,11 +1275,19 @@ function subscribeBrowserResumeReconnects(listener: (reason: string) => void): (
     }
   };
 
+  // A network change — Wi-Fi to Ethernet, joining a VPN, waking on a new
+  // network — leaves sockets that look open but are dead.
+  const handleOnline = () => {
+    listener("online");
+  };
+
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("pageshow", handlePageShow);
+  window.addEventListener("online", handleOnline);
   return () => {
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     window.removeEventListener("pageshow", handlePageShow);
+    window.removeEventListener("online", handleOnline);
   };
 }
 

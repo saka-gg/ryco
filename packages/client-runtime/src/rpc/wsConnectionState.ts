@@ -12,6 +12,8 @@ export const WS_RECONNECT_BACKOFF_FACTOR = 2;
 export const WS_RECONNECT_MAX_DELAY_MS = 64_000;
 export const WS_RECONNECT_MAX_RETRIES = 7;
 export const WS_RECONNECT_MAX_ATTEMPTS = WS_RECONNECT_MAX_RETRIES + 1;
+/** Ceiling for a connection that never gives up — a saved remote environment. */
+export const WS_PERSISTENT_RECONNECT_MAX_DELAY_MS = 60_000;
 
 export interface WsConnectionStatus {
   readonly attemptCount: number;
@@ -110,6 +112,26 @@ export interface WsConnectionMetadata {
   /** When present, the record call also writes this environment's keyed slot. */
   readonly environmentId?: EnvironmentId | null;
   readonly versionMismatchHint?: string | null;
+  /**
+   * `false` records only the environment's keyed slot. A secondary environment
+   * must not overwrite the global status, which the app reads as its primary
+   * connection's — and reconnects the primary on.
+   */
+  readonly recordGlobal?: boolean;
+  /** The socket retries forever with a capped backoff, so it is never `exhausted`. */
+  readonly persistentReconnect?: boolean;
+}
+
+/** Applies one transition to the environment's slot and, unless opted out, the global status. */
+function recordTransition(
+  metadata: WsConnectionMetadata | undefined,
+  transition: (current: WsConnectionStatus) => WsConnectionStatus,
+): WsConnectionStatus {
+  updateWsConnectionStatusForEnvironment(metadata?.environmentId, transition);
+  if (metadata?.recordGlobal === false && metadata.environmentId) {
+    return getWsConnectionStatusForEnvironment(metadata.environmentId);
+  }
+  return updateWsConnectionStatus(transition);
 }
 
 function normalizeConnectionLabel(label: string | null | undefined): string | null {
@@ -174,8 +196,7 @@ export function recordWsConnectionAttempt(
     reconnectPhase: "attempting",
     socketUrl,
   });
-  updateWsConnectionStatusForEnvironment(metadata?.environmentId, transition);
-  return updateWsConnectionStatus(transition);
+  return recordTransition(metadata, transition);
 }
 
 export function recordWsConnectionOpened(metadata?: WsConnectionMetadata): WsConnectionStatus {
@@ -193,12 +214,11 @@ export function recordWsConnectionOpened(metadata?: WsConnectionMetadata): WsCon
     reconnectAttemptCount: 0,
     reconnectPhase: "idle",
   });
-  updateWsConnectionStatusForEnvironment(metadata?.environmentId, transition);
   appAtomRegistry.set(
     wsConnectionOpenedCountAtom,
     appAtomRegistry.get(wsConnectionOpenedCountAtom) + 1,
   );
-  return updateWsConnectionStatus(transition);
+  return recordTransition(metadata, transition);
 }
 
 function appendHint(message: string | null | undefined, hint: string | null | undefined) {
@@ -215,14 +235,17 @@ export function recordWsConnectionErrored(
   metadata?: WsConnectionMetadata,
 ): WsConnectionStatus {
   const transition = (current: WsConnectionStatus): WsConnectionStatus =>
-    applyDisconnectState(current, {
-      lastError:
-        appendHint(message, metadata?.versionMismatchHint) ??
-        appendHint(current.lastError, metadata?.versionMismatchHint),
-      lastErrorAt: isoNow(),
-    });
-  updateWsConnectionStatusForEnvironment(metadata?.environmentId, transition);
-  return updateWsConnectionStatus(transition);
+    applyDisconnectState(
+      current,
+      {
+        lastError:
+          appendHint(message, metadata?.versionMismatchHint) ??
+          appendHint(current.lastError, metadata?.versionMismatchHint),
+        lastErrorAt: isoNow(),
+      },
+      metadata?.persistentReconnect === true ? { persistentReconnect: true } : undefined,
+    );
+  return recordTransition(metadata, transition);
 }
 
 export function recordWsConnectionClosed(
@@ -242,10 +265,12 @@ export function recordWsConnectionClosed(
           appendHint(details?.reason, metadata?.versionMismatchHint) ??
           appendHint(current.closeReason, metadata?.versionMismatchHint),
       },
-      connectionLabel === null ? undefined : { connectionLabel },
+      {
+        ...(connectionLabel === null ? {} : { connectionLabel }),
+        ...(metadata?.persistentReconnect === true ? { persistentReconnect: true } : {}),
+      },
     );
-  updateWsConnectionStatusForEnvironment(metadata?.environmentId, transition);
-  return updateWsConnectionStatus(transition);
+  return recordTransition(metadata, transition);
 }
 
 export function setBrowserOnlineStatus(online: boolean): WsConnectionStatus {
@@ -285,6 +310,19 @@ export function seedWsConnectionOnlineStatus(
   return setBrowserOnlineStatus(appLifecycle.isOnline());
 }
 
+/**
+ * Backoff for a connection that never gives up: the same doubling as the
+ * bounded schedule, held at `WS_PERSISTENT_RECONNECT_MAX_DELAY_MS` instead of
+ * ending.
+ */
+export function getPersistentWsReconnectDelayMs(retryIndex: number): number {
+  const index = Number.isInteger(retryIndex) && retryIndex > 0 ? retryIndex : 0;
+  return Math.min(
+    Math.round(WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** Math.min(index, 16)),
+    WS_PERSISTENT_RECONNECT_MAX_DELAY_MS,
+  );
+}
+
 export function getWsReconnectDelayMsForRetry(retryIndex: number): number | null {
   if (!Number.isInteger(retryIndex) || retryIndex < 0 || retryIndex >= WS_RECONNECT_MAX_RETRIES) {
     return null;
@@ -304,10 +342,13 @@ function applyDisconnectState(
   metadata?: WsConnectionMetadata,
 ): WsConnectionStatus {
   const disconnectedAt = current.disconnectedAt ?? isoNow();
+  const retryIndex = Math.max(0, current.reconnectAttemptCount - 1);
   const nextRetryDelayMs =
     current.nextRetryAt !== null || current.reconnectPhase === "exhausted"
       ? null
-      : getWsReconnectDelayMsForRetry(Math.max(0, current.reconnectAttemptCount - 1));
+      : metadata?.persistentReconnect === true
+        ? getPersistentWsReconnectDelayMs(retryIndex)
+        : getWsReconnectDelayMsForRetry(retryIndex);
 
   return {
     ...current,

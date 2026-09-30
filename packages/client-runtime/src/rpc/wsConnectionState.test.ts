@@ -6,6 +6,7 @@ import {
   clearWsConnectionStatusForEnvironment,
   getWsConnectionStatus,
   getWsConnectionStatusForEnvironment,
+  getPersistentWsReconnectDelayMs,
   getWsReconnectDelayMsForRetry,
   getWsConnectionUiState,
   recordWsConnectionAttempt,
@@ -200,5 +201,31 @@ describe("per-environment wsConnectionState", () => {
     recordWsConnectionClosed({ code: 1006, reason: "gone" });
 
     expect(getWsConnectionStatusForEnvironment(ENV_A).phase).toBe("connected");
+  });
+
+  it("never exhausts a persistently reconnecting environment", () => {
+    const environmentId = "env-persistent" as EnvironmentId;
+    const metadata = { environmentId, recordGlobal: false, persistentReconnect: true } as const;
+    for (let attempt = 0; attempt < WS_RECONNECT_MAX_ATTEMPTS + 4; attempt += 1) {
+      recordWsConnectionAttempt("ws://remote:3773/ws", metadata);
+      recordWsConnectionErrored("Unable to connect to the Ryco server WebSocket.", metadata);
+      recordWsConnectionClosed({ code: 1006, reason: "" }, metadata);
+    }
+
+    expect(getWsConnectionStatusForEnvironment(environmentId).reconnectPhase).toBe("waiting");
+    expect(getPersistentWsReconnectDelayMs(20)).toBe(60_000);
+  });
+
+  it("keeps a secondary environment out of the global status", () => {
+    recordWsConnectionAttempt("ws://localhost:3020/ws");
+    recordWsConnectionOpened();
+    const environmentId = "env-secondary" as EnvironmentId;
+    const metadata = { environmentId, recordGlobal: false } as const;
+
+    recordWsConnectionAttempt("ws://remote:3773/ws", metadata);
+    recordWsConnectionErrored("Unable to connect to the Ryco server WebSocket.", metadata);
+
+    expect(getWsConnectionStatus().phase).toBe("connected");
+    expect(getWsConnectionStatusForEnvironment(environmentId).phase).toBe("disconnected");
   });
 });

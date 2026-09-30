@@ -11,6 +11,7 @@ import {
   trackRpcRequestSent,
 } from "./requestLatencyState.ts";
 import {
+  getPersistentWsReconnectDelayMs,
   getWsReconnectDelayMsForRetry,
   recordWsConnectionAttempt,
   recordWsConnectionClosed,
@@ -68,6 +69,17 @@ export interface WsProtocolLifecycleHandlers {
   readonly getReconnectDelayMs?: (retryCount: number) => number;
   readonly preserveSocketPath?: boolean;
   readonly shouldReconnect?: () => boolean;
+  /**
+   * Retry forever with a capped backoff rather than giving up after
+   * `WS_RECONNECT_MAX_RETRIES`. For a saved remote environment, which nothing
+   * else would ever reconnect once its schedule ran out.
+   */
+  readonly persistentReconnect?: boolean;
+  /**
+   * `false` keeps this socket's status out of the global status, which the app
+   * reads as its primary connection's. Its environment slot is still written.
+   */
+  readonly recordGlobalConnectionState?: boolean;
   readonly authorizeRequest?: (info: { readonly tag: string; readonly stream: boolean }) => boolean;
   /** Secondary feature channels must not replace the app's primary status. */
   readonly recordConnectionState?: boolean;
@@ -109,6 +121,8 @@ function resolveConnectionMetadata(handlers?: WsProtocolLifecycleHandlers): WsCo
     connectionLabel: handlers?.getConnectionLabel?.() ?? null,
     environmentId: handlers?.getEnvironmentId?.() ?? null,
     versionMismatchHint: handlers?.getVersionMismatchHint?.() ?? null,
+    ...(handlers?.recordGlobalConnectionState === false ? { recordGlobal: false } : {}),
+    ...(handlers?.persistentReconnect === true ? { persistentReconnect: true } : {}),
   };
 }
 
@@ -194,13 +208,19 @@ export function createWsRpcProtocolLayer(
   handlers?: WsProtocolLifecycleHandlers,
 ) {
   const lifecycle = composeLifecycleHandlers(handlers);
+  const persistent = handlers?.persistentReconnect === true;
   const retryPolicy = Schedule.addDelay(
-    Schedule.recurs(handlers?.reconnectMaxRetries ?? WS_RECONNECT_MAX_RETRIES),
+    Schedule.recurs(
+      handlers?.reconnectMaxRetries ??
+        (persistent ? Number.MAX_SAFE_INTEGER : WS_RECONNECT_MAX_RETRIES),
+    ),
     ({ output: retryCount }) =>
       Effect.succeed(
         Duration.millis(
           handlers?.getReconnectDelayMs?.(retryCount) ??
-            getWsReconnectDelayMsForRetry(retryCount) ??
+            (persistent
+              ? getPersistentWsReconnectDelayMs(retryCount)
+              : getWsReconnectDelayMsForRetry(retryCount)) ??
             0,
         ),
       ),
