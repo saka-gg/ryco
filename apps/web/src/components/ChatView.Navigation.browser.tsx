@@ -1564,6 +1564,9 @@ describe("ChatView Navigation (full app)", () => {
       window.desktopBridge = {
         pickFolder,
         setTheme: vi.fn().mockResolvedValue(undefined),
+        // The primary-environment auth and URL resolvers call this on any later
+        // navigation; leaving it out throws the app into the root error view.
+        getLocalEnvironmentBootstrap: () => null,
       } as unknown as NonNullable<typeof window.desktopBridge>;
 
       await page.getByTestId("sidebar-add-project-trigger").click();
