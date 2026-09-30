@@ -14,7 +14,7 @@ import {
   makeAiFocusModelOverridePatch,
   resolveAiFocusEnvironmentRows,
   selectAiFocusManualRefreshTargets,
-} from "./AiFocusSettings.logic";
+} from "./aiFocusSettings.ts";
 
 const envA = EnvironmentId.make("environment-a");
 const envB = EnvironmentId.make("environment-b");

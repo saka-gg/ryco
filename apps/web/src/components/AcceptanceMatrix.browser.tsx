@@ -580,7 +580,12 @@ describe("acceptance matrix — hosted entry surfaces and connection controls", 
 // the comment legend so an alias cannot drift from the file it points at.
 const SUITE_FILES = {
   AM: "./AcceptanceMatrix.browser.tsx",
-  CV: "./ChatView.browser.tsx",
+  CVNavigation: "./ChatView.Navigation.browser.tsx",
+  CVConversation: "./ChatView.Conversation.browser.tsx",
+  CVComposer: "./ChatView.Composer.browser.tsx",
+  CVWorkspace: "./ChatView.Workspace.browser.tsx",
+  CVPhoneSurfaces: "./ChatView.PhoneSurfaces.browser.tsx",
+  CVPhoneComposer: "./ChatView.PhoneComposer.browser.tsx",
   HR: "./hostedHub/HostedHubRoot.browser.tsx",
   HN: "./hostedHub/HostedNodeRoutes.browser.tsx",
   HC: "./hostedHub/HostedConnectionControls.browser.tsx",
@@ -721,48 +726,48 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "home navigation",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "navigates the phone stack from the thread app bar to Home",
   },
   {
     cell: "thread @320",
-    file: "CV",
+    file: "CVComposer",
     test: "contains the active chat and composer at 320 CSS pixels",
   },
   {
     cell: "thread keyboard",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "keeps the composer and send action above a stubbed software keyboard on phones",
   },
   {
     cell: "thread coarse landscape single action",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "shows exactly one set of pending-answer actions on a coarse landscape phone",
   },
   {
     cell: "thread keyboard insets rotation",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "tracks keyboard insets across orientation changes and removes them when closed",
   },
   {
     cell: "thread rotation state",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "preserves route, draft, and panel search state across a mid-size rotation tier flip",
   },
   {
     cell: "thread desktop no keyboard vars",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "publishes no keyboard variables and changes no composer geometry without an inset",
   },
   {
     cell: "approval @320",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "renders the full approval detail scrollable with all actions visible on a phone",
   },
   { cell: "approval @320 keyboard", file: "AC", test: "stays readable and actionable at " },
   {
     cell: "approval @390 arrival",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "keeps approval actions visible when an approval arrives while the phone composer is expanded",
   },
   {
@@ -777,22 +782,22 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "diff @320",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "renders desktop-shaped workspace links full-screen at 320px with contained diff scrolling and a files push",
   },
   {
     cell: "diff @390 full-screen",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "promotes the workspace panel to a full-screen phone surface with history-coherent back",
   },
   {
     cell: "diff/files coarse landscape",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "contains the review and files surfaces on a coarse landscape phone",
   },
   {
     cell: "diff rotation",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "preserves the open review surface across a mid-size rotation tier flip",
   },
   {
@@ -807,12 +812,12 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "terminal @320 + coarse landscape",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "contains the terminal surface at 320px and on a coarse landscape phone",
   },
   {
     cell: "terminal @390 toolbar",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "renders the terminal surface full-screen with a 44px toolbar above a stubbed keyboard",
   },
   {
@@ -828,7 +833,7 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "settings @390 from Home",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "presents phone settings full-screen from Home with the labeled section list",
   },
   {
@@ -838,12 +843,12 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "settings rotation",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "preserves open settings across a mid-size rotation tier flip",
   },
   {
     cell: "settings desktop dialog",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "keeps the desktop settings dialog presentation on desktop viewports",
   },
   { cell: "settings desktop panels", file: "SP", test: "persists the diff behavior toggles" },
@@ -881,7 +886,7 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "coarse-pointer hidden shortcut hints",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "hides keyboard-shortcut hints in the command palette on coarse pointers",
   },
   {
@@ -911,12 +916,12 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "200% text — app bar",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "keeps phone app-bar controls visible at 200% text scale at 320px and 390px",
   },
   {
     cell: "safe areas — surfaces",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "pads phone surfaces from the safe-area insets directly instead of the root inset",
   },
   {
@@ -926,7 +931,7 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "desktop regression — sidebar density",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "keeps tablet-width sidebar density unchanged on coarse pointers",
   },
   {
@@ -941,7 +946,7 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "icon-only accessible names",
-    file: "CV",
+    file: "CVPhoneSurfaces",
     test: "gives every visible phone control an accessible name across Home, thread, and sheets",
   },
 
@@ -988,17 +993,17 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   },
   {
     cell: "step4 composer — one-tap focus in activation task",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "focuses the phone composer editor in the activating task on the first tap",
   },
   {
     cell: "step4 composer — 16px type across tier",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "keeps a 16px composer type size across the whole phone tier",
   },
   {
     cell: "step4 composer — collapse across 640-767",
-    file: "CV",
+    file: "CVPhoneComposer",
     test: "collapses the composer across the whole phone tier, including 640-767px viewports",
   },
   {

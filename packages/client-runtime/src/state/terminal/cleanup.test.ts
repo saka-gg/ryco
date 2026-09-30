@@ -2,7 +2,7 @@ import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { ThreadId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { collectActiveTerminalThreadIds } from "./terminalStateCleanup";
+import { collectActiveTerminalThreadIds } from "./cleanup.ts";
 
 const threadId = (id: string): ThreadId => ThreadId.make(id);
 const threadKey = (environmentId: string, id: string): string =>

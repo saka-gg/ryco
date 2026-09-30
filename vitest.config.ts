@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { defineConfig } from "vite-plus/test/config";
+import { ciTestReporting } from "./scripts/lib/vitestReporting.ts";
 
 export default defineConfig({
   resolve: {
@@ -15,6 +16,7 @@ export default defineConfig({
     ],
   },
   test: {
+    ...ciTestReporting(),
     testTimeout: 60_000,
     hookTimeout: 60_000,
   },

@@ -59,6 +59,7 @@ import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
 import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
 import { navigateHub, resetHubRoutesForTests } from "../../hostedHub/hubRoutes";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
+import { useUiStateStore } from "../../uiStateStore";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { HostedHubRoot } from "./HostedHubRoot";
 import { createBrowserWorkspaceMetadataCache } from "../../persistence/workspaceMetadataCache";
@@ -244,6 +245,9 @@ describe("hosted node directory", () => {
       payloadBytes: workspaceMetadataPayloadBytes(snapshot),
       updatedAt: NOW,
     });
+    // The UI store hydrates before beforeEach clears localStorage. Select the
+    // view under test explicitly instead of inheriting another suite's mode.
+    useUiStateStore.getState().setSidebarMode("inbox");
     seedDirectory([cachedNode]);
     const selectNode = vi.spyOn(hostedHubController, "selectNode");
     const rootRoute = createRootRoute({ component: HostedHubRoot });

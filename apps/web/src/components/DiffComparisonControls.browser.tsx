@@ -70,7 +70,6 @@ describe("comparison controls", () => {
       .element(screen.getByText(/Staged, unstaged, and untracked changes are excluded/))
       .toBeVisible();
     await expect.poll(() => f.read.mock.calls[0]?.[0]).toEqual({ ref: "main", mode: "mergeBase" });
-    await page.screenshot({ path: "../../output/task05-comparison.png" });
     f.read.mockResolvedValueOnce(result("main", "mergeBase", "moved12345"));
     await screen.getByRole("button", { name: "Refresh comparison" }).click();
     await expect.element(screen.getByText(/selected reference moved/)).toBeVisible();

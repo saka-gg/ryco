@@ -63,6 +63,7 @@ vi.mock("../../../environments/runtime", () => {
     getSavedEnvironmentRuntimeState: () => null,
     hasSavedEnvironmentRegistryHydrated: () => true,
     listSavedEnvironmentRecords: () => [],
+    listEnvironmentConnections: () => [primaryConnection],
     resetSavedEnvironmentRegistryStoreForTests: () => undefined,
     resetSavedEnvironmentRuntimeStoreForTests: () => undefined,
     resolveEnvironmentHttpUrl: (_environmentId: unknown, path: string) =>
@@ -247,7 +248,22 @@ async function mountSurface() {
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
 describe("PhoneSettingsSurface", () => {
-  beforeAll(() => {
+  beforeAll(async () => {
+    // Navigation assertions exercise rendered panels. Resolve their lazy modules
+    // once so cold Vite transforms cannot exhaust a short interaction wait.
+    await Promise.all([
+      import("../../settings/ProvidersSettingsPanel"),
+      import("../../settings/AiFocusSettings"),
+      import("../../settings/OpinionatedPluginsSettings"),
+      import("../../settings/McpServersSettings"),
+      import("../../settings/AppearanceSettings"),
+      import("../../settings/KeybindingsSettings"),
+      import("../../settings/SourceControlSettings"),
+      import("../../settings/ConnectionsSettings"),
+      import("../../settings/NodeSecuritySettings"),
+      import("../../settings/DiagnosticsSettings"),
+      import("../../settings/StatisticsPanel"),
+    ]);
     syncDocumentPresentationTier();
   });
 

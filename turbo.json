@@ -6,6 +6,13 @@
   "globalDependencies": [
     "tsconfig.base.json",
     "tsconfig.node.json",
+    // Shared test configuration and build helpers are imported across workspace
+    // boundaries that Turbo cannot infer from package dependencies.
+    "vitest.config.ts",
+    "scripts/lib/vitestReporting.ts",
+    "scripts/lib/brand-assets.ts",
+    "scripts/lib/resolve-catalog.ts",
+    "scripts/lib/build-timing.ts",
     "native/resource-monitor/Cargo.toml",
     "native/resource-monitor/Cargo.lock",
     "native/resource-monitor/rust-toolchain.toml",
@@ -67,6 +74,13 @@
       // This stops a README or test-only edit from busting the build cache
       // without risking a stale hit on a real source change.
       "inputs": ["$TURBO_DEFAULT$", "!**/*.md", "!**/*.test.ts", "!**/*.test.tsx", "!**/*.spec.ts"]
+    },
+    "@ryco/web#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"],
+      // Tailwind scans test fixtures too. Keep them in this package's hash so
+      // a utility added in a test cannot change CSS behind a stale cache hit.
+      "inputs": ["$TURBO_DEFAULT$", "!**/*.md"]
     },
     "@ryco/desktop#build": {
       "dependsOn": ["^build"],
