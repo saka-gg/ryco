@@ -311,12 +311,16 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         Option.none(),
       ).pipe(
         Effect.provide(
-          Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })), NetService.layer),
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
         ),
         Effect.result,
       );
       assert.isTrue(result._tag === "Failure");
-      if (result._tag === "Failure") assert.include(String(result.failure), `Unknown command "${word}"`);
+      if (result._tag === "Failure")
+        assert.include(String(result.failure), `Unknown command "${word}"`);
       const fs = yield* FileSystem.FileSystem;
       assert.isFalse(yield* fs.exists(join(process.cwd(), word)));
 
@@ -327,7 +331,10 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         Option.none(),
       ).pipe(
         Effect.provide(
-          Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })), NetService.layer),
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
         ),
       );
       expect(created.cwd).toBe(folder);
