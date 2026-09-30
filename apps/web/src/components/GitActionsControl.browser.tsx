@@ -27,6 +27,7 @@ const {
   activeDraftThreadRef,
   primaryServerConfigRef,
   liveBranchRef,
+  isDefaultRefRef,
   hasServerThreadRef,
   refreshGitStatusSpy,
   runStackedActionMutateAsyncSpy,
@@ -41,6 +42,7 @@ const {
   activeDraftThreadRef: { current: null as unknown },
   primaryServerConfigRef: { current: null as ServerConfig | null },
   liveBranchRef: { current: "" },
+  isDefaultRefRef: { current: false },
   hasServerThreadRef: { current: true },
   refreshGitStatusSpy: vi.fn(() => Promise.resolve(null)),
   runStackedActionMutateAsyncSpy: vi.fn(() => activeRunStackedActionDeferredRef.current.promise),
@@ -110,7 +112,7 @@ vi.mock("~/lib/gitStatusState", () => ({
         baseUrl: "https://github.com",
       },
       hasPrimaryRemote: true,
-      isDefaultRef: false,
+      isDefaultRef: isDefaultRefRef.current,
       refName: liveBranchRef.current,
       hasWorkingTreeChanges: false,
       workingTree: { files: [], insertions: 0, deletions: 0 },
@@ -263,6 +265,7 @@ function setEnvironmentConfig(environmentId: EnvironmentId, prefix: string | nul
 }
 
 import GitActionsControl from "./GitActionsControl";
+import { OverviewRail } from "./overview/OverviewRail";
 
 function findButtonByText(text: string): HTMLButtonElement | null {
   return (Array.from(document.querySelectorAll("button")).find((button) =>
@@ -304,6 +307,7 @@ describe("GitActionsControl thread-scoped progress toast", () => {
     setEnvironmentConfig(ENVIRONMENT_A, "ryco");
     setEnvironmentConfig(ENVIRONMENT_B, "team/saved");
     liveBranchRef.current = BRANCH_NAME;
+    isDefaultRefRef.current = false;
   });
 
   afterEach(() => {
@@ -378,6 +382,60 @@ describe("GitActionsControl thread-scoped progress toast", () => {
       vi.useRealTimers();
       await screen.unmount();
       host.remove();
+    }
+  });
+
+  it("runs the rail's suggested action directly without first opening its options menu", async () => {
+    const screen = await render(
+      <OverviewRail label="Overview" pinned onPinnedChange={vi.fn()}>
+        <GitActionsControl
+          gitCwd={GIT_CWD}
+          activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
+          appearance="rail"
+        />
+      </OverviewRail>,
+    );
+    try {
+      const primary = document.querySelector<HTMLButtonElement>(
+        "[data-overview-rail-item]:not([data-overview-rail-secondary])",
+      )!;
+      expect(primary.textContent).toContain("Push & create PR");
+      primary.click();
+      await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledOnce());
+      expect(document.querySelector('[data-slot="menu-popup"]')).toBeNull();
+    } finally {
+      activeRunStackedActionDeferredRef.current.reject(new Error("test cleanup"));
+      await Promise.resolve();
+      await screen.unmount();
+    }
+  });
+
+  it("keeps the default-branch confirmation on the rail's direct Git action", async () => {
+    isDefaultRefRef.current = true;
+    liveBranchRef.current = "main";
+    const screen = await render(
+      <OverviewRail label="Overview" pinned onPinnedChange={vi.fn()}>
+        <GitActionsControl
+          gitCwd={GIT_CWD}
+          activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
+          appearance="rail"
+        />
+      </OverviewRail>,
+    );
+    try {
+      document
+        .querySelector<HTMLButtonElement>(
+          "[data-overview-rail-item]:not([data-overview-rail-secondary])",
+        )!
+        .click();
+      await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).not.toBeNull());
+      expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+      const abort = findButtonByText("Abort")!;
+      abort.click();
+      await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
+      expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
     }
   });
 

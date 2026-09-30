@@ -8,6 +8,7 @@ import type { ThreadSubagentView } from "../../threadWorkspaceViewModel";
 import {
   buildOpenAgentSearch,
   buildOpenAgentsSearch,
+  buildOpenBrowserSearch,
   buildOpenFilesSearch,
   buildOpenReviewSearch,
   buildOpenSimulatorSearch,
@@ -40,6 +41,7 @@ export interface UseChatWorkspacePanelsResult {
   onOpenFilesPanel: () => void;
   onOpenTerminalPanel: () => void;
   onOpenSimulatorPanel: () => void;
+  onOpenBrowserPanel: () => void;
   onToggleWorkspacePanel: () => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onCloseDiff: () => void;
@@ -190,6 +192,27 @@ export function useChatWorkspacePanels(
       search: nextSearch,
     });
   });
+  const onOpenBrowserPanel = useEvent(() => {
+    // The frozen phone tier has no browser workspace (AGENTS.md).
+    if (isPhoneTier) return;
+    const nextSearch = (previous: Record<string, unknown>) => buildOpenBrowserSearch(previous);
+    if (routeKind === "draft" && draftId) {
+      void navigate({
+        to: "/draft/$draftId",
+        params: { draftId },
+        replace: true,
+        search: nextSearch,
+      });
+      return;
+    }
+    if (!isServerThread) return;
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId, threadId },
+      replace: true,
+      search: nextSearch,
+    });
+  });
   const onToggleWorkspacePanel = useEvent(() => {
     if (externalToggleWorkspacePanel) {
       externalToggleWorkspacePanel();
@@ -322,6 +345,7 @@ export function useChatWorkspacePanels(
     onOpenFilesPanel,
     onOpenTerminalPanel,
     onOpenSimulatorPanel,
+    onOpenBrowserPanel,
     onToggleWorkspacePanel,
     onOpenTurnDiff,
     onCloseDiff,

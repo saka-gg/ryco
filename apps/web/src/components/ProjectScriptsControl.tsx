@@ -1,7 +1,6 @@
 import type { ProjectScript, ProjectScriptIcon, ResolvedKeybindingsConfig } from "@ryco/contracts";
 import {
   BugIcon,
-  ChevronDownIcon,
   FlaskConicalIcon,
   HammerIcon,
   ListChecksIcon,
@@ -32,12 +31,8 @@ import {
   AlertDialogPopup,
   AlertDialogTitle,
 } from "./ui/alert-dialog";
+import { OverviewRailButton, OverviewRailMenuAction } from "./overview/OverviewRail";
 import { Button } from "./ui/button";
-import {
-  HEADER_CHROME_BUTTON_CLASS_NAME,
-  HEADER_CHROME_GROUP_CLASS_NAME,
-  HEADER_CHROME_ICON_BUTTON_CLASS_NAME,
-} from "./chat/headerChrome";
 import {
   Dialog,
   DialogDescription,
@@ -49,7 +44,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "./ui/menu";
+import { MenuItem, MenuShortcut } from "./ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
@@ -147,6 +142,10 @@ function keybindingFromEvent(event: KeyboardEvent<HTMLInputElement>): string | n
   return parts.join("+");
 }
 
+/**
+ * Project scripts as a desktop overview rail item: the row names the preferred
+ * script and runs it directly. Its options menu runs, edits, or adds scripts.
+ */
 export default function ProjectScriptsControl({
   scripts,
   keybindings,
@@ -266,99 +265,77 @@ export default function ProjectScriptsControl({
     void onDeleteScript(editingScriptId);
   }, [editingScriptId, onDeleteScript]);
 
+  const scriptMenuItems = (
+    <>
+      {scripts.map((script) => {
+        const shortcutLabel = shortcutLabelForCommand(
+          keybindings,
+          commandForProjectScript(script.id),
+        );
+        return (
+          <MenuItem
+            key={script.id}
+            className={`group ${dropdownItemClassName}`}
+            onClick={() => onRunScript(script)}
+          >
+            <ScriptIcon icon={script.icon} className="size-4" />
+            <span className="truncate">
+              {script.runOnWorktreeCreate ? `${script.name} (setup)` : script.name}
+            </span>
+            <span className="relative ms-auto flex h-6 min-w-6 items-center justify-end">
+              {shortcutLabel && (
+                <MenuShortcut className="ms-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0">
+                  {shortcutLabel}
+                </MenuShortcut>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="absolute right-0 top-1/2 size-6 -translate-y-1/2 opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto group-focus-visible:opacity-100 group-focus-visible:pointer-events-auto"
+                aria-label={`Edit ${script.name}`}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  openEditDialog(script);
+                }}
+              >
+                <SettingsIcon className="size-3.5" />
+              </Button>
+            </span>
+          </MenuItem>
+        );
+      })}
+      <MenuItem className={dropdownItemClassName} onClick={openAddDialog}>
+        <PlusIcon className="size-4" />
+        Add action
+      </MenuItem>
+    </>
+  );
+  const primaryShortcutLabel = primaryScript
+    ? shortcutLabelForCommand(keybindings, commandForProjectScript(primaryScript.id))
+    : null;
+
   return (
     <>
       {primaryScript ? (
-        <div aria-label="Project scripts" className={HEADER_CHROME_GROUP_CLASS_NAME} role="group">
-          <Button
-            size="xs"
-            variant="ghost"
-            className={HEADER_CHROME_BUTTON_CLASS_NAME}
-            onClick={() => onRunScript(primaryScript)}
-            title={`Run ${primaryScript.name}`}
-          >
-            <ScriptIcon icon={primaryScript.icon} />
-            <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
-              {primaryScript.name}
-            </span>
-          </Button>
-          <Menu highlightItemOnHover={false}>
-            <MenuTrigger
-              render={
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  className={HEADER_CHROME_ICON_BUTTON_CLASS_NAME}
-                  aria-label="Script actions"
-                />
-              }
-            >
-              <ChevronDownIcon className="size-4" />
-            </MenuTrigger>
-            <MenuPopup align="end">
-              {scripts.map((script) => {
-                const shortcutLabel = shortcutLabelForCommand(
-                  keybindings,
-                  commandForProjectScript(script.id),
-                );
-                return (
-                  <MenuItem
-                    key={script.id}
-                    className={`group ${dropdownItemClassName}`}
-                    onClick={() => onRunScript(script)}
-                  >
-                    <ScriptIcon icon={script.icon} className="size-4" />
-                    <span className="truncate">
-                      {script.runOnWorktreeCreate ? `${script.name} (setup)` : script.name}
-                    </span>
-                    <span className="relative ms-auto flex h-6 min-w-6 items-center justify-end">
-                      {shortcutLabel && (
-                        <MenuShortcut className="ms-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0">
-                          {shortcutLabel}
-                        </MenuShortcut>
-                      )}
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        className="absolute right-0 top-1/2 size-6 -translate-y-1/2 opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto group-focus-visible:opacity-100 group-focus-visible:pointer-events-auto"
-                        aria-label={`Edit ${script.name}`}
-                        onPointerDown={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                        }}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          openEditDialog(script);
-                        }}
-                      >
-                        <SettingsIcon className="size-3.5" />
-                      </Button>
-                    </span>
-                  </MenuItem>
-                );
-              })}
-              <MenuItem className={dropdownItemClassName} onClick={openAddDialog}>
-                <PlusIcon className="size-4" />
-                Add action
-              </MenuItem>
-            </MenuPopup>
-          </Menu>
-        </div>
-      ) : (
-        <Button
-          size="xs"
-          variant="ghost"
-          className={HEADER_CHROME_BUTTON_CLASS_NAME}
-          onClick={openAddDialog}
-          title="Add action"
+        <OverviewRailMenuAction
+          icon={<ScriptIcon icon={primaryScript.icon} className="size-4" />}
+          label={`Run ${primaryScript.name}`}
+          value={primaryShortcutLabel ?? undefined}
+          aria-label={`Run ${primaryScript.name}`}
+          onClick={() => onRunScript(primaryScript)}
+          optionsLabel="Project scripts"
+          menuProps={{ highlightItemOnHover: false }}
         >
-          <PlusIcon className="size-3.5" />
-          <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
-            Add action
-          </span>
-        </Button>
+          {scriptMenuItems}
+        </OverviewRailMenuAction>
+      ) : (
+        <OverviewRailButton icon={<PlusIcon />} label="Add action" onClick={openAddDialog} />
       )}
 
       <Dialog
@@ -384,7 +361,7 @@ export default function ProjectScriptsControl({
           <DialogHeader>
             <DialogTitle>{isEditing ? "Edit Action" : "Add Action"}</DialogTitle>
             <DialogDescription>
-              Actions are project-scoped commands you can run from the top bar or keybindings.
+              Actions are project-scoped commands you can run from the overview or keybindings.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>

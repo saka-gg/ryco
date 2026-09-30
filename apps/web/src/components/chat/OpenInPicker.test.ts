@@ -1,7 +1,7 @@
 import { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { shouldShowOpenInPicker } from "./ChatHeader";
+import { shouldShowOpenInPicker } from "./OpenInPicker";
 
 describe("shouldShowOpenInPicker", () => {
   const primaryEnvironmentId = EnvironmentId.make("environment-primary");

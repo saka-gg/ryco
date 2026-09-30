@@ -714,7 +714,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from the split timeline contexts, which propagate through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-hidden" data-timeline-root="true">
+      <div className={TIMELINE_ROW_ROOT_CLASS_NAME} data-timeline-root="true">
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -810,6 +810,20 @@ function resolveTimelineRowHeight(state: TimelinePositionState, rowIndex: number
 function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
 }
+
+/*
+ * The desktop overview rail floats at the chat column's right edge and
+ * publishes its footprint (from that edge) as `--chat-overview-rail-clearance`.
+ * Rows only give up the part of it their centered margin doesn't already
+ * cover — padding percentages resolve against the list's content width, so
+ * `(100% - 48rem) / 2` is the margin beside a full-width row. Wide columns are
+ * untouched; narrow ones keep text clear of the collapsed rail. The scroller's
+ * own inline padding (px-3 / sm:px-5) already counts toward the footprint.
+ */
+const TIMELINE_ROW_ROOT_CLASS_NAME =
+  "mx-auto w-full min-w-0 max-w-3xl overflow-x-hidden " +
+  "pr-[max(0px,calc(var(--chat-overview-rail-clearance,0px)_-_0.75rem_-_max(0px,(100%_-_48rem)_/_2)))] " +
+  "sm:pr-[max(0px,calc(var(--chat-overview-rail-clearance,0px)_-_1.25rem_-_max(0px,(100%_-_48rem)_/_2)))]";
 
 function TimelineMinimap({
   hasPersistentGutter,

@@ -220,12 +220,13 @@ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/Compos
 import {
   ChatOverviewPanel,
   FloatingOverviewMotionFrame,
-  OverviewSidebarMotionFrame,
   OVERVIEW_FLOATING_EXIT_DURATION_MS,
-  OVERVIEW_SIDEBAR_EXIT_DURATION_MS,
   usePostPushWorkflowWatch,
   useOverviewPanelControls,
 } from "./chat/ChatOverviewPanel";
+import { ChatOverviewRail } from "./chat/ChatOverviewRail";
+import { shouldShowOpenInPicker } from "./chat/OpenInPicker";
+import { resolveOverviewRailEnvironment } from "./overview/overviewRail.logic";
 import { useChatGlobalShortcuts } from "./chat/useChatGlobalShortcuts";
 import { useChatPendingUserInput } from "./chat/useChatPendingUserInput";
 import { useChatWorkspacePanels } from "./chat/useChatWorkspacePanels";
@@ -601,13 +602,18 @@ export default function ChatView(props: ChatViewProps) {
     Record<string, string | null>
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
-  const [planSidebarOpen, setPlanSidebarOpen] = useState(true);
+  // The overview's "open" state: the desktop rail pinned expanded, or the phone
+  // tier's overview surface. Closed by default; plan auto-open and explicit
+  // requests open it.
+  const [planSidebarOpen, setPlanSidebarOpen] = useState(false);
   // Set once the user opens the overview from the new-thread surface, so the
   // empty-thread suppression below yields to an explicit request.
   const [overviewOpenedOnEmptyThread, setOverviewOpenedOnEmptyThread] = useState(false);
   const [overviewFloatingOpen, setOverviewFloatingOpen] = useState(false);
-  const viewportNeedsPlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
-  const shouldUsePlanSidebarSheet = viewportNeedsPlanSidebarSheet || paneThreadRef !== null;
+  // Narrow viewports and split panes present the context-handoff inspection
+  // as a sheet instead of an inline aside.
+  const viewportNeedsInspectionSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const shouldUseInspectionSheet = viewportNeedsInspectionSheet || paneThreadRef !== null;
   const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
   const presentationTier = usePresentationTier();
   // With the thread sidebar collapsed this header owns the workspace's
@@ -622,8 +628,6 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     if (paneThreadRef) setPlanSidebarOpen(false);
   }, [paneThreadRef]);
-  const shouldUsePlanSidebarSheetRef = useRef(shouldUsePlanSidebarSheet);
-  shouldUsePlanSidebarSheetRef.current = shouldUsePlanSidebarSheet;
   const [inspectedContextHandoff, setInspectedContextHandoff] = useState<{
     readonly marker: ContextHandoffTimelineEntry;
     readonly trigger: HTMLButtonElement;
@@ -2123,6 +2127,7 @@ export default function ChatView(props: ChatViewProps) {
     onOpenFilesPanel,
     onOpenTerminalPanel,
     onOpenSimulatorPanel,
+    onOpenBrowserPanel,
     onToggleWorkspacePanel,
     onOpenTurnDiff,
     onCloseDiff,
@@ -2410,6 +2415,12 @@ export default function ChatView(props: ChatViewProps) {
   }, [setOverviewSidebarOpen]);
   const toggleOverviewSidebar = useCallback(
     (nextOpen?: boolean) => {
+      // Desktop: the overview rail is always present, so "open" means pinned
+      // expanded — independent of the workspace panel and the empty thread.
+      if (presentationTier !== "phone") {
+        setOverviewSidebarOpen(typeof nextOpen === "boolean" ? nextOpen : !planSidebarOpen);
+        return;
+      }
       if (workspacePanelOpen) {
         const wantsOpen = typeof nextOpen === "boolean" ? nextOpen : !overviewFloatingOpen;
         setOverviewFloatingOpen(wantsOpen);
@@ -2432,6 +2443,7 @@ export default function ChatView(props: ChatViewProps) {
       setOverviewOpenedOnEmptyThread(wantsOpen);
     },
     [
+      presentationTier,
       showNewThreadSurface,
       overviewFloatingOpen,
       overviewOpenedOnEmptyThread,
@@ -2623,19 +2635,13 @@ export default function ChatView(props: ChatViewProps) {
     setShowScrollToBottom(false);
     // Honor an explicit "open the overview on the next thread" signal, set when
     // implementing a plan in a freshly created thread (`onImplementPlanInNewThread`).
-    // In wide layouts the overview opens by default anyway, but in sheet/narrow
-    // layouts it starts closed on every thread switch — without consuming this
-    // signal the request to surface the new thread's plan would be silently lost.
+    // The overview starts closed on every thread switch — the desktop rail rests
+    // collapsed, and the phone tier's full-screen surface must never open by
+    // default — so without consuming this signal the request to surface the new
+    // thread's plan would be silently lost.
     const openOverviewForNextThread = planSidebarOpenOnNextThreadRef.current;
     planSidebarOpenOnNextThreadRef.current = false;
-    // The phone tier renders the overview as a full-screen surface, so it must
-    // never open by default on a thread switch regardless of viewport width.
-    // Read through the ref: a tier flip alone must not re-run this reset (it
-    // would drop preserved panel state on rotation).
-    setPlanSidebarOpen(
-      openOverviewForNextThread ||
-        (!shouldUsePlanSidebarSheetRef.current && presentationTierRef.current !== "phone"),
-    );
+    setPlanSidebarOpen(openOverviewForNextThread);
     planSidebarDismissedForTurnRef.current = null;
   }, [activeThread?.id]);
 
@@ -2757,6 +2763,8 @@ export default function ChatView(props: ChatViewProps) {
     sourceControlActions: overviewSourceControlActions,
     branchControl: overviewBranchControl,
   } = useOverviewPanelControls({
+    // The frozen phone tier keeps the panel form; desktop renders the rail.
+    appearance: presentationTier === "phone" ? "panel" : "rail",
     gitCwd,
     activeThreadRef,
     routeKind,
@@ -4350,33 +4358,43 @@ export default function ChatView(props: ChatViewProps) {
     setOverviewOpenedOnEmptyThread(false);
   }, [activeThread?.id]);
 
-  // The new-thread surface reads as its own page. The overview panel describes
-  // a thread's history — checks, changes, plan — and an empty thread has none,
-  // so suppress it until the user asks for it. This is a display-time override
-  // rather than a `planSidebarOpen` reset so the panel reappears on its own the
-  // moment the first turn lands, with no second state machine to keep in sync.
+  const isPhoneTier = presentationTier === "phone";
+  // Phone tier (frozen, AGENTS.md): the overview is a full-screen surface, or a
+  // floating overlay over an open workspace panel. The new-thread surface reads
+  // as its own page — an empty thread has no checks, changes, or plan — so it
+  // stays suppressed until the user asks for it. This is a display-time
+  // override rather than a `planSidebarOpen` reset so the panel reappears on
+  // its own the moment the first turn lands.
   const overviewSuppressedForEmptyThread = showNewThreadSurface && !overviewOpenedOnEmptyThread;
   const overviewSidebarVisible =
     planSidebarOpen && !workspacePanelOpen && !overviewSuppressedForEmptyThread;
-  const showFloatingOverviewSidebar = overviewFloatingOpen && workspacePanelOpen;
-  const overviewControlOpen = overviewSidebarVisible || showFloatingOverviewSidebar;
-  // The phone tier always promotes the overview to a full-screen surface;
-  // the width-based inline/sheet fork only applies to the desktop tier.
-  const isPhoneTier = presentationTier === "phone";
-  const showInlineOverviewSidebar =
-    overviewSidebarVisible && !shouldUsePlanSidebarSheet && !isPhoneTier;
-  const showOverviewSidebarSheet =
-    overviewSidebarVisible && (shouldUsePlanSidebarSheet || isPhoneTier);
+  const showFloatingOverviewSidebar = isPhoneTier && overviewFloatingOpen && workspacePanelOpen;
+  const showOverviewSidebarSheet = isPhoneTier && overviewSidebarVisible;
   const renderFloatingOverviewSidebar = useDelayedUnmount(
     showFloatingOverviewSidebar,
     prefersReducedMotion || !workspacePanelOpen ? 0 : OVERVIEW_FLOATING_EXIT_DURATION_MS,
   );
-  const renderInlineOverviewSidebar = useDelayedUnmount(
-    showInlineOverviewSidebar,
-    prefersReducedMotion || shouldUsePlanSidebarSheet || workspacePanelOpen
-      ? 0
-      : OVERVIEW_SIDEBAR_EXIT_DURATION_MS,
-  );
+  // Desktop tier: the overview is the always-present rail, and "open" means
+  // pinned expanded — independent of the workspace panel, which stays a
+  // separate surface.
+  const overviewControlOpen = isPhoneTier
+    ? overviewSidebarVisible || showFloatingOverviewSidebar
+    : planSidebarOpen;
+  const overviewRailEnvironment = useMemo(() => {
+    const active = logicalProjectEnvironments.find(
+      (option) => option.environmentId === environmentId,
+    );
+    return resolveOverviewRailEnvironment({
+      unavailable: activeEnvironmentUnavailableState,
+      active: active ? { label: active.label, isPrimary: active.isPrimary } : null,
+      hasMultipleEnvironments,
+    });
+  }, [
+    activeEnvironmentUnavailableState,
+    environmentId,
+    hasMultipleEnvironments,
+    logicalProjectEnvironments,
+  ]);
 
   // The thread dock renders inside the composer, beneath the approval and
   // pending-input panels (see `ChatComposer`), so an open panel cannot carry it
@@ -4624,17 +4642,9 @@ export default function ChatView(props: ChatViewProps) {
           />
         ) : (
           <ChatHeader
-            activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadTitle={activeThread.title}
             activeProjectName={activeProject?.name}
             isGitRepo={isGitRepo}
-            openInCwd={gitCwd}
-            activeProjectScripts={activeProject?.scripts}
-            preferredScriptId={
-              activeProject ? (lastInvokedScriptByProjectId[activeProject.id] ?? null) : null
-            }
-            keybindings={keybindings}
-            availableEditors={availableEditors}
             worktreeBranch={activeWorktreeSummary?.branch ?? activeThread.branch ?? null}
             worktreeTitle={activeWorktreeSummary?.title ?? null}
             worktreeOrigin={activeWorktreeSummary?.origin ?? null}
@@ -4655,12 +4665,6 @@ export default function ChatView(props: ChatViewProps) {
               workspaceTab: rawSearch.workspaceTab,
             })}
             onToggleWorkspacePanel={onToggleWorkspacePanel}
-            overviewSidebarOpen={overviewControlOpen}
-            onToggleOverviewSidebar={toggleOverviewSidebar}
-            onRunProjectScript={runProjectScript}
-            onAddProjectScript={saveProjectScript}
-            onUpdateProjectScript={updateProjectScript}
-            onDeleteProjectScript={deleteProjectScript}
           />
         )}
       </header>
@@ -4690,8 +4694,71 @@ export default function ChatView(props: ChatViewProps) {
       />
       {/* Main content area with optional plan sidebar */}
       <div className="flex min-h-0 min-w-0 flex-1">
-        {/* Chat column */}
-        <div ref={chatColumnRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Chat column. On the desktop tier it publishes the overview rail's
+            footprint so the transcript keeps its text clear of the rail. */}
+        <div
+          ref={chatColumnRef}
+          className={cn(
+            "relative flex min-h-0 min-w-0 flex-1 flex-col",
+            !isPhoneTier && "[--chat-overview-rail-clearance:4rem]",
+          )}
+        >
+          {!isPhoneTier ? (
+            <ChatOverviewRail
+              environmentId={environmentId}
+              gitCwd={gitCwd}
+              activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
+              activeThreadBranch={activeThread?.branch ?? null}
+              activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
+              activeWorktreePrState={activeWorktreeSummary?.prState}
+              activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
+              activeWorktreeTitle={activeWorktreeSummary?.title}
+              postPushWorkflowWatch={postPushWorkflowWatch}
+              onPostPushDiscoveryComplete={clearPostPushWatch}
+              activeThreadKey={activeThreadKey}
+              activeEnvironmentUnavailableState={activeEnvironmentUnavailableState}
+              changedFileSummaries={activeThread?.turnDiffSummaries}
+              activePlan={activePlan}
+              sidebarProposedPlan={sidebarProposedPlan}
+              threadSubagents={threadSubagents}
+              markdownCwd={gitCwd ?? undefined}
+              workspaceRoot={activeWorkspaceRoot}
+              sourceControlActions={overviewSourceControlActions}
+              branchControl={overviewBranchControl}
+              repositoryIdentity={activeProject?.repositoryIdentity}
+              environment={overviewRailEnvironment}
+              pinned={planSidebarOpen}
+              onPinnedChange={setOverviewSidebarOpen}
+              onFocusReturnFallback={focusComposer}
+              onOpenReview={onOpenReviewPanel}
+              onOpenSubagent={onOpenSubagentPanel}
+              onOpenAgents={onOpenAgentsPanel}
+              onOpenFiles={activeProject ? onOpenFilesPanel : null}
+              filesActive={workspacePanelOpen && rawSearch.workspaceTab === "files"}
+              onOpenBrowser={onOpenBrowserPanel}
+              browserActive={workspacePanelOpen && rawSearch.workspaceTab === "browser"}
+              onToggleTerminal={toggleTerminalVisibility}
+              terminalAvailable={activeProject !== undefined && terminalCapability.allowed}
+              terminalOpen={Boolean(terminalState.terminalOpen)}
+              terminalCount={terminalState.terminalIds.length}
+              keybindings={keybindings}
+              projectScripts={activeProject?.scripts}
+              preferredScriptId={
+                activeProject ? (lastInvokedScriptByProjectId[activeProject.id] ?? null) : null
+              }
+              onRunProjectScript={runProjectScript}
+              onAddProjectScript={saveProjectScript}
+              onUpdateProjectScript={updateProjectScript}
+              onDeleteProjectScript={deleteProjectScript}
+              showOpenInEditor={shouldShowOpenInPicker({
+                activeProjectName: activeProject?.name,
+                activeThreadEnvironmentId: activeThread.environmentId,
+                primaryEnvironmentId,
+              })}
+              availableEditors={availableEditors}
+              openInCwd={gitCwd}
+            />
+          ) : null}
           {/* Messages Wrapper. Stays `flex-1` even while empty so the absolutely
               positioned children below (search bar, floating overview, scroll
               pill) keep a full-height containing block. */}
@@ -5135,7 +5202,7 @@ export default function ChatView(props: ChatViewProps) {
           />
         </div>
         {/* end chat column */}
-        {inspectedContextHandoff && !shouldUsePlanSidebarSheet && !isPhoneTier ? (
+        {inspectedContextHandoff && !shouldUseInspectionSheet && !isPhoneTier ? (
           <aside className="flex min-h-0 w-[25rem] shrink-0 border-l border-border pt-[var(--chat-header-clearance,0px)]">
             <ContextHandoffInspectionPanel
               environmentId={activeThread.environmentId}
@@ -5144,38 +5211,6 @@ export default function ChatView(props: ChatViewProps) {
               onClose={closeContextHandoffInspection}
             />
           </aside>
-        ) : renderInlineOverviewSidebar ? (
-          <OverviewSidebarMotionFrame
-            animate={!prefersReducedMotion}
-            open={showInlineOverviewSidebar}
-          >
-            <ChatOverviewPanel
-              environmentId={environmentId}
-              gitCwd={gitCwd}
-              activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-              activeThreadBranch={activeThread?.branch ?? null}
-              activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-              activeWorktreePrState={activeWorktreeSummary?.prState}
-              activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
-              activeWorktreeTitle={activeWorktreeSummary?.title}
-              postPushWorkflowWatch={postPushWorkflowWatch}
-              activeThreadKey={activeThreadKey}
-              activeEnvironmentUnavailableState={activeEnvironmentUnavailableState}
-              activePlan={activePlan}
-              sidebarProposedPlan={sidebarProposedPlan}
-              threadSubagents={threadSubagents}
-              changedFileSummaries={activeThread?.turnDiffSummaries}
-              sourceControlActions={overviewSourceControlActions}
-              branchControl={overviewBranchControl}
-              markdownCwd={gitCwd ?? undefined}
-              workspaceRoot={activeWorkspaceRoot}
-              mode="sidebar"
-              onOpenFiles={onOpenFilesPanel}
-              onOpenReview={onOpenReviewPanel}
-              onOpenSubagent={onOpenSubagentPanel}
-              onPostPushDiscoveryComplete={clearPostPushWatch}
-            />
-          </OverviewSidebarMotionFrame>
         ) : null}
       </div>
       {/* end horizontal flex container */}
@@ -5202,7 +5237,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddTerminalContext={addTerminalContextToDraft}
         />
       ))}
-      {paneFocused && !isPhoneTier && shouldUsePlanSidebarSheet && inspectedContextHandoff ? (
+      {paneFocused && !isPhoneTier && shouldUseInspectionSheet && inspectedContextHandoff ? (
         <RightPanelSheet open onClose={closeContextHandoffInspection}>
           <ContextHandoffInspectionPanel
             environmentId={activeThread.environmentId}
@@ -5254,35 +5289,6 @@ export default function ChatView(props: ChatViewProps) {
             />
           </PhoneSurfaceScaffold>
         </PhoneWorkSurfaceSheet>
-      ) : shouldUsePlanSidebarSheet ? (
-        <RightPanelSheet open={paneFocused && showOverviewSidebarSheet} onClose={closePlanSidebar}>
-          <ChatOverviewPanel
-            environmentId={environmentId}
-            gitCwd={gitCwd}
-            activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-            activeThreadBranch={activeThread?.branch ?? null}
-            activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-            activeWorktreePrState={activeWorktreeSummary?.prState}
-            activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
-            activeWorktreeTitle={activeWorktreeSummary?.title}
-            postPushWorkflowWatch={postPushWorkflowWatch}
-            activeThreadKey={activeThreadKey}
-            activeEnvironmentUnavailableState={activeEnvironmentUnavailableState}
-            activePlan={activePlan}
-            sidebarProposedPlan={sidebarProposedPlan}
-            threadSubagents={threadSubagents}
-            changedFileSummaries={activeThread?.turnDiffSummaries}
-            sourceControlActions={overviewSourceControlActions}
-            branchControl={overviewBranchControl}
-            markdownCwd={gitCwd ?? undefined}
-            workspaceRoot={activeWorkspaceRoot}
-            mode="sheet"
-            onOpenFiles={onOpenFilesPanel}
-            onOpenReview={onOpenReviewPanel}
-            onOpenSubagent={onOpenSubagentPanel}
-            onPostPushDiscoveryComplete={clearPostPushWatch}
-          />
-        </RightPanelSheet>
       ) : null}
 
       {expandedImage && (

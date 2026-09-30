@@ -2,7 +2,7 @@
 // phone tier variants drive the collision and pill assertions.
 import "../../index.css";
 
-import { EnvironmentId, type ResolvedKeybindingsConfig } from "@ryco/contracts";
+import { EnvironmentId } from "@ryco/contracts";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -213,35 +213,15 @@ describe("hosted connection controls", () => {
       <SidebarProvider>
         <header className="w-full border-b border-border px-5">
           <ChatHeader
-            activeThreadEnvironmentId={selectedNode.environmentId}
             activeThreadTitle="Phone shell implementation"
             activeProjectName="Ryco"
             isGitRepo
-            openInCwd="/repo/project"
-            activeProjectScripts={[
-              {
-                id: "build",
-                name: "Build",
-                command: "bun run build",
-                icon: "build",
-                runOnWorktreeCreate: false,
-              },
-            ]}
-            preferredScriptId={null}
-            keybindings={{} as ResolvedKeybindingsConfig}
-            availableEditors={["vscode"]}
             worktreeBranch="feat/phone-shell"
             worktreeTitle="Phone shell"
             worktreeOrigin="manual"
             workspacePanelOpen={false}
             liveAgentCount={0}
             onToggleWorkspacePanel={vi.fn()}
-            overviewSidebarOpen={false}
-            onToggleOverviewSidebar={vi.fn()}
-            onRunProjectScript={vi.fn()}
-            onAddProjectScript={vi.fn()}
-            onUpdateProjectScript={vi.fn()}
-            onDeleteProjectScript={vi.fn()}
           />
         </header>
       </SidebarProvider>,
@@ -267,12 +247,8 @@ describe("hosted connection controls", () => {
 
       const summaryRect = summary!.getBoundingClientRect();
       expect(summaryRect.width).toBeGreaterThan(0);
-      const otherControls = [
-        document.querySelector('button[aria-label="Toggle overview panel"]'),
-        document.querySelector('button[aria-label="Toggle workspace panel"]'),
-        document.querySelector('[aria-label="Project scripts"]'),
-        document.querySelector('[aria-label="Subscription actions"]'),
-      ];
+      // Overview, scripts, and "Open in editor" live in the overview rail.
+      const otherControls = [document.querySelector('button[aria-label="Toggle workspace panel"]')];
       for (const control of otherControls) {
         expect(control, `header control missing at ${width}px`).not.toBeNull();
         const controlRect = (control as HTMLElement).getBoundingClientRect();

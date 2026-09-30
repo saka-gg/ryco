@@ -58,6 +58,29 @@ export function deriveRepositoryWebUrl(
   }
   return null;
 }
+
+/**
+ * The repository's real remote name (`owner/repo`, or `group/sub/repo` on
+ * nested hosts) for display. Falls back to the browsable remote's path and
+ * finally the identity's own display name.
+ */
+export function deriveRepositoryDisplayName(
+  identity: RepositoryIdentity | null | undefined,
+): string | null {
+  if (!identity) return null;
+  if (identity.owner && identity.name) return `${identity.owner}/${identity.name}`;
+  const remotes = identity.remotes ?? [];
+  const locatorRemote =
+    remotes.find((remote) => remote.name === identity.locator.remoteName) ?? remotes[0];
+  if (locatorRemote?.ownerRepo) return locatorRemote.ownerRepo;
+  const webUrl = deriveRepositoryWebUrl(identity);
+  if (webUrl) {
+    const path = new URL(webUrl).pathname.replace(/^\/+|\/+$/g, "");
+    if (path) return decodeURIComponent(path);
+  }
+  return identity.displayName ?? identity.name ?? null;
+}
+
 export {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,

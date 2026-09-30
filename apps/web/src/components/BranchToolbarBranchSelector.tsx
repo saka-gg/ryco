@@ -7,7 +7,7 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { ArrowDownIcon, ArrowUpIcon, ChevronDownIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ChevronDownIcon, GitBranchIcon } from "lucide-react";
 import {
   useCallback,
   useDeferredValue,
@@ -21,7 +21,6 @@ import {
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { readEnvironmentApi } from "../environmentApi";
-import { readLocalApi } from "../localApi";
 import { gitScopeKey, invalidateScopes, prefetchBranches, useGitBranches } from "../rpc/useGit";
 import { useSourceControlChangeRequestList } from "../rpc/useSourceControl";
 import { useGitStatus } from "../lib/gitStatusState";
@@ -33,14 +32,14 @@ import { useStore } from "../store";
 import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
 import {
   deriveLocalBranchNameFromRemoteRef,
-  deriveRepositoryWebUrl,
   resolveBranchSelectionTarget,
   resolveBranchToolbarValue,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
   shouldIncludeBranchPickerItem,
 } from "./BranchToolbar.logic";
-import { GitIcon } from "./Icons";
+import { OverviewRailButton } from "./overview/OverviewRail";
+import { useRepositoryRemote } from "./sourceControl/useRepositoryRemote";
 import { Button } from "./ui/button";
 import {
   Combobox,
@@ -62,8 +61,10 @@ interface BranchToolbarBranchSelectorProps {
    * "pill" renders the legacy inset branch pill.
    * "panelRow" renders the full-width overview-panel row (branch icon + mono
    * name + ahead/behind + chevron) — see {@link OverviewLayoutProps}.
+   * "rail" renders a desktop overview rail item whose picker opens beside the
+   * rail; the repository remote is a separate rail item there.
    */
-  appearance?: "default" | "pill" | "panelRow";
+  appearance?: "default" | "pill" | "panelRow" | "rail";
   environmentId: EnvironmentId;
   threadId: ThreadId;
   draftId?: DraftId;
@@ -261,21 +262,11 @@ export function BranchToolbarBranchSelector({
     [branchStatusQuery.data?.sourceControlProvider],
   );
   const SourceControlIcon = sourceControlPresentation.Icon;
-  const providerKind = branchStatusQuery.data?.sourceControlProvider?.kind ?? null;
-  const hasKnownProvider = providerKind !== null && providerKind !== "unknown";
-  // Brand icon for a known remote host, otherwise the (colored) git mark for a
-  // local-only repository.
-  const PillIcon = hasKnownProvider ? SourceControlIcon : GitIcon;
-  const repositoryWebUrl = useMemo(
-    () => deriveRepositoryWebUrl(activeProject?.repositoryIdentity),
-    [activeProject?.repositoryIdentity],
-  );
-  const openRepositoryRemote = useCallback(() => {
-    if (!repositoryWebUrl) return;
-    const api = readLocalApi();
-    if (!api) return;
-    void api.shell.openExternal(repositoryWebUrl).catch(() => undefined);
-  }, [repositoryWebUrl]);
+  const repositoryRemote = useRepositoryRemote({
+    identity: activeProject?.repositoryIdentity,
+    provider: branchStatusQuery.data?.sourceControlProvider,
+  });
+  const PillIcon = repositoryRemote.Icon;
   const canonicalActiveBranch = resolveBranchToolbarValue({
     envMode: effectiveEnvMode,
     activeWorktreePath,
@@ -682,6 +673,13 @@ export function BranchToolbarBranchSelector({
     );
   }
 
+  const aheadCount = branchStatusQuery.data?.aheadCount ?? 0;
+  const behindCount = branchStatusQuery.data?.behindCount ?? 0;
+  // Ahead/behind come from the current checkout, so only show them when the
+  // displayed label matches that checkout (not an override/optimistic ref).
+  const showAheadBehind =
+    resolvedActiveBranch === currentGitBranch && (aheadCount > 0 || behindCount > 0);
+
   return (
     <Combobox
       items={branchPickerItems}
@@ -701,7 +699,31 @@ export function BranchToolbarBranchSelector({
       open={isBranchMenuOpen}
       value={resolvedActiveBranch}
     >
-      {appearance === "pill" || appearance === "panelRow" ? (
+      {appearance === "rail" ? (
+        <ComboboxTrigger
+          render={
+            <OverviewRailButton
+              icon={<GitBranchIcon />}
+              label={<span className="font-mono text-[12px]">{triggerLabel}</span>}
+              value={
+                showAheadBehind ? (
+                  <AheadBehindCounts ahead={aheadCount} behind={behindCount} />
+                ) : undefined
+              }
+              // Behind upstream is the one branch state that wants action.
+              tone={showAheadBehind && behindCount > 0 ? "warning" : null}
+              aria-label={[
+                `Branch ${triggerLabel}`,
+                showAheadBehind && aheadCount > 0 ? `${aheadCount} ahead` : null,
+                showAheadBehind && behindCount > 0 ? `${behindCount} behind` : null,
+              ]
+                .filter(Boolean)
+                .join(", ")}
+            />
+          }
+          disabled={(isBranchesSearchPending && refs.length === 0) || isBranchActionPending}
+        />
+      ) : appearance === "pill" || appearance === "panelRow" ? (
         <div
           data-appearance={appearance}
           className={cn(
@@ -712,15 +734,11 @@ export function BranchToolbarBranchSelector({
             className,
           )}
         >
-          {repositoryWebUrl ? (
+          {repositoryRemote.webUrl ? (
             <button
               type="button"
-              onClick={openRepositoryRemote}
-              title={
-                hasKnownProvider
-                  ? `Open on ${sourceControlPresentation.providerName}`
-                  : "Open repository remote"
-              }
+              onClick={repositoryRemote.open}
+              title={repositoryRemote.openLabel}
               aria-label="Open repository remote"
               className={cn(
                 "grid h-full shrink-0 place-items-center text-foreground/80 transition-colors hover:bg-accent",
@@ -769,29 +787,14 @@ export function BranchToolbarBranchSelector({
             >
               {triggerLabel}
             </span>
-            {/* Ahead/behind come from the current checkout, so only show them when
-                the displayed label matches that checkout (not an override/optimistic ref). */}
-            {resolvedActiveBranch === currentGitBranch &&
-            ((branchStatusQuery.data?.aheadCount ?? 0) > 0 ||
-              (branchStatusQuery.data?.behindCount ?? 0) > 0) ? (
+            {showAheadBehind ? (
               <span
                 className={cn(
                   "flex shrink-0 items-center gap-1 font-mono font-semibold text-muted-foreground tabular-nums",
                   appearance === "pill" ? "text-[11px]" : "text-[10px]",
                 )}
               >
-                {(branchStatusQuery.data?.aheadCount ?? 0) > 0 ? (
-                  <span className="flex items-center gap-0.5">
-                    <ArrowUpIcon className="size-[11px]" />
-                    {branchStatusQuery.data?.aheadCount}
-                  </span>
-                ) : null}
-                {(branchStatusQuery.data?.behindCount ?? 0) > 0 ? (
-                  <span className="flex items-center gap-0.5">
-                    <ArrowDownIcon className="size-[11px]" />
-                    {branchStatusQuery.data?.behindCount}
-                  </span>
-                ) : null}
+                <AheadBehindCounts ahead={aheadCount} behind={behindCount} />
               </span>
             ) : null}
             <ChevronDownIcon
@@ -813,9 +816,15 @@ export function BranchToolbarBranchSelector({
         </ComboboxTrigger>
       )}
       <ComboboxPopup
-        align="end"
-        side="top"
-        className="w-80 data-ending-style:translate-y-1 data-starting-style:translate-y-1"
+        align={appearance === "rail" ? "start" : "end"}
+        side={appearance === "rail" ? "left" : "top"}
+        sideOffset={appearance === "rail" ? 10 : undefined}
+        className={cn(
+          "w-80",
+          appearance === "rail"
+            ? "data-ending-style:translate-x-1 data-starting-style:translate-x-1"
+            : "data-ending-style:translate-y-1 data-starting-style:translate-y-1",
+        )}
       >
         <div className="border-b p-1">
           <ComboboxInput
@@ -857,5 +866,24 @@ export function BranchToolbarBranchSelector({
         {branchStatusText ? <ComboboxStatus>{branchStatusText}</ComboboxStatus> : null}
       </ComboboxPopup>
     </Combobox>
+  );
+}
+
+function AheadBehindCounts({ ahead, behind }: { ahead: number; behind: number }) {
+  return (
+    <>
+      {ahead > 0 ? (
+        <span className="flex items-center gap-0.5">
+          <ArrowUpIcon className="size-[11px]" />
+          {ahead}
+        </span>
+      ) : null}
+      {behind > 0 ? (
+        <span className="flex items-center gap-0.5">
+          <ArrowDownIcon className="size-[11px]" />
+          {behind}
+        </span>
+      ) : null}
+    </>
   );
 }

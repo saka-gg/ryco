@@ -95,7 +95,11 @@ export interface OverviewChanges {
   behindCount: number;
 }
 
-export type OverviewPanelMode = "floating" | "sheet" | "sidebar";
+/**
+ * Presentations of the panel form of the overview, used by the phone tier. The
+ * desktop tier renders the overview as the rail (`OverviewRail`).
+ */
+export type OverviewPanelMode = "floating" | "sheet";
 
 /** The data and callbacks rendered by the overview panel's Status Board. */
 export interface OverviewLayoutProps {
