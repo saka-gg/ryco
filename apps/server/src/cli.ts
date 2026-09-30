@@ -3,6 +3,7 @@ import NodeOs from "node:os";
 import NodePath from "node:path";
 
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
+import { canonicalizeHubOrigin } from "@ryco/shared/nodeIdentity";
 import { NetService } from "@ryco/shared/Net";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
 import {
@@ -30,6 +31,7 @@ import {
   LogLevel,
   Option,
   Path,
+  Redacted,
   References,
   Schema,
   SchemaIssue,
@@ -37,7 +39,7 @@ import {
 } from "effect";
 // oxlint-disable-next-line no-unused-vars -- TS needs the symbol in scope to name exported CLI types.
 import type { NodeInspectSymbol } from "effect/Inspectable";
-import { Argument, Command, Flag, GlobalFlag } from "effect/unstable/cli";
+import { Argument, Command, Flag, GlobalFlag, Prompt } from "effect/unstable/cli";
 import {
   FetchHttpClient,
   HttpClient,
@@ -75,6 +77,12 @@ import {
 import { expandHomePath, resolveBaseDir } from "./os-jank.ts";
 import { runServer } from "./server.ts";
 import { renderTerminalQrCode } from "./startupAccess.ts";
+import {
+  approveOwnEnrollment,
+  createCliHubAccount,
+  describeAccountLinkFailure,
+  startPasswordSignIn,
+} from "./hubConnector/cliAccountLink.ts";
 import {
   installNodeService,
   isEphemeralCliInstall,
@@ -698,6 +706,16 @@ export const resolveServerConfig = (
     return config;
   });
 
+/**
+ * Admin commands open the node's state directly, which logs routine startup
+ * (migrations) at Info; that is noise next to their one line of output. They
+ * log warnings and errors unless a level was asked for explicitly.
+ */
+const adminCommandLogLevel = (
+  requested: Option.Option<LogLevel.LogLevel>,
+  configured: LogLevel.LogLevel,
+): LogLevel.LogLevel => (Option.isSome(requested) ? configured : "Warn");
+
 const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
@@ -823,7 +841,7 @@ const runWithAuthControlPlane = <A, E>(
     Effect.gen(function* () {
       const logLevel = yield* GlobalFlag.LogLevel;
       const config = yield* resolveCliAuthConfig(flags, logLevel);
-      const minimumLogLevel = quiet ? "Error" : config.logLevel;
+      const minimumLogLevel = quiet ? "Error" : adminCommandLogLevel(logLevel, config.logLevel);
       return yield* Effect.gen(function* () {
         const authControlPlane = yield* AuthControlPlane;
         return yield* run(authControlPlane);
@@ -1134,7 +1152,7 @@ const runHubCommandQuiet = Effect.fn("runHubCommand")(function* <A>(
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveCliAuthConfig(flags, logLevel);
-  const minimumLogLevel = quiet ? "Error" : config.logLevel;
+  const minimumLogLevel = quiet ? "Error" : adminCommandLogLevel(logLevel, config.logLevel);
   return yield* Effect.gen(function* () {
     const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
     if (Option.isNone(runtimeState)) {
@@ -1705,10 +1723,128 @@ const hubResumeCommand = Command.make("resume", {
   ),
 );
 
+class HubLoginError extends Data.TaggedError("HubLoginError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+const hubLoginStep = <A>(run: () => Promise<A>) =>
+  Effect.tryPromise({
+    try: run,
+    catch: (cause) => new HubLoginError({ message: describeAccountLinkFailure(cause), cause }),
+  });
+
+/** Poll the local connector until it reports `online`, for up to a minute. */
+const waitForHubOnline = (flags: CliAuthLocationFlags) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const status = yield* runHubCommand(flags, requestHubStatus, { quietLogs: true }).pipe(
+        Effect.orElseSucceed(() => null),
+      );
+      if (status?.state === "online") return status;
+      yield* Effect.sleep(1_000);
+    }
+    return null;
+  });
+
+const hubLoginCommand = Command.make("login", {
+  ...authLocationFlags,
+  hubOrigin: Flag.string("hub-origin").pipe(
+    Flag.withDescription(`Hub to sign in to (defaults to ${DEFAULT_HOSTED_APP_ORIGIN}).`),
+    Flag.optional,
+  ),
+  username: Flag.string("username").pipe(
+    Flag.withDescription("Ryco username; asked for when omitted. Passwords are only ever prompted for."),
+    Flag.optional,
+  ),
+}).pipe(
+  Command.withDescription(
+    "Link this node to your Ryco account by signing in here: no device code to compare or approve in a browser. Needs an account with a password and a second factor; otherwise use `ryco hub enroll`.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const hubOrigin = yield* Effect.try({
+        try: () => canonicalizeHubOrigin(Option.getOrElse(flags.hubOrigin, () => DEFAULT_HOSTED_APP_ORIGIN)),
+        catch: () => new HubLoginError({ message: "--hub-origin must be an https:// origin." }),
+      });
+      const local = yield* runHubCommand(
+        flags,
+        (origin, token) =>
+          Effect.all({
+            status: requestHubStatus(origin, token),
+            identity: requestHubIdentitySummary(origin, token),
+          }),
+        { quietLogs: true },
+      );
+      if (local.status.state === "disabled") {
+        return yield* new HubLoginError({
+          message:
+            "This node's Hub connector is off. Start it with `ryco serve --hub` (or `ryco service install --hub`), then run `ryco hub login` again.",
+        });
+      }
+      if (local.identity.enrolled === "active") {
+        yield* Console.log(
+          `This node is already linked to a Ryco account${local.identity.fingerprint ? ` (${local.identity.fingerprint})` : ""}.\n`,
+        );
+        return;
+      }
+
+      const username = Option.isSome(flags.username)
+        ? flags.username.value
+        : yield* Prompt.run(Prompt.text({ message: "Ryco username" }));
+      const password = yield* Prompt.run(Prompt.password({ message: "Password" }));
+      const account = yield* hubLoginStep(() => createCliHubAccount(hubOrigin));
+      const signIn = yield* hubLoginStep(() =>
+        startPasswordSignIn(account, { username, password: Redacted.value(password) }),
+      );
+      const code = yield* Prompt.run(
+        Prompt.text({
+          message:
+            signIn.factor === "totp"
+              ? "Code from your authenticator app"
+              : "Code from the email the Hub just sent",
+        }),
+      );
+      yield* hubLoginStep(() => signIn.finish(code));
+
+      yield* Effect.gen(function* () {
+        const ceremony = yield* runHubCommand(
+          flags,
+          (origin, token) =>
+            local.identity.enrolled === "pending"
+              ? requestHubPendingEnrollment(origin, token)
+              : requestHubEnrollment(origin, token),
+          { quietLogs: true },
+        );
+        if (ceremony === null) {
+          return yield* new HubLoginError({
+            message: "No enrollment is pending on this node. Run `ryco hub login` again.",
+          });
+        }
+        yield* Console.log(`Approving "${ceremony.label}" (${ceremony.fingerprint}) on ${hubOrigin}…`);
+        yield* hubLoginStep(() => approveOwnEnrollment(account.api, ceremony));
+      }).pipe(
+        // The account session only ever exists to approve this node.
+        Effect.ensuring(
+          Effect.promise(() => account.api.signOut().catch(() => undefined)),
+        ),
+      );
+
+      const online = yield* waitForHubOnline(flags);
+      yield* Console.log(
+        online
+          ? "Linked. This node is online through the Hub and appears under your machines in Ryco.\n"
+          : "Approved. The node will come online once it next polls the Hub; check with `ryco hub status`.\n",
+      );
+    }),
+  ),
+);
+
 const hubCommand = Command.make("hub").pipe(
   Command.withDescription("Manage the outbound Hub connector through the local Ryco server."),
   Command.withSubcommands([
     hubStatusCommand,
+    hubLoginCommand,
     hubEnrollCommand,
     hubPendingCommand,
     hubCancelCommand,
