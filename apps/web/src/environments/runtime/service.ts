@@ -863,8 +863,15 @@ async function resolveSavedEnvironmentSocketUrl(
   bearerToken: string,
   pathname: "/ws" | "/ws/device" | "/ws/device-frames",
 ): Promise<string> {
-  const record = getSavedEnvironmentRecord(environmentId);
-  if (!record) throw new Error(`Saved environment ${environmentId} not found.`);
+  const saved = getSavedEnvironmentRecord(environmentId);
+  if (!saved) throw new Error(`Saved environment ${environmentId} not found.`);
+  // An SSH tunnel does not survive sleep or a dropped network, and nothing
+  // restarts it on its own. Ensuring it here — a quick readiness check when it
+  // is healthy — lets every reconnect attempt rebuild a dead tunnel, relaunch
+  // the remote server if needed, and follow a new local port.
+  const record = saved.desktopSsh
+    ? (await prepareSavedEnvironmentRecordForConnection(saved)).record
+    : saved;
   const rawUrl = record.desktopSsh
     ? await resolveDesktopSshWebSocketConnectionUrl(
         record.wsBaseUrl,
@@ -1284,10 +1291,16 @@ function subscribeBrowserResumeReconnects(listener: (reason: string) => void): (
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("pageshow", handlePageShow);
   window.addEventListener("online", handleOnline);
+  // Desktop windows usually stay visible through a sleep, so they hear about
+  // the wake from the main process instead.
+  const unsubscribeSystemResume = window.desktopBridge?.onSystemResume?.(() => {
+    listener("system-resume");
+  });
   return () => {
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     window.removeEventListener("pageshow", handlePageShow);
     window.removeEventListener("online", handleOnline);
+    unsubscribeSystemResume?.();
   };
 }
 

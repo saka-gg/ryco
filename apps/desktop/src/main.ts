@@ -23,6 +23,7 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  powerMonitor,
   Notification,
   protocol,
   safeStorage,
@@ -192,6 +193,7 @@ const SET_THEME_CHANNEL = "desktop:set-theme";
 const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
 const MENU_ACTION_CHANNEL = "desktop:menu-action";
+const SYSTEM_RESUMED_CHANNEL = "desktop:system-resumed";
 const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
 const UPDATE_SET_CHANNEL_CHANNEL = "desktop:update-set-channel";
@@ -2647,6 +2649,24 @@ async function stopBackendAndWaitForExit(timeoutMs = 5_000): Promise<void> {
   });
 }
 
+/**
+ * Tell every window the machine woke or was unlocked. Sockets that were open
+ * across a sleep look alive but are usually dead, and a window that stayed
+ * visible the whole time gets no browser visibility event to react to.
+ */
+let systemResumeForwardingRegistered = false;
+function forwardSystemResumeToRenderers(): void {
+  if (systemResumeForwardingRegistered) return;
+  systemResumeForwardingRegistered = true;
+  const notify = () => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(SYSTEM_RESUMED_CHANNEL);
+    }
+  };
+  powerMonitor.on("resume", notify);
+  powerMonitor.on("unlock-screen", notify);
+}
+
 function registerIpcHandlers(): void {
   ipcMain.removeAllListeners(GET_APP_BRANDING_CHANNEL);
   ipcMain.on(GET_APP_BRANDING_CHANNEL, (event) => {
@@ -3736,6 +3756,7 @@ async function bootstrap(): Promise<void> {
   }
 
   registerIpcHandlers();
+  forwardSystemResumeToRenderers();
   try {
     computerUseRuntime = new DesktopComputerUseRuntime({
       stateDir: STATE_DIR,
