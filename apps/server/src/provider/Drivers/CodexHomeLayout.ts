@@ -1,10 +1,8 @@
-import * as NodeOS from "node:os";
-
 import { ProviderDriverKind, type CodexSettings } from "@ryco/contracts";
 import { Effect, FileSystem, Path, Schema } from "effect";
 import * as PlatformError from "effect/PlatformError";
 
-import { expandHomePath } from "../../pathExpansion.ts";
+import { parseProviderSourcePaths } from "../ProviderSourcePaths.ts";
 
 export interface CodexHomeLayout {
   readonly mode: "direct" | "authOverlay";
@@ -28,30 +26,27 @@ const KNOWN_SHARED_DIRECTORIES = [
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp"]);
 
-function resolveHomePath(path: Path.Path, value: string | undefined): string {
-  const expanded =
-    value && value.trim().length > 0
-      ? expandHomePath(value)
-      : path.join(NodeOS.homedir(), ".codex");
-  return path.resolve(expanded);
-}
-
 export const resolveCodexHomeLayout = Effect.fn("resolveCodexHomeLayout")(function* (
   config: CodexSettings,
+  env: NodeJS.ProcessEnv = process.env,
 ): Effect.fn.Return<CodexHomeLayout, never, Path.Path> {
-  const path = yield* Path.Path;
-  const sharedHomePath = resolveHomePath(path, config.homePath);
+  yield* Path.Path;
+  const parsed = parseProviderSourcePaths("codex", config, env);
+  const sharedHomePath = parsed.root;
   const shadowHomePath = config.shadowHomePath.trim();
   if (shadowHomePath.length === 0) {
     return {
       mode: "direct",
       sharedHomePath,
-      effectiveHomePath: config.homePath.trim().length > 0 ? sharedHomePath : undefined,
+      // Leave Codex's default-home bootstrap intact when CODEX_HOME was not
+      // explicitly selected; forcing a missing default path breaks first run.
+      effectiveHomePath:
+        config.homePath.trim() || env.CODEX_HOME?.trim() ? sharedHomePath : undefined,
       continuationKey: `codex:home:${sharedHomePath}`,
     };
   }
 
-  const effectiveHomePath = path.resolve(expandHomePath(shadowHomePath));
+  const effectiveHomePath = parsed.shadow!;
   return {
     mode: "authOverlay",
     sharedHomePath,

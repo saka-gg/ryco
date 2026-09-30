@@ -52,6 +52,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   storageManagement: Schema.optionalKey(Schema.Boolean),
   environmentIcon: Schema.optionalKey(Schema.Boolean),
   projectPreferences: Schema.optionalKey(Schema.Boolean),
+  threadSidebarUndo: Schema.optional(Schema.Boolean),
   threadSnooze: Schema.optional(Schema.Boolean),
   threadSettlement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   threadPriorityRanking: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),

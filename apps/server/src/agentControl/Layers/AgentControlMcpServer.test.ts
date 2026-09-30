@@ -524,6 +524,7 @@ const makeFlippableSettings = Effect.gen(function* () {
   const pubsub = yield* PubSub.unbounded<ServerSettings>();
   const ref = yield* Ref.make(decodeSettings({ agentControl: { enabled: true } }));
   const shape: ServerSettingsShape = {
+    withSettingsSnapshot: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
     start: Effect.void,
     ready: Effect.void,
     getSettings: Ref.get(ref),

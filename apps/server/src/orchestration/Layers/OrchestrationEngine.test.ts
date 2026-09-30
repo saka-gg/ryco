@@ -1,10 +1,9 @@
 import { makeStorageService } from "../../storage/StorageService.ts";
-import { recordCreatedWorktree } from "../../storage/lifecycle.ts";
+import { canonicalStoragePath, recordCreatedWorktree } from "../../storage/lifecycle.ts";
 import { makeWorkspaceAccessPolicy } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { runProcess } from "../../processRunner.ts";
 import type { ServerConfigShape } from "../../config.ts";
 import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { storageLifecycleLock } from "../../storage/lifecycle.ts";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -19,12 +18,25 @@ import {
   ThreadId,
   TurnId,
   WorktreeId,
+  type OrchestrationCommand,
   type OrchestrationEvent,
   ProviderInstanceId,
 } from "@ryco/contracts";
-import { Effect, Layer, ManagedRuntime, Metric, Option, Queue, Stream } from "effect";
+import {
+  Deferred,
+  Effect,
+  Layer,
+  ManagedRuntime,
+  Metric,
+  Option,
+  Queue,
+  Semaphore,
+  Stream,
+} from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { OrchestrationCommandAdmissionError } from "../Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
@@ -340,6 +352,67 @@ describe("OrchestrationEngine", () => {
     }
   });
 
+  it("rolls back rejected admission, keeps its receipt retryable and skips admission for accepted retries", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      const sql = system.sql;
+      await system.run(sql`CREATE TABLE synthetic_admission (marker TEXT)`);
+      let allowed = false,
+        admissions = 0;
+      const admission = {
+        admit: <A, E>(commit: Effect.Effect<A, E>) =>
+          sql
+            .withTransaction(
+              Effect.gen(function* () {
+                admissions++;
+                yield* sql`INSERT INTO synthetic_admission VALUES ('binding')`;
+                if (!allowed)
+                  return yield* new OrchestrationCommandAdmissionError({
+                    detail: "Synthetic admission changed",
+                  });
+                return yield* commit;
+              }),
+            )
+            .pipe(
+              Effect.catchTag("SqlError", () =>
+                Effect.fail(
+                  new OrchestrationCommandAdmissionError({
+                    detail: "Synthetic transaction failed",
+                  }),
+                ),
+              ),
+            ),
+      };
+      const command = {
+        type: "project.create" as const,
+        commandId: CommandId.make("admission-command"),
+        projectId: ProjectId.make("admission-project"),
+        title: "Synthetic admission",
+        workspaceRoot: "/synthetic/project",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "fixture-model",
+        },
+        createdAt: now(),
+      };
+      expect((await system.run(Effect.exit(system.engine.dispatch(command, admission))))._tag).toBe(
+        "Failure",
+      );
+      expect(await system.run(sql`SELECT * FROM synthetic_admission`)).toHaveLength(0);
+      expect((await system.readModel()).projects).toHaveLength(0);
+      allowed = true;
+      const accepted = await system.run(system.engine.dispatch(command, admission));
+      expect(await system.run(sql`SELECT * FROM synthetic_admission`)).toHaveLength(1);
+      expect((await system.readModel()).projects).toHaveLength(1);
+      allowed = false;
+      expect(await system.run(system.engine.dispatch(command, admission))).toEqual(accepted);
+      expect(admissions).toBe(2);
+      expect(await system.run(sql`SELECT * FROM synthetic_admission`)).toHaveLength(1);
+    } finally {
+      await system.dispose();
+    }
+  });
+
   it("restores durable approval claims after closing and reopening the database", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-approval-restart-"));
     const database = path.join(directory, "state.sqlite");
@@ -562,16 +635,31 @@ describe("OrchestrationEngine", () => {
 
   it("bootstraps command handling from persisted projections without reading the full snapshot", async () => {
     let nextSequence = 8;
+    let signalAppend!: () => void;
+    let releaseAppend!: () => void;
+    const appendEntered = new Promise<void>((resolve) => {
+      signalAppend = resolve;
+    });
+    const appendReleased = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
     const eventStore: OrchestrationEventStoreShape = {
       append: (event) =>
-        Effect.sync(() => {
-          const savedEvent = {
-            ...event,
-            sequence: nextSequence,
-          } as OrchestrationEvent;
-          nextSequence += 1;
-          return savedEvent;
-        }),
+        Effect.promise(() => {
+          signalAppend();
+          return appendReleased;
+        }).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              const savedEvent = {
+                ...event,
+                sequence: nextSequence,
+              } as OrchestrationEvent;
+              nextSequence += 1;
+              return savedEvent;
+            }),
+          ),
+        ),
       readFromSequence: () => Stream.empty,
       readThroughSequence: () => Stream.empty,
       latestSequence: Effect.succeed(7),
@@ -692,7 +780,14 @@ describe("OrchestrationEngine", () => {
     const runtime = ManagedRuntime.make(layer);
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
-    const result = await runtime.runPromise(
+    const workspace = {
+      threadId: "thread-bootstrap",
+      cwd: "/tmp/project-bootstrap",
+      worktreePath: null,
+    };
+    const beforeUpdate = engine.captureThreadWorkspace!(workspace)!;
+    expect(beforeUpdate()).toBe(true);
+    const dispatching = runtime.runPromise(
       engine.dispatch({
         type: "thread.meta.update",
         commandId: CommandId.make("cmd-bootstrap-thread-update"),
@@ -701,6 +796,16 @@ describe("OrchestrationEngine", () => {
       }),
     );
 
+    await appendEntered;
+    expect(beforeUpdate()).toBe(false);
+    expect(engine.captureThreadWorkspace!(workspace)).toBeUndefined();
+    releaseAppend();
+    const result = await dispatching;
+    expect(beforeUpdate()).toBe(false);
+    expect(engine.captureThreadWorkspace!(workspace)!()).toBe(true);
+    expect(
+      engine.captureThreadWorkspace!({ ...workspace, cwd: "/synthetic/stale" }),
+    ).toBeUndefined();
     expect(result.sequence).toBe(8);
     expect(fullSnapshotReadCount).toBe(0);
 
@@ -1761,3 +1866,653 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 });
+
+async function seedSidebarUndoSystem(databasePath?: string) {
+  const system = await createOrchestrationSystem(databasePath);
+  const projectId = ProjectId.make("undo-project");
+  const threadId = ThreadId.make("undo-thread");
+  const createdAt = "2020-01-01T00:00:00.000Z";
+  const modelSelection = { instanceId: ProviderInstanceId.make("synthetic"), model: "synthetic" };
+  await system.run(
+    system.engine.dispatch({
+      type: "project.create",
+      commandId: CommandId.make("undo-project-create"),
+      projectId,
+      title: "Synthetic Undo",
+      workspaceRoot: "/tmp/ryco-synthetic-undo",
+      defaultModelSelection: modelSelection,
+      createdAt,
+    }),
+  );
+  await system.run(
+    system.engine.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("undo-thread-create"),
+      threadId,
+      projectId,
+      title: "Synthetic Undo",
+      modelSelection,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "full-access",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    }),
+  );
+  // This system includes only the engine/projectors, with no provider reactors or drivers.
+  await system.run(
+    system.engine.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("undo-synthetic-message"),
+      threadId,
+      message: {
+        messageId: MessageId.make("undo-message"),
+        role: "user",
+        text: "Synthetic fixture",
+        attachments: [],
+      },
+      runtimeMode: "full-access",
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt,
+    }),
+  );
+  await system.run(
+    system.engine.dispatch({
+      type: "thread.manual-position.set",
+      commandId: CommandId.make("undo-position"),
+      threadId,
+      position: 17,
+      changedAt: createdAt,
+    }),
+  );
+  return { ...system, projectId, threadId };
+}
+
+function sidebarFields(
+  thread: Pick<
+    import("@ryco/contracts").OrchestrationReadModel["threads"][number],
+    | "archivedAt"
+    | "settledOverride"
+    | "settledAt"
+    | "snoozedUntil"
+    | "snoozedAt"
+    | "updatedAt"
+    | "manualPosition"
+  >,
+) {
+  return {
+    archivedAt: thread.archivedAt,
+    settledOverride: thread.settledOverride,
+    settledAt: thread.settledAt,
+    snoozedUntil: thread.snoozedUntil ?? null,
+    snoozedAt: thread.snoozedAt ?? null,
+    updatedAt: thread.updatedAt,
+    manualPosition: thread.manualPosition,
+  };
+}
+
+describe("server-owned sidebar undo", () => {
+  it.each(["archive", "settle", "snooze"] as const)(
+    "restores exact %s state, timestamps and manual ordering in the shell and durable projection",
+    async (action) => {
+      const system = await seedSidebarUndoSystem();
+      try {
+        if (action === "snooze")
+          await system.run(
+            system.engine.dispatch({
+              type: "thread.settle",
+              commandId: CommandId.make("undo-prior-settle"),
+              threadId: system.threadId,
+            }),
+          );
+        if (action === "settle")
+          await system.run(
+            system.engine.dispatch({
+              type: "thread.snooze",
+              commandId: CommandId.make("undo-prior-snooze"),
+              threadId: system.threadId,
+              snoozedUntil: new Date(Date.now() + 3_600_000).toISOString(),
+            }),
+          );
+        const before = sidebarFields((await system.readModel()).threads[0]!);
+        const original = {
+          type: `thread.${action}` as const,
+          commandId: CommandId.make("undo-original"),
+          threadId: system.threadId,
+          snoozedUntil: new Date(Date.now() + 7_200_000).toISOString(),
+        };
+        await system.run(system.engine.dispatch(original));
+        const undo = {
+          type: "thread.sidebar.undo" as const,
+          commandId: CommandId.make("undo-restore"),
+          threadId: system.threadId,
+          undoCommandId: original.commandId,
+        };
+        const result = await system.run(system.engine.dispatch(undo));
+        expect(sidebarFields((await system.readModel()).threads[0]!)).toEqual(before);
+        expect(sidebarFields((await system.readShell()).threads[0]!)).toEqual(before);
+        expect(await system.run(system.engine.dispatch(undo))).toEqual(result);
+        await expect(
+          system.run(system.engine.dispatch({ ...undo, commandId: CommandId.make("undo-again") })),
+        ).rejects.toThrow("Undo expired or the thread changed");
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+  it.each(["thread", "project", "delete", "rapid", "wrong-thread", "failed-original"])(
+    "refuses %s changes without overwriting authoritative state",
+    async (change) => {
+      const system = await seedSidebarUndoSystem();
+      try {
+        const commandId = CommandId.make("undo-original");
+        if (change === "failed-original") {
+          await expect(
+            system.run(
+              system.engine.dispatch({
+                type: "thread.snooze",
+                commandId,
+                threadId: system.threadId,
+                snoozedUntil: "2020-01-01T00:00:00.000Z",
+              }),
+            ),
+          ).rejects.toThrow();
+        } else
+          await system.run(
+            system.engine.dispatch({ type: "thread.settle", commandId, threadId: system.threadId }),
+          );
+        if (change === "thread")
+          await system.run(
+            system.engine.dispatch({
+              type: "thread.meta.update",
+              commandId: CommandId.make("remote-rename"),
+              threadId: system.threadId,
+              title: "Remote change",
+            }),
+          );
+        if (change === "project")
+          await system.run(
+            system.engine.dispatch({
+              type: "project.meta.update",
+              commandId: CommandId.make("remote-project"),
+              projectId: system.projectId,
+              title: "Remote project",
+            }),
+          );
+        if (change === "delete")
+          await system.run(
+            system.engine.dispatch({
+              type: "thread.delete",
+              commandId: CommandId.make("remote-delete"),
+              threadId: system.threadId,
+            }),
+          );
+        if (change === "rapid")
+          await system.run(
+            system.engine.dispatch({
+              type: "thread.unsettle",
+              commandId: CommandId.make("remote-unsettle"),
+              threadId: system.threadId,
+              reason: "user",
+            }),
+          );
+        const before = await system.readModel();
+        await expect(
+          system.run(
+            system.engine.dispatch({
+              type: "thread.sidebar.undo",
+              commandId: CommandId.make("stale-undo"),
+              threadId: change === "wrong-thread" ? ThreadId.make("other-thread") : system.threadId,
+              undoCommandId: commandId,
+            }),
+          ),
+        ).rejects.toThrow("Undo expired or the thread changed");
+        expect(await system.readModel()).toEqual(before);
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+  it("does not let a restarted server reuse an old receipt", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-sidebar-undo-restart-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await seedSidebarUndoSystem(database);
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("before-restart"),
+          threadId: system.threadId,
+        }),
+      );
+      await system.dispose();
+      const restarted = await createOrchestrationSystem(database);
+      system = { ...restarted, projectId: system.projectId, threadId: system.threadId };
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            type: "thread.sidebar.undo",
+            commandId: CommandId.make("after-restart"),
+            threadId: system.threadId,
+            undoCommandId: CommandId.make("before-restart"),
+          }),
+        ),
+      ).rejects.toThrow("Undo expired or the thread changed");
+      expect((await system.readModel()).threads[0]?.settledOverride).toBe("settled");
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+it("keeps undo receipts for rapid actions on different threads independent", async () => {
+  const system = await seedSidebarUndoSystem();
+  const otherId = ThreadId.make("undo-other-thread");
+  const createdAt = "2020-01-01T00:00:00.000Z";
+  try {
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("other-create"),
+        threadId: otherId,
+        projectId: system.projectId,
+        title: "Other synthetic thread",
+        modelSelection: { instanceId: ProviderInstanceId.make("synthetic"), model: "synthetic" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    for (const threadId of [system.threadId, otherId])
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make(`settle-${threadId}`),
+          threadId,
+        }),
+      );
+    for (const threadId of [system.threadId, otherId])
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.sidebar.undo",
+          commandId: CommandId.make(`undo-${threadId}`),
+          undoCommandId: CommandId.make(`settle-${threadId}`),
+          threadId,
+        }),
+      );
+    expect((await system.readModel()).threads.map((thread) => thread.settledOverride)).toEqual([
+      null,
+      null,
+    ]);
+  } finally {
+    await system.dispose();
+  }
+});
+
+it("keeps Snooze Undo usable during response streaming without rolling newer content or timestamps back", async () => {
+  const system = await seedSidebarUndoSystem();
+  try {
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("streaming-snooze"),
+        threadId: system.threadId,
+        snoozedUntil: new Date(Date.now() + 3_600_000).toISOString(),
+      }),
+    );
+    const updatedAt = new Date().toISOString();
+    const messageId = MessageId.make("synthetic-response-progress");
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: CommandId.make("response-progress"),
+        threadId: system.threadId,
+        messageId,
+        delta: "Synthetic response progress",
+        createdAt: updatedAt,
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.sidebar.undo",
+        commandId: CommandId.make("streaming-undo"),
+        threadId: system.threadId,
+        undoCommandId: CommandId.make("streaming-snooze"),
+      }),
+    );
+    const thread = (await system.readModel()).threads[0]!;
+    expect(thread).toMatchObject({
+      snoozedUntil: null,
+      snoozedAt: null,
+      settledOverride: null,
+      updatedAt,
+      manualPosition: 17,
+    });
+    expect(thread.messages.find((message) => message.id === messageId)?.text).toBe(
+      "Synthetic response progress",
+    );
+  } finally {
+    await system.dispose();
+  }
+});
+
+it.each([true, false])(
+  "refuses sidebar Undo after cleanup claims the unchanged checkout (worktree: %s)",
+  async (hasWorktree) => {
+    const system = await seedSidebarUndoSystem();
+    const checkout = hasWorktree ? "/tmp/ryco-synthetic-undo/checkout" : "/tmp/ryco-synthetic-undo";
+    try {
+      if (hasWorktree)
+        await system.run(
+          system.engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.make("undo-checkout"),
+            threadId: system.threadId,
+            worktreePath: checkout,
+          }),
+        );
+      const archiveId = CommandId.make("undo-before-cleanup");
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.archive",
+          commandId: archiveId,
+          threadId: system.threadId,
+        }),
+      );
+      const before = sidebarFields((await system.readShell()).threads[0]!);
+      const canonical = await canonicalStoragePath(checkout);
+      await system.run(
+        system.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('undo-cleanup', ${canonical}, 'worktree', '{}', '2026-01-01', 'removing')`,
+      );
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            type: "thread.sidebar.undo",
+            commandId: CommandId.make("undo-after-cleanup"),
+            undoCommandId: archiveId,
+            threadId: system.threadId,
+          }),
+        ),
+      ).rejects.toThrow("Checkout cleanup is pending or complete");
+      expect(sidebarFields((await system.readShell()).threads[0]!)).toEqual(before);
+    } finally {
+      await system.dispose();
+    }
+  },
+);
+
+it("acquires an import settings lease before storage admission without blocking a queued settings writer", async () => {
+  const system = await createOrchestrationSystem();
+  const settings = Semaphore.makeUnsafe(1);
+  const attempted = Deferred.makeUnsafe<void>();
+  await system.run(settings.take(1));
+  const publication = system.run(
+    system.engine.dispatch(
+      {
+        type: "project.create",
+        commandId: CommandId.make("ordered-admission"),
+        projectId: ProjectId.make("ordered-project"),
+        title: "Synthetic admission",
+        workspaceRoot: "/synthetic/project",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("synthetic"),
+          model: "synthetic",
+        },
+        createdAt: now(),
+      },
+      {
+        withCommitLease: <A, E>(commit: Effect.Effect<A, E>) =>
+          Deferred.succeed(attempted, undefined).pipe(Effect.andThen(settings.withPermit(commit))),
+        admit: <A, E>(commit: Effect.Effect<A, E>) => commit,
+      },
+    ),
+  );
+  try {
+    await system.run(Deferred.await(attempted));
+    // This represents a settings writer already owning its semaphore. The
+    // import must wait outside storage admission so the writer can finish.
+    await system.run(
+      storageLifecycleLock.withPermit(Effect.void).pipe(Effect.timeout("2 seconds")),
+    );
+  } finally {
+    await system.run(settings.release(1));
+    await publication;
+    await system.dispose();
+  }
+});
+
+it("keeps import publication retryable when storage cleanup blocks its project root", async () => {
+  const system = await seedSidebarUndoSystem();
+  const root = await canonicalStoragePath("/tmp/ryco-synthetic-undo");
+  const command = {
+    type: "thread.history.import" as const,
+    commandId: CommandId.make("import-storage-admission"),
+    threadId: ThreadId.make("synthetic-import"),
+    projectId: system.projectId,
+    title: "Synthetic import",
+    modelSelection: { instanceId: ProviderInstanceId.make("synthetic"), model: "synthetic" },
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+    branch: null,
+    worktreePath: null,
+    createdAt: now(),
+    source: "codex" as const,
+    archived: false,
+    messages: [],
+  };
+  try {
+    await system.run(
+      system.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('import-blocked', ${root}, 'worktree', '{}', '2026-01-01', 'removed')`,
+    );
+    await expect(system.run(system.engine.dispatch(command))).rejects.toThrow(
+      "Checkout cleanup is pending or complete",
+    );
+    expect(
+      (await system.readShell()).threads.some((thread) => thread.id === command.threadId),
+    ).toBe(false);
+    await system.run(
+      system.sql`UPDATE storage_owned_entries SET state = 'owned' WHERE id = 'import-blocked'`,
+    );
+    const accepted = await system.run(system.engine.dispatch(command));
+    await system.run(
+      system.sql`UPDATE storage_owned_entries SET state = 'removing' WHERE id = 'import-blocked'`,
+    );
+    expect(await system.run(system.engine.dispatch(command))).toEqual(accepted);
+  } finally {
+    await system.dispose();
+  }
+});
+
+async function seedAttachedSidebarUndoSystem(threadPath: string | null) {
+  const system = await seedSidebarUndoSystem();
+  const worktreeId = WorktreeId.make("undo-id-only-tree");
+  const checkout = "/tmp/ryco-synthetic-undo/id-only-checkout";
+  try {
+    await system.run(
+      system.engine.dispatch({
+        type: "worktree.create",
+        commandId: CommandId.make("undo-id-only-create"),
+        worktreeId,
+        projectId: system.projectId,
+        branch: "synthetic",
+        worktreePath: checkout,
+        origin: "branch",
+        prNumber: null,
+        issueNumber: null,
+        prTitle: null,
+        issueTitle: null,
+        createdAt: now(),
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.attach-to-worktree",
+        commandId: CommandId.make("undo-id-only-attach"),
+        threadId: system.threadId,
+        worktreeId,
+        attachedAt: now(),
+      }),
+    );
+    // A normal metadata edit retains the ID association while changing its
+    // legacy path, and gives both projections the same event timestamp.
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("legacy-checkout-path"),
+        threadId: system.threadId,
+        title: "Synthetic attached fixture",
+        worktreePath: threadPath,
+      }),
+    );
+    return { ...system, worktreeId, checkout };
+  } catch (error) {
+    await system.dispose();
+    throw error;
+  }
+}
+
+function storageGuardCommands(
+  threadId: ThreadId,
+  undoCommandId: CommandId,
+): OrchestrationCommand[] {
+  const message = {
+    messageId: MessageId.make("blocked-message"),
+    role: "user" as const,
+    text: "Synthetic",
+    attachments: [],
+  };
+  const at = now();
+  return [
+    {
+      type: "thread.sidebar.undo",
+      commandId: CommandId.make("undo-id-only"),
+      undoCommandId,
+      threadId,
+    },
+    {
+      type: "thread.turn.start",
+      commandId: CommandId.make("blocked-turn"),
+      threadId,
+      message,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: at,
+    },
+    {
+      type: "thread.turn.steer",
+      commandId: CommandId.make("blocked-steer"),
+      threadId,
+      message,
+      expectedTurnId: TurnId.make("synthetic-turn"),
+      createdAt: at,
+      requestedAt: at,
+    },
+    {
+      type: "thread.goal.set",
+      commandId: CommandId.make("blocked-goal"),
+      threadId,
+      objective: "Synthetic goal",
+      status: "active",
+      createdAt: at,
+    },
+  ];
+}
+
+it.each([
+  { state: "removing", target: "attached" },
+  { state: "removed", target: "attached" },
+  { state: "removing", target: "project" },
+  { state: "removed", target: "project" },
+])(
+  "refuses Undo and activation for an ID-only worktree or its effective cwd: %j",
+  async ({ state, target }) => {
+    const system = await seedAttachedSidebarUndoSystem(null);
+    const archiveId = CommandId.make("undo-id-only-archive");
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.archive",
+          commandId: archiveId,
+          threadId: system.threadId,
+        }),
+      );
+      const before = (await system.readModel()).threads[0]!;
+      expect(before.worktreePath).toBeNull();
+      expect(before.worktreeId).toBe(system.worktreeId);
+      const canonical = await canonicalStoragePath(
+        target === "attached" ? system.checkout : "/tmp/ryco-synthetic-undo",
+      );
+      await system.run(
+        system.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('undo-id-only', ${canonical}, 'worktree', '{}', '2026-01-01', ${state})`,
+      );
+      for (const command of storageGuardCommands(system.threadId, archiveId))
+        await expect(system.run(system.engine.dispatch(command))).rejects.toThrow(
+          "Checkout cleanup is pending or complete",
+        );
+      expect((await system.readModel()).threads[0]).toEqual(before);
+    } finally {
+      await system.dispose();
+    }
+  },
+);
+
+it.each([
+  { state: "removing", target: "legacy" },
+  { state: "removed", target: "legacy" },
+  { state: "removing", target: "attached" },
+  { state: "removed", target: "attached" },
+])(
+  "checks both paths of a mismatched attachment while preserving healthy Undo: %j",
+  async ({ state, target }) => {
+    const legacyPath = "/tmp/ryco-synthetic-undo/legacy-checkout";
+    const system = await seedAttachedSidebarUndoSystem(legacyPath);
+    const archiveId = CommandId.make("mismatch-archive");
+    try {
+      const original = (await system.readModel()).threads[0]!;
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("healthy-mismatch-archive"),
+          threadId: system.threadId,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.sidebar.undo",
+          commandId: CommandId.make("healthy-mismatch-undo"),
+          undoCommandId: CommandId.make("healthy-mismatch-archive"),
+          threadId: system.threadId,
+        }),
+      );
+      expect(sidebarFields((await system.readModel()).threads[0]!)).toEqual(
+        sidebarFields(original),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.archive",
+          commandId: archiveId,
+          threadId: system.threadId,
+        }),
+      );
+      const before = (await system.readModel()).threads[0]!;
+      expect(before.worktreePath).toBe(legacyPath);
+      expect(before.worktreeId).toBe(system.worktreeId);
+      const canonical = await canonicalStoragePath(
+        target === "legacy" ? legacyPath : system.checkout,
+      );
+      await system.run(
+        system.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('undo-mismatch', ${canonical}, 'worktree', '{}', '2026-01-01', ${state})`,
+      );
+      for (const command of storageGuardCommands(system.threadId, archiveId))
+        await expect(system.run(system.engine.dispatch(command))).rejects.toThrow(
+          "Checkout cleanup is pending or complete",
+        );
+      expect((await system.readModel()).threads[0]).toEqual(before);
+    } finally {
+      await system.dispose();
+    }
+  },
+);

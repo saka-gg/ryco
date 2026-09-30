@@ -54,6 +54,7 @@ describe("pre-auth server environment descriptor", () => {
       "storageManagement",
       "threadPriorityRanking",
       "threadSettlement",
+      "threadSidebarUndo",
       "threadSnooze",
       "worktreeSubmoduleSettings",
     ]);

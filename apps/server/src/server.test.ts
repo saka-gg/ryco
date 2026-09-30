@@ -1096,6 +1096,19 @@ const getHttpServerUrl = (pathname = "") =>
     return `http://127.0.0.1:${address.port}${pathname}`;
   });
 
+const readAuthFixtureJson = (response: Response, requestUrl: string) =>
+  Effect.gen(function* () {
+    const request = new URL(requestUrl);
+    const received = new URL(response.url);
+    const contentType = response.headers.get("content-type") ?? "";
+    assert.include(
+      contentType,
+      "application/json",
+      `Auth fixture POST ${request.origin}${request.pathname} received ${response.status} ${contentType} from ${received.origin}${received.pathname}; redirected=${response.redirected}`,
+    );
+    return yield* Effect.promise(() => response.json());
+  });
+
 const bootstrapBrowserSession = (
   credential = defaultDesktopBootstrapToken,
   options?: {
@@ -1116,7 +1129,7 @@ const bootstrapBrowserSession = (
         }),
       }),
     );
-    const body = (yield* Effect.promise(() => response.json())) as {
+    const body = (yield* readAuthFixtureJson(response, bootstrapUrl)) as {
       readonly authenticated: boolean;
       readonly sessionMethod: string;
       readonly expiresAt: string;
@@ -1142,7 +1155,7 @@ const bootstrapBearerSession = (credential = defaultDesktopBootstrapToken) =>
         }),
       }),
     );
-    const body = (yield* Effect.promise(() => response.json())) as {
+    const body = (yield* readAuthFixtureJson(response, bootstrapUrl)) as {
       readonly authenticated: boolean;
       readonly sessionMethod: string;
       readonly expiresAt: string;
@@ -1206,7 +1219,7 @@ const getAuthenticatedWebSocketToken = (credential = defaultDesktopBootstrapToke
         new Error(`Expected websocket token response to succeed, got ${response.status}`),
       );
     }
-    const body = (yield* Effect.promise(() => response.json())) as {
+    const body = (yield* readAuthFixtureJson(response, wsTokenUrl)) as {
       readonly token?: string;
     };
     if (!body.token) {

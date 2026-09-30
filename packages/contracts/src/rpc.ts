@@ -17,6 +17,11 @@ import {
 import {
   SessionImportDiscoverInput,
   SessionImportPage,
+  SessionImportSourcesInput,
+  SessionImportStores,
+  SessionImportReconcileInput,
+  SessionImportRecovery,
+  SessionImportAdoptInput,
   SessionImportInput,
   SessionImportResult,
   SessionImportError,
@@ -351,6 +356,9 @@ export const WS_METHODS = {
   // Filesystem methods
   sessionImportDiscover: "sessionImport.discover",
   sessionImportRun: "sessionImport.run",
+  sessionImportSources: "sessionImport.sources",
+  sessionImportReconcile: "sessionImport.reconcile",
+  sessionImportAdopt: "sessionImport.adopt",
   filesystemBrowse: "filesystem.browse",
 
   // VCS methods
@@ -1346,6 +1354,21 @@ export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   error: Schema.Union([OpenError, AuthRpcError]),
 });
 
+export const WsSessionImportSourcesRpc = Rpc.make(WS_METHODS.sessionImportSources, {
+  payload: SessionImportSourcesInput,
+  success: SessionImportStores,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
+export const WsSessionImportReconcileRpc = Rpc.make(WS_METHODS.sessionImportReconcile, {
+  payload: SessionImportReconcileInput,
+  success: SessionImportRecovery,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
+export const WsSessionImportAdoptRpc = Rpc.make(WS_METHODS.sessionImportAdopt, {
+  payload: SessionImportAdoptInput,
+  success: SessionImportResult,
+  error: Schema.Union([SessionImportError, AuthRpcError]),
+});
 export const WsSessionImportDiscoverRpc = Rpc.make(WS_METHODS.sessionImportDiscover, {
   payload: SessionImportDiscoverInput,
   success: SessionImportPage,
@@ -1939,6 +1962,9 @@ export const WsAgentControlDisconnectMcpInstallationRpc = Rpc.make(
 
 /** Keep declaration emit bounded as shared settings and RPC schemas grow. */
 export const WsRpcGroup: RpcGroup.RpcGroup<
+  | typeof WsSessionImportSourcesRpc
+  | typeof WsSessionImportReconcileRpc
+  | typeof WsSessionImportAdoptRpc
   | typeof WsSessionImportDiscoverRpc
   | typeof WsSessionImportRunRpc
   | typeof WsServerGetConfigRpc
@@ -2108,6 +2134,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsContextHandoffReadRawPayloadChunkRpc
   | typeof WsContextHandoffReadExportChunkRpc
 > = RpcGroup.make(
+  WsSessionImportSourcesRpc,
+  WsSessionImportReconcileRpc,
+  WsSessionImportAdoptRpc,
   WsSessionImportDiscoverRpc,
   WsSessionImportRunRpc,
   WsServerGetConfigRpc,

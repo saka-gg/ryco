@@ -13,7 +13,7 @@ import {
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import { assert, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Schema, Deferred, Fiber } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Schema } from "effect";
 import { ServerConfig } from "./config.ts";
 import { ServerSettingsLive, ServerSettingsService, makeServerSettings } from "./serverSettings.ts";
 
@@ -85,6 +85,35 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.equal(reloaded.worktreeSubmodules, "top-level");
       assert.deepEqual(reloaded.projectWorktreeSubmodules, { b: "recursive" });
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect(
+    "serializes publication snapshots with settings writes without losing a queued update",
+    () =>
+      Effect.gen(function* () {
+        const settings = yield* ServerSettingsService;
+        const started = yield* Deferred.make<void>();
+        const updated = yield* Deferred.make<void>();
+        const writer = yield* settings.withSettingsSnapshot(
+          Effect.gen(function* () {
+            const before = yield* settings.getSettings;
+            const writer = yield* Effect.forkChild(
+              Effect.gen(function* () {
+                yield* Deferred.succeed(started, undefined);
+                yield* settings.updateSettings({ environmentIcon: "cloud" });
+                yield* Deferred.succeed(updated, undefined);
+              }),
+            );
+            yield* Deferred.await(started);
+            yield* Effect.yieldNow;
+            assert.equal(yield* Deferred.isDone(updated), false);
+            assert.equal((yield* settings.getSettings).environmentIcon, before.environmentIcon);
+            return writer;
+          }),
+        );
+        yield* Fiber.join(writer);
+        assert.equal((yield* settings.getSettings).environmentIcon, "cloud");
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
   it.effect("canonicalizes root saves and persists independent project resets", () =>

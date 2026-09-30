@@ -5,6 +5,7 @@ import path from "node:path";
 import type { SessionImportSource } from "@ryco/contracts";
 
 export const IMPORT_LIMITS = {
+  sources: 128,
   files: 2000,
   entries: 10000,
   records: 20000,
@@ -118,14 +119,28 @@ export function parseHistory(source: SessionImportSource, contents: string): Sou
     }
     if (source === "codex" && row.type === "session_meta") {
       const meta = record(row.payload);
+      if (id && id !== string(meta.id)) throw new Error("Conflicting source identity.");
       id = string(meta.id);
       cwd = sourceCwd(meta.cwd);
-      if (uuid.test(string(meta.forked_from_id))) forkedFromId = string(meta.forked_from_id);
+      if (meta.forked_from_id !== undefined && meta.forked_from_id !== null) {
+        if (
+          !uuid.test(string(meta.forked_from_id)) ||
+          (forkedFromId && forkedFromId !== meta.forked_from_id)
+        )
+          throw new Error("Conflicting fork provenance.");
+        forkedFromId = string(meta.forked_from_id);
+      }
     }
     if (source === "claudeAgent") {
+      if (row.sessionId && id && id !== row.sessionId)
+        throw new Error("Conflicting source identity.");
       id ||= string(row.sessionId);
       const forkOrigin = record(row.forkedFrom).sessionId;
-      if (uuid.test(string(forkOrigin))) forkedFromId = string(forkOrigin);
+      if (forkOrigin !== undefined) {
+        if (!uuid.test(string(forkOrigin)) || (forkedFromId && forkedFromId !== forkOrigin))
+          throw new Error("Conflicting fork provenance.");
+        forkedFromId = string(forkOrigin);
+      }
       cwd ||= sourceCwd(row.cwd);
       sidechain ||= row.isSidechain === true;
       if (typeof row.uuid !== "string") continue;
@@ -207,10 +222,21 @@ function validDate(value: unknown, index: number): string {
   const millis = typeof value === "string" ? Date.parse(value) : NaN;
   return new Date(Number.isFinite(millis) ? millis : index).toISOString();
 }
+export const sourceFileStamp = (info: {
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  ino: number;
+}) => `${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}`;
+export async function sourceStamp(file: string): Promise<string> {
+  const info = await lstat(file);
+  if (!info.isFile()) throw new Error("Source must remain a regular file.");
+  return sourceFileStamp(info);
+}
 export async function readSource(
   root: string,
   file: string,
-): Promise<{ contents: string; fingerprint: string }> {
+): Promise<{ contents: string; fingerprint: string; stamp: string }> {
   const canonical = await realpath(root);
   const resolved = await realpath(file);
   if (
@@ -232,7 +258,7 @@ export async function readSource(
       bytes += result.bytesRead;
     }
     const after = await handle.stat();
-    if (bytes !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs)
+    if (bytes !== before.size || sourceFileStamp(before) !== sourceFileStamp(after))
       throw new Error("Source history changed while being read. Retry when it is idle.");
     let contents: string;
     try {
@@ -240,7 +266,11 @@ export async function readSource(
     } catch {
       throw new Error("Source history contains malformed UTF-8.");
     }
-    return { contents, fingerprint: createHash("sha256").update(contents).digest("hex") };
+    return {
+      contents,
+      fingerprint: createHash("sha256").update(contents).digest("hex"),
+      stamp: sourceFileStamp(after),
+    };
   } finally {
     await handle.close();
   }
@@ -249,10 +279,11 @@ export async function discoverFiles(
   source: SessionImportSource,
   root: string,
   archived: boolean,
-): Promise<{ files: SourceFile[]; capped: boolean }> {
+): Promise<{ files: SourceFile[]; capped: boolean; blocked: boolean }> {
   const files: SourceFile[] = [];
   let entries = 0;
   let capped = false;
+  let blocked = false;
   const canonical = await realpath(root);
   const deadline = Date.now() + IMPORT_LIMITS.pageMillis;
   async function visit(dir: string, depth: number, isArchived: boolean) {
@@ -260,6 +291,10 @@ export async function discoverFiles(
     if (depth > (source === "codex" ? 4 : 1)) return;
     let directory;
     try {
+      if ((await lstat(dir)).isSymbolicLink() || (await realpath(dir)) !== dir) {
+        blocked = true;
+        return;
+      }
       directory = await opendir(dir);
     } catch (error) {
       if (record(error).code === "ENOENT") return;
@@ -274,7 +309,10 @@ export async function discoverFiles(
         capped = true;
         break;
       }
-      if (entry.isSymbolicLink()) continue;
+      if (entry.isSymbolicLink()) {
+        blocked = true;
+        continue;
+      }
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) await visit(file, depth + 1, isArchived);
       if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
@@ -289,5 +327,5 @@ export async function discoverFiles(
   await visit(path.join(canonical, source === "codex" ? "sessions" : "projects"), 0, false);
   if (source === "codex" && archived)
     await visit(path.join(canonical, "archived_sessions"), 0, true);
-  return { files: files.toSorted((a, b) => a.key.localeCompare(b.key)), capped };
+  return { files: files.toSorted((a, b) => a.key.localeCompare(b.key)), capped, blocked };
 }

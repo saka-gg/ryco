@@ -13,6 +13,7 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 
+import type { SidebarActionCommand } from "@ryco/client-runtime/state/threads";
 import { newCommandId } from "../../lib/ids";
 
 // §3-15: pure thread session-action dispatch wrappers, ported from
@@ -97,8 +98,9 @@ export async function setThreadArchived(
   api: EnvironmentApi,
   threadId: ThreadId,
   archived: boolean,
+  dispatch: (command: SidebarActionCommand) => Promise<unknown> = api.orchestration.dispatchCommand,
 ): Promise<void> {
-  await api.orchestration.dispatchCommand({
+  await dispatch({
     type: archived ? "thread.archive" : "thread.unarchive",
     commandId: newCommandId(),
     threadId,
@@ -109,8 +111,9 @@ export async function setThreadSettled(
   api: EnvironmentApi,
   threadId: ThreadId,
   settled: boolean,
+  dispatch: (command: SidebarActionCommand) => Promise<unknown> = api.orchestration.dispatchCommand,
 ): Promise<void> {
-  await api.orchestration.dispatchCommand(
+  await dispatch(
     settled
       ? { type: "thread.settle", commandId: newCommandId(), threadId }
       : {

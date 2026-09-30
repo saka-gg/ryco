@@ -145,6 +145,7 @@ it("deduplicates same-account exports from multiple instances and keeps failed r
                 Layer.provide(NodeServices.layer),
               ),
               Layer.succeed(ServerSettingsService, {
+                withSettingsSnapshot: (effect) => effect,
                 start: Effect.void,
                 ready: Effect.void,
                 getSettings: Effect.succeed(settings),

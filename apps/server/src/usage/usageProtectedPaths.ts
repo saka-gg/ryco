@@ -2,6 +2,7 @@
 import * as OS from "node:os";
 import * as Path from "node:path";
 import type { ProviderInstanceConfigMap, ServerSettings } from "@ryco/contracts";
+import { parseProviderSourcePaths } from "../provider/ProviderSourcePaths.ts";
 
 export class UsageProtectedPathError extends Error {
   constructor() {
@@ -136,14 +137,44 @@ export function resolveUsageProtectedPaths(
   if (settings !== undefined) {
     const claudeHome = pathField(settings.providers.claudeAgent, "homePath");
     const codexHome = pathField(settings.providers.codex, "homePath");
-    // These sources are unconditional in UsageService, including legacy disabled
-    // defaults. Its driver helpers use OS homedir(), not the instance environment.
+    // Retain historical OS/legacy sources, including disabled defaults, in
+    // addition to the current environment authority resolved below.
     addClaudeHistory(absolute(claudeHome || home, true));
     addCodexHistory(absolute(codexHome || Path.join(home, ".codex"), true));
     const shadowHome = pathField(settings.providers.codex, "shadowHomePath");
     if (shadowHome) addProviderHome(shadowHome, "codex");
     const exportPath = pathField(settings.providers.cursor, "usageExportPath");
     if (exportPath) add(exportPath);
+    // Imports always declare the process-default stores, even when no provider
+    // instances exist or legacy providers are disabled. Drivers also resolve
+    // legacy configurations against this environment. Preserve the OS-based
+    // statistics paths above AND these actual runtime/discovery authorities.
+    const environment = {
+      HOME: baseEnvironment.HOME,
+      CODEX_HOME: baseEnvironment.CODEX_HOME,
+      CLAUDE_CONFIG_DIR: baseEnvironment.CLAUDE_CONFIG_DIR,
+    };
+    for (const driver of ["codex", "claudeAgent"] as const) {
+      const defaults = parseProviderSourcePaths(driver, {}, environment, home);
+      const legacy = parseProviderSourcePaths(
+        driver,
+        {
+          homePath: driver === "codex" ? codexHome : claudeHome,
+          ...(driver === "codex" ? { shadowHomePath: shadowHome } : {}),
+        },
+        environment,
+        home,
+      );
+      addProviderHome(defaults.root, driver);
+      addProviderHome(legacy.root, driver);
+      if (legacy.shadow) addProviderHome(legacy.shadow, driver);
+      if (driver === "claudeAgent") {
+        // Statistics also read both HOME layouts independently of the SDK
+        // configuration-store override used by imports/continuation.
+        addClaudeHistory(defaults.home);
+        addClaudeHistory(legacy.home);
+      }
+    }
   }
   for (const instance of Object.values(instances)) {
     if (!["codex", "claudeAgent", "opencode", "cursor"].includes(instance.driver)) continue;
@@ -206,6 +237,20 @@ export function resolveUsageProtectedPaths(
       }
       const configured = env.get("CLAUDE_CONFIG_DIR");
       if (configured !== undefined) addProviderHome(configured, "claudeAgent");
+    }
+    if (instance.driver === "codex" || instance.driver === "claudeAgent") {
+      // Runtime/import authority is a subset of protection. Keep all legacy,
+      // statistics, disabled and shadow roots above, then include the current
+      // continuation store using the same parser as the provider drivers.
+      const driver = instance.driver === "codex" ? "codex" : "claudeAgent";
+      const layout = parseProviderSourcePaths(
+        driver,
+        { homePath: field("homePath"), shadowHomePath: field("shadowHomePath") },
+        Object.fromEntries(env),
+        home,
+      );
+      addProviderHome(layout.root, driver);
+      if (driver === "claudeAgent") addClaudeHistory(layout.home);
     }
   }
   return [...paths].toSorted();

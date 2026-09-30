@@ -7,6 +7,7 @@ import { getFallbackThreadIdAfterDelete } from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { readEnvironmentApi } from "../environmentApi";
+import { sidebarUndo } from "../sidebarUndo";
 import { newCommandId } from "../lib/utils";
 import { readLocalApi } from "../localApi";
 import { selectThreadByRef, selectThreadsForEnvironment, useStore } from "../store";
@@ -64,21 +65,27 @@ export function useThreadActions() {
         throw new Error("Cannot archive a running thread.");
       }
 
-      await api.orchestration.dispatchCommand({
-        type: "thread.archive",
-        commandId: newCommandId(),
-        threadId: threadRef.threadId,
+      await sidebarUndo.archive(threadRef, newCommandId(), {
+        currentRoute: () => router.state.location.href,
+        shouldLeave: () => {
+          const current = getCurrentRouteThreadRef();
+          return (
+            current?.threadId === threadRef.threadId &&
+            current.environmentId === threadRef.environmentId
+          );
+        },
+        leave: async () => {
+          await handleNewThreadRef.current(scopeProjectRef(thread.environmentId, thread.projectId));
+          return router.state.location.href;
+        },
+        reopen: () =>
+          router.navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(threadRef),
+          }),
       });
-      const currentRouteThreadRef = getCurrentRouteThreadRef();
-
-      if (
-        currentRouteThreadRef?.threadId === threadRef.threadId &&
-        currentRouteThreadRef.environmentId === threadRef.environmentId
-      ) {
-        await handleNewThreadRef.current(scopeProjectRef(thread.environmentId, thread.projectId));
-      }
     },
-    [getCurrentRouteThreadRef, resolveThreadTarget],
+    [getCurrentRouteThreadRef, resolveThreadTarget, router],
   );
 
   const unarchiveThread = useCallback(async (target: ScopedThreadRef) => {

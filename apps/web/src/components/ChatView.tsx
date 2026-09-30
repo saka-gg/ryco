@@ -1,5 +1,6 @@
 import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
 import { notifyWorktreeSubmoduleSetup } from "./worktrees/worktreeCreationNotifications";
+import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
 import { BatchLaunchControls } from "./chat/BatchLaunchControls";
 import { BatchResultSummary } from "./chat/BatchResultSummary";
@@ -2304,26 +2305,11 @@ export default function ChatView(props: ChatViewProps) {
       const api = readEnvironmentApi(environmentId);
       if (!activeThreadId || !api || !terminalCapability.allowed) return;
       const isFinalTerminal = terminalState.terminalIds.length <= 1;
-      const fallbackExitWrite = () =>
-        api.terminal
-          .write({ threadId: activeThreadId, terminalId, data: "exit\n" })
+      if (activeThreadRef)
+        void terminalSnippetBroker
+          .close({ threadRef: activeThreadRef, terminalId }, api.terminal, isFinalTerminal)
           .catch(() => undefined);
-      if ("close" in api.terminal && typeof api.terminal.close === "function") {
-        void (async () => {
-          if (isFinalTerminal) {
-            await api.terminal
-              .clear({ threadId: activeThreadId, terminalId })
-              .catch(() => undefined);
-          }
-          await api.terminal.close({
-            threadId: activeThreadId,
-            terminalId,
-            deleteHistory: true,
-          });
-        })().catch(() => fallbackExitWrite());
-      } else {
-        void fallbackExitWrite();
-      }
+
       if (activeThreadRef) {
         storeCloseTerminal(activeThreadRef, terminalId);
       }

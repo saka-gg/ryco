@@ -2,8 +2,9 @@ import { expect, it } from "vitest";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { nativeContext } from "./forkReconciliation.ts";
 import { parseHistory } from "./sourceHistory.ts";
-import { forkClaudeNative } from "./claudeNativeFork.ts";
+import { forkClaudeNative, verifyClaudeNative } from "./claudeNativeFork.ts";
 
 it("uses the real SDK to fork into the target cwd's native store without changing the source", async () => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "ryco-sdk-import-")));
@@ -69,6 +70,17 @@ it("uses the real SDK to fork into the target cwd's native store without changin
     expect(history.messages).toHaveLength(2);
     expect(history.id).toBe(fork);
     expect(copied).not.toContain(`"uuid":"${answer}"`);
+    expect(nativeContext("claudeAgent", copied)).toBe(nativeContext("claudeAgent", contents));
+    expect(
+      await verifyClaudeNative({ root, cwd: target, candidateId: fork, candidateFile: targetFile }),
+    ).toBe(true);
+    expect(
+      await verifyClaudeNative({ root, cwd: source, candidateId: fork, candidateFile: targetFile }),
+    ).toBe(false);
+    expect(
+      await verifyClaudeNative({ root, cwd: target, candidateId: id, candidateFile: targetFile }),
+    ).toBe(false);
+    expect(await readFile(sourceFile, "utf8")).toBe(contents);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

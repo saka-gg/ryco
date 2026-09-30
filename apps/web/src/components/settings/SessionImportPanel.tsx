@@ -1,9 +1,11 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import {
   ProjectId,
   ProviderInstanceId,
   type SessionImportCandidate,
   type SessionImportSource,
+  type SessionImportStore,
+  type SessionImportRecovery,
   type ServerProvider,
 } from "@ryco/contracts";
 import type { WsRpcClient } from "@ryco/client-runtime/rpc";
@@ -35,6 +37,10 @@ export function SessionImportPanel({
     [],
   );
   const [source, setSource] = useState<SessionImportSource>("codex");
+  const [stores, setStores] = useState<readonly SessionImportStore[]>([]);
+  const [storeKey, setStoreKey] = useState("");
+  const [recovery, setRecovery] = useState<Record<string, SessionImportRecovery>>({});
+  const current = useRef({ allowed, source, client });
   const [search, setSearch] = useState("");
   const [archived, setArchived] = useState(false);
   const [items, setItems] = useState<readonly SessionImportCandidate[]>([]);
@@ -46,8 +52,40 @@ export function SessionImportPanel({
   const [busy, setBusy] = useState(false);
   const [notices, setNotices] = useState<readonly string[]>([]);
   const [statuses, setStatuses] = useState<Record<string, string>>({});
+  useLayoutEffect(() => {
+    if (current.current.allowed !== allowed || current.current.source !== source)
+      generation.current++;
+    current.current = { allowed, source, client };
+  }, [allowed, source, client]);
+  useEffect(() => {
+    const attempt = generation.current;
+    if (allowed)
+      void Promise.resolve()
+        .then(() => current.current.client().sources({ source }))
+        .then((result) => {
+          if (attempt === generation.current) {
+            setStores(result);
+            setRecovery({});
+          }
+        })
+        .catch((error) => {
+          if (attempt === generation.current)
+            setNotices([error instanceof Error ? error.message : "Source stores unavailable."]);
+        })
+        .finally(() => {
+          if (attempt === generation.current) setBusy(false);
+        });
+  }, [source, allowed]);
+  const activeStore = storeKey
+    ? stores.find((store) => store.key === storeKey)
+    : stores.find((store) => store.isDefault);
   const providers = providerOptions.filter(
-    (p) => p.driver === source && p.enabled && p.installed && p.availability !== "unavailable",
+    (p) =>
+      p.driver === source &&
+      p.enabled &&
+      p.installed &&
+      p.availability !== "unavailable" &&
+      !!activeStore?.instanceIds.includes(p.instanceId),
   );
   const activeProvider =
     providers.find((provider) => provider.instanceId === instance) ?? providers[0];
@@ -56,13 +94,21 @@ export function SessionImportPanel({
     activeProvider?.models.find((choice) => choice.isDefault) ??
     activeProvider?.models[0];
   const discover = async (offset = 0) => {
+    if (!current.current.allowed) return;
     setBusy(true);
     const attempt = generation.current;
     try {
-      const result = await client().discover({ source, search, offset, includeArchived: archived });
+      const result = await client().discover({
+        source,
+        ...(activeStore ? { storeKey: activeStore.key } : {}),
+        search,
+        offset,
+        includeArchived: archived,
+      });
       if (attempt !== generation.current) return;
       setItems((previous) => (offset ? [...previous, ...result.items] : result.items));
       if (!offset) {
+        setRecovery({});
         setSelected(new Set());
         setStatuses({});
       }
@@ -76,6 +122,7 @@ export function SessionImportPanel({
     }
   };
   const run = async () => {
+    if (!current.current.allowed) return;
     setBusy(true);
     const attempt = generation.current;
     const destination = ProjectId.make(project);
@@ -93,6 +140,7 @@ export function SessionImportPanel({
         await client().run({
           source: item.source,
           key: item.key,
+          ...(activeStore ? { storeKey: activeStore.key } : {}),
           projectId: destination,
           modelSelection: { instanceId, model: activeModel!.slug },
         });
@@ -107,6 +155,75 @@ export function SessionImportPanel({
       }
     }
     if (attempt === generation.current) setBusy(false);
+  };
+  const inspect = async (item: SessionImportCandidate, cursor?: string) => {
+    if (!current.current.allowed) return;
+    setBusy(true);
+    const attempt = generation.current;
+    try {
+      const result = await client().reconcile({
+        source: item.source,
+        key: item.key,
+        ...(cursor ? { cursor } : {}),
+      });
+      if (attempt === generation.current)
+        setRecovery((previous) => ({ ...previous, [item.key]: result }));
+    } catch (error) {
+      if (attempt === generation.current) {
+        setRecovery((previous) => {
+          const updated = { ...previous };
+          delete updated[item.key];
+          return updated;
+        });
+        setStatuses((previous) => ({
+          ...previous,
+          [item.key]:
+            error instanceof Error ? error.message : "Inspection failed. Import remains paused.",
+        }));
+      }
+    } finally {
+      if (attempt === generation.current) setBusy(false);
+    }
+  };
+  const adopt = async (item: SessionImportCandidate, adoptionToken: string) => {
+    if (!current.current.allowed) return;
+    setBusy(true);
+    const attempt = generation.current;
+    try {
+      const result = await client().adopt({ source: item.source, key: item.key, adoptionToken });
+      if (attempt === generation.current) {
+        setItems((previous) =>
+          previous.map((entry) =>
+            entry.key === item.key
+              ? { ...entry, quarantined: false, importedThreadId: result.threadId }
+              : entry,
+          ),
+        );
+        setRecovery((previous) => {
+          const updated = { ...previous };
+          delete updated[item.key];
+          return updated;
+        });
+        setStatuses((previous) => ({ ...previous, [item.key]: "Imported" }));
+      }
+    } catch (error) {
+      if (attempt === generation.current) {
+        setRecovery((previous) => {
+          const updated = { ...previous };
+          delete updated[item.key];
+          return updated;
+        });
+        setStatuses((previous) => ({
+          ...previous,
+          [item.key]:
+            error instanceof Error
+              ? error.message
+              : "Adoption failed. Refresh and retry the saved import.",
+        }));
+      }
+    } finally {
+      if (attempt === generation.current) setBusy(false);
+    }
   };
   return (
     <section aria-label="Import local conversations" className="space-y-4">
@@ -123,6 +240,10 @@ export function SessionImportPanel({
             disabled={busy}
             onChange={(event) => {
               setSource(event.target.value as SessionImportSource);
+              generation.current++;
+              setStores([]);
+              setRecovery({});
+              setStoreKey("");
               setItems([]);
               setNext(null);
               setInstance("");
@@ -133,6 +254,31 @@ export function SessionImportPanel({
           >
             <option value="codex">Codex</option>
             <option value="claudeAgent">Claude Code</option>
+          </select>
+        </label>
+        <label>
+          Source store{" "}
+          <select
+            aria-label="Import source store"
+            value={activeStore?.key ?? ""}
+            disabled={busy || !allowed}
+            onChange={(event) => {
+              generation.current++;
+              setStoreKey(event.target.value);
+              setItems([]);
+              setSelected(new Set());
+              setRecovery({});
+              setNext(null);
+              setStatuses({});
+            }}
+          >
+            {!activeStore && <option value="">Choose a configured store</option>}
+            {stores.map((store) => (
+              <option key={store.key} value={store.key}>
+                {store.label}
+                {store.instanceIds.length ? "" : " (no enabled continuation instance)"}
+              </option>
+            ))}
           </select>
         </label>
         <Input
@@ -152,7 +298,11 @@ export function SessionImportPanel({
           />
           Include archived
         </label>
-        <Button variant="outline" disabled={busy || !allowed} onClick={() => void discover()}>
+        <Button
+          variant="outline"
+          disabled={busy || !allowed || !activeStore}
+          onClick={() => void discover()}
+        >
           Find conversations
         </Button>
       </div>
@@ -162,8 +312,8 @@ export function SessionImportPanel({
         ))}
       </div>
       <div className="max-h-80 overflow-auto divide-y">
-        {items.map((item) => (
-          <label key={item.key} className="flex gap-3 py-3 text-sm">
+        {(allowed ? items : []).map((item) => (
+          <div key={item.key} className="flex gap-3 py-3 text-sm">
             <input
               type="checkbox"
               aria-label={`Select ${item.title}`}
@@ -183,7 +333,7 @@ export function SessionImportPanel({
                 })
               }
             />
-            <span className="min-w-0">
+            <div className="min-w-0">
               <span className="block break-words">
                 {item.title}
                 {item.archived ? " (archived)" : ""}
@@ -193,17 +343,56 @@ export function SessionImportPanel({
               </span>
               <span role="status">
                 {item.quarantined
-                  ? "Import outcome uncertain — item quarantined"
+                  ? statuses[item.key] || "Import outcome uncertain — item quarantined"
                   : item.importedThreadId
                     ? "Already imported"
                     : statuses[item.key]}
               </span>
-            </span>
-          </label>
+              {item.quarantined && (
+                <div className="mt-2 space-y-2">
+                  <Button
+                    variant="outline"
+                    disabled={busy || !allowed}
+                    onClick={() => void inspect(item)}
+                  >
+                    Inspect existing copies
+                  </Button>
+                  {recovery[item.key] && (
+                    <div aria-label={`Recovery for ${item.title}`}>
+                      <p role="status">{recovery[item.key]!.notice}</p>
+                      {recovery[item.key]!.candidates.map((candidate) => (
+                        <p key={candidate.id}>
+                          Copy {candidate.id} · {candidate.messageCount} messages
+                        </p>
+                      ))}
+                      {recovery[item.key]!.nextCursor && (
+                        <Button
+                          variant="outline"
+                          disabled={busy || !allowed}
+                          onClick={() => void inspect(item, recovery[item.key]!.nextCursor!)}
+                        >
+                          Inspect next page
+                        </Button>
+                      )}
+                      {recovery[item.key]!.state === "unique" &&
+                        recovery[item.key]!.adoptionToken && (
+                          <Button
+                            disabled={busy || !allowed}
+                            onClick={() => void adopt(item, recovery[item.key]!.adoptionToken!)}
+                          >
+                            Adopt proven copy
+                          </Button>
+                        )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
         ))}
       </div>
       {next !== null && (
-        <Button variant="outline" disabled={busy} onClick={() => void discover(next)}>
+        <Button variant="outline" disabled={busy || !allowed} onClick={() => void discover(next)}>
           Search next page
         </Button>
       )}
