@@ -48,10 +48,14 @@ describe("pre-auth server environment descriptor", () => {
       "environmentIcon",
       "fileAttachments",
       "projectIcons",
+      "projectPreferences",
       "repositoryIdentity",
+      "requiredWorktreeBootstrap",
+      "storageManagement",
       "threadPriorityRanking",
       "threadSettlement",
       "threadSnooze",
+      "worktreeSubmoduleSettings",
     ]);
   });
 });

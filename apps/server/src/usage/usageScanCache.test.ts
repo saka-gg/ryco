@@ -41,7 +41,7 @@ describe("usage scan cache", () => {
     expect(anonymized.dedupeKey).toHaveLength(64);
   });
 
-  it("round-trips compact cached rows and recomputes totals", () => {
+  it("round-trips compact cached rows and preserves totals", () => {
     const fileKey = usageCacheFileKey("claude", "/transcripts/a.jsonl");
     const rootKey = usageCacheRootKey("claude", "/transcripts");
     const cache: UsageScanCache = new Map([
@@ -90,4 +90,41 @@ describe("usage scan cache", () => {
     ).toBe(2);
     expect([...cache.keys()].toSorted()).toEqual(["keep", "live"]);
   });
+});
+
+it("preserves authoritative totals and unavailable reasoning in new provider caches, while reading v2", () => {
+  const cached = record({
+    provider: "opencode",
+    totals: {
+      uncachedInputTokens: 1,
+      cachedInputTokens: 2,
+      cacheCreationInputTokens: 3,
+      outputTokens: 4,
+      totalTokens: 999,
+    },
+  });
+  const document = encodeUsageScanCache(
+    new Map([
+      [
+        "new",
+        {
+          rootKey: "root",
+          size: 1,
+          mtimeMs: 1,
+          fingerprint: "inode",
+          provider: "opencode",
+          records: [cached],
+        },
+      ],
+    ]),
+  );
+  expect(decodeUsageScanCache(document).get("new")?.records[0]?.totals).toEqual(cached.totals);
+  const old = encodeUsageScanCache(
+    new Map([
+      ["old", { rootKey: "root", size: 1, mtimeMs: 1, provider: "claude", records: [record()] }],
+    ]),
+  ) as unknown as { version: number; files: Record<string, { r: unknown[][] }> };
+  old.version = 2;
+  old.files.old!.r[0]!.splice(10);
+  expect(decodeUsageScanCache(old).get("old")?.records[0]?.totals.totalTokens).toBe(10);
 });

@@ -1,3 +1,8 @@
+import {
+  storageLifecycleLock,
+  isStoragePathBlocked,
+  canonicalStoragePath,
+} from "../../storage/lifecycle.ts";
 import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import { ApprovalRequestId } from "@ryco/contracts";
@@ -206,6 +211,49 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             commandId: envelope.command.commandId,
             detail: existingReceipt.value.error ?? "Previously rejected.",
           });
+        }
+
+        const storageCommand = envelope.command;
+        const storageThread =
+          "threadId" in storageCommand
+            ? commandReadModel.threads.find((thread) => thread.id === storageCommand.threadId)
+            : undefined;
+        const storagePath =
+          "worktreePath" in storageCommand
+            ? storageCommand.worktreePath
+            : storageCommand.type === "thread.attach-to-worktree"
+              ? commandReadModel.worktrees?.find(
+                  (worktree) => worktree.worktreeId === storageCommand.worktreeId,
+                )?.worktreePath
+              : storageCommand.type === "thread.turn.start" ||
+                  storageCommand.type === "thread.turn.steer" ||
+                  storageCommand.type === "thread.goal.set"
+                ? storageThread?.worktreePath
+                : null;
+        if (storagePath) {
+          const canonicalPath = yield* Effect.tryPromise(() =>
+            canonicalStoragePath(storagePath),
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationCommandInvariantError({
+                  commandType: storageCommand.type,
+                  detail: "Cannot establish checkout readiness.",
+                  cause,
+                }),
+            ),
+          );
+          if (
+            yield* isStoragePathBlocked(sql, canonicalPath).pipe(
+              Effect.mapError(toPersistenceSqlError("storage.readiness")),
+            )
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: storageCommand.type,
+              detail:
+                "Checkout cleanup is pending or complete. Restore/recreate the checkout before starting work.",
+            });
+          }
         }
 
         if (
@@ -426,7 +474,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const worker = Effect.forever(
     Queue.take(commandQueue).pipe(
       Effect.tap(() => commandQueueMetrics.recordDequeued()),
-      Effect.flatMap(processEnvelope),
+      Effect.flatMap((envelope) => storageLifecycleLock.withPermit(processEnvelope(envelope))),
     ),
   );
   yield* Effect.forkScoped(worker);

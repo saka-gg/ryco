@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./worktreeSubmodules": "./src/worktreeSubmodules.ts",
     "./retiredFeatures": "./src/retiredFeatures.ts",
     "./backgroundWork": {
       "types": "./src/backgroundWork.ts",
@@ -314,7 +315,8 @@
       "import": "./src/appSnapShortcut.ts"
     },
     "./computerAuditFile": "./src/computerAuditFile.ts",
-    "./computerAuditHistory": "./src/computerAuditHistory.ts"
+    "./computerAuditHistory": "./src/computerAuditHistory.ts",
+    "./storageRetention": "./src/storageRetention.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -49,3 +49,9 @@ describe("parseStatisticsSearch", () => {
     });
   });
 });
+
+it("preserves useful native history and export provider filters", () => {
+  expect(
+    parseStatisticsSearch({ providers: ["cursor", "opencode", "cursor", "unknown"] }).providers,
+  ).toEqual(["cursor", "opencode"]);
+});

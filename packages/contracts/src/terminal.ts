@@ -180,10 +180,18 @@ export class TerminalSubscriptionResyncError extends Schema.TaggedError<Terminal
 
 export class TerminalCwdError extends Schema.TaggedError<TerminalCwdError>()("TerminalCwdError", {
   cwd: Schema.String,
-  reason: Schema.Literals(["notFound", "notDirectory", "outsideWorkspace", "statFailed"]),
+  reason: Schema.Literals([
+    "notFound",
+    "notDirectory",
+    "outsideWorkspace",
+    "statFailed",
+    "cleanupPending",
+  ]),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message() {
+    if (this.reason === "cleanupPending")
+      return "Checkout cleanup is pending or complete. Restore it before opening a terminal.";
     if (this.reason === "notDirectory") {
       return `Terminal cwd is not a directory: ${this.cwd}`;
     }

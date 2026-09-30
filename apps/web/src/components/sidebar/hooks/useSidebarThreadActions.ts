@@ -285,7 +285,12 @@ export function useSidebarThreadActions(params: {
         ...(seedContext.worktreePath !== undefined
           ? { worktreePath: seedContext.worktreePath }
           : {}),
-        envMode: seedContext.envMode,
+        // Contextual choices stay explicit; a plain new draft resolves the owning project's defaults.
+        ...(seedOverride ||
+        seedContext.branch !== undefined ||
+        seedContext.worktreePath !== undefined
+          ? { envMode: seedContext.envMode }
+          : {}),
       });
     },
     [defaultThreadEnvMode, handleNewThread, isMobile, router, setOpenMobile],

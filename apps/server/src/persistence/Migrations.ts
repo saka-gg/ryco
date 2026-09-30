@@ -1,3 +1,4 @@
+import Migration0066 from "./Migrations/066_StorageLifecycle.ts";
 import Migration0062 from "./Migrations/062_SessionImports.ts";
 import Migration0063 from "./Migrations/063_AgentControlCompletionReturns.ts";
 import Migration0065 from "./Migrations/065_OptionalUserInput.ts";
@@ -91,6 +92,7 @@ import Migration0053 from "./Migrations/053_ThreadPriorityRankings.ts";
  * returns migrations sorted by ID.
  */
 export const migrationEntries = [
+  [66, "StorageLifecycle", Migration0066],
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],

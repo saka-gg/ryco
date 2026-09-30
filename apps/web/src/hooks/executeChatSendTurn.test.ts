@@ -323,7 +323,8 @@ describe("buildSendTurnBootstrap", () => {
     expect(result?.prepareWorktree?.projectCwd).toBe("/tmp/project");
     expect(result?.prepareWorktree?.baseBranch).toBe("main");
     expect(result?.prepareWorktree?.branch).toBeDefined();
-    expect(result?.runSetupScript).toBe(true);
+    // Omission lets the server resolve current project setup preferences.
+    expect(result?.runSetupScript).toBeUndefined();
   });
 
   it("skips generated branch name for legacy worktree materialization", () => {

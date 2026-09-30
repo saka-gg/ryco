@@ -1,7 +1,10 @@
+import { resolveProjectPreferences } from "../../project/projectPreferences.ts";
+import { ProjectSetupScriptRunner } from "../../project/Services/ProjectSetupScriptRunner.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
+import { setupProjectScript } from "@ryco/shared/projectScripts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -240,6 +243,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const proposalEvents = yield* AgentControlProposalEvents;
     const validator = yield* AgentControlActionValidator;
     const settingsService = yield* Effect.serviceOption(ServerSettingsService);
+    const setupScriptRunner = yield* Effect.serviceOption(ProjectSetupScriptRunner);
     const automations = yield* Effect.serviceOption(AgentControlAutomationService);
     const commandApplication = yield* OrchestrationCommandApplication;
     const engine = yield* OrchestrationEngineService;
@@ -689,6 +693,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               });
             } else {
               yield* git.createWorktree({
+                projectId: plan.projectId,
                 cwd: expected.projectRoot,
                 path: expected.path,
                 refName: expected.branch,
@@ -923,19 +928,32 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             readonly branch: string;
             readonly checkoutPath: string;
             readonly baseRef: string;
+            readonly runSetupScript: boolean;
           }>;
 
           const worktreeSettings = Option.isSome(settingsService)
             ? yield* settingsService.value.getSettings
             : DEFAULT_SERVER_SETTINGS;
-          const { worktreeBranchPrefix } = worktreeSettings;
 
           // Entire batch preflight completes before any thread command is dispatched.
           for (const [index, entry] of entries.entries()) {
             if (entry.envMode !== "worktree") continue;
             const project = snapshot.projects.find((candidate) => candidate.id === entry.projectId);
             if (!project) return yield* Effect.fail(new Error("Requested project is unavailable."));
-            const branch = branchFor(operation.operationId, index, worktreeBranchPrefix);
+            const effective = resolveProjectPreferences({ settings: worktreeSettings, project });
+            if (
+              effective.runSetupScript.value &&
+              Option.isNone(setupScriptRunner) &&
+              setupProjectScript(project.scripts ?? [])
+            )
+              return yield* Effect.fail(
+                new Error("Project setup is unavailable. Retry when the server is ready."),
+              );
+            const branch = branchFor(
+              operation.operationId,
+              index,
+              effective.worktreeBranchPrefix.value,
+            );
             const checkoutPath = resolveWorktreeCheckoutPath({
               location: undefined,
               appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
@@ -965,11 +983,14 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               branch,
               checkoutPath,
               baseRef,
+              runSetupScript: effective.runSetupScript.value,
             });
           }
 
           for (const worktree of prepared) {
             const created = yield* git.createWorktree({
+              settingsSnapshot: worktreeSettings,
+              projectId: worktree.project.id,
               cwd: worktree.project.workspaceRoot,
               refName: worktree.baseRef,
               newRefName: worktree.branch,
@@ -1071,6 +1092,18 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 worktreeId: worktree.worktreeId,
                 attachedAt: createdAt,
               });
+              // Checkout preparation (including feature-specific submodules) must
+              // finish before setup. Required plan model/env inputs stay explicit.
+              if (worktree.runSetupScript && Option.isSome(setupScriptRunner)) {
+                yield* validator.revalidateExecution(proposal);
+                yield* setupScriptRunner.value.runForThread({
+                  threadId,
+                  projectId: project.id,
+                  projectCwd: project.workspaceRoot,
+                  worktreePath: worktree.checkoutPath,
+                });
+                yield* checkpoint(appendStep(operation.state, `setup-launched:${index}`));
+              }
             }
             if ("returnToOrigin" in entry && entry.returnToOrigin) {
               const origin = proposal.principal;

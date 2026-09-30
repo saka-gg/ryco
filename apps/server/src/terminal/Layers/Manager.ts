@@ -1,3 +1,9 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import {
+  storageLifecycleLock,
+  isStoragePathBlocked,
+  canonicalStoragePath,
+} from "../../storage/lifecycle.ts";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -914,6 +920,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     const context = yield* Effect.context<never>();
     const runFork = Effect.runForkWith(context);
 
+    const storageSql = yield* Effect.serviceOption(SqlClient.SqlClient);
     const logsDir = options.logsDir;
     const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
     const maxHistoryBytes = Math.max(1, options.maxHistoryBytes ?? DEFAULT_HISTORY_MAX_BYTES);
@@ -1352,6 +1359,17 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               ),
             )
         : cwd;
+      if (Option.isSome(storageSql)) {
+        const canonical = yield* Effect.tryPromise(() => canonicalStoragePath(authorizedCwd)).pipe(
+          Effect.mapError((cause) => new TerminalCwdError({ cwd, reason: "statFailed", cause })),
+        );
+        if (
+          yield* isStoragePathBlocked(storageSql.value, canonical).pipe(
+            Effect.mapError((cause) => new TerminalCwdError({ cwd, reason: "statFailed", cause })),
+          )
+        )
+          return yield* new TerminalCwdError({ cwd, reason: "cleanupPending" });
+      }
       const stats = yield* fileSystem.stat(authorizedCwd).pipe(
         Effect.mapError(
           (cause) =>
@@ -2223,11 +2241,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     );
 
     return {
-      open,
+      open: (input) => storageLifecycleLock.withPermit(open(input)),
       write,
       resize,
       clear,
-      restart,
+      restart: (input) => storageLifecycleLock.withPermit(restart(input)),
       close,
       listDiagnostics: SynchronizedRef.get(managerStateRef).pipe(
         Effect.map((state) =>

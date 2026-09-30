@@ -22,30 +22,35 @@ import {
 } from "./sendEngine.ts";
 
 describe("send engine — bootstrap", () => {
-  it.each([null, "feature/custom"])("preserves fetch preference and branch naming (%s)", (name) => {
-    const bootstrap = buildSendTurnBootstrap({
-      isLocalDraftThread: true,
-      baseBranchForWorktree: "origin/main",
-      fetchOrigin: true,
-      worktreeBranchName: name,
-      worktreeBranchPrefix: "team/tasks",
-      shouldMaterializeLegacyBranchWorktree: false,
-      projectId: ProjectId.make("project-1"),
-      projectCwd: "/workspace",
-      title: "Title",
-      threadCreateModelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      tokenMode: "balanced",
-      activeThreadBranch: null,
-      worktreePath: null,
-      threadCreatedAt: "2026-07-23T00:00:00.000Z",
-    });
-    expect(bootstrap?.prepareWorktree?.fetchOrigin).toBe(true);
-    expect(bootstrap?.prepareWorktree?.baseBranch).toBe("origin/main");
-    if (name) expect(bootstrap?.prepareWorktree?.branch).toBe(name);
-    else expect(bootstrap?.prepareWorktree?.branch).toMatch(/^team\/tasks\//);
-  });
+  it.each([null, "feature/custom"])(
+    "preserves fetch preference, disabled setup and branch naming (%s)",
+    (name) => {
+      const bootstrap = buildSendTurnBootstrap({
+        isLocalDraftThread: true,
+        baseBranchForWorktree: "origin/main",
+        fetchOrigin: true,
+        runSetupScript: false,
+        worktreeBranchName: name,
+        worktreeBranchPrefix: "team/tasks",
+        shouldMaterializeLegacyBranchWorktree: false,
+        projectId: ProjectId.make("project-1"),
+        projectCwd: "/workspace",
+        title: "Title",
+        threadCreateModelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        tokenMode: "balanced",
+        activeThreadBranch: null,
+        worktreePath: null,
+        threadCreatedAt: "2026-07-23T00:00:00.000Z",
+      });
+      expect(bootstrap?.prepareWorktree?.fetchOrigin).toBe(true);
+      expect(bootstrap?.runSetupScript).toBe(false);
+      expect(bootstrap?.prepareWorktree?.baseBranch).toBe("origin/main");
+      if (name) expect(bootstrap?.prepareWorktree?.branch).toBe(name);
+      else expect(bootstrap?.prepareWorktree?.branch).toMatch(/^team\/tasks\//);
+    },
+  );
   it("does not resolve a bootstrap for an existing thread without a worktree", () => {
     expect(
       buildSendTurnBootstrap({

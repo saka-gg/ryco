@@ -9,6 +9,7 @@ import {
 import { SourceControlProviderError, SourceControlProviderInfo } from "./sourceControl.ts";
 import { VcsDriverKind } from "./vcs.ts";
 import { WorktreeCheckoutLocation, WorktreeId } from "./worktree.ts";
+import { WorktreeSubmodules } from "./settings.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const GIT_LIST_BRANCHES_MAX_LIMIT = 200;
@@ -290,8 +291,17 @@ export const VcsListRefsResult = Schema.Struct({
 });
 export type VcsListRefsResult = typeof VcsListRefsResult.Type;
 
+export const WorktreeSubmoduleInitialization = Schema.Struct({
+  mode: WorktreeSubmodules,
+  source: Schema.Literals(["project", "repository", "node"]),
+  status: Schema.Literals(["initialized", "skipped"]),
+  reason: Schema.String,
+});
+export type WorktreeSubmoduleInitialization = typeof WorktreeSubmoduleInitialization.Type;
+
 export const VcsCreateWorktreeResult = Schema.Struct({
   worktree: VcsWorktree,
+  submoduleInitialization: Schema.optional(WorktreeSubmoduleInitialization),
 });
 export type VcsCreateWorktreeResult = typeof VcsCreateWorktreeResult.Type;
 
@@ -304,6 +314,7 @@ export const GitPreparePullRequestThreadResult = Schema.Struct({
   pullRequest: GitResolvedPullRequest,
   branch: TrimmedNonEmptyStringSchema,
   worktreePath: TrimmedNonEmptyStringSchema.pipe(Schema.NullOr),
+  submoduleInitialization: Schema.optional(WorktreeSubmoduleInitialization),
 });
 export type GitPreparePullRequestThreadResult = typeof GitPreparePullRequestThreadResult.Type;
 

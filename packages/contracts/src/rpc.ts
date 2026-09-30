@@ -1,3 +1,13 @@
+import { EffectiveProjectPreferences } from "./settings.ts";
+import {
+  StorageScanInput,
+  StoragePreviewInput,
+  StorageExecuteInput,
+  StorageSnapshot,
+  StorageCleanupPreview,
+  StorageCleanupResult,
+  StorageError,
+} from "./storage.ts";
 import {
   CodexResetCreditAccount,
   CodexResetCreditInput,
@@ -120,6 +130,7 @@ import {
   VcsCreateRefResult,
   VcsCreateWorktreeInput,
   VcsCreateWorktreeResult,
+  WorktreeSubmoduleInitialization,
   VcsInitInput,
   VcsListRefsInput,
   VcsListRefsResult,
@@ -315,6 +326,9 @@ import {
 } from "./worktree.ts";
 
 export const WS_METHODS = {
+  storageScan: "storage.scan",
+  storagePreview: "storage.preview",
+  storageExecute: "storage.execute",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -396,6 +410,7 @@ export const WS_METHODS = {
   serverUpsertKeybinding: "server.upsertKeybinding",
   keybindingsReplaceCustom: "keybindings.replaceCustom",
   serverGetSettings: "server.getSettings",
+  serverGetProjectPreferences: "server.getProjectPreferences",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverListOpinionatedPlugins: "server.listOpinionatedPlugins",
@@ -493,6 +508,7 @@ export type GitCreateWorktreeForProjectInput = typeof GitCreateWorktreeForProjec
 export const GitCreateWorktreeForProjectOutput = Schema.Struct({
   worktreeId: WorktreeId,
   sessionId: ThreadId,
+  submoduleInitialization: Schema.optional(WorktreeSubmoduleInitialization),
 });
 export type GitCreateWorktreeForProjectOutput = typeof GitCreateWorktreeForProjectOutput.Type;
 
@@ -765,6 +781,12 @@ export const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
   payload: Schema.Struct({}),
   success: ServerSettings,
   error: ServerSettingsError,
+});
+
+export const WsServerGetProjectPreferencesRpc = Rpc.make(WS_METHODS.serverGetProjectPreferences, {
+  payload: Schema.Struct({ projectId: Schema.optionalKey(ProjectId) }),
+  success: EffectiveProjectPreferences,
+  error: Schema.Union([ServerSettingsError, AuthRpcError]),
 });
 
 export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1415,6 +1437,22 @@ export const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePu
   error: Schema.Union([GitManagerServiceError, AuthRpcError]),
 });
 
+export const WsStorageScanRpc = Rpc.make(WS_METHODS.storageScan, {
+  payload: StorageScanInput,
+  success: StorageSnapshot,
+  error: Schema.Union([StorageError, AuthRpcError]),
+});
+export const WsStoragePreviewRpc = Rpc.make(WS_METHODS.storagePreview, {
+  payload: StoragePreviewInput,
+  success: StorageCleanupPreview,
+  error: Schema.Union([StorageError, AuthRpcError]),
+});
+export const WsStorageExecuteRpc = Rpc.make(WS_METHODS.storageExecute, {
+  payload: StorageExecuteInput,
+  success: StorageCleanupResult,
+  error: Schema.Union([StorageError, AuthRpcError]),
+});
+
 export const WsGitCreateWorktreeForProjectRpc = Rpc.make(WS_METHODS.gitCreateWorktreeForProject, {
   payload: GitCreateWorktreeForProjectInput,
   success: GitCreateWorktreeForProjectOutput,
@@ -1918,6 +1956,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
   | typeof WsKeybindingsReplaceCustomRpc
+  | typeof WsServerGetProjectPreferencesRpc
   | typeof WsServerGetSettingsRpc
   | typeof WsServerUpdateSettingsRpc
   | typeof WsServerGetDiagnosticsSnapshotRpc
@@ -1999,6 +2038,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsGitRunStackedActionRpc
   | typeof WsGitResolvePullRequestRpc
   | typeof WsGitPreparePullRequestThreadRpc
+  | typeof WsStorageScanRpc
+  | typeof WsStoragePreviewRpc
+  | typeof WsStorageExecuteRpc
   | typeof WsGitCreateWorktreeForProjectRpc
   | typeof WsGitFindWorktreeForOriginRpc
   | typeof WsGitArchiveWorktreeRpc
@@ -2083,6 +2125,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,
   WsKeybindingsReplaceCustomRpc,
+  WsServerGetProjectPreferencesRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
   WsServerGetDiagnosticsSnapshotRpc,
@@ -2164,6 +2207,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsGitRunStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
+  WsStorageScanRpc,
+  WsStoragePreviewRpc,
+  WsStorageExecuteRpc,
   WsGitCreateWorktreeForProjectRpc,
   WsGitFindWorktreeForOriginRpc,
   WsGitArchiveWorktreeRpc,

@@ -160,7 +160,7 @@ describe("Statistics contract", () => {
   });
 
   it("keeps the usage contract version explicit", () => {
-    expect(USAGE_CONTRACT_VERSION).toBe(1);
+    expect(USAGE_CONTRACT_VERSION).toBe(2);
   });
 });
 

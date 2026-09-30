@@ -1,4 +1,12 @@
-import type { MergedUsageSummary } from "@ryco/client-runtime/usage";
+import {
+  USAGE_PROVIDERS,
+  USAGE_PROVIDER_COLORS,
+  USAGE_PROVIDER_LABELS,
+  filterUsageImports,
+  sumUsageImports,
+  type MergedUsageSummary,
+} from "@ryco/client-runtime/usage";
+import type { UsageImportedMetric, UsageProviderKind } from "@ryco/contracts";
 import {
   AlertCircleIcon,
   BrainCircuitIcon,
@@ -9,7 +17,7 @@ import {
   SparklesIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
 import { Button } from "~/components/ui/button";
@@ -48,11 +56,6 @@ const usd = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
-const USAGE_PROVIDER_COLORS = {
-  claude: "#d97757",
-  codex: "var(--foreground)",
-} as const;
-
 function formatCost(value: number | null): string {
   return value === null ? "Unavailable" : usd.format(value);
 }
@@ -74,6 +77,7 @@ export function UsageView({
     const buckets = filterUsageBuckets(merged, search.providers);
     return {
       buckets,
+      imports: filterUsageImports(merged, search.providers),
       totals: sumUsageTotals(merged, buckets),
       days: buildUsageDaySeries(merged, buckets),
       breakdown: buildUsageBreakdown(buckets, search.usageBreakdown),
@@ -95,7 +99,7 @@ export function UsageView({
         description={
           failed.length > 0
             ? `Usage failed for ${failed.map((environment) => environment.label).join(", ")}. ${failed[0]?.message ?? "Retry after checking the environment connection."}`
-            : "Connect an environment with Claude Code or Codex transcripts, then refresh this view."
+            : "Connect an environment with supported provider histories, then refresh this view."
         }
         action={
           <Button size="sm" variant="outline" onClick={result.refresh}>
@@ -122,7 +126,7 @@ export function UsageView({
       ? "all"
       : search.environmentIds[0]!;
   const foundTranscriptSource = merged.sources.some(
-    (source) => source.included && source.status !== "not-found",
+    (source) => source.included && (source.status === "complete" || source.status === "partial"),
   );
 
   return (
@@ -168,10 +172,11 @@ export function UsageView({
       </div>
 
       <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">
-        Provider-recorded usage from Claude Code and Codex transcripts on the selected machines.
-        This includes sessions run outside Ryco and is intentionally not attributed to projects.
+        Provider-recorded usage from supported local histories on the selected machines. This
+        includes sessions run outside Ryco and is intentionally not attributed to projects.
       </p>
 
+      {derived.imports.length > 0 ? <ImportedCursorUsage rows={derived.imports} /> : null}
       {derived.buckets.length === 0 ? (
         <StatePanel
           icon={Layers3Icon}
@@ -179,7 +184,7 @@ export function UsageView({
           description={
             foundTranscriptSource
               ? "The transcript sources were found, but no provider-recorded usage matched these filters."
-              : "Claude Code and Codex transcript directories were not found on the selected environments."
+              : "No supported provider history was found on the selected environments. See source coverage below."
           }
         />
       ) : (
@@ -223,8 +228,13 @@ export function UsageView({
               </div>
               <UsageAreaChart data={days} metric={search.usageMetric} />
               <div className="flex items-center justify-end gap-4 px-2 text-[11px] text-muted-foreground">
-                <LegendDot color={USAGE_PROVIDER_COLORS.claude} label="Claude" />
-                <LegendDot color={USAGE_PROVIDER_COLORS.codex} label="Codex" />
+                {USAGE_PROVIDERS.map((provider) => (
+                  <LegendDot
+                    key={provider}
+                    color={USAGE_PROVIDER_COLORS[provider]}
+                    label={USAGE_PROVIDER_LABELS[provider]}
+                  />
+                ))}
               </div>
             </div>
           </section>
@@ -236,7 +246,11 @@ export function UsageView({
             <MetricRail label="Cache read" value={`${Math.round(cacheShare * 100)}%`} />
             <MetricRail
               label="Reasoning"
-              value={formatTokens(totals.reasoningTokens)}
+              value={
+                totals.reasoningTokens === null
+                  ? "Unavailable"
+                  : formatTokens(totals.reasoningTokens)
+              }
               detail="included in output"
             />
           </div>
@@ -281,10 +295,17 @@ export function UsageView({
               ))}
             </div>
           </Panel>
-
-          <Coverage summary={merged} />
         </>
       )}
+      <Coverage
+        summary={{
+          ...merged,
+          sources: merged.sources.filter(
+            (source) =>
+              search.providers === undefined || search.providers.includes(source.provider),
+          ),
+        }}
+      />
     </div>
   );
 }
@@ -317,10 +338,10 @@ interface SearchControlProps {
 }
 
 function ProviderControl({ search, onSearchChange }: SearchControlProps) {
-  const selected = new Set<"claude" | "codex">(search.providers ?? (["claude", "codex"] as const));
+  const selected = new Set<UsageProviderKind>(search.providers ?? USAGE_PROVIDERS);
   return (
     <div className="inline-flex rounded-lg border bg-card p-0.5">
-      {(["claude", "codex"] as const).map((provider) => (
+      {USAGE_PROVIDERS.map((provider) => (
         <button
           key={provider}
           type="button"
@@ -332,7 +353,9 @@ function ProviderControl({ search, onSearchChange }: SearchControlProps) {
             const providers = [...next].toSorted();
             onSearchChange({
               ...search,
-              ...(providers.length === 2 ? { providers: undefined } : { providers }),
+              ...(providers.length === USAGE_PROVIDERS.length
+                ? { providers: undefined }
+                : { providers }),
             });
           }}
           className={cn(
@@ -347,7 +370,7 @@ function ProviderControl({ search, onSearchChange }: SearchControlProps) {
             className="mr-1.5 inline-block size-1.5 rounded-full"
             style={{ backgroundColor: USAGE_PROVIDER_COLORS[provider] }}
           />
-          {provider}
+          {USAGE_PROVIDER_LABELS[provider]}
         </button>
       ))}
     </div>
@@ -409,16 +432,6 @@ function UsageAreaChart({
   return (
     <ChartContainer className="h-[300px]">
       <AreaChart data={[...data]} margin={{ left: 4, right: 10, top: 18, bottom: 0 }}>
-        <defs>
-          <linearGradient id="usageClaude" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%" stopColor={USAGE_PROVIDER_COLORS.claude} stopOpacity={0.3} />
-            <stop offset="95%" stopColor={USAGE_PROVIDER_COLORS.claude} stopOpacity={0.02} />
-          </linearGradient>
-          <linearGradient id="usageCodex" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%" stopColor={USAGE_PROVIDER_COLORS.codex} stopOpacity={0.18} />
-            <stop offset="95%" stopColor={USAGE_PROVIDER_COLORS.codex} stopOpacity={0.01} />
-          </linearGradient>
-        </defs>
         <CartesianGrid vertical={false} strokeDasharray="3 5" />
         <XAxis
           dataKey="date"
@@ -449,22 +462,19 @@ function UsageAreaChart({
             />
           }
         />
-        <Area
-          dataKey={`claude${suffix}`}
-          name="Claude"
-          type="monotone"
-          stroke={USAGE_PROVIDER_COLORS.claude}
-          fill="url(#usageClaude)"
-          strokeWidth={1.75}
-        />
-        <Area
-          dataKey={`codex${suffix}`}
-          name="Codex"
-          type="monotone"
-          stroke={USAGE_PROVIDER_COLORS.codex}
-          fill="url(#usageCodex)"
-          strokeWidth={1.75}
-        />
+        {USAGE_PROVIDERS.map((provider) => (
+          <Area
+            key={provider}
+            dataKey={`${provider}${suffix}`}
+            name={formatProviderLabel(provider)}
+            type="monotone"
+            stroke={USAGE_PROVIDER_COLORS[provider]}
+            fill={USAGE_PROVIDER_COLORS[provider]}
+            fillOpacity={0.08}
+            strokeWidth={1.75}
+            connectNulls={false}
+          />
+        ))}
       </AreaChart>
     </ChartContainer>
   );
@@ -594,6 +604,15 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
           }
         />
       </div>
+      {issues.map((source) => (
+        <p
+          key={`${source.environmentId}:${source.sourceId}`}
+          className="mt-3 text-xs text-muted-foreground"
+        >
+          {formatProviderLabel(source.provider)} · {source.environmentLabel}:{" "}
+          {source.message ?? source.diagnosticCode ?? source.status}
+        </p>
+      ))}
     </Panel>
   );
 }
@@ -620,5 +639,62 @@ function CoverageItem({
         <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{detail}</p>
       </div>
     </div>
+  );
+}
+
+function ImportedCursorUsage({ rows }: { readonly rows: readonly UsageImportedMetric[] }) {
+  const [page, setPage] = useState(0);
+  const totals = sumUsageImports(rows);
+  const pages = Math.ceil(rows.length / 20),
+    current = Math.min(page, pages - 1);
+  const ordered = [...rows].toSorted(
+    (left, right) => right.date.localeCompare(left.date) || left.metric.localeCompare(right.metric),
+  );
+  return (
+    <Panel title="Cursor exported events and billed cost">
+      <p className="text-sm text-muted-foreground">
+        Saved Cursor Admin API exports. Billed costs include Cursor fees and remain separate from
+        model cost. Exported events without token fields do not contribute token totals.
+      </p>
+      <p className="mt-3 text-sm">
+        {totals.requests === null
+          ? "Requests unavailable"
+          : `${formatInteger(totals.requests)} exported events`}
+        {totals.costs
+          .map((cost) => ` · ${cost.value.toLocaleString()} ${cost.currency} billed cost`)
+          .join("")}
+      </p>
+      <div className="mt-4 divide-y">
+        {ordered.slice(current * 20, (current + 1) * 20).map((row) => (
+          <div
+            key={row.recordId}
+            className="flex flex-wrap items-center justify-between gap-3 py-2 text-xs"
+          >
+            <span>
+              {formatDayLabel(row.date)}
+              {row.model ? ` · ${formatModelLabel(row.model)}` : ""}
+            </span>
+            <span>
+              {row.metric === "requests"
+                ? `${formatInteger(row.value)} events`
+                : `${row.value.toLocaleString()} ${row.currency}`}
+            </span>
+          </div>
+        ))}
+      </div>
+      {pages > 1 ? (
+        <div className="mt-3 flex items-center gap-3">
+          <Button size="sm" disabled={current === 0} onClick={() => setPage(current - 1)}>
+            Previous
+          </Button>
+          <span className="text-xs">
+            {current + 1} / {pages}
+          </span>
+          <Button size="sm" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
+            Next
+          </Button>
+        </div>
+      ) : null}
+    </Panel>
   );
 }

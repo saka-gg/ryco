@@ -299,6 +299,7 @@ export const ServerObservability = Schema.Struct({
 export type ServerObservability = typeof ServerObservability.Type;
 
 export const ServerConfig = Schema.Struct({
+  usageContractVersion: Schema.optional(NonNegativeInt),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,

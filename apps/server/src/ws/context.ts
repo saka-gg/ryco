@@ -1,8 +1,10 @@
+import { StorageService } from "../storage/StorageService.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
 import { Cause, Effect, Metric, Option, Schema, Stream } from "effect";
 import {
   AuthSessionId,
+  USAGE_CONTRACT_VERSION,
   CommandId,
   type DiagnosticsProviderProcess,
   EventId,
@@ -63,6 +65,7 @@ import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScript
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { resolveConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
+import { resolveBootstrapPreferences } from "./context/bootstrapPreferences.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
@@ -164,6 +167,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const config = yield* ServerConfig;
     const lifecycleEvents = yield* ServerLifecycleEvents;
     const serverSettings = yield* ServerSettingsService;
+    const storageService = yield* Effect.serviceOption(StorageService);
     const codexMcp = yield* makeCodexMcpService;
     const claudeMcp = yield* makeClaudeMcpAdapter();
     const copilotMcp = yield* makeCopilotMcpAdapter();
@@ -365,22 +369,53 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
       Effect.gen(function* () {
         const bootstrap = command.bootstrap;
+        if (bootstrap?.requireWorktree) {
+          const create = bootstrap.createThread;
+          const prepare = bootstrap.prepareWorktree;
+          if (!create || !prepare?.branch || create.worktreePath !== null) {
+            return yield* Effect.fail(
+              new OrchestrationDispatchCommandError({
+                message: "This launch requires a fresh thread and an isolated Git worktree.",
+              }),
+            );
+          }
+          // The preference resolver below reads the selected project once and
+          // binds its authorized root to this cwd before any mutation.
+        }
         const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
         let createdThread = false;
         let targetProjectId = bootstrap?.createThread?.projectId;
         let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
         let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
+        let shouldRunSetupScript = bootstrap?.runSetupScript ?? false;
+        let targetWorktreeId: WorktreeId | null = null;
 
         const cleanupCreatedThread = () =>
-          createdThread
-            ? orchestrationEngine
-                .dispatch({
-                  type: "thread.delete",
-                  commandId: serverCommandId("bootstrap-thread-delete"),
-                  threadId: command.threadId,
-                })
-                .pipe(Effect.ignoreCause({ log: true }))
-            : Effect.void;
+          Effect.gen(function* () {
+            if (!createdThread) return;
+            if (bootstrap?.requireWorktree) {
+              const live = yield* projectionSnapshotQuery.getThreadShellById(command.threadId).pipe(
+                Effect.map(Option.getOrNull),
+                Effect.catchCause(() => Effect.succeed(null)),
+              );
+              // A cancelled setup can race a replacement task under the same id.
+              // Failure cleanup must never delete that replacement's data.
+              if (
+                !live ||
+                live.projectId !== targetProjectId ||
+                live.createdAt !== bootstrap.createThread?.createdAt ||
+                live.worktreeId !== targetWorktreeId
+              )
+                return;
+            }
+            yield* orchestrationEngine
+              .dispatch({
+                type: "thread.delete",
+                commandId: serverCommandId("bootstrap-thread-delete"),
+                threadId: command.threadId,
+              })
+              .pipe(Effect.ignoreCause({ log: true }));
+          });
 
         const recordSetupScriptLaunchFailure = (input: {
           readonly error: unknown;
@@ -459,7 +494,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         };
 
         const runSetupProgram = () =>
-          bootstrap?.runSetupScript && targetWorktreePath
+          shouldRunSetupScript && targetWorktreePath
             ? (() => {
                 const worktreePath = targetWorktreePath;
                 const requestedAt = new Date().toISOString();
@@ -496,6 +531,15 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
             : Effect.void;
 
         const bootstrapProgram = Effect.gen(function* () {
+          const resolved = yield* resolveBootstrapPreferences({
+            bootstrap,
+            settings: serverSettings,
+            projects: projectionSnapshotQuery,
+            workspaceAccess: workspaceAccessPolicy,
+          });
+          const { settings, project: bootstrapProject, choices } = resolved;
+          shouldRunSetupScript = resolved.runSetupScript;
+          if (bootstrap?.prepareWorktree && bootstrapProject) targetProjectId = bootstrapProject.id;
           if (bootstrap?.createThread) {
             const created = yield* orchestrationEngine.dispatch({
               type: "thread.create",
@@ -503,7 +547,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               threadId: command.threadId,
               projectId: bootstrap.createThread.projectId,
               title: bootstrap.createThread.title,
-              modelSelection: bootstrap.createThread.modelSelection,
+              modelSelection: choices.modelSelection,
               runtimeMode: bootstrap.createThread.runtimeMode,
               interactionMode: bootstrap.createThread.interactionMode,
               ...(bootstrap.createThread.tokenMode === undefined
@@ -521,19 +565,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           }
 
           if (bootstrap?.prepareWorktree) {
-            const bootstrapProject = yield* projectionSnapshotQuery
-              .getActiveProjectByWorkspaceRoot(bootstrap.prepareWorktree.projectCwd)
-              .pipe(
-                Effect.map(Option.getOrNull),
-                Effect.mapError((cause) =>
-                  toGitManagerError(
-                    "git.bootstrapPrepareWorktree",
-                    "Failed to load project for bootstrap worktree.",
-                    cause,
-                  ),
-                ),
-              );
             const worktree = yield* gitWorkflow.createWorktree({
+              settingsSnapshot: settings,
+              projectId: targetProjectId ?? bootstrapProject?.id,
               cwd: bootstrap.prepareWorktree.projectCwd,
               refName: bootstrap.prepareWorktree.baseBranch,
               fetchOrigin: bootstrap.prepareWorktree.fetchOrigin,
@@ -541,7 +575,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               path: resolveWorktreeCheckoutPath({
                 location: undefined,
                 appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
-                  settings: yield* serverSettings.getSettings,
+                  settings,
                   projectId: targetProjectId ?? bootstrapProject?.id,
                   config,
                   policy: workspaceAccessPolicy,
@@ -558,6 +592,17 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
                   bootstrap.prepareWorktree.branch ?? bootstrap.prepareWorktree.baseBranch,
               }),
             });
+            if (
+              bootstrap.requireWorktree &&
+              worktree.worktree.path === bootstrap.prepareWorktree.projectCwd
+            ) {
+              return yield* Effect.fail(
+                new OrchestrationDispatchCommandError({
+                  message:
+                    "An isolated worktree is required before running setup or starting this model turn.",
+                }),
+              );
+            }
             targetWorktreePath = worktree.worktree.path;
             yield* orchestrationEngine.dispatch({
               type: "thread.meta.update",
@@ -569,6 +614,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
             const worktreeProjectId = targetProjectId ?? bootstrapProject?.id;
             if (worktreeProjectId !== undefined) {
               const worktreeId = WorktreeId.make(`worktree-${crypto.randomUUID()}`);
+              targetWorktreeId = worktreeId;
               const createdAt = new Date().toISOString();
               yield* orchestrationEngine.dispatch({
                 type: "worktree.create",
@@ -597,6 +643,40 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
 
           yield* runSetupProgram();
 
+          if (
+            bootstrap?.requireWorktree &&
+            (!targetWorktreePath || targetWorktreePath === targetProjectCwd)
+          ) {
+            return yield* Effect.fail(
+              new OrchestrationDispatchCommandError({
+                message: "An isolated worktree is required before starting this model turn.",
+              }),
+            );
+          }
+          if (bootstrap?.requireWorktree) {
+            const liveThread = yield* projectionSnapshotQuery
+              .getThreadShellById(command.threadId)
+              .pipe(
+                Effect.map(Option.getOrNull),
+                Effect.mapError((cause) =>
+                  toDispatchCommandError(cause, "Failed to verify batch thread after setup."),
+                ),
+              );
+            if (
+              !liveThread ||
+              liveThread.projectId !== targetProjectId ||
+              liveThread.worktreePath !== targetWorktreePath ||
+              liveThread.worktreeId !== targetWorktreeId ||
+              liveThread.createdAt !== bootstrap.createThread?.createdAt
+            ) {
+              return yield* Effect.fail(
+                new OrchestrationDispatchCommandError({
+                  message:
+                    "The batch setup was cancelled or its workspace changed. The model turn was not started.",
+                }),
+              );
+            }
+          }
           return yield* orchestrationEngine.dispatch(finalTurnStartCommand);
         });
 
@@ -669,6 +749,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         ...(config.workspaceAccessRoot !== undefined
           ? { workspaceAccessRoot: config.workspaceAccessRoot }
           : {}),
+        usageContractVersion: USAGE_CONTRACT_VERSION,
         keybindingsConfigPath: config.keybindingsConfigPath,
         keybindings: keybindingsConfig.keybindings,
         issues: keybindingsConfig.issues,
@@ -762,6 +843,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       );
 
     return {
+      storageService,
+      storagePrincipalKey: `${principal.transport}:${principal.scopeId}:${crypto.randomUUID()}`,
       currentSessionId,
       projectionSnapshotQuery,
       statisticsQuery,
@@ -796,6 +879,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectAvatarStore,
       workspaceEntries,
       workspaceFileSystem,
+      workspaceAccessPolicy,
       sourceControlDiscovery,
       sourceControlRepositories,
       sourceControlRegistry,

@@ -1,3 +1,9 @@
+import {
+  storageLifecycleLock,
+  hasStorageSettingsLease,
+  acquireStorageSettingsUpdateLease,
+  noteStorageSettingsChange,
+} from "./storage/lifecycle.ts";
 /**
  * ServerSettings - Server-authoritative settings service.
  *
@@ -47,7 +53,7 @@ import {
 import * as Semaphore from "effect/Semaphore";
 import { writeFileStringAtomically } from "./atomicWrite.ts";
 import { ServerConfig } from "./config.ts";
-import { type DeepPartial, deepMerge } from "@ryco/shared/Struct";
+import { type DeepPartial } from "@ryco/shared/Struct";
 import { fromLenientJson } from "@ryco/shared/schemaJson";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
@@ -118,12 +124,12 @@ export class ServerSettingsService extends Context.Service<
   ServerSettingsService,
   ServerSettingsShape
 >()("ryco/serverSettings/ServerSettingsService") {
-  static readonly layerTest = (overrides: DeepPartial<ServerSettings> = {}) =>
+  static readonly layerTest = (overrides: DeepPartial<ServerSettings> | ServerSettingsPatch = {}) =>
     Layer.effect(
       ServerSettingsService,
       Effect.gen(function* () {
         const currentSettingsRef = yield* Ref.make<ServerSettings>(
-          deepMerge(DEFAULT_SERVER_SETTINGS, overrides),
+          applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, overrides as ServerSettingsPatch),
         );
 
         return {
@@ -133,14 +139,26 @@ export class ServerSettingsService extends Context.Service<
           updateSettings: (patch) =>
             Ref.get(currentSettingsRef).pipe(
               Effect.flatMap((currentSettings) =>
-                Schema.decodeEffect(ServerSettings)(
-                  applyServerSettingsPatch(currentSettings, patch),
-                ).pipe(
+                Effect.try({
+                  try: () => applyServerSettingsPatch(currentSettings, patch),
+                  catch: (cause) =>
+                    new ServerSettingsError({
+                      settingsPath: "<memory>",
+                      detail:
+                        cause instanceof Error
+                          ? cause.message
+                          : "Invalid project preference patch.",
+                      cause,
+                    }),
+                }).pipe(
+                  Effect.flatMap(Schema.decodeEffect(ServerSettings)),
                   Effect.mapError(
                     (cause) =>
                       new ServerSettingsError({
                         settingsPath: "<memory>",
-                        detail: `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
+                        detail: Schema.is(ServerSettingsError)(cause)
+                          ? cause.detail
+                          : `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
                         cause,
                       }),
                   ),
@@ -208,7 +226,10 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
 }
 
 // Values under these keys are compared as a whole — never stripped field-by-field.
-const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set(["textGenerationModelSelection"]);
+const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
+  "textGenerationModelSelection",
+  "initialModelSelection",
+]);
 
 function stripDefaultServerSettings(current: unknown, defaults: unknown): unknown | undefined {
   if (Array.isArray(current) || Array.isArray(defaults)) {
@@ -244,7 +265,7 @@ function stripDefaultServerSettings(current: unknown, defaults: unknown): unknow
   return Object.is(current, defaults) ? undefined : current;
 }
 
-const makeServerSettings = Effect.gen(function* () {
+export const makeServerSettings = Effect.gen(function* () {
   const { settingsPath, workspaceAccessRoot } = yield* ServerConfig;
   const worktreeAccessPolicy = yield* makeWorkspaceAccessPolicy(workspaceAccessRoot);
   const fs = yield* FileSystem.FileSystem;
@@ -472,6 +493,7 @@ const makeServerSettings = Effect.gen(function* () {
 
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
+      noteStorageSettingsChange();
       yield* Cache.invalidate(settingsCache, cacheKey);
       const settings = yield* getSettingsFromCache;
       yield* emitChange(settings);
@@ -565,10 +587,58 @@ const makeServerSettings = Effect.gen(function* () {
             }
             normalizedPatch.projectWorktreeRoots = Object.fromEntries(roots);
           }
-          const nextPersisted = yield* persistProviderEnvironmentSecrets(
-            current,
-            applyServerSettingsPatch(current, normalizedPatch),
+          const rawNext = yield* Effect.try({
+            try: () => applyServerSettingsPatch(current, normalizedPatch),
+            catch: (cause) =>
+              new ServerSettingsError({
+                settingsPath,
+                detail:
+                  cause instanceof Error ? cause.message : "Invalid project preference patch.",
+                cause,
+              }),
+          });
+          const validated = yield* Schema.decodeEffect(ServerSettings)(rawNext).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath,
+                  detail: "Invalid server preferences.",
+                  cause,
+                }),
+            ),
           );
+          const relevantChanges = [
+            "providerInstances",
+            "providers",
+            "storageRetention",
+            "projectStorageRetention",
+          ].some(
+            (key) =>
+              JSON.stringify(current[key as keyof ServerSettings]) !==
+              JSON.stringify(rawNext[key as keyof ServerSettings]),
+          );
+          // Compare BEFORE redaction and BEFORE any secret set/remove. Secret values
+          // can change while persisted redacted JSON stays byte-for-byte identical.
+          if (relevantChanges) {
+            const release = yield* storageLifecycleLock.withPermit(
+              Effect.gen(function* () {
+                if (hasStorageSettingsLease())
+                  return yield* new ServerSettingsError({
+                    settingsPath,
+                    detail:
+                      "Storage removal is in progress. Retry provider or retention settings after it completes.",
+                  });
+                const release = acquireStorageSettingsUpdateLease();
+                noteStorageSettingsChange();
+                return release;
+              }),
+            );
+            yield* Effect.addFinalizer(() => Effect.sync(release));
+          }
+          const nextPersisted =
+            JSON.stringify(current.providerInstances) === JSON.stringify(rawNext.providerInstances)
+              ? validated
+              : yield* persistProviderEnvironmentSecrets(current, validated);
           const next = yield* Schema.decodeEffect(ServerSettings)(nextPersisted).pipe(
             Effect.mapError(
               (cause) =>
@@ -579,12 +649,16 @@ const makeServerSettings = Effect.gen(function* () {
                 }),
             ),
           );
-          yield* writeSettingsAtomically(next);
-          yield* Cache.set(settingsCache, cacheKey, next);
-          yield* emitChange(next);
+          yield* storageLifecycleLock.withPermit(
+            Effect.gen(function* () {
+              yield* writeSettingsAtomically(next);
+              yield* Cache.set(settingsCache, cacheKey, next);
+              yield* emitChange(next);
+            }),
+          );
           const materialized = yield* materializeProviderEnvironmentSecrets(next);
           return resolveTextGenerationProvider(materialized);
-        }),
+        }).pipe(Effect.scoped, Effect.uninterruptible),
       ),
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub).pipe(

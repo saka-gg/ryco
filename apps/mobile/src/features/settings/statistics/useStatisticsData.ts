@@ -5,6 +5,7 @@ import {
   type StatisticsSnapshot,
 } from "@ryco/contracts";
 import {
+  isUsageContractMismatch,
   mergeUsageEnvironmentResults,
   usageRequestForRange,
   type UsageEnvironmentResult,
@@ -71,7 +72,9 @@ export async function loadNodeStatistics(
             usage: {
               environmentId: environment.environmentId,
               label: environment.label,
-              status: "failed" as const,
+              status: isUsageContractMismatch(cause)
+                ? ("stale-contract" as const)
+                : ("failed" as const),
               message: error,
             },
           }

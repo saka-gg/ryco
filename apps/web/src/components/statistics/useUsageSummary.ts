@@ -1,5 +1,6 @@
 // @effect-diagnostics globalDate:off
 import {
+  isUsageContractMismatch,
   mergeUsageEnvironmentResults,
   UsageRequestGeneration,
   type MergedUsageSummary,
@@ -101,7 +102,7 @@ export function useUsageSummary(input: {
           return {
             environmentId: connection.environmentId,
             label: connection.knownEnvironment.label,
-            status: "failed",
+            status: isUsageContractMismatch(cause) ? "stale-contract" : "failed",
             message: cause instanceof Error ? cause.message : String(cause),
           };
         }

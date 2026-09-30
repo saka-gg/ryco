@@ -527,7 +527,7 @@ export const ChatImageAttachment = Schema.Struct({
 });
 export type ChatImageAttachment = typeof ChatImageAttachment.Type;
 
-const UploadChatImageAttachment = Schema.Struct({
+export const UploadChatImageAttachment = Schema.Struct({
   type: Schema.Literal("image"),
   name: ChatAttachmentName,
   mimeType: ChatAttachmentMimeType.check(Schema.isPattern(/^image\//i)),
@@ -1326,6 +1326,8 @@ const ThreadTurnStartBootstrapPrepareWorktree = Schema.Struct({
 });
 
 const ThreadTurnStartBootstrap = Schema.Struct({
+  /** Reject a turn unless this bootstrap creates a fresh isolated Git worktree. */
+  requireWorktree: Schema.optional(Schema.Boolean),
   createThread: Schema.optional(ThreadTurnStartBootstrapCreateThread),
   prepareWorktree: Schema.optional(ThreadTurnStartBootstrapPrepareWorktree),
   runSetupScript: Schema.optional(Schema.Boolean),

@@ -13,6 +13,7 @@ import {
   type ServerSettingsPatch,
   WS_METHODS,
 } from "@ryco/contracts";
+import { assertUsageContractVersion, UsageContractMismatchError } from "../usage/compatibility.ts";
 import { applyGitStatusStreamEvent } from "@ryco/shared/git";
 import { Effect, Stream } from "effect";
 
@@ -213,6 +214,11 @@ export interface WsRpcClient {
     readonly restoreWorktree: RpcUnaryMethod<typeof WS_METHODS.gitRestoreWorktree>;
     readonly deleteWorktree: RpcUnaryMethod<typeof WS_METHODS.gitDeleteWorktree>;
   };
+  readonly storage: {
+    readonly scan: RpcUnaryMethod<typeof WS_METHODS.storageScan>;
+    readonly preview: RpcUnaryMethod<typeof WS_METHODS.storagePreview>;
+    readonly execute: RpcUnaryMethod<typeof WS_METHODS.storageExecute>;
+  };
   readonly worktrees: {
     readonly setManualPosition: RpcUnaryMethod<typeof WS_METHODS.worktreesSetManualPosition>;
   };
@@ -252,6 +258,7 @@ export interface WsRpcClient {
     >;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
     readonly upsertKeybinding: RpcUnaryMethod<typeof WS_METHODS.serverUpsertKeybinding>;
+    readonly getProjectPreferences: RpcUnaryMethod<typeof WS_METHODS.serverGetProjectPreferences>;
     readonly getSettings: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetSettings>;
     readonly updateSettings: (
       patch: ServerSettingsPatch,
@@ -604,6 +611,11 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       deleteWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.gitDeleteWorktree](input)),
     },
+    storage: {
+      scan: (input) => transport.request((client) => client[WS_METHODS.storageScan](input)),
+      preview: (input) => transport.request((client) => client[WS_METHODS.storagePreview](input)),
+      execute: (input) => transport.request((client) => client[WS_METHODS.storageExecute](input)),
+    },
     worktrees: {
       setManualPosition: (input) =>
         transport.request((client) => client[WS_METHODS.worktreesSetManualPosition](input)),
@@ -624,8 +636,22 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverGetDiagnosticsMetrics]({})),
       getStatistics: () =>
         transport.request((client) => client[WS_METHODS.serverGetStatistics]({})),
-      getUsageSummary: (input) =>
-        transport.request((client) => client[WS_METHODS.serverGetUsageSummary](input)),
+      getUsageSummary: async (input) => {
+        const config = await transport.request((client) => client[WS_METHODS.serverGetConfig]({}));
+        assertUsageContractVersion(config.usageContractVersion);
+        assertUsageContractVersion(input.contractVersion);
+        try {
+          return await transport.request((client) =>
+            client[WS_METHODS.serverGetUsageSummary](input),
+          );
+        } catch (error) {
+          // A node upgrade/reconnect between capability check and response can
+          // still produce a version decoding error. Hide its schema dump.
+          if (error instanceof Error && error.message.includes("contractVersion"))
+            throw new UsageContractMismatchError();
+          throw error;
+        }
+      },
       readCodexResetCredits: (input) =>
         transport.request((client) => client[WS_METHODS.serverReadCodexResetCredits](input)),
       consumeCodexResetCredit: (input) =>
@@ -644,6 +670,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverUpdateProvider](input)),
       upsertKeybinding: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpsertKeybinding](input)),
+      getProjectPreferences: (input) =>
+        transport.request((client) => client[WS_METHODS.serverGetProjectPreferences](input)),
       getSettings: () => transport.request((client) => client[WS_METHODS.serverGetSettings]({})),
       updateSettings: (patch) =>
         transport.request((client) => client[WS_METHODS.serverUpdateSettings]({ patch })),

@@ -31,7 +31,6 @@ import {
   type GitPreparePullRequestThreadResult,
   type GitPullRequestRefInput,
   type VcsPullResult,
-  type VcsRemoveWorktreeInput,
   type GitResolvePullRequestResult,
   type GitRunStackedActionInput,
   type GitRunStackedActionResult,
@@ -41,8 +40,16 @@ import {
   type VcsStatusResult,
 } from "@ryco/contracts";
 
-import { GitManager, type GitRunStackedActionOptions } from "./GitManager.ts";
-import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
+import {
+  GitManager,
+  type GitRunStackedActionOptions,
+  type GitPreparePullRequestThreadOptions,
+} from "./GitManager.ts";
+import {
+  GitVcsDriver,
+  type GitWorktreeCreationContext,
+  type GitVcsDriverShape,
+} from "../vcs/GitVcsDriver.ts";
 import { VcsDriverRegistry } from "../vcs/VcsDriverRegistry.ts";
 
 export interface GitWorkflowServiceShape {
@@ -79,13 +86,17 @@ export interface GitWorkflowServiceShape {
     input: GitPullRequestRefInput,
   ) => Effect.Effect<GitResolvePullRequestResult, GitManagerServiceError>;
   readonly preparePullRequestThread: (
-    input: GitPreparePullRequestThreadInput,
+    input: GitPreparePullRequestThreadInput & GitWorktreeCreationContext,
+    options?: GitPreparePullRequestThreadOptions,
   ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
   readonly listRefs: (input: VcsListRefsInput) => Effect.Effect<VcsListRefsResult, GitCommandError>;
+  readonly assertWorktreeSetupComplete: (
+    checkoutPath: string,
+  ) => Effect.Effect<void, GitCommandError>;
   readonly createWorktree: (
-    input: VcsCreateWorktreeInput,
+    input: VcsCreateWorktreeInput & GitWorktreeCreationContext,
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
-  readonly removeWorktree: (input: VcsRemoveWorktreeInput) => Effect.Effect<void, GitCommandError>;
+  readonly removeWorktree: GitVcsDriverShape["removeWorktree"];
   readonly pruneWorktrees: (cwd: string) => Effect.Effect<void, GitCommandError>;
   readonly listWorktreePaths: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
   readonly listLocalBranchNames: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
@@ -328,10 +339,10 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
       "GitWorkflowService.resolvePullRequest",
       gitManager.resolvePullRequest,
     ),
-    preparePullRequestThread: routeGitManager(
-      "GitWorkflowService.preparePullRequestThread",
-      gitManager.preparePullRequestThread,
-    ),
+    preparePullRequestThread: (input, options) =>
+      ensureGit("GitWorkflowService.preparePullRequestThread", input.cwd).pipe(
+        Effect.andThen(gitManager.preparePullRequestThread(input, options)),
+      ),
     // Authorize before repository-kind discovery; readers also validate Git's resolved root.
     readLineBlame: (input) =>
       authorizeGitReadCwd(input.cwd, "readLineBlame").pipe(
@@ -361,6 +372,7 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
             : Effect.succeed(nonRepositoryListRefs()),
         ),
       ),
+    assertWorktreeSetupComplete: git.assertWorktreeSetupComplete,
     createWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
         Effect.andThen(git.createWorktree(input)),
