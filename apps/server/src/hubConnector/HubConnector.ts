@@ -1,3 +1,5 @@
+import { networkInterfaces } from "node:os";
+
 import type {
   HubConnectorStatus,
   HubEnrollmentCeremonyDetail,
@@ -54,6 +56,36 @@ export interface HubConnectorScheduler extends RelaySessionScheduler {
 }
 
 /**
+ * The connector watches for the two events that silently kill an outbound
+ * socket — the machine sleeping and the network changing — instead of waiting
+ * out the Hub's 45-second heartbeat timeout after each.
+ */
+const LIVENESS_WATCH_INTERVAL_MS = 5_000;
+/** A watch tick this late means the process was suspended: the machine slept. */
+const LIVENESS_WATCH_WAKE_GAP_MS = 15_000;
+/** How long a node-initiated ping may wait for its pong before the socket is declared dead. */
+const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
+const RELAY_HEARTBEAT_NONCE_BYTES = 8;
+
+/** The machine's external addresses; a change means the network moved under the socket. */
+export function defaultNetworkFingerprint(): string {
+  return Object.values(networkInterfaces())
+    .flatMap((entries) => entries ?? [])
+    .filter((entry) => !entry.internal)
+    .map((entry) => entry.address)
+    .toSorted()
+    .join(",");
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+/**
  * Distinguish a custody read that may succeed later from one that cannot.
  *
  * A construction failure is latched into a stub whose every method throws for
@@ -86,6 +118,14 @@ export class HubConnector {
   readonly #onE2eeEnrollmentRevoked: (
     frame: RelayE2eeEnrollmentRevokedFrame,
   ) => void | Promise<void>;
+  readonly #networkFingerprint: () => string;
+  readonly #livenessWatchEnabled: boolean;
+  #watchTimer: unknown;
+  #watchLastTickAt: number | undefined;
+  #watchLastNetwork: string | undefined;
+  #probe:
+    | { readonly generation: number; readonly nonce: Uint8Array; readonly timer: unknown }
+    | undefined;
   #attempt = 0;
   #protocolViolations = 0;
   #started = false;
@@ -124,6 +164,10 @@ export class HubConnector {
     readonly onE2eeEnrollmentRevoked?: (
       frame: RelayE2eeEnrollmentRevokedFrame,
     ) => void | Promise<void>;
+    /** Injectable for tests; see `defaultNetworkFingerprint`. */
+    readonly networkFingerprint?: () => string;
+    /** Watch for wake and network changes; see `nudge`. On unless a test opts out. */
+    readonly livenessWatch?: boolean;
   }) {
     this.#config = options.config;
     this.#identity = options.identity;
@@ -140,6 +184,104 @@ export class HubConnector {
       authorization: this.#identity.e2eeClientAuthorization,
     });
     this.#onE2eeEnrollmentRevoked = options.onE2eeEnrollmentRevoked ?? (() => undefined);
+    this.#networkFingerprint = options.networkFingerprint ?? defaultNetworkFingerprint;
+    this.#livenessWatchEnabled = options.livenessWatch ?? true;
+  }
+
+  /**
+   * Something suggests the Hub connection is dead, or newly possible: the
+   * machine woke, or the network changed. An online connector proves its socket
+   * with a ping it expects answered within `LIVENESS_PROBE_TIMEOUT_MS`; one
+   * backing off retries now, with a fresh backoff, rather than when a timer
+   * grown during the outage fires. Every other state is left alone — in
+   * particular nothing here retries a failure that needs operator action.
+   */
+  nudge(): void {
+    if (!this.#started || this.#stopping) return;
+    const status = this.#state.snapshot();
+    if (status.state === "online") {
+      this.#probeLiveness(this.#state.generation);
+      return;
+    }
+    if (
+      status.state === "degraded" &&
+      status.degradedMode === "backing_off" &&
+      this.#retryTimer !== undefined
+    ) {
+      this.#clearTimer("retry");
+      this.#attempt = 0;
+      void this.#connect();
+    }
+  }
+
+  #startLivenessWatch(): void {
+    if (!this.#livenessWatchEnabled || this.#watchTimer !== undefined) return;
+    this.#watchLastTickAt = this.#scheduler.now();
+    this.#watchLastNetwork = this.#networkFingerprint();
+    this.#watchTimer = this.#scheduler.setTimeout(
+      () => this.#livenessWatchTick(),
+      LIVENESS_WATCH_INTERVAL_MS,
+    );
+  }
+
+  #livenessWatchTick(): void {
+    this.#watchTimer = undefined;
+    if (this.#stopping) return;
+    const now = this.#scheduler.now();
+    const woke =
+      this.#watchLastTickAt !== undefined &&
+      now - this.#watchLastTickAt > LIVENESS_WATCH_INTERVAL_MS + LIVENESS_WATCH_WAKE_GAP_MS;
+    this.#watchLastTickAt = now;
+    let networkChanged = false;
+    try {
+      const network = this.#networkFingerprint();
+      networkChanged = this.#watchLastNetwork !== undefined && network !== this.#watchLastNetwork;
+      this.#watchLastNetwork = network;
+    } catch {
+      // An unreadable interface list is not evidence of a change.
+    }
+    if (woke || networkChanged) this.nudge();
+    this.#watchTimer = this.#scheduler.setTimeout(
+      () => this.#livenessWatchTick(),
+      LIVENESS_WATCH_INTERVAL_MS,
+    );
+  }
+
+  #stopLivenessWatch(): void {
+    if (this.#watchTimer !== undefined) this.#scheduler.clearTimeout(this.#watchTimer);
+    this.#watchTimer = undefined;
+    this.#watchLastTickAt = undefined;
+    this.#watchLastNetwork = undefined;
+  }
+
+  #probeLiveness(generation: number): void {
+    if (this.#probe !== undefined) return;
+    const ready = this.#session?.ready;
+    if (ready === undefined || this.#sendQueue === undefined) return;
+    const nonce = crypto.getRandomValues(new Uint8Array(RELAY_HEARTBEAT_NONCE_BYTES));
+    if (
+      !this.#sendQueue.enqueueControl({
+        type: "ping",
+        protocolMajor: ready.protocolMajor,
+        protocolMinor: ready.protocolMinor,
+        nonce,
+      })
+    ) {
+      void this.#handleFailure(generation, "internal_error");
+      return;
+    }
+    const timer = this.#scheduler.setTimeout(() => {
+      if (this.#probe?.timer !== timer) return;
+      this.#probe = undefined;
+      void this.#handleFailure(generation, "heartbeat_timeout");
+    }, LIVENESS_PROBE_TIMEOUT_MS);
+    this.#probe = { generation, nonce, timer };
+    this.#flushAndScheduleDrain(generation);
+  }
+
+  #clearProbe(): void {
+    if (this.#probe !== undefined) this.#scheduler.clearTimeout(this.#probe.timer);
+    this.#probe = undefined;
   }
 
   status(): HubConnectorStatus {
@@ -188,6 +330,7 @@ export class HubConnector {
       });
       return;
     }
+    this.#startLivenessWatch();
     let identity;
     try {
       identity = await this.#identity.readState();
@@ -445,6 +588,7 @@ export class HubConnector {
   async stop(): Promise<void> {
     if (this.#stopping) return this.#frameChain;
     this.#stopping = true;
+    this.#stopLivenessWatch();
     this.#state.invalidateGeneration();
     if (this.#state.snapshot().state !== "disabled") this.#state.transition("stopping");
     await this.#teardownConnection();
@@ -755,6 +899,20 @@ export class HubConnector {
         await this.#handleFailure(generation, "internal_error");
         return;
       }
+    } else if (frame.type === "pong") {
+      // Only the answer to this connector's own outstanding probe is valid; an
+      // unsolicited pong stays the protocol violation it always was.
+      const probe = this.#probe;
+      if (probe === undefined || probe.generation !== generation) {
+        throw new RelayChannelProtocolError();
+      }
+      if (!sameBytes(probe.nonce, frame.nonce)) throw new RelayChannelProtocolError();
+      this.#clearProbe();
+      this.#scheduleHeartbeatTimeout(
+        generation,
+        this.#session?.ready?.limits.deadConnectionTimeoutMs ?? 45_000,
+      );
+      return;
     } else if (frame.type === "error") {
       await this.#handleFailure(
         generation,
@@ -800,6 +958,7 @@ export class HubConnector {
     if (!this.#state.isCurrent(generation) || this.#stopping) return;
     this.#state.invalidateGeneration();
     this.#e2eeState.clear();
+    this.#clearProbe();
     this.#clearTimer("stable");
     this.#clearTimer("heartbeat");
     this.#clearTimer("drain");
@@ -920,6 +1079,7 @@ export class HubConnector {
   }
 
   #clearAllTimers(): void {
+    this.#clearProbe();
     this.#clearTimer("retry");
     this.#clearTimer("enrollment");
     this.#clearTimer("stable");
