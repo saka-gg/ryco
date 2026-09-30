@@ -19,6 +19,7 @@ import {
   selectActiveAgentControlProposals,
   selectAgentControlProposalsForThread,
   selectRecentAgentControlProposals,
+  selectAgentControlExternalActivity,
   selectAgentControlThreadActivity,
 } from "./logic.ts";
 
@@ -301,6 +302,41 @@ describe("thread activity", () => {
       snapshotEvent({ revision: 0, active: proposals }),
     );
 
+  it("keeps external requests reachable without mixing in provider or automation approvals", () => {
+    const external = makeProposal("external", {
+      principal: { kind: "external-integration", integrationId: "integration" as never },
+    });
+    const running = {
+      ...external,
+      proposalId: AgentControlProposalId.make("running"),
+      status: "executing" as const,
+    };
+    const state = queue(
+      makeProposal("thread-request"),
+      external,
+      running,
+      { ...external, proposalId: AgentControlProposalId.make("completed"), status: "completed" },
+      makeProposal("automation", {
+        principal: {
+          kind: "automation-owner",
+          projectId: ProjectId.make("project"),
+          runtimeMode: "approval-required",
+          envMode: "local",
+        },
+      }),
+    );
+    const selection = selectAgentControlExternalActivity(state);
+    expect(selection.pending.map((proposal) => proposal.proposalId)).toEqual(["external"]);
+    expect(selection.activity.map((proposal) => proposal.proposalId)).toEqual(["running"]);
+    expect(selection.managerThreadId).toBeNull();
+    expect(selectAgentControlThreadActivity(state, null).pending).toEqual([]);
+    const reconnected = applyAgentControlStreamEvent(
+      state,
+      snapshotEvent({ revision: 0, active: Object.values(state.proposalsById) }),
+    );
+    expect(selectAgentControlExternalActivity(reconnected)).toEqual(selection);
+  });
+
   it("only shows the originating thread's approvals and latest activity", () => {
     const state = queue(
       makeProposal("pending"),
@@ -417,6 +453,7 @@ describe("thread activity", () => {
     const newManager = ThreadId.make("new-manager");
     const newer = makeProposal("newer", {
       status: "executing",
+      decidedAt: "2026-09-30T00:00:00.000Z",
       updatedAt: "2026-09-30T00:00:00.000Z",
       principal: {
         kind: "provider-session",
@@ -427,6 +464,83 @@ describe("thread activity", () => {
     expect(selectAgentControlThreadActivity(queue(created, newer), target).managerThreadId).toBe(
       newManager,
     );
+  });
+
+  it("does not replace a newer manager when an older action receives a delayed child return", () => {
+    const older = makeProposal("older", {
+      status: "completed",
+      decidedAt: "2026-08-17T00:01:00.000Z",
+      updatedAt: "2026-08-17T00:02:00.000Z",
+      plan: {
+        kind: "createThreads",
+        entries: [
+          {
+            projectId: ProjectId.make("project"),
+            title: "Child task",
+            prompt: "Work on the task",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture" },
+            runtimeMode: "approval-required",
+            envMode: "local",
+            returnToOrigin: true,
+          },
+        ],
+      },
+      result: {
+        outcome: "completed",
+        createdThreadIds: [target],
+        completedAt: "2026-08-17T00:02:00.000Z",
+      },
+      completionReturns: [
+        {
+          revision: 1,
+          childThreadId: target,
+          initialMessageId: MessageId.make("initial"),
+          parentThreadId: callerThreadId,
+          parentTurnId: TurnId.make("origin"),
+          childTurnId: null,
+          status: "waiting",
+          detail: "Waiting",
+          updatedAt: "2026-08-17T00:02:00.000Z",
+        },
+      ],
+    });
+    const newManager = ThreadId.make("new-manager");
+    const newer = makeProposal("newer", {
+      status: "completed",
+      createdAt: "2026-08-17T00:03:00.000Z",
+      decidedAt: "2026-08-17T00:04:00.000Z",
+      updatedAt: "2026-08-17T00:05:00.000Z",
+      result: { outcome: "completed", completedAt: "2026-08-17T00:05:00.000Z" },
+      principal: {
+        kind: "provider-session",
+        threadId: newManager,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      },
+    });
+    const state = applyAgentControlStreamEvent(
+      queue(older, newer),
+      proposalEvent(2, {
+        ...older,
+        updatedAt: "2026-09-30T00:00:00.000Z",
+        completionReturns: [
+          {
+            ...older.completionReturns![0]!,
+            revision: 2,
+            status: "delivered",
+            updatedAt: "2026-09-30T00:00:00.000Z",
+          },
+        ],
+      }),
+    );
+    expect(selectAgentControlThreadActivity(state, callerThreadId).activity[0]?.proposalId).toBe(
+      "older",
+    );
+    expect(selectAgentControlThreadActivity(state, target).managerThreadId).toBe(newManager);
+    const reconnected = applyAgentControlStreamEvent(
+      state,
+      snapshotEvent({ revision: 0, recent: Object.values(state.proposalsById) }),
+    );
+    expect(selectAgentControlThreadActivity(reconnected, target).managerThreadId).toBe(newManager);
   });
 
   it("does not treat affected threads of a project operation as managed children", () => {

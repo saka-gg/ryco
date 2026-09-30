@@ -7,6 +7,7 @@ import {
 } from "@ryco/contracts";
 import {
   EMPTY_AGENT_CONTROL_QUEUE_STATE,
+  selectAgentControlExternalActivity,
   selectAgentControlThreadActivity,
   startAgentControlProposalSync,
   useAgentControlStore,
@@ -28,8 +29,9 @@ export interface AgentControlApprovalsProps {
 
 /**
  * Thread-scoped approvals and compact activity. The environment-wide
- * subscription remains authoritative, but unrelated proposals never render
- * in this chat.
+ * subscription remains authoritative, but other provider threads' proposals
+ * never render in this chat. External clients have no caller thread; their
+ * live requests remain reachable in a separate environment-wide section.
  *
  * The Agent Control setting is enforced by the TARGET environment's server
  * (which may not be the primary node whose settings the web client
@@ -94,6 +96,10 @@ export function AgentControlApprovals({
       ),
     [queueState, activeThreadId],
   );
+  const externalSelection = useMemo(
+    () => selectAgentControlExternalActivity(queueState ?? EMPTY_AGENT_CONTROL_QUEUE_STATE),
+    [queueState],
+  );
   const threadShells = useStore(
     (state) => state.environmentStateById[environmentId]?.threadShellById,
   );
@@ -133,16 +139,28 @@ export function AgentControlApprovals({
     [environmentId],
   );
 
+  const activityProps = {
+    environmentId,
+    getThreadTitle,
+    submittingIds,
+    decisionErrorsById,
+    disabledReason: decisionCapability.allowed ? null : (decisionCapability.reason ?? null),
+    onDecide: (proposalId: AgentControlProposalId, decision: "accept" | "reject") =>
+      void decide(proposalId, decision),
+  };
   return (
-    <AgentControlThreadActivity
-      key={`${environmentId}:${activeThreadId ?? ""}`}
-      environmentId={environmentId}
-      selection={selection}
-      getThreadTitle={getThreadTitle}
-      submittingIds={submittingIds}
-      decisionErrorsById={decisionErrorsById}
-      disabledReason={decisionCapability.allowed ? null : (decisionCapability.reason ?? null)}
-      onDecide={(proposalId, decision) => void decide(proposalId, decision)}
-    />
+    <>
+      <AgentControlThreadActivity
+        key={`thread:${environmentId}:${activeThreadId ?? ""}`}
+        {...activityProps}
+        selection={selection}
+      />
+      <AgentControlThreadActivity
+        key={`external:${environmentId}`}
+        {...activityProps}
+        scope="external"
+        selection={externalSelection}
+      />
+    </>
   );
 }

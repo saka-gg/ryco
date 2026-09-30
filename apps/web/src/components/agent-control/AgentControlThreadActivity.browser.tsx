@@ -166,17 +166,24 @@ it("keeps pending child results and uncertain delivery visible in the compact su
     },
   ]);
   const screen = await render(
-    <AgentControlThreadActivity
-      environmentId={environmentId}
-      selection={selectAgentControlThreadActivity(state, parent)}
-      getThreadTitle={getThreadTitle}
-      submittingIds={[]}
-      decisionErrorsById={{}}
-      disabledReason={null}
-      onDecide={() => {}}
-    />,
+    <div style={{ width: 440 }}>
+      <AgentControlThreadActivity
+        environmentId={environmentId}
+        selection={selectAgentControlThreadActivity(state, parent)}
+        getThreadTitle={getThreadTitle}
+        submittingIds={[]}
+        decisionErrorsById={{}}
+        disabledReason={null}
+        onDecide={() => {}}
+      />
+    </div>,
   );
   await expect.element(screen.getByText(/1 child result pending/)).toBeVisible();
+  const pendingSummary = screen.getByText(/1 child result pending/).element();
+  expect(pendingSummary.scrollWidth).toBeLessThanOrEqual(pendingSummary.clientWidth);
   await expect.element(screen.getByText("1 needs attention")).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: /Agent Control activity/ }))
+    .toHaveAccessibleDescription("1 child result pending 1 needs attention");
   await expect.element(screen.getByTestId("agent-control-proposal-card")).not.toBeInTheDocument();
 });
