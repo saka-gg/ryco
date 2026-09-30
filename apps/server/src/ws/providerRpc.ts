@@ -145,7 +145,8 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         }),
       ),
     [WS_METHODS.serverSearchAcpRegistry]: (input) =>
-      ownerEffect(
+      ctx.withAccess(
+        "viewer",
         WS_METHODS.serverSearchAcpRegistry,
         Effect.tryPromise({ try: () => registry.search(input.query), catch: registryError }).pipe(
           Effect.map((agents) => ({ agents })),
@@ -292,7 +293,8 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         { "rpc.aggregate": "server" },
       ),
     [WS_METHODS.serverGetProjectPreferences]: ({ projectId }) =>
-      ownerEffect(
+      ctx.withAccess(
+        "viewer",
         WS_METHODS.serverGetProjectPreferences,
         Effect.gen(function* () {
           const settings = yield* serverSettings.getSettings;

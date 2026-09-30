@@ -35,6 +35,7 @@ import {
   DateTime,
   Duration,
   Effect,
+  Fiber,
   FileSystem,
   Layer,
   ManagedRuntime,
@@ -1261,6 +1262,39 @@ const getWsServerUrl = (
   });
 
 it.layer(NodeServices.layer)("server router seam", (it) => {
+  it.effect("loads draft preferences without interrupting diagnostics or shell subscriptions", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getProjectShellById: () =>
+              Effect.succeed(Option.some(makeDefaultOrchestrationReadModel().projects[0]!)),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const shell = yield* client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+              Stream.take(1),
+              Stream.runCollect,
+              Effect.forkScoped,
+            );
+            const preferences = yield* client[WS_METHODS.serverGetProjectPreferences]({});
+            assert.isDefined(preferences.initialModelSelection);
+            const projectPreferences = yield* client[WS_METHODS.serverGetProjectPreferences]({
+              projectId: defaultProjectId,
+            });
+            assert.equal(projectPreferences.initialModelSelection.source, "legacy-project");
+            const diagnostics = yield* client[WS_METHODS.serverGetDiagnosticsSnapshot]({});
+            assert.isDefined(diagnostics);
+            assert.lengthOf(yield* Fiber.join(shell), 1);
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
   it.effect("classifies static cache-control headers", () =>
     Effect.sync(() => {
       assert.equal(resolveStaticCacheControl("index.html"), "no-cache");
