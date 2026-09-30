@@ -314,7 +314,11 @@
       "import": "./src/appSnapShortcut.ts"
     },
     "./computerAuditFile": "./src/computerAuditFile.ts",
-    "./computerAuditHistory": "./src/computerAuditHistory.ts"
+    "./computerAuditHistory": "./src/computerAuditHistory.ts",
+    "./pairingUrl": {
+      "types": "./src/pairingUrl.ts",
+      "import": "./src/pairingUrl.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

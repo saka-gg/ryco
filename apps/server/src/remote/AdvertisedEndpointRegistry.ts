@@ -6,15 +6,20 @@ import {
 } from "@ryco/shared/advertisedEndpoint";
 import type { AdvertisedEndpoint, AdvertisedEndpointProvider } from "@ryco/contracts";
 import { isTailscaleIpv4Address } from "@ryco/tailscale";
+import {
+  readCachedTailscaleMagicDnsName,
+  resolveTailscaleIpAdvertisedEndpoints,
+  resolveTailscaleMagicDnsAdvertisedEndpoint,
+} from "@ryco/tailscale/endpoints";
 import { Effect, Layer } from "effect";
 import { HttpServer } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
 import {
+  bindsAllInterfaces,
   formatHostForUrl,
   isLoopbackHost,
-  isWildcardHost,
-  resolveHeadlessConnectionHost,
+  resolveExternalInterfaceHost,
   resolveListeningPort,
 } from "../startupAccess.ts";
 import {
@@ -76,16 +81,20 @@ export function resolveServerAdvertisedEndpoints(input: {
     }),
   ];
 
-  if (input.host && isLoopbackHost(input.host)) {
+  const allInterfaces = bindsAllInterfaces(input.host);
+  if (!allInterfaces && input.host && isLoopbackHost(input.host)) {
     return endpoints;
   }
 
-  const configuredHost =
-    input.host && !isWildcardHost(input.host)
-      ? input.host.replace(/^\[(.*)\]$/u, "$1")
-      : resolveHeadlessConnectionHost(input.host, input.networkInterfaces);
+  const configuredHost = allInterfaces
+    ? resolveExternalInterfaceHost(input.networkInterfaces)
+    : input.host?.replace(/^\[(.*)\]$/u, "$1");
 
-  if (isLoopbackHost(configuredHost) || configuredHost === "localhost") {
+  if (
+    configuredHost === undefined ||
+    isLoopbackHost(configuredHost) ||
+    configuredHost === "localhost"
+  ) {
     return endpoints;
   }
 
@@ -110,16 +119,59 @@ export function resolveServerAdvertisedEndpoints(input: {
   return endpoints;
 }
 
+/**
+ * Server endpoints plus this machine's Tailnet endpoints: its Tailscale IP when
+ * the listener accepts it, and its MagicDNS HTTPS URL when Tailscale Serve
+ * fronts this server. A desktop-managed backend gets the same Tailnet endpoints
+ * from Desktop instead, which owns its Tailscale Serve setup.
+ */
+export async function resolveServerAdvertisedEndpointsWithTailscale(input: {
+  readonly host: string | undefined;
+  readonly port: number;
+  readonly networkInterfaces: NodeJS.Dict<NetworkInterfaceInfo[]>;
+  readonly tailscaleServeEnabled: boolean;
+  readonly tailscaleServePort?: number;
+  readonly readMagicDnsName?: () => Promise<string | null>;
+  readonly probe?: (baseUrl: string) => Promise<boolean>;
+}): Promise<readonly AdvertisedEndpoint[]> {
+  const server = resolveServerAdvertisedEndpoints(input);
+  const seen = new Set(server.map((endpoint) => endpoint.httpBaseUrl));
+  const tailnet: AdvertisedEndpoint[] = [];
+  if (bindsAllInterfaces(input.host)) {
+    tailnet.push(
+      ...resolveTailscaleIpAdvertisedEndpoints({
+        port: input.port,
+        networkInterfaces: input.networkInterfaces,
+        source: "server",
+      }),
+    );
+  }
+  if (input.tailscaleServeEnabled) {
+    const magicDns = await resolveTailscaleMagicDnsAdvertisedEndpoint({
+      dnsName: await (input.readMagicDnsName ?? readCachedTailscaleMagicDnsName)(),
+      serveEnabled: true,
+      ...(input.tailscaleServePort === undefined ? {} : { servePort: input.tailscaleServePort }),
+      ...(input.probe === undefined ? {} : { probe: input.probe }),
+      source: "server",
+    });
+    if (magicDns) tailnet.push(magicDns);
+  }
+  return [...server, ...tailnet.filter((endpoint) => !seen.has(endpoint.httpBaseUrl))];
+}
+
 export const makeAdvertisedEndpointRegistry = Effect.fn("makeAdvertisedEndpointRegistry")(
   function* () {
     const config = yield* ServerConfig;
     const httpServer = yield* HttpServer.HttpServer;
 
-    const list = Effect.sync(() =>
-      resolveServerAdvertisedEndpoints({
+    const list = Effect.promise(() =>
+      resolveServerAdvertisedEndpointsWithTailscale({
         host: config.host,
         port: resolveListeningPort(httpServer.address, config.port),
         networkInterfaces: networkInterfaces(),
+        // Desktop advertises its backend's Tailnet endpoints itself.
+        tailscaleServeEnabled: config.mode !== "desktop" && config.tailscaleServeEnabled,
+        tailscaleServePort: config.tailscaleServePort,
       }),
     );
 
