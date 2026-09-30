@@ -3,8 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   selectionTouchesMentionBoundary,
   splitPromptIntoComposerSegments,
-} from "./composer-editor-mentions";
-import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+} from "./editorMentions.ts";
+import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./terminalContext.ts";
 
 describe("splitPromptIntoComposerSegments", () => {
   it("splits mention tokens followed by whitespace into mention segments", () => {

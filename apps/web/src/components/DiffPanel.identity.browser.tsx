@@ -219,7 +219,6 @@ describe("real Pierre file identity and panel navigation", () => {
       const shadow = a.querySelector("diffs-container")?.shadowRoot;
       expect(shadow?.querySelector("[data-line]")).toBeTruthy();
     });
-    await page.screenshot({ path: "../../output/task04-panel.png" });
     const b = row("b.ts");
     const aMounts = { ...fixture.mounts };
     const aRenders = { ...fixture.renders };
@@ -289,7 +288,9 @@ describe("real Pierre file identity and panel navigation", () => {
       expect(document.querySelectorAll("[data-diff-file-path]")).toHaveLength(3),
     );
     await page.getByRole("button", { name: "Split diff view", exact: true }).click();
-    await page.screenshot({ path: "../../output/task04-panel-split.png" });
+    await expect
+      .element(page.getByRole("button", { name: "Split diff view", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
     fixture.selectedFile = null;
     await screen.unmount();
   });

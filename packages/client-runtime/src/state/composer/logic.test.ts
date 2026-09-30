@@ -12,9 +12,9 @@ import {
   parseThreadGoalSlashCommand,
   replaceTextRange,
   shouldUseNativeComposerFileReference,
-} from "./composer-logic";
-import { serializeComposerMentionPath } from "./composerMentionSyntax";
-import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+} from "./logic.ts";
+import { serializeComposerMentionPath } from "./mentionSyntax.ts";
+import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./terminalContext.ts";
 
 describe("detectComposerTrigger", () => {
   it("detects @path trigger at cursor", () => {

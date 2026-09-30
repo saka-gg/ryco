@@ -206,7 +206,6 @@ describe("staged and unstaged review", () => {
     await expect
       .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
       .toBeVisible();
-    await page.screenshot({ path: "../../output/task07-staged-review.png" });
     fixture.apply.mockRejectedValueOnce(
       new Error("HEAD, branch, index or patch changed. Refresh before staging or unstaging."),
     );
@@ -221,7 +220,9 @@ describe("staged and unstaged review", () => {
       .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
       .toBeVisible();
     await page.viewport(720, 850);
-    await page.screenshot({ path: "../../output/task07-staged-narrow.png" });
+    await expect
+      .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
+      .toBeVisible();
     await screen.unmount();
   });
 });

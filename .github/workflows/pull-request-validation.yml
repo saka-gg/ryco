@@ -24,8 +24,7 @@ concurrency:
 
 jobs:
   # repository_dispatch does not include pull_request data. Fetch one
-  # authoritative PR record here for both trust checks and the current
-  # path-scope / Turbo inputs.
+  # authoritative PR record here for the trust decision and Turbo inputs.
   gate:
     name: Gate
     runs-on: ubuntu-24.04
@@ -33,8 +32,6 @@ jobs:
     outputs:
       checkout-ref: ${{ steps.gate.outputs.checkout-ref }}
       affected-base: ${{ steps.gate.outputs.affected-base }}
-      web: ${{ steps.gate.outputs.web }}
-      desktop: ${{ steps.gate.outputs.desktop }}
       should-validate: ${{ steps.gate.outputs.should-validate }}
     steps:
       - id: gate
@@ -84,38 +81,6 @@ jobs:
               return;
             }
 
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-              per_page: 100,
-            });
-            // A rename touches both its former and current locations, matching
-            // the conservative behavior of dorny/paths-filter.
-            const paths = files.flatMap((file) =>
-              file.previous_filename ? [file.filename, file.previous_filename] : [file.filename],
-            );
-            const shared = (path) =>
-              path.startsWith("packages/") ||
-              [
-                "package.json",
-                "bun.lock",
-                "turbo.json",
-                ".github/workflows/_validation.yml",
-                ".github/workflows/pull-request-validation.yml",
-              ].includes(path) ||
-              /^tsconfig.*\.json$/.test(path) ||
-              path.startsWith(".github/actions/");
-            const web = paths.some((path) => shared(path) || path.startsWith("apps/web/"));
-            const desktop = paths.some(
-              (path) =>
-                shared(path) ||
-                path.startsWith("native/resource-monitor/") ||
-                path.startsWith("apps/desktop/") ||
-                path.startsWith("apps/server/") ||
-                path.startsWith("apps/web/"),
-            );
-
             core.info(
               manualApproval && !trusted
                 ? `Validating PR #${prNumber} by manual approval.`
@@ -123,8 +88,6 @@ jobs:
             );
             core.setOutput("checkout-ref", `refs/pull/${prNumber}/merge`);
             core.setOutput("affected-base", pullRequest.base.sha);
-            core.setOutput("web", web);
-            core.setOutput("desktop", desktop);
             core.setOutput("should-validate", "true");
 
   validate:
@@ -135,6 +98,8 @@ jobs:
     with:
       checkout-ref: ${{ needs.gate.outputs.checkout-ref }}
       affected-base: ${{ needs.gate.outputs.affected-base }}
-      run-browser-tests: ${{ needs.gate.outputs.web == 'true' }}
-      run-desktop-build: ${{ needs.gate.outputs.desktop == 'true' }}
+      # The reusable workflow resolves paths from the checked-out merge commit,
+      # after trust approval, using the same affected plan as the unit matrix.
+      run-browser-tests: true
+      run-desktop-build: true
       run-release-smoke: true

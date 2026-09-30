@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { TerminalEvent, TerminalSessionSnapshot } from "@ryco/contracts";
-import { terminalRunningSubprocessFromEvent } from "./terminalActivity";
+import { terminalRunningSubprocessFromEvent } from "./activity.ts";
 
 const snapshot: TerminalSessionSnapshot = {
   threadId: "thread-1",

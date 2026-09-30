@@ -214,7 +214,6 @@ describe("real comparison line blame and path identity", () => {
       filePath: "a/file.ts",
       line: 3,
     });
-    await page.screenshot({ path: "../../output/task06-line-blame.png" });
     await page
       .getByRole("dialog")
       .element()
@@ -320,7 +319,6 @@ describe("real comparison line blame and path identity", () => {
     await expect
       .element(page.getByText("Preserve the original line", { exact: true }))
       .toBeVisible();
-    await page.screenshot({ path: "../../output/task06-line-blame-dark.png" });
     const dialog = page.getByRole("dialog").element().getBoundingClientRect();
     expect(dialog.left).toBeGreaterThanOrEqual(0);
     expect(dialog.right).toBeLessThanOrEqual(window.innerWidth);
