@@ -326,6 +326,10 @@ export function createMobileEnvironmentDriver(
       },
       pushSequenceMonitor: noopPushSequenceMonitor,
       resetShellProjection: (environmentId) => getSupervisor().resetShellProjection(environmentId),
+      // A direct connection may resume its shell after a reconnect; the hosted
+      // primary below always takes a fresh snapshot.
+      readShellResumeSequence: (environmentId) =>
+        getSupervisor().readShellProjectionSequence(environmentId),
       applyShellEvent: (event, environmentId) =>
         getSupervisor().applyShellEvent(event, environmentId),
       syncShellSnapshot: (snapshot, environmentId) =>

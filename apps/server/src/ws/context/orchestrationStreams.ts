@@ -3,6 +3,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
+  type OrchestrationShellStreamItem,
   OrchestrationGetSnapshotError,
   ThreadId,
   WorktreeId,
@@ -454,13 +455,37 @@ export const makeOrchestrationStreamHelpers = (deps: {
       return queuedBytesRef;
     });
 
+  /**
+   * Can a client that last applied `fromSequence` catch up from the event log
+   * rather than a snapshot? Only when that sequence names an event this log
+   * still holds — a reset or foreign log restarts below it — and no more than one
+   * replay page has happened since, beyond which a snapshot is the cheaper send.
+   * The log is never pruned today; pruning must keep this answer truthful.
+   */
+  const canResumeShellAfter = (fromSequence: number) =>
+    Effect.gen(function* () {
+      if (!Number.isSafeInteger(fromSequence) || fromSequence <= 0) return false;
+      const anchor = yield* orchestrationEngine.readEventsPage(fromSequence - 1, 1);
+      if (anchor.events[0]?.sequence !== fromSequence) return false;
+      const missed = yield* orchestrationEngine.readEventsPage(
+        fromSequence,
+        ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
+      );
+      return !missed.hasMore;
+    }).pipe(Effect.orElseSucceed(() => false));
+
   const makeReplayableShellStream = (
     snapshot: Effect.Effect<OrchestrationShellSnapshot, OrchestrationGetSnapshotError>,
+    options: { readonly resumeFromSequence?: number | undefined } = {},
   ) =>
     Stream.unwrap(
       Effect.gen(function* () {
-        const loadedSnapshot = yield* snapshot;
-        const snapshotSequence = loadedSnapshot.snapshotSequence;
+        const resumeFromSequence = options.resumeFromSequence;
+        const resumed =
+          resumeFromSequence !== undefined && (yield* canResumeShellAfter(resumeFromSequence));
+        const loadedSnapshot = resumed ? undefined : yield* snapshot;
+        const snapshotSequence =
+          loadedSnapshot?.snapshotSequence ?? (resumed ? resumeFromSequence : 0);
         const liveSubscription = yield* orchestrationEngine.subscribeDomainEvents;
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
@@ -509,11 +534,12 @@ export const makeOrchestrationStreamHelpers = (deps: {
           })),
         );
 
+        const head: OrchestrationShellStreamItem =
+          loadedSnapshot === undefined
+            ? { kind: "resumed", fromSequence: snapshotSequence }
+            : { kind: "snapshot", snapshot: loadedSnapshot };
         return Stream.concat(
-          Stream.make({
-            kind: "snapshot" as const,
-            snapshot: loadedSnapshot,
-          }),
+          Stream.make(head),
           Stream.merge(eventStream, prioritySnapshotStream),
         ).pipe(Stream.ensuring(replayMetrics.reset));
       }),

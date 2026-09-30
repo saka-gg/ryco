@@ -10,6 +10,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   type OpinionatedPluginCheckInput,
   type OpinionatedPluginInstallInput,
+  type OrchestrationShellStreamItem,
   type ServerSettingsPatch,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -28,6 +29,14 @@ type RpcInput<TTag extends RpcTag> = Parameters<RpcMethod<TTag>>[0];
 interface StreamSubscriptionOptions {
   readonly onResubscribe?: () => void;
   readonly onError?: () => void;
+}
+
+export interface ShellSubscriptionOptions extends StreamSubscriptionOptions {
+  /**
+   * Read at every (re)subscription: the last shell sequence the caller applied,
+   * or `null` to ask for a snapshot. See `OrchestrationSubscribeShellInput`.
+   */
+  readonly resumeFromSequence?: () => number | null;
 }
 
 type RpcUnaryMethod<TTag extends RpcTag> =
@@ -310,7 +319,10 @@ export interface WsRpcClient {
     readonly getThreadHistoryPage?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadHistoryPage
     >;
-    readonly subscribeShell: RpcStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeShell>;
+    readonly subscribeShell: (
+      listener: (event: OrchestrationShellStreamItem) => void,
+      options?: ShellSubscriptionOptions,
+    ) => () => void;
     readonly subscribeThread: RpcInputStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeThread>;
     readonly subscribeThreadWindow?: RpcInputStreamMethod<
       typeof ORCHESTRATION_WS_METHODS.subscribeThreadWindow
@@ -721,9 +733,18 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadHistoryPage](input)),
       subscribeShell: (listener, options) =>
         transport.subscribe(
-          (client) => client[ORCHESTRATION_WS_METHODS.subscribeShell]({}),
+          (client) => {
+            const resumeFromSequence = options?.resumeFromSequence?.() ?? null;
+            return client[ORCHESTRATION_WS_METHODS.subscribeShell](
+              resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {},
+            );
+          },
           listener,
-          { ...options, tag: ORCHESTRATION_WS_METHODS.subscribeShell },
+          {
+            ...(options?.onResubscribe === undefined ? {} : { onResubscribe: options.onResubscribe }),
+            ...(options?.onError === undefined ? {} : { onError: options.onError }),
+            tag: ORCHESTRATION_WS_METHODS.subscribeShell,
+          },
         ),
       subscribeThread: (input, listener, options) =>
         transport.subscribe(

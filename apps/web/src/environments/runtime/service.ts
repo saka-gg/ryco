@@ -717,6 +717,14 @@ export function applyEnvironmentThreadDetailEvent(
 function createEnvironmentConnectionHandlers(
   hostedGeneration: number | null = null,
   initialRefreshEnvironmentId?: EnvironmentId,
+  options: {
+    /**
+     * Resume the shell after a reconnect instead of taking a fresh snapshot.
+     * Direct connections only: a hosted session must accept a current snapshot
+     * before it regains mutation authority.
+     */
+    readonly resumeShell?: boolean;
+  } = {},
 ) {
   const acceptsEvent = () =>
     hostedGeneration === null || useHostedHubStore.getState().generation === hostedGeneration;
@@ -742,7 +750,17 @@ function createEnvironmentConnectionHandlers(
       .ready(environmentId, refreshGeneration, isAuthoritativelyReady)
       .catch(() => undefined);
   };
+  const resumeShell = options.resumeShell === true && hostedGeneration === null;
   return {
+    ...(resumeShell
+      ? {
+          readShellResumeSequence: (environmentId: EnvironmentId) =>
+            getEnvironmentSupervisor().readShellProjectionSequence(environmentId),
+          onShellResumed: (environmentId: EnvironmentId) => {
+            completeQueryRefresh(environmentId);
+          },
+        }
+      : {}),
     onResubscribe: (environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
       beginQueryRefresh(environmentId);
@@ -1022,6 +1040,7 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
       ...createEnvironmentConnectionHandlers(
         hostedGeneration,
         hostedGeneration !== null ? knownEnvironment.environmentId : undefined,
+        { resumeShell: hostedGeneration === null },
       ),
     }),
   );
@@ -1198,7 +1217,7 @@ async function connectSavedEnvironment(
           descriptor: payload.environment,
         });
       },
-      ...createEnvironmentConnectionHandlers(),
+      ...createEnvironmentConnectionHandlers(null, undefined, { resumeShell: true }),
     });
 
     try {

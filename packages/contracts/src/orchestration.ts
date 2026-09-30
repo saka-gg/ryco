@@ -1010,9 +1010,29 @@ export const OrchestrationShellStreamItem = Schema.Union([
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationShellSnapshot,
   }),
+  /**
+   * The server accepted `resumeFromSequence`: instead of a snapshot, the events
+   * after `fromSequence` follow, and the client keeps the shell it already has.
+   * Only ever sent to a client that asked to resume.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("resumed"),
+    fromSequence: NonNegativeInt,
+  }),
   OrchestrationShellStreamEvent,
 ]);
 export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.Type;
+
+export const OrchestrationSubscribeShellInput = Schema.Struct({
+  /**
+   * The last shell sequence the client applied. A server that still holds every
+   * event since then answers `resumed` and replays only those, sparing a full
+   * snapshot on every reconnect; otherwise it sends a snapshot as usual. Older
+   * servers ignore the field.
+   */
+  resumeFromSequence: Schema.optional(NonNegativeInt),
+});
+export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShellInput.Type;
 
 export const OrchestrationSubscribeThreadInput = Schema.Struct({
   threadId: ThreadId,
@@ -2848,7 +2868,7 @@ export const OrchestrationRpcSchemas = {
     output: OrchestrationThreadWindowStreamItem,
   },
   subscribeShell: {
-    input: Schema.Struct({}),
+    input: OrchestrationSubscribeShellInput,
     output: OrchestrationShellStreamItem,
   },
 } as const;

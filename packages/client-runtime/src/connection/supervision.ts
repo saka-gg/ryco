@@ -157,6 +157,8 @@ export interface EnvironmentConnectionSupervisor {
     environmentId: EnvironmentId,
   ) => void;
   readonly resetShellProjection: (environmentId: EnvironmentId) => void;
+  /** The last shell sequence applied for an environment, for resuming its subscription. */
+  readonly readShellProjectionSequence: (environmentId: EnvironmentId) => number | null;
   readonly syncShellSnapshot: (
     snapshot: OrchestrationShellSnapshot,
     environmentId: EnvironmentId,
@@ -812,6 +814,8 @@ export function createEnvironmentConnectionSupervisor<
     cancelPendingSavedEnvironmentConnection,
     applyShellEvent,
     resetShellProjection: (environmentId) => projectionTracker.clearEnvironment(environmentId),
+    readShellProjectionSequence: (environmentId) =>
+      projectionTracker.read(environmentId)?.sequence ?? null,
     syncShellSnapshot,
     retainThreadDetailSubscription: retain,
     disposeThreadDetailSubscriptionsForEnvironment: disposeForEnvironment,

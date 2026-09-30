@@ -54,6 +54,16 @@ export interface OrchestrationHandlers {
     environmentId: EnvironmentId,
   ) => void;
   readonly applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => void;
+  /**
+   * The last shell sequence applied for this environment. When provided, a
+   * replacement subscription asks the server to resume after it instead of
+   * resending the whole shell, and the projection is reset only if a snapshot
+   * arrives after all. Leave it out where a fresh snapshot is required — a hosted
+   * session must accept a current snapshot before it may mutate.
+   */
+  readonly readShellResumeSequence?: (environmentId: EnvironmentId) => number | null;
+  /** A replacement subscription resumed on top of the shell already held. */
+  readonly onShellResumed?: (environmentId: EnvironmentId) => void;
 }
 
 export interface EnvironmentConnectionInput extends OrchestrationHandlers {
@@ -200,10 +210,32 @@ export function createEnvironmentConnection(
         },
       )
     : () => undefined;
+  // Resume is attempted only on top of a baseline this connection established
+  // itself, and a projection reset waits until the server has chosen between
+  // resuming and sending a snapshot.
+  let hasShellBaseline = false;
+  let awaitingResubscribeBaseline = false;
+  const readShellResumeSequence = input.readShellResumeSequence;
   const unsubShell = input.client.orchestration.subscribeShell(
     (item) => {
       if (disposed) return;
+      if (item.kind === "resumed") {
+        awaitingResubscribeBaseline = false;
+        hasShellBaseline = true;
+        input.pushSequenceMonitor.recordSnapshot(environmentId, item.fromSequence);
+        bootstrapGate.resolve();
+        const attempt = getWsConnectionStatusForEnvironment(environmentId).attemptCount;
+        if (shellSnapshot?.attempt !== attempt) shellSnapshot = { attempt };
+        notifyShellReadiness();
+        input.onShellResumed?.(environmentId);
+        return;
+      }
       if (item.kind === "snapshot") {
+        if (awaitingResubscribeBaseline) {
+          awaitingResubscribeBaseline = false;
+          input.resetShellProjection(environmentId);
+        }
+        hasShellBaseline = true;
         input.pushSequenceMonitor.recordSnapshot(environmentId, item.snapshot.snapshotSequence);
         input.syncShellSnapshot(item.snapshot, environmentId);
         bootstrapGate.resolve();
@@ -216,11 +248,21 @@ export function createEnvironmentConnection(
       input.applyShellEvent(item, environmentId);
     },
     {
+      ...(readShellResumeSequence === undefined
+        ? {}
+        : {
+            resumeFromSequence: () =>
+              hasShellBaseline && !disposed ? readShellResumeSequence(environmentId) : null,
+          }),
       onResubscribe: () => {
         if (disposed) return;
         bootstrapGate.reset();
         invalidateShellReadiness();
-        input.resetShellProjection(environmentId);
+        if (readShellResumeSequence !== undefined && hasShellBaseline) {
+          awaitingResubscribeBaseline = true;
+        } else {
+          input.resetShellProjection(environmentId);
+        }
         input.onResubscribe?.(environmentId);
       },
       onError: () => {
