@@ -7,15 +7,15 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { createEnvironmentFallbackThreadRefSelector } from "./storeSelectors";
-import type { AppState, EnvironmentState } from "./store";
+import { createEnvironmentFallbackThreadRefSelector } from "./storeSelectors.ts";
+import type { AppState, EnvironmentState } from "./store.ts";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   type SidebarThreadSummary,
   type ThreadShell,
-} from "./types";
+} from "./types.ts";
 
 const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");

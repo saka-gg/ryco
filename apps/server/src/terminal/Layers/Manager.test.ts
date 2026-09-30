@@ -257,9 +257,9 @@ const createManager = (
         ...(options.subprocessPollIntervalMs !== undefined
           ? { subprocessPollIntervalMs: options.subprocessPollIntervalMs }
           : {}),
-        ...(options.processKillGraceMs !== undefined
-          ? { processKillGraceMs: options.processKillGraceMs }
-          : {}),
+        // Fake PTYs have no OS process to reap. Keep ordinary fixture teardown
+        // immediate; shutdown timing is covered separately with TestClock.
+        processKillGraceMs: options.processKillGraceMs ?? 0,
         ...(options.maxRetainedInactiveSessions !== undefined
           ? { maxRetainedInactiveSessions: options.maxRetainedInactiveSessions }
           : {}),
@@ -903,23 +903,17 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
 
       // The initial wake-up may race the second open. Start counting after it
       // has completed, when both running terminals are present for one tick.
-      yield* Effect.sleep("50 millis");
+      yield* TestClock.adjust("50 millis");
       recordSnapshots = true;
-
-      yield* waitFor(
-        Effect.map(getEvents, (events) => {
-          const activeThreads = new Set(
-            events
-              .filter((event) => event.type === "activity" && event.hasRunningSubprocess === true)
-              .map((event) => event.threadId),
-          );
-          return activeThreads.has("thread-1") && activeThreads.has("thread-2");
-        }),
-        "1500 millis",
+      yield* TestClock.adjust("1000 millis");
+      const activeThreads = new Set(
+        (yield* getEvents)
+          .filter((event) => event.type === "activity" && event.hasRunningSubprocess === true)
+          .map((event) => event.threadId),
       );
-
+      expect(activeThreads).toEqual(new Set(["thread-1", "thread-2"]));
       assert.equal(snapshotCalls, 1);
-    }),
+    }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("keeps last known activity when process-table enumeration fails", () =>

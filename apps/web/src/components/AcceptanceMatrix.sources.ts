@@ -10,7 +10,7 @@
  * glob from here keeps `AcceptanceMatrix.browser.tsx` in the result set.
  *
  * Keys are paths relative to this file (same directory as the matrix suite):
- * `./ChatView.browser.tsx`, `./mobile/MobileSheet.browser.tsx`,
+ * `./ChatView.PhoneComposer.browser.tsx`, `./mobile/MobileSheet.browser.tsx`,
  * `../hostedHub/state.test.ts`, `../pwa/lifecycle.test.ts`, and so on.
  */
 export const SUITE_SOURCES = import.meta.glob(

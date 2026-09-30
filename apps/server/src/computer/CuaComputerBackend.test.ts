@@ -18,6 +18,18 @@ import type { ToolContext } from "./tools/toolRuntime.ts";
 
 const isTyping = (name?: string) => name === "type_text";
 
+/** Exercise real retry loops without waiting for the mocked driver's clock. */
+async function withDriverRetryClock<T>(operation: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const pending = operation();
+    await vi.runAllTimersAsync();
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 function fixture(options?: {
   readonly semanticTextLaneHoldMs?: number;
   readonly semanticTextLaneGapMs?: number;
@@ -1841,7 +1853,7 @@ describe("Cua native boundary", () => {
       endpoint: "/fixture-only",
       request,
     });
-    await backend.provision();
+    await withDriverRetryClock(() => backend.provision());
     expect(requests.find((request) => request.method === "setup")?.timeoutMs).toBe(
       CUA_SETUP_TIMEOUT_MS,
     );
@@ -1855,7 +1867,7 @@ describe("Cua native boundary", () => {
   it("reports only the current missing permission and the responsible app", async () => {
     const f = fixture();
     f.denyScreenRecording();
-    const availability = await f.backend.availability();
+    const availability = await withDriverRetryClock(() => f.backend.availability());
     expect(availability).toMatchObject({
       kind: "permission-required",
       missing: ["screenRecording"],
@@ -1864,13 +1876,17 @@ describe("Cua native boundary", () => {
     expect(availability.kind === "permission-required" && availability.message).not.toContain(
       "Accessibility",
     );
+    // A persistent denial publishes after four retries, without probing forever.
+    expect(f.calls.filter((call) => call.name === "check_permissions")).toHaveLength(5);
     expect(await f.backend.provision()).toContain("Allow Screen Recording");
   });
 
   it("an explicit status refresh consumes a newly granted permission without waiting for the action cache", async () => {
     const f = fixture();
     f.denyPermissions();
-    expect(await f.backend.availability()).toMatchObject({ kind: "permission-required" });
+    expect(await withDriverRetryClock(() => f.backend.availability())).toMatchObject({
+      kind: "permission-required",
+    });
     f.grantPermissions();
     expect(await f.backend.availability()).toMatchObject({ kind: "permission-required" });
     expect(await f.backend.availability({ refresh: true })).toMatchObject({ kind: "available" });
@@ -1879,7 +1895,7 @@ describe("Cua native boundary", () => {
   it("does not reuse an in-flight permission denial for a grant-triggered status refresh", async () => {
     const f = fixture();
     f.denyPermissions();
-    await f.backend.availability();
+    await withDriverRetryClock(() => f.backend.availability());
     const previousChecks = f.calls.filter((call) => call.name === "check_permissions").length;
     let release!: () => void;
     f.waitForPermission(
@@ -1913,7 +1929,7 @@ describe("Cua native boundary", () => {
     const provision = f.backend.provision();
     f.grantPermissions();
     release();
-    await previous;
+    await withDriverRetryClock(() => previous);
     expect(await provision).toContain("permissions are ready");
     expect(await f.backend.availability()).toMatchObject({ kind: "available" });
   });
@@ -1921,7 +1937,7 @@ describe("Cua native boundary", () => {
   it("names Input Monitoring when the physical interruption listener lacks its grant", async () => {
     const f = fixture({ hostPlatform: "darwin" });
     f.setInputMonitor(false, false);
-    const availability = await f.backend.availability();
+    const availability = await withDriverRetryClock(() => f.backend.availability());
     expect(availability).toMatchObject({
       kind: "permission-required",
       missing: ["inputMonitoring"],
@@ -2014,48 +2030,51 @@ describe("Cua native boundary", () => {
   it("re-probes a transient missing report before publishing availability", async () => {
     const f = fixture();
     f.denyPermissions();
-    let release!: () => void;
-    f.waitForPermission(
-      new Promise<void>((resolve) => {
-        release = resolve;
-      }),
-    );
-    const pending = f.backend.availability();
-    // Park the first check_permissions on the gate long enough to have read
-    // "missing", then flip to granted so the delayed re-probe sees the truth.
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    f.grantPermissions();
-    release();
-    expect(await pending).toMatchObject({ kind: "available" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let completed = false;
+      const pending = f.backend.availability().then((availability) => {
+        completed = true;
+        return availability;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.calls.filter((call) => call.name === "check_permissions")).toHaveLength(1);
+      f.grantPermissions();
+      await vi.advanceTimersByTimeAsync(599);
+      expect(completed).toBe(false);
+      expect(f.calls.filter((call) => call.name === "check_permissions")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toMatchObject({ kind: "available" });
+      expect(f.calls.filter((call) => call.name === "check_permissions")).toHaveLength(2);
+      await vi.runAllTimersAsync();
+      expect(f.calls.filter((call) => call.name === "check_permissions")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps re-probing until a delayed grant lands", async () => {
     const f = fixture();
     f.denyPermissions();
-    const gates: Array<() => void> = [];
-    const arm = () =>
-      f.waitForPermission(
-        new Promise<void>((resolve) => {
-          gates.push(resolve);
-        }),
-      );
-    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
-    arm();
-    const pending = f.backend.availability();
-    await tick();
-    // Initial check reads missing; probe one reads missing too; the grant only
-    // exists by probe two — matching the multi-second transient seen live.
-    gates.shift()!();
-    await tick();
-    arm();
-    await tick();
-    gates.shift()!();
-    await tick();
-    arm();
-    f.grantPermissions();
-    await tick();
-    gates.shift()!();
-    expect(await pending).toMatchObject({ kind: "available" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let completed = false;
+      const pending = f.backend.availability().then((availability) => {
+        completed = true;
+        return availability;
+      });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(completed).toBe(false);
+      expect(f.calls.filter((call) => call.name === "check_permissions")).toHaveLength(2);
+      f.grantPermissions();
+      await vi.advanceTimersByTimeAsync(599);
+      expect(completed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toMatchObject({ kind: "available" });
+      expect(f.calls.filter((call) => call.name === "check_permissions")).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("clears an old capture failure after explicit setup so recovery can be retried", async () => {
@@ -2998,10 +3017,12 @@ describe("Cua native boundary", () => {
       content: [{ type: "text", text: "Sent SIGKILL to pid 10." }],
     }));
     apps = [{ pid: 10, name: "TextEdit", active: true }];
-    await expect(f.backend.killApp!(10)).resolves.toMatchObject({
+    const previousReads = f.calls.filter((call) => call.name === "list_apps").length;
+    await expect(withDriverRetryClock(() => f.backend.killApp!(10))).resolves.toMatchObject({
       verified: "unconfirmed",
       effect: "dispatched-unknown",
     });
+    expect(f.calls.filter((call) => call.name === "list_apps")).toHaveLength(previousReads + 4);
   });
   it("sends the hidden launch flag only when the caller asks for it", async () => {
     const f = fixture();
@@ -3298,7 +3319,7 @@ describe("Cua native boundary", () => {
   it("encodes missing grants with the public permission schema", async () => {
     const f = fixture();
     f.denyPermissions();
-    const availability = await f.backend.availability();
+    const availability = await withDriverRetryClock(() => f.backend.availability());
     expect(Schema.decodeUnknownSync(ComputerAvailability)(availability)).toMatchObject({
       kind: "permission-required",
       missing: ["accessibility", "screenRecording"],
@@ -3749,7 +3770,7 @@ describe("Cua hardening", () => {
     expect(f.backend.buildSignature()).toBe("unknown");
     expect(f.backend.buildSignature()).toBe(f.backend.buildSignature());
     f.denyPermissions();
-    const availability = await f.backend.availability();
+    const availability = await withDriverRetryClock(() => f.backend.availability());
     expect(availability.kind === "permission-required" && availability.buildSignature).toBe(
       "unknown",
     );
@@ -3908,7 +3929,7 @@ describe("Cua hardening", () => {
 
     // The revoke lands mid-task: the probe reports the grant missing...
     f.denyScreenRecording();
-    expect(await f.backend.availability()).toMatchObject({
+    expect(await withDriverRetryClock(() => f.backend.availability())).toMatchObject({
       kind: "permission-required",
       missing: ["screenRecording"],
     });

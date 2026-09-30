@@ -76,6 +76,7 @@ jobs:
         uses: ./.github/actions/setup-ryco
         with:
           cache-scope: static
+          install-resource-monitor-toolchain: "false"
 
       - name: Format
         run: bun run fmt:check
@@ -94,37 +95,40 @@ jobs:
           path: .turbo/cache
           key: ${{ steps.setup.outputs['turbo-cache-key'] }}
 
-  # Turbo forbids combining `--filter` with `--affected`, so the test strategy
-  # switches shape by mode: PRs run a single `--affected` job (changed packages
-  # plus their dependents — small and fast); full runs (main / manual) shard the
-  # whole suite across three runners. This job just emits the matrix, so it gets
-  # the smallest runner rather than a 4 vCPU box for a few seconds of shell.
+  # A dry plan owns affected-package selection. Each selected package can then
+  # use explicit filters, and the server remains sharded in PR and full runs.
   test-matrix:
     name: Test matrix
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
       include: ${{ steps.pick.outputs.include }}
+      has-tests: ${{ steps.pick.outputs.has-tests }}
+      browser: ${{ steps.pick.outputs.browser }}
+      desktop: ${{ steps.pick.outputs.desktop }}
+      release: ${{ steps.pick.outputs.release }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs['checkout-ref'] != '' && inputs['checkout-ref'] || github.ref }}
+          fetch-depth: ${{ inputs['affected-base'] == '' && 1 || 0 }}
+          persist-credentials: false
+
+      - name: Setup project
+        uses: ./.github/actions/setup-ryco
+        with:
+          cache-scope: test-matrix
+          install-resource-monitor-toolchain: "false"
+
       - id: pick
-        shell: bash
-        env:
-          AFFECTED_BASE: ${{ inputs['affected-base'] }}
-        run: |
-          if [ -n "$AFFECTED_BASE" ]; then
-            echo 'include=[{"name":"affected","filter":"--affected","runner":"blacksmith-2vcpu-ubuntu-2404"}]' >> "$GITHUB_OUTPUT"
-          else
-            # "rest" uses negation filters so a newly added package is always
-            # covered by exactly one shard and can never slip out of CI.
-            # "server" is the long pole (~4m vs ~1m for the others), so it gets a
-            # GitHub-hosted 4 vCPU runner while the short shards stay on the
-            # cheaper 2 vCPU Blacksmith boxes.
-            echo 'include=[{"name":"server","filter":"--filter=ryco-cli","runner":"ubuntu-24.04"},{"name":"web","filter":"--filter=@ryco/web","runner":"blacksmith-2vcpu-ubuntu-2404"},{"name":"rest","filter":"--filter=!ryco-cli --filter=!@ryco/web","runner":"blacksmith-2vcpu-ubuntu-2404"}]' >> "$GITHUB_OUTPUT"
-          fi
+        name: Resolve test and validation scope
+        run: bun scripts/ci/test-matrix.ts
 
   test:
     name: Test ${{ matrix.name }}
     needs: test-matrix
+    if: ${{ needs.test-matrix.outputs.has-tests == 'true' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     strategy:
@@ -147,9 +151,24 @@ jobs:
         with:
           cache-scope: test-${{ matrix.name }}
 
-      # PR mode passes `--affected`; full mode passes one shard's `--filter`.
       - name: Test
-        run: bun run test ${{ matrix.filter }}
+        run: bun run test ${{ matrix.filters }} -- ${{ matrix.shard }}
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-results-${{ matrix.name }}
+          path: |
+            apps/**/test-results/*
+            packages/**/test-results/*
+            scripts/test-results/*
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Summarize test timings
+        if: always()
+        run: bun scripts/ci/summarize-tests.ts
 
       - name: Save Turbo cache
         if: ${{ always() && steps.setup.outputs['turbo-cache-key'] != '' }}
@@ -193,7 +212,8 @@ jobs:
   # shard stays internally serial, preserving the timing invariant.
   browser:
     name: Browser tests ${{ matrix.shard }}
-    if: ${{ inputs['run-browser-tests'] }}
+    needs: test-matrix
+    if: ${{ inputs['run-browser-tests'] && needs.test-matrix.outputs.browser == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -212,6 +232,7 @@ jobs:
         uses: ./.github/actions/setup-ryco
         with:
           cache-scope: browser-${{ matrix.shard }}
+          install-resource-monitor-toolchain: "false"
 
       # Browser tests run vitest directly (not through Turbo), so build the web
       # package and its workspace dependencies first.
@@ -244,6 +265,21 @@ jobs:
       - name: Browser test
         run: bun run --cwd apps/web test:browser --shard ${{ matrix.shard }}
 
+      - name: Upload browser test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-test-results-${{ strategy.job-index }}
+          path: |
+            apps/web/test-results/*
+            apps/web/src/**/__screenshots__/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Summarize browser test timings
+        if: always()
+        run: bun scripts/ci/summarize-tests.ts
+
       - name: Save Turbo cache
         if: ${{ always() && steps.setup.outputs['turbo-cache-key'] != '' }}
         uses: actions/cache/save@v5
@@ -253,7 +289,8 @@ jobs:
 
   desktop:
     name: Desktop build
-    if: ${{ inputs['run-desktop-build'] }}
+    needs: test-matrix
+    if: ${{ inputs['run-desktop-build'] && needs.test-matrix.outputs.desktop == 'true' }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
@@ -291,7 +328,8 @@ jobs:
 
   release-smoke:
     name: Release Smoke
-    if: ${{ inputs['run-release-smoke'] }}
+    needs: test-matrix
+    if: ${{ inputs['run-release-smoke'] && needs.test-matrix.outputs.release == 'true' }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
@@ -305,6 +343,7 @@ jobs:
         uses: ./.github/actions/setup-ryco
         with:
           cache-scope: release-smoke
+          install-resource-monitor-toolchain: "false"
 
       # No Turbo save: this job runs no Turbo task, so it has nothing to
       # contribute to the cache.

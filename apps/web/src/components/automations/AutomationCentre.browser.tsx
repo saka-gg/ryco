@@ -121,7 +121,6 @@ describe("automation centre", () => {
     await page.getByRole("textbox", { name: "Task prompt" }).fill("Inspect the dependency report.");
     await page.getByRole("combobox", { name: "Provider instance" }).selectOptions("codex");
     await page.getByRole("combobox", { name: "Model", exact: true }).selectOptions("test-model");
-    await page.screenshot({ path: "../../../../../output/automation-centre-editor.png" });
     await page.getByRole("button", { name: "Review schedule" }).click();
     expect(props.onCommand).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -170,13 +169,11 @@ describe("automation centre", () => {
     expect(props.onCommand).toHaveBeenLastCalledWith(
       expect.objectContaining({ kind: "retry", runId: "run-expired" }),
     );
-    await page.screenshot({ path: "../../../../../output/automation-centre-runs.png" });
   });
   it("disables changes while hosted mutation authority is unavailable", async () => {
     const props = mount({ disabledReason: "Reconnecting. Wait for a current session." });
     await expect.element(page.getByRole("button", { name: "New schedule" })).toBeDisabled();
     await expect.element(page.getByRole("button", { name: "Cancel schedule…" })).toBeDisabled();
     expect(props.onCommand).not.toHaveBeenCalled();
-    await page.screenshot({ path: "../../../../../output/automation-centre-schedules.png" });
   });
 });

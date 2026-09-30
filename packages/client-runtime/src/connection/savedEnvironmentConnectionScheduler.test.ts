@@ -4,7 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   orderSavedEnvironmentConnectionQueue,
   runSavedEnvironmentConnectionQueue,
-} from "./savedEnvironmentConnectionScheduler";
+} from "./savedEnvironmentConnectionScheduler.ts";
 
 describe("savedEnvironmentConnectionScheduler", () => {
   it("prioritizes explicit ids, then most recently connected records", () => {

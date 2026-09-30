@@ -1,4 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
+import { setTimeout as waitForComputer } from "node:timers/promises";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -37,6 +38,10 @@ import { PROVIDER_KINDS } from "./toolInput.ts";
 import { makeAgentGatewayComputerBrowserTools } from "./computerBrowserTools.ts";
 
 const THREAD = "thread-computer";
+
+// Spy wrappers preserve real, abortable waits in all other tests while allowing
+// the bounded sleep contract below to use a controlled timer.
+vi.mock("node:timers/promises", { spy: true });
 
 function resultJson(result: McpToolCallResult): unknown {
   const text = result.content.find((entry) => entry.type === "text");
@@ -2527,33 +2532,54 @@ describe("agent gateway computer tools", () => {
     });
   });
 
-  it(
-    "waits without touching the desktop, and never for longer than its bound",
-    async () => {
-      const { backend, call } = await setup();
-      const started = Date.now();
-      const result = await call("computer_wait", { duration_ms: 5 });
-      expect(Date.now() - started).toBeGreaterThanOrEqual(4);
+  it("waits without touching the desktop, and never for longer than its bound", async () => {
+    const { backend, call, manager } = await setup();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.mocked(waitForComputer).mockImplementation(
+      (delay, value) => new Promise((resolve) => setTimeout(() => resolve(value), delay)),
+    );
+    try {
+      let completed = false;
+      const pending = call("computer_wait", { duration_ms: 5 }).then((result) => {
+        completed = true;
+        return result;
+      });
+      await vi.advanceTimersByTimeAsync(4);
+      expect(completed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await pending;
       expect(result.isError).not.toBe(true);
       expect(resultJson(result)).toMatchObject({ waitedMs: 5 });
       // No pointer, no keys, no capture: a wait that photographed the desktop
       // would be a screenshot with a delay, which is not what it is for.
       expect(backend.callsFor("captureScreenshot")).toHaveLength(0);
       expect(backend.callsFor("click")).toHaveLength(0);
+      expect(backend.callsFor("pressKey")).toHaveLength(0);
 
       // Clamped rather than refused: the intent is clear and only the scale is
       // wrong, and an unclamped wait stalls the whole turn behind a sleep.
-      const clamped = await call("computer_wait", {
+      completed = false;
+      const pendingClamp = call("computer_wait", {
         duration_ms: 60 * 60 * 1_000,
+      }).then((result) => {
+        completed = true;
+        return result;
       });
+      await vi.advanceTimersByTimeAsync(COMPUTER_WAIT_MAX_MS - 1);
+      expect(completed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const clamped = await pendingClamp;
       expect(resultJson(clamped)).toMatchObject({
         waitedMs: COMPUTER_WAIT_MAX_MS,
       });
       const negative = await call("computer_wait", { duration_ms: -5 });
       expect(resultJson(negative)).toMatchObject({ waitedMs: 0 });
-    },
-    COMPUTER_WAIT_MAX_MS + 5_000,
-  );
+    } finally {
+      vi.mocked(waitForComputer).mockRestore();
+      vi.useRealTimers();
+      await manager.dispose();
+    }
+  });
 
   it("holds modifiers across a click and a scroll, and refuses a name it cannot press", async () => {
     // Not expressible as a press_key chord, which releases its keys before the

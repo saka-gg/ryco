@@ -1,12 +1,12 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@ryco/contracts";
 import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@ryco/contracts/settings";
 import { describe, expect, it } from "vite-plus/test";
-import { deriveProviderInstanceEntries } from "./providerInstances";
+import { deriveProviderInstanceEntries } from "./providerInstances.ts";
 import {
   getAppModelOptionsForInstance,
   resolveAppModelSelectionForInstance,
   resolveAppModelSelectionState,
-} from "./modelSelection";
+} from "./modelSelection.ts";
 
 function provider(input: {
   provider?: ProviderDriverKind;

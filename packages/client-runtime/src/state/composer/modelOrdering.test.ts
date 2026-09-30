@@ -5,7 +5,7 @@ import {
   providerModelKey,
   sortModelsForProviderInstance,
   sortProviderModelItems,
-} from "./modelOrdering";
+} from "./modelOrdering.ts";
 
 const CODEX_WORK_ID = ProviderInstanceId.make("codex_work");
 const CLAUDE_ID = ProviderInstanceId.make("claudeAgent");

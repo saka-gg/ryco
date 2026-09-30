@@ -6,6 +6,7 @@ import { parseOptInSourcemapEnv, readEnv } from "@ryco/shared/runtimeEnv";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type UserConfig } from "vite-plus";
 import pkg from "./package.json" with { type: "json" };
+import { ciTestReporting } from "../../scripts/lib/vitestReporting.ts";
 import { createHostedPwaBuildPlugin } from "./src/pwa/buildArtifacts";
 
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
@@ -188,6 +189,7 @@ export function createWebViteConfig(
       sourcemap: buildSourcemap,
     },
     test: {
+      ...ciTestReporting(),
       // A full web run has several module-heavy suites. Capping workers avoids
       // multiplying their module graph until the host starts swapping.
       maxWorkers: process.env.CI ? 2 : 4,

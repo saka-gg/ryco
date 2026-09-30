@@ -2,7 +2,7 @@ import type { MergedUsageSummary } from "@ryco/client-runtime/usage";
 import { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildUsageBreakdown, buildUsageDaySeries, sumUsageTotals } from "./selectors";
+import { buildUsageBreakdown, buildUsageDaySeries, sumUsageTotals } from "./selectors.ts";
 
 const summary: MergedUsageSummary = {
   startDate: "2026-08-08",
