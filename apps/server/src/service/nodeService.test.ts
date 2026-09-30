@@ -18,7 +18,14 @@ const spec: NodeServiceSpec = {
   label: DEFAULT_NODE_SERVICE_LABEL,
   execPath: "/opt/homebrew/bin/node",
   scriptPath: "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs",
-  args: ["serve", "--base-dir", "/Users/me/.ryco", "--hub-node-name", "Mac & <mini>", "/Users/me/code"],
+  args: [
+    "serve",
+    "--base-dir",
+    "/Users/me/.ryco",
+    "--hub-node-name",
+    "Mac & <mini>",
+    "/Users/me/code",
+  ],
   workingDirectory: "/Users/me/code",
   logPath: "/Users/me/.ryco/userdata/logs/service.log",
   environment: { PATH: "/opt/homebrew/bin:/usr/bin", HOME: "/Users/me" },
@@ -55,7 +62,9 @@ describe("node service definitions", () => {
 
   it("renders a systemd unit that restarts and quotes every argument", () => {
     const unit = renderSystemdUserUnit({ ...spec, args: [...spec.args, "100%"] });
-    expect(unit).toContain('ExecStart="/opt/homebrew/bin/node" "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs" "serve"');
+    expect(unit).toContain(
+      'ExecStart="/opt/homebrew/bin/node" "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs" "serve"',
+    );
     expect(unit).toContain('"Mac & <mini>"');
     expect(unit).toContain('"100%%"');
     expect(unit).toContain("Restart=always");
@@ -64,10 +73,16 @@ describe("node service definitions", () => {
   });
 
   it("refuses installs that disappear after a reboot", () => {
-    expect(isEphemeralCliInstall("/Users/me/.npm/_npx/abc/node_modules/ryco-cli/dist/bin.mjs")).toBe(true);
-    expect(isEphemeralCliInstall("/Users/me/.bun/install/cache/ryco-cli@0.1.27/dist/bin.mjs")).toBe(true);
+    expect(
+      isEphemeralCliInstall("/Users/me/.npm/_npx/abc/node_modules/ryco-cli/dist/bin.mjs"),
+    ).toBe(true);
+    expect(isEphemeralCliInstall("/Users/me/.bun/install/cache/ryco-cli@0.1.27/dist/bin.mjs")).toBe(
+      true,
+    );
     expect(isEphemeralCliInstall("/tmp/x/bin.mjs", "/tmp")).toBe(true);
-    expect(isEphemeralCliInstall("/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs", "/tmp")).toBe(false);
+    expect(
+      isEphemeralCliInstall("/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs", "/tmp"),
+    ).toBe(false);
   });
 
   it("reads launchctl and systemctl state", () => {

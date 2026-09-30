@@ -47,7 +47,9 @@ describe("ryco hub login", () => {
     expect(describeAccountLinkFailure(new HostedHubApiError("rate_limited", 429))).toContain(
       "Too many",
     );
-    expect(describeAccountLinkFailure(new TypeError("fetch failed"))).toContain("could not be reached");
+    expect(describeAccountLinkFailure(new TypeError("fetch failed"))).toContain(
+      "could not be reached",
+    );
   });
 
   it("signs Hub requests with a fresh DPoP proof and no stored credential", async () => {
@@ -67,7 +69,11 @@ describe("ryco hub login", () => {
     expect(requests[0]?.url).toBe("https://hub.example/api/auth/native/identity/password/start");
     const proof = requests[0]?.headers.get("DPoP") ?? "";
     const header = JSON.parse(Buffer.from(proof.split(".")[0]!, "base64url").toString());
-    expect(header).toMatchObject({ typ: "dpop+jwt", alg: "ES256", jwk: { kty: "EC", crv: "P-256" } });
+    expect(header).toMatchObject({
+      typ: "dpop+jwt",
+      alg: "ES256",
+      jwk: { kty: "EC", crv: "P-256" },
+    });
     expect(header.jwk.d).toBeUndefined();
     expect(requests[0]?.headers.get("Authorization")).toBeNull();
   });

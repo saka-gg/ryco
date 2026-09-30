@@ -162,7 +162,9 @@ it("prints alternatives, the token lifetime, and the Hub hint", () => {
     token: "PAIRCODE",
     pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
     tokenExpiresInMinutes: 5,
-    alternativeLinks: [{ label: "Tailscale IP", url: "http://100.100.100.100:3773/pair#token=PAIRCODE" }],
+    alternativeLinks: [
+      { label: "Tailscale IP", url: "http://100.100.100.100:3773/pair#token=PAIRCODE" },
+    ],
     hubOrigin: "https://app.example",
   });
 

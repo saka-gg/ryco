@@ -44,7 +44,10 @@ export class CliRemoteError extends Data.TaggedError("CliRemoteError")<{
 }> {}
 
 /** The RPC client a connected remote exposes: the same surface the apps use. */
-export type CliRemoteRpcClient = RpcClient.FromGroup<typeof WsRpcGroup, RpcClientError.RpcClientError>;
+export type CliRemoteRpcClient = RpcClient.FromGroup<
+  typeof WsRpcGroup,
+  RpcClientError.RpcClientError
+>;
 
 export const cliRemotesPath = (stateDir: string) => path.join(stateDir, "cli-remotes.json");
 
@@ -102,7 +105,10 @@ const remoteApi = (baseOrigin: string) =>
   createRemoteEnvironmentApi(
     {
       fetch: (url, init) =>
-        globalThis.fetch(url, init === undefined ? undefined : (init as RequestInit)) as Promise<Response>,
+        globalThis.fetch(
+          url,
+          init === undefined ? undefined : (init as RequestInit),
+        ) as Promise<Response>,
     },
     baseOrigin,
   );
@@ -113,15 +119,19 @@ export async function pairCliRemote(input: {
   readonly pairingUrl: string;
 }): Promise<CliRemote> {
   if (!REMOTE_NAME_PATTERN.test(input.name)) {
-    throw new CliRemoteError({ message: "Remote names use letters, digits, '.', '_' and '-', starting with a letter or digit." });
+    throw new CliRemoteError({
+      message:
+        "Remote names use letters, digits, '.', '_' and '-', starting with a letter or digit.",
+    });
   }
-  const target = resolveRemotePairingTarget(
-    { pairingUrl: input.pairingUrl },
-    "https://localhost",
-    { readPairingToken: getPairingTokenFromUrl, readHostedPairingRequest },
-  );
+  const target = resolveRemotePairingTarget({ pairingUrl: input.pairingUrl }, "https://localhost", {
+    readPairingToken: getPairingTokenFromUrl,
+    readHostedPairingRequest,
+  });
   const api = remoteApi(target.httpBaseUrl);
-  const descriptor = await api.fetchRemoteEnvironmentDescriptor({ httpBaseUrl: target.httpBaseUrl });
+  const descriptor = await api.fetchRemoteEnvironmentDescriptor({
+    httpBaseUrl: target.httpBaseUrl,
+  });
   const session = await api.bootstrapRemoteBearerSession({
     httpBaseUrl: target.httpBaseUrl,
     credential: target.credential,
@@ -154,7 +164,10 @@ export const connectCliRemote = (
           bearerToken: remote.token,
         }),
       catch: (cause) =>
-        new CliRemoteError({ message: `Could not reach "${remote.name}" at ${remote.httpBaseUrl}, or its pairing was revoked.`, cause }),
+        new CliRemoteError({
+          message: `Could not reach "${remote.name}" at ${remote.httpBaseUrl}, or its pairing was revoked.`,
+          cause,
+        }),
     });
     const url = new URL(socketUrl);
     url.pathname = "/ws";

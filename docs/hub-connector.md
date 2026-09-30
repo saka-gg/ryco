@@ -384,18 +384,18 @@ loop for these conditions.
 
 Local status exposes only these bounded states:
 
-| State                  | Meaning                                                                    |
-| ---------------------- | -------------------------------------------------------------------------- |
-| `disabled`             | No polling, socket, reconnect timer, or relay channel exists.              |
-| `enrolling`            | Enabled and ready to start device-code enrollment.                         |
-| `awaiting_approval`    | A protected enrollment ceremony is being polled.                           |
-| `connecting`           | Proof preflight or network connection is in progress.                      |
-| `authenticating`       | The auth frame was sent and Ryco is waiting for `ready`.                   |
+| State                  | Meaning                                                                           |
+| ---------------------- | --------------------------------------------------------------------------------- |
+| `disabled`             | No polling, socket, reconnect timer, or relay channel exists.                     |
+| `enrolling`            | Enabled and ready to start device-code enrollment.                                |
+| `awaiting_approval`    | A protected enrollment ceremony is being polled.                                  |
+| `connecting`           | Proof preflight or network connection is in progress.                             |
+| `authenticating`       | The auth frame was sent and Ryco is waiting for `ready`.                          |
 | `online`               | Protocol 1.2 or 1.3 is negotiated; bounded channel and queue counts are included. |
-| `degraded`             | Backing off automatically or waiting for operator action.                  |
-| `revoked`              | The node was revoked; automatic reconnect is stopped.                      |
-| `version_incompatible` | The peer version is unsupported; automatic reconnect is stopped.           |
-| `stopping`             | New work is rejected while resources are closed.                           |
+| `degraded`             | Backing off automatically or waiting for operator action.                         |
+| `revoked`              | The node was revoked; automatic reconnect is stopped.                             |
+| `version_incompatible` | The peer version is unsupported; automatic reconnect is stopped.                  |
+| `stopping`             | New work is rejected while resources are closed.                                  |
 
 DNS, network, TLS, authentication timeout, Hub draining, rate limiting, heartbeat timeout, slow
 consumer, and isolated internal transport failures retry automatically. Backoff is exponential,

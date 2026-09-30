@@ -352,8 +352,7 @@ export function createEnvironmentConnectionSupervisor<
     // after a reconnect resumes after it instead of reloading the thread. Hosted
     // and Hub-relayed connections always take a fresh snapshot.
     let appliedSequence: number | null = null;
-    const resumable =
-      !input.isHostedMode() && connection.knownEnvironment.source !== "hub-hosted";
+    const resumable = !input.isHostedMode() && connection.knownEnvironment.source !== "hub-hosted";
     const resumeOptions = resumable ? { resumeFromSequence: () => appliedSequence } : {};
     const subscribeLegacy = () => {
       if (!active) return;

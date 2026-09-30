@@ -40,10 +40,11 @@ export async function createCliHubAccount(
   origin: string,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<CliHubAccount> {
-  const keyPair = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, [
-    "sign",
-    "verify",
-  ]);
+  const keyPair = await webcrypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign", "verify"],
+  );
   const publicJwk = await webcrypto.subtle.exportKey("jwk", keyPair.publicKey);
   if (publicJwk.x === undefined || publicJwk.y === undefined) {
     throw new Error("Unable to create a DPoP key.");
@@ -65,8 +66,7 @@ export async function createCliHubAccount(
     {
       now: Date.now,
       randomJti: () => randomUUID(),
-      sha256: async (bytes) =>
-        new Uint8Array(await webcrypto.subtle.digest("SHA-256", bytes)),
+      sha256: async (bytes) => new Uint8Array(await webcrypto.subtle.digest("SHA-256", bytes)),
     },
   );
   let bearerToken: string | null = null;

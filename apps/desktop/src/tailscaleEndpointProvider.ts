@@ -1,7 +1,4 @@
-export {
-  isTailscaleIpv4Address,
-  parseTailscaleMagicDnsName,
-} from "@ryco/tailscale";
+export { isTailscaleIpv4Address, parseTailscaleMagicDnsName } from "@ryco/tailscale";
 export {
   resolveTailscaleAdvertisedEndpoints,
   resolveTailscaleIpAdvertisedEndpoints,

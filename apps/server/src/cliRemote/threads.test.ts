@@ -59,13 +59,38 @@ describe("ryco remote threads", () => {
           [ORCHESTRATION_WS_METHODS.subscribeThread]: () =>
             Stream.make(
               { kind: "snapshot", snapshot: {} },
-              event(9, "thread.message-sent", { role: "assistant", messageId: "m0", text: "old", streaming: false }),
+              event(9, "thread.message-sent", {
+                role: "assistant",
+                messageId: "m0",
+                text: "old",
+                streaming: false,
+              }),
               event(11, "thread.session-set", { session: { status: "running", lastError: null } }),
-              event(12, "thread.message-sent", { role: "assistant", messageId: "m1", text: "Hel", streaming: true }),
-              event(13, "thread.message-sent", { role: "assistant", messageId: "m1", text: "lo", streaming: true }),
-              event(14, "thread.message-sent", { role: "assistant", messageId: "m1", text: "Hello", streaming: false }),
+              event(12, "thread.message-sent", {
+                role: "assistant",
+                messageId: "m1",
+                text: "Hel",
+                streaming: true,
+              }),
+              event(13, "thread.message-sent", {
+                role: "assistant",
+                messageId: "m1",
+                text: "lo",
+                streaming: true,
+              }),
+              event(14, "thread.message-sent", {
+                role: "assistant",
+                messageId: "m1",
+                text: "Hello",
+                streaming: false,
+              }),
               event(15, "thread.session-set", { session: { status: "ready", lastError: null } }),
-              event(16, "thread.message-sent", { role: "assistant", messageId: "m2", text: "later", streaming: false }),
+              event(16, "thread.message-sent", {
+                role: "assistant",
+                messageId: "m2",
+                text: "later",
+                streaming: false,
+              }),
             ),
           [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command: unknown) =>
             Effect.sync(() => {

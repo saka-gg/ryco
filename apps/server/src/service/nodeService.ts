@@ -336,12 +336,24 @@ export async function readNodeServiceStatus(
       allowFailure: true,
     });
     const loaded = printed.code === 0;
-    const { running, pid } = loaded ? parseLaunchctlPrint(printed.stdout) : { running: false, pid: null };
+    const { running, pid } = loaded
+      ? parseLaunchctlPrint(printed.stdout)
+      : { running: false, pid: null };
     return { platform, label, definitionPath, installed, loaded, running, pid, lingering: null };
   }
   const shown = await run(
     "systemctl",
-    ["--user", "show", systemdUnitName(label), "-p", "LoadState", "-p", "ActiveState", "-p", "MainPID"],
+    [
+      "--user",
+      "show",
+      systemdUnitName(label),
+      "-p",
+      "LoadState",
+      "-p",
+      "ActiveState",
+      "-p",
+      "MainPID",
+    ],
     { allowFailure: true },
   );
   const parsed = parseSystemctlShow(shown.stdout);

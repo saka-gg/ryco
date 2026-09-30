@@ -124,7 +124,10 @@ describe("ssh tunnel scripts", () => {
     });
 
     assert.include(script, "exec npx --yes 'ryco-cli@nightly; touch /tmp/ryco-owned' \"$@\"");
-    assert.include(script, "exec npm exec --yes 'ryco-cli@nightly; touch /tmp/ryco-owned' -- \"$@\"");
+    assert.include(
+      script,
+      "exec npm exec --yes 'ryco-cli@nightly; touch /tmp/ryco-owned' -- \"$@\"",
+    );
     assert.notInclude(script, "exec npx --yes ryco-cli@nightly; touch /tmp/ryco-owned");
   });
 
@@ -159,7 +162,10 @@ describe("ssh tunnel scripts", () => {
     assert.include(buildRemoteLaunchScript(), '--base-dir "$DEFAULT_SERVER_HOME"');
     assert.notInclude(buildRemoteLaunchScript(), "server-home");
     assert.include(buildRemoteLaunchScript(), "Remote Ryco server did not become ready");
-    assert.include(buildRemoteLaunchScript({ packageSpec: "ryco-cli@nightly" }), "ryco-cli@nightly");
+    assert.include(
+      buildRemoteLaunchScript({ packageSpec: "ryco-cli@nightly" }),
+      "ryco-cli@nightly",
+    );
     assert.include(
       buildRemotePairingScript(target),
       '"$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json',

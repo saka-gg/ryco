@@ -300,7 +300,9 @@ export function createMobileEnvironmentDriver(
         lastError: "Saved environment is missing its saved credential. Pair it again.",
         lastErrorAt: nowIso(),
       });
-      throw new SavedEnvironmentCredentialError("Saved environment is missing its saved credential.");
+      throw new SavedEnvironmentCredentialError(
+        "Saved environment is missing its saved credential.",
+      );
     }
 
     const client = createSavedEnvironmentClient(record.environmentId, bearerToken);

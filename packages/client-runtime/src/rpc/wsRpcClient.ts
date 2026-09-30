@@ -48,7 +48,10 @@ const resumeInput = (options: ResumableSubscriptionOptions | undefined) => {
   return resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {};
 };
 
-const transportSubscribeOptions = (options: StreamSubscriptionOptions | undefined, tag: string) => ({
+const transportSubscribeOptions = (
+  options: StreamSubscriptionOptions | undefined,
+  tag: string,
+) => ({
   ...(options?.onResubscribe === undefined ? {} : { onResubscribe: options.onResubscribe }),
   ...(options?.onError === undefined ? {} : { onError: options.onError }),
   tag,

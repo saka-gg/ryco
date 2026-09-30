@@ -593,7 +593,9 @@ export const HubConnectorLive = Layer.effect(
               (bytes) =>
                 Effect.promise(() => e2ee.emit(bytes)).pipe(
                   Effect.flatMap((result) =>
-                    result === "sent" ? Effect.void : Effect.fail(new RpcOutputRefusedError(result)),
+                    result === "sent"
+                      ? Effect.void
+                      : Effect.fail(new RpcOutputRefusedError(result)),
                   ),
                 ),
               {

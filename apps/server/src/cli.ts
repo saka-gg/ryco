@@ -708,7 +708,8 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
-      preventSleep: Option.getOrUndefined(normalizedFlags.preventSleep) ?? env.preventSleep ?? false,
+      preventSleep:
+        Option.getOrUndefined(normalizedFlags.preventSleep) ?? env.preventSleep ?? false,
       hubConnector,
       hubE2eePolicy,
     };
@@ -1764,7 +1765,9 @@ const hubLoginCommand = Command.make("login", {
     Flag.optional,
   ),
   username: Flag.string("username").pipe(
-    Flag.withDescription("Ryco username; asked for when omitted. Passwords are only ever prompted for."),
+    Flag.withDescription(
+      "Ryco username; asked for when omitted. Passwords are only ever prompted for.",
+    ),
     Flag.optional,
   ),
 }).pipe(
@@ -1774,7 +1777,8 @@ const hubLoginCommand = Command.make("login", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const hubOrigin = yield* Effect.try({
-        try: () => canonicalizeHubOrigin(Option.getOrElse(flags.hubOrigin, () => DEFAULT_HOSTED_APP_ORIGIN)),
+        try: () =>
+          canonicalizeHubOrigin(Option.getOrElse(flags.hubOrigin, () => DEFAULT_HOSTED_APP_ORIGIN)),
         catch: () => new HubLoginError({ message: "--hub-origin must be an https:// origin." }),
       });
       const local = yield* runHubCommand(
@@ -1831,13 +1835,13 @@ const hubLoginCommand = Command.make("login", {
             message: "No enrollment is pending on this node. Run `ryco hub login` again.",
           });
         }
-        yield* Console.log(`Approving "${ceremony.label}" (${ceremony.fingerprint}) on ${hubOrigin}…`);
+        yield* Console.log(
+          `Approving "${ceremony.label}" (${ceremony.fingerprint}) on ${hubOrigin}…`,
+        );
         yield* hubLoginStep(() => approveOwnEnrollment(account.api, ceremony));
       }).pipe(
         // The account session only ever exists to approve this node.
-        Effect.ensuring(
-          Effect.promise(() => account.api.signOut().catch(() => undefined)),
-        ),
+        Effect.ensuring(Effect.promise(() => account.api.signOut().catch(() => undefined))),
       );
 
       const online = yield* waitForHubOnline(flags);
@@ -3138,7 +3142,6 @@ const runServerCommand = (
     return yield* runServer.pipe(Effect.provideService(ServerConfig, config));
   });
 
-
 // ─── ryco service ─────────────────────────────────────────────────────────────
 
 const serviceLocationFlags = { baseDir: baseDirFlag } as const;
@@ -3288,9 +3291,7 @@ const serviceInstallCommand = Command.make("install", {
           "",
           "It starts at login and restarts if it stops.",
           ...(platform === "systemd" && status.lingering === false
-            ? [
-                "Run `sudo loginctl enable-linger $USER` so it also runs at boot without a login.",
-              ]
+            ? ["Run `sudo loginctl enable-linger $USER` so it also runs at boot without a login."]
             : []),
           "Next:",
           "  ryco auth pairing create --ttl 1h   # pair a desktop, browser, or phone",
@@ -3501,7 +3502,10 @@ const remoteAddCommand = Command.make("add", {
       const remote = yield* remoteStep(() => pairCliRemote({ name: flags.name, pairingUrl }));
       const existing = yield* remoteStep(() => readCliRemotes(filePath));
       yield* remoteStep(() =>
-        writeCliRemotes(filePath, [...existing.filter((entry) => entry.name !== remote.name), remote]),
+        writeCliRemotes(filePath, [
+          ...existing.filter((entry) => entry.name !== remote.name),
+          remote,
+        ]),
       );
       yield* Console.log(
         `Added "${remote.name}": ${remote.label} at ${remote.httpBaseUrl} (${remote.role} access).\nTry \`ryco remote threads ${remote.name}\`.\n`,
@@ -3517,16 +3521,17 @@ const remoteListCommand = Command.make("list", { ...remoteLocationFlags, json: j
       const filePath = yield* remotesFilePath(flags.baseDir);
       const remotes = yield* remoteStep(() => readCliRemotes(filePath));
       if (flags.json) {
-        yield* Console.log(
-          JSON.stringify(remotes.map(({ token: _token, ...remote }) => remote)),
-        );
+        yield* Console.log(JSON.stringify(remotes.map(({ token: _token, ...remote }) => remote)));
         return;
       }
       yield* Console.log(
         remotes.length === 0
           ? "No remotes. Add one with `ryco remote add <name> <pairing-url>`.\n"
           : `${remotes
-              .map((remote) => `${remote.name}  ${remote.label}  ${remote.httpBaseUrl}  (${remote.role})`)
+              .map(
+                (remote) =>
+                  `${remote.name}  ${remote.label}  ${remote.httpBaseUrl}  (${remote.role})`,
+              )
               .join("\n")}\n`,
       );
     }),
@@ -3537,7 +3542,9 @@ const remoteRemoveCommand = Command.make("remove", {
   ...remoteLocationFlags,
   name: remoteNameArgument,
 }).pipe(
-  Command.withDescription("Forget a remote. Revoke its session on the remote from Settings → Connections."),
+  Command.withDescription(
+    "Forget a remote. Revoke its session on the remote from Settings → Connections.",
+  ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const filePath = yield* remotesFilePath(flags.baseDir);
@@ -3547,7 +3554,10 @@ const remoteRemoveCommand = Command.make("remove", {
         catch: (cause) => cause as CliRemoteError,
       });
       yield* remoteStep(() =>
-        writeCliRemotes(filePath, remotes.filter((entry) => entry.name !== flags.name)),
+        writeCliRemotes(
+          filePath,
+          remotes.filter((entry) => entry.name !== flags.name),
+        ),
       );
       yield* Console.log(`Removed "${flags.name}".\n`);
     }),
@@ -3567,10 +3577,7 @@ const loadRemote = (baseDir: Option.Option<string>, name: string) =>
 const remoteThreadsCommand = Command.make("threads", {
   ...remoteLocationFlags,
   name: remoteNameArgument,
-  all: Flag.boolean("all").pipe(
-    Flag.withDescription("Include archived threads."),
-    Flag.optional,
-  ),
+  all: Flag.boolean("all").pipe(Flag.withDescription("Include archived threads."), Flag.optional),
   json: jsonFlag,
 }).pipe(
   Command.withDescription("List a remote's threads, most recently updated first."),

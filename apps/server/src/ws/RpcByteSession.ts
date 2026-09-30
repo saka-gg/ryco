@@ -179,7 +179,8 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
     const clients = new Set<number>([0]);
     let queuedBytes = 0;
     let rejected = false;
-    const outputStallTimeoutMs = options.outputStallTimeoutMs ?? DEFAULT_RPC_OUTPUT_STALL_TIMEOUT_MS;
+    const outputStallTimeoutMs =
+      options.outputStallTimeoutMs ?? DEFAULT_RPC_OUTPUT_STALL_TIMEOUT_MS;
     // One response at a time, in order: a response waiting out backpressure
     // holds its place, exactly as it would on a socket, instead of letting later
     // responses overtake it.
