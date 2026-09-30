@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   DEFAULT_TERMINAL_ID,
+  TerminalInputRejectedError,
   type DiagnosticsTerminalProcess,
   type TerminalEvent,
   type TerminalCursor,
@@ -17,6 +18,7 @@ import {
 } from "@ryco/contracts";
 import { makeKeyedCoalescingWorker } from "@ryco/shared/KeyedCoalescingWorker";
 import { latestStateQueuePolicy } from "@ryco/shared/QueuePolicy";
+import { bracketedTerminalSnippet } from "@ryco/shared/terminalPaste";
 import {
   Effect,
   Deferred,
@@ -130,6 +132,8 @@ interface TerminalStartInput {
 }
 
 interface TerminalSessionState {
+  inputEpoch: string;
+  hasReceivedInput: boolean;
   threadId: string;
   terminalId: string;
   cwd: string;
@@ -192,6 +196,7 @@ interface TerminalManagerState {
 
 function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
   return {
+    inputEpoch: session.inputEpoch,
     threadId: session.threadId,
     terminalId: session.terminalId,
     cwd: session.cwd,
@@ -1678,6 +1683,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
       yield* modifyManagerState((state) => {
         session.status = "starting";
+        session.inputEpoch = randomUUID();
+        session.hasReceivedInput = false;
         session.cwd = input.cwd;
         session.worktreePath = input.worktreePath ?? null;
         session.cols = input.cols;
@@ -1968,6 +1975,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             const cols = input.cols ?? DEFAULT_OPEN_COLS;
             const rows = input.rows ?? DEFAULT_OPEN_ROWS;
             const session: TerminalSessionState = {
+              inputEpoch: randomUUID(),
+              hasReceivedInput: false,
               threadId: input.threadId,
               terminalId,
               cwd: input.cwd,
@@ -2078,19 +2087,70 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         }),
       );
 
-    const write: TerminalManagerShape["write"] = Effect.fn("terminal.write")(function* (input) {
-      const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
-      const session = yield* requireSession(input.threadId, terminalId);
-      const process = session.process;
-      if (!process || session.status !== "running") {
-        if (session.status === "exited") return;
-        return yield* new TerminalNotRunningError({
-          threadId: input.threadId,
-          terminalId,
-        });
-      }
-      yield* Effect.sync(() => process.write(input.data));
-    });
+    const write: TerminalManagerShape["write"] = Effect.fn("terminal.write")((input, canCommit) =>
+      withThreadLock(
+        input.threadId,
+        Effect.gen(function* () {
+          const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
+          const session = yield* requireSession(input.threadId, terminalId);
+          const guardIsCurrent = () =>
+            !input.guard ||
+            ((canCommit?.() ?? false) &&
+              session.inputEpoch === input.guard.inputEpoch &&
+              session.cwd === input.guard.cwd &&
+              session.worktreePath === input.guard.worktreePath &&
+              session.status === "running" &&
+              !session.hasRunningSubprocess &&
+              !session.hasReceivedInput &&
+              session.cursor.generation === input.guard.outputCursor.generation &&
+              session.cursor.sequence === input.guard.outputCursor.sequence &&
+              session.pendingProcessEvents.length === session.pendingProcessEventIndex);
+          if (input.guard) {
+            const validPaste = yield* Effect.try({
+              try: () => input.data === bracketedTerminalSnippet(input.data.slice(6, -6)),
+              catch: () =>
+                new TerminalInputRejectedError({
+                  message:
+                    "Safe insertion requires a complete bracketed paste without terminal controls or an Enter outside the paste.",
+                }),
+            });
+            if (!validPaste)
+              return yield* new TerminalInputRejectedError({
+                message:
+                  "Safe insertion requires bracketed paste without an Enter outside the paste.",
+              });
+            if (!guardIsCurrent())
+              return yield* new TerminalInputRejectedError({
+                message: "Terminal changed. Insert the snippet again in the current workspace.",
+              });
+            yield* assertValidCwd(input.guard.cwd);
+          }
+          // Admission may yield for filesystem IO. Recheck output/session/input
+          // evidence and write synchronously afterward, under the lifecycle lock.
+          yield* Effect.suspend(
+            (): Effect.Effect<void, TerminalInputRejectedError | TerminalNotRunningError> => {
+              if (!guardIsCurrent()) {
+                return Effect.fail(
+                  new TerminalInputRejectedError({
+                    message: "Terminal changed. Insert the snippet again in the current workspace.",
+                  }),
+                );
+              }
+              const process = session.process;
+              if (!process || session.status !== "running") {
+                if (session.status === "exited") return Effect.void;
+                return Effect.fail(
+                  new TerminalNotRunningError({ threadId: input.threadId, terminalId }),
+                );
+              }
+              session.hasReceivedInput = true;
+              process.write(input.data);
+              return Effect.void;
+            },
+          );
+        }),
+      ),
+    );
 
     const resize: TerminalManagerShape["resize"] = Effect.fn("terminal.resize")(function* (input) {
       const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
@@ -2145,6 +2205,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             const cols = input.cols ?? DEFAULT_OPEN_COLS;
             const rows = input.rows ?? DEFAULT_OPEN_ROWS;
             session = {
+              inputEpoch: randomUUID(),
+              hasReceivedInput: false,
               threadId: input.threadId,
               terminalId,
               cwd: input.cwd,
@@ -2242,7 +2304,10 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
     return {
       open: (input) => storageLifecycleLock.withPermit(open(input)),
-      write,
+      write: (input, canCommit) =>
+        input.guard
+          ? storageLifecycleLock.withPermit(write(input, canCommit))
+          : write(input, canCommit),
       resize,
       clear,
       restart: (input) => storageLifecycleLock.withPermit(restart(input)),

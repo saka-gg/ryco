@@ -1541,3 +1541,28 @@ it("rejects legacy recall commands while preserving historical recall payloads",
   });
   assert.deepEqual(payload.projectMemory, projectMemory);
 });
+
+it.effect("decodes server-owned sidebar undo requests without client restoration state", () =>
+  Effect.gen(function* () {
+    const undo = yield* decodeClientOrchestrationCommand({
+      type: "thread.sidebar.undo",
+      commandId: "undo",
+      threadId: "synthetic-thread",
+      undoCommandId: "original",
+      restoredSidebarState: {
+        settledOverride: "settled",
+        snoozedUntil: "2099-01-01T00:00:00.000Z",
+      },
+    });
+    assert.strictEqual(undo.type, "thread.sidebar.undo");
+    assert.strictEqual("restoredSidebarState" in undo, false);
+    const missingReceipt = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        type: "thread.sidebar.undo",
+        commandId: "undo",
+        threadId: "synthetic-thread",
+      }),
+    );
+    assert.strictEqual(missingReceipt._tag, "Failure");
+  }),
+);

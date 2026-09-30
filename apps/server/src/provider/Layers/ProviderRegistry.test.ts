@@ -345,6 +345,7 @@ function makeMutableServerSettingsService(
     const changes = yield* PubSub.unbounded<ContractServerSettings>();
 
     return {
+      withSettingsSnapshot: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
       start: Effect.void,
       ready: Effect.void,
       getSettings: Ref.get(settingsRef),

@@ -2,7 +2,14 @@ import "../../index.css";
 import { page } from "vite-plus/test/browser";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-const harness = vi.hoisted(() => ({ discover: vi.fn(), run: vi.fn(), allowed: true }));
+const harness = vi.hoisted(() => ({
+  discover: vi.fn(),
+  run: vi.fn(),
+  sources: vi.fn(),
+  reconcile: vi.fn(),
+  adopt: vi.fn(),
+  allowed: true,
+}));
 import { SessionImportPanel } from "./SessionImportPanel";
 import { ProviderInstanceId, ProviderDriverKind } from "@ryco/contracts";
 function FixturePanel() {
@@ -54,13 +61,27 @@ function FixturePanel() {
           ],
         },
       ]}
-      client={() => ({ discover: harness.discover, run: harness.run })}
+      client={() => ({
+        discover: harness.discover,
+        run: harness.run,
+        sources: harness.sources,
+        reconcile: harness.reconcile,
+        adopt: harness.adopt,
+      })}
     />
   );
 }
 beforeEach(() => {
   vi.clearAllMocks();
   harness.allowed = true;
+  harness.sources.mockImplementation(async ({ source }) => [
+    {
+      key: "c".repeat(64),
+      label: "Default store",
+      isDefault: true,
+      instanceIds: source === "codex" ? ["codex", "codex-other"] : ["claude"],
+    },
+  ]);
 });
 describe("local history import", () => {
   it("selects history, maps a moved folder, reports failure and retries without repeating completed items", async () => {
@@ -149,10 +170,10 @@ describe("local history import", () => {
     await expect.element(page.getByLabelText("Continuation model")).toHaveValue("fixture-model");
     await page.getByLabelText("Import provider instance").selectOptions("codex-other");
     await expect.element(page.getByLabelText("Continuation model")).toHaveValue("other-model");
-    await page.getByLabelText("Import source").selectOptions("claudeAgent");
+    await page.getByLabelText("Import source", { exact: true }).selectOptions("claudeAgent");
     await expect.element(page.getByLabelText("Import provider instance")).toHaveValue("claude");
     await expect.element(page.getByLabelText("Continuation model")).toHaveValue("claude-model");
-    await page.getByLabelText("Import source").selectOptions("codex");
+    await page.getByLabelText("Import source", { exact: true }).selectOptions("codex");
     await expect.element(page.getByLabelText("Continuation model")).toHaveValue("fixture-model");
   });
   it("keeps discovery disabled until hosted mutation readiness is current", async () => {
@@ -161,4 +182,124 @@ describe("local history import", () => {
     await expect.element(page.getByRole("button", { name: "Find conversations" })).toBeDisabled();
     expect(harness.discover).not.toHaveBeenCalled();
   });
+});
+
+const uncertain = {
+  key: "a".repeat(64),
+  source: "codex",
+  title: "Recovery fixture",
+  cwd: "/old",
+  archived: false,
+  messageCount: 2,
+  importedThreadId: null,
+  quarantined: true,
+};
+const unique = {
+  state: "unique",
+  candidates: [{ id: "synthetic-copy", messageCount: 2 }],
+  nextCursor: null,
+  adoptionToken: "server-proof",
+  notice: "One compatible copy is proven.",
+};
+it("inspects bounded pages and explicitly adopts only the server-proven copy", async () => {
+  harness.discover.mockResolvedValue({ items: [uncertain], notices: [], nextOffset: null });
+  harness.reconcile
+    .mockResolvedValueOnce({
+      state: "scanning",
+      candidates: [],
+      nextCursor: "scan-page",
+      adoptionToken: null,
+      notice: "Continue inspection.",
+    })
+    .mockResolvedValueOnce(unique);
+  harness.adopt.mockResolvedValue({ threadId: "saved-copy", alreadyImported: false });
+  render(<FixturePanel />);
+  await page.getByRole("button", { name: "Find conversations" }).click();
+  await page.getByRole("button", { name: "Inspect existing copies" }).click();
+  await expect
+    .element(page.getByRole("button", { name: "Adopt proven copy" }))
+    .not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Inspect next page" }).click();
+  expect(harness.reconcile.mock.calls[1]![0]).toMatchObject({
+    cursor: "scan-page",
+    key: uncertain.key,
+  });
+  await expect.element(page.getByText("Copy synthetic-copy · 2 messages")).toBeVisible();
+  expect(harness.adopt).not.toHaveBeenCalled();
+  await page.getByRole("button", { name: "Adopt proven copy" }).click();
+  await expect.element(page.getByText("Already imported")).toBeVisible();
+  expect(harness.adopt.mock.calls[0]![0]).toEqual({
+    source: "codex",
+    key: uncertain.key,
+    adoptionToken: "server-proof",
+  });
+  expect(harness.run).not.toHaveBeenCalled();
+});
+it.each(["missing", "multiple", "mismatched", "unknown"])(
+  "keeps %s evidence paused without an adopt or refork action",
+  async (state) => {
+    harness.discover.mockResolvedValue({ items: [uncertain], notices: [], nextOffset: null });
+    harness.reconcile.mockResolvedValue({
+      ...unique,
+      state,
+      adoptionToken: null,
+      notice: "Import remains paused.",
+    });
+    render(<FixturePanel />);
+    await page.getByRole("button", { name: "Find conversations" }).click();
+    await page.getByRole("button", { name: "Inspect existing copies" }).click();
+    await expect.element(page.getByText("Import remains paused.")).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Adopt proven copy" }))
+      .not.toBeInTheDocument();
+    expect(harness.adopt).not.toHaveBeenCalled();
+    expect(harness.run).not.toHaveBeenCalled();
+  },
+);
+it("filters continuation instances by the explicitly chosen store and clears old discovery", async () => {
+  harness.sources.mockResolvedValue([
+    { key: "c".repeat(64), label: "Default store", isDefault: true, instanceIds: ["codex"] },
+    { key: "d".repeat(64), label: "Custom store", isDefault: false, instanceIds: ["codex-other"] },
+    { key: "e".repeat(64), label: "Disabled store", isDefault: false, instanceIds: [] },
+  ]);
+  harness.discover.mockResolvedValue({ items: [uncertain], notices: [], nextOffset: null });
+  render(<FixturePanel />);
+  await page.getByRole("button", { name: "Find conversations" }).click();
+  await expect.element(page.getByLabelText("Import provider instance")).toHaveValue("codex");
+  await page.getByLabelText("Import source store").selectOptions("d".repeat(64));
+  await expect.element(page.getByText("Recovery fixture")).not.toBeInTheDocument();
+  await expect.element(page.getByLabelText("Import provider instance")).toHaveValue("codex-other");
+  await page.getByRole("button", { name: "Find conversations" }).click();
+  expect(harness.discover.mock.calls[1]![0].storeKey).toBe("d".repeat(64));
+  await page.getByLabelText("Import source store").selectOptions("e".repeat(64));
+  await expect
+    .element(page.getByRole("button", { name: "Import selected / retry failed" }))
+    .toBeDisabled();
+});
+
+it("invalidates a late inspection when owner readiness is lost", async () => {
+  harness.discover.mockResolvedValue({ items: [uncertain], notices: [], nextOffset: null });
+  let resolve!: (value: typeof unique) => void;
+  harness.reconcile.mockReturnValue(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  const view = await render(<FixturePanel />);
+  await page.getByRole("button", { name: "Find conversations" }).click();
+  await page.getByRole("button", { name: "Inspect existing copies" }).click();
+  harness.allowed = false;
+  await view.rerender(<FixturePanel />);
+  resolve(unique);
+  await expect.element(page.getByRole("button", { name: "Find conversations" })).toBeDisabled();
+  await expect
+    .element(page.getByRole("button", { name: "Adopt proven copy" }))
+    .not.toBeInTheDocument();
+  expect(harness.adopt).not.toHaveBeenCalled();
+  harness.allowed = true;
+  await view.rerender(<FixturePanel />);
+  await expect.element(page.getByRole("button", { name: "Find conversations" })).toBeEnabled();
+  await expect
+    .element(page.getByRole("button", { name: "Adopt proven copy" }))
+    .not.toBeInTheDocument();
 });

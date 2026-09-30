@@ -32,6 +32,7 @@ import { glassSurfaceClassName } from "../mobile/GlassSurface";
 import { type TurnDiffSummary } from "../../types";
 import { summarizeTurnDiffStats } from "../../lib/turnDiffTree";
 import ChatMarkdown from "../ChatMarkdown";
+import { TerminalSnippetActions } from "./TerminalSnippetActions";
 import {
   BotIcon,
   CheckIcon,
@@ -136,6 +137,26 @@ import {
 
 const TimelineStreamingCtx = createContext<TimelineStreamingState>(null!);
 const TimelineStableCtx = createContext<TimelineStableState>(null!);
+function TimelineStableProvider({
+  value,
+  children,
+}: {
+  value: TimelineStableState;
+  children: ReactNode;
+}) {
+  const threadRef = useMemo(
+    () => parseScopedThreadKey(value.routeThreadKey),
+    [value.routeThreadKey],
+  );
+  const content = <TimelineStableCtx.Provider value={value}>{children}</TimelineStableCtx.Provider>;
+  return threadRef ? (
+    <TerminalSnippetActions key={value.routeThreadKey} threadRef={threadRef}>
+      {content}
+    </TerminalSnippetActions>
+  ) : (
+    content
+  );
+}
 const NOOP_CLOSE_DIFF = () => {};
 /* Top clearance mirrors the footer: when the desktop header overlays the
    transcript, the chat shell publishes `--chat-header-clearance` and the
@@ -730,7 +751,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }
 
   return (
-    <TimelineStableCtx.Provider value={stableState}>
+    <TimelineStableProvider value={stableState}>
       <TimelineStreamingCtx.Provider value={streamingState}>
         <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
           <LegendList<MessagesTimelineRow>
@@ -782,7 +803,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           }}
         />
       </TimelineStreamingCtx.Provider>
-    </TimelineStableCtx.Provider>
+    </TimelineStableProvider>
   );
 });
 
@@ -1135,6 +1156,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   {(displayedUserMessage.visibleText.trim().length > 0 ||
                     terminalContexts.length > 0) && (
                     <UserMessageBody
+                      cwd={ctx.markdownCwd}
+                      environmentId={ctx.activeThreadEnvironmentId}
                       text={displayedUserMessage.visibleText}
                       terminalContexts={terminalContexts}
                       skills={ctx.skills}
@@ -1195,6 +1218,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   }
                 >
                   <ChatMarkdown
+                    allowTerminalInsertion
                     text={messageText}
                     cwd={ctx.markdownCwd}
                     environmentId={ctx.activeThreadEnvironmentId}
@@ -1867,13 +1891,37 @@ const UserMessageTerminalContextInlineLabel = memo(
 );
 
 const UserMessageBody = memo(function UserMessageBody(props: {
+  cwd: string | undefined;
+  environmentId: EnvironmentId;
   text: string;
   terminalContexts: ParsedTerminalContextEntry[];
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   searchHighlight?: Omit<SkillInlineTextSearchHighlight, "cursor" | "keyPrefix"> | undefined;
 }) {
+  const isPhone = usePresentationTier() === "phone";
   const searchHighlightCursorRef = useRef({ occurrenceIndex: 0 });
   searchHighlightCursorRef.current.occurrenceIndex = 0;
+  if (!isPhone && /(?:^|\n) {0,3}(?:`{3,}|~{3,})/.test(props.text)) {
+    return (
+      <>
+        {props.terminalContexts.length > 0 ? (
+          <div className="mb-1 flex flex-wrap gap-1">
+            {props.terminalContexts.map((context) => (
+              <UserMessageTerminalContextInlineLabel key={context.header} context={context} />
+            ))}
+          </div>
+        ) : null}
+        <ChatMarkdown
+          allowTerminalInsertion
+          text={props.text}
+          cwd={props.cwd}
+          environmentId={props.environmentId}
+          skills={props.skills}
+          searchHighlight={props.searchHighlight}
+        />
+      </>
+    );
+  }
   const searchHighlight = props.searchHighlight
     ? {
         ...props.searchHighlight,

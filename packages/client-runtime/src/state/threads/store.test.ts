@@ -1732,6 +1732,44 @@ describe("thread settlement state", () => {
     });
   });
 
+  it.each(["thread.unsettled", "thread.unsnoozed"] as const)(
+    "projects %s Undo restoration into shell, sidebar and detail state",
+    (type) => {
+      const threadId = ThreadId.make("thread-settlement");
+      const initial = syncServerShellSnapshot(
+        makeEmptyState(),
+        makeShellSnapshot(null, null),
+        localEnvironmentId,
+      );
+      const restoredSidebarState = {
+        settledOverride: null,
+        settledAt: null,
+        snoozedAt: "2026-07-31T01:00:00.000Z",
+        snoozedUntil: "2026-08-01T01:00:00.000Z",
+      };
+      const updatedAt = "2026-07-31T00:00:00.000Z";
+      const restored = applyOrchestrationEvent(
+        initial,
+        makeEvent(type, {
+          threadId,
+          updatedAt,
+          ...(type === "thread.unsettled" ? { reason: "user" as const } : {}),
+          restoredSidebarState,
+        }),
+        localEnvironmentId,
+      );
+      expect(localEnvironmentStateOf(restored).threadShellById[threadId]).toMatchObject({
+        ...restoredSidebarState,
+        updatedAt,
+      });
+      expect(localEnvironmentStateOf(restored).sidebarThreadSummaryById[threadId]).toMatchObject({
+        ...restoredSidebarState,
+        updatedAt,
+      });
+      expect(threadsOf(restored)[0]).toMatchObject({ ...restoredSidebarState, updatedAt });
+    },
+  );
+
   it("applies raw settle and activity-unsettle events to shell and sidebar state", () => {
     const threadId = ThreadId.make("thread-settlement");
     const initial = syncServerShellSnapshot(

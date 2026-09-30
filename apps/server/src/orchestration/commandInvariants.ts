@@ -364,3 +364,16 @@ export function requireNonNegativeInteger(input: {
     ),
   );
 }
+
+/** Resolve both ID-backed and historical path-backed thread workspace ownership. */
+export function findThreadWorktree(
+  readModel: OrchestrationReadModel,
+  thread: OrchestrationReadModel["threads"][number],
+) {
+  if (thread.worktreeId != null) return findWorktreeById(readModel, thread.worktreeId);
+  if (thread.worktreePath == null) return undefined;
+  return readModel.worktrees?.find(
+    (worktree) =>
+      worktree.projectId === thread.projectId && worktree.worktreePath === thread.worktreePath,
+  );
+}

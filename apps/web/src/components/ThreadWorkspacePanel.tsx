@@ -1,3 +1,4 @@
+import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 import { useSideChatStore } from "../sideChatStore";
 import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -462,27 +463,9 @@ function WorkspaceTerminalPanel() {
       const api = readEnvironmentApi(threadRef.environmentId);
       if (!api) return;
       const isFinalTerminal = terminalState.terminalIds.length <= 1;
-      const fallbackExitWrite = () =>
-        api.terminal
-          .write({ threadId: threadRef.threadId, terminalId, data: "exit\n" })
-          .catch(() => undefined);
-
-      if ("close" in api.terminal && typeof api.terminal.close === "function") {
-        void (async () => {
-          if (isFinalTerminal) {
-            await api.terminal
-              .clear({ threadId: threadRef.threadId, terminalId })
-              .catch(() => undefined);
-          }
-          await api.terminal.close({
-            threadId: threadRef.threadId,
-            terminalId,
-            deleteHistory: true,
-          });
-        })().catch(() => fallbackExitWrite());
-      } else {
-        void fallbackExitWrite();
-      }
+      void terminalSnippetBroker
+        .close({ threadRef, terminalId }, api.terminal, isFinalTerminal)
+        .catch(() => undefined);
 
       storeCloseTerminal(threadRef, terminalId);
       storeSetTerminalOpen(threadRef, false);

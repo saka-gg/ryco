@@ -126,7 +126,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
       });
-      const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
+      const continuationGroupKey = yield* makeClaudeContinuationGroupKey(
+        effectiveConfig,
+        processEnv,
+      );
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
@@ -153,7 +156,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             Effect.provideService(Path.Path, path),
           ),
       });
-      const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(effectiveConfig);
+      const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(
+        effectiveConfig,
+        processEnv,
+      );
       const usageProbeCache = yield* Cache.make({
         capacity: 1,
         timeToLive: USAGE_PROBE_TTL,

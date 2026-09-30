@@ -39,6 +39,8 @@ import {
   type PtySpawnInput,
   PtySpawnError,
 } from "../Services/PTY.ts";
+import { createWorkspaceCommitFence } from "../../orchestration/workspaceCommitFence.ts";
+import { createEmptyReadModel } from "../../orchestration/projector.ts";
 import { makeTerminalManagerWithOptions } from "./Manager.ts";
 import {
   makeTerminalSubscriberOffer,
@@ -648,6 +650,209 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }),
   );
 
+  it.effect(
+    "guards exact bracketed insertion against stale sessions, output, workspace and existing input",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager();
+        const initial = yield* manager.open(openInput());
+        const guard = {
+          inputEpoch: initial.inputEpoch!,
+          outputCursor: initial.cursor!,
+          cwd: initial.cwd,
+          worktreePath: initial.worktreePath,
+        };
+        const data = "\x1b[200~printf 'héllo 🌏'\n\tprintf '第二行'\n\x1b[201~";
+        for (const invalid of [
+          { ...guard, inputEpoch: "old-process" },
+          { ...guard, cwd: "/synthetic/stale-worktree" },
+          {
+            ...guard,
+            outputCursor: { ...guard.outputCursor, sequence: guard.outputCursor.sequence - 1 },
+          },
+        ]) {
+          const error = yield* manager
+            .write(
+              {
+                threadId: initial.threadId,
+                terminalId: initial.terminalId,
+                data,
+                guard: invalid,
+              },
+              () => true,
+            )
+            .pipe(Effect.flip);
+          assert.equal(error._tag, "TerminalInputRejectedError");
+        }
+        for (const invalid of [
+          data + "\r",
+          "printf 'unsafe'\n",
+          "\x1b[200~a\x1b[201~\r\x1b[201~",
+        ]) {
+          const error = yield* manager
+            .write(
+              {
+                threadId: initial.threadId,
+                terminalId: initial.terminalId,
+                data: invalid,
+                guard,
+              },
+              () => true,
+            )
+            .pipe(Effect.flip);
+          assert.equal(error._tag, "TerminalInputRejectedError");
+        }
+        expect(ptyAdapter.processes[0]!.writes).toEqual([]);
+        yield* manager.write(
+          {
+            threadId: initial.threadId,
+            terminalId: initial.terminalId,
+            data,
+            guard,
+          },
+          () => true,
+        );
+        expect(ptyAdapter.processes[0]!.writes).toEqual([data]);
+        const duplicate = yield* manager
+          .write(
+            { threadId: initial.threadId, terminalId: initial.terminalId, data, guard },
+            () => true,
+          )
+          .pipe(Effect.flip);
+        assert.equal(duplicate._tag, "TerminalInputRejectedError");
+        yield* manager.restart(restartInput());
+        const stale = yield* manager
+          .write(
+            { threadId: initial.threadId, terminalId: initial.terminalId, data, guard },
+            () => true,
+          )
+          .pipe(Effect.flip);
+        assert.equal(stale._tag, "TerminalInputRejectedError");
+        expect(ptyAdapter.processes[1]!.writes).toEqual([]);
+        const current = yield* manager.open(openInput());
+        yield* manager.write({
+          threadId: current.threadId,
+          terminalId: current.terminalId,
+          data: "unfinished",
+        });
+        const busy = yield* manager
+          .write(
+            {
+              threadId: current.threadId,
+              terminalId: current.terminalId,
+              data,
+              guard: { ...guard, inputEpoch: current.inputEpoch!, outputCursor: current.cursor! },
+            },
+            () => true,
+          )
+          .pipe(Effect.flip);
+        assert.equal(busy._tag, "TerminalInputRejectedError");
+        expect(ptyAdapter.processes[1]!.writes).toEqual(["unfinished"]);
+      }),
+  );
+
+  it.effect(
+    "rejects canonical workspace changes during filesystem admission at the final input commit",
+    () =>
+      Effect.gen(function* () {
+        for (const boundary of ["filesystem", "thread-lock"]) {
+          const fs = yield* FileSystem.FileSystem;
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          let block = false;
+          const controlledFs = {
+            ...fs,
+            stat: (file: string) =>
+              block && file === process.cwd()
+                ? Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.andThen(fs.stat(file)),
+                  )
+                : fs.stat(file),
+          };
+          const { manager, ptyAdapter } = yield* createManager().pipe(
+            Effect.provideService(FileSystem.FileSystem, controlledFs),
+          );
+          const initial = yield* manager.open(openInput());
+          let model = {
+            ...createEmptyReadModel(new Date().toISOString()),
+            threads: [
+              {
+                id: initial.threadId,
+                projectId: "synthetic-project",
+                worktreePath: null,
+                deletedAt: null,
+              },
+            ],
+            projects: [{ id: "synthetic-project", workspaceRoot: initial.cwd, deletedAt: null }],
+          } as unknown as ReturnType<typeof createEmptyReadModel>;
+          const fence = createWorkspaceCommitFence(() => model);
+          const guard = {
+            inputEpoch: initial.inputEpoch!,
+            outputCursor: initial.cursor!,
+            cwd: initial.cwd,
+            worktreePath: null,
+          };
+          const canCommit = fence.capture({ threadId: initial.threadId, ...guard })!;
+          block = true;
+          const opening =
+            boundary === "thread-lock"
+              ? yield* manager.open(openInput()).pipe(Effect.forkScoped)
+              : undefined;
+          if (opening) yield* Deferred.await(entered);
+          const writing = yield* manager
+            .write(
+              { threadId: initial.threadId, data: "\x1b[200~printf 'a'\x1b[201~", guard },
+              canCommit,
+            )
+            .pipe(Effect.exit, Effect.forkScoped);
+          yield* Deferred.await(entered);
+          yield* Effect.yieldNow;
+          fence.begin([{ type: "project.meta-updated" }]);
+          model = {
+            ...model,
+            projects: [{ ...model.projects[0]!, workspaceRoot: "/synthetic/new-workspace" }],
+          };
+          fence.publish();
+          yield* Deferred.succeed(release, undefined);
+          if (opening) yield* Fiber.join(opening);
+          const result = yield* Fiber.join(writing);
+          expect(Exit.isFailure(result)).toBe(true);
+          expect(ptyAdapter.processes[0]!.writes).toEqual([]);
+          // The failed guarded write leaves ordinary manual terminal semantics intact.
+          yield* manager.write({ threadId: initial.threadId, data: "manual" });
+          expect(ptyAdapter.processes[0]!.writes).toEqual(["manual"]);
+        }
+      }),
+  );
+  it.effect(
+    "rejects paste when the shell output changed after its bracketed-paste state was reviewed",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager();
+        const initial = yield* manager.open(openInput());
+        ptyAdapter.processes[0]!.emitData("\x1b[?2004l");
+        const error = yield* manager
+          .write(
+            {
+              threadId: initial.threadId,
+              terminalId: initial.terminalId,
+              data: "\x1b[200~printf 'a'\x1b[201~",
+              guard: {
+                inputEpoch: initial.inputEpoch!,
+                outputCursor: initial.cursor!,
+                cwd: initial.cwd,
+                worktreePath: null,
+              },
+            },
+            () => true,
+          )
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "TerminalInputRejectedError");
+        expect(ptyAdapter.processes[0]!.writes).toEqual([]);
+      }),
+  );
+
   it.effect("resizes running terminal on open when a different size is requested", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
@@ -848,38 +1053,63 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }),
   );
 
-  it.effect("emits subprocess activity events when child-process state changes", () =>
-    Effect.gen(function* () {
-      let hasRunningSubprocess = false;
-      const { manager, getEvents } = yield* createManager(5, {
-        processTableSnapshotter: () =>
-          Effect.succeed({
-            childrenByParent: hasRunningSubprocess
-              ? new Map([[9000, [100]]])
-              : new Map<number, number[]>(),
-          }),
-        subprocessPollIntervalMs: 20,
-      });
+  it.effect(
+    "emits subprocess activity and refuses guarded insertion into a running subprocess",
+    () =>
+      Effect.gen(function* () {
+        let hasRunningSubprocess = false;
+        const { manager, getEvents, ptyAdapter } = yield* createManager(5, {
+          processTableSnapshotter: () =>
+            Effect.succeed({
+              childrenByParent: hasRunningSubprocess
+                ? new Map([[9000, [100]]])
+                : new Map<number, number[]>(),
+            }),
+          subprocessPollIntervalMs: 20,
+        });
 
-      yield* manager.open(openInput());
-      expect((yield* getEvents).some((event) => event.type === "activity")).toBe(false);
+        yield* manager.open(openInput());
+        expect((yield* getEvents).some((event) => event.type === "activity")).toBe(false);
 
-      hasRunningSubprocess = true;
-      yield* waitFor(
-        Effect.map(getEvents, (events) =>
-          events.some((event) => event.type === "activity" && event.hasRunningSubprocess === true),
-        ),
-        "1200 millis",
-      );
+        hasRunningSubprocess = true;
+        yield* waitFor(
+          Effect.map(getEvents, (events) =>
+            events.some(
+              (event) => event.type === "activity" && event.hasRunningSubprocess === true,
+            ),
+          ),
+          "1200 millis",
+        );
 
-      hasRunningSubprocess = false;
-      yield* waitFor(
-        Effect.map(getEvents, (events) =>
-          events.some((event) => event.type === "activity" && event.hasRunningSubprocess === false),
-        ),
-        "1200 millis",
-      );
-    }),
+        const active = yield* manager.open(openInput());
+        const rejected = yield* manager
+          .write(
+            {
+              threadId: active.threadId,
+              terminalId: active.terminalId,
+              data: "\x1b[200~printf 'a'\x1b[201~",
+              guard: {
+                inputEpoch: active.inputEpoch!,
+                outputCursor: active.cursor!,
+                cwd: active.cwd,
+                worktreePath: active.worktreePath,
+              },
+            },
+            () => true,
+          )
+          .pipe(Effect.flip);
+        assert.equal(rejected._tag, "TerminalInputRejectedError");
+        expect(ptyAdapter.processes[0]!.writes).toEqual([]);
+        hasRunningSubprocess = false;
+        yield* waitFor(
+          Effect.map(getEvents, (events) =>
+            events.some(
+              (event) => event.type === "activity" && event.hasRunningSubprocess === false,
+            ),
+          ),
+          "1200 millis",
+        );
+      }),
   );
 
   it.effect("does not invoke subprocess polling until a terminal session is running", () =>

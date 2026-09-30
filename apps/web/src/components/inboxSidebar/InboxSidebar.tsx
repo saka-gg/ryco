@@ -1,3 +1,4 @@
+import { sidebarUndo } from "../../sidebarUndo";
 import { DeviceIcon } from "../DeviceIcon";
 import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
 import type { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
@@ -209,7 +210,8 @@ function InboxThreadRow(props: {
     try {
       const api = readEnvironmentApi(props.row.environmentId);
       if (!api) throw new Error("The owning machine is not connected.");
-      await api.orchestration.dispatchCommand(
+      await sidebarUndo.dispatch(
+        { environmentId: props.row.environmentId, threadId: props.row.threadId },
         snoozedUntil
           ? {
               type: "thread.snooze",
@@ -544,7 +546,8 @@ export function InboxSidebar(props: InboxSidebarProps) {
         return false;
       }
       try {
-        await api.orchestration.dispatchCommand(
+        await sidebarUndo.dispatch(
+          { environmentId: row.environmentId, threadId: row.threadId },
           settled
             ? {
                 type: "thread.settle",

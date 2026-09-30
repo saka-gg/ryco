@@ -15,6 +15,7 @@ import {
 } from "@ryco/contracts";
 import { makeSessionImport } from "./SessionImport.ts";
 import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
+import recoveryMigration from "../persistence/Migrations/067_SessionImportRecovery.ts";
 import migration from "../persistence/Migrations/062_SessionImports.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
@@ -61,6 +62,7 @@ it("restarts an interrupted import without reforking, deduplicates completed ret
       ]),
     } as unknown as ProviderRegistry["Service"]),
     Layer.succeed(ServerSettingsService, {
+      withSettingsSnapshot: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
       getSettings: Effect.succeed({
         providers: {},
         providerInstances: {
@@ -76,13 +78,19 @@ it("restarts an interrupted import without reforking, deduplicates completed ret
         }),
     } as unknown as ProviderSessionDirectory["Service"]),
     Layer.succeed(OrchestrationEngineService, {
-      dispatch: (command: OrchestrationCommand) =>
-        Effect.gen(function* () {
+      dispatch: (
+        command: OrchestrationCommand,
+        admission?: Parameters<OrchestrationEngineService["Service"]["dispatch"]>[1],
+      ) => {
+        const commit = Effect.gen(function* () {
           if (fail) return yield* Effect.fail(new Error("synthetic process interruption"));
           commands.set(command.commandId, command);
           published = true;
           return { sequence: 1 };
-        }),
+        });
+        const admitted = admission ? admission.admit(commit) : commit;
+        return admission?.withCommitLease ? admission.withCommitLease(admitted) : admitted;
+      },
     } as unknown as OrchestrationEngineService["Service"]),
     Layer.succeed(ProjectionSnapshotQuery, {
       getProjectShellById: () =>
@@ -101,12 +109,25 @@ it("restarts an interrupted import without reforking, deduplicates completed ret
   await Effect.runPromise(
     Effect.gen(function* () {
       yield* migration;
+      yield* recoveryMigration;
       const options = {
         rootForSource: () => root,
-        fork: async () => {
+        fork: async ({ sourceId }: { sourceId: string }) => {
           forks++;
-          return native;
+          const copiedId = sourceId === id ? native : "88888888-1111-4111-8111-111111111111";
+          const contents = await readFile(
+            path.join(root, "sessions", `rollout-${sourceId}.jsonl`),
+            "utf8",
+          );
+          await writeFile(
+            path.join(root, "sessions", `rollout-${copiedId}.jsonl`),
+            contents
+              .replaceAll(sourceId, copiedId)
+              .replace('"payload":{', `"payload":{"forked_from_id":"${sourceId}",`),
+          );
+          return copiedId;
         },
+        verifyNative: async () => {},
       };
       const sql = yield* SqlClient.SqlClient;
       const importer = yield* makeSessionImport(options);

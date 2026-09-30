@@ -84,6 +84,9 @@ export interface WsRpcClient {
     readonly initializeGit: RpcUnaryMethod<typeof WS_METHODS.projectsInitializeGit>;
   };
   readonly sessionImport: {
+    readonly sources: RpcUnaryMethod<typeof WS_METHODS.sessionImportSources>;
+    readonly reconcile: RpcUnaryMethod<typeof WS_METHODS.sessionImportReconcile>;
+    readonly adopt: RpcUnaryMethod<typeof WS_METHODS.sessionImportAdopt>;
     readonly discover: RpcUnaryMethod<typeof WS_METHODS.sessionImportDiscover>;
     readonly run: RpcUnaryMethod<typeof WS_METHODS.sessionImportRun>;
   };
@@ -388,7 +391,13 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
     ...(device ? { device } : {}),
     terminal: {
       open: (input) => transport.request((client) => client[WS_METHODS.terminalOpen](input)),
-      write: (input) => transport.request((client) => client[WS_METHODS.terminalWrite](input)),
+      write: (input) =>
+        transport.request((client) => {
+          const write = client[WS_METHODS.terminalWrite](input);
+          // Interrupt the RPC wait as well as bounding the UI handoff. Input is
+          // never retried: interruption cannot undo bytes already committed.
+          return input.guard ? write.pipe(Effect.timeout("10 seconds")) : write;
+        }),
       resize: (input) => transport.request((client) => client[WS_METHODS.terminalResize](input)),
       clear: (input) => transport.request((client) => client[WS_METHODS.terminalClear](input)),
       restart: (input) => transport.request((client) => client[WS_METHODS.terminalRestart](input)),
@@ -418,6 +427,11 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsInitializeGit](input)),
     },
     sessionImport: {
+      sources: (input) =>
+        transport.request((client) => client[WS_METHODS.sessionImportSources](input)),
+      reconcile: (input) =>
+        transport.request((client) => client[WS_METHODS.sessionImportReconcile](input)),
+      adopt: (input) => transport.request((client) => client[WS_METHODS.sessionImportAdopt](input)),
       discover: (input) =>
         transport.request((client) => client[WS_METHODS.sessionImportDiscover](input)),
       run: (input) => transport.request((client) => client[WS_METHODS.sessionImportRun](input)),

@@ -37,6 +37,35 @@ const baseRemoteStatus: VcsStatusRemoteResult = {
 };
 
 describe("wsRpcClient", () => {
+  it("bounds guarded terminal RPC waits without replaying the write", async () => {
+    vi.useFakeTimers();
+    try {
+      const wire = vi.fn(() => Effect.never);
+      const transport = {
+        request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+          Effect.runPromise(invoke({ [WS_METHODS.terminalWrite]: wire })),
+      };
+      const client = createWsRpcClient(transport as unknown as WsTransport);
+      const result = expect(
+        client.terminal.write({
+          threadId: "synthetic-thread",
+          terminalId: "new-pane",
+          data: "\x1b[200~printf 'a'\x1b[201~",
+          guard: {
+            inputEpoch: "process",
+            outputCursor: { generation: "server", sequence: 1 },
+            cwd: "/synthetic/workspace",
+            worktreePath: null,
+          },
+        }),
+      ).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await result;
+      expect(wire).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("calls the source-control merge wire method", async () => {
     const mergeWireMethod = vi.fn(() => Effect.succeed({ outcome: "enqueued" as const }));
     const transport = {
@@ -168,4 +197,27 @@ it("turns response version decoding failures into an update instruction without 
   await expect(
     client.server.getUsageSummary({ contractVersion: 2, endDate: "2026-08-10", timeZone: "UTC" }),
   ).rejects.toThrow("Update Ryco");
+});
+
+it("routes import source selection and reconciliation through the shared transport", async () => {
+  const sources = vi.fn(() => Effect.succeed([]));
+  const reconcile = vi.fn(() => Effect.succeed({ state: "unknown" }));
+  const adopt = vi.fn(() => Effect.succeed({ threadId: "saved-copy", alreadyImported: false }));
+  const wire = {
+    [WS_METHODS.sessionImportSources]: sources,
+    [WS_METHODS.sessionImportReconcile]: reconcile,
+    [WS_METHODS.sessionImportAdopt]: adopt,
+  };
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(invoke(wire)),
+  } as unknown as WsTransport;
+  const client = createWsRpcClient(transport);
+  const input = { source: "codex" as const, key: "a".repeat(64) };
+  await client.sessionImport.sources({ source: input.source });
+  await client.sessionImport.reconcile({ ...input, cursor: "server-cursor" });
+  await client.sessionImport.adopt({ ...input, adoptionToken: "server-proof" });
+  expect(sources).toHaveBeenCalledWith({ source: "codex" });
+  expect(reconcile).toHaveBeenCalledWith({ ...input, cursor: "server-cursor" });
+  expect(adopt).toHaveBeenCalledWith({ ...input, adoptionToken: "server-proof" });
 });

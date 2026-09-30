@@ -46,7 +46,11 @@ const probe = (homePath: string) =>
 
 describe("Claude usage credential isolation", () => {
   beforeEach(() => {
-    vi.stubGlobal("process", { ...process, platform: "darwin" });
+    vi.stubGlobal("process", {
+      ...process,
+      platform: "darwin",
+      env: { HOME: "/mock/default" },
+    });
     vi.stubGlobal("fetch", mocks.fetch);
     mocks.execFile.mockImplementation((_file, args, _options, callback) =>
       callback(null, args[0] === "find-generic-password" ? credentials("mock-default") : ""),
@@ -77,6 +81,23 @@ describe("Claude usage credential isolation", () => {
     await probe("");
     expect(mocks.readFile).not.toHaveBeenCalled();
     expect(mocks.fetch.mock.calls[0]?.[1].headers.Authorization).toBe("Bearer mock-default");
+  });
+  it("uses the environment home's file without selecting the OS home's Keychain account", async () => {
+    process.env.HOME = "/mock/environment";
+    expect((await probe(""))?.primary?.usedPercent).toBe(42);
+    expect(mocks.execFile).not.toHaveBeenCalled();
+    expect(mocks.readFile).toHaveBeenCalledWith(
+      "/mock/environment/.claude/.credentials.json",
+      "utf8",
+    );
+    expect(mocks.fetch.mock.calls[0]?.[1].headers.Authorization).toBe("Bearer mock-separate");
+  });
+  it("does not fall back to the OS home's account when the environment home has no credentials", async () => {
+    process.env.HOME = "/mock/environment";
+    mocks.readFile.mockRejectedValue(new Error("missing"));
+    expect(await probe("")).toBeUndefined();
+    expect(mocks.execFile).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
   });
   it("persists a separate-home refresh only to that home's file", async () => {
     mocks.readFile.mockResolvedValue(credentials("mock-separate", true));

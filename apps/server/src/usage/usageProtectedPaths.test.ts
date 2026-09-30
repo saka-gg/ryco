@@ -6,7 +6,9 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import * as NodePath from "@effect/platform-node/NodePath";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
+import { CodexSettings } from "@ryco/contracts";
+import { resolveClaudeSourceRoot } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { type UsageProtectionSettings, resolveUsageProtectedPaths } from "./usageProtectedPaths.ts";
@@ -92,8 +94,8 @@ describe("authoritative usage cleanup protection", () => {
   });
 });
 
-// Provider helpers use the OS home independently from an instance HOME. All
-// paths are synthetic; those helpers and this resolver perform no content reads.
+// All OS/environment paths are synthetic; helpers and protection resolve only
+// paths and perform no content or credential reads.
 vi.mock("node:os", async (original) => ({
   ...(await original<typeof import("node:os")>()),
   homedir: () => "/fixture/os-home",
@@ -116,6 +118,138 @@ function settings(
   };
 }
 describe("settings-aware usage protection", () => {
+  it.each([
+    { disabled: false, explicitClaudeStore: false, explicitLegacy: false },
+    { disabled: false, explicitClaudeStore: true, explicitLegacy: false },
+    { disabled: true, explicitClaudeStore: false, explicitLegacy: false },
+    { disabled: true, explicitClaudeStore: true, explicitLegacy: false },
+    { disabled: false, explicitClaudeStore: false, explicitLegacy: true },
+    { disabled: false, explicitClaudeStore: true, explicitLegacy: true },
+    { disabled: true, explicitClaudeStore: false, explicitLegacy: true },
+    { disabled: true, explicitClaudeStore: true, explicitLegacy: true },
+  ])(
+    "protects process-default sources with empty/disabled declarations: %j",
+    ({ disabled, explicitClaudeStore, explicitLegacy }) => {
+      const environment = {
+        HOME: "/fixture/owned/worktree/runtime-home",
+        CODEX_HOME: "/fixture/owned/worktree/provider-store",
+        ...(explicitClaudeStore
+          ? { CLAUDE_CONFIG_DIR: "/fixture/owned/worktree/claude-store" }
+          : {}),
+      };
+      const legacy = settings(
+        explicitLegacy ? "/fixture/legacy-claude" : "",
+        explicitLegacy ? "/fixture/legacy-codex" : "",
+      );
+      const current = {
+        ...legacy,
+        providers: {
+          ...legacy.providers,
+          codex: { ...legacy.providers.codex, shadowHomePath: "/fixture/legacy-shadow" },
+        },
+        providerInstances: disabled
+          ? {
+              [ProviderInstanceId.make("disabled-codex")]: {
+                driver: ProviderDriverKind.make("codex"),
+                config: {},
+                enabled: false,
+              },
+              [ProviderInstanceId.make("disabled-claude")]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                config: {},
+                enabled: false,
+              },
+            }
+          : {},
+      };
+      const codex = Effect.runSync(
+        resolveCodexHomeLayout(current.providers.codex, environment).pipe(
+          Effect.provide(NodePath.layer),
+        ),
+      ).sharedHomePath;
+      const claude = Effect.runSync(
+        resolveClaudeSourceRoot(current.providers.claudeAgent, environment).pipe(
+          Effect.provide(NodePath.layer),
+        ),
+      );
+      const home = Effect.runSync(
+        resolveClaudeHomePath(current.providers.claudeAgent, environment).pipe(
+          Effect.provide(NodePath.layer),
+        ),
+      );
+      const defaults = Effect.runSync(
+        resolveClaudeSourceRoot({ homePath: "" }, environment).pipe(Effect.provide(NodePath.layer)),
+      );
+      expect(resolveUsageProtectedPaths(current, environment)).toEqual(
+        expect.arrayContaining([
+          codex,
+          claude,
+          defaults,
+          environment.CODEX_HOME,
+          "/fixture/legacy-shadow",
+          `${home}/.claude/projects`,
+          `${home}/projects`,
+          `${environment.HOME}/.claude/projects`,
+          `${environment.HOME}/projects`,
+          ...(explicitLegacy
+            ? [
+                "/fixture/legacy-codex/sessions",
+                "/fixture/legacy-codex/archived_sessions",
+                "/fixture/legacy-claude/.claude/projects",
+                "/fixture/legacy-claude/projects",
+              ]
+            : [
+                "/fixture/os-home/.codex/sessions",
+                "/fixture/os-home/.codex/archived_sessions",
+                "/fixture/os-home/.claude/projects",
+                "/fixture/os-home/projects",
+              ]),
+        ]),
+      );
+    },
+  );
+  it.each(["codex", "claudeAgent"] as const)(
+    "protects the exact %s continuation source plus legacy disabled histories",
+    (driver) => {
+      const env = {
+        HOME: "/fixture/environment-home",
+        CODEX_HOME: "/fixture/env-codex",
+        CLAUDE_CONFIG_DIR: "/fixture/env-claude",
+      };
+      const config = { homePath: "~/configured", shadowHomePath: "~/shadow" };
+      const current = {
+        ...settings(),
+        providerInstances: {
+          [ProviderInstanceId.make("disabled-source")]: {
+            driver: ProviderDriverKind.make(driver),
+            config,
+            enabled: false,
+          },
+        },
+      };
+      const root =
+        driver === "codex"
+          ? Effect.runSync(
+              resolveCodexHomeLayout(Schema.decodeSync(CodexSettings)(config), env).pipe(
+                Effect.provide(NodePath.layer),
+              ),
+            ).sharedHomePath
+          : Effect.runSync(
+              resolveClaudeSourceRoot(config, env).pipe(Effect.provide(NodePath.layer)),
+            );
+      const protectedPaths = resolveUsageProtectedPaths(current, env);
+      expect(protectedPaths).toContain(root);
+      expect(protectedPaths).toEqual(
+        expect.arrayContaining([
+          "/fixture/legacy-codex/sessions",
+          "/fixture/legacy-codex/archived_sessions",
+          "/fixture/legacy-claude/.claude/projects",
+          "/fixture/legacy-claude/projects",
+        ]),
+      );
+      if (driver === "codex") expect(protectedPaths).toContain("/fixture/os-home/shadow");
+    },
+  );
   it("includes unconditional legacy roots outside instance homes and retains disabled instances", () => {
     const paths = resolveUsageProtectedPaths(settings(), { HOME: "/fixture/environment-home" });
     expect(paths).toEqual(
@@ -142,10 +276,10 @@ describe("settings-aware usage protection", () => {
   it("matches default driver history locations without protecting the entire HOME", () => {
     const current = settings("", "");
     const claudeHome = Effect.runSync(
-      resolveClaudeHomePath(current.providers.claudeAgent).pipe(Effect.provide(NodePath.layer)),
+      resolveClaudeHomePath(current.providers.claudeAgent, {}).pipe(Effect.provide(NodePath.layer)),
     );
     const codexHome = Effect.runSync(
-      resolveCodexHomeLayout(current.providers.codex).pipe(Effect.provide(NodePath.layer)),
+      resolveCodexHomeLayout(current.providers.codex, {}).pipe(Effect.provide(NodePath.layer)),
     ).sharedHomePath;
     const paths = resolveUsageProtectedPaths(current, {
       HOME: "/fixture/environment-home",

@@ -111,6 +111,11 @@ export interface ServerSettingsShape {
   /** Read the current settings. */
   readonly getSettings: Effect.Effect<ServerSettings, ServerSettingsError>;
 
+  /** Serialize a short mutation admission with settings writes/reloads. */
+  readonly withSettingsSnapshot: <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E, R>;
+
   /** Patch settings and persist. Returns the new full settings object. */
   readonly updateSettings: (
     patch: ServerSettingsPatch,
@@ -132,39 +137,43 @@ export class ServerSettingsService extends Context.Service<
           applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, overrides as ServerSettingsPatch),
         );
 
+        const writeSemaphore = yield* Semaphore.make(1);
         return {
+          withSettingsSnapshot: writeSemaphore.withPermits(1),
           start: Effect.void,
           ready: Effect.void,
           getSettings: Ref.get(currentSettingsRef),
           updateSettings: (patch) =>
-            Ref.get(currentSettingsRef).pipe(
-              Effect.flatMap((currentSettings) =>
-                Effect.try({
-                  try: () => applyServerSettingsPatch(currentSettings, patch),
-                  catch: (cause) =>
-                    new ServerSettingsError({
-                      settingsPath: "<memory>",
-                      detail:
-                        cause instanceof Error
-                          ? cause.message
-                          : "Invalid project preference patch.",
-                      cause,
-                    }),
-                }).pipe(
-                  Effect.flatMap(Schema.decodeEffect(ServerSettings)),
-                  Effect.mapError(
-                    (cause) =>
+            writeSemaphore.withPermits(1)(
+              Ref.get(currentSettingsRef).pipe(
+                Effect.flatMap((currentSettings) =>
+                  Effect.try({
+                    try: () => applyServerSettingsPatch(currentSettings, patch),
+                    catch: (cause) =>
                       new ServerSettingsError({
                         settingsPath: "<memory>",
-                        detail: Schema.is(ServerSettingsError)(cause)
-                          ? cause.detail
-                          : `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
+                        detail:
+                          cause instanceof Error
+                            ? cause.message
+                            : "Invalid project preference patch.",
                         cause,
                       }),
+                  }).pipe(
+                    Effect.flatMap(Schema.decodeEffect(ServerSettings)),
+                    Effect.mapError(
+                      (cause) =>
+                        new ServerSettingsError({
+                          settingsPath: "<memory>",
+                          detail: Schema.is(ServerSettingsError)(cause)
+                            ? cause.detail
+                            : `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
+                          cause,
+                        }),
+                    ),
                   ),
                 ),
+                Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
               ),
-              Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
             ),
           streamChanges: Stream.empty,
         } satisfies ServerSettingsShape;
@@ -561,6 +570,7 @@ export const makeServerSettings = Effect.gen(function* () {
   });
 
   return {
+    withSettingsSnapshot: writeSemaphore.withPermits(1),
     start,
     ready: Deferred.await(startedDeferred),
     getSettings: getSettingsFromCache.pipe(

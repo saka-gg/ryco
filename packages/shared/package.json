@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./worktreeSubmodules": "./src/worktreeSubmodules.ts",
+    "./terminalPaste": "./src/terminalPaste.ts",
     "./retiredFeatures": "./src/retiredFeatures.ts",
     "./backgroundWork": {
       "types": "./src/backgroundWork.ts",

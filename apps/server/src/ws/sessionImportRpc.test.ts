@@ -23,7 +23,13 @@ it("denies viewers/operators before evaluating source discovery or import", asyn
       });
     const principal = relayRpcPrincipal(role, "fixture");
     const ctx = {
-      sessionImport: Option.some({ discover: invoke, importSession: invoke }),
+      sessionImport: Option.some({
+        discover: invoke,
+        importSession: invoke,
+        sources: invoke,
+        reconcile: invoke,
+        adopt: invoke,
+      }),
       ownerEffect: <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) =>
         authorizeRpcPrincipal(principal, "owner", method).pipe(Effect.andThen(effect)),
     } as unknown as WsRpcContext;
@@ -34,10 +40,17 @@ it("denies viewers/operators before evaluating source discovery or import", asyn
       offset: 0,
       includeArchived: false,
       key: "a".repeat(64),
+      adoptionToken: "fixture",
       projectId: ProjectId.make("project"),
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture" },
     };
-    for (const method of [WS_METHODS.sessionImportDiscover, WS_METHODS.sessionImportRun]) {
+    for (const method of [
+      WS_METHODS.sessionImportDiscover,
+      WS_METHODS.sessionImportRun,
+      WS_METHODS.sessionImportSources,
+      WS_METHODS.sessionImportReconcile,
+      WS_METHODS.sessionImportAdopt,
+    ]) {
       const run = handlers[method] as (
         request: typeof input,
       ) => Effect.Effect<unknown, SessionImportError | AuthRpcError>;
@@ -56,6 +69,6 @@ it("denies viewers/operators before evaluating source discovery or import", asyn
         }).allowed,
       ).toBe(false);
     }
-    expect(calls).toBe(role === "owner" ? 2 : 0);
+    expect(calls).toBe(role === "owner" ? 5 : 0);
   }
 });
