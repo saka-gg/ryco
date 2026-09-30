@@ -10,6 +10,9 @@ import {
   ORCHESTRATION_WS_METHODS,
   type OpinionatedPluginCheckInput,
   type OpinionatedPluginInstallInput,
+  type OrchestrationShellStreamItem,
+  type OrchestrationThreadStreamItem,
+  type OrchestrationThreadWindowStreamItem,
   type ServerSettingsPatch,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -31,6 +34,30 @@ interface StreamSubscriptionOptions {
   readonly onError?: () => void;
 }
 
+/**
+ * Options for a stream the server can resume instead of resending a snapshot.
+ * `resumeFromSequence` is read at every (re)subscription: the last sequence the
+ * caller applied, or `null` to ask for a snapshot.
+ */
+export interface ResumableSubscriptionOptions extends StreamSubscriptionOptions {
+  readonly resumeFromSequence?: () => number | null;
+}
+export type ShellSubscriptionOptions = ResumableSubscriptionOptions;
+
+const resumeInput = (options: ResumableSubscriptionOptions | undefined) => {
+  const resumeFromSequence = options?.resumeFromSequence?.() ?? null;
+  return resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {};
+};
+
+const transportSubscribeOptions = (
+  options: StreamSubscriptionOptions | undefined,
+  tag: string,
+) => ({
+  ...(options?.onResubscribe === undefined ? {} : { onResubscribe: options.onResubscribe }),
+  ...(options?.onError === undefined ? {} : { onError: options.onError }),
+  tag,
+});
+
 type RpcUnaryMethod<TTag extends RpcTag> =
   RpcMethod<TTag> extends (input: any, options?: any) => Effect.Effect<infer TSuccess, any, any>
     ? (input: RpcInput<TTag>) => Promise<TSuccess>
@@ -44,15 +71,6 @@ type RpcUnaryNoArgMethod<TTag extends RpcTag> =
 type RpcStreamMethod<TTag extends RpcTag> =
   RpcMethod<TTag> extends (input: any, options?: any) => Stream.Stream<infer TEvent, any, any>
     ? (listener: (event: TEvent) => void, options?: StreamSubscriptionOptions) => () => void
-    : never;
-
-type RpcInputStreamMethod<TTag extends RpcTag> =
-  RpcMethod<TTag> extends (input: any, options?: any) => Stream.Stream<infer TEvent, any, any>
-    ? (
-        input: RpcInput<TTag>,
-        listener: (event: TEvent) => void,
-        options?: StreamSubscriptionOptions,
-      ) => () => void
     : never;
 
 interface GitRunStackedActionOptions {
@@ -320,11 +338,23 @@ export interface WsRpcClient {
     readonly getThreadHistoryPage?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadHistoryPage
     >;
-    readonly subscribeShell: RpcStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeShell>;
-    readonly subscribeThread: RpcInputStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeThread>;
-    readonly subscribeThreadWindow?: RpcInputStreamMethod<
-      typeof ORCHESTRATION_WS_METHODS.subscribeThreadWindow
-    >;
+    readonly subscribeShell: (
+      listener: (event: OrchestrationShellStreamItem) => void,
+      options?: ShellSubscriptionOptions,
+    ) => () => void;
+    readonly subscribeThread: (
+      input: Omit<RpcInput<typeof ORCHESTRATION_WS_METHODS.subscribeThread>, "resumeFromSequence">,
+      listener: (event: OrchestrationThreadStreamItem) => void,
+      options?: ResumableSubscriptionOptions,
+    ) => () => void;
+    readonly subscribeThreadWindow?: (
+      input: Omit<
+        RpcInput<typeof ORCHESTRATION_WS_METHODS.subscribeThreadWindow>,
+        "resumeFromSequence"
+      >,
+      listener: (event: OrchestrationThreadWindowStreamItem) => void,
+      options?: ResumableSubscriptionOptions,
+    ) => () => void;
   };
   readonly threadPriority: {
     readonly ensureCurrent: RpcUnaryMethod<typeof WS_METHODS.threadPriorityEnsureCurrent>;
@@ -763,21 +793,29 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadHistoryPage](input)),
       subscribeShell: (listener, options) =>
         transport.subscribe(
-          (client) => client[ORCHESTRATION_WS_METHODS.subscribeShell]({}),
+          (client) => client[ORCHESTRATION_WS_METHODS.subscribeShell](resumeInput(options)),
           listener,
-          { ...options, tag: ORCHESTRATION_WS_METHODS.subscribeShell },
+          transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeShell),
         ),
       subscribeThread: (input, listener, options) =>
         transport.subscribe(
-          (client) => client[ORCHESTRATION_WS_METHODS.subscribeThread](input),
+          (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+              ...input,
+              ...resumeInput(options),
+            }),
           listener,
-          { ...options, tag: ORCHESTRATION_WS_METHODS.subscribeThread },
+          transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThread),
         ),
       subscribeThreadWindow: (input, listener, options) =>
         transport.subscribe(
-          (client) => client[ORCHESTRATION_WS_METHODS.subscribeThreadWindow](input),
+          (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeThreadWindow]({
+              ...input,
+              ...resumeInput(options),
+            }),
           listener,
-          { ...options, tag: ORCHESTRATION_WS_METHODS.subscribeThreadWindow },
+          transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThreadWindow),
         ),
     },
     threadPriority: {

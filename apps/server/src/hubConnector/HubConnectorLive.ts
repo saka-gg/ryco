@@ -417,6 +417,7 @@ export const HubConnectorLive = Layer.effect(
               // "false". The proposal is the operator's statement for this run,
               // and a narrowing one runs the full §12.6 procedure.
               e2eePolicy: {
+                mode: config.hubE2eePolicy?.mode,
                 requireE2EE: config.hubE2eePolicy?.requireE2EE,
                 requireApprovedClientE2EE: config.hubE2eePolicy?.requireApprovedClientE2EE,
               },
@@ -582,19 +583,30 @@ export const HubConnectorLive = Layer.effect(
                 makeServerWsRpcLayer(relayRpcPrincipal(effectiveRole, channelId)),
                 makeDeviceWsRpcLayer(relayRpcPrincipal(effectiveRole, channelId)),
               ),
-              // A refused response is reported, not thrown: the registry already
-              // closes the channel naming the cause, and a defect here would
-              // instead kill the RPC server fiber and every request on it. On an
-              // `e2ee` channel this is also the §4.2 send pipeline — the ceiling,
-              // the §9.3 admission, the pair, the AEAD, and the envelope.
+              // A refused response is a value carrying its reason, not a defect,
+              // which would kill the RPC server fiber and every request on it.
+              // The byte session waits out backpressure and fails an oversized
+              // response's own request; anything it cannot deliver ends the
+              // channel through `onOutputFailure` below. On an `e2ee` channel
+              // this is also the §4.2 send pipeline — the ceiling, the §9.3
+              // admission, the pair, the AEAD, and the envelope.
               (bytes) =>
                 Effect.promise(() => e2ee.emit(bytes)).pipe(
-                  Effect.flatMap((accepted) =>
-                    accepted ? Effect.void : Effect.fail(new RpcOutputRefusedError()),
+                  Effect.flatMap((result) =>
+                    result === "sent"
+                      ? Effect.void
+                      : Effect.fail(new RpcOutputRefusedError(result)),
                   ),
                 ),
               {
                 queueCapacity: 64,
+                // A lost response would leave its request — or, with acknowledged
+                // streams, its whole subscription — waiting forever. Ending the
+                // channel makes the client reconnect and resubscribe instead.
+                onOutputFailure: (failure) => {
+                  void runPromise(Effect.logWarning("relay RPC output failed", { failure }));
+                  e2ee.abandon();
+                },
                 // §4.3: discrimination on the reassembled, prelude-stripped
                 // payload, and the only path to the RPC parser.
                 interceptor: (message) =>

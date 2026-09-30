@@ -1,4 +1,6 @@
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "./pairingUrl";
+import { buildHostedPairingUrl as buildSharedHostedPairingUrl } from "@ryco/shared/pairingUrl";
+
+import { getPairingTokenFromUrl } from "./pairingUrl";
 
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 
@@ -58,13 +60,5 @@ export function buildHostedPairingUrl(input: {
   readonly token: string;
   readonly label?: string | null;
 }): string {
-  const url = new URL("/pair", configuredHostedAppUrl());
-  url.searchParams.set("host", input.host);
-
-  const label = input.label?.trim();
-  if (label) {
-    url.searchParams.set("label", label);
-  }
-
-  return setPairingTokenOnUrl(url, input.token).toString();
+  return buildSharedHostedPairingUrl({ hostedAppOrigin: configuredHostedAppUrl(), ...input });
 }

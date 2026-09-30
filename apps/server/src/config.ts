@@ -8,6 +8,10 @@
  */
 import path from "node:path";
 import type { ComputerUseBridgeConfig } from "@ryco/contracts";
+import {
+  NodeE2eeAdmissionPolicy,
+  type NodeE2eeAdmissionPolicy as NodeE2eeAdmissionPolicyMode,
+} from "@ryco/contracts/native-e2ee";
 
 import { Effect, FileSystem, Layer, LogLevel, Path, Schema, Context } from "effect";
 import { canonicalizeHubOrigin, normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
@@ -170,6 +174,13 @@ export function resolveHubConnectorConfig(raw: RawHubConnectorConfig): HubConnec
  * function, `effectiveNodeE2eePolicy`.
  */
 export interface NodeE2eePolicyConfig {
+  /**
+   * The closed admission mode, `--hub-e2ee-policy` / `RYCO_HUB_E2EE_POLICY`.
+   * `undefined` when this start configured nothing. The legacy booleans below
+   * remain migration aliases; a proposal where they disagree with the mode is
+   * refused by `resolveNodeE2eePolicyProposal`.
+   */
+  readonly mode?: NodeE2eeAdmissionPolicyMode | undefined;
   /** §12.3, raw. `undefined` when this start configured nothing. */
   readonly requireE2EE: boolean | undefined;
   /** §12.4, raw. Implies effective `requireE2EE`; the implication is applied downstream. */
@@ -178,12 +189,14 @@ export interface NodeE2eePolicyConfig {
 }
 
 export const DEFAULT_NODE_E2EE_POLICY_CONFIG: NodeE2eePolicyConfig = {
+  mode: undefined,
   requireE2EE: undefined,
   requireApprovedClientE2EE: undefined,
   configurationIssue: undefined,
 };
 
 interface RawNodeE2eePolicyConfig {
+  readonly mode?: string | undefined;
   readonly requireE2EE?: string | undefined;
   readonly requireApprovedClientE2EE?: string | undefined;
 }
@@ -212,8 +225,16 @@ const parseTriStateBoolean = (value: string | undefined): boolean | "unset" | un
 export function resolveNodeE2eePolicyConfig(raw: RawNodeE2eePolicyConfig): NodeE2eePolicyConfig {
   const requireE2EE = parseTriStateBoolean(raw.requireE2EE);
   const requireApprovedClientE2EE = parseTriStateBoolean(raw.requireApprovedClientE2EE);
-  const invalid = requireE2EE === undefined || requireApprovedClientE2EE === undefined;
+  const mode =
+    raw.mode === undefined
+      ? undefined
+      : Schema.is(NodeE2eeAdmissionPolicy)(raw.mode)
+        ? raw.mode
+        : null;
+  const invalid =
+    requireE2EE === undefined || requireApprovedClientE2EE === undefined || mode === null;
   return {
+    mode: mode ?? undefined,
     requireE2EE: typeof requireE2EE === "boolean" ? requireE2EE : undefined,
     requireApprovedClientE2EE:
       typeof requireApprovedClientE2EE === "boolean" ? requireApprovedClientE2EE : undefined,
@@ -258,6 +279,8 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly logWebSocketEvents: boolean;
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
+  /** Hold an OS sleep assertion for the life of this process (`--prevent-sleep`). */
+  readonly preventSleep?: boolean;
   readonly hubConnector?: HubConnectorConfig;
   /**
    * Kept beside `hubConnector` rather than inside it: `resolveHubConnectorConfig`

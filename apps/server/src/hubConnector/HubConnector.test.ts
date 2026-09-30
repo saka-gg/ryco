@@ -278,6 +278,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     await connector.start();
     expect(connector.status().state).toBe("disabled");
@@ -304,6 +305,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     const starting = connector.start();
@@ -378,6 +380,7 @@ describe("HubConnector", () => {
       transport: { open: () => socket },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
       onE2eeEnrollmentRevoked: (frame) => {
         revocations.push(frame);
@@ -505,6 +508,7 @@ describe("HubConnector", () => {
       },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
 
@@ -564,6 +568,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     const starting = connector.start();
     await settle();
@@ -633,6 +638,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     const starting = connector.start();
     await settle();
@@ -769,6 +775,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     await connector.start();
@@ -839,6 +846,7 @@ describe("HubConnector", () => {
         }),
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     const starting = connector.start();
     await settle();
@@ -884,6 +892,7 @@ describe("HubConnector", () => {
       transport: { open: () => socket },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     const starting = connector.start();
     await settle();
@@ -913,6 +922,120 @@ describe("HubConnector", () => {
     await connector.stop();
   });
 
+  describe("liveness watch", () => {
+    // Timers run on process uptime, which stops while the machine sleeps, so a
+    // wake shows up only as the wall clock jumping ahead of the timers.
+    function sleepingScheduler() {
+      const clock = scheduler();
+      let slept = 0;
+      return {
+        ...clock,
+        value: { ...clock.value, now: () => clock.value.now() + slept },
+        sleep: (milliseconds: number) => {
+          slept += milliseconds;
+        },
+      };
+    }
+
+    async function onlineConnector(options: { readonly network?: () => string } = {}) {
+      const clock = sleepingScheduler();
+      const sockets: FakeSocket[] = [];
+      const connector = new HubConnector({
+        config: enabledConfig,
+        identity: identity(),
+        transport: {
+          open: () => {
+            const socket = new FakeSocket();
+            sockets.push(socket);
+            return socket;
+          },
+        },
+        channels: { open: async () => Promise.reject(new Error("unused")) },
+        enrollmentMetadata,
+        scheduler: clock.value,
+        networkFingerprint: options.network ?? (() => "192.168.1.2"),
+      });
+      const starting = connector.start();
+      await settle();
+      sockets[0]!.emit("open", {} as Event);
+      sockets[0]!.emit("message", {
+        data: encoded({
+          type: "ready",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          limits: RELAY_INITIAL_LIMITS,
+        }),
+      } as MessageEvent);
+      await starting;
+      return { clock, sockets, connector };
+    }
+
+    const sentFrames = (socket: FakeSocket) =>
+      socket.sent.map((bytes) => decodeRelayFrame(bytes)).flatMap((r) => (r.ok ? [r.value] : []));
+
+    it("proves the socket with a ping after the machine wakes", async () => {
+      const { clock, sockets, connector } = await onlineConnector();
+      clock.sleep(10 * 60_000);
+      await clock.advance(5_000);
+      await settle();
+
+      const ping = sentFrames(sockets[0]!).find((frame) => frame.type === "ping");
+      expect(ping).toBeDefined();
+      if (ping?.type !== "ping") throw new Error("expected a ping");
+      sockets[0]!.emit("message", {
+        data: encoded({ type: "pong", protocolMajor: 1, protocolMinor: 2, nonce: ping.nonce }),
+      } as MessageEvent);
+      await settle();
+      await clock.advance(5_000);
+      await settle();
+
+      expect(connector.status().state).toBe("online");
+      await connector.stop();
+      expect(clock.timers.size).toBe(0);
+    });
+
+    it("reconnects at once when the probe goes unanswered", async () => {
+      const { clock, sockets, connector } = await onlineConnector();
+      clock.sleep(10 * 60_000);
+      await clock.advance(5_000);
+      await settle();
+      await clock.advance(5_000);
+      await settle();
+
+      expect(connector.status()).toMatchObject({
+        state: "degraded",
+        failure: "heartbeat_timeout",
+      });
+      await clock.advance(1_000);
+      await settle();
+      expect(sockets).toHaveLength(2);
+      await connector.stop();
+    });
+
+    it("retries immediately when the network changes while backing off", async () => {
+      let network = "192.168.1.2";
+      const { clock, sockets, connector } = await onlineConnector({ network: () => network });
+      // Grow the backoff: every attempt fails before authenticating.
+      sockets[0]!.emit("close", {} as CloseEvent);
+      await settle();
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await clock.advance(60_000);
+        await settle();
+        sockets.at(-1)!.emit("close", {} as CloseEvent);
+        await settle();
+      }
+      const attemptsBefore = sockets.length;
+      expect(connector.status()).toMatchObject({ state: "degraded", degradedMode: "backing_off" });
+
+      network = "10.0.0.7";
+      await clock.advance(5_000);
+      await settle();
+
+      expect(sockets.length).toBe(attemptsBefore + 1);
+      await connector.stop();
+    });
+  });
+
   it("times out a missing heartbeat and resets backoff only after stability", async () => {
     const clock = scheduler();
     const sockets: FakeSocket[] = [];
@@ -928,6 +1051,7 @@ describe("HubConnector", () => {
       },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     const starting = connector.start();
@@ -1029,6 +1153,7 @@ describe("HubConnector", () => {
       transport: { open: () => socket },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     const starting = connector.start();
     await settle();
@@ -1058,6 +1183,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     const starting = connector.start();
     await settle();
@@ -1102,6 +1228,7 @@ describe("HubConnector", () => {
       transport: { open: () => socket },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     const starting = connector.start();
@@ -1195,6 +1322,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     await connector.start();
@@ -1281,6 +1409,7 @@ describe("HubConnector", () => {
       transport: { open: () => new FakeSocket() },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     await connector.start();
@@ -1330,6 +1459,7 @@ describe("HubConnector", () => {
       transport: { open: () => new FakeSocket() },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
     });
 
     await connector.start();
@@ -1389,6 +1519,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     await connector.start();
@@ -1442,6 +1573,7 @@ describe("HubConnector", () => {
       transport: { open: () => new FakeSocket() },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
     });
 
     await connector.start();
@@ -1479,6 +1611,7 @@ describe("HubConnector", () => {
       transport: { open: () => new FakeSocket() },
       channels: { open: async () => Promise.reject(new Error("unused")) },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     await connector.start();
@@ -1528,6 +1661,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     await connector.start();
@@ -1572,6 +1706,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     await connector.start();
     const enrolling = connector.enroll();
@@ -1609,6 +1744,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: clock.value,
     });
     const socketClose = socket.close.bind(socket);
@@ -1662,6 +1798,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
       scheduler: scheduler().value,
     });
 
@@ -1690,6 +1827,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
     await connector.start();
     const status = await connector.leave();
@@ -1727,6 +1865,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
 
     expect(await connector.identitySummary()).toEqual({ enrolled: "none" });
@@ -1744,6 +1883,7 @@ describe("HubConnector", () => {
         },
       },
       enrollmentMetadata,
+      livenessWatch: false,
     });
 
     expect(await connector.identitySummary()).toEqual({ enrolled: "active", fingerprint });

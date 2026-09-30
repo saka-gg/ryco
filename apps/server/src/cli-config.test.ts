@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { assert, expect, it } from "@effect/vitest";
 import { ConfigProvider, Effect, FileSystem, Layer, Option, Path } from "effect";
 
+import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import { NetService } from "@ryco/shared/Net";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -245,6 +246,150 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  it.effect("reads saved node settings between the environment and defaults", () =>
+    Effect.gen(function* () {
+      const baseDir = join(os.tmpdir(), `ryco-cli-config-node-${process.pid}`);
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.makeDirectory(join(baseDir, "userdata"), { recursive: true });
+      const workspace = join(baseDir, "workspace");
+      yield* fs.writeFileString(
+        join(baseDir, "userdata", "node.json"),
+        JSON.stringify({
+          version: 1,
+          workspace,
+          host: "0.0.0.0",
+          port: 4123,
+          tailscaleServe: true,
+          hub: { enabled: true, nodeName: "Saved node" },
+          preventSleep: true,
+        }),
+      );
+      const resolve = (overrides: Partial<ResolveServerFlags>, env: Record<string, string>) =>
+        resolveServerConfig(
+          {
+            ...makeServerFlags(baseDir, overrides),
+            port: overrides.port ?? Option.none(),
+            host: overrides.host ?? Option.none(),
+          },
+          Option.none(),
+          { useNodeConfig: true },
+        ).pipe(
+          Effect.provide(
+            Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env })), NetService.layer),
+          ),
+        );
+
+      const fromFile = yield* resolve({}, {});
+      expect(fromFile).toMatchObject({
+        cwd: workspace,
+        host: "0.0.0.0",
+        port: 4123,
+        tailscaleServeEnabled: true,
+        preventSleep: true,
+        hubConnector: { enabled: true, nodeName: "Saved node", origin: DEFAULT_HOSTED_APP_ORIGIN },
+      });
+
+      // A flag beats the environment, and the environment beats the file.
+      const overridden = yield* resolve(
+        { port: Option.some(5000) },
+        { RYCO_PORT: "6000", RYCO_HOST: "127.0.0.1", RYCO_HUB_NODE_NAME: "From env" },
+      );
+      expect(overridden).toMatchObject({
+        port: 5000,
+        host: "127.0.0.1",
+        hubConnector: { nodeName: "From env" },
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("refuses an unknown command word instead of creating a folder for it", () =>
+    Effect.gen(function* () {
+      const baseDir = join(os.tmpdir(), `ryco-cli-config-word-${process.pid}`);
+      const word = `notacommand${process.pid}`;
+      const result = yield* resolveServerConfig(
+        makeServerFlags(baseDir, { cwd: Option.some(word) }),
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
+        ),
+        Effect.result,
+      );
+      assert.isTrue(result._tag === "Failure");
+      if (result._tag === "Failure")
+        assert.include(String(result.failure), `Unknown command "${word}"`);
+      const fs = yield* FileSystem.FileSystem;
+      assert.isFalse(yield* fs.exists(join(process.cwd(), word)));
+
+      // An explicit path still creates the folder, as before.
+      const folder = join(baseDir, "new-project");
+      const created = yield* resolveServerConfig(
+        makeServerFlags(baseDir, { cwd: Option.some(folder) }),
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
+        ),
+      );
+      expect(created.cwd).toBe(folder);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("defaults an enabled connector to the hosted Hub origin", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveHubServerConfig(
+        "default-origin",
+        { hubConnectorEnabled: Option.some(true) },
+        {},
+      );
+
+      expect(resolved.hubConnector).toEqual({
+        ...DEFAULT_HUB_CONNECTOR_CONFIG,
+        enabled: true,
+        origin: DEFAULT_HOSTED_APP_ORIGIN,
+      });
+    }),
+  );
+
+  it.effect("resolves the E2EE admission mode from the flag before the environment", () =>
+    Effect.gen(function* () {
+      const fromFlag = yield* resolveHubServerConfig(
+        "e2ee-policy-flag",
+        { hubE2eePolicy: Option.some("require-native-e2ee") },
+        { RYCO_HUB_E2EE_POLICY: "require-e2ee" },
+      );
+      expect(fromFlag.hubE2eePolicy).toMatchObject({
+        mode: "require-native-e2ee",
+        configurationIssue: undefined,
+      });
+
+      const fromEnv = yield* resolveHubServerConfig(
+        "e2ee-policy-env",
+        {},
+        { RYCO_HUB_E2EE_POLICY: "require-e2ee" },
+      );
+      expect(fromEnv.hubE2eePolicy?.mode).toBe("require-e2ee");
+
+      // An unknown mode never becomes a policy: it stays unset, which can only
+      // leave the committed policy as it was, and is reported.
+      const invalid = yield* resolveHubServerConfig(
+        "e2ee-policy-invalid",
+        {},
+        { RYCO_HUB_E2EE_POLICY: "require-everything" },
+      );
+      expect(invalid.hubE2eePolicy).toMatchObject({
+        mode: undefined,
+        configurationIssue: "configuration_invalid",
+      });
+    }),
+  );
+
   it.effect("keeps invalid CLI origins fail-closed and out of resolved configuration", () =>
     Effect.gen(function* () {
       const resolved = yield* resolveHubServerConfig(
@@ -328,6 +473,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
       });
     }),
   );
@@ -395,6 +541,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: true,
         tailscaleServePort: 8443,
+        preventSleep: false,
       });
     }),
   );
@@ -409,6 +556,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
       });
       const derivedPaths = yield* deriveServerPaths(baseDir, new URL("http://127.0.0.1:4173"));
 
@@ -465,6 +613,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: false,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
       });
     }),
   );
@@ -485,6 +634,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
         hubConnectorEnabled: true,
         hubOrigin: "https://bootstrap.example",
         hubNodeName: "Bootstrap node",
@@ -562,6 +712,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
       });
       assert.equal(join(baseDir, "dev"), resolved.stateDir);
     }),
@@ -690,6 +841,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: false,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
         hubConnectorEnabled: false,
         hubOrigin: "https://bootstrap.example",
         hubNodeName: "Bootstrap node",
@@ -775,6 +927,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
       });
     }),
   );
@@ -844,6 +997,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: false,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
       });
     }),
   );
@@ -908,6 +1062,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: false,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        preventSleep: false,
       });
     }),
   );

@@ -476,7 +476,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           ),
         { "rpc.aggregate": "orchestration" },
       ),
-    [ORCHESTRATION_WS_METHODS.subscribeShell]: (_input) =>
+    [ORCHESTRATION_WS_METHODS.subscribeShell]: (input) =>
       observeRpcStreamEffect(
         ORCHESTRATION_WS_METHODS.subscribeShell,
         // Realign worktree rows with disk while the shell loads. Any correction
@@ -497,6 +497,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
                     }),
                 ),
               ),
+              { resumeFromSequence: input.resumeFromSequence },
             ).pipe(
               Stream.tap((item) =>
                 Effect.sync(() =>
@@ -563,6 +564,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               return snapshot;
             }),
             input.threadId,
+            { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
             (stream) => withHistoryRecovery(input.threadId, stream),
             Stream.tap((item) =>
@@ -597,6 +599,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               return snapshot;
             }),
             input.threadId,
+            { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
             (stream) => withHistoryRecovery(input.threadId, stream),
             Stream.tap((item) =>

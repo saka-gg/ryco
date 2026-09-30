@@ -401,6 +401,39 @@ describe("RelayChannelRegistry", () => {
     ).toBe(true);
   });
 
+  it("ignores frames the relay forwarded before it learned a channel ended", async () => {
+    const { registry, sendQueue } = harness();
+    await registry.handle(openFrame(channelA));
+    await registry.handle(openFrame(channelB));
+    await registry.closeChannel(channelA, "slow_consumer");
+    sendQueue.flush();
+
+    // Frames already in flight when the node closed A. Treating them as a
+    // protocol violation used to tear down the whole connection, B included.
+    await expect(
+      registry.handle({
+        type: "data",
+        ...version,
+        channelId: channelA,
+        sequence: 0 as never,
+        payload: Uint8Array.of(1),
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      registry.handle({ type: "flow.pause", ...version, channelId: channelA }),
+    ).resolves.toBeUndefined();
+    await expect(
+      registry.handle({ type: "flow.resume", ...version, channelId: channelA }),
+    ).resolves.toBeUndefined();
+    expect(registry.has(channelB)).toBe(true);
+
+    // A channel that never existed is still a violation.
+    const unknown = `ch_${"C".repeat(22)}` as RelayChannelId;
+    await expect(
+      registry.handle({ type: "flow.pause", ...version, channelId: unknown }),
+    ).rejects.toBeInstanceOf(RelayChannelProtocolError);
+  });
+
   it("hands a session its channel context and a send handle usable outside the RPC path", async () => {
     let connection: RelayConnectionIdentity | undefined;
     const { registry, sendQueue, sent, opens } = harness({ connection: () => connection });

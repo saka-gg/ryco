@@ -1,8 +1,8 @@
-import { Effect, Queue, Scope } from "effect";
+import { Clock, Effect, Queue, Scope, Semaphore } from "effect";
 import type { Layer } from "effect";
 import type { Rpc } from "effect/unstable/rpc";
 import { RelayMessageAssembler } from "@ryco/shared/relayMessageChunks";
-import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { RpcMessage, RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import type { RpcGroup } from "effect/unstable/rpc";
 
 export interface RpcByteSession {
@@ -24,20 +24,45 @@ export interface RpcByteSession {
 }
 
 /**
+ * Why the transport declined a message.
+ *
+ * - `backpressure`: the send path is full right now; a later attempt may pass.
+ * - `too_large`: these bytes can never be carried on this channel.
+ * - `unavailable`: the channel will carry nothing further.
+ */
+export type RpcOutputRefusal = "backpressure" | "too_large" | "unavailable";
+
+/**
  * The transport declined to carry a message.
  *
- * A refusal is a value, not a defect: the layer that owns the channel already
- * reacts to it — by closing the channel, or by reporting it to its caller and
- * leaving the channel usable — so failing the RPC server fiber here would tear
- * down every other in-flight request for a condition the channel has already
- * handled. Genuine sink defects stay defects.
+ * A refusal is a value, not a defect: failing the RPC server fiber here would
+ * tear down every other in-flight request. The session reacts per refusal
+ * instead — it waits out backpressure, fails just the request an oversized
+ * response belongs to, and otherwise reports that output failed so the owner
+ * can end the channel. What it never does is drop a response and carry on:
+ * with acknowledged streams, one lost chunk stalls its subscription forever.
+ * Genuine sink defects stay defects.
  */
 export class RpcOutputRefusedError extends Error {
-  constructor() {
-    super("RPC byte session output was refused.");
+  readonly refusal: RpcOutputRefusal;
+  constructor(refusal: RpcOutputRefusal = "unavailable") {
+    super(`RPC byte session output was refused (${refusal}).`);
     this.name = "RpcOutputRefusedError";
+    this.refusal = refusal;
   }
 }
+
+/**
+ * Why the session gave up on output, reported once to the owner:
+ * `stalled` when backpressure outlasted the stall timeout, `lost` when a
+ * response could not be delivered at all.
+ */
+export type RpcOutputFailure = "stalled" | "lost";
+
+/** How long output may sit behind backpressure before the channel is declared stalled. */
+export const DEFAULT_RPC_OUTPUT_STALL_TIMEOUT_MS = 30_000;
+const OUTPUT_RETRY_INITIAL_DELAY_MS = 5;
+const OUTPUT_RETRY_MAX_DELAY_MS = 100;
 
 /**
  * What an inbound, reassembled, prelude-stripped payload becomes.
@@ -112,6 +137,15 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
   options: {
     readonly queueCapacity?: number;
     readonly interceptor?: RpcInboundInterceptor;
+    /** See `DEFAULT_RPC_OUTPUT_STALL_TIMEOUT_MS`. */
+    readonly outputStallTimeoutMs?: number;
+    /**
+     * Told, once, that a response could not be delivered and the session can no
+     * longer keep this channel coherent. The owner is expected to end the
+     * channel so the client reconnects with fresh state. Nothing further is
+     * sent after this fires.
+     */
+    readonly onOutputFailure?: (failure: RpcOutputFailure) => void;
     /**
      * Told that the interceptor refused a payload and this channel is finished.
      *
@@ -145,9 +179,66 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
     const clients = new Set<number>([0]);
     let queuedBytes = 0;
     let rejected = false;
+    const outputStallTimeoutMs =
+      options.outputStallTimeoutMs ?? DEFAULT_RPC_OUTPUT_STALL_TIMEOUT_MS;
+    // One response at a time, in order: a response waiting out backpressure
+    // holds its place, exactly as it would on a socket, instead of letting later
+    // responses overtake it.
+    const outputLock = yield* Semaphore.make(1);
+    let outputFailed = false;
+    const failOutput = (failure: RpcOutputFailure) =>
+      Effect.sync(() => {
+        if (outputFailed) return;
+        outputFailed = true;
+        try {
+          options.onOutputFailure?.(failure);
+        } catch {
+          // Contained: the owner's reaction must not kill the RPC server fiber.
+        }
+      });
+    const encodeResponse = (response: unknown): Uint8Array | undefined => {
+      const encoded = parser.encode(response);
+      if (encoded === undefined) return undefined;
+      return typeof encoded === "string" ? encoder.encode(encoded) : Uint8Array.from(encoded);
+    };
+    /**
+     * Hands bytes to the sink, waiting out backpressure. Resolves `undefined`
+     * once accepted, otherwise the refusal that ended the attempt — with
+     * `stalled` standing for backpressure that outlasted the timeout.
+     */
+    const deliver = (bytes: Uint8Array) =>
+      Effect.gen(function* () {
+        const startedAt = yield* Clock.currentTimeMillis;
+        let delayMs = OUTPUT_RETRY_INITIAL_DELAY_MS;
+        while (true) {
+          const refusal = yield* sink(bytes).pipe(
+            Effect.as(undefined),
+            Effect.catch((error: RpcOutputRefusedError) => Effect.succeed(error.refusal)),
+          );
+          if (refusal !== "backpressure") return refusal;
+          if (outputFailed) return "unavailable" as const;
+          const elapsed = (yield* Clock.currentTimeMillis) - startedAt;
+          if (elapsed >= outputStallTimeoutMs) return "stalled" as const;
+          yield* Effect.sleep(Math.min(delayMs, outputStallTimeoutMs - elapsed));
+          delayMs = Math.min(delayMs * 2, OUTPUT_RETRY_MAX_DELAY_MS);
+        }
+      });
+    // Interrupts are handed to the server from their own fiber: the response
+    // that needs one is being sent BY the request fiber it interrupts, and a
+    // fiber cannot wait for its own interruption.
+    const interrupts = yield* Queue.unbounded<RpcMessage.RequestId>();
 
     const protocol = yield* RpcServer.Protocol.make((writeRequest) =>
       Effect.gen(function* () {
+        yield* Effect.forkScoped(
+          Effect.forever(
+            Queue.take(interrupts).pipe(
+              Effect.flatMap((requestId) =>
+                writeRequest(0, { _tag: "Interrupt", requestId } as never),
+              ),
+            ),
+          ),
+        );
         yield* Effect.forkScoped(
           Effect.forever(
             Queue.take(incoming).pipe(
@@ -200,15 +291,35 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
         return {
           disconnects,
           send: (_clientId, response) =>
-            Effect.sync(() => parser.encode(response)).pipe(
-              Effect.flatMap((encoded) => {
-                if (encoded === undefined) return Effect.void;
-                const bytes =
-                  typeof encoded === "string" ? encoder.encode(encoded) : Uint8Array.from(encoded);
-                // A refusal drops this response and leaves the fiber running:
-                // the channel layer decides whether a refusal is fatal, and
-                // dying here would take every other in-flight request with it.
-                return sink(bytes).pipe(Effect.catch(() => Effect.void));
+            outputLock.withPermits(1)(
+              Effect.gen(function* () {
+                if (outputFailed) return;
+                const bytes = encodeResponse(response);
+                if (bytes === undefined) return;
+                const outcome = yield* deliver(bytes);
+                if (outcome === undefined) return;
+                if (
+                  outcome === "too_large" &&
+                  (response._tag === "Chunk" || response._tag === "Exit")
+                ) {
+                  // Only this request is lost. Fail it for the client, and stop a
+                  // stream on the server — it would otherwise wait forever for
+                  // the acknowledgement of a chunk that was never sent.
+                  const requestId = RpcMessage.RequestId(response.requestId);
+                  if (response._tag === "Chunk") yield* Queue.offer(interrupts, requestId);
+                  const replacement = encodeResponse(
+                    RpcMessage.ResponseExitDieEncoded({
+                      requestId,
+                      defect: new Error(
+                        "The response exceeded the largest message this connection can carry.",
+                      ),
+                    }),
+                  );
+                  if (replacement !== undefined && (yield* deliver(replacement)) === undefined) {
+                    return;
+                  }
+                }
+                yield* failOutput(outcome === "stalled" ? "stalled" : "lost");
               }),
             ),
           end: () => Effect.void,

@@ -1010,12 +1010,41 @@ export const OrchestrationShellStreamItem = Schema.Union([
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationShellSnapshot,
   }),
+  /**
+   * The server accepted `resumeFromSequence`: instead of a snapshot, the events
+   * after `fromSequence` follow, and the client keeps the shell it already has.
+   * Only ever sent to a client that asked to resume.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("resumed"),
+    fromSequence: NonNegativeInt,
+  }),
   OrchestrationShellStreamEvent,
 ]);
 export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.Type;
 
+export const OrchestrationSubscribeShellInput = Schema.Struct({
+  /**
+   * The last shell sequence the client applied. A server that still holds every
+   * event since then answers `resumed` and replays only those, sparing a full
+   * snapshot on every reconnect; otherwise it sends a snapshot as usual. Older
+   * servers ignore the field.
+   */
+  resumeFromSequence: Schema.optional(NonNegativeInt),
+});
+export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShellInput.Type;
+
+/**
+ * The last orchestration sequence the client applied for this thread. A server
+ * that still holds every event since then answers `resumed` and replays only
+ * the thread's missed events; otherwise it sends a snapshot. Older servers
+ * ignore the field.
+ */
+const ThreadResumeFromSequence = Schema.optional(NonNegativeInt);
+
 export const OrchestrationSubscribeThreadInput = Schema.Struct({
   threadId: ThreadId,
+  resumeFromSequence: ThreadResumeFromSequence,
 });
 export type OrchestrationSubscribeThreadInput = typeof OrchestrationSubscribeThreadInput.Type;
 
@@ -1066,6 +1095,14 @@ export const OrchestrationGetThreadWindowInput = Schema.Struct({
   limits: OrchestrationThreadHistoryLimits,
 });
 export type OrchestrationGetThreadWindowInput = typeof OrchestrationGetThreadWindowInput.Type;
+
+export const OrchestrationSubscribeThreadWindowInput = Schema.Struct({
+  threadId: ThreadId,
+  limits: OrchestrationThreadHistoryLimits,
+  resumeFromSequence: ThreadResumeFromSequence,
+});
+export type OrchestrationSubscribeThreadWindowInput =
+  typeof OrchestrationSubscribeThreadWindowInput.Type;
 
 export const OrchestrationThreadWindowSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
@@ -2523,6 +2560,15 @@ export const OrchestrationThreadStreamItem = Schema.Union([
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationThreadDetailSnapshot,
   }),
+  /**
+   * The server accepted `resumeFromSequence`: no snapshot follows, only the
+   * thread's events after `fromSequence`, applied on top of what the client
+   * already holds. Only ever sent to a client that asked to resume.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("resumed"),
+    fromSequence: NonNegativeInt,
+  }),
   Schema.Struct({
     kind: Schema.Literal("event"),
     event: OrchestrationEvent,
@@ -2534,6 +2580,15 @@ export const OrchestrationThreadWindowStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationThreadWindowSnapshot,
+  }),
+  /**
+   * The server accepted `resumeFromSequence`: no snapshot follows, only the
+   * thread's events after `fromSequence`, applied on top of what the client
+   * already holds. Only ever sent to a client that asked to resume.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("resumed"),
+    fromSequence: NonNegativeInt,
   }),
   Schema.Struct({
     kind: Schema.Literal("event"),
@@ -2868,11 +2923,11 @@ export const OrchestrationRpcSchemas = {
     output: OrchestrationThreadStreamItem,
   },
   subscribeThreadWindow: {
-    input: OrchestrationGetThreadWindowInput,
+    input: OrchestrationSubscribeThreadWindowInput,
     output: OrchestrationThreadWindowStreamItem,
   },
   subscribeShell: {
-    input: Schema.Struct({}),
+    input: OrchestrationSubscribeShellInput,
     output: OrchestrationShellStreamItem,
   },
 } as const;

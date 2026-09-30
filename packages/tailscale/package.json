@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts"
+    },
+    "./endpoints": {
+      "types": "./src/endpoints.ts",
+      "import": "./src/endpoints.ts"
     }
   },
   "scripts": {
@@ -15,6 +19,8 @@
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
+    "@ryco/contracts": "workspace:*",
+    "@ryco/shared": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Deferred, Effect, Schema } from "effect";
+import { Deferred, Effect, Exit, Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
 import {
   prepareRelayMessage,
@@ -133,28 +133,124 @@ describe("RpcByteSession", () => {
     ),
   );
 
-  it.effect("drops a refused response instead of failing the session", () =>
+  // Live clock: the session sleeps between backpressure retries.
+  it.live("waits out backpressure instead of dropping a response", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const delivered = yield* Deferred.make<Uint8Array>();
         let refusals = 0;
-        const session = yield* makeRpcByteSession(TestGroup, echoHandlers, (bytes) =>
-          Effect.suspend(() => {
-            if (refusals === 0) {
-              refusals += 1;
-              return Effect.fail(new RpcOutputRefusedError());
-            }
-            return Deferred.succeed(delivered, Uint8Array.from(bytes)).pipe(Effect.asVoid);
-          }),
+        const failures: string[] = [];
+        const session = yield* makeRpcByteSession(
+          TestGroup,
+          echoHandlers,
+          (bytes) =>
+            Effect.suspend(() => {
+              if (refusals < 3) {
+                refusals += 1;
+                return Effect.fail(new RpcOutputRefusedError("backpressure"));
+              }
+              return Deferred.succeed(delivered, Uint8Array.from(bytes)).pipe(Effect.asVoid);
+            }),
+          { onOutputFailure: (failure) => failures.push(failure) },
         );
 
         expect(yield* session.receive(request("1", "first"))).toBe(true);
-        expect(yield* session.receive(request("2", "second"))).toBe(true);
-        // A refusal used to be a defect, which took the RPC server fiber and
-        // every other request on the channel with it.
+        // Dropping the refused response used to leave its request waiting
+        // forever; the session now retries it until the send path admits it.
         const response = new TextDecoder().decode(yield* Deferred.await(delivered));
-        expect(response).toContain('"requestId":"2"');
-        expect(refusals).toBe(1);
+        expect(response).toContain('"requestId":"1"');
+        expect(refusals).toBe(3);
+        expect(failures).toEqual([]);
+      }),
+    ),
+  );
+
+  it.live("fails only the request whose response is too large to carry", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sent: string[] = [];
+        const second = yield* Deferred.make<void>();
+        const failures: string[] = [];
+        const session = yield* makeRpcByteSession(
+          TestGroup,
+          echoHandlers,
+          (bytes) =>
+            Effect.suspend(() => {
+              const text = new TextDecoder().decode(bytes);
+              if (text.includes("oversized")) {
+                return Effect.fail(new RpcOutputRefusedError("too_large"));
+              }
+              sent.push(text);
+              return text.includes('"requestId":"2"')
+                ? Deferred.succeed(second, undefined).pipe(Effect.asVoid)
+                : Effect.void;
+            }),
+          { onOutputFailure: (failure) => failures.push(failure) },
+        );
+
+        expect(yield* session.receive(request("1", "oversized"))).toBe(true);
+        expect(yield* session.receive(request("2", "small"))).toBe(true);
+        yield* Deferred.await(second);
+
+        // The client learns request 1 failed instead of waiting on it forever,
+        // and the channel keeps serving everything else.
+        const first = sent.find((text) => text.includes('"requestId":"1"'));
+        expect(first).toContain('"_tag":"Exit"');
+        expect(first).toContain('"_tag":"Die"');
+        expect(failures).toEqual([]);
+      }),
+    ),
+  );
+
+  it.live("reports a response it could not deliver and sends nothing after it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const failures: string[] = [];
+        let attempts = 0;
+        const reported = yield* Deferred.make<void>();
+        const session = yield* makeRpcByteSession(
+          TestGroup,
+          echoHandlers,
+          () =>
+            Effect.suspend(() => {
+              attempts += 1;
+              return Effect.fail(new RpcOutputRefusedError("unavailable"));
+            }),
+          {
+            onOutputFailure: (failure) => {
+              failures.push(failure);
+              Deferred.doneUnsafe(reported, Exit.void);
+            },
+          },
+        );
+
+        expect(yield* session.receive(request("1", "first"))).toBe(true);
+        yield* Deferred.await(reported);
+        expect(yield* session.receive(request("2", "second"))).toBe(true);
+        yield* Effect.sleep(20);
+
+        expect(failures).toEqual(["lost"]);
+        expect(attempts).toBe(1);
+      }),
+    ),
+  );
+
+  it.live("declares output stalled when backpressure outlasts the timeout", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const reported = yield* Deferred.make<string>();
+        const session = yield* makeRpcByteSession(
+          TestGroup,
+          echoHandlers,
+          () => Effect.fail(new RpcOutputRefusedError("backpressure")),
+          {
+            outputStallTimeoutMs: 40,
+            onOutputFailure: (failure) => Deferred.doneUnsafe(reported, Exit.succeed(failure)),
+          },
+        );
+
+        expect(yield* session.receive(request("1", "first"))).toBe(true);
+        expect(yield* Deferred.await(reported)).toBe("stalled");
       }),
     ),
   );

@@ -25,6 +25,7 @@ import {
   createDeviceFrameSource,
   type ReleaseThreadDetailSubscription,
   SavedEnvironmentConnectionCancelledError,
+  SavedEnvironmentCredentialError,
 } from "@ryco/client-runtime/connection";
 export {
   classifyProjectionSnapshot,
@@ -716,6 +717,14 @@ export function applyEnvironmentThreadDetailEvent(
 function createEnvironmentConnectionHandlers(
   hostedGeneration: number | null = null,
   initialRefreshEnvironmentId?: EnvironmentId,
+  options: {
+    /**
+     * Resume the shell after a reconnect instead of taking a fresh snapshot.
+     * Direct connections only: a hosted session must accept a current snapshot
+     * before it regains mutation authority.
+     */
+    readonly resumeShell?: boolean;
+  } = {},
 ) {
   const acceptsEvent = () =>
     hostedGeneration === null || useHostedHubStore.getState().generation === hostedGeneration;
@@ -741,7 +750,17 @@ function createEnvironmentConnectionHandlers(
       .ready(environmentId, refreshGeneration, isAuthoritativelyReady)
       .catch(() => undefined);
   };
+  const resumeShell = options.resumeShell === true && hostedGeneration === null;
   return {
+    ...(resumeShell
+      ? {
+          readShellResumeSequence: (environmentId: EnvironmentId) =>
+            getEnvironmentSupervisor().readShellProjectionSequence(environmentId),
+          onShellResumed: (environmentId: EnvironmentId) => {
+            completeQueryRefresh(environmentId);
+          },
+        }
+      : {}),
     onResubscribe: (environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
       beginQueryRefresh(environmentId);
@@ -862,8 +881,15 @@ async function resolveSavedEnvironmentSocketUrl(
   bearerToken: string,
   pathname: "/ws" | "/ws/device" | "/ws/device-frames",
 ): Promise<string> {
-  const record = getSavedEnvironmentRecord(environmentId);
-  if (!record) throw new Error(`Saved environment ${environmentId} not found.`);
+  const saved = getSavedEnvironmentRecord(environmentId);
+  if (!saved) throw new Error(`Saved environment ${environmentId} not found.`);
+  // An SSH tunnel does not survive sleep or a dropped network, and nothing
+  // restarts it on its own. Ensuring it here — a quick readiness check when it
+  // is healthy — lets every reconnect attempt rebuild a dead tunnel, relaunch
+  // the remote server if needed, and follow a new local port.
+  const record = saved.desktopSsh
+    ? (await prepareSavedEnvironmentRecordForConnection(saved)).record
+    : saved;
   const rawUrl = record.desktopSsh
     ? await resolveDesktopSshWebSocketConnectionUrl(
         record.wsBaseUrl,
@@ -890,6 +916,10 @@ function createSavedEnvironmentClient(
     new WsTransport(() => resolveSavedEnvironmentSocketUrl(environmentId, bearerToken, "/ws"), {
       getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
       getEnvironmentId: () => environmentId,
+      // A remote machine can be asleep or offline for hours; keep trying on a
+      // capped backoff, and keep its status out of the primary's.
+      persistentReconnect: true,
+      recordGlobalConnectionState: false,
       getVersionMismatchHint: () =>
         resolveServerConfigVersionMismatch(
           useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
@@ -1010,6 +1040,7 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
       ...createEnvironmentConnectionHandlers(
         hostedGeneration,
         hostedGeneration !== null ? knownEnvironment.environmentId : undefined,
+        { resumeShell: hostedGeneration === null },
       ),
     }),
   );
@@ -1139,7 +1170,9 @@ async function connectSavedEnvironment(
           lastError: "Saved environment is missing its saved credential. Pair it again.",
           lastErrorAt: isoNow(),
         });
-        throw new Error("Saved environment is missing its saved credential.");
+        throw new SavedEnvironmentCredentialError(
+          "Saved environment is missing its saved credential.",
+        );
       }
     }
     const prepared = await prepareSavedEnvironmentRecordForConnection(activeRecord);
@@ -1184,7 +1217,7 @@ async function connectSavedEnvironment(
           descriptor: payload.environment,
         });
       },
-      ...createEnvironmentConnectionHandlers(),
+      ...createEnvironmentConnectionHandlers(null, undefined, { resumeShell: true }),
     });
 
     try {
@@ -1211,9 +1244,10 @@ async function connectSavedEnvironment(
         }
         if (!activeRecord.desktopSsh) {
           await removeSavedEnvironmentBearerToken(activeRecord.environmentId);
-          throw new Error("Saved environment credential expired. Pair it again.", {
-            cause: error,
-          });
+          throw new SavedEnvironmentCredentialError(
+            "Saved environment credential expired. Pair it again.",
+            { cause: error },
+          );
         }
 
         const issued = await issueDesktopSshBearerSession(activeRecord);
@@ -1267,11 +1301,25 @@ function subscribeBrowserResumeReconnects(listener: (reason: string) => void): (
     }
   };
 
+  // A network change — Wi-Fi to Ethernet, joining a VPN, waking on a new
+  // network — leaves sockets that look open but are dead.
+  const handleOnline = () => {
+    listener("online");
+  };
+
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("pageshow", handlePageShow);
+  window.addEventListener("online", handleOnline);
+  // Desktop windows usually stay visible through a sleep, so they hear about
+  // the wake from the main process instead.
+  const unsubscribeSystemResume = window.desktopBridge?.onSystemResume?.(() => {
+    listener("system-resume");
+  });
   return () => {
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     window.removeEventListener("pageshow", handlePageShow);
+    window.removeEventListener("online", handleOnline);
+    unsubscribeSystemResume?.();
   };
 }
 

@@ -312,6 +312,22 @@ describe("Hub node proof client", () => {
         failure: "authentication_failed",
       },
       {
+        name: "forbidden",
+        fetch: async () => Response.json({ error: "FORBIDDEN-CANARY" }, { status: 403 }),
+        failure: "authentication_failed",
+      },
+      {
+        // A proxy that has not picked up the Hub's routes yet mid-deploy.
+        name: "proxy missing route",
+        fetch: async () => new Response("PROXY-CANARY", { status: 404 }),
+        failure: "network",
+      },
+      {
+        name: "proxy timeout",
+        fetch: async () => new Response("PROXY-CANARY", { status: 408 }),
+        failure: "network",
+      },
+      {
         name: "invalid success",
         fetch: async () => Response.json({ challenge: "SUCCESS-CANARY" }, { status: 201 }),
         failure: "protocol_invalid",

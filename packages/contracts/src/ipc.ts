@@ -784,6 +784,8 @@ export interface DesktopBridge {
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
+  /** The machine woke from sleep or the screen was unlocked; live sockets may be dead. */
+  onSystemResume?: (listener: () => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;

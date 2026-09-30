@@ -5661,9 +5661,177 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(
-        result.map((item) => (item.kind === "snapshot" ? "snapshot" : item.sequence)),
+        result.map((item) =>
+          item.kind === "snapshot" || item.kind === "resumed" ? item.kind : item.sequence,
+        ),
         ["snapshot", 11, 12],
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  const makeShellDeletedEvent = (sequence: number, threadId: ThreadId) =>
+    ({
+      sequence,
+      eventId: EventId.make(`event-shell-resume-${sequence}`),
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt: "2026-04-05T00:00:00.000Z",
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.deleted",
+      payload: { threadId, deletedAt: "2026-04-05T00:00:00.000Z" },
+    }) satisfies Extract<OrchestrationEvent, { type: "thread.deleted" }>;
+
+  const makeResumeActivityEvent = (sequence: number, threadId: ThreadId) =>
+    ({
+      sequence,
+      eventId: EventId.make(`event-thread-resume-${sequence}`),
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt: "2026-04-05T00:00:00.000Z",
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.activity-appended",
+      payload: {
+        threadId,
+        activity: {
+          id: EventId.make(`activity-thread-resume-${sequence}`),
+          tone: "info",
+          kind: "resume.test",
+          summary: `resume event ${sequence}`,
+          payload: {},
+          turnId: null,
+          sequence,
+          createdAt: "2026-04-05T00:00:00.000Z",
+        },
+      },
+    }) satisfies Extract<OrchestrationEvent, { type: "thread.activity-appended" }>;
+
+  const buildShellResumeApp = (
+    storedSequences: ReadonlyArray<number>,
+    makeEvent: (sequence: number, threadId: ThreadId) => OrchestrationEvent = makeShellDeletedEvent,
+  ) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-shell-resume");
+      const stored = storedSequences.map((sequence) => makeEvent(sequence, threadId));
+      const livePubSub = yield* PubSub.unbounded<OrchestrationEvent>();
+      let snapshotLoads = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            readEventsPage: (fromSequenceExclusive, limit) => {
+              const after = stored.filter((event) => event.sequence > fromSequenceExclusive);
+              const events = after.slice(0, limit);
+              return Effect.succeed({
+                events,
+                nextSequence: events.at(-1)?.sequence ?? fromSequenceExclusive,
+                hasMore: after.length > limit,
+              });
+            },
+            subscribeDomainEvents: PubSub.subscribe(livePubSub),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.sync(() => {
+                snapshotLoads += 1;
+                return {
+                  snapshotSequence: storedSequences.at(-1) ?? 0,
+                  projects: [],
+                  threads: [],
+                  updatedAt: "2026-04-05T00:00:00.000Z",
+                };
+              }),
+          },
+        },
+      });
+      return { snapshotLoads: () => snapshotLoads };
+    });
+
+  it.effect("resumes a shell subscription from the client's last sequence", () =>
+    Effect.gen(function* () {
+      const app = yield* buildShellResumeApp([9, 10, 11, 12]);
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 10 }).pipe(
+            Stream.take(3),
+            Stream.runCollect,
+            Effect.map((items) => Array.from(items)),
+          ),
+        ),
+      );
+
+      assert.deepEqual(result[0], { kind: "resumed", fromSequence: 10 });
+      assert.deepEqual(
+        result.slice(1).map((item) => ("sequence" in item ? item.sequence : item.kind)),
+        [11, 12],
+      );
+      assert.equal(app.snapshotLoads(), 0);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("resumes a thread subscription with only that thread's missed events", () =>
+    Effect.gen(function* () {
+      yield* buildShellResumeApp([9, 10, 11, 12], makeResumeActivityEvent);
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: ThreadId.make("thread-shell-resume"),
+            resumeFromSequence: 10,
+          }).pipe(
+            Stream.take(3),
+            Stream.runCollect,
+            Effect.map((items) => Array.from(items)),
+          ),
+        ),
+      );
+
+      assert.deepEqual(
+        result.map((item) => (item.kind === "event" ? item.event.sequence : item.kind)),
+        ["resumed", 11, 12],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("sends a snapshot when the resume cursor is not in this event log", () =>
+    Effect.gen(function* () {
+      // The client's cursor 10 predates a reset: this log starts at 20.
+      yield* buildShellResumeApp([20, 21]);
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const first = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 10 }).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.map((items) => Array.from(items)[0]),
+          ),
+        ),
+      );
+
+      assert.equal(first?.kind, "snapshot");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("sends a snapshot when more than a replay page was missed", () =>
+    Effect.gen(function* () {
+      yield* buildShellResumeApp(Array.from({ length: 1_002 }, (_, index) => index + 1));
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const first = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 1 }).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.map((items) => Array.from(items)[0]),
+          ),
+        ),
+      );
+
+      assert.equal(first?.kind, "snapshot");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -5750,7 +5918,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.deepEqual(replayPageCursors, [10, 11]);
       assert.deepEqual(
-        result.map((item) => (item.kind === "snapshot" ? "snapshot" : item.sequence)),
+        result.map((item) =>
+          item.kind === "snapshot" || item.kind === "resumed" ? item.kind : item.sequence,
+        ),
         ["snapshot", 11, 12],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -5835,7 +6005,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(
-        result.map((item) => (item.kind === "snapshot" ? "snapshot" : item.event.sequence)),
+        result.map((item) => (item.kind === "event" ? item.event.sequence : item.kind)),
         ["snapshot", 11, 12],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -5907,7 +6077,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
             Stream.tap((item) => {
-              const next = item.kind === "snapshot" ? 11 : item.event.sequence + 1;
+              const next = item.kind === "event" ? item.event.sequence + 1 : 11;
               return next <= 22 ? PubSub.publish(livePubSub, makeActivityEvent(next)) : Effect.void;
             }),
             Stream.take(13),
@@ -5918,7 +6088,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(
-        result.map((item) => (item.kind === "snapshot" ? "snapshot" : item.event.sequence)),
+        result.map((item) => (item.kind === "event" ? item.event.sequence : item.kind)),
         ["snapshot", ...Array.from({ length: 12 }, (_, index) => index + 11)],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),

@@ -115,4 +115,25 @@ describe("resolveServerAdvertisedEndpoints", () => {
       },
     ]);
   });
+
+  it("treats an unset host as bound to all interfaces", () => {
+    expect(
+      resolveServerAdvertisedEndpoints({
+        host: undefined,
+        port: 3773,
+        networkInterfaces: {
+          en0: [
+            {
+              address: "192.168.1.44",
+              family: "IPv4",
+              internal: false,
+              netmask: "255.255.255.0",
+              cidr: "192.168.1.44/24",
+              mac: "00:00:00:00:00:00",
+            },
+          ],
+        },
+      }).map((endpoint) => endpoint.httpBaseUrl),
+    ).toEqual(["http://127.0.0.1:3773/", "http://192.168.1.44:3773/"]);
+  });
 });

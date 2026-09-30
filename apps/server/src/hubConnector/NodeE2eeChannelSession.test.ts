@@ -119,7 +119,7 @@ describe("NodeE2eeChannelSession", () => {
 
     // The node's own response goes out as an envelope, not as plaintext.
     const before = node.dataPayloads().length;
-    expect(await node.session().emit(utf8('{"_tag":"Pong"}'))).toBe(true);
+    expect(await node.session().emit(utf8('{"_tag":"Pong"}'))).toBe("sent");
     node.flush();
     const emitted = node.dataPayloads().slice(before);
     expect(emitted).toHaveLength(1);
@@ -367,7 +367,7 @@ describe("NodeE2eeChannelSession", () => {
     // Row N3 has been taken and session keys exist, but §8.9's finish has not
     // authenticated: the node may emit no application RPC and invoke no handler.
     expect(node.deliveredToParser).toHaveLength(0);
-    expect(await node.session().emit(utf8('{"_tag":"Pong"}'))).toBe(false);
+    expect(await node.session().emit(utf8('{"_tag":"Pong"}'))).toBe("unavailable");
     node.flush();
     expect(node.dataPayloads()).toHaveLength(2); // the carrier and the accept
   });
@@ -403,7 +403,7 @@ describe("NodeE2eeChannelSession", () => {
     await clientSend(node, client, E2EE_INNER_TYPE_RPC, utf8('{"_tag":"Ping"}'));
 
     const session = node.session();
-    expect(await session.emit(utf8("first"))).toBe(true);
+    expect(await session.emit(utf8("first"))).toBe("sent");
     node.flush();
     const afterFirst = node.dataPayloads().length;
     // Authenticated, so the client's §9.2 expectation is exactly one past it.
@@ -413,7 +413,7 @@ describe("NodeE2eeChannelSession", () => {
     // else about the channel changes.
     const dataCapacity = limits.maxQueuedBytes - limits.maxControlFrameBytes;
     expect(node.sendQueue.reserveData(CHANNEL_ID, dataCapacity)).toBe(true);
-    expect(await session.emit(utf8("refused"))).toBe(false);
+    expect(await session.emit(utf8("refused"))).toBe("backpressure");
     node.flush();
 
     // THE CARRY-FORWARD (§9.3, §11.4): no wire record of any kind, and the
@@ -422,7 +422,7 @@ describe("NodeE2eeChannelSession", () => {
     expect(session.mode()).toBe("e2ee");
 
     node.sendQueue.releaseReservation(CHANNEL_ID, dataCapacity);
-    expect(await session.emit(utf8("second"))).toBe(true);
+    expect(await session.emit(utf8("second"))).toBe("sent");
     node.flush();
     const emitted = node.dataPayloads().slice(afterFirst);
     expect(emitted).toHaveLength(1);
@@ -556,7 +556,7 @@ describe("NodeE2eeChannelSession", () => {
     const before = node.dataPayloads().length;
     const sending = session.emit(utf8('{"_tag":"Pong"}'));
     const closing = session.beginClose();
-    expect(await sending).toBe(true);
+    expect(await sending).toBe("sent");
     await settle();
     node.flush();
 
@@ -683,7 +683,7 @@ describe("NodeE2eeChannelSession", () => {
         expectedRecv: positionOf(client.record.receiveState),
       }),
     );
-    expect(await sending).toBe(true);
+    expect(await sending).toBe("sent");
     await settle();
     node.flush();
 
@@ -725,7 +725,7 @@ describe("NodeE2eeChannelSession", () => {
     // The section a send waits for is exactly the window in which the channel can
     // end: §9.5's erasure is synchronous on every terminal path, and the record
     // session asserts on an erased session before its own funnel can answer. The
-    // send path answers it instead — `emit` is owed the `false` its contract
+    // send path answers it instead — `emit` is owed the refusal its contract
     // promises, and the same section carries `beginClose`, where a throw would
     // escape into `NodeE2eeRelayChannel.close`.
     const node = await harness();
@@ -737,7 +737,7 @@ describe("NodeE2eeChannelSession", () => {
     const before = node.dataPayloads().length;
     const sending = session.emit(utf8('{"_tag":"Pong"}'));
     session.dispose();
-    expect(await sending).toBe(false);
+    expect(await sending).toBe("unavailable");
     node.flush();
     // §11.4: no pair was consumed and no wire record of any kind was produced.
     expect(node.dataPayloads()).toHaveLength(before);
@@ -771,7 +771,7 @@ describe("NodeE2eeChannelSession", () => {
     // unbounded microtask chain and never resolve this — starving every channel
     // on the connection, not just this one.
     await delivering;
-    expect(await sending).toBe(false);
+    expect(await sending).toBe("unavailable");
     node.flush();
 
     // §9.6, §10.4: no wire record of any kind for the close, and the channel's
@@ -1191,7 +1191,7 @@ describe("NodeE2eeChannelSession", () => {
     const session = node.session();
     const before = node.dataPayloads().length;
     // §11.4: a sender-local refusal, and never a channel-fatal one.
-    expect(await session.emit(utf8('{"_tag":"Pong"}'))).toBe(false);
+    expect(await session.emit(utf8('{"_tag":"Pong"}'))).toBe("unavailable");
     await settle();
     node.flush();
 
@@ -1204,7 +1204,7 @@ describe("NodeE2eeChannelSession", () => {
     expect(node.closeReasons()).toEqual([]);
     // §10.2: the application phase is over from this endpoint's first
     // close-machine record, so a further `emit` protects nothing at all.
-    expect(await session.emit(utf8('{"_tag":"Pong"}'))).toBe(false);
+    expect(await session.emit(utf8('{"_tag":"Pong"}'))).toBe("unavailable");
     node.flush();
     expect(node.dataPayloads().slice(before)).toHaveLength(1);
   });
@@ -1381,7 +1381,7 @@ describe("NodeE2eeChannelSession", () => {
     const sending = session.emit(utf8('{"_tag":"Pong"}'));
     // Row N11 / §11.3 Q6, raised while the application record is still in flight.
     await node.deliver(utf8('{"_tag":"Ping"}'));
-    expect(await sending).toBe(true);
+    expect(await sending).toBe("sent");
     node.flush();
 
     const emitted = node.dataPayloads().slice(before);

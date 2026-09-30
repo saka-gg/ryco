@@ -32,6 +32,13 @@ const MAX_CACHED_THREAD_DETAIL_ESTIMATED_BYTES = 12 * 1024 * 1024;
 const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
 const SAVED_ENVIRONMENT_STARTUP_DELAY_MS = 2500;
 const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
+/**
+ * A saved environment that could not be reached — the remote machine asleep,
+ * offline, or not started yet — is tried again on this doubling schedule until
+ * it connects, instead of staying disconnected until the app restarts.
+ */
+const SAVED_ENVIRONMENT_RETRY_BASE_MS = 5_000;
+const SAVED_ENVIRONMENT_RETRY_MAX_MS = 60_000;
 
 export interface EnvironmentSupervisorThrottle {
   readonly maybeExecute: () => void;
@@ -95,6 +102,22 @@ export class SavedEnvironmentConnectionCancelledError extends Error {
   }
 }
 
+/**
+ * The saved credential is missing or no longer accepted. Retrying cannot help;
+ * the user has to pair the environment again, so the supervisor does not retry.
+ */
+export class SavedEnvironmentCredentialError extends Error {
+  constructor(message: string, options?: { readonly cause?: unknown }) {
+    super(message, options);
+    this.name = "SavedEnvironmentCredentialError";
+  }
+}
+
+export function savedEnvironmentRetryDelayMs(failedAttempts: number): number {
+  const exponent = Math.max(0, Math.min(failedAttempts - 1, 8));
+  return Math.min(SAVED_ENVIRONMENT_RETRY_BASE_MS * 2 ** exponent, SAVED_ENVIRONMENT_RETRY_MAX_MS);
+}
+
 type ThreadDetailSubscriptionEntry = {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -134,6 +157,8 @@ export interface EnvironmentConnectionSupervisor {
     environmentId: EnvironmentId,
   ) => void;
   readonly resetShellProjection: (environmentId: EnvironmentId) => void;
+  /** The last shell sequence applied for an environment, for resuming its subscription. */
+  readonly readShellProjectionSequence: (environmentId: EnvironmentId) => number | null;
   readonly syncShellSnapshot: (
     snapshot: OrchestrationShellSnapshot,
     environmentId: EnvironmentId,
@@ -205,6 +230,29 @@ export function createEnvironmentConnectionSupervisor<
     stop: () => void;
   } | null = null;
   let lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
+  const savedRetries = new Map<
+    EnvironmentId,
+    { failedAttempts: number; timeoutId: ReturnType<typeof setTimeout> | null }
+  >();
+  let requestSavedSyncForRetry: (() => void) | null = null;
+  const clearSavedRetry = (environmentId: EnvironmentId) => {
+    const retry = savedRetries.get(environmentId);
+    if (retry?.timeoutId != null) input.clearTimeout(retry.timeoutId);
+    savedRetries.delete(environmentId);
+  };
+  const clearAllSavedRetries = () => {
+    for (const environmentId of savedRetries.keys()) clearSavedRetry(environmentId);
+  };
+  const scheduleSavedRetry = (environmentId: EnvironmentId) => {
+    const retry = savedRetries.get(environmentId) ?? { failedAttempts: 0, timeoutId: null };
+    retry.failedAttempts += 1;
+    savedRetries.set(environmentId, retry);
+    if (retry.timeoutId !== null) return;
+    retry.timeoutId = input.setTimeout(() => {
+      retry.timeoutId = null;
+      requestSavedSyncForRetry?.();
+    }, savedEnvironmentRetryDelayMs(retry.failedAttempts));
+  };
 
   const emit = () => {
     for (const listener of listeners) listener();
@@ -300,24 +348,35 @@ export function createEnvironmentConnectionSupervisor<
       environmentId: entry.environmentId,
       threadId: entry.threadId,
     };
+    // The last sequence this subscription applied. A replacement subscription
+    // after a reconnect resumes after it instead of reloading the thread. Hosted
+    // and Hub-relayed connections always take a fresh snapshot.
+    let appliedSequence: number | null = null;
+    const resumable = !input.isHostedMode() && connection.knownEnvironment.source !== "hub-hosted";
+    const resumeOptions = resumable ? { resumeFromSequence: () => appliedSequence } : {};
     const subscribeLegacy = () => {
       if (!active) return;
       entry.protocol = "legacy";
       unsubscribeCurrent();
+      appliedSequence = null;
       unsubscribeCurrent = connection.client.orchestration.subscribeThread(
         { threadId: entry.threadId },
         (item) => {
+          if (item.kind === "resumed") return;
           if (item.kind === "snapshot") {
+            appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
             recordRetainedSnapshot(entry, item.snapshot);
             evictToCapacity();
             input.syncThreadDetailSnapshot(entry.environmentId, item.snapshot);
             return;
           }
+          appliedSequence = Math.max(appliedSequence ?? 0, item.event.sequence);
           recordRetainedEvent(entry, item.event);
           evictToCapacity();
           input.applyThreadDetailEvent(entry.environmentId, item.event);
         },
+        resumeOptions,
       );
     };
     entry.unsubscribe = () => {
@@ -345,7 +404,9 @@ export function createEnvironmentConnectionSupervisor<
         },
       },
       (item) => {
+        if (item.kind === "resumed") return;
         if (item.kind === "snapshot") {
+          appliedSequence = item.snapshot.snapshotSequence;
           historyPagination.beginSnapshot(scope);
           recordRetainedSnapshot(entry, item.snapshot);
           evictToCapacity();
@@ -356,11 +417,12 @@ export function createEnvironmentConnectionSupervisor<
           }
           return;
         }
+        appliedSequence = Math.max(appliedSequence ?? 0, item.event.sequence);
         recordRetainedEvent(entry, item.event);
         evictToCapacity();
         input.applyThreadDetailEvent(entry.environmentId, item.event);
       },
-      { onError: requestLegacy },
+      { ...resumeOptions, onError: requestLegacy },
     );
     if (fallbackRequested) subscribeLegacy();
     return true;
@@ -619,12 +681,27 @@ export function createEnvironmentConnectionSupervisor<
       stale.map((environmentId) => input.disconnectSavedEnvironment(environmentId)),
     );
     await input.waitForPrimaryShellSnapshotApplied(SAVED_ENVIRONMENT_STARTUP_DELAY_MS);
+    for (const environmentId of savedRetries.keys()) {
+      if (!expected.has(environmentId)) clearSavedRetry(environmentId);
+    }
     await runSavedEnvironmentConnectionQueue(orderSavedEnvironmentConnectionQueue(records), {
       concurrency: SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
       connect: async (record) => {
-        await ensureSavedEnvironmentConnection(record, (isCancelled) =>
-          input.connectSavedEnvironment(record, isCancelled),
-        ).catch(() => undefined);
+        try {
+          await ensureSavedEnvironmentConnection(record, (isCancelled) =>
+            input.connectSavedEnvironment(record, isCancelled),
+          );
+          clearSavedRetry(record.environmentId);
+        } catch (error) {
+          if (
+            error instanceof SavedEnvironmentCredentialError ||
+            error instanceof SavedEnvironmentConnectionCancelledError
+          ) {
+            clearSavedRetry(record.environmentId);
+            return;
+          }
+          scheduleSavedRetry(record.environmentId);
+        }
       },
     });
   };
@@ -653,6 +730,17 @@ export function createEnvironmentConnectionSupervisor<
   const reconnectAfterResume = (reason: string) => {
     const now = input.now();
     if (now - lastBrowserResumeReconnectAt < BROWSER_RESUME_RECONNECT_COOLDOWN_MS) return;
+    // Waking or regaining the network is the moment an unreachable environment
+    // most likely became reachable: try every one now rather than on the
+    // backoff it had grown while the machine slept.
+    if (savedRetries.size > 0) {
+      for (const retry of savedRetries.values()) {
+        if (retry.timeoutId !== null) input.clearTimeout(retry.timeoutId);
+        retry.timeoutId = null;
+        retry.failedAttempts = 0;
+      }
+      requestSavedSyncForRetry?.();
+    }
     for (const connection of connections.values()) {
       if (connection.client.isHeartbeatFresh()) continue;
       lastBrowserResumeReconnectAt = now;
@@ -668,6 +756,8 @@ export function createEnvironmentConnectionSupervisor<
   const stopActive = () => {
     activeService?.stop();
     activeService = null;
+    requestSavedSyncForRetry = null;
+    clearAllSavedRetries();
   };
   const requestProviderInvalidation = () => {
     activeService?.throttle.maybeExecute();
@@ -686,6 +776,9 @@ export function createEnvironmentConnectionSupervisor<
     input.resetProviderInvalidation();
     const throttle = input.createInvalidationThrottle();
     const requestSavedSync = createSyncScheduler();
+    requestSavedSyncForRetry = () => {
+      void requestSavedSync();
+    };
     connectPrimary();
     const unsubscribeSaved = input.isHostedMode()
       ? NOOP
@@ -735,6 +828,8 @@ export function createEnvironmentConnectionSupervisor<
     cancelPendingSavedEnvironmentConnection,
     applyShellEvent,
     resetShellProjection: (environmentId) => projectionTracker.clearEnvironment(environmentId),
+    readShellProjectionSequence: (environmentId) =>
+      projectionTracker.read(environmentId)?.sequence ?? null,
     syncShellSnapshot,
     retainThreadDetailSubscription: retain,
     disposeThreadDetailSubscriptionsForEnvironment: disposeForEnvironment,

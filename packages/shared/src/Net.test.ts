@@ -79,6 +79,25 @@ it.layer(NetService.layer)("NetService", (it) => {
       }),
     );
 
+    it.effect("findAvailablePort skips a port another process holds only on loopback", () =>
+      Effect.acquireUseRelease(
+        openServer("127.0.0.1"),
+        (server) =>
+          Effect.gen(function* () {
+            const net = yield* NetService;
+            const preferred = getPort(server);
+
+            // A wildcard bind can still succeed here on macOS; the server
+            // would then fail to bind loopback at startup.
+            const resolved = yield* net.findAvailablePort(preferred);
+            assert.notEqual(resolved, preferred);
+            const resolvedForLoopback = yield* net.findAvailablePort(preferred, "127.0.0.1");
+            assert.notEqual(resolvedForLoopback, preferred);
+          }),
+        closeServer,
+      ),
+    );
+
     it.effect("findAvailablePort falls back when preferred is occupied", () =>
       Effect.acquireUseRelease(
         openServer(),

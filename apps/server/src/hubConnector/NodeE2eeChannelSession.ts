@@ -29,6 +29,7 @@ import {
 import {
   E2eeRecordSession,
   type E2eeProtectResult,
+  type E2eeSenderLocalErrorCode,
   type E2eeReceiveFatalReason,
   type E2eeSyntheticDirectionState,
 } from "@ryco/shared/relayE2eeSession";
@@ -105,6 +106,17 @@ const FATAL_CLOSE_REASON: RelayCloseReason = "channel_rejected";
 
 /** The §4.4 node states, plus the terminal one a driver needs to stop at. */
 export type NodeE2eeChannelMode = "negotiating" | "e2ee" | "legacy" | "closed";
+
+/**
+ * What became of one outbound RPC message.
+ *
+ * The refusals are all §11.4 sender-local — none of them changes the channel —
+ * but the application layer above reacts to each differently, so they are kept
+ * apart: `backpressure` may succeed on a later attempt, `too_large` never will
+ * for these bytes, and `unavailable` means this channel will carry no further
+ * application record at all.
+ */
+export type NodeE2eeEmitResult = "sent" | "backpressure" | "too_large" | "unavailable";
 
 /**
  * What one inbound, reassembled, prelude-stripped payload becomes.
@@ -313,10 +325,19 @@ export interface NodeE2eeChannelSession {
   readonly intercept: (payload: Uint8Array) => Promise<NodeE2eeInboundDisposition>;
   /**
    * One outbound RPC message: plaintext in `legacy`, an envelope in `e2ee`, and
-   * dropped in every other state (§4.4, §8.9, §10.2). `false` is a non-fatal
-   * refusal — §11.4's sender-local disposition, never a channel-fatal one.
+   * dropped in every other state (§4.4, §8.9, §10.2). Every result other than
+   * `sent` is a non-fatal refusal — §11.4's sender-local disposition, never a
+   * channel-fatal one.
    */
-  readonly emit: (bytes: Uint8Array) => Promise<boolean>;
+  readonly emit: (bytes: Uint8Array) => Promise<NodeE2eeEmitResult>;
+  /**
+   * The application layer can no longer keep this channel coherent — it lost an
+   * RPC message it could not deliver — and asks for the channel to end so the
+   * client reconnects with fresh state. An `e2ee` channel attempts §10's
+   * authenticated close first and fails locally only when that cannot finish;
+   * any other open channel closes as a slow consumer. Idempotent.
+   */
+  readonly abandon: () => void;
   /**
    * §10: begin the authenticated close. Resolves once this endpoint's exchange
    * has completed, a `T_CLOSE` wait has expired, or the channel has ended —
@@ -585,7 +606,7 @@ export function makeNodeE2eeChannelSession(
      * non-`protected` outcome precisely because a caller that must decide the
      * channel's fate reacts to ordinary backpressure differently from a failure.
      */
-    | { readonly kind: "refused" }
+    | { readonly kind: "refused"; readonly reason: E2eeSenderLocalErrorCode }
     | { readonly kind: "close_required" }
     /**
      * The send path declines this record in this state — erased, spent, or the
@@ -670,7 +691,7 @@ export function makeNodeE2eeChannelSession(
     }
     if (result.kind === "exhausted") return { kind: "unusable" };
     if (result.kind === "unavailable") return { kind: "unavailable" };
-    return { kind: "refused" };
+    return { kind: "refused", reason: result.reason };
   }
 
   // ─── §4.4 deadlines ────────────────────────────────────────────────────────
@@ -1551,19 +1572,32 @@ export function makeNodeE2eeChannelSession(
     }
   }
 
-  async function emit(bytes: Uint8Array): Promise<boolean> {
-    if (mode === "legacy") return sources.send(bytes, { onRefused: "report" }).accepted;
-    if (mode !== "e2ee") return false;
+  async function emit(bytes: Uint8Array): Promise<NodeE2eeEmitResult> {
+    if (mode === "legacy") {
+      const sent = sources.send(bytes, { onRefused: "report" });
+      if (sent.accepted) return "sent";
+      switch (sent.refusal) {
+        case "queue_full":
+          return "backpressure";
+        case "message_too_large":
+        case "peer_unsupported":
+          return "too_large";
+        case "channel_closed":
+        case "sequence_exhausted":
+          return "unavailable";
+      }
+    }
+    if (mode !== "e2ee") return "unavailable";
     const session = record;
     const machine = closeMachine;
-    if (session === undefined || machine === undefined) return false;
+    if (session === undefined || machine === undefined) return "unavailable";
     // §8.9: no node-to-client application RPC before the implicit finish
     // authenticates. §10.2: none after this endpoint's first close-machine
     // record either — the keepalive `Ping` included, which is why the gate is
     // the machine's own and not a check for the close inner types.
-    if (!implicitFinishAuthenticated || !machine.mayProtectApplicationRecord) return false;
+    if (!implicitFinishAuthenticated || !machine.mayProtectApplicationRecord) return "unavailable";
     const outcome = await serializeSend(() => protectRecord(session, E2EE_INNER_TYPE_RPC, bytes));
-    if (outcome.kind === "protected") return true;
+    if (outcome.kind === "protected") return "sent";
     if (outcome.kind === "close_required") {
       // §9.6: protecting this record would leave less than the post-application
       // reserve. Nothing was consumed, and the endpoint MUST initiate §10's
@@ -1572,13 +1606,13 @@ export function makeNodeE2eeChannelSession(
       // throw escaping it has no caller to reach and takes the fail-closed
       // teardown every other local defect takes.
       void beginClose().catch(() => failLocal());
-      return false;
+      return "unavailable";
     }
     if (outcome.kind === "unusable") {
       // §11.3 Q10: no byte reached the relay, so no `E2EEError` may follow — it
       // would itself create the sequence gap being avoided.
       failLocal();
-      return false;
+      return "unavailable";
     }
     // `refused` is §11.4 sender-local — `e2ee_message_too_large` or
     // `e2ee_send_unavailable`: no pair consumed, no wire record, channel
@@ -1587,7 +1621,31 @@ export function makeNodeE2eeChannelSession(
     // ambiguous delivery §9.3 leaves unattributed; neither is a condition this
     // sender may resolve by closing the channel, so both refuse the message and
     // leave the channel exactly as they found it.
-    return false;
+    if (outcome.kind === "refused") {
+      return outcome.reason === "e2ee_message_too_large" ? "too_large" : "backpressure";
+    }
+    return "unavailable";
+  }
+
+  function abandon(): void {
+    if (mode === "closed") return;
+    if (mode !== "e2ee") {
+      mode = "closed";
+      releaseChannel();
+      sources.close("slow_consumer");
+      return;
+    }
+    // §10 first: an orderly close keeps the verdict clean when the relay still
+    // admits the close record. When it does not — the very backpressure that
+    // brought us here — no close phase opened and nothing else will end the
+    // channel, so fail locally rather than leave it lingering undeliverable. A
+    // phase that did open ends the channel itself, lingering included.
+    void beginClose().then(
+      () => {
+        if (!closePhaseFinished && closeMachine?.closePhaseActive !== true) failLocal();
+      },
+      () => failLocal(),
+    );
   }
 
   return {
@@ -1595,6 +1653,7 @@ export function makeNodeE2eeChannelSession(
     announce,
     intercept,
     emit,
+    abandon,
     beginClose,
     revokeAccountGrant: async () => {
       if (mode === "e2ee") {

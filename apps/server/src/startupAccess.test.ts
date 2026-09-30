@@ -6,8 +6,33 @@ import {
   renderTerminalQrCode,
   resolveHeadlessConnectionHost,
   resolveHeadlessConnectionString,
+  resolveHeadlessServeLinks,
   resolveListeningPort,
 } from "./startupAccess.ts";
+import { resolveServerAdvertisedEndpointsWithTailscale } from "./remote/AdvertisedEndpointRegistry.ts";
+
+const lanAndTailnetInterfaces = {
+  tailscale0: [
+    {
+      address: "100.100.100.100",
+      netmask: "255.192.0.0",
+      family: "IPv4" as const,
+      mac: "00:00:00:00:00:00",
+      internal: false,
+      cidr: "100.100.100.100/10",
+    },
+  ],
+  en0: [
+    {
+      address: "192.168.1.42",
+      netmask: "255.255.255.0",
+      family: "IPv4" as const,
+      mac: "00:00:00:00:00:00",
+      internal: false,
+      cidr: "192.168.1.42/24",
+    },
+  ],
+};
 
 it("prefers localhost when no explicit host is configured", () => {
   expect(resolveHeadlessConnectionHost(undefined)).toBe("localhost");
@@ -76,4 +101,75 @@ it("formats headless serve output with the connection string, token, pairing url
   expect(output).toContain("Token: PAIRCODE");
   expect(output).toContain("Pairing URL: http://192.168.1.42:3773/pair#token=PAIRCODE");
   assert.isTrue(output.includes("█") || output.includes("▀") || output.includes("▄"));
+});
+
+it("prefers a LAN address over a Tailnet one for a wildcard host", () => {
+  expect(resolveHeadlessConnectionHost("0.0.0.0", lanAndTailnetInterfaces)).toBe("192.168.1.42");
+});
+
+it("lists every reachable endpoint, leading with the LAN address when bound to all interfaces", async () => {
+  const endpoints = await resolveServerAdvertisedEndpointsWithTailscale({
+    host: undefined,
+    port: 3773,
+    networkInterfaces: lanAndTailnetInterfaces,
+    tailscaleServeEnabled: true,
+    readMagicDnsName: async () => "node.tail.ts.net",
+    probe: async () => true,
+  });
+  const links = resolveHeadlessServeLinks({
+    endpoints,
+    credential: "PAIRCODE",
+    fallbackConnectionString: "http://localhost:3773",
+    hostedAppOrigin: "https://app.example",
+  });
+
+  expect(links.connectionString).toBe("http://192.168.1.42:3773");
+  expect(links.pairingUrl).toBe("http://192.168.1.42:3773/pair#token=PAIRCODE");
+  expect(links.alternativeLinks).toEqual([
+    { label: "Tailscale IP", url: "http://100.100.100.100:3773/pair#token=PAIRCODE" },
+    { label: "Tailscale HTTPS", url: "https://node.tail.ts.net/pair#token=PAIRCODE" },
+    {
+      label: "Tailscale HTTPS (hosted app)",
+      url: "https://app.example/pair?host=https%3A%2F%2Fnode.tail.ts.net%2F#token=PAIRCODE",
+    },
+  ]);
+});
+
+it("leads with the Tailnet HTTPS URL for a loopback server behind Tailscale Serve", async () => {
+  const endpoints = await resolveServerAdvertisedEndpointsWithTailscale({
+    host: "127.0.0.1",
+    port: 3773,
+    networkInterfaces: lanAndTailnetInterfaces,
+    tailscaleServeEnabled: true,
+    readMagicDnsName: async () => "node.tail.ts.net",
+    probe: async () => true,
+  });
+  const links = resolveHeadlessServeLinks({
+    endpoints,
+    credential: "PAIRCODE",
+    fallbackConnectionString: "http://127.0.0.1:3773",
+  });
+
+  expect(links.pairingUrl).toBe("https://node.tail.ts.net/pair#token=PAIRCODE");
+  expect(links.alternativeLinks.map((link) => link.label)).toEqual([
+    "Tailscale HTTPS (hosted app)",
+  ]);
+});
+
+it("prints alternatives, the token lifetime, and the Hub hint", () => {
+  const output = formatHeadlessServeOutput({
+    connectionString: "http://192.168.1.42:3773",
+    token: "PAIRCODE",
+    pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
+    tokenExpiresInMinutes: 5,
+    alternativeLinks: [
+      { label: "Tailscale IP", url: "http://100.100.100.100:3773/pair#token=PAIRCODE" },
+    ],
+    hubOrigin: "https://app.example",
+  });
+
+  expect(output).toContain("Token: PAIRCODE (one-time, expires in 5 min");
+  expect(output).toContain("Also reachable at:");
+  expect(output).toContain("Tailscale IP  http://100.100.100.100:3773/pair#token=PAIRCODE");
+  expect(output).toContain("Hub relay: enabled via https://app.example.");
 });

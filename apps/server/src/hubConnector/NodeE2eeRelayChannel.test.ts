@@ -23,7 +23,8 @@ function stubSession(calls: string[]): NodeE2eeChannelSession {
     mode: () => "e2ee",
     announce: () => calls.push("announce"),
     intercept: async () => ({ kind: "claimed" }),
-    emit: async () => true,
+    emit: async () => "sent",
+    abandon: () => calls.push("abandon"),
     beginClose: async () => {
       calls.push("beginClose");
     },

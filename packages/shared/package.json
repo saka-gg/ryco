@@ -317,6 +317,10 @@
     },
     "./computerAuditFile": "./src/computerAuditFile.ts",
     "./computerAuditHistory": "./src/computerAuditHistory.ts",
+    "./pairingUrl": {
+      "types": "./src/pairingUrl.ts",
+      "import": "./src/pairingUrl.ts"
+    },
     "./storageRetention": "./src/storageRetention.ts"
   },
   "scripts": {

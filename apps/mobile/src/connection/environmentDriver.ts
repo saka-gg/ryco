@@ -3,6 +3,7 @@ import {
   createEnvironmentConnection,
   createEnvironmentConnectionSupervisor,
   SavedEnvironmentConnectionCancelledError,
+  SavedEnvironmentCredentialError,
   type EnvironmentConnection,
   type EnvironmentConnectionSupervisor,
   type EnvironmentStateSink,
@@ -275,6 +276,7 @@ export function createMobileEnvironmentDriver(
         {
           getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
           getEnvironmentId: () => environmentId,
+          persistentReconnect: true,
           onAttempt: () => setRuntimeConnecting(environmentId),
           onOpen: () => setRuntimeConnected(environmentId),
           onError: (message) => setRuntimeError(environmentId, new Error(message)),
@@ -298,7 +300,9 @@ export function createMobileEnvironmentDriver(
         lastError: "Saved environment is missing its saved credential. Pair it again.",
         lastErrorAt: nowIso(),
       });
-      throw new Error("Saved environment is missing its saved credential.");
+      throw new SavedEnvironmentCredentialError(
+        "Saved environment is missing its saved credential.",
+      );
     }
 
     const client = createSavedEnvironmentClient(record.environmentId, bearerToken);
@@ -324,6 +328,10 @@ export function createMobileEnvironmentDriver(
       },
       pushSequenceMonitor: noopPushSequenceMonitor,
       resetShellProjection: (environmentId) => getSupervisor().resetShellProjection(environmentId),
+      // A direct connection may resume its shell after a reconnect; the hosted
+      // primary below always takes a fresh snapshot.
+      readShellResumeSequence: (environmentId) =>
+        getSupervisor().readShellProjectionSequence(environmentId),
       applyShellEvent: (event, environmentId) =>
         getSupervisor().applyShellEvent(event, environmentId),
       syncShellSnapshot: (snapshot, environmentId) =>

@@ -64,10 +64,20 @@ function proofError(failure: HubNodeProofFailure): never {
   throw new HubNodeProofClientError(failure);
 }
 
+/**
+ * Client errors a reverse proxy or load balancer answers with while a Hub
+ * deploys or restarts — a missing route, a timeout, a conflict, a misdirected
+ * or too-early request. The Hub's own challenge route answers none of them for
+ * a node it refuses, so they are retried rather than parking the node for an
+ * operator; a genuine refusal (400, 401, 403) still stops.
+ */
+const TRANSIENT_PROOF_STATUSES = new Set([404, 405, 408, 409, 421, 425]);
+
 function proofHttpError(status: number): never {
   if (status === 429) return proofError("rate_limited");
   if (status === 503) return proofError("server_draining");
   if (status >= 500 && status <= 599) return proofError("network");
+  if (TRANSIENT_PROOF_STATUSES.has(status)) return proofError("network");
   if (status >= 400 && status <= 499) return proofError("authentication_failed");
   return proofError("protocol_invalid");
 }

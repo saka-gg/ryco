@@ -325,6 +325,19 @@ export class RelayChannelProtocolError extends Error {
   }
 }
 
+/**
+ * How many recently ended channel ids a connection remembers.
+ *
+ * Frames the relay forwarded before it learned a channel ended are still on the
+ * wire when the node ends it, so a `data` or flow frame naming a just-closed
+ * channel is an ordinary race, not a protocol violation. Treating it as one
+ * tore down the whole connection — every other channel with it — and a second
+ * occurrence before the stability interval parked the connector for operator
+ * action. Bounded, oldest first, because the race window is short and a peer
+ * must not be able to grow node memory by cycling channels.
+ */
+const RECENTLY_CLOSED_CHANNEL_LIMIT = 256;
+
 export class RelayChannelQueueError extends Error {
   constructor() {
     super("Relay channel control queue is full.");
@@ -343,6 +356,7 @@ export class RelayChannelRegistry {
   readonly #scheduler: RelaySessionScheduler;
   readonly #channels = new Map<string, ChannelEntry>();
   readonly #preparing = new Set<string>();
+  readonly #recentlyClosed = new Set<string>();
   #stopping = false;
 
   constructor(options: {
@@ -410,11 +424,17 @@ export class RelayChannelRegistry {
         await this.#data(frame);
         return;
       case "flow.pause":
-        if (!this.#channels.has(frame.channelId as string)) throw new RelayChannelProtocolError();
+        if (!this.#channels.has(frame.channelId as string)) {
+          this.#assertRecentlyClosed(frame.channelId);
+          return;
+        }
         this.#sendQueue.pause(frame.channelId);
         return;
       case "flow.resume":
-        if (!this.#channels.has(frame.channelId as string)) throw new RelayChannelProtocolError();
+        if (!this.#channels.has(frame.channelId as string)) {
+          this.#assertRecentlyClosed(frame.channelId);
+          return;
+        }
         this.#sendQueue.resume(frame.channelId);
         return;
       case "channel.close":
@@ -505,6 +525,7 @@ export class RelayChannelRegistry {
     if (entry === undefined || entry.closed) return;
     entry.closed = true;
     this.#channels.delete(key);
+    this.#rememberClosed(key);
     // A message enqueued immediately before a close used to be destroyed
     // outright: the purge below drops the channel's queue, and even without it
     // `flush` drains control frames ahead of data, so the `channel.close` would
@@ -657,6 +678,24 @@ export class RelayChannelRegistry {
     }
   }
 
+  #rememberClosed(key: string): void {
+    this.#recentlyClosed.delete(key);
+    this.#recentlyClosed.add(key);
+    if (this.#recentlyClosed.size > RECENTLY_CLOSED_CHANNEL_LIMIT) {
+      const oldest = this.#recentlyClosed.values().next().value;
+      if (oldest !== undefined) this.#recentlyClosed.delete(oldest);
+    }
+  }
+
+  /**
+   * A frame for a channel this connection does not have is ignored when the
+   * channel ended recently — see `RECENTLY_CLOSED_CHANNEL_LIMIT` — and is still a
+   * protocol violation when the channel never existed.
+   */
+  #assertRecentlyClosed(channelId: RelayChannelId): void {
+    if (!this.#recentlyClosed.has(channelId as string)) throw new RelayChannelProtocolError();
+  }
+
   async #open(frame: RelayChannelOpenFrame): Promise<void> {
     const key = frame.channelId as string;
     const rejected =
@@ -667,6 +706,7 @@ export class RelayChannelRegistry {
       this.#channels.has(key) ||
       this.#preparing.has(key);
     if (rejected) {
+      if (!this.#channels.has(key) && !this.#preparing.has(key)) this.#rememberClosed(key);
       this.#enqueueControl({
         type: "channel.reject",
         ...this.#version,
@@ -675,6 +715,7 @@ export class RelayChannelRegistry {
       });
       return;
     }
+    this.#recentlyClosed.delete(key);
     this.#preparing.add(key);
     let entry: ChannelEntry | undefined;
     try {
@@ -829,7 +870,10 @@ export class RelayChannelRegistry {
 
   async #data(frame: RelayDataFrame): Promise<void> {
     const entry = this.#channels.get(frame.channelId as string);
-    if (entry === undefined || entry.closed) throw new RelayChannelProtocolError();
+    if (entry === undefined || entry.closed) {
+      this.#assertRecentlyClosed(frame.channelId);
+      return;
+    }
     if (
       (frame.sequence as number) !== entry.inboundSequence ||
       entry.inboundSequence > 0xffff_ffff
