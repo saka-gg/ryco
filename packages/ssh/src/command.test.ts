@@ -116,14 +116,14 @@ describe("ssh command", () => {
           appVersion: "0.0.17",
           updateChannel: "latest",
         }),
-        "ryco@0.0.17",
+        "ryco-cli@0.0.17",
       );
       assert.equal(
         resolveRemoteRycoCliPackageSpec({
           appVersion: "0.0.17-nightly.20260415.44",
           updateChannel: "nightly",
         }),
-        "ryco@0.0.17-nightly.20260415.44",
+        "ryco-cli@0.0.17-nightly.20260415.44",
       );
       assert.equal(
         resolveRemoteRycoCliPackageSpec({
@@ -131,7 +131,7 @@ describe("ssh command", () => {
           updateChannel: "nightly",
           isDevelopment: true,
         }),
-        "ryco@nightly",
+        "ryco-cli@nightly",
       );
       assert.equal(
         resolveRemoteRycoCliPackageSpec({
@@ -139,7 +139,7 @@ describe("ssh command", () => {
           updateChannel: "latest",
           isDevelopment: true,
         }),
-        "ryco@nightly",
+        "ryco-cli@nightly",
       );
     }),
   );

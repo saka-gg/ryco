@@ -33,6 +33,7 @@ import {
   getLastNonEmptyOutputLine,
   remoteStateKey,
   resolveSshTarget,
+  RYCO_CLI_PACKAGE_NAME,
   runSshCommand,
   SSH_COMMAND,
   targetConnectionKey,
@@ -518,7 +519,7 @@ fi
 `;
 
 export function buildRemoteRycoRunnerScript(input?: RemoteRycoRunnerOptions): string {
-  const packageSpec = shellSingleQuote(input?.packageSpec?.trim() || "ryco@latest");
+  const packageSpec = shellSingleQuote(input?.packageSpec?.trim() || `${RYCO_CLI_PACKAGE_NAME}@latest`);
   const nodeScriptPath = input?.nodeScriptPath?.trim() || "";
   return stripTrailingNewlines(
     applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {

@@ -8,6 +8,8 @@ import { buildSshChildEnvironment, type SshAuthOptions } from "./auth.ts";
 import { SshCommandError, SshInvalidTargetError } from "./errors.ts";
 
 const PUBLISHABLE_RYCO_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
+/** The npm package that ships the `ryco` binary. There is no package named `ryco`. */
+export const RYCO_CLI_PACKAGE_NAME = "ryco-cli";
 const DEFAULT_SSH_COMMAND_TIMEOUT_MS = 60_000;
 const MAX_SSH_ERROR_OUTPUT_LENGTH = 4_000;
 
@@ -351,12 +353,12 @@ export function resolveRemoteRycoCliPackageSpec(input: {
 }): string {
   const appVersion = input.appVersion.trim();
   if (!input.isDevelopment && PUBLISHABLE_RYCO_VERSION_PATTERN.test(appVersion)) {
-    return `ryco@${appVersion}`;
+    return `${RYCO_CLI_PACKAGE_NAME}@${appVersion}`;
   }
 
   if (input.isDevelopment) {
-    return "ryco@nightly";
+    return `${RYCO_CLI_PACKAGE_NAME}@nightly`;
   }
 
-  return input.updateChannel === "nightly" ? "ryco@nightly" : "ryco@latest";
+  return `${RYCO_CLI_PACKAGE_NAME}@${input.updateChannel === "nightly" ? "nightly" : "latest"}`;
 }
