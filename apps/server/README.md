@@ -50,6 +50,13 @@ Run without opening a browser:
 ryco --no-browser
 ```
 
+Set this computer up for your other devices with an interactive guide — background service,
+Ryco account, Tailscale, pairing — and come back to it later for status, logs, and settings:
+
+```bash
+npx ryco-cli setup
+```
+
 Run in headless mode and print pairing details for remote clients:
 
 ```bash
@@ -99,6 +106,9 @@ ryco auth pairing revoke <id>
 ryco auth session issue [--ttl 30d] [--role owner|client]
 ryco auth session list
 ryco auth session revoke <session-id>
+
+ryco setup
+ryco config [show | path | edit | set <key> <value> | unset <key>]
 
 ryco service install [serve flags] [cwd]
 ryco service status | logs [-f] | restart | stop | start | uninstall

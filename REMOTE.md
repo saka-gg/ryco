@@ -59,6 +59,26 @@ For `https://app.ryco.space`, prefer an HTTPS Tailnet or other HTTPS endpoint. A
 
 ### Option 2: Headless Server (CLI)
 
+The quickest way is the interactive guide. Run it on the computer that should host Ryco:
+
+```bash
+npx ryco-cli setup        # or just `npx ryco-cli` in a terminal and choose "Set up…"
+```
+
+It checks for coding agents and Tailscale, asks where your projects are, how your other devices
+should reach this computer (your Ryco account, Tailscale, the local network), and whether Ryco
+should run in the background. After one summary to confirm, it saves the settings, installs the
+background service (offering to install `ryco-cli` globally when run through npx), links your Ryco
+account, and shows a QR code to pair a device.
+
+Run `ryco setup` (or plain `ryco` in a terminal) again later for a status screen: pair another
+device, open Ryco in the browser, follow the live logs, restart or stop the service, change
+settings, or edit the settings file. A bare `ryco` in a terminal offers the guide only until the
+machine is set up or you choose "don't ask again"; set `RYCO_NO_SETUP_PROMPT=1` to skip it, and
+anything scripted or given arguments starts the server as before.
+
+The steps below do the same by hand.
+
 Use this when you want to run the server without a GUI, for example on a second Mac or a remote
 machine over SSH.
 
@@ -113,7 +133,8 @@ ryco auth pairing create --ttl 1h --base-url https://machine.tailnet.ts.net
 `ryco service install` runs `ryco serve` in the background as a per-user LaunchAgent on macOS or a
 systemd user unit on Linux. It starts at login, restarts the server if it stops, and — unless you
 pass `--no-prevent-sleep` — keeps the machine from idle-sleeping while on AC power. It takes the same
-network and Hub flags as `ryco serve`:
+network and Hub flags as `ryco serve` and saves them as the node's settings, which the service reads
+on every start:
 
 ```bash
 npm install -g ryco-cli            # a service cannot rely on an npx cache
@@ -128,6 +149,21 @@ its log; use `ryco auth pairing create` to pair devices. On Linux, run
 `sudo loginctl enable-linger $USER` so the unit also runs at boot without a login.
 
 `ryco serve --prevent-sleep` holds the same sleep assertion for a foreground server.
+
+### Node settings
+
+The node's settings live in `~/.ryco/userdata/node.json`. `ryco setup` and `ryco service install`
+write it; every `ryco serve` on this machine — including the background service — reads it, with
+explicit flags and environment variables still taking precedence. Change it without the guide:
+
+```bash
+ryco config                          # show every setting
+ryco config set hub true             # keys are named like the serve flags
+ryco config set tailscale-serve true
+ryco config unset port
+ryco config edit                     # open it in $EDITOR, checked when you save
+ryco service restart                 # apply to a running background service
+```
 
 ### Reach a node through your Ryco account
 
