@@ -66,6 +66,7 @@ import {
   shouldBlurComposerOnSubmit,
 } from "./ComposerSendPipeline";
 import { ComposerFooter } from "./ComposerFooter";
+import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import {
   type ComposerImageAttachment,
   type DraftId,
@@ -343,11 +344,7 @@ export interface ChatComposerProps {
   keybindings: ResolvedKeybindingsConfig;
   terminalOpen: boolean;
   gitCwd: string | null;
-  executionTargets: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly label: string;
-    readonly disabled?: boolean;
-  }>;
+  executionTargets: ReadonlyArray<ComposerExecutionTarget>;
   executionTargetLocked: boolean;
   onExecutionTargetChange: (environmentId: EnvironmentId) => void;
 
