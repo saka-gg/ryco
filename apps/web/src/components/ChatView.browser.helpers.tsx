@@ -332,10 +332,12 @@ function createBaseServerConfig(): ServerConfig {
 }
 
 function createMockEnvironmentApi(input: {
+  getConfig: () => Promise<ServerConfig>;
   browse: EnvironmentApi["filesystem"]["browse"];
   dispatchCommand: EnvironmentApi["orchestration"]["dispatchCommand"];
 }): EnvironmentApi {
   return {
+    server: { getConfig: input.getConfig } as NonNullable<EnvironmentApi["server"]>,
     terminal: {} as EnvironmentApi["terminal"],
     projects: {} as EnvironmentApi["projects"],
     filesystem: {

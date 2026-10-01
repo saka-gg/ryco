@@ -1415,6 +1415,8 @@ describe("ChatView Navigation (full app)", () => {
     __setEnvironmentApiOverrideForTests(
       REMOTE_ENVIRONMENT_ID,
       createMockEnvironmentApi({
+        getConfig: async () =>
+          useSavedEnvironmentRuntimeStore.getState().byId[REMOTE_ENVIRONMENT_ID]!.serverConfig!,
         browse: remoteBrowseMock,
         dispatchCommand: remoteDispatchMock,
       }),
