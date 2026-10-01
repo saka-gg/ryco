@@ -22,6 +22,7 @@ import {
 } from "./CompactComposerControlsMenu";
 import { ContextPickerButton } from "./ContextPickerButton";
 import { ContextWindowMeter } from "./ContextWindowMeter";
+import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import { PhoneSessionPolicyControl } from "./PhoneSessionPolicySheet";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import {
@@ -467,11 +468,7 @@ export interface ComposerFooterProps {
   onSelectIssue: (issue: SourceControlIssueSummary) => void;
   onSelectChangeRequest: (cr: ChangeRequest) => void;
   onAttachFile: (file: File) => void;
-  executionTargets?: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly label: string;
-    readonly disabled?: boolean;
-  }>;
+  executionTargets?: ReadonlyArray<ComposerExecutionTarget>;
   selectedExecutionEnvironmentId?: EnvironmentId;
   executionTargetLocked?: boolean;
   onExecutionTargetChange?: (environmentId: EnvironmentId) => void;
@@ -610,7 +607,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
                 title={
                   props.executionTargetLocked
                     ? "Existing threads stay on their owning machine"
-                    : "Execution machine"
+                    : "Choose a device to run this thread"
                 }
               >
                 <DeviceIcon
@@ -636,7 +633,12 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
                         label={target.label}
                         className="size-3.5 shrink-0 text-muted-foreground"
                       />
-                      <span className="truncate">{target.label}</span>
+                      <span className="flex min-w-0 flex-col">
+                        <span className="truncate">{target.label}</span>
+                        {target.status ? (
+                          <span className="text-xs text-muted-foreground">{target.status}</span>
+                        ) : null}
+                      </span>
                     </span>
                   </SelectItem>
                 ))}
@@ -646,9 +648,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             props.executionTargets?.find(
               (target) => target.environmentId === props.selectedExecutionEnvironmentId,
             )?.disabled ? (
-              <span className="shrink-0 text-destructive text-xs">
-                No verified machine available
-              </span>
+              <span className="shrink-0 text-destructive text-xs">Device unavailable</span>
             ) : null}
           </>
         ) : null}

@@ -7,6 +7,7 @@ import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { useSettings } from "../hooks/useSettings";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectProjectsAcrossEnvironments, useStore } from "../store";
+import { useHostedWorkspaceState } from "../hostedHub/hostedConnectionCoordinator";
 import { cn } from "~/lib/utils";
 import { ProjectFavicon } from "./ProjectFavicon";
 import {
@@ -63,7 +64,15 @@ export function ProjectSwitcher({
     sidebarProjectGroupingMode: settings.sidebarProjectGroupingMode,
     sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
   }));
-  const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
+  const hosted = useHostedWorkspaceState();
+  const allProjects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
+  const projects = useMemo(
+    () =>
+      hosted.status === "signed-out"
+        ? allProjects
+        : allProjects.filter((project) => project.environmentId === activeProjectEnvironmentId),
+    [activeProjectEnvironmentId, allProjects, hosted.status],
+  );
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const triggerRef = useRef<HTMLButtonElement | null>(null);

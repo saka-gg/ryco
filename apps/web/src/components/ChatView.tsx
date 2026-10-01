@@ -316,7 +316,14 @@ import {
   retainHostedWorkspaceThreadScope,
   retainHostedWorkspaceVcsScope,
 } from "../hostedHub/hostedConnectionScopes";
-import { useHostedWorkspaceState } from "../hostedHub/hostedConnectionCoordinator";
+import {
+  nodeIdForHostedEnvironment,
+  useHostedWorkspaceState,
+} from "../hostedHub/hostedConnectionCoordinator";
+import { adoptRoutedHostedNode } from "../hostedHub/nodeRoutes";
+import { useHostedDraftExecutionTarget } from "../hooks/useHostedDraftExecutionTarget";
+import { hostedComposerExecutionTargets } from "./chat/ExecutionTarget.logic";
+import { DraftDeviceProjectDialog } from "./chat/DraftDeviceProjectDialog";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { Button } from "./ui/button";
 import {
@@ -1066,18 +1073,6 @@ export default function ChatView(props: ChatViewProps) {
     activeWorktreeSessionTabs,
     activeSessionTabKey,
   });
-
-  useEffect(() => {
-    const releaseHostedDemand = retainHostedWorkspaceThreadScope(environmentId, threadId);
-    if (routeKind !== "server") {
-      return releaseHostedDemand;
-    }
-    const releaseSubscription = retainThreadDetailSubscription(environmentId, threadId);
-    return () => {
-      releaseHostedDemand();
-      releaseSubscription();
-    };
-  }, [environmentId, routeKind, threadId]);
 
   // Compute the list of environments this logical project spans, used to
   // drive the environment picker in BranchToolbar.
@@ -2240,6 +2235,44 @@ export default function ChatView(props: ChatViewProps) {
     },
     [draftId, envLocked, logicalProjectEnvironments, setDraftThreadContext],
   );
+  const hostedDraftTarget = useHostedDraftExecutionTarget({
+    draftId,
+    project: activeProject ?? null,
+    locked: envLocked || routeKind === "server" || isSendBusy,
+  });
+  const hostedDemandEnvironmentId = hostedDraftTarget.pending?.environmentId ?? environmentId;
+  useEffect(() => {
+    if (routeKind === "draft" && hostedWorkspace.status !== "signed-out") {
+      const nodeId = nodeIdForHostedEnvironment(hostedDemandEnvironmentId);
+      if (nodeId) adoptRoutedHostedNode(nodeId);
+    }
+    const releaseHostedDemand = retainHostedWorkspaceThreadScope(
+      hostedDemandEnvironmentId,
+      threadId,
+    );
+    if (routeKind !== "server") return releaseHostedDemand;
+    const releaseSubscription = retainThreadDetailSubscription(environmentId, threadId);
+    return () => {
+      releaseHostedDemand();
+      releaseSubscription();
+    };
+  }, [environmentId, hostedDemandEnvironmentId, hostedWorkspace.status, routeKind, threadId]);
+  const executionTargets = useMemo(
+    () =>
+      hostedWorkspace.status === "signed-out"
+        ? logicalProjectEnvironments
+        : hostedComposerExecutionTargets({
+            machines: hostedWorkspace.machines,
+            ready: hostedWorkspace.status === "ready",
+            environmentId,
+            label: primaryDeviceName,
+          }),
+    [environmentId, hostedWorkspace, logicalProjectEnvironments, primaryDeviceName],
+  );
+  const onExecutionTargetChange =
+    hostedWorkspace.status === "signed-out"
+      ? onEnvironmentChange
+      : hostedDraftTarget.selectEnvironment;
   const executionTargetMachine =
     hostedWorkspace.status === "signed-out"
       ? desktopExecutionMachines.find((machine) => machine.environmentId === environmentId)
@@ -3285,7 +3318,7 @@ export default function ChatView(props: ChatViewProps) {
     settingsSnapshot: SendTurnSettings,
     messageId?: MessageId,
   ): Promise<boolean> => {
-    if (!dispatchCapability.allowed) return false;
+    if (!dispatchCapability.allowed || hostedDraftTarget.pending !== null) return false;
     const api = readEnvironmentApi(environmentId);
     if (!api || !activeThread || !activeProject || editorSendPreparationRef.current) return false;
     editorSendPreparationRef.current = true;
@@ -3726,7 +3759,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const runSend = async (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
-    if (!dispatchCapability.allowed) return;
+    if (!dispatchCapability.allowed || hostedDraftTarget.pending !== null) return;
     const api = readEnvironmentApi(environmentId);
     // When a turn is already running the submit is queued, so don't let the
     // transient post-dispatch `isSendBusy` window swallow a mid-turn message.
@@ -5047,7 +5080,9 @@ export default function ChatView(props: ChatViewProps) {
                       envLocked={envLocked}
                       availableEnvironments={logicalProjectEnvironments}
                       onEnvironmentChange={
-                        hasMultipleEnvironments ? onEnvironmentChange : undefined
+                        hostedWorkspace.status === "signed-out" && hasMultipleEnvironments
+                          ? onEnvironmentChange
+                          : undefined
                       }
                       onComposerFocusRequest={scheduleComposerFocus}
                       onCheckoutPullRequestRequest={
@@ -5279,7 +5314,10 @@ export default function ChatView(props: ChatViewProps) {
                   phase={phase}
                   isConnecting={isConnecting}
                   isSendBusy={
-                    isSendBusy || !dispatchCapability.allowed || workspaceExecutionTargetUnavailable
+                    isSendBusy ||
+                    !dispatchCapability.allowed ||
+                    workspaceExecutionTargetUnavailable ||
+                    hostedDraftTarget.pending !== null
                   }
                   isPreparingWorktree={isPreparingWorktree}
                   environmentUnavailable={activeEnvironmentUnavailableState}
@@ -5311,9 +5349,14 @@ export default function ChatView(props: ChatViewProps) {
                   keybindings={keybindings}
                   terminalOpen={Boolean(terminalState.terminalOpen)}
                   gitCwd={gitCwd}
-                  executionTargets={logicalProjectEnvironments}
-                  executionTargetLocked={envLocked || routeKind === "server"}
-                  onExecutionTargetChange={onEnvironmentChange}
+                  executionTargets={executionTargets}
+                  executionTargetLocked={
+                    envLocked ||
+                    routeKind === "server" ||
+                    isSendBusy ||
+                    hostedDraftTarget.pending !== null
+                  }
+                  onExecutionTargetChange={onExecutionTargetChange}
                   promptRef={promptRef}
                   composerImagesRef={composerImagesRef}
                   composerTerminalContextsRef={composerTerminalContextsRef}
@@ -5375,7 +5418,9 @@ export default function ChatView(props: ChatViewProps) {
                   {...(canCheckoutPullRequestIntoThread
                     ? { onCheckoutPullRequestRequest: openPullRequestDialog }
                     : {})}
-                  {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
+                  {...(hostedWorkspace.status === "signed-out" && hasMultipleEnvironments
+                    ? { onEnvironmentChange }
+                    : {})}
                   availableEnvironments={logicalProjectEnvironments}
                   terminalAvailable={activeProject !== undefined && terminalCapability.allowed}
                   terminalOpen={terminalState.terminalOpen}
@@ -5473,6 +5518,16 @@ export default function ChatView(props: ChatViewProps) {
         ) : null}
       </div>
       {/* end horizontal flex container */}
+
+      {hostedDraftTarget.pending ? (
+        <DraftDeviceProjectDialog
+          key={hostedDraftTarget.pending.environmentId}
+          {...hostedDraftTarget.pending}
+          onCancel={hostedDraftTarget.cancel}
+          onRetry={hostedDraftTarget.retry}
+          onSelect={hostedDraftTarget.selectProject}
+        />
+      ) : null}
 
       {mountedTerminalThreadRefs.map(({ key: mountedThreadKey, threadRef: mountedThreadRef }) => (
         <PersistentThreadTerminalDrawer

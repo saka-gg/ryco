@@ -1,3 +1,7 @@
+import {
+  hostedDraftTargetController,
+  useHostedDraftTargetSelection,
+} from "../../hooks/useHostedDraftExecutionTarget";
 import { DeviceIcon } from "../DeviceIcon";
 import { useNavigate } from "@tanstack/react-router";
 import { hostedHubFailureExplanation } from "@ryco/client-runtime/authorization";
@@ -393,6 +397,7 @@ function HostedNodeFailureSurface({
             <RefreshCwIcon aria-hidden /> Retry
           </Button>
         ) : null}
+        <HostedDraftSwitchCancel />
       </HubStatus>
     </HubShell>
   );
@@ -433,9 +438,8 @@ function HubStatus({
 }
 
 function HostedNodeRestoringSurface() {
-  // No escape here on purpose: this is a single-round-trip fail-closed
-  // validation whose URL the route orchestrator owns, and an escape would race
-  // the reconcile.
+  // Validation stays fail-closed. A pending draft switch can return to its
+  // source through the same route orchestrator that owns the reconcile.
   return (
     <HubShell measure="content">
       <HubStatus
@@ -446,6 +450,7 @@ function HostedNodeRestoringSurface() {
           <InlineProgress />
           Checking your access before reconnecting…
         </p>
+        <HostedDraftSwitchCancel />
       </HubStatus>
     </HubShell>
   );
@@ -473,6 +478,7 @@ function HostedNodeStartingSurface({ node }: { readonly node: HostedHubNode }) {
         >
           Back to nodes
         </Button>
+        <HostedDraftSwitchCancel />
       </HubStatus>
     </HubShell>
   );
@@ -1680,5 +1686,15 @@ function DirectoryEmptyState({
         </EmptyContent>
       ) : null}
     </Empty>
+  );
+}
+
+function HostedDraftSwitchCancel() {
+  const selection = useHostedDraftTargetSelection();
+  if (!selection) return null;
+  return (
+    <Button variant="ghost" className="mt-3" onClick={() => hostedDraftTargetController.cancel()}>
+      Cancel device switch
+    </Button>
   );
 }
