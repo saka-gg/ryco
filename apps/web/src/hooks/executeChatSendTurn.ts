@@ -1,6 +1,4 @@
 import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
-import { getSavedEnvironmentRuntimeState } from "../environments/runtime";
-import { getServerConfig } from "../rpc/serverState";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
 import type { ComputerTurnIntent } from "@ryco/contracts";
@@ -477,11 +475,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     );
 
     // Resolve the node-owned default at creation time, including for queued drafts.
-    const primaryConfig = getServerConfig();
-    const config =
-      primaryConfig?.environment.environmentId === draft.environmentId
-        ? primaryConfig
-        : getSavedEnvironmentRuntimeState(draft.environmentId)?.serverConfig;
+    const config = worktree.baseBranchForWorktree ? await api.server?.getConfig?.() : null;
     const effective = worktree.baseBranchForWorktree
       ? await readEffectiveProjectPreferences({ api, config, projectId: project.projectId })
       : null;

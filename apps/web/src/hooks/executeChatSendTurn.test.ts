@@ -5,6 +5,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ServerConfig,
   ThreadId,
 } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -842,7 +843,10 @@ describe("worktree branch defaults", () => {
     const getSettings = vi.fn(async () => ({ worktreeBranchPrefix: prefix }));
     input.dispatch.api = {
       orchestration: { dispatchCommand },
-      server: { getSettings },
+      server: {
+        getConfig: async () => ({ environment: { capabilities: {} } }) as ServerConfig,
+        getSettings,
+      },
     } as never;
     expect(await executeChatSendTurn(input)).toBe(true);
     expect(getSettings).toHaveBeenCalledOnce();
@@ -863,6 +867,30 @@ describe("worktree branch defaults", () => {
     input.worktree.shouldCreateWorktree = true;
     expect(await executeChatSendTurn(input)).toBe(false);
     expect(dispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("preserves the draft without falling back when the target config read fails", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.refs.promptRef.current = input.composer.prompt;
+    input.worktree.baseBranchForWorktree = "main";
+    const getSettings = vi.fn();
+    input.dispatch.api = {
+      orchestration: { dispatchCommand },
+      server: {
+        getConfig: async () => {
+          throw new Error("Node disconnected");
+        },
+        getSettings,
+      },
+    } as never;
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(getSettings).not.toHaveBeenCalled();
+    expect(dispatchCommand).not.toHaveBeenCalled();
+    expect(input.refs.promptRef.current).toBe(input.composer.prompt);
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      input.composer.prompt,
+    );
   });
 });
 
