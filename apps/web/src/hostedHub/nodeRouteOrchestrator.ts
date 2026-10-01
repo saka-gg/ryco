@@ -19,6 +19,8 @@ import {
 } from "./state";
 import { hasActiveHostedWorkspaceCoordinator } from "./hostedConnectionCoordinator";
 import { retainHostedWorkspaceThreadScope } from "./hostedConnectionScopes";
+import { selectThreadExistsByRef, useStore } from "../store";
+import { canShowHostedReadPreview, readHostedReadCache } from "./readCache";
 
 /**
  * Orchestrates the routed node segment against the hosted lifecycle owner.
@@ -256,6 +258,17 @@ function reconcile(): void {
   const scopedThread = parseHostedScopedThreadPath(routed.logicalPathname);
   if (routeScopeKeyFor(scopedThread) !== routeScopeKey) replaceRouteScope(null);
   const directoryNode = state.nodes.find((candidate) => candidate.id === nodeId) ?? null;
+  const hasCachedView =
+    scopedThread !== null &&
+    selectThreadExistsByRef(useStore.getState(), scopedThread) &&
+    ((directoryNode?.environmentId === scopedThread.environmentId &&
+      directoryNode.revokedAt === null &&
+      !directoryNode.capabilities?.nativeClientRequired) ||
+      (state.directoryStatus !== "ready" &&
+        canShowHostedReadPreview() &&
+        readHostedReadCache().nodes.some(
+          (node) => node.nodeId === nodeId && node.environmentId === scopedThread.environmentId,
+        )));
   if (
     directoryNode &&
     (directoryNode.capabilities?.nativeClientRequired === true ||
@@ -297,6 +310,7 @@ function reconcile(): void {
       state.selectionStatus === "offline" &&
       state.errorMessage === HOSTED_SESSION_SYNC_FAILURE_MESSAGE
     ) {
+      if (hasCachedView) return;
       // An authorized node can be transiently reported offline while a cold
       // route is restoring. Let the singular hosted lifecycle own its bounded
       // reconnect window; only after that lifecycle terminates do we return
@@ -310,6 +324,10 @@ function reconcile(): void {
   }
 
   if (state.directoryStatus === "stale") {
+    if (hasCachedView) {
+      replaceRouteScope(null);
+      return;
+    }
     failClosed(state.selectionStatus, "unavailable");
     return;
   }

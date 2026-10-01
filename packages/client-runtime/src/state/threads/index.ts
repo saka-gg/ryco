@@ -1,4 +1,5 @@
 export * from "./runtime.ts";
+export * from "./readCache.ts";
 export * from "./store.ts";
 export * from "./storeSelectors.ts";
 export * from "./threadDerivation.ts";

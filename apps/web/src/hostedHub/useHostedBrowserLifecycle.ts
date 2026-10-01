@@ -16,9 +16,13 @@ export function useHostedBrowserLifecycle(): void {
   const accountStatus = useHostedHubStore((state) => state.accountStatus);
 
   useEffect(() => {
-    if (accountStatus !== "authenticated") return;
+    if (accountStatus !== "authenticated" && accountStatus !== "unavailable") return;
     const resumeIfVisible = () => {
       if (document.visibilityState === "visible" && navigator.onLine) {
+        if (accountStatus === "unavailable") {
+          void hostedHubController.bootstrap();
+          return;
+        }
         void hostedHubController.resumeBrowser().then(() => setHostedWorkspaceBackgrounded(false));
       }
     };

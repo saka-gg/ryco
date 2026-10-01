@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@ryco/contracts";
 import { configureHostedRuntime } from "@ryco/client-runtime/authorization";
+import * as threadStore from "../store";
 
 import type { HostedHubNode, HostedHubSessionResponse } from "./types";
 import { createFakeHistoryWindow, type FakeHistoryWindow } from "../../test/fakeHistoryWindow";
@@ -434,6 +435,24 @@ describe("hosted node route restore pipeline", () => {
     expect(activateHostedNode).not.toHaveBeenCalled();
     expect(win.location.pathname).toBe("/");
     expect(getHostedNodeRouteNotice()).toMatch(/not in your authorized node directory/);
+  });
+
+  it("keeps a known cached thread readable when directory refresh is temporarily unavailable", async () => {
+    const target = node();
+    vi.spyOn(threadStore, "selectThreadExistsByRef").mockReturnValue(true);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      nodes: [target],
+      directoryStatus: "stale",
+    });
+    const path = `/node/${target.id}/${target.environmentId}/saved-thread`;
+    const { win, flush } = setup(path);
+    await settle();
+    flush();
+    expect(win.location.pathname).toBe(path);
+    expect(activateHostedNode).not.toHaveBeenCalled();
+    expect(getHostedNodeRouteNotice()).toBeNull();
   });
 
   it("redirects legacy thread URLs to the node-scoped shape in place", async () => {

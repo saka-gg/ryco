@@ -1,5 +1,9 @@
 import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
+  readHostedThreadScroll,
+  saveHostedThreadScroll,
+} from "../../persistence/hostedReadViewState";
+import {
   type EnvironmentId,
   type MessageId,
   type ServerProviderSkill,
@@ -287,6 +291,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onInspectContextHandoff,
 }: MessagesTimelineProps) {
   usePerfMark("MessagesTimeline");
+  const initialScrollOffset = useMemo(
+    () => readHostedThreadScroll(routeThreadKey),
+    [routeThreadKey],
+  );
   const turnFoldExpandedById = useUiStateStore(
     (store) => store.threadTurnFoldExpandedById[routeThreadKey] ?? EMPTY_EXPANSION_OVERRIDES,
   );
@@ -368,6 +376,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const handleScroll = useCallback(() => {
     const isAtEnd = evaluateIsAtEnd();
     const scrollNode = listRef.current?.getScrollableNode?.();
+    if (scrollNode instanceof HTMLElement)
+      saveHostedThreadScroll(routeThreadKey, scrollNode.scrollTop);
     if (
       scrollNode instanceof HTMLElement &&
       scrollNode.scrollTop <= 320 &&
@@ -410,6 +420,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, [
     canLoadOlder,
     evaluateIsAtEnd,
+    routeThreadKey,
     isLoadingOlder,
     listRef,
     minimapItems,
@@ -761,7 +772,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             renderItem={renderItem}
             estimatedItemSize={56}
             recycleItems={false}
-            initialScrollAtEnd
+            initialScrollAtEnd={initialScrollOffset === undefined}
+            {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
             maintainScrollAtEnd={liveFollowEnabled}
             maintainScrollAtEndThreshold={0.1}
             maintainVisibleContentPosition

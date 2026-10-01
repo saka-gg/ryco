@@ -131,12 +131,14 @@ self.addEventListener("fetch", (event) => {
   if (NETWORK_ONLY_PATH_PREFIXES.some((prefix) => hasPathPrefix(url.pathname, prefix))) return;
 
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request).catch(async () => (await caches.match(offlineUrl)) ?? Response.error()));
+    event.respondWith(caches.open(CACHE_NAME).then(async (cache) => (await cache.match(offlineUrl)) ?? fetch(request)));
     return;
   }
 
   if (!absolutePrecacheUrls.has(url.href)) return;
-  event.respondWith(caches.open(CACHE_NAME).then(async (cache) => (await cache.match(request)) ?? fetch(request)));
+  // Only fingerprinted, same-origin build assets reach here. Their bytes do not
+  // vary with request headers; module requests can add Origin unlike precaching.
+  event.respondWith(caches.open(CACHE_NAME).then(async (cache) => (await cache.match(request, { ignoreVary: true })) ?? fetch(request)));
 });
 `;
 }
@@ -176,12 +178,23 @@ export function createHostedPwaBuildPlugin(): Plugin {
       publicBase = config.base;
     },
     generateBundle(_outputOptions, bundle) {
+      const entries = entriesFromBundle(bundle);
       const offlineDocument = renderHostedPwaOfflineDocument({
         startUrl: normalizeBase(publicBase),
+        scripts: entries
+          .filter((entry) => entry.isEntry && IMMUTABLE_ASSET_PATTERN.test(entry.fileName))
+          .map((entry) => pathAtBase(publicBase, entry.fileName)),
+        styles: [
+          ...new Set(
+            entries.filter((entry) => entry.isEntry).flatMap((entry) => entry.importedCss ?? []),
+          ),
+        ]
+          .filter((fileName) => IMMUTABLE_ASSET_PATTERN.test(fileName))
+          .map((fileName) => pathAtBase(publicBase, fileName)),
       });
       const precache = resolveHostedPwaPrecache({
         base: publicBase,
-        entries: entriesFromBundle(bundle),
+        entries,
         offlineDocument,
       });
       this.emitFile({

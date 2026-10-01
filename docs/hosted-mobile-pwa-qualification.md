@@ -58,8 +58,9 @@ node menu rather than capturing one.
 - [ ] Rotate portrait to landscape and back without losing node, thread, draft, or panel state.
 - [ ] Background and foreground the installed app. Mutations remain disabled until access and the
       current node snapshot are revalidated.
-- [ ] Go offline and return online. The static offline page contains no prior application data, and
-      reconnect uses the normal fresh-session path.
+- [ ] Go offline and return online. The cached boot document contains no application data. With
+      **Remember this browser** enabled, the page can display saved text from its encrypted local
+      store; sending remains disabled and reconnect uses the normal fresh-session path.
 - [ ] Verify a waiting update does not reload active work, then activate it with **Update ready**.
 
 ## Android Chrome

@@ -31,6 +31,11 @@ import {
 } from "../workspaceMetadataProjection";
 import { hostedHubController, hostedHubStore } from "./state";
 import { clearWebHostedAccountScopedState } from "./environment";
+import {
+  canShowHostedReadPreview,
+  readHostedReadCache,
+  subscribeHostedReadCache,
+} from "./readCache";
 import { setHostedNodeRouteEnvironmentResolver } from "./nodeRoutes";
 import {
   HOSTED_WEB_SCOPE_LEASE_TTL_MS,
@@ -369,6 +374,52 @@ export function startHostedWorkspaceCoordinator(input?: {
 
   const publish = (machines: ReadonlyArray<WorkspaceMachineCatalogEntry>) => {
     const state = hostedHubStore.getState();
+    const cached = readHostedReadCache();
+    if (state.accountStatus !== "authenticated" && canShowHostedReadPreview()) {
+      hostedMutationLeaseAuthority.update({
+        environmentId: null,
+        snapshotGeneration: 0,
+        effectiveRole: null,
+        directoryReady: false,
+        relayReady: false,
+        shellReady: false,
+      });
+      const cachedMachines = reconcileWorkspaceMachineCatalog(
+        cached.nodes.map((node) => ({
+          environmentId: node.environmentId,
+          nodeId: node.nodeId,
+          label: node.label,
+          platform: { os: "unknown" as const, arch: "other" as const },
+          serverVersion: null,
+          capabilities: {
+            repositoryIdentity: true,
+            threadSettlement: false,
+            nativeClientRequired: false,
+          },
+          clientTier: "hosted-web" as const,
+          nativeTrust: "not-required" as const,
+          requiresNativeVerification: false,
+          effectiveRole: "viewer" as const,
+          online: false,
+          lastSeenAt: null,
+          observedAt: now(),
+          connectionState: "disconnected" as const,
+          deliveryUnknown: false,
+          revokedAt: null,
+        })),
+      ).map((machine) => ({ ...machine, canConnect: false, canMutate: false }));
+      publishHostedWorkspace({
+        status: "stale",
+        accountId: cached.accountId,
+        machines: cachedMachines,
+        workspace: buildUnifiedWorkspaceIndex({
+          machines: cachedMachines,
+          snapshots: cached.snapshots,
+        }),
+        demand: coordinator.snapshot(),
+      });
+      return;
+    }
     const status =
       state.accountStatus !== "authenticated"
         ? "signed-out"
@@ -413,6 +464,12 @@ export function startHostedWorkspaceCoordinator(input?: {
   const synchronize = async () => {
     const generation = ++syncGeneration;
     const state = hostedHubStore.getState();
+    // A failed session check does not prove sign-out. Retain the remembered
+    // account's read model while the single lifecycle owner retries access.
+    if (state.accountStatus === "unavailable" && canShowHostedReadPreview()) {
+      publish([]);
+      return;
+    }
     const accountId = state.accountStatus === "authenticated" ? (state.account?.id ?? null) : null;
     const nextAccountKey = accountId ? JSON.stringify([hubOrigin, accountId]) : null;
     const previousAccountId = activeAccountId;
@@ -427,6 +484,11 @@ export function startHostedWorkspaceCoordinator(input?: {
       accountKey = null;
       publish([]);
       return;
+    }
+    const preview = readHostedReadCache();
+    if (preview.accountId === accountId) {
+      for (const cached of preview.snapshots)
+        if (!snapshots.has(cached.environmentId)) snapshots.set(cached.environmentId, cached);
     }
     if (nextAccountKey !== accountKey && state.directoryStatus === "ready") {
       accountKey = nextAccountKey;
@@ -521,6 +583,7 @@ export function startHostedWorkspaceCoordinator(input?: {
   };
 
   const unsubscribeHub = hostedHubStore.subscribe(() => void synchronize());
+  const unsubscribeReadCache = subscribeHostedReadCache(() => void synchronize());
   const unsubscribeStore = useStore.subscribe(scheduleLiveSnapshotPublish);
   const unsubscribeCoordinator = coordinator.subscribe(() =>
     publish(hostedWorkspaceSnapshot.machines),
@@ -533,6 +596,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     syncGeneration += 1;
     if (publishTimer !== null) cancel(publishTimer);
     unsubscribeHub();
+    unsubscribeReadCache();
     unsubscribeStore();
     unsubscribeCoordinator();
     resetRouteResolver();

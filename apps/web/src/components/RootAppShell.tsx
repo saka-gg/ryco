@@ -95,7 +95,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
           />
         ) : null}
         {primaryEnvironmentAuthenticated ? <SlowRpcAckToastCoordinator /> : null}
-        {primaryEnvironmentAuthenticated ? (
+        {authGateState.status === "authenticated" ? (
           <WebSocketConnectionSurface>{appShell}</WebSocketConnectionSurface>
         ) : (
           appShell
