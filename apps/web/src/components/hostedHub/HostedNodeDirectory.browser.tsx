@@ -62,7 +62,7 @@ import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { useUiStateStore } from "../../uiStateStore";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { HostedHubRoot } from "./HostedHubRoot";
-import { createBrowserWorkspaceMetadataCache } from "../../persistence/workspaceMetadataCache";
+import { getBrowserWorkspaceMetadataCache } from "../../persistence/workspaceMetadataCache";
 
 const account = {
   id: "acct_aaaaaaaaaaaaaaaaaaaaaa",
@@ -178,6 +178,10 @@ beforeEach(async () => {
     expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
   });
   localStorage.clear();
+  await getBrowserWorkspaceMetadataCache().purgeAccount({
+    hubOrigin: window.location.origin,
+    accountId: account.id,
+  });
   sessionStorage.clear();
   hostedHubController.resetForTests();
   resetDirectoryRouteForTests();
@@ -235,7 +239,7 @@ describe("hosted node directory", () => {
         },
       ],
     };
-    await createBrowserWorkspaceMetadataCache(localStorage).replace({
+    await getBrowserWorkspaceMetadataCache().replace({
       namespace: {
         hubOrigin: window.location.origin,
         accountId: account.id,

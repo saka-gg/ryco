@@ -194,7 +194,23 @@ let browserWorkspaceMetadataCache: WorkspaceMetadataCache | null = null;
 
 export function getBrowserWorkspaceMetadataCache(): WorkspaceMetadataCache {
   if (!browserWorkspaceMetadataCache) {
-    browserWorkspaceMetadataCache = createBrowserWorkspaceMetadataCache(window.localStorage);
+    // Disk persistence now belongs to the account-fenced encrypted read cache.
+    // This adapter remains the coordinator's bounded in-memory metadata index.
+    try {
+      window.localStorage.removeItem(HOSTED_WORKSPACE_METADATA_CACHE_KEY);
+    } catch {
+      /* Optional storage. */
+    }
+    const memory = new Map<string, string>();
+    browserWorkspaceMetadataCache = createBrowserWorkspaceMetadataCache({
+      getItem: (key) => memory.get(key) ?? null,
+      setItem: (key, value) => {
+        memory.set(key, value);
+      },
+      removeItem: (key) => {
+        memory.delete(key);
+      },
+    });
   }
   return browserWorkspaceMetadataCache;
 }

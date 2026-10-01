@@ -1,4 +1,5 @@
 import { ClaudeCacheDetails } from "./ClaudeCacheReview";
+import { isHostedHubMode } from "../../env";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
 import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
@@ -970,9 +971,11 @@ export const ChatComposer = memo(
     // tap at all. The collapsed surface needs an explicit expand path in that
     // state (see the surface onClick below).
     const isComposerEditorDisabled =
-      isConnecting ||
       isComposerApprovalState ||
-      (environmentUnavailable !== null && activePendingProgress === null);
+      // Hosted text editing is local while cached conversations reconnect.
+      // The independent primary-action and dispatch gates still require fresh authority.
+      (!isHostedHubMode() &&
+        (isConnecting || (environmentUnavailable !== null && activePendingProgress === null)));
 
     const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
     const showPlanSidebarToggle = false;

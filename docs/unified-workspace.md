@@ -6,7 +6,8 @@ visible as the provenance and execution location of each physical project, workt
 
 The Hub is not an aggregation service. Relay payload encryption keeps project and thread content
 node-owned, so Mobile, Desktop, and hosted Web build the unified view from environment-scoped node
-snapshots and their own metadata-only caches.
+snapshots and client-owned caches. Hosted Web can also remember bounded conversation text when
+the user enables **Account → Overview → Remember this browser**.
 
 ## Physical ownership and logical projects
 
@@ -57,10 +58,26 @@ path.
 
 ## Cache and failure behavior
 
-The client cache contains bounded workspace metadata only: project, worktree, thread-shell, and
-status summaries. It never stores messages, provider events, terminals, files, attachments,
-screenshots, detailed diffs, credentials, or secrets. A cache namespace includes Hub origin,
-account, and environment. Only a complete settled snapshot replaces cached state.
+The shared workspace index contains bounded project, worktree, thread-shell, and status summaries.
+Hosted Web's optional remembered-browser cache additionally stores recent message text, text drafts,
+and scroll positions in page-owned encrypted IndexedDB. It uses a non-exportable per-account AES-GCM
+key, with origin, account, environment and format bound to each record. Up to 16 environments,
+32 conversations per environment and 150 messages per conversation fit within a 12 MiB ciphertext
+budget; each environment record is limited to 2 MiB. Larger histories are trimmed, with the routed
+thread preferred. Attachment bodies, preview URLs, terminal output, provider events, detailed diffs,
+credentials and transport secrets are excluded. Metadata persistence uses this same opt-in boundary.
+
+Remembered text can render before session checking, including offline. Anyone with access to that
+browser profile can read it. Stored data never restores a role, session, streaming state, mutation
+lease or replay cursor. Live state wins over a late cache read. A fresh bounded detail snapshot
+reconciles remembered text; a trimmed display window is not a valid incremental replay baseline.
+Explicit sign-out, observed expiry, account change and loss of node eligibility purge remembered
+data. Disabling the setting deletes records and keys. Cross-tab invalidation and account epochs
+prevent pending writes from restoring a deleted copy.
+
+The service worker only caches build-generated static entry points and immutable assets. Its
+data-free boot document lets the page open the encrypted cache while offline; authenticated APIs,
+relay traffic and live HTML responses never enter CacheStorage.
 
 Failures stay with their owning environment:
 

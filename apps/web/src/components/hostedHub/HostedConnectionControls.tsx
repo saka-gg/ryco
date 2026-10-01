@@ -45,6 +45,11 @@ import {
 } from "./HostedConnectionControls.logic";
 import { HostedE2eeVerification } from "./HostedE2eeVerification";
 import { HostedPwaControls } from "./HostedPwaControls";
+import {
+  useHostedReadCache,
+  canShowHostedReadPreview,
+  setHostedReadCacheEnabled,
+} from "../../hostedHub/readCache";
 
 /**
  * The one place a glyph name becomes a glyph. Everything that DECIDES which name
@@ -162,6 +167,7 @@ function DeliveryUnknownAcknowledgement() {
  * while no node is selected, which also covers every non-hosted mode.
  */
 export function HostedNodeMenu() {
+  const readCache = useHostedReadCache();
   const node = useHostedHubStore((state) => state.selectedNode);
   const nodes = useHostedHubStore((state) => state.nodes);
   const transport = useHostedHubStore((state) => state.transportStatus);
@@ -176,7 +182,25 @@ export function HostedNodeMenu() {
   const e2eeStatus = useWebE2eeChannelStatus();
   const { switchNode, returnToAllNodes } = useHostedConnectionActions();
   const disclosureRef = useRef<HTMLDetailsElement>(null);
-  if (!node) return null;
+  if (!node) {
+    if (!readCache.accountId || !canShowHostedReadPreview()) return null;
+    return (
+      <details className="relative text-xs">
+        <summary className="cursor-pointer rounded-lg px-3 py-2 text-muted-foreground">
+          Saved view · Reconnecting
+        </summary>
+        <div className="absolute right-0 z-50 mt-2 grid w-64 gap-2 rounded-lg border bg-popover p-3 shadow-md">
+          <p>Reading saved text. Sending work waits for a fresh connection.</p>
+          <Button variant="ghost" size="sm" onClick={() => void hostedHubController.bootstrap()}>
+            Retry connection
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => void setHostedReadCacheEnabled(false)}>
+            Forget saved conversations
+          </Button>
+        </div>
+      </details>
+    );
+  }
 
   const statusInput = {
     browserStatus,

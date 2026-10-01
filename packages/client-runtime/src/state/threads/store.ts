@@ -3072,6 +3072,7 @@ export interface CachedEnvironmentShellSnapshot {
   readonly threads: ReadonlyArray<{
     readonly shell: ThreadShell;
     readonly summary: SidebarThreadSummary;
+    readonly content?: import("./readCache.ts").CachedThreadContent | undefined;
   }>;
 }
 
@@ -3126,6 +3127,25 @@ export function hydrateEnvironmentStateFromCache(
         backgroundLiveness: null,
       },
     });
+    if (thread.content) {
+      const id = thread.shell.id;
+      environmentState = {
+        ...environmentState,
+        messageIdsByThreadId: {
+          ...environmentState.messageIdsByThreadId,
+          [id]: thread.content.messages.map((message) => message.id),
+        },
+        messageByThreadId: {
+          ...environmentState.messageByThreadId,
+          [id]: Object.fromEntries(
+            thread.content.messages.map((message) => [
+              message.id,
+              { ...message, streaming: false },
+            ]),
+          ),
+        },
+      };
+    }
   }
   return commitEnvironmentState(state, environmentId, environmentState);
 }
