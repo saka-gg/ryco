@@ -5,8 +5,6 @@ import {
   readEffectiveProjectPreferences,
 } from "@ryco/client-runtime/state/settings";
 import { ensureEnvironmentApi } from "../environmentApi";
-import { getSavedEnvironmentRuntimeState } from "../environments/runtime";
-import { getServerConfig } from "../rpc/serverState";
 import { useDeviceName } from "../deviceName";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import {
@@ -262,15 +260,15 @@ function useNewThreadState() {
       return (async () => {
         const leaseBefore =
           hostedNodeId !== null ? readHostedNodeMutationLease(projectRef.environmentId) : null;
-        const primaryConfig = getServerConfig();
-        const config =
-          primaryConfig?.environment.environmentId === projectRef.environmentId
-            ? primaryConfig
-            : getSavedEnvironmentRuntimeState(projectRef.environmentId)?.serverConfig;
-        if (!config)
+        const api = ensureEnvironmentApi(projectRef.environmentId);
+        if (!api.server?.getConfig)
           throw new Error("Node settings are still loading. Try creating the draft again.");
+        // Read from the scoped connection: a hosted node's local descriptor may
+        // differ from its canonical identity, and the primary cache can still
+        // contain the previous node's settings while switching targets.
+        const config = await api.server.getConfig();
         const effective = await readEffectiveProjectPreferences({
-          api: ensureEnvironmentApi(projectRef.environmentId),
+          api,
           config,
           projectId: projectRef.projectId,
         });
