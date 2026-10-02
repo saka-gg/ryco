@@ -36,7 +36,12 @@ import {
   readHostedReadCache,
   subscribeHostedReadCache,
 } from "./readCache";
-import { setHostedNodeRouteEnvironmentResolver } from "./nodeRoutes";
+import {
+  getInstalledHostedNodeHistory,
+  getRoutedHostedNode,
+  setHostedNodeRouteEnvironmentResolver,
+  subscribeRoutedHostedNode,
+} from "./nodeRoutes";
 import {
   HOSTED_WEB_SCOPE_LEASE_TTL_MS,
   HOSTED_WEB_SCOPE_REPORT_INTERVAL_MS,
@@ -196,6 +201,10 @@ export interface HostedWorkspaceSnapshot {
   readonly machines: ReadonlyArray<WorkspaceMachineCatalogEntry>;
   readonly workspace: UnifiedWorkspaceIndex;
   readonly demand: HostedConnectionCoordinatorSnapshot;
+  readonly homeDiscovery: {
+    readonly environmentId: EnvironmentId | null;
+    readonly failedEnvironmentIds: ReadonlyArray<EnvironmentId>;
+  };
 }
 
 const EMPTY_WORKSPACE: UnifiedWorkspaceIndex = {
@@ -212,6 +221,7 @@ let hostedWorkspaceSnapshot: HostedWorkspaceSnapshot = {
   accountId: null,
   machines: [],
   workspace: EMPTY_WORKSPACE,
+  homeDiscovery: { environmentId: null, failedEnvironmentIds: [] },
   demand: {
     demand: createWorkspaceConnectionDemandState(MAX_HOSTED_WEB_CONNECTIONS),
     queuedEnvironmentIds: [],
@@ -220,6 +230,7 @@ let hostedWorkspaceSnapshot: HostedWorkspaceSnapshot = {
 };
 const hostedWorkspaceListeners = new Set<() => void>();
 let activeCoordinator: HostedConnectionCoordinator | null = null;
+let retryHomeDiscovery: (() => void) | null = null;
 const hostedMutationLeaseAuthority = createNodeMutationLeaseAuthority();
 
 export function readHostedNodeMutationLease(
@@ -271,6 +282,10 @@ export function useHostedWorkspaceState(): HostedWorkspaceSnapshot {
   );
 }
 
+export function retryHostedHomeDiscovery(): void {
+  retryHomeDiscovery?.();
+}
+
 export function hostedNodeRequiresNativeClient(node: HostedHubNode): boolean {
   return node.capabilities?.nativeClientRequired === true;
 }
@@ -319,6 +334,8 @@ export function startHostedWorkspaceCoordinator(input?: {
   readonly setInterval?: (callback: () => void, delayMs: number) => unknown;
   readonly clearInterval?: (timer: unknown) => void;
   readonly hubOrigin?: string;
+  /** The root can show a route-error directory at `/` instead of the workspace. */
+  readonly canDiscoverHome?: () => boolean;
 }): () => void {
   const cache = input?.cache ?? getBrowserWorkspaceMetadataCache();
   const now = input?.now ?? Date.now;
@@ -342,6 +359,10 @@ export function startHostedWorkspaceCoordinator(input?: {
   let disposed = false;
   let syncGeneration = 0;
   let lastSelectedEnvironmentId: EnvironmentId | null = null;
+  let discoveryEnvironmentId: EnvironmentId | null = null;
+  let releaseDiscoveryScope: (() => void) | null = null;
+  let discoveryPending = false;
+  const failedDiscoveryEnvironments = new Set<EnvironmentId>();
 
   const coordinator = createHostedConnectionCoordinator({
     scopes: hostedWebConnectionScopes,
@@ -351,7 +372,13 @@ export function startHostedWorkspaceCoordinator(input?: {
     connect: async (environmentId, delayMs) => {
       if (delayMs > 0) await new Promise<void>((resolve) => schedule(resolve, delayMs));
       const state = hostedHubStore.getState();
-      if (state.directoryStatus !== "ready" || state.browserStatus !== "current") {
+      if (
+        disposed ||
+        state.accountStatus !== "authenticated" ||
+        state.directoryStatus !== "ready" ||
+        state.browserStatus !== "current" ||
+        !hostedWebConnectionScopes.list().some((scope) => scope.environmentId === environmentId)
+      ) {
         throw new Error("Hosted Web directory is not current.");
       }
       const node = state.nodes.find(
@@ -362,7 +389,14 @@ export function startHostedWorkspaceCoordinator(input?: {
           !hostedNodeRequiresNativeClient(candidate),
       );
       if (!node) throw new Error("Hosted Web environment is not eligible.");
-      await hostedHubController.selectNode(node.id);
+      if (state.selectedNode?.id === node.id && state.transportStatus === "terminal-failure") {
+        await hostedHubController.retrySelectedNode();
+      } else {
+        await hostedHubController.selectNode(node.id);
+      }
+      if (disposed || hostedHubStore.getState().selectedNode?.id !== node.id) {
+        throw new Error("Hosted Web connection demand was superseded.");
+      }
     },
     release: async (environmentId) => {
       if (hostedHubStore.getState().selectedNode?.environmentId === environmentId) {
@@ -417,6 +451,7 @@ export function startHostedWorkspaceCoordinator(input?: {
           snapshots: cached.snapshots,
         }),
         demand: coordinator.snapshot(),
+        homeDiscovery: { environmentId: null, failedEnvironmentIds: [] },
       });
       return;
     }
@@ -458,8 +493,95 @@ export function startHostedWorkspaceCoordinator(input?: {
         snapshots: Array.from(snapshots.values()),
       }),
       demand: coordinator.snapshot(),
+      homeDiscovery: {
+        environmentId: discoveryEnvironmentId,
+        failedEnvironmentIds: [...failedDiscoveryEnvironments],
+      },
     });
   };
+
+  const releaseDiscovery = () => {
+    const release = releaseDiscoveryScope;
+    releaseDiscoveryScope = null;
+    discoveryEnvironmentId = null;
+    release?.();
+  };
+
+  // Home contributes only one disposable demand lease at a time. Connection,
+  // authorization and shell synchronization still belong to the normal owner.
+  // A routed thread or any other interactive scope always takes precedence.
+  const reconcileHomeDiscovery = () => {
+    const state = hostedHubStore.getState();
+    const route = getRoutedHostedNode();
+    const foregroundDemand = hostedWebConnectionScopes
+      .list()
+      .some(
+        (entry) =>
+          entry.environmentId !== discoveryEnvironmentId ||
+          entry.scope.type !== "interactive" ||
+          entry.refCount > 1,
+      );
+    const canDiscover =
+      getInstalledHostedNodeHistory() !== null &&
+      route.nodeId === null &&
+      route.logicalPathname === "/" &&
+      !route.malformed &&
+      input?.canDiscoverHome?.() !== false &&
+      state.accountStatus === "authenticated" &&
+      state.account?.id === activeAccountId &&
+      accountKey === JSON.stringify([hubOrigin, activeAccountId]) &&
+      state.directoryStatus === "ready" &&
+      state.browserStatus === "current" &&
+      !coordinator.snapshot().demand.backgrounded &&
+      !foregroundDemand;
+    const eligible = state.nodes.filter(
+      (node) =>
+        node.revokedAt === null && node.presence.online && !hostedNodeRequiresNativeClient(node),
+    );
+    if (!canDiscover) {
+      releaseDiscovery();
+    } else {
+      if (discoveryEnvironmentId !== null) {
+        const failed =
+          state.selectedNode?.environmentId === discoveryEnvironmentId &&
+          state.transportStatus === "terminal-failure";
+        if (failed) failedDiscoveryEnvironments.add(discoveryEnvironmentId);
+        if (
+          failed ||
+          snapshots.has(discoveryEnvironmentId) ||
+          !eligible.some((node) => node.environmentId === discoveryEnvironmentId)
+        )
+          releaseDiscovery();
+      }
+      if (discoveryEnvironmentId === null) {
+        const next = eligible.find(
+          (node) =>
+            !snapshots.has(node.environmentId) &&
+            !failedDiscoveryEnvironments.has(node.environmentId),
+        );
+        if (next) {
+          discoveryEnvironmentId = next.environmentId;
+          releaseDiscoveryScope = hostedWebConnectionScopes.retain(next.environmentId, {
+            type: "interactive",
+          });
+        }
+      }
+    }
+    publish(hostedWorkspaceSnapshot.machines);
+  };
+  const scheduleHomeDiscovery = () => {
+    if (discoveryPending || disposed) return;
+    discoveryPending = true;
+    queueMicrotask(() => {
+      discoveryPending = false;
+      if (!disposed) reconcileHomeDiscovery();
+    });
+  };
+  const retryDiscovery = () => {
+    failedDiscoveryEnvironments.clear();
+    scheduleHomeDiscovery();
+  };
+  retryHomeDiscovery = retryDiscovery;
 
   const synchronize = async () => {
     const generation = ++syncGeneration;
@@ -467,6 +589,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     // A failed session check does not prove sign-out. Retain the remembered
     // account's read model while the single lifecycle owner retries access.
     if (state.accountStatus === "unavailable" && canShowHostedReadPreview()) {
+      releaseDiscovery();
       publish([]);
       return;
     }
@@ -475,6 +598,8 @@ export function startHostedWorkspaceCoordinator(input?: {
     const previousAccountId = activeAccountId;
     activeAccountId = accountId;
     if (previousAccountId && accountId !== previousAccountId) {
+      releaseDiscovery();
+      failedDiscoveryEnvironments.clear();
       await cache.purgeAccount({ hubOrigin, accountId: previousAccountId }).catch(() => undefined);
       snapshots.clear();
       hostedWebConnectionScopes.reset();
@@ -482,6 +607,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     }
     if (!accountId) {
       accountKey = null;
+      releaseDiscovery();
       publish([]);
       return;
     }
@@ -491,9 +617,9 @@ export function startHostedWorkspaceCoordinator(input?: {
         if (!snapshots.has(cached.environmentId)) snapshots.set(cached.environmentId, cached);
     }
     if (nextAccountKey !== accountKey && state.directoryStatus === "ready") {
-      accountKey = nextAccountKey;
       const cached = await cache.list({ hubOrigin, accountId });
       if (disposed || generation !== syncGeneration) return;
+      accountKey = nextAccountKey;
       const eligibleEnvironmentIds = new Set(
         state.nodes
           .filter((node) => node.revokedAt === null && !hostedNodeRequiresNativeClient(node))
@@ -548,6 +674,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     }
     if (disposed || generation !== syncGeneration) return;
     publish(machines);
+    scheduleHomeDiscovery();
   };
 
   const scheduleLiveSnapshotPublish = () => {
@@ -579,15 +706,19 @@ export function startHostedWorkspaceCoordinator(input?: {
           .catch(() => undefined);
       }
       publish(machines);
+      scheduleHomeDiscovery();
     }, 100);
   };
 
   const unsubscribeHub = hostedHubStore.subscribe(() => void synchronize());
   const unsubscribeReadCache = subscribeHostedReadCache(() => void synchronize());
+  const unsubscribeRoute = subscribeRoutedHostedNode(scheduleHomeDiscovery);
+  const unsubscribeScopes = hostedWebConnectionScopes.subscribe(scheduleHomeDiscovery);
   const unsubscribeStore = useStore.subscribe(scheduleLiveSnapshotPublish);
-  const unsubscribeCoordinator = coordinator.subscribe(() =>
-    publish(hostedWorkspaceSnapshot.machines),
-  );
+  const unsubscribeCoordinator = coordinator.subscribe(() => {
+    publish(hostedWorkspaceSnapshot.machines);
+    scheduleHomeDiscovery();
+  });
   const resetRouteResolver = setHostedNodeRouteEnvironmentResolver(nodeIdForHostedEnvironment);
   void coordinator.reconcile();
   void synchronize();
@@ -597,6 +728,10 @@ export function startHostedWorkspaceCoordinator(input?: {
     if (publishTimer !== null) cancel(publishTimer);
     unsubscribeHub();
     unsubscribeReadCache();
+    unsubscribeRoute();
+    unsubscribeScopes();
+    releaseDiscovery();
+    if (retryHomeDiscovery === retryDiscovery) retryHomeDiscovery = null;
     unsubscribeStore();
     unsubscribeCoordinator();
     resetRouteResolver();
@@ -616,6 +751,7 @@ export function startHostedWorkspaceCoordinator(input?: {
         accountId: null,
         machines: [],
         workspace: EMPTY_WORKSPACE,
+        homeDiscovery: { environmentId: null, failedEnvironmentIds: [] },
         demand: coordinator.snapshot(),
       });
     }

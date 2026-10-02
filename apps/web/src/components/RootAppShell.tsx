@@ -52,6 +52,7 @@ import {
 } from "../environments/primary";
 import { ServerStateBootstrap } from "./ServerStateBootstrap";
 import { ThreadPriorityRefreshBridge } from "./ThreadPriorityRefreshBridge";
+import { getRoutedHostedNode } from "../hostedHub/nodeRoutes";
 
 export interface RootAppShellProps {
   readonly authGateState: {
@@ -214,6 +215,7 @@ function EventRouter({ hosted }: { readonly hosted: boolean }) {
         !shouldApplyBootstrapThreadRedirect({
           pathname: readPathname(),
           tier: getPresentationTier(),
+          hostedHome: hosted && getRoutedHostedNode().nodeId === null,
         })
       ) {
         return;

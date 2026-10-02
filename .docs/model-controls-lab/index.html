@@ -31,7 +31,8 @@
          ============================================================ */
       :root {
         color-scheme: light;
-        --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        --font-sans:
+          "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
         --font-mono: "Geist Mono", "SF Mono", ui-monospace, Menlo, monospace;
         --ease: cubic-bezier(0.16, 1, 0.3, 1);
         --spring-snappy: cubic-bezier(0.3, 1.36, 0.44, 1);
@@ -118,16 +119,36 @@
         --fast: #facc15;
         --fast-bg: rgba(250, 204, 21, 0.13);
       }
-      [data-level="none"] { --lv: var(--lv-none); }
-      [data-level="minimal"] { --lv: var(--lv-minimal); }
-      [data-level="low"] { --lv: var(--lv-low); }
-      [data-level="medium"] { --lv: var(--lv-medium); }
-      [data-level="high"] { --lv: var(--lv-high); }
-      [data-level="xhigh"] { --lv: var(--lv-xhigh); }
-      [data-level="max"] { --lv: var(--lv-max); }
-      [data-level="ultracode"] { --lv: var(--lv-ultracode); }
-      [data-level="off"] { --lv: var(--lv-off); }
-      [data-level="on"] { --lv: var(--lv-on); }
+      [data-level="none"] {
+        --lv: var(--lv-none);
+      }
+      [data-level="minimal"] {
+        --lv: var(--lv-minimal);
+      }
+      [data-level="low"] {
+        --lv: var(--lv-low);
+      }
+      [data-level="medium"] {
+        --lv: var(--lv-medium);
+      }
+      [data-level="high"] {
+        --lv: var(--lv-high);
+      }
+      [data-level="xhigh"] {
+        --lv: var(--lv-xhigh);
+      }
+      [data-level="max"] {
+        --lv: var(--lv-max);
+      }
+      [data-level="ultracode"] {
+        --lv: var(--lv-ultracode);
+      }
+      [data-level="off"] {
+        --lv: var(--lv-off);
+      }
+      [data-level="on"] {
+        --lv: var(--lv-on);
+      }
 
       [data-motion="off"] *,
       [data-motion="off"] *::before,
@@ -139,8 +160,14 @@
       /* ============================================================
          Base / lab chrome
          ============================================================ */
-      * { box-sizing: border-box; }
-      html, body { margin: 0; padding: 0; }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
       body {
         font-family: var(--font-sans);
         background: var(--page);
@@ -150,10 +177,23 @@
         line-height: 1.45;
         min-height: 100vh;
       }
-      button { font: inherit; color: inherit; }
-      .ic { width: 16px; height: 16px; flex: none; }
-      .ic.fill { fill: currentColor; }
-      .pv { width: 16px; height: 16px; flex: none; }
+      button {
+        font: inherit;
+        color: inherit;
+      }
+      .ic {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
+      .ic.fill {
+        fill: currentColor;
+      }
+      .pv {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
       kbd {
         display: inline-flex;
         align-items: center;
@@ -170,31 +210,104 @@
         box-shadow: inset 0 0 0 1px var(--border);
       }
 
-      .lab { max-width: 1120px; margin: 0 auto; padding: 28px 28px 64px; }
-      .lab-bar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
-      .lab-title { font-size: 20px; font-weight: 600; letter-spacing: -0.015em; margin: 0; }
-      .lab-sub { margin: 4px 0 0; color: var(--muted-fg); font-size: 13.5px; max-width: 560px; }
-      .lab-controls { display: flex; align-items: center; gap: 8px; }
+      .lab {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 28px 28px 64px;
+      }
+      .lab-bar {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        flex-wrap: wrap;
+      }
+      .lab-title {
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+        margin: 0;
+      }
+      .lab-sub {
+        margin: 4px 0 0;
+        color: var(--muted-fg);
+        font-size: 13.5px;
+        max-width: 560px;
+      }
+      .lab-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
       .lab-icon-btn {
-        height: 30px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px;
-        border-radius: 8px; border: 0; background: transparent; color: var(--muted-fg);
-        box-shadow: inset 0 0 0 1px var(--border); cursor: pointer; font-size: 12.5px;
+        height: 30px;
+        padding: 0 10px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 8px;
+        border: 0;
+        background: transparent;
+        color: var(--muted-fg);
+        box-shadow: inset 0 0 0 1px var(--border);
+        cursor: pointer;
+        font-size: 12.5px;
       }
-      .lab-icon-btn:hover { color: var(--foreground); background: var(--muted); }
-      .lab-icon-btn[aria-pressed="false"] { opacity: 0.7; }
-      .lab-tabs .seg-opt { height: 26px; padding: 0 12px; font-size: 12.5px; }
-      .lab-tabs .seg-opt b { font-weight: 600; margin-right: 5px; color: var(--faint-fg); }
-      .lab-tabs .seg-opt[aria-checked="true"] b { color: var(--muted-fg); }
+      .lab-icon-btn:hover {
+        color: var(--foreground);
+        background: var(--muted);
+      }
+      .lab-icon-btn[aria-pressed="false"] {
+        opacity: 0.7;
+      }
+      .lab-tabs .seg-opt {
+        height: 26px;
+        padding: 0 12px;
+        font-size: 12.5px;
+      }
+      .lab-tabs .seg-opt b {
+        font-weight: 600;
+        margin-right: 5px;
+        color: var(--faint-fg);
+      }
+      .lab-tabs .seg-opt[aria-checked="true"] b {
+        color: var(--muted-fg);
+      }
 
-      .scenarios { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 18px 0 14px; font-size: 12.5px; color: var(--muted-fg); }
-      .scenarios > span { margin-right: 4px; }
-      .scenario {
-        height: 26px; padding: 0 10px; border-radius: 999px; border: 0; cursor: pointer;
-        background: transparent; color: var(--muted-fg); box-shadow: inset 0 0 0 1px var(--border);
-        font-size: 12px; display: inline-flex; align-items: center; gap: 6px;
+      .scenarios {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin: 18px 0 14px;
+        font-size: 12.5px;
+        color: var(--muted-fg);
       }
-      .scenario:hover { color: var(--foreground); background: var(--muted); }
-      .scenario .pv { width: 12px; height: 12px; }
+      .scenarios > span {
+        margin-right: 4px;
+      }
+      .scenario {
+        height: 26px;
+        padding: 0 10px;
+        border-radius: 999px;
+        border: 0;
+        cursor: pointer;
+        background: transparent;
+        color: var(--muted-fg);
+        box-shadow: inset 0 0 0 1px var(--border);
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .scenario:hover {
+        color: var(--foreground);
+        background: var(--muted);
+      }
+      .scenario .pv {
+        width: 12px;
+        height: 12px;
+      }
 
       /* ============================================================
          Stage — a faithful slice of the chat pane
@@ -207,63 +320,184 @@
         box-shadow: inset 0 0 0 1px var(--border);
         overflow: hidden;
       }
-      .thread { max-width: 720px; margin: 0 auto; padding: 36px 24px 0; display: flex; flex-direction: column; gap: 18px; }
-      .msg-user {
-        align-self: flex-end; max-width: 78%; padding: 9px 14px; border-radius: 16px;
-        background: var(--muted); font-size: 14px;
+      .thread {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 36px 24px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
       }
-      .msg-assistant { font-size: 14px; color: var(--foreground); }
-      .msg-assistant p { margin: 0 0 10px; }
+      .msg-user {
+        align-self: flex-end;
+        max-width: 78%;
+        padding: 9px 14px;
+        border-radius: 16px;
+        background: var(--muted);
+        font-size: 14px;
+      }
+      .msg-assistant {
+        font-size: 14px;
+        color: var(--foreground);
+      }
+      .msg-assistant p {
+        margin: 0 0 10px;
+      }
       .msg-assistant code {
-        font-family: var(--font-mono); font-size: 12.5px; padding: 1px 5px; border-radius: 5px;
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        padding: 1px 5px;
+        border-radius: 5px;
         background: var(--muted);
       }
-      .msg-meta { font-size: 12px; color: var(--faint-fg); }
+      .msg-meta {
+        font-size: 12px;
+        color: var(--faint-fg);
+      }
 
-      .composer-dock { position: absolute; left: 0; right: 0; bottom: 0; padding: 0 24px 22px; }
+      .composer-dock {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        padding: 0 24px 22px;
+      }
       .composer {
-        max-width: 720px; margin: 0 auto; border-radius: 20px; background: var(--card);
-        box-shadow: inset 0 0 0 1px var(--border), var(--composer-shadow);
+        max-width: 720px;
+        margin: 0 auto;
+        border-radius: 20px;
+        background: var(--card);
+        box-shadow:
+          inset 0 0 0 1px var(--border),
+          var(--composer-shadow);
       }
       .composer textarea {
-        display: block; width: 100%; border: 0; outline: 0; resize: none; background: transparent;
-        font: inherit; font-size: 14px; color: var(--foreground); padding: 14px 16px 4px; min-height: 52px;
+        display: block;
+        width: 100%;
+        border: 0;
+        outline: 0;
+        resize: none;
+        background: transparent;
+        font: inherit;
+        font-size: 14px;
+        color: var(--foreground);
+        padding: 14px 16px 4px;
+        min-height: 52px;
       }
-      .composer textarea::placeholder { color: var(--faint-fg); }
-      .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 10px 10px; }
-      .cf-left { display: flex; align-items: center; gap: 2px; min-width: 0; }
-      .cf-right { display: flex; align-items: center; gap: 10px; }
+      .composer textarea::placeholder {
+        color: var(--faint-fg);
+      }
+      .composer-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 0 10px 10px;
+      }
+      .cf-left {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        min-width: 0;
+      }
+      .cf-right {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
       .ghost-icon {
-        width: 28px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 8px;
-        background: transparent; color: var(--muted-fg); cursor: pointer;
+        width: 28px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted-fg);
+        cursor: pointer;
       }
-      .ghost-icon:hover, .ghost-chip:hover { background: var(--accent); color: var(--foreground); }
+      .ghost-icon:hover,
+      .ghost-chip:hover {
+        background: var(--accent);
+        color: var(--foreground);
+      }
       .ghost-chip {
-        height: 26px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 0;
-        border-radius: 8px; background: transparent; color: var(--muted-fg); font-size: 12.5px; cursor: pointer;
+        height: 26px;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted-fg);
+        font-size: 12.5px;
+        cursor: pointer;
         white-space: nowrap;
       }
-      .ghost-chip .ic { width: 14px; height: 14px; }
-      .ctx-ring { width: 18px; height: 18px; color: var(--faint-fg); }
-      .send {
-        width: 30px; height: 30px; border-radius: 999px; border: 0; display: grid; place-items: center;
-        background: var(--foreground); color: var(--background); cursor: pointer;
+      .ghost-chip .ic {
+        width: 14px;
+        height: 14px;
       }
-      .send .ic { width: 16px; height: 16px; }
-      .trigger-slot { display: inline-flex; min-width: 0; }
+      .ctx-ring {
+        width: 18px;
+        height: 18px;
+        color: var(--faint-fg);
+      }
+      .send {
+        width: 30px;
+        height: 30px;
+        border-radius: 999px;
+        border: 0;
+        display: grid;
+        place-items: center;
+        background: var(--foreground);
+        color: var(--background);
+        cursor: pointer;
+      }
+      .send .ic {
+        width: 16px;
+        height: 16px;
+      }
+      .trigger-slot {
+        display: inline-flex;
+        min-width: 0;
+      }
 
       /* ============================================================
          Shared bits: roll text, presence, shimmer, segmented
          ============================================================ */
-      .roll { display: inline-grid; overflow: hidden; vertical-align: top; }
-      .roll > .roll-item { grid-area: 1 / 1; justify-self: start; white-space: nowrap; }
-      .roll.center > .roll-item { justify-self: center; }
-      .presence { display: inline-flex; align-items: center; overflow: hidden; flex: none; }
-      .presence[hidden] { display: none !important; }
+      .roll {
+        display: inline-grid;
+        overflow: hidden;
+        vertical-align: top;
+      }
+      .roll > .roll-item {
+        grid-area: 1 / 1;
+        justify-self: start;
+        white-space: nowrap;
+      }
+      .roll.center > .roll-item {
+        justify-self: center;
+      }
+      .presence {
+        display: inline-flex;
+        align-items: center;
+        overflow: hidden;
+        flex: none;
+      }
+      .presence[hidden] {
+        display: none !important;
+      }
 
       .shimmer > .roll-item {
         background-image: linear-gradient(
-          100deg, var(--lv) 0%, var(--lv) 42%, var(--shine) 50%, var(--lv) 58%, var(--lv) 100%
+          100deg,
+          var(--lv) 0%,
+          var(--lv) 42%,
+          var(--shine) 50%,
+          var(--lv) 58%,
+          var(--lv) 100%
         );
         background-size: 300% 100%;
         -webkit-background-clip: text;
@@ -272,35 +506,89 @@
         animation: text-sheen 3.2s linear infinite;
       }
       @keyframes text-sheen {
-        from { background-position: 0% 0; }
-        to { background-position: -150% 0; }
+        from {
+          background-position: 0% 0;
+        }
+        to {
+          background-position: -150% 0;
+        }
       }
 
       .seg {
-        position: relative; display: inline-flex; align-items: stretch; padding: 2px; border-radius: 8px;
-        background: var(--track); isolation: isolate;
+        position: relative;
+        display: inline-flex;
+        align-items: stretch;
+        padding: 2px;
+        border-radius: 8px;
+        background: var(--track);
+        isolation: isolate;
       }
       .seg-opt {
-        position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center;
-        gap: 4px; height: 22px; padding: 0 8px; border: 0; background: transparent; border-radius: 6px;
-        font-size: 11.5px; font-weight: 500; color: var(--muted-fg); cursor: pointer; white-space: nowrap;
+        position: relative;
+        z-index: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        height: 22px;
+        padding: 0 8px;
+        border: 0;
+        background: transparent;
+        border-radius: 6px;
+        font-size: 11.5px;
+        font-weight: 500;
+        color: var(--muted-fg);
+        cursor: pointer;
+        white-space: nowrap;
         transition: color 0.2s;
       }
-      .seg-opt:hover, .seg-opt[aria-checked="true"] { color: var(--foreground); }
-      .seg-opt:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-      .seg-opt .ic { width: 13px; height: 13px; }
-      .seg-ind {
-        position: absolute; z-index: 0; top: 2px; bottom: 2px; left: 0; width: 0; border-radius: 6px;
-        background: var(--background); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18), inset 0 0 0 1px var(--border);
-        transition:
-          transform 0.36s var(--spring-snappy), width 0.36s var(--spring-snappy),
-          background-color 0.25s, box-shadow 0.25s;
+      .seg-opt:hover,
+      .seg-opt[aria-checked="true"] {
+        color: var(--foreground);
       }
-      .dark .seg-ind { background: rgba(255, 255, 255, 0.11); }
+      .seg-opt:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: 1px;
+      }
+      .seg-opt .ic {
+        width: 13px;
+        height: 13px;
+      }
+      .seg-ind {
+        position: absolute;
+        z-index: 0;
+        top: 2px;
+        bottom: 2px;
+        left: 0;
+        width: 0;
+        border-radius: 6px;
+        background: var(--background);
+        box-shadow:
+          0 1px 2px rgba(0, 0, 0, 0.18),
+          inset 0 0 0 1px var(--border);
+        transition:
+          transform 0.36s var(--spring-snappy),
+          width 0.36s var(--spring-snappy),
+          background-color 0.25s,
+          box-shadow 0.25s;
+      }
+      .dark .seg-ind {
+        background: rgba(255, 255, 255, 0.11);
+      }
 
-      .seg-lg { display: flex; width: 100%; }
-      .seg-lg .seg-opt { flex: 1 1 auto; height: 26px; font-size: 12px; padding: 0 8px; }
-      .seg-effort .seg-opt[aria-checked="true"] { color: var(--lv); }
+      .seg-lg {
+        display: flex;
+        width: 100%;
+      }
+      .seg-lg .seg-opt {
+        flex: 1 1 auto;
+        height: 26px;
+        font-size: 12px;
+        padding: 0 8px;
+      }
+      .seg-effort .seg-opt[aria-checked="true"] {
+        color: var(--lv);
+      }
       .seg-ind[data-level] {
         background: color-mix(in srgb, var(--lv) 15%, transparent);
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lv) 34%, transparent);
@@ -309,88 +597,208 @@
         background: var(--fast-bg);
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fast) 32%, transparent);
       }
-      .seg-opt[data-level="fast"][aria-checked="true"] { color: var(--fast); }
-      .seg-opt[data-level="fast"][aria-checked="true"] .ic { fill: currentColor; }
-      .seg-opt[data-level="on"][aria-checked="true"] { color: var(--lv-on); }
+      .seg-opt[data-level="fast"][aria-checked="true"] {
+        color: var(--fast);
+      }
+      .seg-opt[data-level="fast"][aria-checked="true"] .ic {
+        fill: currentColor;
+      }
+      .seg-opt[data-level="on"][aria-checked="true"] {
+        color: var(--lv-on);
+      }
       .ctx-bar {
-        display: inline-block; height: 3px; width: calc(var(--w) * 4px); border-radius: 2px;
-        background: currentColor; opacity: 0.45; margin-left: 2px;
+        display: inline-block;
+        height: 3px;
+        width: calc(var(--w) * 4px);
+        border-radius: 2px;
+        background: currentColor;
+        opacity: 0.45;
+        margin-left: 2px;
       }
 
       /* Rotating lavender edge, shared by C's capsule + indicator */
       .seg-ind[data-level="ultracode"]::before,
       .cap.uc::before {
-        content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none;
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        padding: 1px;
+        pointer-events: none;
         background: conic-gradient(
-          from var(--ang), transparent 0deg, transparent 190deg, var(--uc-2) 270deg, var(--uc-3) 315deg,
-          var(--uc-2) 340deg, transparent 360deg
+          from var(--ang),
+          transparent 0deg,
+          transparent 190deg,
+          var(--uc-2) 270deg,
+          var(--uc-3) 315deg,
+          var(--uc-2) 340deg,
+          transparent 360deg
         );
-        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+        -webkit-mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
         -webkit-mask-composite: xor;
         mask-composite: exclude;
         animation: spin-ang 2.8s linear infinite;
       }
-      @keyframes spin-ang { to { --ang: 360deg; } }
+      @keyframes spin-ang {
+        to {
+          --ang: 360deg;
+        }
+      }
 
       .spark {
-        position: absolute; width: 3px; height: 3px; border-radius: 50%; pointer-events: none; z-index: 30;
-        background: var(--uc-3); box-shadow: 0 0 6px 1px var(--lv-ultracode);
+        position: absolute;
+        width: 3px;
+        height: 3px;
+        border-radius: 50%;
+        pointer-events: none;
+        z-index: 30;
+        background: var(--uc-3);
+        box-shadow: 0 0 6px 1px var(--lv-ultracode);
       }
 
-      .pulse { animation: pulse-ring 0.9s var(--ease); }
-      @keyframes pulse-ring {
-        0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ring) 55%, transparent); }
-        100% { box-shadow: 0 0 0 8px transparent; }
+      .pulse {
+        animation: pulse-ring 0.9s var(--ease);
       }
-      .flash { animation: row-flash 1s var(--ease); }
+      @keyframes pulse-ring {
+        0% {
+          box-shadow: 0 0 0 0 color-mix(in srgb, var(--ring) 55%, transparent);
+        }
+        100% {
+          box-shadow: 0 0 0 8px transparent;
+        }
+      }
+      .flash {
+        animation: row-flash 1s var(--ease);
+      }
       @keyframes row-flash {
-        0%, 30% { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 45%, transparent); }
-        100% { box-shadow: inset 0 0 0 1px transparent; }
+        0%,
+        30% {
+          box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 45%, transparent);
+        }
+        100% {
+          box-shadow: inset 0 0 0 1px transparent;
+        }
       }
 
       .switch {
-        position: relative; width: 34px; height: 20px; border-radius: 999px; border: 0; cursor: pointer;
-        background: var(--track); box-shadow: inset 0 0 0 1px var(--border); transition: background 0.2s; flex: none;
+        position: relative;
+        width: 34px;
+        height: 20px;
+        border-radius: 999px;
+        border: 0;
+        cursor: pointer;
+        background: var(--track);
+        box-shadow: inset 0 0 0 1px var(--border);
+        transition: background 0.2s;
+        flex: none;
       }
       .switch .knob {
-        position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
-        background: var(--thumb); box-shadow: var(--thumb-shadow); transition: transform 0.3s var(--spring-snappy);
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: var(--thumb);
+        box-shadow: var(--thumb-shadow);
+        transition: transform 0.3s var(--spring-snappy);
       }
-      .switch[aria-checked="true"] { background: var(--lv-on); }
-      .switch[aria-checked="true"] .knob { transform: translateX(14px); }
+      .switch[aria-checked="true"] {
+        background: var(--lv-on);
+      }
+      .switch[aria-checked="true"] .knob {
+        transform: translateX(14px);
+      }
 
       /* ============================================================
          Inline trigger (A + B)
          ============================================================ */
       .trig {
-        display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 7px 0 6px;
-        border: 0; border-radius: 8px; background: transparent; cursor: pointer; white-space: nowrap;
-        color: color-mix(in srgb, var(--muted-fg) 88%, transparent); font-size: 12.5px; font-weight: 500;
-        transition: background 0.12s, color 0.12s;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 26px;
+        padding: 0 7px 0 6px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        cursor: pointer;
+        white-space: nowrap;
+        color: color-mix(in srgb, var(--muted-fg) 88%, transparent);
+        font-size: 12.5px;
+        font-weight: 500;
+        transition:
+          background 0.12s,
+          color 0.12s;
       }
-      .trig:hover, .trig[aria-expanded="true"] { background: var(--accent); color: var(--foreground); }
-      .trig:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-      .trig-icon { display: inline-grid; place-items: center; width: 16px; height: 16px; }
-      .trig-icon > * { grid-area: 1 / 1; }
-      .trig-chev { width: 12px; height: 12px; opacity: 0.55; }
-      .trig-level { gap: 5px; color: color-mix(in srgb, var(--lv) 88%, var(--foreground)); }
-      .trig-fast { color: var(--fast); }
-      .trig-fast .ic { width: 13px; height: 13px; }
+      .trig:hover,
+      .trig[aria-expanded="true"] {
+        background: var(--accent);
+        color: var(--foreground);
+      }
+      .trig:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: 1px;
+      }
+      .trig-icon {
+        display: inline-grid;
+        place-items: center;
+        width: 16px;
+        height: 16px;
+      }
+      .trig-icon > * {
+        grid-area: 1 / 1;
+      }
+      .trig-chev {
+        width: 12px;
+        height: 12px;
+        opacity: 0.55;
+      }
+      .trig-level {
+        gap: 5px;
+        color: color-mix(in srgb, var(--lv) 88%, var(--foreground));
+      }
+      .trig-fast {
+        color: var(--fast);
+      }
+      .trig-fast .ic {
+        width: 13px;
+        height: 13px;
+      }
       .trig-ctx {
-        height: 17px; padding: 0 5px; border-radius: 5px; font-size: 10.5px; font-weight: 500;
-        color: var(--muted-fg); box-shadow: inset 0 0 0 1px var(--border); font-variant-numeric: tabular-nums;
+        height: 17px;
+        padding: 0 5px;
+        border-radius: 5px;
+        font-size: 10.5px;
+        font-weight: 500;
+        color: var(--muted-fg);
+        box-shadow: inset 0 0 0 1px var(--border);
+        font-variant-numeric: tabular-nums;
       }
-      .glyph { display: block; flex: none; }
+      .glyph {
+        display: block;
+        flex: none;
+      }
 
       /* ============================================================
          Capsule trigger (C)
          ============================================================ */
       .cap {
-        position: relative; display: inline-flex; align-items: stretch; height: 26px; border-radius: 9px;
-        box-shadow: inset 0 0 0 1px var(--border); overflow: hidden; isolation: isolate;
+        position: relative;
+        display: inline-flex;
+        align-items: stretch;
+        height: 26px;
+        border-radius: 9px;
+        box-shadow: inset 0 0 0 1px var(--border);
+        overflow: hidden;
+        isolation: isolate;
         transition: box-shadow 0.3s;
       }
-      .cap.max { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lv-max) 40%, var(--border)); }
+      .cap.max {
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lv-max) 40%, var(--border));
+      }
       .cap.uc {
         box-shadow:
           inset 0 0 0 1px color-mix(in srgb, var(--lv-ultracode) 22%, var(--border)),
@@ -398,264 +806,848 @@
         overflow: visible;
       }
       .cap-seg {
-        position: relative; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border: 0;
-        background: transparent; color: color-mix(in srgb, var(--muted-fg) 88%, transparent); font-size: 12.5px;
-        font-weight: 500; cursor: pointer; white-space: nowrap; transition: background 0.12s, color 0.12s;
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 0 7px;
+        border: 0;
+        background: transparent;
+        color: color-mix(in srgb, var(--muted-fg) 88%, transparent);
+        font-size: 12.5px;
+        font-weight: 500;
+        cursor: pointer;
+        white-space: nowrap;
+        transition:
+          background 0.12s,
+          color 0.12s;
       }
-      .cap-seg:first-child { padding-left: 6px; border-radius: 9px 0 0 9px; }
+      .cap-seg:first-child {
+        padding-left: 6px;
+        border-radius: 9px 0 0 9px;
+      }
       .cap-seg:not(:first-child)::before {
-        content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 1px; background: var(--border);
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 7px;
+        bottom: 7px;
+        width: 1px;
+        background: var(--border);
       }
-      .cap-seg:hover, .cap-model[aria-expanded="true"] { background: var(--accent); color: var(--foreground); }
-      .cap-seg:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-      .cap-effort { color: color-mix(in srgb, var(--lv) 88%, var(--foreground)); }
-      .cap-effort:hover { color: var(--lv); }
-      .cap-fast .ic { width: 13px; height: 13px; }
-      .cap-fast[aria-pressed="true"] { color: var(--fast); background: var(--fast-bg); }
-      .cap-fast[aria-pressed="true"] .ic { fill: currentColor; }
-      .cap-ctx { font-size: 11px; font-variant-numeric: tabular-nums; }
+      .cap-seg:hover,
+      .cap-model[aria-expanded="true"] {
+        background: var(--accent);
+        color: var(--foreground);
+      }
+      .cap-seg:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: -2px;
+      }
+      .cap-effort {
+        color: color-mix(in srgb, var(--lv) 88%, var(--foreground));
+      }
+      .cap-effort:hover {
+        color: var(--lv);
+      }
+      .cap-fast .ic {
+        width: 13px;
+        height: 13px;
+      }
+      .cap-fast[aria-pressed="true"] {
+        color: var(--fast);
+        background: var(--fast-bg);
+      }
+      .cap-fast[aria-pressed="true"] .ic {
+        fill: currentColor;
+      }
+      .cap-ctx {
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
 
       /* ============================================================
          Picker shell
          ============================================================ */
       .picker {
-        position: absolute; z-index: 20; width: min(400px, calc(100% - 24px)); display: flex; flex-direction: column;
-        border-radius: 12px; background: color-mix(in srgb, var(--popover) 94%, transparent);
-        -webkit-backdrop-filter: blur(22px) saturate(170%); backdrop-filter: blur(22px) saturate(170%);
-        box-shadow: inset 0 0 0 1px var(--border), var(--pop-shadow); overflow: hidden; transform-origin: 0% 100%;
+        position: absolute;
+        z-index: 20;
+        width: min(400px, calc(100% - 24px));
+        display: flex;
+        flex-direction: column;
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--popover) 94%, transparent);
+        -webkit-backdrop-filter: blur(22px) saturate(170%);
+        backdrop-filter: blur(22px) saturate(170%);
+        box-shadow:
+          inset 0 0 0 1px var(--border),
+          var(--pop-shadow);
+        overflow: hidden;
+        transform-origin: 0% 100%;
       }
-      .pk-top { display: flex; height: 248px; min-height: 0; }
+      .pk-top {
+        display: flex;
+        height: 248px;
+        min-height: 0;
+      }
       .pk-rail {
-        width: 46px; flex: none; display: flex; flex-direction: column; gap: 4px; padding: 6px;
+        width: 46px;
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 6px;
         border-right: 1px solid var(--border);
       }
       .pk-rail button {
-        position: relative; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px;
-        border: 0; background: transparent; color: var(--muted-fg); cursor: pointer; transition: background 0.12s;
+        position: relative;
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        border: 0;
+        background: transparent;
+        color: var(--muted-fg);
+        cursor: pointer;
+        transition: background 0.12s;
       }
-      .pk-rail button:hover { background: var(--muted); }
+      .pk-rail button:hover {
+        background: var(--muted);
+      }
       .pk-rail button[aria-selected="true"] {
-        background: var(--background); color: var(--foreground);
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 0 0 1px var(--border);
+        background: var(--background);
+        color: var(--foreground);
+        box-shadow:
+          0 1px 2px rgba(0, 0, 0, 0.2),
+          inset 0 0 0 1px var(--border);
       }
       .pk-rail button[aria-selected="true"]::after {
-        content: ""; position: absolute; right: -7px; top: 50%; width: 2px; height: 18px; margin-top: -9px;
-        border-radius: 2px 0 0 2px; background: var(--foreground);
+        content: "";
+        position: absolute;
+        right: -7px;
+        top: 50%;
+        width: 2px;
+        height: 18px;
+        margin-top: -9px;
+        border-radius: 2px 0 0 2px;
+        background: var(--foreground);
       }
-      .pk-rail .ic, .pk-rail .pv { width: 17px; height: 17px; }
-      .pk-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .pk-rail .ic,
+      .pk-rail .pv {
+        width: 17px;
+        height: 17px;
+      }
+      .pk-main {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
       .pk-search {
-        display: flex; align-items: center; gap: 8px; height: 40px; flex: none; padding: 0 12px;
-        border-bottom: 1px solid var(--border); color: var(--faint-fg);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 40px;
+        flex: none;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--faint-fg);
       }
       .pk-search input {
-        flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font: inherit; font-size: 13px;
+        flex: 1;
+        min-width: 0;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        font: inherit;
+        font-size: 13px;
         color: var(--foreground);
       }
-      .pk-search input::placeholder { color: var(--faint-fg); }
+      .pk-search input::placeholder {
+        color: var(--faint-fg);
+      }
       .pk-list {
-        flex: 1; min-height: 0; overflow-y: auto; padding: 4px 6px;
-        background: color-mix(in srgb, var(--muted) 55%, transparent); scrollbar-width: thin;
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 4px 6px;
+        background: color-mix(in srgb, var(--muted) 55%, transparent);
+        scrollbar-width: thin;
       }
-      .pk-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
-      .pk-row + .pk-row { margin-top: 1px; }
-      .pk-row.hl { background: var(--muted); }
-      .pk-row[aria-selected="true"] { background: var(--accent); }
+      .pk-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 7px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .pk-row + .pk-row {
+        margin-top: 1px;
+      }
+      .pk-row.hl {
+        background: var(--muted);
+      }
+      .pk-row[aria-selected="true"] {
+        background: var(--accent);
+      }
       .pk-star {
-        margin-top: 1px; padding: 0; border: 0; background: transparent; color: var(--muted-fg); cursor: pointer;
-        opacity: 0.4; transition: opacity 0.15s; display: grid;
+        margin-top: 1px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--muted-fg);
+        cursor: pointer;
+        opacity: 0.4;
+        transition: opacity 0.15s;
+        display: grid;
       }
-      .pk-row:hover .pk-star { opacity: 1; }
-      .pk-star.on { opacity: 1; color: #eab308; }
-      .pk-star.on .ic { fill: currentColor; }
-      .pk-star .ic { width: 15px; height: 15px; }
-      .pk-row-main { flex: 1; min-width: 0; }
-      .pk-row-title { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 500; }
-      .pk-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pk-row:hover .pk-star {
+        opacity: 1;
+      }
+      .pk-star.on {
+        opacity: 1;
+        color: #eab308;
+      }
+      .pk-star.on .ic {
+        fill: currentColor;
+      }
+      .pk-star .ic {
+        width: 15px;
+        height: 15px;
+      }
+      .pk-row-main {
+        flex: 1;
+        min-width: 0;
+      }
+      .pk-row-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12.5px;
+        font-weight: 500;
+      }
+      .pk-row-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .pk-row-effort {
-        display: inline-flex; align-items: center; gap: 3px; font-size: 11.5px; font-weight: 500;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        font-size: 11.5px;
+        font-weight: 500;
         color: color-mix(in srgb, var(--lv) 75%, var(--muted-fg));
       }
-      .pk-row-effort .ic { width: 11px; height: 11px; color: var(--fast); }
-      .pk-row-sub { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 11.5px; color: var(--muted-fg); }
-      .pk-row-sub .pv { width: 12px; height: 12px; }
-      .pk-empty { padding: 24px 0; text-align: center; font-size: 12px; color: var(--muted-fg); }
-      .tuning-host { position: relative; border-top: 1px solid var(--border); overflow: clip; }
+      .pk-row-effort .ic {
+        width: 11px;
+        height: 11px;
+        color: var(--fast);
+      }
+      .pk-row-sub {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 2px;
+        font-size: 11.5px;
+        color: var(--muted-fg);
+      }
+      .pk-row-sub .pv {
+        width: 12px;
+        height: 12px;
+      }
+      .pk-empty {
+        padding: 24px 0;
+        text-align: center;
+        font-size: 12px;
+        color: var(--muted-fg);
+      }
+      .tuning-host {
+        position: relative;
+        border-top: 1px solid var(--border);
+        overflow: clip;
+      }
 
       /* ============================================================
          A · Dial
          ============================================================ */
-      .dial { padding: 10px 12px 10px; }
-      .dial-head { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; margin-bottom: 8px; }
-      .dial-side { width: 32px; }
-      .dial-fast, .dial-reset {
-        position: relative; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px;
-        border: 0; background: transparent; color: var(--muted-fg); cursor: pointer; transition: color 0.15s, background 0.15s;
+      .dial {
+        padding: 10px 12px 10px;
       }
-      .dial-fast:hover, .dial-reset:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
-      .dial-fast .ic, .dial-reset .ic { width: 17px; height: 17px; }
-      .dial-fast[aria-pressed="true"] { color: var(--fast); }
-      .dial-fast[aria-pressed="true"] .ic { fill: currentColor; }
+      .dial-head {
+        display: grid;
+        grid-template-columns: 32px 1fr 32px;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      .dial-side {
+        width: 32px;
+      }
+      .dial-fast,
+      .dial-reset {
+        position: relative;
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        border: 0;
+        background: transparent;
+        color: var(--muted-fg);
+        cursor: pointer;
+        transition:
+          color 0.15s,
+          background 0.15s;
+      }
+      .dial-fast:hover,
+      .dial-reset:hover:not(:disabled) {
+        background: var(--muted);
+        color: var(--foreground);
+      }
+      .dial-fast .ic,
+      .dial-reset .ic {
+        width: 17px;
+        height: 17px;
+      }
+      .dial-fast[aria-pressed="true"] {
+        color: var(--fast);
+      }
+      .dial-fast[aria-pressed="true"] .ic {
+        fill: currentColor;
+      }
       .dial-fast.burst::after {
-        content: ""; position: absolute; inset: 4px; border-radius: 50%;
-        box-shadow: 0 0 0 1.5px var(--fast); animation: ring-out 0.6s var(--ease) forwards;
+        content: "";
+        position: absolute;
+        inset: 4px;
+        border-radius: 50%;
+        box-shadow: 0 0 0 1.5px var(--fast);
+        animation: ring-out 0.6s var(--ease) forwards;
       }
       @keyframes ring-out {
-        from { transform: scale(0.6); opacity: 0.9; }
-        to { transform: scale(1.5); opacity: 0; }
+        from {
+          transform: scale(0.6);
+          opacity: 0.9;
+        }
+        to {
+          transform: scale(1.5);
+          opacity: 0;
+        }
       }
-      .dial-reset:disabled { opacity: 0.28; cursor: default; }
-      .dial-title { display: flex; flex-direction: column; align-items: center; min-width: 0; }
-      .dial-level { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; color: var(--lv); transition: color 0.25s; }
+      .dial-reset:disabled {
+        opacity: 0.28;
+        cursor: default;
+      }
+      .dial-title {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-width: 0;
+      }
+      .dial-level {
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        line-height: 1.3;
+        color: var(--lv);
+        transition: color 0.25s;
+      }
       .dial-model {
-        display: inline-flex; align-items: center; gap: 1px; border: 0; background: none; padding: 0 2px;
-        font-size: 12px; color: var(--muted-fg); cursor: pointer; border-radius: 4px;
+        display: inline-flex;
+        align-items: center;
+        gap: 1px;
+        border: 0;
+        background: none;
+        padding: 0 2px;
+        font-size: 12px;
+        color: var(--muted-fg);
+        cursor: pointer;
+        border-radius: 4px;
       }
-      .dial-model:hover { color: var(--foreground); }
-      .dial-model .ic { width: 12px; height: 12px; opacity: 0.7; }
+      .dial-model:hover {
+        color: var(--foreground);
+      }
+      .dial-model .ic {
+        width: 12px;
+        height: 12px;
+        opacity: 0.7;
+      }
 
       .dial-track {
         --r: 20px;
-        position: relative; height: 36px; margin: 4px 0; border-radius: 999px; background: var(--track);
-        cursor: pointer; touch-action: none; outline: none;
+        position: relative;
+        height: 36px;
+        margin: 4px 0;
+        border-radius: 999px;
+        background: var(--track);
+        cursor: pointer;
+        touch-action: none;
+        outline: none;
         transition: --t 0.5s var(--spring-snappy);
       }
-      .dial-track.dragging { transition: none; cursor: grabbing; }
-      .dial-track:focus-visible .dial-thumb { box-shadow: var(--thumb-shadow), 0 0 0 3px color-mix(in srgb, var(--lv) 55%, transparent); }
+      .dial-track.dragging {
+        transition: none;
+        cursor: grabbing;
+      }
+      .dial-track:focus-visible .dial-thumb {
+        box-shadow:
+          var(--thumb-shadow),
+          0 0 0 3px color-mix(in srgb, var(--lv) 55%, transparent);
+      }
       .dial-fill {
-        position: absolute; left: 0; top: 0; bottom: 0; overflow: hidden; border-radius: 999px;
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        overflow: hidden;
+        border-radius: 999px;
         width: calc(2 * var(--r) + (100% - 2 * var(--r)) * clamp(0, var(--t), 1));
-        background: linear-gradient(90deg, color-mix(in srgb, var(--lv) 45%, transparent), var(--lv));
+        background: linear-gradient(
+          90deg,
+          color-mix(in srgb, var(--lv) 45%, transparent),
+          var(--lv)
+        );
         transition: box-shadow 0.4s;
       }
-      .dial[data-level="max"] .dial-fill { box-shadow: 0 0 22px -4px var(--lv); }
+      .dial[data-level="max"] .dial-fill {
+        box-shadow: 0 0 22px -4px var(--lv);
+      }
       .dial[data-level="ultracode"] .dial-fill {
-        background-image: linear-gradient(90deg, var(--uc-1), var(--uc-2) 40%, var(--uc-3) 50%, var(--uc-2) 60%, var(--uc-1));
+        background-image: linear-gradient(
+          90deg,
+          var(--uc-1),
+          var(--uc-2) 40%,
+          var(--uc-3) 50%,
+          var(--uc-2) 60%,
+          var(--uc-1)
+        );
         background-size: 200% 100%;
         animation: fill-sheen 2.8s linear infinite;
         box-shadow: 0 0 26px -6px var(--uc-2);
       }
       @keyframes fill-sheen {
-        from { background-position: 0% 0; }
-        to { background-position: -200% 0; }
+        from {
+          background-position: 0% 0;
+        }
+        to {
+          background-position: -200% 0;
+        }
       }
-      .dial-sparks { position: absolute; left: 0; top: 0; height: 100%; pointer-events: none; }
+      .dial-sparks {
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 100%;
+        pointer-events: none;
+      }
       .dial-notch {
-        position: absolute; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%;
-        left: calc(var(--r) + (100% - 2 * var(--r)) * var(--i)); background: var(--notch); pointer-events: none;
+        position: absolute;
+        top: 50%;
+        width: 4px;
+        height: 4px;
+        margin: -2px 0 0 -2px;
+        border-radius: 50%;
+        left: calc(var(--r) + (100% - 2 * var(--r)) * var(--i));
+        background: var(--notch);
+        pointer-events: none;
         transition: background 0.25s;
       }
-      .dial-notch.lit { background: rgba(255, 255, 255, 0.72); }
-      .dial-thumb {
-        position: absolute; top: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%;
-        left: calc(var(--r) + (100% - 2 * var(--r)) * clamp(0, var(--t), 1));
-        background: var(--thumb); box-shadow: var(--thumb-shadow); transition: transform 0.18s var(--ease), box-shadow 0.2s;
+      .dial-notch.lit {
+        background: rgba(255, 255, 255, 0.72);
       }
-      .dial-track:hover .dial-thumb { transform: scale(1.04); }
-      .dial-track.dragging .dial-thumb { transform: scale(0.94); }
+      .dial-thumb {
+        position: absolute;
+        top: 50%;
+        width: 40px;
+        height: 40px;
+        margin: -20px 0 0 -20px;
+        border-radius: 50%;
+        left: calc(var(--r) + (100% - 2 * var(--r)) * clamp(0, var(--t), 1));
+        background: var(--thumb);
+        box-shadow: var(--thumb-shadow);
+        transition:
+          transform 0.18s var(--ease),
+          box-shadow 0.2s;
+      }
+      .dial-track:hover .dial-thumb {
+        transform: scale(1.04);
+      }
+      .dial-track.dragging .dial-thumb {
+        transform: scale(0.94);
+      }
       .dial[data-level="ultracode"] .dial-thumb::after,
       .dial[data-level="max"] .dial-thumb::after {
-        content: ""; position: absolute; inset: -5px; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--lv);
+        content: "";
+        position: absolute;
+        inset: -5px;
+        border-radius: 50%;
+        box-shadow: 0 0 0 1.5px var(--lv);
         animation: halo 1.9s var(--ease) infinite;
       }
-      .dial[data-level="max"] .dial-thumb::after { animation-duration: 2.8s; }
-      @keyframes halo {
-        0% { transform: scale(0.88); opacity: 0.75; }
-        100% { transform: scale(1.4); opacity: 0; }
+      .dial[data-level="max"] .dial-thumb::after {
+        animation-duration: 2.8s;
       }
-      .dial-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; min-height: 26px; }
-      .kv { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted-fg); }
-      .kv b { font-weight: 500; color: var(--foreground); }
-      .kv i { font-style: normal; color: var(--faint-fg); }
-      .hint { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--faint-fg); }
+      @keyframes halo {
+        0% {
+          transform: scale(0.88);
+          opacity: 0.75;
+        }
+        100% {
+          transform: scale(1.4);
+          opacity: 0;
+        }
+      }
+      .dial-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 8px;
+        min-height: 26px;
+      }
+      .kv {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--muted-fg);
+      }
+      .kv b {
+        font-weight: 500;
+        color: var(--foreground);
+      }
+      .kv i {
+        font-style: normal;
+        color: var(--faint-fg);
+      }
+      .hint {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        font-size: 11px;
+        color: var(--faint-fg);
+      }
 
       /* ============================================================
          B · Matrix
          ============================================================ */
-      .mx { padding: 12px 14px 12px; }
-      .mx-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 15px; }
-      .mx-k { color: var(--muted-fg); font-weight: 500; }
-      .mx-level { color: var(--lv); font-weight: 600; transition: color 0.25s; }
-      .mx-spacer { flex: 1; }
-      .mx-model { font-size: 12px; color: var(--faint-fg); }
-      .mx-help { position: relative; }
+      .mx {
+        padding: 12px 14px 12px;
+      }
+      .mx-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-size: 15px;
+      }
+      .mx-k {
+        color: var(--muted-fg);
+        font-weight: 500;
+      }
+      .mx-level {
+        color: var(--lv);
+        font-weight: 600;
+        transition: color 0.25s;
+      }
+      .mx-spacer {
+        flex: 1;
+      }
+      .mx-model {
+        font-size: 12px;
+        color: var(--faint-fg);
+      }
+      .mx-help {
+        position: relative;
+      }
       .mx-help > button {
-        width: 26px; height: 26px; display: grid; place-items: center; border-radius: 7px; border: 0;
-        background: transparent; color: var(--muted-fg); cursor: pointer;
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        border-radius: 7px;
+        border: 0;
+        background: transparent;
+        color: var(--muted-fg);
+        cursor: pointer;
       }
-      .mx-help > button:hover { color: var(--foreground); background: var(--muted); }
-      .mx-help > button .ic { width: 17px; height: 17px; }
+      .mx-help > button:hover {
+        color: var(--foreground);
+        background: var(--muted);
+      }
+      .mx-help > button .ic {
+        width: 17px;
+        height: 17px;
+      }
       .mx-card {
-        position: absolute; right: -4px; bottom: calc(100% + 6px); width: 260px; padding: 8px 10px; z-index: 5;
-        border-radius: 10px; background: var(--popover); box-shadow: inset 0 0 0 1px var(--border), var(--pop-shadow);
-        font-size: 12px; opacity: 0; transform: translateY(4px); pointer-events: none;
-        transition: opacity 0.16s, transform 0.2s var(--ease);
+        position: absolute;
+        right: -4px;
+        bottom: calc(100% + 6px);
+        width: 260px;
+        padding: 8px 10px;
+        z-index: 5;
+        border-radius: 10px;
+        background: var(--popover);
+        box-shadow:
+          inset 0 0 0 1px var(--border),
+          var(--pop-shadow);
+        font-size: 12px;
+        opacity: 0;
+        transform: translateY(4px);
+        pointer-events: none;
+        transition:
+          opacity 0.16s,
+          transform 0.2s var(--ease);
       }
-      .mx-help:hover .mx-card, .mx-help:focus-within .mx-card { opacity: 1; transform: none; }
-      .mx-card div { display: flex; gap: 8px; padding: 3px 0; }
-      .mx-card b { width: 72px; flex: none; font-weight: 600; color: var(--lv); }
-      .mx-card span { color: var(--muted-fg); }
-      .mx-ends { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted-fg); margin-bottom: 6px; }
+      .mx-help:hover .mx-card,
+      .mx-help:focus-within .mx-card {
+        opacity: 1;
+        transform: none;
+      }
+      .mx-card div {
+        display: flex;
+        gap: 8px;
+        padding: 3px 0;
+      }
+      .mx-card b {
+        width: 72px;
+        flex: none;
+        font-weight: 600;
+        color: var(--lv);
+      }
+      .mx-card span {
+        color: var(--muted-fg);
+      }
+      .mx-ends {
+        display: flex;
+        justify-content: space-between;
+        font-size: 13px;
+        color: var(--muted-fg);
+        margin-bottom: 6px;
+      }
       .mx-track {
-        position: relative; height: 44px; border-radius: 12px; background: var(--track); cursor: pointer;
-        touch-action: none; outline: none; transition: box-shadow 0.3s;
+        position: relative;
+        height: 44px;
+        border-radius: 12px;
+        background: var(--track);
+        cursor: pointer;
+        touch-action: none;
+        outline: none;
+        transition: box-shadow 0.3s;
       }
-      .mx-track:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--lv) 60%, transparent); }
-      .mx[data-level="ultracode"] .mx-track { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lv) 22%, transparent); }
-      .mx-track.dragging { cursor: grabbing; }
-      .mx-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .mx-track:focus-visible {
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--lv) 60%, transparent);
+      }
+      .mx[data-level="ultracode"] .mx-track {
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lv) 22%, transparent);
+      }
+      .mx-track.dragging {
+        cursor: grabbing;
+      }
+      .mx-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
       .mx-thumb {
-        position: absolute; left: 0; top: 50%; width: 30px; height: 34px; border-radius: 9px;
-        background: var(--thumb); box-shadow: var(--thumb-shadow); will-change: transform; pointer-events: none;
+        position: absolute;
+        left: 0;
+        top: 50%;
+        width: 30px;
+        height: 34px;
+        border-radius: 9px;
+        background: var(--thumb);
+        box-shadow: var(--thumb-shadow);
+        will-change: transform;
+        pointer-events: none;
       }
-      .mx-rec { position: relative; height: 22px; font-size: 12px; color: var(--muted-fg); }
-      .mx-rec span { position: absolute; top: 4px; transform: translateX(-50%); white-space: nowrap; transition: left 0.3s var(--ease); }
-      .mx-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+      .mx-rec {
+        position: relative;
+        height: 22px;
+        font-size: 12px;
+        color: var(--muted-fg);
+      }
+      .mx-rec span {
+        position: absolute;
+        top: 4px;
+        transform: translateX(-50%);
+        white-space: nowrap;
+        transition: left 0.3s var(--ease);
+      }
+      .mx-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 8px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+      }
       .mx-chip {
-        height: 26px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px 0 8px; border: 0;
-        border-radius: 8px; background: transparent; color: var(--muted-fg); box-shadow: inset 0 0 0 1px var(--border);
-        font-size: 12px; font-weight: 500; cursor: pointer; transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+        height: 26px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px 0 8px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted-fg);
+        box-shadow: inset 0 0 0 1px var(--border);
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition:
+          background 0.2s,
+          color 0.2s,
+          box-shadow 0.2s;
       }
-      .mx-chip:hover { color: var(--foreground); }
-      .mx-chip .ic { width: 13px; height: 13px; }
+      .mx-chip:hover {
+        color: var(--foreground);
+      }
+      .mx-chip .ic {
+        width: 13px;
+        height: 13px;
+      }
       .mx-chip[aria-pressed="true"] {
-        color: var(--fast); background: var(--fast-bg);
+        color: var(--fast);
+        background: var(--fast-bg);
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fast) 30%, transparent);
       }
-      .mx-chip[aria-pressed="true"] .ic { fill: currentColor; }
-      .mx-think { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0 2px; }
-      .mx-think .t { font-size: 13px; font-weight: 500; }
-      .mx-think .d { font-size: 12px; color: var(--muted-fg); }
+      .mx-chip[aria-pressed="true"] .ic {
+        fill: currentColor;
+      }
+      .mx-think {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 4px 0 2px;
+      }
+      .mx-think .t {
+        font-size: 13px;
+        font-weight: 500;
+      }
+      .mx-think .d {
+        font-size: 12px;
+        color: var(--muted-fg);
+      }
 
       /* ============================================================
          C · Segments (spec sheet)
          ============================================================ */
-      .spec { display: flex; flex-direction: column; gap: 9px; padding: 10px 14px 12px; }
-      .spec-head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted-fg); }
-      .spec-title { font-weight: 600; color: var(--foreground); }
-      .spec-model { color: var(--faint-fg); }
-      .spec-reset {
-        margin-left: auto; height: 22px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px;
-        border: 0; border-radius: 6px; background: transparent; color: var(--muted-fg); font-size: 11.5px; cursor: pointer;
+      .spec {
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+        padding: 10px 14px 12px;
       }
-      .spec-reset:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
-      .spec-reset:disabled { opacity: 0.35; cursor: default; }
-      .spec-reset .ic { width: 12px; height: 12px; }
-      .spec-row { display: grid; grid-template-columns: 56px 1fr; gap: 10px; align-items: start; }
-      .spec-label { font-size: 12px; line-height: 30px; color: var(--muted-fg); }
-      .spec-stack { min-width: 0; }
-      .spec-desc { display: grid; margin-top: 5px; font-size: 11.5px; color: var(--muted-fg); }
-      .spec-static { font-size: 12px; line-height: 30px; color: var(--muted-fg); }
-      .spec-static b { font-weight: 500; color: var(--foreground); }
+      .spec-head {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--muted-fg);
+      }
+      .spec-title {
+        font-weight: 600;
+        color: var(--foreground);
+      }
+      .spec-model {
+        color: var(--faint-fg);
+      }
+      .spec-reset {
+        margin-left: auto;
+        height: 22px;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 6px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted-fg);
+        font-size: 11.5px;
+        cursor: pointer;
+      }
+      .spec-reset:hover:not(:disabled) {
+        background: var(--muted);
+        color: var(--foreground);
+      }
+      .spec-reset:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+      .spec-reset .ic {
+        width: 12px;
+        height: 12px;
+      }
+      .spec-row {
+        display: grid;
+        grid-template-columns: 56px 1fr;
+        gap: 10px;
+        align-items: start;
+      }
+      .spec-label {
+        font-size: 12px;
+        line-height: 30px;
+        color: var(--muted-fg);
+      }
+      .spec-stack {
+        min-width: 0;
+      }
+      .spec-desc {
+        display: grid;
+        margin-top: 5px;
+        font-size: 11.5px;
+        color: var(--muted-fg);
+      }
+      .spec-static {
+        font-size: 12px;
+        line-height: 30px;
+        color: var(--muted-fg);
+      }
+      .spec-static b {
+        font-weight: 500;
+        color: var(--foreground);
+      }
 
       /* ============================================================
          Notes
          ============================================================ */
-      .notes { margin-top: 26px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px; }
-      .notes h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--muted-fg); letter-spacing: 0.01em; }
-      .notes p { margin: 0; font-size: 13px; color: var(--foreground); opacity: 0.86; }
-      .notes-foot { margin-top: 22px; font-size: 12px; color: var(--faint-fg); max-width: 760px; }
-      @media (max-width: 860px) { .notes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+      .notes {
+        margin-top: 26px;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 28px;
+      }
+      .notes h3 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted-fg);
+        letter-spacing: 0.01em;
+      }
+      .notes p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--foreground);
+        opacity: 0.86;
+      }
+      .notes-foot {
+        margin-top: 22px;
+        font-size: 12px;
+        color: var(--faint-fg);
+        max-width: 760px;
+      }
+      @media (max-width: 860px) {
+        .notes {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
     </style>
   </head>
   <body>
@@ -664,14 +1656,21 @@
         <div>
           <h1 class="lab-title">Composer model controls</h1>
           <p class="lab-sub">
-            Three directions for folding reasoning effort, fast mode and context window into the model
-            picker. Hover or click the model control in the composer.
+            Three directions for folding reasoning effort, fast mode and context window into the
+            model picker. Hover or click the model control in the composer.
           </p>
         </div>
         <div class="lab-controls">
           <div id="tabs-slot"></div>
-          <button class="lab-icon-btn" id="theme-btn" type="button" aria-label="Toggle theme"></button>
-          <button class="lab-icon-btn" id="motion-btn" type="button" aria-pressed="true">Motion</button>
+          <button
+            class="lab-icon-btn"
+            id="theme-btn"
+            type="button"
+            aria-label="Toggle theme"
+          ></button>
+          <button class="lab-icon-btn" id="motion-btn" type="button" aria-pressed="true">
+            Motion
+          </button>
         </div>
       </header>
 
@@ -679,31 +1678,60 @@
 
       <div class="stage" id="stage">
         <div class="thread">
-          <div class="msg-user">Make provider hot reload keep live sessions instead of dropping them.</div>
+          <div class="msg-user">
+            Make provider hot reload keep live sessions instead of dropping them.
+          </div>
           <div class="msg-assistant">
             <p>
-              Reloads currently tear down the instance before in-flight turns settle. I'll put a generation
-              counter on <code>ProviderInstanceRegistryLive</code> so a reload swaps the driver only once the
-              old generation drains, then add a regression test for a reload mid-turn.
+              Reloads currently tear down the instance before in-flight turns settle. I'll put a
+              generation counter on <code>ProviderInstanceRegistryLive</code> so a reload swaps the
+              driver only once the old generation drains, then add a regression test for a reload
+              mid-turn.
             </p>
             <div class="msg-meta">Worked for 2m 14s · 3 files changed</div>
           </div>
         </div>
         <div class="composer-dock">
           <div class="composer">
-            <textarea rows="2" placeholder="Ask anything — @ to add context, / for commands"></textarea>
+            <textarea
+              rows="2"
+              placeholder="Ask anything — @ to add context, / for commands"
+            ></textarea>
             <div class="composer-footer">
               <div class="cf-left">
-                <button class="ghost-icon" type="button" aria-label="Add context" id="plus-btn"></button>
+                <button
+                  class="ghost-icon"
+                  type="button"
+                  aria-label="Add context"
+                  id="plus-btn"
+                ></button>
                 <div class="trigger-slot" id="trigger-slot"></div>
                 <button class="ghost-chip" type="button" id="plan-chip"></button>
                 <button class="ghost-chip" type="button" id="access-chip"></button>
               </div>
               <div class="cf-right">
                 <svg class="ctx-ring" viewBox="0 0 20 20" aria-label="Context 32% used">
-                  <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-opacity=".28" stroke-width="2" />
-                  <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2"
-                    stroke-dasharray="47.1" stroke-dashoffset="32" stroke-linecap="round" transform="rotate(-90 10 10)" />
+                  <circle
+                    cx="10"
+                    cy="10"
+                    r="7.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-opacity=".28"
+                    stroke-width="2"
+                  />
+                  <circle
+                    cx="10"
+                    cy="10"
+                    r="7.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-dasharray="47.1"
+                    stroke-dashoffset="32"
+                    stroke-linecap="round"
+                    transform="rotate(-90 10 10)"
+                  />
                 </svg>
                 <button class="send" type="button" aria-label="Send" id="send-btn"></button>
               </div>
@@ -714,11 +1742,12 @@
 
       <section class="notes" id="notes"></section>
       <p class="notes-foot">
-        Data is real: Claude options come from <code>apps/server/src/provider/model-manifest.json</code>, Codex
-        options from <code>CodexProvider.mapCodexModelCapabilities</code>. Each direction renders the existing
-        descriptors (effort / reasoningEffort select, fastMode boolean, contextWindow select, thinking boolean),
-        so none of them need contract changes. Keys: ↑↓ list, Enter pick &amp; close, ←→ effort (search empty),
-        Esc close, 1/2/3 switch direction.
+        Data is real: Claude options come from
+        <code>apps/server/src/provider/model-manifest.json</code>, Codex options from
+        <code>CodexProvider.mapCodexModelCapabilities</code>. Each direction renders the existing
+        descriptors (effort / reasoningEffort select, fastMode boolean, contextWindow select,
+        thinking boolean), so none of them need contract changes. Keys: ↑↓ list, Enter pick &amp;
+        close, ←→ effort (search empty), Esc close, 1/2/3 switch direction.
       </p>
     </div>
 
@@ -740,8 +1769,10 @@
           for (const [k, v] of Object.entries(attrs)) {
             if (v == null || v === false) continue;
             if (k === "class") el.className = v;
-            else if (k === "style") for (const [sk, sv] of Object.entries(v)) el.style.setProperty(sk, String(sv));
-            else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v);
+            else if (k === "style")
+              for (const [sk, sv] of Object.entries(v)) el.style.setProperty(sk, String(sv));
+            else if (k.startsWith("on") && typeof v === "function")
+              el.addEventListener(k.slice(2).toLowerCase(), v);
             else el.setAttribute(k, v === true ? "" : String(v));
           }
         for (const c of children.flat(Infinity)) {
@@ -757,13 +1788,17 @@
         zap: '<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
         star: '<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>',
         search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
-        rotateCcw: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+        rotateCcw:
+          '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
         help: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
-        brain: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>',
+        brain:
+          '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>',
         plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
         arrowUp: '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
-        listTodo: '<rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
-        shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+        listTodo:
+          '<rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
+        shield:
+          '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
         moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
         sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
       };
@@ -828,7 +1863,10 @@
           { duration: 320, easing: GENTLE },
         );
         if (Math.abs(w1 - w0) > 0.5)
-          container.animate([{ width: `${w0}px` }, { width: `${w1}px` }], { duration: 320, easing: GENTLE });
+          container.animate([{ width: `${w0}px` }, { width: `${w1}px` }], {
+            duration: 320,
+            easing: GENTLE,
+          });
       }
 
       /** Width-collapsing show/hide for inline pieces of a trigger. */
@@ -887,19 +1925,35 @@
           return;
         }
         for (const p of prev) {
-          p.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(.5) rotate(-40deg)" }], {
-            duration: 180,
-            easing: EASE,
-            fill: "forwards",
-          }).onfinish = () => p.remove();
+          p.animate(
+            [
+              { opacity: 1, transform: "none" },
+              { opacity: 0, transform: "scale(.5) rotate(-40deg)" },
+            ],
+            {
+              duration: 180,
+              easing: EASE,
+              fill: "forwards",
+            },
+          ).onfinish = () => p.remove();
         }
-        next.animate([{ opacity: 0, transform: "scale(.5) rotate(40deg)" }, { opacity: 1, transform: "none" }], {
-          duration: 320,
-          easing: EASE,
-        });
+        next.animate(
+          [
+            { opacity: 0, transform: "scale(.5) rotate(40deg)" },
+            { opacity: 1, transform: "none" },
+          ],
+          {
+            duration: 320,
+            easing: EASE,
+          },
+        );
       }
       function spin(el) {
-        if (motionOn()) el.animate([{ transform: "rotate(0)" }, { transform: "rotate(-360deg)" }], { duration: 560, easing: GENTLE });
+        if (motionOn())
+          el.animate([{ transform: "rotate(0)" }, { transform: "rotate(-360deg)" }], {
+            duration: 560,
+            easing: GENTLE,
+          });
       }
       function retrigger(el, cls) {
         el.classList.remove(cls);
@@ -912,11 +1966,21 @@
         mutate();
         const h1 = el.getBoundingClientRect().height;
         if (!motionOn()) return;
-        if (Math.abs(h1 - h0) > 1) el.animate([{ height: `${h0}px` }, { height: `${h1}px` }], { duration: 300, easing: GENTLE });
-        el.firstElementChild?.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], {
-          duration: 260,
-          easing: GENTLE,
-        });
+        if (Math.abs(h1 - h0) > 1)
+          el.animate([{ height: `${h0}px` }, { height: `${h1}px` }], {
+            duration: 300,
+            easing: GENTLE,
+          });
+        el.firstElementChild?.animate(
+          [
+            { opacity: 0, transform: "translateY(4px)" },
+            { opacity: 1, transform: "none" },
+          ],
+          {
+            duration: 260,
+            easing: GENTLE,
+          },
+        );
       }
       /** Sparks radiating from an element, positioned inside `layer`. */
       function burst(anchorEl, layer, count = 12) {
@@ -954,7 +2018,16 @@
         const btns = options.map((o) => {
           const b = h(
             "button",
-            { class: "seg-opt", type: "button", role: "radio", "aria-checked": "false", tabindex: "-1", "data-id": o.id, "data-level": o.level, title: o.title },
+            {
+              class: "seg-opt",
+              type: "button",
+              role: "radio",
+              "aria-checked": "false",
+              tabindex: "-1",
+              "data-id": o.id,
+              "data-level": o.level,
+              title: o.title,
+            },
             o.content ?? o.label,
           );
           b.addEventListener("click", () => onChange(o.id));
@@ -966,7 +2039,14 @@
           e.preventDefault();
           e.stopPropagation();
           const i = options.findIndex((o) => o.id === cur);
-          let j = e.key === "ArrowLeft" ? i - 1 : e.key === "ArrowRight" ? i + 1 : e.key === "Home" ? 0 : options.length - 1;
+          let j =
+            e.key === "ArrowLeft"
+              ? i - 1
+              : e.key === "ArrowRight"
+                ? i + 1
+                : e.key === "Home"
+                  ? 0
+                  : options.length - 1;
           j = clamp(j, 0, options.length - 1);
           onChange(options[j].id);
           btns[j].focus();
@@ -1012,7 +2092,17 @@
       }
 
       function toggleSwitch(on, onChange, label) {
-        const el = h("button", { class: "switch", type: "button", role: "switch", "aria-checked": String(on), "aria-label": label }, h("span", { class: "knob" }));
+        const el = h(
+          "button",
+          {
+            class: "switch",
+            type: "button",
+            role: "switch",
+            "aria-checked": String(on),
+            "aria-label": label,
+          },
+          h("span", { class: "knob" }),
+        );
         el.addEventListener("click", () => onChange(el.getAttribute("aria-checked") !== "true"));
         return { el, set: (v) => el.setAttribute("aria-checked", String(v)) };
       }
@@ -1026,9 +2116,18 @@
         low: { label: "Low", seg: "Low", desc: "Quick edits and lookups" },
         medium: { label: "Medium", seg: "Med", desc: "Balanced speed and depth" },
         high: { label: "High", seg: "High", desc: "Thorough work on multi-file changes" },
-        xhigh: { label: "Extra High", short: "XHigh", seg: "XHigh", desc: "Extended reasoning for hard problems" },
+        xhigh: {
+          label: "Extra High",
+          short: "XHigh",
+          seg: "XHigh",
+          desc: "Extended reasoning for hard problems",
+        },
         max: { label: "Max", seg: "Max", desc: "Deepest reasoning, slowest turns" },
-        ultracode: { label: "Ultracode", seg: "Ultracode", desc: "Extra-high effort with Claude’s Ultracode mode" },
+        ultracode: {
+          label: "Ultracode",
+          seg: "Ultracode",
+          desc: "Extra-high effort with Claude’s Ultracode mode",
+        },
       };
       const shortLabel = (k) => LEVELS[k].short ?? LEVELS[k].label;
       const CTX_LABEL = { "200k": "200K", "1m": "1M" };
@@ -1041,10 +2140,31 @@
           id: "claude",
           name: "Claude",
           models: [
-            { slug: "claude-fable-5-1", short: "Fable 5.1", effort: { levels: CLAUDE_LEVELS, def: "high" }, context: { options: ["200k", "1m"], def: "1m" } },
-            { slug: "claude-opus-5-5", short: "Opus 5.5", effort: { levels: CLAUDE_LEVELS, def: "medium" }, contextFixed: "1m" },
-            { slug: "claude-opus-5", short: "Opus 5", effort: { levels: CLAUDE_LEVELS, def: "high" }, fast: true, context: { options: ["200k", "1m"], def: "1m" } },
-            { slug: "claude-sonnet-5-5", short: "Sonnet 5.5", effort: { levels: CLAUDE_LEVELS, def: "high" }, context: { options: ["200k", "1m"], def: "200k" } },
+            {
+              slug: "claude-fable-5-1",
+              short: "Fable 5.1",
+              effort: { levels: CLAUDE_LEVELS, def: "high" },
+              context: { options: ["200k", "1m"], def: "1m" },
+            },
+            {
+              slug: "claude-opus-5-5",
+              short: "Opus 5.5",
+              effort: { levels: CLAUDE_LEVELS, def: "medium" },
+              contextFixed: "1m",
+            },
+            {
+              slug: "claude-opus-5",
+              short: "Opus 5",
+              effort: { levels: CLAUDE_LEVELS, def: "high" },
+              fast: true,
+              context: { options: ["200k", "1m"], def: "1m" },
+            },
+            {
+              slug: "claude-sonnet-5-5",
+              short: "Sonnet 5.5",
+              effort: { levels: CLAUDE_LEVELS, def: "high" },
+              context: { options: ["200k", "1m"], def: "200k" },
+            },
             { slug: "claude-haiku-4-5", short: "Haiku 4.5", thinking: { def: true } },
           ],
         },
@@ -1052,16 +2172,44 @@
           id: "codex",
           name: "Codex",
           models: [
-            { slug: "gpt-5.6-sol", short: "GPT-5.6 Sol", effort: { levels: CODEX_LEVELS, def: "medium" }, fast: true },
-            { slug: "gpt-5.6-terra", short: "GPT-5.6 Terra", effort: { levels: CODEX_LEVELS, def: "medium" }, fast: true },
-            { slug: "gpt-5.6-luna", short: "GPT-5.6 Luna", effort: { levels: ["minimal", "low", "medium", "high"], def: "low" } },
+            {
+              slug: "gpt-5.6-sol",
+              short: "GPT-5.6 Sol",
+              effort: { levels: CODEX_LEVELS, def: "medium" },
+              fast: true,
+            },
+            {
+              slug: "gpt-5.6-terra",
+              short: "GPT-5.6 Terra",
+              effort: { levels: CODEX_LEVELS, def: "medium" },
+              fast: true,
+            },
+            {
+              slug: "gpt-5.6-luna",
+              short: "GPT-5.6 Luna",
+              effort: { levels: ["minimal", "low", "medium", "high"], def: "low" },
+            },
           ],
         },
       ];
       const MODELS = new Map();
-      for (const p of PROVIDERS) for (const m of p.models) MODELS.set(`${p.id}/${m.slug}`, { ...m, key: `${p.id}/${m.slug}`, provider: p });
-      const capSig = (m) => JSON.stringify([m.effort?.levels, !!m.fast, m.context?.options, !!m.thinking, m.contextFixed]);
-      const defaultsFor = (m) => ({ effort: m.effort?.def, fast: false, context: m.context?.def, thinking: m.thinking?.def });
+      for (const p of PROVIDERS)
+        for (const m of p.models)
+          MODELS.set(`${p.id}/${m.slug}`, { ...m, key: `${p.id}/${m.slug}`, provider: p });
+      const capSig = (m) =>
+        JSON.stringify([
+          m.effort?.levels,
+          !!m.fast,
+          m.context?.options,
+          !!m.thinking,
+          m.contextFixed,
+        ]);
+      const defaultsFor = (m) => ({
+        effort: m.effort?.def,
+        fast: false,
+        context: m.context?.def,
+        thinking: m.thinking?.def,
+      });
 
       /* ==========================================================
          Store
@@ -1111,7 +2259,12 @@
       function isDefault(key = state.active) {
         const d = defaultsFor(MODELS.get(key));
         const s = sel(key);
-        return d.effort === s.effort && !!d.fast === !!s.fast && d.context === s.context && d.thinking === s.thinking;
+        return (
+          d.effort === s.effort &&
+          !!d.fast === !!s.fast &&
+          d.context === s.context &&
+          d.thinking === s.thinking
+        );
       }
       function resetDefaults() {
         const prev = { ...sel() };
@@ -1141,7 +2294,14 @@
          ========================================================== */
       const stage = $("#stage");
       const slot = $("#trigger-slot");
-      const picker = { el: null, open: false, sticky: false, dragging: false, hoverTimer: 0, closeTimer: 0 };
+      const picker = {
+        el: null,
+        open: false,
+        sticky: false,
+        dragging: false,
+        hoverTimer: 0,
+        closeTimer: 0,
+      };
       let triggerCtl = null;
       let tuningCtl = null;
       let currentItems = [];
@@ -1192,7 +2352,13 @@
         state.rail = activeModel().provider.id;
         state.query = "";
         state.highlight = -1;
-        const search = h("input", { type: "text", placeholder: "Search models…", "aria-label": "Search models", spellcheck: "false", autocomplete: "off" });
+        const search = h("input", {
+          type: "text",
+          placeholder: "Search models…",
+          "aria-label": "Search models",
+          spellcheck: "false",
+          autocomplete: "off",
+        });
         search.addEventListener("input", () => {
           state.query = search.value;
           state.highlight = 0;
@@ -1205,7 +2371,12 @@
             "div",
             { class: "pk-top" },
             h("nav", { class: "pk-rail", role: "tablist", "aria-label": "Providers" }),
-            h("div", { class: "pk-main" }, h("label", { class: "pk-search" }, icon("search"), search), h("div", { class: "pk-list", role: "listbox" })),
+            h(
+              "div",
+              { class: "pk-main" },
+              h("label", { class: "pk-search" }, icon("search"), search),
+              h("div", { class: "pk-list", role: "listbox" }),
+            ),
           ),
           h("div", { class: "tuning-host" }),
         );
@@ -1293,12 +2464,20 @@
           return [...MODELS.values()]
             .filter((m) => `${m.short} ${m.slug} ${m.provider.name}`.toLowerCase().includes(q))
             .map((m) => ({ key: m.key, model: m }));
-        if (state.rail === "favorites") return state.favorites.map((f) => ({ key: f.key, model: MODELS.get(f.key), fav: f }));
-        return PROVIDERS.find((p) => p.id === state.rail).models.map((m) => ({ key: `${state.rail}/${m.slug}`, model: MODELS.get(`${state.rail}/${m.slug}`) }));
+        if (state.rail === "favorites")
+          return state.favorites.map((f) => ({ key: f.key, model: MODELS.get(f.key), fav: f }));
+        return PROVIDERS.find((p) => p.id === state.rail).models.map((m) => ({
+          key: `${state.rail}/${m.slug}`,
+          model: MODELS.get(`${state.rail}/${m.slug}`),
+        }));
       }
       const favMatches = (f) => {
         const s = sel(f.key);
-        return f.key === state.active && (f.effort === undefined || s.effort === f.effort) && !!s.fast === !!f.fast;
+        return (
+          f.key === state.active &&
+          (f.effort === undefined || s.effort === f.effort) &&
+          !!s.fast === !!f.fast
+        );
       };
       function rowState(it) {
         const m = it.model;
@@ -1317,14 +2496,22 @@
       }
       function effortTag(level, fast) {
         if (!level) return null;
-        return h("span", { class: "pk-row-effort", "data-level": level }, level === "on" ? "Thinking" : shortLabel(level), fast ? icon("zap", "fill") : null);
+        return h(
+          "span",
+          { class: "pk-row-effort", "data-level": level },
+          level === "on" ? "Thinking" : shortLabel(level),
+          fast ? icon("zap", "fill") : null,
+        );
       }
 
       function renderList(fade = false) {
         if (!picker.open) return;
         const list = $(".pk-list", picker.el);
         const items = listItems();
-        const sig = items.map((i) => i.key + (i.fav ? `#${state.favorites.indexOf(i.fav)}` : "")).join("|") + (state.query ? "q" : "") + state.rail;
+        const sig =
+          items.map((i) => i.key + (i.fav ? `#${state.favorites.indexOf(i.fav)}` : "")).join("|") +
+          (state.query ? "q" : "") +
+          state.rail;
         const showProvider = state.rail === "favorites" || !!state.query.trim();
         if (state.highlight < 0 || state.highlight >= items.length) {
           const si = items.findIndex((it) => rowState(it).selected);
@@ -1378,14 +2565,29 @@
             h(
               "div",
               { class: "pk-row-main" },
-              h("div", { class: "pk-row-title" }, h("span", { class: "pk-row-name" }, m.short), effortTag(st.level, st.fast), i < 9 ? h("kbd", null, `⌘${i + 1}`) : null),
-              showProvider ? h("div", { class: "pk-row-sub" }, providerIcon(m.provider.id), m.provider.name) : null,
+              h(
+                "div",
+                { class: "pk-row-title" },
+                h("span", { class: "pk-row-name" }, m.short),
+                effortTag(st.level, st.fast),
+                i < 9 ? h("kbd", null, `⌘${i + 1}`) : null,
+              ),
+              showProvider
+                ? h("div", { class: "pk-row-sub" }, providerIcon(m.provider.id), m.provider.name)
+                : null,
             ),
           );
         });
         list.replaceChildren(...rows);
         if (!rows.length) list.append(h("div", { class: "pk-empty" }, "No models found"));
-        if (fade && motionOn()) list.animate([{ opacity: 0.35, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
+        if (fade && motionOn())
+          list.animate(
+            [
+              { opacity: 0.35, transform: "translateY(3px)" },
+              { opacity: 1, transform: "none" },
+            ],
+            { duration: 200, easing: EASE },
+          );
       }
       function setHighlight(i) {
         if (state.highlight === i || !picker.el) return;
@@ -1394,7 +2596,8 @@
       }
       function choose(it, forceClose) {
         const wasActive = it.fav ? favMatches(it.fav) : it.key === state.active;
-        if (it.fav) setModel(it.key, { effort: it.fav.effort, fast: !!it.fav.fast, context: it.fav.context });
+        if (it.fav)
+          setModel(it.key, { effort: it.fav.effort, fast: !!it.fav.fast, context: it.fav.context });
         else setModel(it.key);
         if (forceClose || wasActive) {
           closePicker();
@@ -1403,11 +2606,20 @@
       }
       function toggleFav(it) {
         if (it.fav) state.favorites = state.favorites.filter((f) => f !== it.fav);
-        else if (state.favorites.some((f) => f.key === it.key)) state.favorites = state.favorites.filter((f) => f.key !== it.key);
+        else if (state.favorites.some((f) => f.key === it.key))
+          state.favorites = state.favorites.filter((f) => f.key !== it.key);
         else {
           const m = it.model;
           const s = sel(it.key);
-          state.favorites = [...state.favorites, { key: it.key, effort: m.effort ? s.effort : undefined, fast: !!(m.fast && s.fast), context: m.context ? s.context : undefined }];
+          state.favorites = [
+            ...state.favorites,
+            {
+              key: it.key,
+              effort: m.effort ? s.effort : undefined,
+              fast: !!(m.fast && s.fast),
+              context: m.context ? s.context : undefined,
+            },
+          ];
         }
         renderList();
       }
@@ -1449,7 +2661,9 @@
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
           e.preventDefault();
           if (!currentItems.length) return;
-          const next = (state.highlight + (e.key === "ArrowDown" ? 1 : -1) + currentItems.length) % currentItems.length;
+          const next =
+            (state.highlight + (e.key === "ArrowDown" ? 1 : -1) + currentItems.length) %
+            currentItems.length;
           setHighlight(next);
           $(".pk-list", picker.el).children[next]?.scrollIntoView({ block: "nearest" });
         } else if (e.key === "Enter") {
@@ -1509,7 +2723,8 @@
           if (lv) {
             level.dataset.level = lv;
             const idx = effortIndex(m, s);
-            const dir = evt.type === "effort" || evt.type === "reset" ? Math.sign(idx - lastIdx) || 1 : 1;
+            const dir =
+              evt.type === "effort" || evt.type === "reset" ? Math.sign(idx - lastIdx) || 1 : 1;
             lastIdx = idx;
             swapRoll(levelText, lv === "on" ? "Thinking" : shortLabel(lv), dir, init);
             levelText.classList.toggle("shimmer", lv === "ultracode");
@@ -1523,7 +2738,13 @@
           setPresence(ctx, !!m.context, { instant: init });
           if (m.context) swapRoll(ctxText, CTX_LABEL[s.context], s.context === "1m" ? 1 : -1, init);
           if (evt.type === "theme" || evt.type === "motion") g?.refresh();
-          const parts = [m.provider.name, m.short, lv && (lv === "on" ? "thinking on" : `${LEVELS[lv]?.label} effort`), fastOn && "fast mode", m.context && `${CTX_LABEL[s.context]} context`];
+          const parts = [
+            m.provider.name,
+            m.short,
+            lv && (lv === "on" ? "thinking on" : `${LEVELS[lv]?.label} effort`),
+            fastOn && "fast mode",
+            m.context && `${CTX_LABEL[s.context]} context`,
+          ];
           btn.setAttribute("aria-label", parts.filter(Boolean).join(", "));
         }
         return {
@@ -1560,7 +2781,15 @@
           ctx.clearRect(0, 0, w, hh);
           const fw = fill.clientWidth;
           if (parts.length < Math.min(34, fw / 7) && Math.random() < 0.6)
-            parts.push({ x: 6 + Math.random() * Math.max(10, fw - 44), y: hh * (0.2 + Math.random() * 0.6), vx: 0.2 + Math.random() * 0.55, vy: (Math.random() - 0.5) * 0.1, life: 0, max: 45 + Math.random() * 70, r: 0.6 + Math.random() * 1.1 });
+            parts.push({
+              x: 6 + Math.random() * Math.max(10, fw - 44),
+              y: hh * (0.2 + Math.random() * 0.6),
+              vx: 0.2 + Math.random() * 0.55,
+              vy: (Math.random() - 0.5) * 0.1,
+              life: 0,
+              max: 45 + Math.random() * 70,
+              r: 0.6 + Math.random() * 1.1,
+            });
           for (let i = parts.length - 1; i >= 0; i--) {
             const p = parts[i];
             p.life += dt;
@@ -1601,8 +2830,14 @@
         let els = {};
         let stopSparks = null;
         const levelsOf = (mm) => (mm.effort ? mm.effort.levels : mm.thinking ? ["off", "on"] : []);
-        const curIdx = () => (field === "effort" ? levels.indexOf(sel().effort) : sel().thinking ? 1 : 0);
-        const labelOf = (i) => (field === "effort" ? LEVELS[levels[i]].label : levels[i] === "on" ? "Thinking" : "No thinking");
+        const curIdx = () =>
+          field === "effort" ? levels.indexOf(sel().effort) : sel().thinking ? 1 : 0;
+        const labelOf = (i) =>
+          field === "effort"
+            ? LEVELS[levels[i]].label
+            : levels[i] === "on"
+              ? "Thinking"
+              : "No thinking";
 
         function build() {
           stopSparks?.();
@@ -1615,16 +2850,53 @@
           sig = capSig(m);
           const s = sel();
           const fastBtn = m.fast
-            ? h("button", { class: "dial-fast", type: "button", "aria-pressed": String(!!s.fast), "aria-label": "Fast mode", title: "Fast mode", onclick: () => setOpt("fast", !sel().fast) }, icon("zap"))
+            ? h(
+                "button",
+                {
+                  class: "dial-fast",
+                  type: "button",
+                  "aria-pressed": String(!!s.fast),
+                  "aria-label": "Fast mode",
+                  title: "Fast mode",
+                  onclick: () => setOpt("fast", !sel().fast),
+                },
+                icon("zap"),
+              )
             : h("span", { class: "dial-side" });
           const levelEl = h("div", { class: "roll center dial-level", "aria-live": "polite" });
-          const modelBtn = h("button", { class: "dial-model", type: "button", title: "Show in list", onclick: revealActiveRow }, h("span", { class: "roll" }), icon("chevronRight"));
-          const resetBtn = h("button", { class: "dial-reset", type: "button", "aria-label": "Reset to model defaults", title: "Reset to defaults" }, icon("rotateCcw"));
+          const modelBtn = h(
+            "button",
+            {
+              class: "dial-model",
+              type: "button",
+              title: "Show in list",
+              onclick: revealActiveRow,
+            },
+            h("span", { class: "roll" }),
+            icon("chevronRight"),
+          );
+          const resetBtn = h(
+            "button",
+            {
+              class: "dial-reset",
+              type: "button",
+              "aria-label": "Reset to model defaults",
+              title: "Reset to defaults",
+            },
+            icon("rotateCcw"),
+          );
           resetBtn.addEventListener("click", () => {
             spin(resetBtn.firstChild);
             resetDefaults();
           });
-          const track = h("div", { class: "dial-track", role: "slider", tabindex: "0", "aria-label": field === "effort" ? "Reasoning effort" : "Thinking", "aria-valuemin": "0", "aria-valuemax": String(n - 1) });
+          const track = h("div", {
+            class: "dial-track",
+            role: "slider",
+            tabindex: "0",
+            "aria-label": field === "effort" ? "Reasoning effort" : "Thinking",
+            "aria-valuemin": "0",
+            "aria-valuemax": String(n - 1),
+          });
           const canvas = h("canvas", { class: "dial-sparks" });
           const fill = h("div", { class: "dial-fill" }, canvas);
           track.append(fill);
@@ -1650,13 +2922,56 @@
           const foot = h("div", { class: "dial-foot" });
           let ctxSeg = null;
           if (m.context) {
-            ctxSeg = segmented(m.context.options.map((id) => ({ id, label: CTX_LABEL[id] })), s.context, (v) => setOpt("context", v), { label: "Context window" });
+            ctxSeg = segmented(
+              m.context.options.map((id) => ({ id, label: CTX_LABEL[id] })),
+              s.context,
+              (v) => setOpt("context", v),
+              { label: "Context window" },
+            );
             foot.append(h("div", { class: "kv" }, "Context", ctxSeg.el));
-          } else if (m.contextFixed) foot.append(h("div", { class: "kv" }, "Context", h("b", null, CTX_LABEL[m.contextFixed]), h("i", null, "fixed")));
+          } else if (m.contextFixed)
+            foot.append(
+              h(
+                "div",
+                { class: "kv" },
+                "Context",
+                h("b", null, CTX_LABEL[m.contextFixed]),
+                h("i", null, "fixed"),
+              ),
+            );
           else foot.append(h("span"));
-          foot.append(h("div", { class: "hint" }, h("kbd", null, "←"), h("kbd", null, "→"), field === "effort" ? "effort" : "thinking"));
-          root.append(h("div", { class: "dial-head" }, fastBtn, h("div", { class: "dial-title" }, levelEl, modelBtn), resetBtn), track, foot);
-          els = { fastBtn, levelEl, modelBtn, resetBtn, track, fill, canvas, notches, thumb, ctxSeg };
+          foot.append(
+            h(
+              "div",
+              { class: "hint" },
+              h("kbd", null, "←"),
+              h("kbd", null, "→"),
+              field === "effort" ? "effort" : "thinking",
+            ),
+          );
+          root.append(
+            h(
+              "div",
+              { class: "dial-head" },
+              fastBtn,
+              h("div", { class: "dial-title" }, levelEl, modelBtn),
+              resetBtn,
+            ),
+            track,
+            foot,
+          );
+          els = {
+            fastBtn,
+            levelEl,
+            modelBtn,
+            resetBtn,
+            track,
+            fill,
+            canvas,
+            notches,
+            thumb,
+            ctxSeg,
+          };
           swapRoll(modelBtn.firstChild, m.short, 1, true);
           idx = curIdx();
           applyLevel(0, true);
@@ -1681,7 +2996,10 @@
             stopSparks = null;
           }
           if (!instant && k === "ultracode" && prevK !== k && motionOn())
-            els.thumb.animate([{ transform: "scale(1)" }, { transform: "scale(1.18)" }, { transform: "scale(1)" }], { duration: 420, easing: EASE });
+            els.thumb.animate(
+              [{ transform: "scale(1)" }, { transform: "scale(1.18)" }, { transform: "scale(1)" }],
+              { duration: 420, easing: EASE },
+            );
         }
         function syncFast(animate) {
           if (!m.fast) return;
@@ -1791,7 +3109,12 @@
       function createGlyph() {
         const W = 20;
         const H = 14;
-        const el = h("canvas", { class: "glyph", width: W * DPR, height: H * DPR, "aria-hidden": "true" });
+        const el = h("canvas", {
+          class: "glyph",
+          width: W * DPR,
+          height: H * DPR,
+          "aria-hidden": "true",
+        });
         el.style.width = `${W}px`;
         el.style.height = `${H}px`;
         const ctx = el.getContext("2d");
@@ -1985,7 +3308,11 @@
               }
             }
             const tw = mo ? Math.sin(t * (ultra ? 2.6 : 1.4) + d.ph) * (ultra ? 0.2 : 0.07) : 0;
-            const alpha = clamp((lit ? 0.62 + 0.38 * d.u + tw : 0.05 + 0.08 * d.u + tw * 0.4) + boost * 0.5, 0, 1);
+            const alpha = clamp(
+              (lit ? 0.62 + 0.38 * d.u + tw : 0.05 + 0.08 * d.u + tw * 0.4) + boost * 0.5,
+              0,
+              1,
+            );
             const size = d.sz * (lit ? 1.12 : 0.9) * (1 + boost * 0.55 + (ultra && lit ? 0.1 : 0));
             ctx.globalAlpha = alpha;
             ctx.fillStyle = lit ? lvColor : dimColor;
@@ -2084,10 +3411,31 @@
                 "div",
                 { class: "mx-help" },
                 h("button", { type: "button", "aria-label": "About effort levels" }, icon("help")),
-                h("div", { class: "mx-card", role: "tooltip" }, m.effort.levels.map((k) => h("div", { "data-level": k }, h("b", null, LEVELS[k].label), h("span", null, LEVELS[k].desc)))),
+                h(
+                  "div",
+                  { class: "mx-card", role: "tooltip" },
+                  m.effort.levels.map((k) =>
+                    h(
+                      "div",
+                      { "data-level": k },
+                      h("b", null, LEVELS[k].label),
+                      h("span", null, LEVELS[k].desc),
+                    ),
+                  ),
+                ),
               )
             : null;
-          root.append(h("div", { class: "mx-head" }, h("span", { class: "mx-k" }, m.effort ? "Effort" : "Thinking"), levelEl, h("span", { class: "mx-spacer" }), h("span", { class: "mx-model" }, m.short), help));
+          root.append(
+            h(
+              "div",
+              { class: "mx-head" },
+              h("span", { class: "mx-k" }, m.effort ? "Effort" : "Thinking"),
+              levelEl,
+              h("span", { class: "mx-spacer" }),
+              h("span", { class: "mx-model" }, m.short),
+              help,
+            ),
+          );
           els.levelEl = levelEl;
           if (m.effort) {
             levels = m.effort.levels;
@@ -2095,9 +3443,25 @@
             idx = levels.indexOf(s.effort);
             const canvas = h("canvas", { class: "mx-canvas" });
             const thumb = h("div", { class: "mx-thumb" });
-            const track = h("div", { class: "mx-track", role: "slider", tabindex: "0", "aria-label": "Reasoning effort", "aria-valuemin": "0", "aria-valuemax": String(n - 1) }, canvas, thumb);
+            const track = h(
+              "div",
+              {
+                class: "mx-track",
+                role: "slider",
+                tabindex: "0",
+                "aria-label": "Reasoning effort",
+                "aria-valuemin": "0",
+                "aria-valuemax": String(n - 1),
+              },
+              canvas,
+              thumb,
+            );
             const recLabel = h("span", null, "Recommended");
-            root.append(h("div", { class: "mx-ends" }, h("span", null, "Faster"), h("span", null, "Smarter")), track, h("div", { class: "mx-rec" }, recLabel));
+            root.append(
+              h("div", { class: "mx-ends" }, h("span", null, "Faster"), h("span", null, "Smarter")),
+              track,
+              h("div", { class: "mx-rec" }, recLabel),
+            );
             track.addEventListener("keydown", (e) => {
               const map = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 };
               if (map[e.key]) {
@@ -2120,21 +3484,61 @@
               },
             });
           } else if (m.thinking) {
-            const sw = toggleSwitch(!!s.thinking, (v) => setOpt("thinking", v), "Extended thinking");
-            root.append(h("div", { class: "mx-think" }, h("div", null, h("div", { class: "t" }, "Extended thinking"), h("div", { class: "d" }, "Let the model reason before it answers")), sw.el));
+            const sw = toggleSwitch(
+              !!s.thinking,
+              (v) => setOpt("thinking", v),
+              "Extended thinking",
+            );
+            root.append(
+              h(
+                "div",
+                { class: "mx-think" },
+                h(
+                  "div",
+                  null,
+                  h("div", { class: "t" }, "Extended thinking"),
+                  h("div", { class: "d" }, "Let the model reason before it answers"),
+                ),
+                sw.el,
+              ),
+            );
             els.sw = sw;
           }
           const foot = h("div", { class: "mx-foot" });
           if (m.fast) {
-            const chip = h("button", { class: "mx-chip", type: "button", "aria-pressed": String(!!s.fast), onclick: () => setOpt("fast", !sel().fast) }, icon("zap"), "Fast mode");
+            const chip = h(
+              "button",
+              {
+                class: "mx-chip",
+                type: "button",
+                "aria-pressed": String(!!s.fast),
+                onclick: () => setOpt("fast", !sel().fast),
+              },
+              icon("zap"),
+              "Fast mode",
+            );
             foot.append(chip);
             els.fastChip = chip;
           } else foot.append(h("span"));
           if (m.context) {
-            const seg = segmented(m.context.options.map((id) => ({ id, label: CTX_LABEL[id] })), s.context, (v) => setOpt("context", v), { label: "Context window" });
+            const seg = segmented(
+              m.context.options.map((id) => ({ id, label: CTX_LABEL[id] })),
+              s.context,
+              (v) => setOpt("context", v),
+              { label: "Context window" },
+            );
             foot.append(h("div", { class: "kv" }, "Context", seg.el));
             els.ctxSeg = seg;
-          } else if (m.contextFixed) foot.append(h("div", { class: "kv" }, "Context", h("b", null, CTX_LABEL[m.contextFixed]), h("i", null, "fixed")));
+          } else if (m.contextFixed)
+            foot.append(
+              h(
+                "div",
+                { class: "kv" },
+                "Context",
+                h("b", null, CTX_LABEL[m.contextFixed]),
+                h("i", null, "fixed"),
+              ),
+            );
           if (m.fast || m.context || m.contextFixed) root.append(foot);
           applyLevel(0, true);
           els.ctxSeg?.sync(false);
@@ -2218,13 +3622,48 @@
       function mountTriggerC(target) {
         const iconBox = h("span", { class: "trig-icon" });
         const name = h("span", { class: "roll" });
-        const modelSeg = h("button", { class: "cap-seg cap-model", type: "button", "aria-haspopup": "dialog", "aria-expanded": "false" }, iconBox, name, icon("chevronDown", "trig-chev"));
+        const modelSeg = h(
+          "button",
+          {
+            class: "cap-seg cap-model",
+            type: "button",
+            "aria-haspopup": "dialog",
+            "aria-expanded": "false",
+          },
+          iconBox,
+          name,
+          icon("chevronDown", "trig-chev"),
+        );
         const effText = h("span", { class: "roll" });
-        const effortSeg = h("button", { class: "cap-seg cap-effort presence", type: "button", hidden: true }, effText);
-        const fastSeg = h("button", { class: "cap-seg cap-fast presence", type: "button", hidden: true, "aria-label": "Fast mode" }, icon("zap"));
+        const effortSeg = h(
+          "button",
+          { class: "cap-seg cap-effort presence", type: "button", hidden: true },
+          effText,
+        );
+        const fastSeg = h(
+          "button",
+          {
+            class: "cap-seg cap-fast presence",
+            type: "button",
+            hidden: true,
+            "aria-label": "Fast mode",
+          },
+          icon("zap"),
+        );
         const ctxText = h("span", { class: "roll" });
-        const ctxSeg = h("button", { class: "cap-seg cap-ctx presence", type: "button", hidden: true }, ctxText);
-        const cap = h("div", { class: "cap", role: "group", "aria-label": "Model controls" }, modelSeg, effortSeg, fastSeg, ctxSeg);
+        const ctxSeg = h(
+          "button",
+          { class: "cap-seg cap-ctx presence", type: "button", hidden: true },
+          ctxText,
+        );
+        const cap = h(
+          "div",
+          { class: "cap", role: "group", "aria-label": "Model controls" },
+          modelSeg,
+          effortSeg,
+          fastSeg,
+          ctxSeg,
+        );
         target.append(cap);
         bindTrigger(modelSeg);
         effortSeg.addEventListener("click", () => {
@@ -2284,11 +3723,24 @@
             effortSeg.dataset.level = lv;
             const idx = effortIndex(m, s);
             const dir = Math.sign(idx - lastIdx) || 1;
-            swapRoll(effText, m.effort ? shortLabel(lv) : s.thinking ? "Thinking" : "No thinking", dir, init);
+            swapRoll(
+              effText,
+              m.effort ? shortLabel(lv) : s.thinking ? "Thinking" : "No thinking",
+              dir,
+              init,
+            );
             effText.classList.toggle("shimmer", lv === "ultracode");
-            effortSeg.title = m.effort ? `Effort: ${LEVELS[lv].label} — scroll or use arrow keys to adjust` : "Toggle thinking";
-            effortSeg.setAttribute("aria-label", m.effort ? `Reasoning effort: ${LEVELS[lv].label}` : `Thinking ${s.thinking ? "on" : "off"}`);
-            if (!init && lv === "ultracode" && evt.type === "effort" && dir > 0) burst(effortSeg, stage, 10);
+            effortSeg.title = m.effort
+              ? `Effort: ${LEVELS[lv].label} — scroll or use arrow keys to adjust`
+              : "Toggle thinking";
+            effortSeg.setAttribute(
+              "aria-label",
+              m.effort
+                ? `Reasoning effort: ${LEVELS[lv].label}`
+                : `Thinking ${s.thinking ? "on" : "off"}`,
+            );
+            if (!init && lv === "ultracode" && evt.type === "effort" && dir > 0)
+              burst(effortSeg, stage, 10);
             lastIdx = idx;
           }
           cap.classList.toggle("uc", lv === "ultracode");
@@ -2322,7 +3774,8 @@
         let m, sig;
         let els = {};
         let lastIdx = 0;
-        const row = (label, content) => h("div", { class: "spec-row" }, h("div", { class: "spec-label" }, label), content);
+        const row = (label, content) =>
+          h("div", { class: "spec-row" }, h("div", { class: "spec-label" }, label), content);
         const describe = (k) => `${LEVELS[k].desc}${k === m.effort.def ? " · default" : ""}`;
         function build() {
           root.replaceChildren();
@@ -2330,19 +3783,37 @@
           m = activeModel();
           sig = capSig(m);
           const s = sel();
-          const reset = h("button", { class: "spec-reset", type: "button", title: "Reset to model defaults" }, icon("rotateCcw"), "Defaults");
+          const reset = h(
+            "button",
+            { class: "spec-reset", type: "button", title: "Reset to model defaults" },
+            icon("rotateCcw"),
+            "Defaults",
+          );
           reset.addEventListener("click", () => {
             spin(reset.firstChild);
             resetDefaults();
           });
           const modelName = h("span", { class: "roll spec-model" });
-          root.append(h("div", { class: "spec-head" }, h("span", { class: "spec-title" }, "Tuning"), modelName, reset));
+          root.append(
+            h(
+              "div",
+              { class: "spec-head" },
+              h("span", { class: "spec-title" }, "Tuning"),
+              modelName,
+              reset,
+            ),
+          );
           swapRoll(modelName, m.short, 1, true);
           els.reset = reset;
           els.modelName = modelName;
           if (m.effort) {
             const seg = segmented(
-              m.effort.levels.map((id) => ({ id, level: id, label: LEVELS[id].seg, title: LEVELS[id].label })),
+              m.effort.levels.map((id) => ({
+                id,
+                level: id,
+                label: LEVELS[id].seg,
+                title: LEVELS[id].label,
+              })),
               s.effort,
               (v) => setOpt("effort", v),
               { label: "Reasoning effort", cls: "seg-lg seg-effort" },
@@ -2380,14 +3851,31 @@
           }
           if (m.context) {
             const seg = segmented(
-              m.context.options.map((id) => ({ id, content: [CTX_LABEL[id], h("span", { class: "ctx-bar", style: { "--w": CTX_TOKENS[id] / 200000 } })] })),
+              m.context.options.map((id) => ({
+                id,
+                content: [
+                  CTX_LABEL[id],
+                  h("span", { class: "ctx-bar", style: { "--w": CTX_TOKENS[id] / 200000 } }),
+                ],
+              })),
               s.context,
               (v) => setOpt("context", v),
               { label: "Context window", cls: "seg-lg" },
             );
             root.append(row("Context", seg.el));
             els.ctx = seg;
-          } else if (m.contextFixed) root.append(row("Context", h("div", { class: "spec-static" }, h("b", null, CTX_LABEL[m.contextFixed]), " · fixed for this model")));
+          } else if (m.contextFixed)
+            root.append(
+              row(
+                "Context",
+                h(
+                  "div",
+                  { class: "spec-static" },
+                  h("b", null, CTX_LABEL[m.contextFixed]),
+                  " · fixed for this model",
+                ),
+              ),
+            );
           for (const k of ["effort", "thinking", "fast", "ctx"]) els[k]?.sync(false);
           applyEffort(0, true);
         }
@@ -2476,10 +3964,22 @@
           mountTrigger: (t) => mountInlineTrigger(t),
           mountTuning: mountTuningA,
           notes: [
-            ["Composer", "One pill: provider, model, effort in its tint, a bolt when Fast is on, a context tag only when the model lets you choose. Each part rolls vertically in the direction of the change."],
-            ["Picker", "A Codex-style dial docked under the model list. Fast toggle top-left, reset top-right, and the model name doubles as a jump-to-row link. Context switch and ←→ hint underneath."],
-            ["Motion", "Spring-snapped thumb with live drag. Max adds a glow and a slow halo; Ultracode turns the fill into a moving lavender sheen with drifting sparks and a pulsing halo."],
-            ["Build", "Swaps ReasoningChip / FastModeChip / ContextWindowChip out of the footer and into the pill + picker. Descriptor logic in TraitsChips stays; the dial renders any select (or a boolean as two stops)."],
+            [
+              "Composer",
+              "One pill: provider, model, effort in its tint, a bolt when Fast is on, a context tag only when the model lets you choose. Each part rolls vertically in the direction of the change.",
+            ],
+            [
+              "Picker",
+              "A Codex-style dial docked under the model list. Fast toggle top-left, reset top-right, and the model name doubles as a jump-to-row link. Context switch and ←→ hint underneath.",
+            ],
+            [
+              "Motion",
+              "Spring-snapped thumb with live drag. Max adds a glow and a slow halo; Ultracode turns the fill into a moving lavender sheen with drifting sparks and a pulsing halo.",
+            ],
+            [
+              "Build",
+              "Swaps ReasoningChip / FastModeChip / ContextWindowChip out of the footer and into the pill + picker. Descriptor logic in TraitsChips stays; the dial renders any select (or a boolean as two stops).",
+            ],
           ],
         },
         B: {
@@ -2487,10 +3987,22 @@
           mountTrigger: (t) => mountInlineTrigger(t, { glyph: true }),
           mountTuning: mountTuningB,
           notes: [
-            ["Composer", "Model, then a six-column dot glyph that fills with effort, then the effort word. The glyph twinkles at Ultracode, so the state reads at a glance without colour alone."],
-            ["Picker", "Claude-style Faster ↔ Smarter dot field: dot density rises left to right and lights up to the thumb. “Recommended” marks the model default; Fast and Context sit below as compact controls."],
-            ["Motion", "Idle twinkle, a ripple from the thumb on every change, speed streaks through the lit dots when Fast turns on, and a travelling shimmer across the field at Ultracode."],
-            ["Build", "One canvas per surface, rAF only while the picker or an animated glyph is visible. Reduced motion freezes to the static field. Most visual, most code to keep crisp."],
+            [
+              "Composer",
+              "Model, then a six-column dot glyph that fills with effort, then the effort word. The glyph twinkles at Ultracode, so the state reads at a glance without colour alone.",
+            ],
+            [
+              "Picker",
+              "Claude-style Faster ↔ Smarter dot field: dot density rises left to right and lights up to the thumb. “Recommended” marks the model default; Fast and Context sit below as compact controls.",
+            ],
+            [
+              "Motion",
+              "Idle twinkle, a ripple from the thumb on every change, speed streaks through the lit dots when Fast turns on, and a travelling shimmer across the field at Ultracode.",
+            ],
+            [
+              "Build",
+              "One canvas per surface, rAF only while the picker or an animated glyph is visible. Reduced motion freezes to the static field. Most visual, most code to keep crisp.",
+            ],
           ],
         },
         C: {
@@ -2498,10 +4010,22 @@
           mountTrigger: mountTriggerC,
           mountTuning: mountTuningC,
           notes: [
-            ["Composer", "A segmented capsule where every part is its own control: model opens the picker, effort scrolls or arrow-steps in place (click opens tuning), bolt and context toggle directly. Fewest clicks."],
-            ["Picker", "A spec-sheet footer: Effort / Speed / Context rows with sliding indicators and a one-line description of the chosen level, so the levels explain themselves."],
-            ["Motion", "Indicators glide between options. Max tints the capsule edge; Ultracode wraps the capsule and its indicator in a rotating lavender edge and throws sparks on selection."],
-            ["Build", "Most reuse: one generic segmented renderer (select → segments, boolean → two stops) covers effort, speed, context, thinking and OpenCode-style variants without per-chip components."],
+            [
+              "Composer",
+              "A segmented capsule where every part is its own control: model opens the picker, effort scrolls or arrow-steps in place (click opens tuning), bolt and context toggle directly. Fewest clicks.",
+            ],
+            [
+              "Picker",
+              "A spec-sheet footer: Effort / Speed / Context rows with sliding indicators and a one-line description of the chosen level, so the levels explain themselves.",
+            ],
+            [
+              "Motion",
+              "Indicators glide between options. Max tints the capsule edge; Ultracode wraps the capsule and its indicator in a rotating lavender edge and throws sparks on selection.",
+            ],
+            [
+              "Build",
+              "Most reuse: one generic segmented renderer (select → segments, boolean → two stops) covers effort, speed, context, thinking and OpenCode-style variants without per-chip components.",
+            ],
           ],
         },
       };
@@ -2514,7 +4038,9 @@
         triggerCtl = DEMOS[id].mountTrigger(slot);
         triggerCtl.update({ type: "init" });
         tabs.set(id);
-        $("#notes").replaceChildren(...DEMOS[id].notes.map(([t, p]) => h("div", null, h("h3", null, t), h("p", null, p))));
+        $("#notes").replaceChildren(
+          ...DEMOS[id].notes.map(([t, p]) => h("div", null, h("h3", null, t), h("p", null, p))),
+        );
         history.replaceState(null, "", `#${id}`);
       }
 
@@ -2537,10 +4063,22 @@
 
       const SCENARIOS = [
         { label: "Opus 5.5 · High", key: "claude/claude-opus-5-5", opts: { effort: "high" } },
-        { label: "Opus 5 · Fast · 1M", key: "claude/claude-opus-5", opts: { effort: "high", fast: true, context: "1m" } },
+        {
+          label: "Opus 5 · Fast · 1M",
+          key: "claude/claude-opus-5",
+          opts: { effort: "high", fast: true, context: "1m" },
+        },
         { label: "Sonnet 5.5 · Max", key: "claude/claude-sonnet-5-5", opts: { effort: "max" } },
-        { label: "Fable 5.1 · Ultracode", key: "claude/claude-fable-5-1", opts: { effort: "ultracode" } },
-        { label: "GPT-5.6 Sol · Fast", key: "codex/gpt-5.6-sol", opts: { effort: "high", fast: true } },
+        {
+          label: "Fable 5.1 · Ultracode",
+          key: "claude/claude-fable-5-1",
+          opts: { effort: "ultracode" },
+        },
+        {
+          label: "GPT-5.6 Sol · Fast",
+          key: "codex/gpt-5.6-sol",
+          opts: { effort: "high", fast: true },
+        },
         { label: "Haiku 4.5 · Thinking", key: "claude/claude-haiku-4-5", opts: { thinking: true } },
       ];
       for (const sc of SCENARIOS) {

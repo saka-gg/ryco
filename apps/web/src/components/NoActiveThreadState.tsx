@@ -15,6 +15,11 @@ import {
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { cn } from "~/lib/utils";
 import { DesktopAccountConnect } from "./DesktopAccountConnect";
+import {
+  retryHostedHomeDiscovery,
+  useHostedWorkspaceState,
+} from "../hostedHub/hostedConnectionCoordinator";
+import { useRoutedHostedNode } from "../hostedHub/nodeRouteOrchestrator";
 
 export function NoActiveThreadState() {
   const navigate = useNavigate();
@@ -73,6 +78,7 @@ export function NoActiveThreadState() {
               {isElectron ? <DesktopAccountConnect /> : null}
               {isHostedHubMode() ? (
                 <div className="mt-5 space-y-3 text-left">
+                  <HostedHomeDiscoveryStatus />
                   <Button variant="outline" onClick={() => navigateHub({ kind: "nodes" })}>
                     Manage nodes
                   </Button>
@@ -84,5 +90,34 @@ export function NoActiveThreadState() {
         </Empty>
       </div>
     </SidebarInset>
+  );
+}
+
+function HostedHomeDiscoveryStatus() {
+  const route = useRoutedHostedNode();
+  const workspace = useHostedWorkspaceState();
+  if (route.nodeId !== null || route.logicalPathname !== "/") return null;
+  const discovery = workspace.homeDiscovery;
+  const machine = workspace.machines.find(
+    (entry) => entry.environmentId === discovery.environmentId,
+  );
+  return (
+    <>
+      {discovery.environmentId !== null ? (
+        <p role="status" className="text-sm text-muted-foreground">
+          Loading threads from {machine?.label ?? "your device"}…
+        </p>
+      ) : null}
+      {discovery.failedEnvironmentIds.length > 0 ? (
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            Some devices could not load their thread lists. Your other threads remain available.
+          </p>
+          <Button variant="outline" onClick={retryHostedHomeDiscovery}>
+            Retry loading threads
+          </Button>
+        </div>
+      ) : null}
+    </>
   );
 }

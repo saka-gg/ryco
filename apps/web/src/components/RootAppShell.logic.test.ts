@@ -10,6 +10,11 @@ const HUB_ENVIRONMENT_ID = EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa");
 const SERVER_ENVIRONMENT_ID = EnvironmentId.make("server-environment-id");
 
 describe("shouldApplyBootstrapThreadRedirect", () => {
+  it("keeps hosted home in place while discovering device thread lists", () => {
+    expect(
+      shouldApplyBootstrapThreadRedirect({ pathname: "/", tier: "desktop", hostedHome: true }),
+    ).toBe(false);
+  });
   it("keeps the desktop last-thread redirect at the logical root", () => {
     expect(shouldApplyBootstrapThreadRedirect({ pathname: "/", tier: "desktop" })).toBe(true);
   });

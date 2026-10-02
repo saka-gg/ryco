@@ -70,6 +70,7 @@ import {
 } from "../../hostedHub/hubRoutes";
 import { hubPageTitle } from "../../hubBranding";
 import {
+  getHostedNodeRouteNotice,
   selectHostedNodeRoute,
   parseHostedScopedThreadPath,
   useHostedNodeRouteNotice,
@@ -208,7 +209,13 @@ export function HostedHubRoot() {
   );
   const routeNotice = useHostedNodeRouteNotice();
   useHostedNodeRouteOrchestrator();
-  useEffect(() => startHostedWorkspaceCoordinator(), []);
+  useEffect(
+    () =>
+      startHostedWorkspaceCoordinator({
+        canDiscoverHome: () => getHostedNodeRouteNotice() === null,
+      }),
+    [],
+  );
   // The single browser lifecycle owner, above the presentation-tier seam: the
   // tier shells mount no lifecycle listeners of their own.
   useHostedBrowserLifecycle();
@@ -293,9 +300,9 @@ export function HostedHubRoot() {
   if (hubRoute?.kind === "nodes" || hubRoute?.kind === "nodes-enroll") {
     return <HostedNodeDirectory />;
   }
-  // Unscoped workspace navigation owns no connection. The Hub home renders the
-  // unified cached workspace even before metadata exists; machine administration
-  // remains the explicit `/nodes` route handled above.
+  // Home paints cached rows immediately. The workspace coordinator discovers
+  // missing lists in the background through ordinary, disposable demand leases.
+  // Machine administration remains the explicit `/nodes` route handled above.
   if (routedNode.nodeId === null) {
     if (routeNotice || routedNode.malformed) return <HostedNodeDirectory />;
     if (selectedNode && sessionEstablished) {
