@@ -1,0 +1,74 @@
+{
+  "/shots/actions.png": {
+    "width": 2660,
+    "height": 1046,
+    "src": "/shots/actions-2660.webp",
+    "srcSet": "/shots/actions-640.webp 640w, /shots/actions-1280.webp 1280w, /shots/actions-2660.webp 2660w"
+  },
+  "/shots/diagnostics.png": {
+    "width": 1946,
+    "height": 1564,
+    "src": "/shots/diagnostics-1946.webp",
+    "srcSet": "/shots/diagnostics-640.webp 640w, /shots/diagnostics-1280.webp 1280w, /shots/diagnostics-1946.webp 1946w"
+  },
+  "/shots/diff.png": {
+    "width": 1798,
+    "height": 1894,
+    "src": "/shots/diff-1798.webp",
+    "srcSet": "/shots/diff-640.webp 640w, /shots/diff-1280.webp 1280w, /shots/diff-1798.webp 1798w"
+  },
+  "/shots/files.png": {
+    "width": 1798,
+    "height": 1894,
+    "src": "/shots/files-1798.webp",
+    "srcSet": "/shots/files-640.webp 640w, /shots/files-1280.webp 1280w, /shots/files-1798.webp 1798w"
+  },
+  "/shots/instance.png": {
+    "width": 1832,
+    "height": 1578,
+    "src": "/shots/instance-1832.webp",
+    "srcSet": "/shots/instance-640.webp 640w, /shots/instance-1280.webp 1280w, /shots/instance-1832.webp 1832w"
+  },
+  "/shots/model-picker.png": {
+    "width": 1594,
+    "height": 850,
+    "src": "/shots/model-picker-1594.webp",
+    "srcSet": "/shots/model-picker-640.webp 640w, /shots/model-picker-1280.webp 1280w, /shots/model-picker-1594.webp 1594w"
+  },
+  "/shots/overview.png": {
+    "width": 2660,
+    "height": 1492,
+    "src": "/shots/overview-2660.webp",
+    "srcSet": "/shots/overview-640.webp 640w, /shots/overview-1280.webp 1280w, /shots/overview-2660.webp 2660w"
+  },
+  "/shots/plugins.png": {
+    "width": 1946,
+    "height": 1586,
+    "src": "/shots/plugins-1946.webp",
+    "srcSet": "/shots/plugins-640.webp 640w, /shots/plugins-1280.webp 1280w, /shots/plugins-1946.webp 1946w"
+  },
+  "/shots/project.png": {
+    "width": 1540,
+    "height": 1258,
+    "src": "/shots/project-1540.webp",
+    "srcSet": "/shots/project-640.webp 640w, /shots/project-1280.webp 1280w, /shots/project-1540.webp 1540w"
+  },
+  "/shots/providers.png": {
+    "width": 1946,
+    "height": 1088,
+    "src": "/shots/providers-1946.webp",
+    "srcSet": "/shots/providers-640.webp 640w, /shots/providers-1280.webp 1280w, /shots/providers-1946.webp 1946w"
+  },
+  "/shots/terminal.png": {
+    "width": 1782,
+    "height": 1010,
+    "src": "/shots/terminal-1782.webp",
+    "srcSet": "/shots/terminal-640.webp 640w, /shots/terminal-1280.webp 1280w, /shots/terminal-1782.webp 1782w"
+  },
+  "/shots/themes.png": {
+    "width": 1946,
+    "height": 1590,
+    "src": "/shots/themes-1946.webp",
+    "srcSet": "/shots/themes-640.webp 640w, /shots/themes-1280.webp 1280w, /shots/themes-1946.webp 1946w"
+  }
+}

@@ -1,3 +1,4 @@
+import { screenshotImageProps } from "@/lib/screenshotAssets";
 import { GitHubIcon } from "@/assets/brands";
 /**
  * Version 4 — "Kinetic" (motion-led art direction).
@@ -1009,7 +1010,8 @@ export default function Version4() {
                       {SHOWCASE.map((s, i) => (
                         <img
                           key={s.shot}
-                          src={s.shot}
+                          {...screenshotImageProps(s.shot)}
+                          decoding="async"
                           alt={s.alt}
                           loading={i === activeShot ? "eager" : "lazy"}
                           draggable={false}
