@@ -208,9 +208,9 @@ describe("§13.5 the inline form is short, and still discharges the duty", () =>
   it("ships the pointer at the long form, and names where it is", () => {
     // A short form whose pointer a caller could drop is a short form that
     // silently becomes the only account an owner is ever offered.
-    // `SettingsDialog.test.ts` holds this string to the label the nav draws, so
+    // `SettingsPage.test.ts` holds this string to the label the nav draws, so
     // renaming the section fails there rather than stranding the reader here.
-    expect(E2EE_WEB_SAS_MORE).toContain("Settings → Connections → Node security");
+    expect(E2EE_WEB_SAS_MORE).toContain("Settings → Security");
   });
 });
 

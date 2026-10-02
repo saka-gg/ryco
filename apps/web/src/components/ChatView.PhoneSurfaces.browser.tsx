@@ -1008,7 +1008,7 @@ describe("ChatView PhoneSurfaces (full app)", () => {
     }
   });
 
-  it("keeps the desktop settings dialog presentation on desktop viewports", async () => {
+  it("presents settings as a page on desktop viewports and returns to the thread", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -1021,24 +1021,29 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       await vi.waitFor(() => {
         expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
       });
+      const threadPath = mounted.router.state.location.pathname;
       useSettingsDialogStore.getState().openSettings();
-      const dialog = await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-slot="dialog-popup"]'),
-        "Unable to find the desktop settings dialog.",
+      const settingsPage = await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-slot="settings-page"]'),
+        "Unable to find the desktop settings page.",
       );
-      expect(dialog.className).toContain("project-glass-surface");
-      // The desktop dialog keeps its section rail; the phone surface never
-      // mounts on the desktop tier.
+      await vi.waitFor(() => {
+        expect(mounted.router.state.location.pathname).toBe("/settings");
+      });
+      // Settings replace the main content instead of floating over it.
+      expect(document.querySelector('[data-slot="dialog-popup"]')).toBeNull();
       await waitForElement(
-        () => dialog.querySelector<HTMLElement>('nav button[aria-label="General"]'),
-        "Unable to find the desktop settings section rail.",
+        () => settingsPage.querySelector<HTMLElement>('nav[aria-label="Settings sections"]'),
+        "Unable to find the desktop settings section nav.",
       );
       expect(document.querySelector('[data-testid="phone-settings-surface"]')).toBeNull();
 
       await userEvent.keyboard("{Escape}");
       await vi.waitFor(() => {
-        expect(document.querySelector('[data-slot="dialog-popup"]')).toBeNull();
+        expect(mounted.router.state.location.pathname).toBe(threadPath);
+        expect(useSettingsDialogStore.getState().open).toBe(false);
       });
+      expect(document.querySelector('[data-slot="settings-page"]')).toBeNull();
     } finally {
       useSettingsDialogStore.setState({ open: false, section: "general" });
       await mounted.cleanup();
@@ -1081,12 +1086,12 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       expect(settingsButton).not.toBeNull();
       settingsButton!.click();
       await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-slot="dialog-popup"]'),
+        () => document.querySelector<HTMLElement>('[data-slot="settings-page"]'),
         "Settings did not open from the collapsed sidebar chrome.",
       );
       await userEvent.keyboard("{Escape}");
       await vi.waitFor(() => {
-        expect(document.querySelector('[data-slot="dialog-popup"]')).toBeNull();
+        expect(document.querySelector('[data-slot="settings-page"]')).toBeNull();
       });
 
       const showSidebarButton = chrome.querySelector<HTMLButtonElement>(
@@ -1709,15 +1714,15 @@ describe("ChatView PhoneSurfaces (full app)", () => {
         expect(heading?.textContent).toContain("Appearance");
       });
 
-      // Rotate across the boundary: the desktop dialog takes over the same
+      // Rotate across the boundary: the desktop page takes over the same
       // open settings state; the phone surface unmounts.
       await mounted.setViewport(ROTATED_MID_VIEWPORT);
       await vi.waitFor(() => {
         expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
       });
       await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-slot="dialog-popup"]'),
-        "Unable to find the desktop settings dialog after the tier flip.",
+        () => document.querySelector<HTMLElement>('[data-slot="settings-page"]'),
+        "Unable to find the desktop settings page after the tier flip.",
       );
       expect(document.querySelector('[data-testid="phone-settings-surface"]')).toBeNull();
       expect(useSettingsDialogStore.getState().open).toBe(true);

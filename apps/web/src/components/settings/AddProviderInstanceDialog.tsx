@@ -10,6 +10,7 @@ import {
 } from "@ryco/contracts";
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { ColorSwatchPicker } from "./ColorSwatchPicker";
 import { cn } from "../../lib/utils";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Button } from "../ui/button";
@@ -395,46 +396,13 @@ export function AddProviderInstanceDialog({
 
               <div className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
                 <span className="text-xs font-medium text-foreground">Accent color</span>
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <input
-                    type="color"
-                    value={normalizeProviderAccentColor(accentColor) ?? PROVIDER_ACCENT_SWATCHES[0]}
-                    onChange={(event) => setAccentColor(event.target.value)}
-                    aria-label="Provider instance accent color"
-                    className="h-8 w-10 cursor-pointer rounded-xl border border-input bg-background p-0.5"
-                  />
-                  <div className="flex flex-wrap gap-1.5">
-                    {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
-                      const selected = accentColor.toLowerCase() === swatch;
-                      return (
-                        <button
-                          key={swatch}
-                          type="button"
-                          className={cn(
-                            "size-6 cursor-pointer rounded-full border transition",
-                            selected
-                              ? "scale-110 border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
-                              : "border-black/10 hover:scale-105 dark:border-white/20",
-                          )}
-                          style={{ backgroundColor: swatch }}
-                          onClick={() => setAccentColor(swatch)}
-                          aria-label={`Use ${swatch} accent`}
-                        />
-                      );
-                    })}
-                  </div>
-                  {accentColor ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-xs text-muted-foreground"
-                      onClick={() => setAccentColor("")}
-                    >
-                      Clear
-                    </Button>
-                  ) : null}
-                </div>
+                <ColorSwatchPicker
+                  ariaLabel="Provider instance accent color"
+                  value={normalizeProviderAccentColor(accentColor) ?? null}
+                  swatches={PROVIDER_ACCENT_SWATCHES}
+                  defaultOption={{ label: "No accent" }}
+                  onChange={(next) => setAccentColor(next ?? "")}
+                />
                 <span className="text-[11px] text-muted-foreground">
                   Optional marker shown in the picker.
                 </span>

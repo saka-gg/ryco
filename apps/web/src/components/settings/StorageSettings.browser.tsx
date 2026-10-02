@@ -40,14 +40,6 @@ vi.mock("../../environments/runtime", () => {
     updateEnvironmentServerSettings: fixtures.save,
   };
 });
-vi.mock("./settingsLayout", () => ({
-  SettingsRow: (props: { title: string; control: import("react").ReactNode }) => (
-    <article>
-      <h2>{props.title}</h2>
-      {props.control}
-    </article>
-  ),
-}));
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 beforeEach(() => {
   fixtures.ready = true;
@@ -115,10 +107,12 @@ afterEach(async () => {
 it("reviews exact paths and requires typed confirmation before deleting", async () => {
   mounted = await render(<StorageSettings />);
   expect(fixtures.scan).not.toHaveBeenCalled();
-  await mounted.getByRole("button", { name: "Scan node storage" }).click();
+  await mounted.getByRole("button", { name: "Scan storage" }).click();
   await expect
-    .element(mounted.getByText("Provider archives · protected · Size unavailable"))
-    .toBeVisible();
+    .element(
+      mounted.getByRole("checkbox", { name: "Provider archives · protected · Size unavailable" }),
+    )
+    .toBeDisabled();
   await expect
     .element(mounted.getByRole("checkbox", { name: /Fixture repository/ }))
     .toBeDisabled();
@@ -141,11 +135,11 @@ it("reviews exact paths and requires typed confirmation before deleting", async 
 
 it("makes automatic cleanup an explicit opt-in and keeps synchronized ownership gating", async () => {
   mounted = await render(<StorageSettings />);
-  await mounted.getByRole("button", { name: "Scan node storage" }).click();
+  await mounted.getByRole("button", { name: "Scan storage" }).click();
   await expect
-    .element(mounted.getByRole("checkbox", { name: "Automatic retention cleanup" }))
+    .element(mounted.getByRole("switch", { name: "Automatic retention cleanup" }))
     .not.toBeChecked();
-  await mounted.getByRole("checkbox", { name: "Automatic retention cleanup" }).click();
+  await mounted.getByRole("switch", { name: "Automatic retention cleanup" }).click();
   expect(fixtures.save).not.toHaveBeenCalled();
   await mounted.getByRole("button", { name: "Enable automatic cleanup", exact: true }).click();
   expect(fixtures.save).toHaveBeenCalledWith("fixture-node", {
@@ -153,5 +147,5 @@ it("makes automatic cleanup an explicit opt-in and keeps synchronized ownership 
   });
   fixtures.ready = false;
   await mounted.rerender(<StorageSettings />);
-  await expect.element(mounted.getByRole("button", { name: "Scan node storage" })).toBeDisabled();
+  await expect.element(mounted.getByRole("button", { name: "Rescan" })).toBeDisabled();
 });

@@ -1,14 +1,13 @@
 import { Schema } from "effect";
 import { useServerConfig } from "../../rpc/serverState";
-import { ProjectPreferenceSettings } from "./ProjectPreferenceSettings";
+import { ProjectDefaultsSection } from "./ProjectDefaultsSection";
 import { StorageSettings } from "./StorageSettings";
+import { DeviceIdentitySettings } from "./DeviceIdentitySettings";
 import { SessionImportSettings } from "./SessionImportSettings";
 import { useAppPreferencesLabel } from "../../deviceName";
 import { settingsRestorePlan } from "./settingsRestore";
 import { selectArchivedSettingsGroups } from "./archivedSettings";
 import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
-import { WorktreeRootSettings } from "./WorktreeRootSettings";
-import { WorktreeSubmoduleSettings } from "./WorktreeSubmoduleSettings";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
@@ -64,6 +63,7 @@ import {
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
+  SettingsCard,
 } from "./settingsLayout";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
@@ -116,13 +116,14 @@ function AboutBrandingHeader() {
       <h3 className="text-base font-semibold tracking-tight text-foreground">{APP_BASE_NAME}</h3>
       <div className="space-y-0.5 text-[11px] text-muted-foreground">
         <p>
-          <button
-            type="button"
+          <Button
+            variant="link"
+            size="xs"
+            className="h-auto px-0 text-[11px] text-muted-foreground hover:text-foreground"
             onClick={() => openExternalLink(REPOSITORY_URL)}
-            className="underline-offset-2 hover:text-foreground hover:underline"
           >
             github.com/sak0a/ryco
-          </button>
+          </Button>
         </p>
       </div>
     </div>
@@ -375,26 +376,23 @@ function LegacyFeaturesSection({
   }, [targeted]);
 
   return (
-    <section className="space-y-2.5">
+    <section data-settings-section="Legacy features" className="min-w-0 scroll-mt-6">
       <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger className="group flex w-full items-center justify-between rounded-lg px-1 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="inline-block h-px w-3 bg-border" aria-hidden />
-            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-foreground/50 transition-colors group-hover:text-foreground/70">
-              Legacy features
-            </span>
-            <span className="hidden text-[11px] text-muted-foreground/55 sm:inline">
-              Compatibility controls
+        <CollapsibleTrigger className="group flex w-full items-center justify-between gap-3 rounded-[min(var(--radius-md),0.5rem)] px-0.5 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
+          <span className="min-w-0">
+            <span className="block text-[13px] font-semibold text-foreground">Legacy features</span>
+            <span className="block text-xs text-muted-foreground">
+              Compatibility controls you shouldn&apos;t normally need.
             </span>
           </span>
           <ChevronRightIcon
             aria-hidden
-            className="size-3.5 text-muted-foreground/60 transition-transform duration-200 group-data-panel-open:rotate-90"
+            className="size-4 text-muted-foreground transition-transform duration-(--app-motion-duration-chip) group-data-panel-open:rotate-90"
           />
         </CollapsibleTrigger>
         <CollapsiblePanel>
-          <div className="pt-2">
-            <div className="relative overflow-hidden rounded-2xl border border-border/80 bg-card text-card-foreground shadow-sm/4 dark:shadow-none">
+          <div className="pt-2.5">
+            <SettingsCard>
               <div ref={tokenStreamingRowRef} id="legacy-token-streaming">
                 <SettingsRow
                   title="Stream token by token (legacy)"
@@ -443,7 +441,7 @@ function LegacyFeaturesSection({
                   }
                 />
               </div>
-            </div>
+            </SettingsCard>
           </div>
         </CollapsiblePanel>
       </Collapsible>
@@ -541,6 +539,7 @@ export function GeneralSettingsPanel({
 
   return (
     <SettingsPageContainer>
+      <DeviceIdentitySettings />
       <SessionImportSettings />
       <SettingsSection title="Behavior" owner="client">
         <OnboardingReplaySetting />
@@ -687,6 +686,8 @@ export function GeneralSettingsPanel({
         />
       </SettingsSection>
       {!isPhoneTier && editingScope !== "node" && <ComposerSettings />}
+      {!isPhoneTier && <ProjectDefaultsSection />}
+      {!isPhoneTier && <StorageSettings />}
       <SettingsSection title="Projects & threads">
         <SettingsRow
           title="Auto-open overview"
@@ -807,11 +808,6 @@ export function GeneralSettingsPanel({
             )}
           </>
         )}
-        {supportsProjectPreferences && !isPhoneTier && <ProjectPreferenceSettings />}
-
-        {!isPhoneTier && <WorktreeRootSettings />}
-        {!isPhoneTier && <WorktreeSubmoduleSettings />}
-        {!isPhoneTier && <StorageSettings />}
 
         <SettingsRow
           title="Add project starts in"
@@ -1152,7 +1148,7 @@ function ArchivedThreadRow(props: {
 
   return (
     <div
-      className="flex items-center justify-between gap-3 border-t border-border px-4 py-3 first:border-t-0 sm:px-5"
+      className="flex items-center justify-between gap-3 border-t border-border/60 px-4 py-3.5 first:border-t-0 sm:px-5"
       {...longPress}
       onContextMenu={(event) => {
         longPress.onContextMenu(event);
@@ -1165,8 +1161,8 @@ function ArchivedThreadRow(props: {
       }}
     >
       <div className="min-w-0 flex-1">
-        <h3 className="truncate text-sm font-medium text-foreground">{thread.title}</h3>
-        <p className="text-xs text-muted-foreground">
+        <h3 className="truncate text-[13px] font-medium text-foreground">{thread.title}</h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">
           Archived {formatRelativeTimeLabel(thread.archivedAt ?? thread.createdAt)}
           {" · Created "}
           {formatRelativeTimeLabel(thread.createdAt)}
@@ -1175,8 +1171,8 @@ function ArchivedThreadRow(props: {
       <Button
         type="button"
         variant="outline"
-        size="sm"
-        className="h-7 shrink-0 cursor-pointer gap-1.5 px-2.5"
+        size="xs"
+        className="shrink-0"
         disabled={!mutationAllowed}
         title={mutationReason ?? undefined}
         onClick={() =>

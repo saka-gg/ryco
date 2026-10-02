@@ -45,14 +45,15 @@ function Table({
   readonly children: ReactNode;
   readonly empty: boolean;
 }) {
-  if (empty) return <p className="px-4 py-4 text-sm text-muted-foreground">No retained records.</p>;
+  if (empty)
+    return <p className="px-4 sm:px-5 py-4 text-sm text-muted-foreground">No retained records.</p>;
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[680px] text-left text-xs [&_td]:px-4 [&_td]:py-3 [&_td]:align-top">
         <thead className="border-b text-muted-foreground">
           <tr>
             {headers.map((header) => (
-              <th key={header} className="px-4 py-2 font-medium">
+              <th key={header} className="px-4 sm:px-5 py-2 font-medium">
                 {header}
               </th>
             ))}
@@ -78,7 +79,7 @@ export function DetailedTraceDiagnostics({
   return (
     <>
       <SettingsSection title="Trace diagnostics">
-        <dl className="grid grid-cols-2 gap-4 px-4 py-4 text-xs lg:grid-cols-4">
+        <dl className="grid grid-cols-2 gap-4 px-4 sm:px-5 py-4 text-xs lg:grid-cols-4">
           {[
             ["Retained spans", snapshot?.tracing.retainedSpanCount],
             ["Failures", summary?.failureCount],
@@ -102,12 +103,12 @@ export function DetailedTraceDiagnostics({
           ))}
         </dl>
         {summary?.partialFailure ? (
-          <p className="px-4 pb-3 text-xs text-warning">
+          <p className="px-4 sm:px-5 pb-3 text-xs text-warning">
             Some trace files could not be read. These results are incomplete.
           </p>
         ) : null}
         {summary ? (
-          <details className="border-t px-4 py-3 text-xs">
+          <details className="border-t px-4 sm:px-5 py-3 text-xs">
             <summary className="cursor-pointer">Collection details</summary>
             <div className="mt-2 space-y-2">
               <p>

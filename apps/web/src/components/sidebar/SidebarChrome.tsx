@@ -10,6 +10,7 @@ import { Link, useLocation } from "@tanstack/react-router";
 import { WS_METHODS } from "@ryco/contracts";
 import { APP_BASE_NAME, APP_STAGE_LABEL, APP_VERSION } from "../../branding";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
+import { SETTINGS_ROUTE_PATH } from "../../settingsRoute";
 import { SidebarFooter, SidebarHeader, useSidebar } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { RycoLetterMark } from "../RycoLetterMark";
@@ -80,8 +81,13 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
             <button
               type="button"
               aria-label="Settings"
+              aria-current={pathname === SETTINGS_ROUTE_PATH ? "page" : undefined}
               onClick={handleSettingsClick}
-              className={SIDEBAR_HEADER_ACTION_CLASS_NAME}
+              className={cn(
+                SIDEBAR_HEADER_ACTION_CLASS_NAME,
+                pathname === SETTINGS_ROUTE_PATH &&
+                  "bg-sidebar-accent text-sidebar-accent-foreground",
+              )}
             >
               <SettingsIcon className="size-3.5" />
             </button>

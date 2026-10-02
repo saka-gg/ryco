@@ -9,7 +9,8 @@ import { DeviceIconPicker } from "./DeviceIconPicker";
 vi.mock("../../composerDraftStore", () => ({ DraftId: { make: (value: string) => value } }));
 const { update } = vi.hoisted(() => ({ update: vi.fn() }));
 vi.mock("../../environments/runtime", () => ({ updateEnvironmentServerSettings: update }));
-vi.mock("./settingsLayout", () => ({
+vi.mock("./settingsLayout", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./settingsLayout")>()),
   SettingsRow: ({
     control,
     status,

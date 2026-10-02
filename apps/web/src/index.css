@@ -2669,3 +2669,105 @@ label:has(> select#reasoning-effort) select {
     display: none;
   }
 }
+
+/* ── Settings page motion ────────────────────────────────────────────────
+   One entrance for every settings panel: a short rise and fade on the house
+   curve. Durations come from the motion tokens, which appearancePreferences.ts
+   zeroes under reduced motion, so these collapse to an instant swap there. */
+@keyframes settings-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes settings-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.settings-panel-enter {
+  animation: settings-panel-enter var(--app-motion-duration-stack, 260ms) var(--app-motion-ease)
+    both;
+}
+.settings-subsections-enter {
+  animation: settings-fade-in var(--app-motion-duration-pop, 200ms) var(--app-motion-ease) both;
+}
+.settings-search-result {
+  animation: settings-panel-enter var(--app-motion-duration-pop, 200ms) var(--app-motion-ease) both;
+  animation-delay: calc(var(--i, 0) * 16ms * var(--settings-stagger, 1));
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-search-result {
+    --settings-stagger: 0;
+  }
+}
+
+/* Keybinding capture: the chip breathes while it waits for a combination. */
+@keyframes keybinding-chip-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--primary) 26%, transparent);
+  }
+}
+.keybinding-chip-recording {
+  animation: keybinding-chip-pulse 1.4s ease-in-out infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+@media (prefers-reduced-motion: reduce) {
+  .keybinding-chip-recording {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
+  }
+}
+
+/* A themed native range input for settings editors. */
+.settings-range {
+  appearance: none;
+  background: transparent;
+  outline: none;
+}
+.settings-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+}
+.settings-range::-moz-range-track {
+  height: 6px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+}
+.settings-range::-webkit-slider-thumb {
+  appearance: none;
+  margin-top: -5px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--background);
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+}
+.settings-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--background);
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+}
+.settings-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 45%, transparent);
+}
+.settings-range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 45%, transparent);
+}

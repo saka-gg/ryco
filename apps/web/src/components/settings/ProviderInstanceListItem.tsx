@@ -38,11 +38,9 @@ export function ProviderInstanceListItem(props: {
       aria-controls={props.editorId}
       aria-label={`Edit ${presentation.displayName} ${kindLabel.toLowerCase()} provider instance`}
       className={cn(
-        "group flex w-full min-w-0 cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 text-left outline-none transition-[background-color,border-color,box-shadow]",
-        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-        props.selected
-          ? "border-foreground/20 bg-background shadow-sm"
-          : "border-transparent hover:border-border/80 hover:bg-background/70",
+        "group flex w-full min-w-0 cursor-pointer items-start gap-3 rounded-[min(var(--radius-md),0.5rem)] px-2.5 py-2 text-left outline-none transition-colors duration-150",
+        "focus-visible:ring-2 focus-visible:ring-ring",
+        props.selected ? "bg-accent" : "hover:bg-accent/50",
       )}
       onClick={props.onSelect}
       onKeyDown={props.onKeyDown}
@@ -62,7 +60,7 @@ export function ProviderInstanceListItem(props: {
           <FallbackIcon className="size-5 text-foreground/80" aria-hidden />
           <span
             className={cn(
-              "pointer-events-none absolute -left-0.5 -top-0.5 size-2 rounded-full ring-2 ring-background",
+              "pointer-events-none absolute -left-0.5 -top-0.5 size-2 rounded-full ring-2 ring-muted",
               statusStyle.dot,
             )}
             aria-hidden
@@ -74,18 +72,20 @@ export function ProviderInstanceListItem(props: {
 
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[13px] font-semibold tracking-[-0.01em] text-foreground">
+          <span className="truncate text-[13px] font-medium text-foreground">
             {presentation.displayName}
           </span>
-          <Badge variant="outline" size="sm" className="shrink-0 bg-background/60">
-            {kindLabel}
-          </Badge>
+          {props.isDefault ? null : (
+            <Badge variant="outline" size="sm" className="shrink-0">
+              {kindLabel}
+            </Badge>
+          )}
         </span>
         <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
           {presentation.summary.headline}
         </span>
         {!props.isDefault ? (
-          <code className="mt-0.5 block truncate text-[10px] text-muted-foreground/70">
+          <code className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground/70">
             {props.instanceId}
           </code>
         ) : null}

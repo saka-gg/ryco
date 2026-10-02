@@ -1,18 +1,12 @@
 import { Menu, MenuTrigger, MenuPopup, MenuItem } from "../ui/menu";
 import {
   EllipsisIcon,
-  BaselineIcon,
   ClipboardCopyIcon,
-  Code2Icon,
   CopyIcon,
   DownloadIcon,
-  GaugeIcon,
-  PaletteIcon,
   PencilIcon,
   PlusIcon,
-  RadiusIcon,
   Trash2Icon,
-  TypeIcon,
   UploadIcon,
 } from "lucide-react";
 import {
@@ -74,6 +68,7 @@ import { toastManager } from "../ui/toast";
 import { ColorPicker } from "../ui/color-picker";
 import {
   SettingResetButton,
+  SettingsCard,
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
@@ -311,8 +306,8 @@ export function AppearanceSettingsPanel({
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="Color mode">
-        <div className="grid grid-cols-3 gap-3 p-4" role="group" aria-label="Color mode">
+      <SettingsSection title="Color mode" bare>
+        <div className="grid grid-cols-3 gap-3" role="group" aria-label="Color mode">
           {VARIANT_OPTIONS.map((option) => (
             <button
               key={option.value}
@@ -320,13 +315,14 @@ export function AppearanceSettingsPanel({
               aria-pressed={theme === option.value}
               onClick={() => setTheme(option.value)}
               className={cn(
-                "min-w-0 rounded-xl border p-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+                APPEARANCE_TILE_CLASS,
+                "p-1.5",
                 theme === option.value
-                  ? "border-primary bg-muted/40"
-                  : "border-border hover:bg-muted/30",
+                  ? APPEARANCE_TILE_SELECTED_CLASS
+                  : APPEARANCE_TILE_IDLE_CLASS,
               )}
             >
-              <div className="relative overflow-hidden rounded-lg">
+              <div className="relative overflow-hidden rounded-[min(var(--radius-lg),0.625rem)]">
                 <ThemePreview
                   compact
                   theme={findTheme(activeThemeId)}
@@ -338,7 +334,9 @@ export function AppearanceSettingsPanel({
                   </div>
                 )}
               </div>
-              <span className="mt-2 block font-medium">{option.label}</span>
+              <span className="block px-1.5 pt-2 pb-1 text-[13px] font-medium text-foreground">
+                {option.label}
+              </span>
             </button>
           ))}
         </div>
@@ -346,6 +344,7 @@ export function AppearanceSettingsPanel({
 
       <SettingsSection
         title="Theme palette"
+        bare
         headerAction={
           <div className="flex items-center gap-1">
             <input
@@ -382,7 +381,7 @@ export function AppearanceSettingsPanel({
           </div>
         }
       >
-        <div role="radiogroup" aria-label="Theme palette" className="grid grid-cols-2 gap-4 p-4">
+        <div role="radiogroup" aria-label="Theme palette" className="grid gap-3 sm:grid-cols-2">
           {themes.map((entry) => {
             const isActive = entry.id === activeThemeId;
             const isEditing = editingId === entry.id;
@@ -417,86 +416,88 @@ export function AppearanceSettingsPanel({
                     }
                   }}
                   className={cn(
-                    "flex cursor-pointer flex-wrap items-center gap-3 rounded-xl border p-3 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
-                    isActive ? "border-primary" : "border-border",
-                    isActive ? "bg-muted/40" : "hover:bg-muted/24",
+                    APPEARANCE_TILE_CLASS,
+                    "flex cursor-pointer flex-col gap-2.5 p-2",
+                    isActive ? APPEARANCE_TILE_SELECTED_CLASS : APPEARANCE_TILE_IDLE_CLASS,
                   )}
                 >
                   <ThemePreview theme={entry} variant={resolvedTheme} />
-                  <span
-                    aria-hidden
-                    className={cn(
-                      "relative flex size-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
-                      isActive ? "border-primary" : "border-muted-foreground/40",
-                    )}
-                  >
-                    {isActive ? (
-                      <span className="size-2 rounded-full bg-primary" aria-hidden />
-                    ) : null}
-                  </span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="flex items-center gap-2">
-                      <span
-                        className="truncate text-sm font-medium text-foreground"
-                        title={entry.name}
-                      >
-                        {entry.name}
-                      </span>
-                      <Badge variant="outline" size="sm">
-                        {entry.builtIn ? "Built-in" : "Custom"}
-                      </Badge>
+                  <div className="flex min-w-0 items-center gap-2.5 px-1 pb-0.5">
+                    <span
+                      aria-hidden
+                      className={cn(
+                        "relative flex size-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
+                        isActive ? "border-primary" : "border-muted-foreground/40",
+                      )}
+                    >
+                      {isActive ? (
+                        <span className="size-2 rounded-full bg-primary" aria-hidden />
+                      ) : null}
                     </span>
-                    {entry.description ? (
-                      <span
-                        className="truncate text-xs text-muted-foreground/80"
-                        title={entry.description}
-                      >
-                        {entry.description}
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="flex items-center gap-2">
+                        <span
+                          className="truncate text-[13px] font-medium text-foreground"
+                          title={entry.name}
+                        >
+                          {entry.name}
+                        </span>
+                        <Badge variant="outline" size="sm">
+                          {entry.builtIn ? "Built-in" : "Custom"}
+                        </Badge>
                       </span>
-                    ) : null}
-                  </div>
-                  <div
-                    onClick={(event) => event.stopPropagation()}
-                    onKeyDown={(event) => event.stopPropagation()}
-                  >
-                    <Menu>
-                      <MenuTrigger
-                        render={
-                          <Button
-                            size="icon-xs"
-                            variant="ghost"
-                            aria-label={`Theme actions for ${entry.name}`}
-                          >
-                            <EllipsisIcon className="size-4" />
-                          </Button>
-                        }
-                      />
-                      <MenuPopup align="end">
-                        {!entry.builtIn && (
-                          <MenuItem onClick={() => startEditing(entry)}>
-                            <PencilIcon /> Edit
+                      {entry.description ? (
+                        <span
+                          className="truncate text-xs text-muted-foreground/80"
+                          title={entry.description}
+                        >
+                          {entry.description}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div
+                      onClick={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => event.stopPropagation()}
+                    >
+                      <Menu>
+                        <MenuTrigger
+                          render={
+                            <Button
+                              size="icon-xs"
+                              variant="ghost"
+                              aria-label={`Theme actions for ${entry.name}`}
+                            >
+                              <EllipsisIcon className="size-4" />
+                            </Button>
+                          }
+                        />
+                        <MenuPopup align="end">
+                          {!entry.builtIn && (
+                            <MenuItem onClick={() => startEditing(entry)}>
+                              <PencilIcon /> Edit
+                            </MenuItem>
+                          )}
+                          <MenuItem onClick={() => handleDuplicate(entry)}>
+                            <CopyIcon /> Duplicate
                           </MenuItem>
-                        )}
-                        <MenuItem onClick={() => handleDuplicate(entry)}>
-                          <CopyIcon /> Duplicate
-                        </MenuItem>
-                        <MenuItem onClick={() => handleExport(entry)}>
-                          <DownloadIcon /> Export
-                        </MenuItem>
-                        <MenuItem onClick={() => void handleCopyJson(entry)}>
-                          <ClipboardCopyIcon /> Copy JSON
-                        </MenuItem>
-                        {!entry.builtIn && (
-                          <MenuItem onClick={() => setPendingDeleteId(entry.id)}>
-                            <Trash2Icon /> Delete
+                          <MenuItem onClick={() => handleExport(entry)}>
+                            <DownloadIcon /> Export
                           </MenuItem>
-                        )}
-                      </MenuPopup>
-                    </Menu>
+                          <MenuItem onClick={() => void handleCopyJson(entry)}>
+                            <ClipboardCopyIcon /> Copy JSON
+                          </MenuItem>
+                          {!entry.builtIn && (
+                            <MenuItem onClick={() => setPendingDeleteId(entry.id)}>
+                              <Trash2Icon /> Delete
+                            </MenuItem>
+                          )}
+                        </MenuPopup>
+                      </Menu>
+                    </div>
                   </div>
                 </div>
                 {isEditing && editing ? (
-                  <div className="col-span-full">
+                  <SettingsCard className="settings-panel-enter col-span-full">
                     <ThemeEditor
                       source={editing.source}
                       draft={editing.draft}
@@ -505,7 +506,7 @@ export function AppearanceSettingsPanel({
                       onCancel={handleCancel}
                       resolvedVariant={resolvedTheme}
                     />
-                  </div>
+                  </SettingsCard>
                 ) : null}
               </Fragment>
             );
@@ -527,16 +528,20 @@ export function AppearanceSettingsPanel({
             ) : null
           }
           control={
-            <FontPreferencePicker
-              ariaLabel="Interface font"
-              icon={<TypeIcon className="size-3.5" />}
+            <FontPreferenceValue
               options={FONT_FAMILY_SANS_OPTIONS}
               value={appearancePreferences.fontFamilySans}
               sample="The quick brown fox"
-              onChange={(value) => handleAppearancePreferenceChange("fontFamilySans", value)}
             />
           }
-        />
+        >
+          <FontPreferencePicker
+            ariaLabel="Interface font"
+            options={FONT_FAMILY_SANS_OPTIONS}
+            value={appearancePreferences.fontFamilySans}
+            onChange={(value) => handleAppearancePreferenceChange("fontFamilySans", value)}
+          />
+        </SettingsRow>
         {isHub ? null : (
           <SettingsRow
             title="Code font"
@@ -550,16 +555,20 @@ export function AppearanceSettingsPanel({
               ) : null
             }
             control={
-              <FontPreferencePicker
-                ariaLabel="Code font"
-                icon={<Code2Icon className="size-3.5" />}
+              <FontPreferenceValue
                 options={FONT_FAMILY_MONO_OPTIONS}
                 value={appearancePreferences.fontFamilyMono}
                 sample="const answer = 42"
-                onChange={(value) => handleAppearancePreferenceChange("fontFamilyMono", value)}
               />
             }
-          />
+          >
+            <FontPreferencePicker
+              ariaLabel="Code font"
+              options={FONT_FAMILY_MONO_OPTIONS}
+              value={appearancePreferences.fontFamilyMono}
+              onChange={(value) => handleAppearancePreferenceChange("fontFamilyMono", value)}
+            />
+          </SettingsRow>
         )}
         <SettingsRow
           title="Text size"
@@ -573,20 +582,24 @@ export function AppearanceSettingsPanel({
             ) : null
           }
           control={
-            <AppearancePreferenceSlider
-              ariaLabel="Text size"
-              icon={<BaselineIcon className="size-3.5" />}
+            <SliderPreferenceValue
               options={FONT_SIZE_OPTIONS}
               value={appearancePreferences.fontSizeBase}
-              onChange={(value) => handleAppearancePreferenceChange("fontSizeBase", value)}
               preview={
-                <span className="flex h-9 min-w-14 items-center justify-center rounded-md border border-border/70 bg-background px-2 font-semibold text-foreground shadow-xs/5">
+                <span className="flex h-8 min-w-12 items-center justify-center rounded-md border border-border/70 bg-background px-2 font-semibold text-foreground shadow-xs/5">
                   <span style={{ fontSize: appearancePreferences.fontSizeBase }}>Aa</span>
                 </span>
               }
             />
           }
-        />
+        >
+          <AppearancePreferenceSlider
+            ariaLabel="Text size"
+            options={FONT_SIZE_OPTIONS}
+            value={appearancePreferences.fontSizeBase}
+            onChange={(value) => handleAppearancePreferenceChange("fontSizeBase", value)}
+          />
+        </SettingsRow>
       </SettingsSection>
       <SettingsSection title="Interface">
         {isHub ? null : (
@@ -602,14 +615,11 @@ export function AppearanceSettingsPanel({
               ) : null
             }
             control={
-              <AppearancePreferenceSlider
-                ariaLabel="Corner radius"
-                icon={<RadiusIcon className="size-3.5" />}
+              <SliderPreferenceValue
                 options={RADIUS_OPTIONS}
                 value={appearancePreferences.radius}
-                onChange={(value) => handleAppearancePreferenceChange("radius", value)}
                 preview={
-                  <span className="grid h-9 min-w-14 grid-cols-2 gap-1 rounded-md border border-border/70 bg-background p-1.5 shadow-xs/5">
+                  <span className="grid h-8 min-w-12 grid-cols-2 gap-1 rounded-md border border-border/70 bg-background p-1.5 shadow-xs/5">
                     <span
                       className="border border-primary/55 bg-primary/15"
                       style={{ borderRadius: appearancePreferences.radius }}
@@ -622,7 +632,14 @@ export function AppearanceSettingsPanel({
                 }
               />
             }
-          />
+          >
+            <AppearancePreferenceSlider
+              ariaLabel="Corner radius"
+              options={RADIUS_OPTIONS}
+              value={appearancePreferences.radius}
+              onChange={(value) => handleAppearancePreferenceChange("radius", value)}
+            />
+          </SettingsRow>
         )}
         <SettingsRow
           title="Primary color"
@@ -634,14 +651,22 @@ export function AppearanceSettingsPanel({
             ) : null
           }
           control={
-            <PrimaryColorPreferencePicker
-              mode={appearancePreferences.primaryColorMode}
-              value={appearancePreferences.primaryColor}
-              onModeChange={handlePrimaryColorModeChange}
-              onColorChange={handlePrimaryColorChange}
-            />
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+              Use theme color
+              <Switch
+                checked={appearancePreferences.primaryColorMode !== "custom"}
+                onCheckedChange={(checked) => handlePrimaryColorModeChange(!checked)}
+                aria-label="Use theme primary color"
+              />
+            </label>
           }
-        />
+        >
+          <PrimaryColorPreferencePicker
+            mode={appearancePreferences.primaryColorMode}
+            value={appearancePreferences.primaryColor}
+            onColorChange={handlePrimaryColorChange}
+          />
+        </SettingsRow>
         <SettingsRow
           title="Transparency"
           description="Adjust glass and floating surfaces like dialogs, menus, popups, and toasts."
@@ -654,14 +679,11 @@ export function AppearanceSettingsPanel({
             ) : null
           }
           control={
-            <AppearancePreferenceSlider
-              ariaLabel="Transparency"
-              icon={<GaugeIcon className="size-3.5" />}
+            <SliderPreferenceValue
               options={SURFACE_TRANSPARENCY_OPTIONS}
               value={appearancePreferences.surfaceTransparency}
-              onChange={(value) => handleAppearancePreferenceChange("surfaceTransparency", value)}
               preview={
-                <span className="relative h-9 min-w-14 overflow-hidden rounded-md border border-border/70 bg-[linear-gradient(135deg,var(--color-sky-500)_0_20%,var(--color-emerald-500)_20%_40%,var(--color-amber-500)_40%_60%,var(--color-fuchsia-500)_60%_80%,var(--color-slate-500)_80%_100%)] p-1.5 shadow-xs/5">
+                <span className="relative h-8 min-w-12 overflow-hidden rounded-md border border-border/70 bg-[linear-gradient(135deg,var(--color-sky-500)_0_20%,var(--color-emerald-500)_20%_40%,var(--color-amber-500)_40%_60%,var(--color-fuchsia-500)_60%_80%,var(--color-slate-500)_80%_100%)] p-1.5 shadow-xs/5">
                   <span
                     className="block h-full rounded border border-border/70 bg-popover"
                     style={{
@@ -674,7 +696,14 @@ export function AppearanceSettingsPanel({
               }
             />
           }
-        />
+        >
+          <AppearancePreferenceSlider
+            ariaLabel="Transparency"
+            options={SURFACE_TRANSPARENCY_OPTIONS}
+            value={appearancePreferences.surfaceTransparency}
+            onChange={(value) => handleAppearancePreferenceChange("surfaceTransparency", value)}
+          />
+        </SettingsRow>
       </SettingsSection>
 
       <AlertDialog
@@ -704,58 +733,89 @@ export function AppearanceSettingsPanel({
   );
 }
 
-function FontPreferencePicker({
-  ariaLabel,
-  icon,
+const APPEARANCE_TILE_CLASS =
+  "min-w-0 rounded-[min(var(--radius-xl),0.875rem)] border bg-card text-left outline-none transition-[background-color,border-color,box-shadow] duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring";
+const APPEARANCE_TILE_SELECTED_CLASS = "border-primary/70 shadow-[0_0_0_1px_var(--color-primary)]";
+const APPEARANCE_TILE_IDLE_CLASS = "border-border/70 hover:border-foreground/20 hover:bg-muted/30";
+
+const PREFERENCE_TILE_CLASS =
+  "min-h-12 min-w-0 rounded-[min(var(--radius-md),0.5rem)] border px-2.5 py-1.5 text-left outline-none transition-[background-color,border-color,color,box-shadow] duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring";
+const PREFERENCE_TILE_SELECTED_CLASS =
+  "border-primary/70 bg-primary/8 text-foreground shadow-[0_0_0_1px_var(--color-primary)]";
+const PREFERENCE_TILE_IDLE_CLASS =
+  "border-border/70 text-muted-foreground hover:border-foreground/25 hover:bg-muted/45 hover:text-foreground";
+
+/** The current value of a preference, shown in its row's control slot. */
+function PreferenceValue({
+  label,
+  description,
+  preview,
+}: {
+  label: ReactNode;
+  description?: ReactNode;
+  preview?: ReactNode;
+}) {
+  return (
+    <span className="flex min-w-0 items-center gap-3">
+      <span className="min-w-0 text-right">
+        <span className="block truncate text-xs font-medium text-foreground">{label}</span>
+        {description ? (
+          <span className="block truncate text-[11px] text-muted-foreground">{description}</span>
+        ) : null}
+      </span>
+      {preview}
+    </span>
+  );
+}
+
+function FontPreferenceValue({
   options,
   value,
   sample,
-  onChange,
 }: {
-  ariaLabel: string;
-  icon: ReactNode;
   options: ReadonlyArray<AppearancePreferenceOption>;
   value: string;
   sample: string;
+}) {
+  const current = options.find((option) => option.value === value);
+  return (
+    <PreferenceValue
+      label={current?.label ?? "Custom"}
+      preview={
+        <span
+          className="flex h-8 max-w-40 min-w-24 items-center truncate rounded-[min(var(--radius-md),0.5rem)] border border-border/70 bg-background px-2.5 text-xs text-foreground"
+          style={{ fontFamily: value }}
+          title={sample}
+        >
+          {sample}
+        </span>
+      }
+    />
+  );
+}
+
+function FontPreferencePicker({
+  ariaLabel,
+  options,
+  value,
+  onChange,
+}: {
+  ariaLabel: string;
+  options: ReadonlyArray<AppearancePreferenceOption>;
+  value: string;
   onChange: (value: string) => void;
 }) {
   const selectedIndex = Math.max(
     0,
     options.findIndex((option) => option.value === value),
   );
-  const current = options[selectedIndex] ?? options[0];
 
   return (
-    <div className="w-full sm:w-96">
-      <div className="mb-2 flex min-h-9 items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/60 text-muted-foreground">
-            {icon}
-          </span>
-          <span className="min-w-0">
-            <span
-              className="block truncate text-sm font-semibold text-foreground"
-              style={{ fontFamily: current?.value ?? value }}
-            >
-              {current?.label ?? value}
-            </span>
-            <span className="block truncate text-[11px] text-muted-foreground">
-              {current?.description ?? "Custom"}
-            </span>
-          </span>
-        </div>
-        <span
-          className="flex h-9 min-w-30 max-w-44 items-center justify-start truncate rounded-md border border-border/70 bg-background px-2 text-xs text-foreground shadow-xs/5"
-          style={{ fontFamily: current?.value ?? value }}
-          title={sample}
-        >
-          {sample}
-        </span>
-      </div>
+    <div className="w-full">
       <div
         role="radiogroup"
         aria-label={ariaLabel}
-        className="grid grid-cols-2 gap-1.5 sm:grid-cols-3"
+        className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-4"
       >
         {options.map((option, index) => {
           const selected = index === selectedIndex;
@@ -769,10 +829,8 @@ function FontPreferencePicker({
               title={`${option.label} (${option.description})`}
               onClick={() => onChange(option.value)}
               className={cn(
-                "min-h-12 min-w-0 rounded-md border px-2 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-                selected
-                  ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/35"
-                  : "border-border/70 text-muted-foreground hover:border-foreground/25 hover:bg-muted/45",
+                PREFERENCE_TILE_CLASS,
+                selected ? PREFERENCE_TILE_SELECTED_CLASS : PREFERENCE_TILE_IDLE_CLASS,
               )}
             >
               <span
@@ -795,12 +853,10 @@ function FontPreferencePicker({
 function PrimaryColorPreferencePicker({
   mode,
   value,
-  onModeChange,
   onColorChange,
 }: {
   mode: string;
   value: string;
-  onModeChange: (custom: boolean) => void;
   onColorChange: (value: string) => void;
 }) {
   const custom = mode === "custom";
@@ -809,11 +865,10 @@ function PrimaryColorPreferencePicker({
     : PRIMARY_COLOR_OPTIONS[0].value;
   const current = PRIMARY_COLOR_OPTIONS.find((option) => option.value === normalizedValue);
   const customPickerClassName = cn(
-    "h-12 w-full rounded-md border px-2 py-1.5 text-left shadow-none",
-    custom && !current
-      ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/35"
-      : "border-border/70 text-muted-foreground hover:border-foreground/25 hover:bg-muted/45",
-    !custom && "cursor-not-allowed opacity-55 hover:border-border/70 hover:bg-transparent",
+    PREFERENCE_TILE_CLASS,
+    "h-12 w-full size-auto shadow-none",
+    custom && !current ? PREFERENCE_TILE_SELECTED_CLASS : PREFERENCE_TILE_IDLE_CLASS,
+    !custom && "cursor-not-allowed hover:border-border/70 hover:bg-transparent",
   );
   const customPickerContent = (
     <span className="flex size-full min-w-0 items-center gap-2">
@@ -832,34 +887,14 @@ function PrimaryColorPreferencePicker({
   );
 
   return (
-    <div className="w-full sm:w-96">
-      <div className="mb-2 flex min-h-9 items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/60 text-muted-foreground">
-            <PaletteIcon className="size-3.5" />
-          </span>
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold text-foreground">
-              {custom ? (current?.label ?? "Custom") : "Theme color"}
-            </span>
-            <span className="block truncate text-[11px] text-muted-foreground">
-              {custom ? normalizedValue : "Active palette"}
-            </span>
-          </span>
-        </div>
-        <label className="flex h-9 shrink-0 items-center gap-2 rounded-md border border-border/70 bg-background px-2 text-xs text-muted-foreground shadow-xs/5">
-          <span>Use theme</span>
-          <Switch
-            checked={!custom}
-            onCheckedChange={(checked) => onModeChange(!checked)}
-            aria-label="Use theme primary color"
-          />
-        </label>
-      </div>
+    <div className="w-full">
       <div
         role="radiogroup"
         aria-label="Primary color"
-        className="grid grid-cols-2 gap-1.5 sm:grid-cols-4"
+        className={cn(
+          "grid grid-cols-2 gap-1.5 transition-opacity duration-(--app-motion-duration-chip) sm:grid-cols-3 lg:grid-cols-4",
+          !custom && "opacity-60",
+        )}
       >
         {PRIMARY_COLOR_OPTIONS.map((option) => {
           const selected = normalizedValue === option.value;
@@ -874,12 +909,11 @@ function PrimaryColorPreferencePicker({
               onClick={() => onColorChange(option.value)}
               disabled={!custom}
               className={cn(
-                "flex min-h-12 min-w-0 items-center gap-2 rounded-md border px-2 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-                custom && selected
-                  ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/35"
-                  : "border-border/70 text-muted-foreground hover:border-foreground/25 hover:bg-muted/45",
+                PREFERENCE_TILE_CLASS,
+                "flex items-center gap-2",
+                custom && selected ? PREFERENCE_TILE_SELECTED_CLASS : PREFERENCE_TILE_IDLE_CLASS,
                 !custom &&
-                  "cursor-not-allowed opacity-55 hover:border-border/70 hover:bg-transparent",
+                  "cursor-not-allowed hover:border-border/70 hover:bg-transparent hover:text-muted-foreground",
               )}
             >
               <span
@@ -922,46 +956,44 @@ function PrimaryColorPreferencePicker({
   );
 }
 
+function SliderPreferenceValue({
+  options,
+  value,
+  preview,
+}: {
+  options: ReadonlyArray<AppearancePreferenceOption>;
+  value: string;
+  preview: ReactNode;
+}) {
+  const current = options.find((option) => option.value === value);
+  return (
+    <PreferenceValue
+      label={current?.label ?? value}
+      description={current?.description}
+      preview={preview}
+    />
+  );
+}
+
 function AppearancePreferenceSlider({
   ariaLabel,
-  icon,
   options,
   value,
   onChange,
-  preview,
 }: {
   ariaLabel: string;
-  icon: ReactNode;
   options: ReadonlyArray<AppearancePreferenceOption>;
   value: string;
   onChange: (value: string) => void;
-  preview: ReactNode;
 }) {
   const selectedIndex = Math.max(
     0,
     options.findIndex((option) => option.value === value),
   );
-  const current = options[selectedIndex] ?? options[0];
   const progress = options.length > 1 ? (selectedIndex / (options.length - 1)) * 100 : 0;
 
   return (
-    <div className="w-full sm:w-96">
-      <div className="mb-2 flex min-h-9 items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/60 text-muted-foreground">
-            {icon}
-          </span>
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold text-foreground">
-              {current?.label ?? value}
-            </span>
-            <span className="block truncate text-[11px] text-muted-foreground">
-              {current?.description ?? value}
-            </span>
-          </span>
-        </div>
-        {preview}
-      </div>
+    <div className="w-full">
       <input
         aria-label={ariaLabel}
         className={cn(

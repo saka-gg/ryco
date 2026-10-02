@@ -8,7 +8,7 @@ import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { useSettingsTarget } from "../../settingsTarget";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Select, SelectTrigger, SelectPopup, SelectItem } from "../ui/select";
-import { SettingsRow } from "./settingsLayout";
+import { SETTINGS_CONTROL_WIDTH, SettingsRow } from "./settingsLayout";
 
 export function DeviceIconPicker() {
   const target = useSettingsTarget();
@@ -37,7 +37,7 @@ export function DeviceIconPicker() {
   };
   return (
     <SettingsRow
-      title="Device icon"
+      title="Icon"
       scope={target.nodeLabel}
       description="Shown across mobile, desktop, and web. Automatic uses the device’s name and operating system."
       control={
@@ -46,15 +46,20 @@ export function DeviceIconPicker() {
           disabled={!allowed || pending}
           onValueChange={save}
         >
-          <SelectTrigger aria-label={`Device icon for ${target.nodeLabel}`} className="w-48">
-            <EnvironmentMachineIcon kind={kind} className="size-4" />
-            <span>
-              {current === "automatic"
-                ? `Automatic · ${ENVIRONMENT_MACHINE_LABELS[kind]}`
-                : ENVIRONMENT_MACHINE_LABELS[kind]}
+          <SelectTrigger
+            aria-label={`Device icon for ${target.nodeLabel}`}
+            className={SETTINGS_CONTROL_WIDTH.md}
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <EnvironmentMachineIcon kind={kind} className="size-4" />
+              <span className="truncate">
+                {current === "automatic"
+                  ? `Automatic · ${ENVIRONMENT_MACHINE_LABELS[kind]}`
+                  : ENVIRONMENT_MACHINE_LABELS[kind]}
+              </span>
             </span>
           </SelectTrigger>
-          <SelectPopup>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
             <SelectItem value="automatic">Automatic</SelectItem>
             {ENVIRONMENT_MACHINE_KINDS.map((value) => (
               <SelectItem key={value} value={value}>

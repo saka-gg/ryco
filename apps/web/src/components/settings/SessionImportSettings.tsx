@@ -26,7 +26,11 @@ export function SessionImportSettings() {
   }, [allowed, environmentId]);
   if (tier === "phone" || scope === "client" || !target) return null;
   return (
-    <SettingsSection title="Import local conversations" owner="node">
+    <SettingsSection
+      title="Import conversations"
+      description={`Bring Codex or Claude Code history from ${target.nodeLabel} into Ryco. New turns continue in separate native session copies.`}
+      owner="node"
+    >
       <SessionImportPanel
         key={target.environmentId}
         nodeLabel={target.nodeLabel}

@@ -33,6 +33,8 @@ import {
   AlertDialogPopup,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
+import { Badge } from "../ui/badge";
+import { SettingsSelect } from "./SettingsSelect";
 import { Button } from "../ui/button";
 import { ColorPicker } from "../ui/color-picker";
 import { Input } from "../ui/input";
@@ -257,24 +259,22 @@ export function ThemeEditor({
   const saveDisabled = jsonError !== null || draft.name.trim().length === 0 || hasInvalidValue;
 
   return (
-    <div className="border-t border-border/60 bg-muted/24">
-      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-border/60 bg-muted/72 px-4 py-2 backdrop-blur-sm sm:px-5">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-          Editing
-        </span>
-        <span className="truncate text-sm font-medium text-foreground" title={draft.name}>
+    <div>
+      <div className="flex flex-wrap items-center gap-2 border-b border-border/60 bg-muted/40 px-4 py-2.5 sm:px-5">
+        <span className="text-xs text-muted-foreground">Editing</span>
+        <span className="truncate text-[13px] font-medium text-foreground" title={draft.name}>
           {draft.name || "Untitled"}
         </span>
         {dirty ? (
-          <span className="rounded-sm bg-warning/16 px-1.5 py-0.5 text-[10px] font-medium text-warning-foreground">
+          <Badge size="sm" variant="warning">
             Unsaved
-          </span>
+          </Badge>
         ) : null}
         <div className="ms-auto flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={handleCancel}>
+          <Button size="xs" variant="ghost" onClick={handleCancel}>
             Cancel
           </Button>
-          <Button size="sm" onClick={onSave} disabled={saveDisabled}>
+          <Button size="xs" onClick={onSave} disabled={saveDisabled}>
             Save
           </Button>
         </div>
@@ -568,7 +568,7 @@ function OpacityRow({ token, value, inherited, overridden, onChange }: RowProps)
           value={sliderValue}
           onChange={(event) => onChange(event.currentTarget.value)}
           aria-label={`--${token} value`}
-          className="h-7.5 flex-1 accent-primary cursor-pointer"
+          className="settings-range h-7.5 flex-1 cursor-pointer"
         />
         <div className="w-20 shrink-0">
           <Input
@@ -665,18 +665,15 @@ function LengthRow({ token, value, inherited, overridden, onChange }: RowProps) 
             onChange={(event) => commitNumber(event.currentTarget.value)}
           />
         </div>
-        <select
+        <SettingsSelect<SupportedLengthUnit>
+          ariaLabel={`--${token} unit`}
+          size="sm"
+          width="sm"
+          className="w-20 min-w-0 sm:w-20"
           value={unit}
-          onChange={(event) => commitUnit(event.currentTarget.value as SupportedLengthUnit)}
-          aria-label={`--${token} unit`}
-          className="h-7.5 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/24 sm:h-6.5 sm:text-xs"
-        >
-          {SUPPORTED_LENGTH_UNITS.map((u) => (
-            <option key={u} value={u}>
-              {u}
-            </option>
-          ))}
-        </select>
+          onValueChange={commitUnit}
+          options={SUPPORTED_LENGTH_UNITS.map((u) => ({ value: u, label: u }))}
+        />
         {overridden ? <ResetButton token={token} onChange={onChange} /> : null}
       </div>
     </div>

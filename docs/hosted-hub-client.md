@@ -69,7 +69,7 @@ Ryco never changes Keychain access rules to suppress an operating-system prompt.
 
 Native mobile authentication requires a hardware-backed device key. If the device cannot provide
 one, setup explains the limitation and offers retry without falling back to a software key.
-Node-level security details live under **Settings → Connections → Node security · Advanced**;
+Node-level security details live under **Settings → Security** (the device group of the settings page);
 the existing owner and connection-readiness checks still apply.
 
 Sign-in uses the existing Hub passkey options and verification endpoints. The client converts the
@@ -418,11 +418,11 @@ line and the pointer at the rest of it:
 
 <!-- shipped-text:web-sas-more -->
 
-> Settings → Connections → Node security explains what else this tab cannot check.
+> Settings → Security explains what else this tab cannot check.
 
 <!-- /shipped-text:web-sas-more -->
 
-In Settings → Connections → Node security, the same code is drawn with the longer account. It names both of the reasons
+In Settings → Security, the same code is drawn with the longer account. It names both of the reasons
 the browser tier is denied the active-Hub column, and keeps them apart: one needs a substituted
 bundle and one needs nothing at all.
 
@@ -455,7 +455,7 @@ analytics, and it must not be captured into qualification evidence, screenshots,
 a channel locked encrypted but produced no code, the surface says so rather than rendering nothing —
 an absent comparison value is reported, not silently dropped.
 
-The code renders in the desktop-width node menu and again in Settings → Connections → Node security, which is where the
+The code renders in the desktop-width node menu and again in Settings → Security, which is where the
 menu's pointer leads. That section is owner-only in hosted mode, so the menu asks whether this
 reader can open it before it points there: a viewer, an operator, or an owner whose role snapshot
 has gone stale is shown the longer account in the menu itself, with the `ryco e2ee sessions`

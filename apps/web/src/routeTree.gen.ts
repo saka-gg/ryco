@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as PairRouteImport } from './routes/pair'
+import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as StatisticsRouteImport } from './routes/statistics'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/_settings.diagnostics'
@@ -25,6 +26,11 @@ const ChatRoute = ChatRouteImport.update({
 const PairRoute = PairRouteImport.update({
   id: '/pair',
   path: '/pair',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsRoute = SettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
 const StatisticsRoute = StatisticsRouteImport.update({
@@ -63,6 +69,7 @@ const NativeAuthorizeHandoffIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
   '/pair': typeof PairRoute
+  '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
   '/diagnostics': typeof SettingsDiagnosticsRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -71,6 +78,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/pair': typeof PairRoute
+  '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
   '/diagnostics': typeof SettingsDiagnosticsRoute
   '/': typeof ChatIndexRoute
@@ -82,6 +90,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_chat': typeof ChatRouteWithChildren
   '/pair': typeof PairRoute
+  '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
   '/_settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/_chat/': typeof ChatIndexRoute
@@ -94,6 +103,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/pair'
+    | '/settings'
     | '/statistics'
     | '/diagnostics'
     | '/$environmentId/$threadId'
@@ -102,6 +112,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/pair'
+    | '/settings'
     | '/statistics'
     | '/diagnostics'
     | '/'
@@ -112,6 +123,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_chat'
     | '/pair'
+    | '/settings'
     | '/statistics'
     | '/_settings/diagnostics'
     | '/_chat/'
@@ -123,6 +135,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   ChatRoute: typeof ChatRouteWithChildren
   PairRoute: typeof PairRoute
+  SettingsRoute: typeof SettingsRoute
   StatisticsRoute: typeof StatisticsRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
   NativeAuthorizeHandoffIdRoute: typeof NativeAuthorizeHandoffIdRoute
@@ -142,6 +155,13 @@ declare module '@tanstack/react-router' {
       path: '/pair'
       fullPath: '/pair'
       preLoaderRoute: typeof PairRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings': {
+      id: '/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/statistics': {
@@ -206,6 +226,7 @@ const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 const rootRouteChildren: RootRouteChildren = {
   ChatRoute: ChatRouteWithChildren,
   PairRoute: PairRoute,
+  SettingsRoute: SettingsRoute,
   StatisticsRoute: StatisticsRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
   NativeAuthorizeHandoffIdRoute: NativeAuthorizeHandoffIdRoute,

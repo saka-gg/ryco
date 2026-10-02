@@ -15,7 +15,6 @@ import {
   CheckCircle2Icon,
   LoaderIcon,
   RefreshCwIcon,
-  TriangleAlertIcon,
   UnplugIcon,
   WrenchIcon,
 } from "lucide-react";
@@ -25,8 +24,17 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { formatProviderDriverKindLabel } from "../../providerModels";
 import { useSettingsTarget } from "../../settingsTarget";
+import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import {
+  SettingsBlock,
+  SettingsEmpty,
+  SettingsNotice,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   AgentControlIntegrationFormFields,
@@ -234,222 +242,207 @@ export function AgentControlMcpInstallations() {
   );
 
   return (
-    <section
-      data-testid="agent-control-mcp-installations"
-      className="border-b bg-muted/10 p-6 sm:p-8"
-    >
-      <div className="mx-auto grid w-full max-w-4xl gap-8">
-        <section className="grid gap-4">
-          <header>
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-              <BotIcon className="size-3.5" />
-              Ryco sessions
-            </div>
-            <h2 className="mt-1 text-lg font-semibold tracking-[-0.01em]">Automatic inside Ryco</h2>
-            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground/80">
-              Supported sessions started by Ryco receive Agent Control automatically. There is
-              nothing to install in those provider profiles.
-            </p>
-          </header>
+    <div data-testid="agent-control-mcp-installations" className="contents">
+      <SettingsSection
+        title="Automatic inside Ryco"
+        description="Supported sessions started by Ryco receive Agent Control automatically. There is nothing to install in those provider profiles."
+      >
+        {loading ? (
+          <SettingsBlock className="flex items-center gap-2 text-xs text-muted-foreground">
+            <LoaderIcon className="size-3.5 animate-spin" /> Loading providers…
+          </SettingsBlock>
+        ) : providers.length === 0 ? (
+          <SettingsEmpty
+            icon={<BotIcon />}
+            title="No provider instances"
+            description="No configured provider instances were found."
+            className="py-8"
+          />
+        ) : (
+          providers.map((provider) => {
+            const driver = getDriverOption(provider.driver);
+            const Icon = driver?.icon ?? BotIcon;
+            const automatic =
+              provider.enabled && provider.capabilities.automaticAgentControl === "available";
+            return (
+              <SettingsRow
+                key={provider.instanceId}
+                title={
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Icon className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{providerLabel(provider)}</span>
+                    <span className="truncate font-mono text-[11px] font-normal text-muted-foreground/70">
+                      {provider.instanceId}
+                    </span>
+                  </span>
+                }
+                description={
+                  automatic
+                    ? "Available in every new Ryco-managed session."
+                    : provider.enabled
+                      ? "This provider does not expose automatic Agent Control yet."
+                      : "This provider instance is disabled."
+                }
+                control={
+                  <Badge size="sm" variant={automatic ? "success" : "outline"}>
+                    {automatic ? "Automatic" : provider.enabled ? "Unavailable" : "Disabled"}
+                  </Badge>
+                }
+              />
+            );
+          })
+        )}
+      </SettingsSection>
 
-          {loading ? (
-            <div className="flex items-center gap-2 rounded-xl border p-4 text-sm text-muted-foreground">
-              <LoaderIcon className="size-4 animate-spin" /> Loading providers…
-            </div>
-          ) : providers.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-              No configured provider instances were found.
-            </div>
-          ) : (
-            <div className="divide-y overflow-hidden rounded-xl border bg-card">
-              {providers.map((provider) => {
-                const driver = getDriverOption(provider.driver);
-                const Icon = driver?.icon ?? BotIcon;
-                const automatic =
-                  provider.enabled && provider.capabilities.automaticAgentControl === "available";
-                return (
-                  <div
-                    key={provider.instanceId}
-                    className="flex items-start justify-between gap-4 px-4 py-3"
-                  >
-                    <div className="flex min-w-0 items-start gap-3">
-                      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border bg-background">
-                        <Icon className="size-4 text-muted-foreground" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium">{providerLabel(provider)}</p>
-                        <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-                          {provider.instanceId}
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {automatic
-                            ? "Available in every new Ryco-managed session."
-                            : provider.enabled
-                              ? "This provider does not expose automatic Agent Control yet."
-                              : "This provider instance is disabled."}
-                        </p>
-                      </div>
-                    </div>
-                    <Badge variant={automatic ? "success" : "outline"}>
-                      {automatic ? "Automatic" : provider.enabled ? "Unavailable" : "Disabled"}
+      <SettingsSection
+        title="Connect an installed provider"
+        description="Ryco detects local provider profiles and writes their native MCP configuration. The default grants project listing and task request/read access, limited to 60 requests per minute and one active task. Every task still requires approval."
+        headerAction={
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground"
+                  aria-label="Refresh Agent Control providers"
+                  disabled={loading}
+                  onClick={() => void refresh()}
+                >
+                  <RefreshCwIcon className={cn(loading && "animate-spin")} />
+                </Button>
+              }
+            />
+            <TooltipPopup>Refresh</TooltipPopup>
+          </Tooltip>
+        }
+      >
+        {topology && !topology.available ? (
+          <SettingsBlock>
+            <SettingsNotice tone="warning" title="Local installation is unavailable">
+              {topology.reason ?? "Ryco could not prove a direct loopback-only topology."}
+            </SettingsNotice>
+          </SettingsBlock>
+        ) : null}
+
+        {!loading && (!agentControlApi || !mcpApi) ? (
+          <SettingsEmpty
+            icon={<CableIcon />}
+            title="Not available here"
+            description="This Ryco environment does not expose provider MCP installation yet."
+            className="py-8"
+          />
+        ) : !loading && installableWorkspaces.length === 0 ? (
+          <SettingsEmpty
+            icon={<CableIcon />}
+            title="No installable profiles"
+            description="Configure a supported provider instance first, then refresh."
+            className="py-8"
+          />
+        ) : (
+          installableWorkspaces.map((workspace) => {
+            const installation = latestInstallation(installations.installations, workspace.id);
+            const status = installationStatus(installation);
+            const connected = installation?.state === "connected";
+            const repairNeeded = installation?.state === "repair-needed";
+            const working = busyId === workspace.id;
+            const customizable = customizingId === workspace.id;
+            const driver = getDriverOption(workspace.driver);
+            const Icon = driver?.icon ?? CableIcon;
+            const hasDetails =
+              Boolean(installation?.lastError) ||
+              Boolean(installation?.preservedUserChanges) ||
+              customizable;
+
+            return (
+              <SettingsRow
+                key={workspace.id}
+                title={
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Icon className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{workspaceLabel(workspace)}</span>
+                    <Badge size="sm" variant={status.variant}>
+                      {status.label}
                     </Badge>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        <section className="grid gap-4">
-          <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-                <CableIcon className="size-3.5" />
-                External agents
-              </div>
-              <h2 className="mt-1 text-lg font-semibold tracking-[-0.01em]">
-                Connect an installed provider
-              </h2>
-              <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground/80">
-                Ryco detects local provider profiles and writes their native MCP configuration. The
-                default grants project listing and task request/read access, limited to 60 requests
-                per minute and one active task. Every task still requires approval.
-              </p>
-            </div>
-            <Button
-              size="icon"
-              variant="outline"
-              aria-label="Refresh Agent Control providers"
-              disabled={loading}
-              onClick={() => void refresh()}
-            >
-              <RefreshCwIcon />
-            </Button>
-          </header>
-
-          {topology && !topology.available ? (
-            <div className="flex gap-3 rounded-xl border border-warning/30 bg-warning/8 p-4 text-sm">
-              <TriangleAlertIcon className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
-              <div>
-                <p className="font-medium">Local installation is unavailable</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {topology.reason ?? "Ryco could not prove a direct loopback-only topology."}
-                </p>
-              </div>
-            </div>
-          ) : null}
-
-          {!loading && (!agentControlApi || !mcpApi) ? (
-            <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-              This Ryco environment does not expose provider MCP installation yet.
-            </div>
-          ) : !loading && installableWorkspaces.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-              No installable provider profiles were detected. Configure a supported provider
-              instance first, then refresh.
-            </div>
-          ) : (
-            <div className="grid gap-3">
-              {installableWorkspaces.map((workspace) => {
-                const installation = latestInstallation(installations.installations, workspace.id);
-                const status = installationStatus(installation);
-                const connected = installation?.state === "connected";
-                const repairNeeded = installation?.state === "repair-needed";
-                const working = busyId === workspace.id;
-                const customizable = customizingId === workspace.id;
-                const driver = getDriverOption(workspace.driver);
-                const Icon = driver?.icon ?? CableIcon;
-
-                return (
-                  <article key={workspace.id} className="grid gap-4 rounded-xl border bg-card p-4">
-                    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="flex min-w-0 items-start gap-3">
-                        <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border bg-background">
-                          <Icon className="size-4 text-muted-foreground" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="text-sm font-semibold">{workspaceLabel(workspace)}</h3>
-                            <Badge variant={status.variant}>{status.label}</Badge>
-                          </div>
-                          <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
-                            {workspace.displayPath}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {workspace.providerInstances.length} configured provider
-                            {workspace.providerInstances.length === 1 ? " instance" : " instances"}
-                            {installation ? ` · MCP name ${installation.serverName}` : ""}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">
-                        {repairNeeded && installation ? (
-                          <Button
-                            size="sm"
-                            disabled={working || topology?.available === false}
-                            onClick={() => void repair(workspace, installation)}
-                          >
-                            {working ? <LoaderIcon className="animate-spin" /> : <WrenchIcon />}
-                            Repair
-                          </Button>
-                        ) : connected && installation ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={working}
-                            onClick={() => void disconnect(workspace, installation)}
-                          >
-                            {working ? <LoaderIcon className="animate-spin" /> : <UnplugIcon />}
-                            Disconnect
-                          </Button>
-                        ) : (
-                          <>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={working || topology?.available === false}
-                              onClick={() => {
-                                if (customizable) {
-                                  setCustomizingId(null);
-                                } else {
-                                  setCustomForm(formFor(workspace));
-                                  setCustomizingId(workspace.id);
-                                }
-                              }}
-                            >
-                              {customizable ? "Close" : "Customize"}
-                            </Button>
-                            <Button
-                              size="sm"
-                              disabled={working || topology?.available === false}
-                              onClick={() => void connect(workspace, false)}
-                            >
-                              {working ? (
-                                <LoaderIcon className="animate-spin" />
-                              ) : (
-                                <CheckCircle2Icon />
-                              )}
-                              Connect
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
+                  </span>
+                }
+                description={
+                  <>
+                    <span
+                      className="block truncate font-mono text-[11px]"
+                      title={workspace.displayPath}
+                    >
+                      {workspace.displayPath}
+                    </span>
+                    <span className="block">
+                      {workspace.providerInstances.length} configured provider
+                      {workspace.providerInstances.length === 1 ? " instance" : " instances"}
+                      {installation ? ` · MCP name ${installation.serverName}` : ""}
+                    </span>
+                  </>
+                }
+                control={
+                  repairNeeded && installation ? (
+                    <Button
+                      size="xs"
+                      disabled={working || topology?.available === false}
+                      onClick={() => void repair(workspace, installation)}
+                    >
+                      {working ? <LoaderIcon className="animate-spin" /> : <WrenchIcon />}
+                      Repair
+                    </Button>
+                  ) : connected && installation ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={working}
+                      onClick={() => void disconnect(workspace, installation)}
+                    >
+                      {working ? <LoaderIcon className="animate-spin" /> : <UnplugIcon />}
+                      Disconnect
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={working || topology?.available === false}
+                        onClick={() => {
+                          if (customizable) {
+                            setCustomizingId(null);
+                          } else {
+                            setCustomForm(formFor(workspace));
+                            setCustomizingId(workspace.id);
+                          }
+                        }}
+                      >
+                        {customizable ? "Close" : "Customize"}
+                      </Button>
+                      <Button
+                        size="xs"
+                        disabled={working || topology?.available === false}
+                        onClick={() => void connect(workspace, false)}
+                      >
+                        {working ? <LoaderIcon className="animate-spin" /> : <CheckCircle2Icon />}
+                        Connect
+                      </Button>
+                    </>
+                  )
+                }
+              >
+                {hasDetails ? (
+                  <div className="flex flex-col gap-3">
                     {installation?.lastError ? (
-                      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
-                        {installation.lastError}
-                      </div>
+                      <SettingsNotice tone="error">{installation.lastError}</SettingsNotice>
                     ) : null}
                     {installation?.preservedUserChanges ? (
-                      <div className="rounded-lg border border-warning/30 bg-warning/8 p-3 text-xs text-warning-foreground">
+                      <SettingsNotice tone="warning">
                         Ryco left this provider&apos;s MCP entry untouched because it had been
                         edited after installation.
-                      </div>
+                      </SettingsNotice>
                     ) : null}
-
                     {customizable ? (
-                      <div className="grid gap-4 border-t pt-4">
+                      <div className="settings-subsections-enter grid gap-4 rounded-[min(var(--radius-lg),0.625rem)] bg-muted/40 p-4">
                         <p className="text-xs text-muted-foreground">
                           Customize the credential scope and limits before Ryco installs it. The
                           provider profile is fixed to this detected workspace.
@@ -461,6 +454,7 @@ export function AgentControlMcpInstallations() {
                         />
                         <div className="flex justify-end">
                           <Button
+                            size="sm"
                             disabled={working || topology?.available === false}
                             onClick={() => void connect(workspace, true)}
                           >
@@ -470,13 +464,13 @@ export function AgentControlMcpInstallations() {
                         </div>
                       </div>
                     ) : null}
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
-      </div>
-    </section>
+                  </div>
+                ) : null}
+              </SettingsRow>
+            );
+          })
+        )}
+      </SettingsSection>
+    </div>
   );
 }

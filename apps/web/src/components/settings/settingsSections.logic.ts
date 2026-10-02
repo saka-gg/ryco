@@ -3,12 +3,12 @@ import type { SettingsSectionId } from "../../settingsDialogStore";
 /**
  * Which settings sections a reader can actually open, as one predicate.
  *
- * IT LIVES HERE RATHER THAN IN `SettingsDialog.tsx` BECAUSE IT HAS A THIRD
+ * IT LIVES HERE RATHER THAN IN `SettingsPage.tsx` BECAUSE IT HAS A THIRD
  * CALLER. The desktop dialog and the phone surface filter their navs with it,
  * and `HostedE2eeVerification` now asks the same question before it draws a
  * sentence that sends a reader to Settings → Security (docs/relay-e2ee-protocol
  * §13.5's accompanying text). That component sits in the eagerly loaded shell
- * and the settings dialog is deliberately behind a dynamic import
+ * and the settings page is deliberately behind a dynamic import
  * (`perf/webBundleSplitting.test.ts`), so importing the predicate from the
  * dialog would have pulled the dialog into the app entry to answer a question
  * about copy. This module imports nothing but a type.

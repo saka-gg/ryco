@@ -109,7 +109,7 @@ import { PhoneSettingsSurface, PHONE_SETTINGS_GENERAL_LABELS } from "./PhoneSett
  * present" — never "these are all of them". A section added to the desktop
  * dialog and forgotten here stayed green, which is how `security` shipped
  * unreachable on the phone tier. The set is checked against the desktop
- * inventory in `SettingsDialog.test.ts`; this drives the geometry and push
+ * inventory in `SettingsPage.test.ts`; this drives the geometry and push
  * assertions over whatever that set turns out to be.
  *
  * "Account" is filtered out at render in the standard client (it is hosted-only),
