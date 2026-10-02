@@ -26,7 +26,7 @@ import {
   type StatisticsTokenAttribution,
   WorktreeId,
 } from "@ryco/contracts";
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
@@ -287,7 +287,7 @@ const makeStatisticsQuery = Effect.gen(function* () {
       `,
   });
 
-  const getStatistics: StatisticsQueryShape["getStatistics"] = () =>
+  const computeStatistics: StatisticsQueryShape["getStatistics"] = () =>
     Effect.gen(function* () {
       const [threadRows, projectRows, tokenRows, toolRows, turnRows, worktreeRows] =
         yield* Effect.all(
@@ -651,6 +651,46 @@ const makeStatisticsQuery = Effect.gen(function* () {
         recentPullRequests,
       };
       return snapshot;
+    });
+
+  // This SQLite client owns one connection. total_changes observes writes on
+  // that connection (including direct repository writes), while data_version
+  // observes commits from other connections. Neither reads table contents.
+  // Keep only one snapshot and serialize misses, so simultaneous requests share
+  // the aggregation without retaining historical copies of analytics data.
+  const cacheLock = yield* Semaphore.make(1);
+  let cached: { writes: number; externalVersion: number; snapshot: StatisticsSnapshot } | undefined;
+  const getStatistics: StatisticsQueryShape["getStatistics"] = () =>
+    Effect.gen(function* () {
+      // A caller may inspect uncommitted data. Never publish that result into
+      // the shared cache: a rollback does not reset SQLite's total_changes.
+      if (Option.isSome(yield* Effect.serviceOption(sql.transactionService))) {
+        return yield* computeStatistics();
+      }
+      return yield* cacheLock.withPermit(
+        sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const rows = yield* sql<{ writes: number; externalVersion: number }>`
+              SELECT total_changes() AS writes, data_version AS "externalVersion"
+              FROM pragma_data_version
+            `;
+              const revision = rows[0]!;
+              if (
+                cached?.writes === revision.writes &&
+                cached.externalVersion === revision.externalVersion
+              ) {
+                return cached.snapshot;
+              }
+              const snapshot = yield* computeStatistics();
+              cached = { ...revision, snapshot };
+              return snapshot;
+            }),
+          )
+          .pipe(
+            Effect.mapError(toPersistenceSqlError("StatisticsQuery.getStatistics:transaction")),
+          ),
+      );
     });
 
   return { getStatistics } satisfies StatisticsQueryShape;

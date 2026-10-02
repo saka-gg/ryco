@@ -2,6 +2,7 @@ import {
   messageTextColumns,
   resolveMessageText,
   messageTextForSearch,
+  messageSearchCandidate,
   MessageTextFromSql,
   decodeMessageText,
 } from "../../persistence/messageText.ts";
@@ -167,6 +168,7 @@ const WorktreeIdLookupInput = Schema.Struct({
 });
 const ThreadMessageSearchQueryInput = Schema.Struct({
   likePattern: Schema.String,
+  candidate: Schema.NullOr(Schema.String),
   projectId: Schema.NullOr(ProjectId),
   threadId: Schema.NullOr(ThreadId),
   limit: NonNegativeInt,
@@ -1109,7 +1111,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const searchThreadMessageRows = SqlSchema.findAll({
     Request: ThreadMessageSearchQueryInput,
     Result: ProjectionThreadMessageSearchRowSchema,
-    execute: ({ likePattern, projectId, threadId, limit }) =>
+    execute: ({ likePattern, candidate, projectId, threadId, limit }) =>
       sql`
         SELECT
           messages.thread_id AS "threadId",
@@ -1127,6 +1129,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           AND messages.role IN ('user', 'assistant')
           AND (${projectId} IS NULL OR threads.project_id = ${projectId})
           AND (${threadId} IS NULL OR messages.thread_id = ${threadId})
+          ${
+            candidate === null
+              ? sql``
+              : sql`AND messages.message_id IN (
+            SELECT ids.message_id
+            FROM projection_message_search(${candidate}) AS candidates
+            INNER JOIN projection_message_search_ids ids ON ids.search_id = candidates.rowid
+            UNION ALL
+            SELECT message_id FROM projection_thread_messages
+            WHERE is_streaming <> 0 OR text_json IS NOT NULL
+          )`
+          }
           AND lower(${messageTextForSearch(sql, "messages")}) LIKE ${likePattern} ESCAPE '\\'
         ORDER BY messages.created_at DESC, messages.message_id DESC
         LIMIT ${limit}
@@ -3560,9 +3574,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     }
 
     const limit = Math.min(Math.max(1, input.limit), 50);
-    const likePattern = `%${escapeSqlLikePattern(query.toLowerCase())}%`;
+    const normalizedQuery = query.toLowerCase();
+    const likePattern = `%${escapeSqlLikePattern(normalizedQuery)}%`;
     return searchThreadMessageRows({
       likePattern,
+      candidate: messageSearchCandidate(normalizedQuery),
       projectId: input.projectId ?? null,
       threadId: input.threadId ?? null,
       limit,

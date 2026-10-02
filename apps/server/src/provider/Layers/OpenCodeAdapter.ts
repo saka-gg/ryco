@@ -77,6 +77,7 @@ import {
 } from "../opencodeRuntime.ts";
 
 import { OpenCodeTaskLifecycle, type OpenCodeTaskTransition } from "../openCodeTaskLifecycle.ts";
+import { OpenCodePartIndex } from "../openCodePartIndex.ts";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_RESUME_VERSION = 1;
@@ -104,9 +105,7 @@ interface OpenCodeSessionContext {
   readonly pendingQuestions: Map<string, QuestionRequest>;
   readonly resolvedRequestIds: Set<string>;
   readonly messageRoleById: Map<string, "user" | "assistant">;
-  readonly partById: Map<string, Part>;
-  readonly emittedTextByPartId: Map<string, string>;
-  readonly completedAssistantPartIds: Set<string>;
+  readonly parts: OpenCodePartIndex;
   readonly childSessionIds: Set<string>;
   readonly subagentBySessionId: Map<string, SubagentRef>;
   readonly subagentBySubtaskPartId: Map<string, SubagentRef>;
@@ -1335,12 +1334,12 @@ export function makeOpenCodeAdapter(
         return;
       }
       const partKey = scopedOpenCodeId(part.sessionID, part.id);
-      const previousText = context.emittedTextByPartId.get(partKey);
+      if (context.parts.isTerminal(partKey)) return;
+      const previousText = context.parts.emittedText(partKey);
       const { latestText, deltaToEmit } = mergeOpenCodeAssistantText(previousText, text);
-      context.emittedTextByPartId.set(partKey, latestText);
+      context.parts.setEmittedText(partKey, latestText);
       if (latestText !== text) {
-        context.partById.set(
-          partKey,
+        context.parts.set(
           (part.type === "text" || part.type === "reasoning"
             ? { ...part, text: latestText }
             : part) satisfies Part,
@@ -1395,9 +1394,8 @@ export function makeOpenCodeAdapter(
       if (
         part.type === "text" &&
         part.time?.end !== undefined &&
-        !context.completedAssistantPartIds.has(partKey)
+        !context.parts.isTerminal(partKey)
       ) {
-        context.completedAssistantPartIds.add(partKey);
         const subagent = context.subagentBySessionId.get(part.sessionID);
         if (!subagent) {
           yield* emitForContext(context, {
@@ -1417,6 +1415,9 @@ export function makeOpenCodeAdapter(
             },
           });
         }
+      }
+      if ((part.type === "text" || part.type === "reasoning") && part.time?.end !== undefined) {
+        context.parts.complete(partKey);
       }
     });
 
@@ -1515,29 +1516,39 @@ export function makeOpenCodeAdapter(
                 });
               }
             }
-            for (const part of context.partById.values()) {
-              if (
-                part.sessionID !== event.properties.sessionID ||
-                part.messageID !== event.properties.info.id
-              ) {
-                continue;
-              }
+            for (const part of context.parts.forMessage(
+              event.properties.sessionID,
+              event.properties.info.id,
+            )) {
               yield* emitAssistantTextDelta(context, part, turnId, event);
             }
+          } else {
+            context.parts.releaseMessageBodies(
+              event.properties.sessionID,
+              event.properties.info.id,
+            );
           }
           break;
         }
 
         case "message.removed": {
+          context.parts.removeMessage(event.properties.sessionID, event.properties.messageID);
           context.messageRoleById.delete(
             scopedOpenCodeId(event.properties.sessionID, event.properties.messageID),
           );
           break;
         }
 
+        case "message.part.removed": {
+          context.parts.complete(
+            scopedOpenCodeId(event.properties.sessionID, event.properties.partID),
+          );
+          break;
+        }
+
         case "message.part.delta": {
           const partKey = scopedOpenCodeId(event.properties.sessionID, event.properties.partID);
-          const existingPart = context.partById.get(partKey);
+          const existingPart = context.parts.get(partKey);
           if (!existingPart) {
             break;
           }
@@ -1551,14 +1562,14 @@ export function makeOpenCodeAdapter(
             break;
           }
           const previousText =
-            context.emittedTextByPartId.get(partKey) ?? textFromPart(existingPart) ?? "";
+            context.parts.emittedText(partKey) ?? textFromPart(existingPart) ?? "";
           const { nextText, deltaToEmit } = appendOpenCodeAssistantTextDelta(previousText, delta);
           if (deltaToEmit.length === 0) {
             break;
           }
-          context.emittedTextByPartId.set(partKey, nextText);
+          context.parts.setEmittedText(partKey, nextText);
           if (existingPart.type === "text" || existingPart.type === "reasoning") {
-            context.partById.set(partKey, {
+            context.parts.set({
               ...existingPart,
               text: nextText,
             });
@@ -1603,8 +1614,8 @@ export function makeOpenCodeAdapter(
 
         case "message.part.updated": {
           const part = event.properties.part;
-          context.partById.set(scopedOpenCodeId(part.sessionID, part.id), part);
           const messageRole = messageRoleForPart(context, part);
+          if (messageRole !== "user" && !context.parts.set(part)) break;
           if (part.sessionID === context.openCodeSessionId && messageRole !== "user") {
             yield* projectOpenCodeTask(context, part);
           } else if (
@@ -2259,10 +2270,8 @@ export function makeOpenCodeAdapter(
           pendingPermissions: new Map(),
           pendingQuestions: new Map(),
           resolvedRequestIds: new Set(),
-          partById: new Map(),
-          emittedTextByPartId: new Map(),
+          parts: new OpenCodePartIndex(),
           messageRoleById: new Map(),
-          completedAssistantPartIds: new Set(),
           childSessionIds: new Set(),
           subagentBySessionId: new Map(),
           subagentBySubtaskPartId: new Map(),
@@ -2414,10 +2423,12 @@ export function makeOpenCodeAdapter(
               });
               continue;
             }
-            const persisted = readPersistedAttachment({
-              attachmentsDir: serverConfig.attachmentsDir,
-              attachment,
-            });
+            const persisted = yield* Effect.promise(() =>
+              readPersistedAttachment({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachment,
+              }),
+            );
             if (!persisted.ok) {
               return yield* new ProviderAdapterRequestError({
                 provider: PROVIDER,

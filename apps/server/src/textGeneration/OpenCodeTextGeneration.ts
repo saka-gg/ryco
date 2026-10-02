@@ -157,10 +157,12 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       if (attachment.id === undefined) {
         continue;
       }
-      const persisted = readPersistedAttachment({
-        attachmentsDir: serverConfig.attachmentsDir,
-        attachment,
-      });
+      const persisted = yield* Effect.promise(() =>
+        readPersistedAttachment({
+          attachmentsDir: serverConfig.attachmentsDir,
+          attachment,
+        }),
+      );
       if (!persisted.ok) {
         return yield* new TextGenerationError({
           operation: input.operation,

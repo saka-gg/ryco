@@ -1,3 +1,4 @@
+import { encodeMessageTextFallback, messageTextForSearch } from "../../persistence/messageText.ts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import {
   CheckpointRef,
@@ -892,6 +893,63 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         wildcardResults.map((result) => result.messageId),
         [asMessageId("message-search-wildcard")],
       );
+
+      // Compare the indexed path against the previous exact predicate over
+      // punctuation, Unicode, JSON fallback bodies, and split streaming text.
+      const bodies = [
+        "Alpha_100% mixed CASE",
+        "alphaX100x",
+        "Ünicode 日本語 alpha",
+        "before\0alpha after",
+        "plain short",
+        "foo\\bar",
+        'quotes " AND OR',
+        "😀alpha",
+        "lone \ud800 alpha",
+      ];
+      for (const [index, body] of bodies.entries()) {
+        yield* sql`INSERT INTO projection_thread_messages(message_id, thread_id, role, text, text_json, is_streaming, created_at, updated_at)
+          VALUES(${`parity-${index}`}, 'thread-search-a', 'assistant', ${body}, ${encodeMessageTextFallback(body)}, 0, '2026-03-01T01:00:00.000Z', '2026-03-01T01:00:00.000Z')`;
+      }
+      yield* sql`INSERT INTO projection_thread_messages(message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        VALUES('parity-stream', 'thread-search-a', 'assistant', 'alp', 1, '2026-03-01T01:00:00.000Z', '2026-03-01T01:00:00.000Z')`;
+      yield* sql`INSERT INTO projection_message_chunks(message_id, event_sequence, text_json) VALUES('parity-stream', 1, '"ha_100% streamed"')`;
+      for (const query of [
+        "alpha",
+        "ALPHA_100%",
+        "100%",
+        "日本語",
+        "Ünicode",
+        "lo",
+        "%",
+        "_",
+        "foo\\bar",
+        "AND OR",
+        "😀alpha",
+        "before\0alpha",
+        "missing-token",
+        "uthent",
+      ]) {
+        const pattern = `%${query
+          .trim()
+          .toLowerCase()
+          .replace(/[\\%_]/g, "\\$&")}%`;
+        const expected = yield* sql<{ messageId: string }>`SELECT messages.message_id AS "messageId"
+          FROM projection_thread_messages messages
+          WHERE messages.thread_id = 'thread-search-a'
+            AND lower(${messageTextForSearch(sql, "messages")}) LIKE ${pattern} ESCAPE '\\'
+          ORDER BY messages.created_at DESC, messages.message_id DESC LIMIT 50`;
+        const actual = yield* snapshotQuery.searchThreadMessages({
+          query,
+          threadId: ThreadId.make("thread-search-a"),
+          limit: 50,
+        });
+        assert.deepEqual(
+          actual.map((row) => row.messageId),
+          expected.map((row) => row.messageId),
+          query,
+        );
+      }
     }),
   );
 
