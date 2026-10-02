@@ -266,6 +266,13 @@ export interface WsRpcClient {
     readonly consumeCodexResetCredit: RpcUnaryMethod<
       typeof WS_METHODS.serverConsumeCodexResetCredit
     >;
+    readonly listLocalTasks: RpcUnaryMethod<typeof WS_METHODS.serverListLocalTasks>;
+    readonly getLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverGetLocalTask>;
+    readonly createLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverCreateLocalTask>;
+    readonly updateLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverUpdateLocalTask>;
+    readonly deleteLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverDeleteLocalTask>;
+    readonly delegateLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverDelegateLocalTask>;
+    readonly getDailyRecap: RpcUnaryMethod<typeof WS_METHODS.serverGetDailyRecap>;
     readonly refreshProviders: (
       input?: RpcInput<typeof WS_METHODS.serverRefreshProviders>,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverRefreshProviders>>;
@@ -700,6 +707,20 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverReadCodexResetCredits](input)),
       consumeCodexResetCredit: (input) =>
         transport.request((client) => client[WS_METHODS.serverConsumeCodexResetCredit](input)),
+      listLocalTasks: (input) =>
+        transport.request((client) => client[WS_METHODS.serverListLocalTasks](input)),
+      getLocalTask: (input) =>
+        transport.request((client) => client[WS_METHODS.serverGetLocalTask](input)),
+      createLocalTask: (input) =>
+        transport.request((client) => client[WS_METHODS.serverCreateLocalTask](input)),
+      updateLocalTask: (input) =>
+        transport.request((client) => client[WS_METHODS.serverUpdateLocalTask](input)),
+      deleteLocalTask: (input) =>
+        transport.request((client) => client[WS_METHODS.serverDeleteLocalTask](input)),
+      delegateLocalTask: (input) =>
+        transport.request((client) => client[WS_METHODS.serverDelegateLocalTask](input)),
+      getDailyRecap: (input) =>
+        transport.request((client) => client[WS_METHODS.serverGetDailyRecap](input)),
       refreshProviders: (input) =>
         transport.request((client) => client[WS_METHODS.serverRefreshProviders](input ?? {})),
       searchAcpRegistry: (input) =>

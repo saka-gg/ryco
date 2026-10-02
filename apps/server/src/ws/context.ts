@@ -1,3 +1,5 @@
+import { LocalTaskService } from "../tasks/LocalTaskService.ts";
+import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { StorageService } from "../storage/StorageService.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
@@ -168,6 +170,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const lifecycleEvents = yield* ServerLifecycleEvents;
     const serverSettings = yield* ServerSettingsService;
     const storageService = yield* Effect.serviceOption(StorageService);
+    const localTaskService = yield* Effect.serviceOption(LocalTaskService);
+    const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     const codexMcp = yield* makeCodexMcpService;
     const claudeMcp = yield* makeClaudeMcpAdapter();
     const copilotMcp = yield* makeCopilotMcpAdapter();
@@ -870,6 +874,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       providerService,
       providerRuntimeIngestion,
       providerMaintenanceRunner,
+      dailyRecapQuery,
+      localTaskService,
       config,
       lifecycleEvents,
       serverSettings,

@@ -1,3 +1,15 @@
+import {
+  LocalTask,
+  LocalTaskId,
+  LocalTaskError,
+  LocalTaskCreateInput,
+  LocalTaskUpdateInput,
+  LocalTaskDeleteInput,
+  LocalTaskListInput,
+  LocalTaskListResult,
+  LocalTaskDelegateInput,
+} from "./localTasks.ts";
+import { DailyRecapRequest, DailyRecapSnapshot, DailyRecapReadError } from "./dailyRecap.ts";
 import { EffectiveProjectPreferences } from "./settings.ts";
 import {
   StorageScanInput,
@@ -413,6 +425,13 @@ export const WS_METHODS = {
   serverAuthenticateAcpRegistry: "server.authenticateAcpRegistry",
   serverReadCodexResetCredits: "server.readCodexResetCredits",
   serverConsumeCodexResetCredit: "server.consumeCodexResetCredit",
+  serverListLocalTasks: "server.listLocalTasks",
+  serverGetLocalTask: "server.getLocalTask",
+  serverCreateLocalTask: "server.createLocalTask",
+  serverUpdateLocalTask: "server.updateLocalTask",
+  serverDeleteLocalTask: "server.deleteLocalTask",
+  serverDelegateLocalTask: "server.delegateLocalTask",
+  serverGetDailyRecap: "server.getDailyRecap",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
@@ -764,6 +783,48 @@ export const WsServerConsumeCodexResetCreditRpc = Rpc.make(
     error: Schema.Union([CodexResetCreditError, AuthRpcError]),
   },
 );
+
+export const WsServerListLocalTasksRpc = Rpc.make(WS_METHODS.serverListLocalTasks, {
+  payload: LocalTaskListInput,
+  success: LocalTaskListResult,
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
+});
+
+export const WsServerGetLocalTaskRpc = Rpc.make(WS_METHODS.serverGetLocalTask, {
+  payload: Schema.Struct({ taskId: LocalTaskId }),
+  success: LocalTask,
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
+});
+
+export const WsServerCreateLocalTaskRpc = Rpc.make(WS_METHODS.serverCreateLocalTask, {
+  payload: LocalTaskCreateInput,
+  success: LocalTask,
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
+});
+
+export const WsServerUpdateLocalTaskRpc = Rpc.make(WS_METHODS.serverUpdateLocalTask, {
+  payload: LocalTaskUpdateInput,
+  success: LocalTask,
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
+});
+
+export const WsServerDeleteLocalTaskRpc = Rpc.make(WS_METHODS.serverDeleteLocalTask, {
+  payload: LocalTaskDeleteInput,
+  success: Schema.Struct({ deleted: Schema.Literal(true) }),
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
+});
+
+export const WsServerDelegateLocalTaskRpc = Rpc.make(WS_METHODS.serverDelegateLocalTask, {
+  payload: LocalTaskDelegateInput,
+  success: LocalTask,
+  error: Schema.Union([LocalTaskError, AuthRpcError, OrchestrationDispatchCommandError]),
+});
+
+export const WsServerGetDailyRecapRpc = Rpc.make(WS_METHODS.serverGetDailyRecap, {
+  payload: DailyRecapRequest,
+  success: DailyRecapSnapshot,
+  error: Schema.Union([DailyRecapReadError, AuthRpcError]),
+});
 
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
   payload: Schema.Struct({
@@ -1978,6 +2039,13 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerAuthenticateAcpRegistryRpc
   | typeof WsServerReadCodexResetCreditsRpc
   | typeof WsServerConsumeCodexResetCreditRpc
+  | typeof WsServerListLocalTasksRpc
+  | typeof WsServerGetLocalTaskRpc
+  | typeof WsServerCreateLocalTaskRpc
+  | typeof WsServerUpdateLocalTaskRpc
+  | typeof WsServerDeleteLocalTaskRpc
+  | typeof WsServerDelegateLocalTaskRpc
+  | typeof WsServerGetDailyRecapRpc
   | typeof WsServerRefreshProvidersRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
@@ -2150,6 +2218,13 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerAuthenticateAcpRegistryRpc,
   WsServerReadCodexResetCreditsRpc,
   WsServerConsumeCodexResetCreditRpc,
+  WsServerListLocalTasksRpc,
+  WsServerGetLocalTaskRpc,
+  WsServerCreateLocalTaskRpc,
+  WsServerUpdateLocalTaskRpc,
+  WsServerDeleteLocalTaskRpc,
+  WsServerDelegateLocalTaskRpc,
+  WsServerGetDailyRecapRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,

@@ -1,3 +1,5 @@
+import { makeLocalTaskHandlers } from "./localTaskRpc.ts";
+import { makeDailyRecapHandlers } from "./dailyRecapRpc.ts";
 import { makeStorageHandlers } from "./storageRpc.ts";
 import { makeSessionImportHandlers } from "./sessionImportRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
@@ -37,6 +39,8 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeProjectHandlers(ctx),
       ...makeSessionImportHandlers(ctx),
       ...makeStorageHandlers(ctx),
+      ...makeDailyRecapHandlers(ctx),
+      ...makeLocalTaskHandlers(ctx),
       ...makeGitHandlers(ctx),
       ...makeTerminalHandlers(ctx),
     });
