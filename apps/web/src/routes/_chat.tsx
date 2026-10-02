@@ -2,6 +2,7 @@ import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { useEffect } from "react";
 
+import { useChatPanesStore } from "../chatPanesStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import {
@@ -11,7 +12,12 @@ import {
 import { isComposerFocused } from "../lib/composerFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { useModelPickerOpen } from "../modelPickerOpenState";
-import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../keybindings";
+import {
+  isSplitViewCommand,
+  resolveShortcutCommand,
+  shouldIgnoreGlobalNavigationShortcut,
+  shouldIgnoreSplitViewShortcut,
+} from "../keybindings";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { resolveSidebarNewThreadEnvMode } from "~/components/Sidebar.logic";
@@ -36,7 +42,8 @@ function ChatRouteGlobalShortcuts() {
   useEffect(() => {
     const onWindowKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
-      if (shouldIgnoreGlobalNavigationShortcut(event)) return;
+      const ignoreNavigation = shouldIgnoreGlobalNavigationShortcut(event);
+      if (ignoreNavigation && shouldIgnoreSplitViewShortcut(event)) return;
       // Read modal/palette state via `getState()` at event time so we always
       // see the latest value without having to re-bind the listener on every
       // toggle. The other booleans come from React-tracked stores or DOM
@@ -55,6 +62,27 @@ function ChatRouteGlobalShortcuts() {
       if (commandPaletteOpen) {
         return;
       }
+
+      if (isSplitViewCommand(command)) {
+        if (command === "pane.split") {
+          event.preventDefault();
+          event.stopPropagation();
+          useCommandPaletteStore.getState().openSplitThread();
+          return;
+        }
+        // A lone pane leaves these keys to the focused control.
+        const controller = useChatPanesStore.getState().controller;
+        const handled =
+          command === "pane.close"
+            ? controller?.closeFocused()
+            : controller?.focusSibling(command === "pane.focusNext" ? 1 : -1);
+        if (!handled) return;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
+      if (ignoreNavigation) return;
 
       if (event.key === "Escape" && selectedThreadKeysSize > 0) {
         event.preventDefault();

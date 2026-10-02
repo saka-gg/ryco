@@ -79,6 +79,121 @@ export function resizePane(root: PaneNode, path: string, ratio: number): PaneNod
     ? { ...root, first: resizePane(root.first, path.slice(1), ratio) }
     : { ...root, second: resizePane(root.second, path.slice(1), ratio) };
 }
+export interface PaneRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+export interface PaneLeafGeometry {
+  ref: ScopedThreadRef;
+  rect: PaneRect;
+  /** The edge of its parent split this leaf occupies; null for a lone pane. */
+  side: PaneSide | null;
+}
+export interface PaneDividerGeometry {
+  path: string;
+  node: Extract<PaneNode, { kind: "split" }>;
+  rect: PaneRect;
+}
+const FULL_RECT: PaneRect = { left: 0, top: 0, width: 100, height: 100 };
+
+/** Percentage rects for every leaf and divider, in leaf order. */
+export function paneGeometry(node: PaneNode, rect: PaneRect = FULL_RECT) {
+  const leaves: PaneLeafGeometry[] = [],
+    dividers: PaneDividerGeometry[] = [];
+  const visit = (node: PaneNode, rect: PaneRect, path: string, side: PaneSide | null) => {
+    if (node.kind === "thread") {
+      leaves.push({ ref: node.ref, rect, side });
+      return;
+    }
+    dividers.push({ path, node, rect });
+    const horizontal = node.axis === "horizontal";
+    visit(
+      node.first,
+      {
+        ...rect,
+        width: horizontal ? rect.width * node.ratio : rect.width,
+        height: horizontal ? rect.height : rect.height * node.ratio,
+      },
+      `${path}0`,
+      horizontal ? "left" : "top",
+    );
+    visit(
+      node.second,
+      {
+        left: rect.left + (horizontal ? rect.width * node.ratio : 0),
+        top: rect.top + (horizontal ? 0 : rect.height * node.ratio),
+        width: horizontal ? rect.width * (1 - node.ratio) : rect.width,
+        height: horizontal ? rect.height : rect.height * (1 - node.ratio),
+      },
+      `${path}1`,
+      horizontal ? "right" : "bottom",
+    );
+  };
+  visit(node, rect, "", null);
+  return { leaves, dividers };
+}
+
+/** The half of a pane a drop on `side` would occupy, in the pane's own percentages. */
+export function paneDropRect(side: PaneSide): PaneRect {
+  return {
+    left: side === "right" ? 50 : 0,
+    top: side === "bottom" ? 50 : 0,
+    width: side === "left" || side === "right" ? 50 : 100,
+    height: side === "top" || side === "bottom" ? 50 : 100,
+  };
+}
+
+/** Same leaves in the same arrangement; ratios are ignored. */
+function samePaneShape(a: PaneNode, b: PaneNode): boolean {
+  if (a.kind === "thread") return b.kind === "thread" && paneKey(a.ref) === paneKey(b.ref);
+  if (b.kind === "thread") return false;
+  return a.axis === b.axis && samePaneShape(a.first, b.first) && samePaneShape(a.second, b.second);
+}
+
+export function sharesPaneLeaves(a: PaneNode, b: PaneNode): boolean {
+  const keys = new Set(paneLeaves(a).map(paneKey));
+  return paneLeaves(b).some((ref) => keys.has(paneKey(ref)));
+}
+
+export type PaneDropRefusal = "full" | "environment" | "axis";
+export type PaneDropVerdict =
+  | { kind: "split" | "move" }
+  | { kind: "refused"; reason: PaneDropRefusal; alternative: PaneAxis | null }
+  | { kind: "noop" };
+
+/**
+ * What dropping `source` on `side` of `target` would do, decided by the same
+ * tree operations the drop runs, so the preview can never promise a layout
+ * the drop refuses.
+ */
+export function resolvePaneDrop(
+  root: PaneNode,
+  target: ScopedThreadRef,
+  source: ScopedThreadRef,
+  side: PaneSide,
+): PaneDropVerdict {
+  if (paneKey(source) === paneKey(target)) return { kind: "noop" };
+  const moving = paneContains(root, source);
+  if (!moving) {
+    if (paneLeaves(root)[0]?.environmentId !== source.environmentId)
+      return { kind: "refused", reason: "environment", alternative: null };
+    if (paneLeaves(root).length >= 4) return { kind: "refused", reason: "full", alternative: null };
+  }
+  const next = movePane(root, target, source, side);
+  if (next === root) {
+    const other: PaneAxis = axisFor(side) === "horizontal" ? "vertical" : "horizontal";
+    const otherSides: PaneSide[] = other === "horizontal" ? ["left", "right"] : ["top", "bottom"];
+    const works = otherSides.some(
+      (candidate) => movePane(root, target, source, candidate) !== root,
+    );
+    return { kind: "refused", reason: "axis", alternative: works ? other : null };
+  }
+  if (moving && samePaneShape(next, root)) return { kind: "noop" };
+  return { kind: moving ? "move" : "split" };
+}
+
 export function paneDropSide(
   rect: { left: number; top: number; width: number; height: number },
   x: number,

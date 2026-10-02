@@ -253,6 +253,23 @@ describe("Dialog", () => {
     expect(hasOpenDialogShortcutTarget()).toBe(false);
   });
 
+  it("does not treat a visible toast as an open dialog unless it holds focus", () => {
+    const toast = document.createElement("div");
+    toast.setAttribute("role", "dialog");
+    toast.dataset.slot = "toast-root";
+    const action = document.createElement("button");
+    action.textContent = "Update";
+    toast.append(action);
+    document.body.append(toast);
+    try {
+      expect(hasOpenDialogShortcutTarget()).toBe(false);
+      action.focus();
+      expect(hasOpenDialogShortcutTarget()).toBe(true);
+    } finally {
+      toast.remove();
+    }
+  });
+
   it("does not let nested dialog keyboard events trigger parent dialog shortcuts", async () => {
     mounted = await render(<NestedDialogShortcutHarness />);
 

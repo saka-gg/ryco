@@ -456,6 +456,9 @@
   --app-motion-duration-stack: 260ms;
   --app-motion-duration-chip: 120ms;
   --app-motion-duration-pop: 200ms;
+  /* Large layout surfaces that move as a whole: split chat panes and the
+     workspace panel slide on the same 360ms house curve. */
+  --app-motion-duration-pane: 360ms;
   --app-motion-activity-play-state: running;
   --background: var(--color-white);
   --app-chrome-background: var(--background);
@@ -577,6 +580,7 @@
     --app-motion-duration-stack: 0s;
     --app-motion-duration-chip: 0s;
     --app-motion-duration-pop: 0s;
+    --app-motion-duration-pane: 0s;
     --app-motion-activity-play-state: paused;
   }
 }
@@ -2266,6 +2270,140 @@ label:has(> select#reasoning-effort) select {
 
   .inbox-row-title::after {
     transition: none;
+  }
+}
+
+/* Split chat panes (ChatPanes). Geometry eases through CSS transitions on the
+   pane token; these keyframes cover what CSS transitions cannot. An opened
+   pane is pushed in from the edge it was dropped on by exactly its own size,
+   on the same curve and duration as its sibling's geometry, so the two edges
+   travel together and never overlap; a closed pane is pushed back out the same
+   way. The strip above a pane grows and folds with the split. The drop preview
+   fades in once per drag, then glides between edges. The pane token collapses
+   to zero under reduced motion. */
+.chat-pane-enter {
+  animation: chat-pane-enter var(--app-motion-duration-pane, 360ms) var(--app-motion-ease) backwards;
+}
+
+@keyframes chat-pane-enter {
+  from {
+    transform: translate(var(--chat-pane-shift-x, 0), var(--chat-pane-shift-y, 0));
+  }
+}
+
+.chat-pane-exit {
+  animation: chat-pane-exit var(--app-motion-duration-pane, 360ms) var(--app-motion-ease) forwards;
+}
+
+@keyframes chat-pane-exit {
+  to {
+    transform: translate(var(--chat-pane-shift-x, 0), var(--chat-pane-shift-y, 0));
+  }
+}
+
+.chat-pane-header-in {
+  animation: chat-pane-header-in var(--app-motion-duration-pane, 360ms) var(--app-motion-ease)
+    backwards;
+}
+
+@keyframes chat-pane-header-in {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+.chat-pane-header-out {
+  animation: chat-pane-header-out var(--app-motion-duration-pane, 360ms) var(--app-motion-ease)
+    forwards;
+}
+
+@keyframes chat-pane-header-out {
+  to {
+    height: 0;
+    border-bottom-width: 0;
+    opacity: 0;
+  }
+}
+
+.chat-pane-drop-in {
+  animation: chat-pane-drop-in var(--app-motion-duration-pop, 200ms) var(--app-motion-spring-gentle);
+}
+
+@keyframes chat-pane-drop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-pane-enter,
+  .chat-pane-exit,
+  .chat-pane-header-in,
+  .chat-pane-header-out,
+  .chat-pane-drop-in {
+    animation: none;
+  }
+}
+
+/* Side chat (SideChatPanel): the panel grows out of the launcher's corner and
+   folds back into it; the launcher pops back once the panel has gone; new
+   questions and answers rise in. Durations ride the house tokens. */
+.side-chat-panel-enter {
+  animation: side-chat-panel-in var(--app-motion-duration-stack, 260ms)
+    var(--app-motion-spring-gentle) backwards;
+}
+
+.side-chat-panel-exit {
+  animation: side-chat-panel-out var(--app-motion-duration-pop, 200ms) cubic-bezier(0.4, 0, 1, 1)
+    forwards;
+}
+
+@keyframes side-chat-panel-in {
+  from {
+    opacity: 0;
+    transform: translate(10px, 10px) scale(0.96);
+  }
+}
+
+@keyframes side-chat-panel-out {
+  to {
+    opacity: 0;
+    transform: translate(10px, 10px) scale(0.96);
+  }
+}
+
+.side-chat-launcher-enter {
+  animation: side-chat-launcher-in var(--app-motion-duration-pop, 200ms)
+    var(--app-motion-spring-snappy) var(--app-motion-duration-chip, 120ms) backwards;
+}
+
+@keyframes side-chat-launcher-in {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+}
+
+.side-chat-rise {
+  animation: side-chat-rise var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle)
+    backwards;
+}
+
+@keyframes side-chat-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-chat-panel-enter,
+  .side-chat-panel-exit,
+  .side-chat-launcher-enter,
+  .side-chat-rise {
+    animation: none;
   }
 }
 

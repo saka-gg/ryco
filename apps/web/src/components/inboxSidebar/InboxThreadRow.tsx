@@ -1,3 +1,4 @@
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
 import {
   CheckIcon,
@@ -11,7 +12,9 @@ import {
 } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
+import { endPaneDrag, startPaneDrag } from "../../chatPanesStore";
 import { readEnvironmentApi } from "../../environmentApi";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useSettings } from "../../hooks/useSettings";
 import { useGitStatus } from "../../lib/gitStatusState";
 import { openExternalLink } from "../../lib/openExternalLink";
@@ -133,6 +136,11 @@ export function InboxThreadRow(props: {
   readonly onSetSettlement: (row: InboxSidebarRow, settled: boolean) => Promise<boolean>;
 }) {
   const { row } = props;
+  const isPhone = usePresentationTier() === "phone";
+  const threadRef = useMemo(
+    () => scopeThreadRef(row.environmentId, row.threadId),
+    [row.environmentId, row.threadId],
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [settling, setSettling] = useState(false);
@@ -310,7 +318,13 @@ export function InboxThreadRow(props: {
         resting ? "items-center py-1" : "py-1.5",
       )}
       data-testid="inbox-thread-row"
+      draggable={!isPhone}
       onClick={props.onOpen}
+      onDragStart={(event) => {
+        props.previewHandle.close();
+        startPaneDrag(event.dataTransfer, threadRef, "copyMove");
+      }}
+      onDragEnd={endPaneDrag}
     >
       <span className="flex h-[18px] items-center">
         {resting ? (

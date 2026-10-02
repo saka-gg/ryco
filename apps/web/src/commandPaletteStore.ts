@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 interface CommandPaletteOpenIntent {
-  kind: "add-project";
+  kind: "add-project" | "split-thread";
   requestId: number;
 }
 
@@ -11,6 +11,8 @@ interface CommandPaletteStore {
   setOpen: (open: boolean) => void;
   toggleOpen: () => void;
   openAddProject: () => void;
+  /** Opens straight into the thread picker for a new split pane. */
+  openSplitThread: () => void;
   clearOpenIntent: () => void;
 }
 
@@ -25,6 +27,14 @@ export const useCommandPaletteStore = create<CommandPaletteStore>((set) => ({
       open: true,
       openIntent: {
         kind: "add-project",
+        requestId: (state.openIntent?.requestId ?? 0) + 1,
+      },
+    })),
+  openSplitThread: () =>
+    set((state) => ({
+      open: true,
+      openIntent: {
+        kind: "split-thread",
         requestId: (state.openIntent?.requestId ?? 0) + 1,
       },
     })),

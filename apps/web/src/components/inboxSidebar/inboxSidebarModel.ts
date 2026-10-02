@@ -287,6 +287,21 @@ function statusLabel(
   }
 }
 
+/**
+ * The status half of an inbox row for one thread, without its environment.
+ * Split-pane titles use it so a pane shows the same glyph as the inbox row.
+ */
+export function resolveInboxThreadStatus(
+  thread: SidebarThreadSummary,
+): Pick<InboxSidebarRow, "state" | "statusLabel" | "attention"> {
+  const state = resolveThreadState(thread, undefined, new Set());
+  return {
+    state,
+    statusLabel: statusLabel(state, undefined),
+    attention: state === "needs-input" ? resolveAttention(thread) : null,
+  };
+}
+
 function sectionKey(state: InboxSidebarThreadState): InboxSidebarSectionKey {
   if (state === "needs-input") return "needs-input";
   if (state === "idle" || state === "offline") return "recent";

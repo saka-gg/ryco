@@ -14,12 +14,46 @@ import { SideChatPanel } from "./SideChatPanel";
 import { useSideChatStore } from "../sideChatStore";
 
 const mocks = vi.hoisted(() => ({ ask: vi.fn(), cancel: vi.fn(async () => ({})), allowed: true }));
-vi.mock("../composerDraftStore", () => import("@ryco/client-runtime/state/composer"));
-vi.mock("../environments/runtime", () => ({
-  readEnvironmentConnection: () => ({
+// The model picker reaches the environment registry; the side chat needs only
+// the text-generation client. Every export is stubbed so imports resolve.
+vi.mock("../environments/runtime", () => {
+  const connection = {
     client: { textGeneration: { askSideQuestion: mocks.ask, cancelSideQuestion: mocks.cancel } },
-  }),
-}));
+  };
+  const registry = (selector: (state: { byId: Record<string, never> }) => unknown) =>
+    selector({ byId: {} });
+  return {
+    addSavedEnvironment: vi.fn(),
+    connectDesktopSshEnvironment: vi.fn(),
+    connectDesktopWorkspaceEnvironment: vi.fn(),
+    connectPrimaryEnvironment: vi.fn(),
+    disconnectPrimaryEnvironment: vi.fn(),
+    disconnectSavedEnvironment: vi.fn(),
+    ensureEnvironmentConnectionBootstrapped: async () => undefined,
+    getEnvironmentHttpBaseUrl: () => "http://localhost:3000",
+    getPrimaryEnvironmentConnection: () => connection,
+    getSavedEnvironmentRecord: () => null,
+    getSavedEnvironmentRuntimeState: () => null,
+    hasSavedEnvironmentRegistryHydrated: () => true,
+    listEnvironmentConnections: () => [],
+    listSavedEnvironmentRecords: () => [],
+    readEnvironmentConnection: () => connection,
+    reconnectSavedEnvironment: vi.fn(),
+    removeSavedEnvironment: vi.fn(),
+    requireEnvironmentConnection: () => connection,
+    resetEnvironmentServiceForTests: vi.fn(),
+    resetSavedEnvironmentRegistryStoreForTests: vi.fn(),
+    resetSavedEnvironmentRuntimeStoreForTests: vi.fn(),
+    resolveEnvironmentHttpUrl: (_environmentId: unknown, path: string) =>
+      new URL(path, "http://localhost:3000").toString(),
+    startEnvironmentConnectionService: vi.fn(),
+    subscribeEnvironmentConnections: () => () => {},
+    updateEnvironmentServerSettings: vi.fn(),
+    useSavedEnvironmentRegistryStore: registry,
+    useSavedEnvironmentRuntimeStore: registry,
+    waitForSavedEnvironmentRegistryHydration: async () => undefined,
+  };
+});
 vi.mock("../hostedHub/capabilities", () => ({
   useHostedRpcCapability: () => ({ allowed: mocks.allowed }),
 }));
@@ -92,8 +126,15 @@ describe("SideChatPanel", () => {
       answer: "A separate answer",
     }));
     await mount();
-    await page.getByLabelText("Side chat model").selectOptions("codex/terra");
-    await page.getByLabelText("Side chat reasoning").selectOptions("high");
+    // The composer's own picker and a reasoning menu, not native selects.
+    await page
+      .elementLocator(
+        document.querySelector<HTMLElement>('[data-chat-provider-model-picker="true"]')!,
+      )
+      .click();
+    await page.getByRole("option").filter({ hasText: "terra" }).click();
+    await page.getByRole("button", { name: "Side chat reasoning" }).click();
+    await page.getByRole("menuitemradio", { name: "High" }).click();
     await page.getByLabelText("Side question").fill("Why?");
     await page.getByRole("button", { name: "Ask", exact: true }).click();
     await expect.element(page.getByText("A separate answer", { exact: true })).toBeVisible();
@@ -200,5 +241,25 @@ describe("SideChatPanel", () => {
       .toHaveValue("B: newer draft\n\nA: quoted text");
     await expect.element(page.getByRole("button", { name: "Ask", exact: true })).toBeEnabled();
     expect(mocks.ask).toHaveBeenCalledOnce();
+  });
+  it("shows a live thinking state, minimizes on Escape and folds away before unmounting", async () => {
+    mocks.ask.mockImplementation(() => new Promise(() => {}));
+    await mount();
+    await expect
+      .element(page.getByText("Ask about this thread while it keeps working."))
+      .toBeVisible();
+    await page.getByLabelText("Side question").fill("Still running?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    await expect.element(page.getByText("Thinking", { exact: true })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+    (page.getByLabelText("Side question").element() as HTMLElement).dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    // The panel folds out inert, the launcher returns, and the answer keeps running.
+    await expect.element(page.getByRole("button", { name: "Side chat · Thinking…" })).toBeVisible();
+    const panel = document.querySelector('aside[aria-label="Side chat"]');
+    if (panel) expect(panel.hasAttribute("inert")).toBe(true);
+    await expect.poll(() => document.querySelector('aside[aria-label="Side chat"]')).toBeNull();
+    expect(mocks.cancel).not.toHaveBeenCalled();
   });
 });

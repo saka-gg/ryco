@@ -35,6 +35,7 @@ import {
   ArrowUpIcon,
   BarChart3Icon,
   CircleAlertIcon,
+  Columns2Icon,
   CornerLeftUpIcon,
   FolderIcon,
   FolderTreeIcon,
@@ -59,6 +60,7 @@ import {
   type ReactNode,
 } from "react";
 import { useShallow } from "zustand/react/shallow";
+import { availablePaneSplit, useChatPanesStore } from "../chatPanesStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { readEnvironmentApi } from "../environmentApi";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
@@ -842,6 +844,34 @@ function OpenCommandPaletteDialog() {
     [activeThreadId, navigate, projectTitleById, settings.sidebarThreadSortOrder, threads],
   );
   const recentThreadItems = allThreadItems.slice(0, RECENT_THREAD_LIMIT);
+  // Threads the mounted split can take: same machine, not already open, and a
+  // free edge beside the focused pane.
+  const paneRoot = useChatPanesStore((state) => state.root);
+  const paneAnchor = useChatPanesStore((state) => state.activeRef);
+  const splitThreadItems = useMemo(
+    () =>
+      paneAnchor
+        ? buildThreadActionItems({
+            threads: threads.filter(
+              (thread) =>
+                availablePaneSplit(
+                  paneRoot,
+                  paneAnchor,
+                  scopeThreadRef(thread.environmentId, thread.id),
+                ) !== null,
+            ),
+            projectTitleById,
+            sortOrder: settings.sidebarThreadSortOrder,
+            icon: <Columns2Icon className={ITEM_ICON_CLASS} />,
+            renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
+            renderTrailingContent: (thread) => <ThreadRowTrailingStatus thread={thread} />,
+            runThread: async (thread) => {
+              useChatPanesStore.getState().open(scopeThreadRef(thread.environmentId, thread.id));
+            },
+          })
+        : [],
+    [paneAnchor, paneRoot, projectTitleById, settings.sidebarThreadSortOrder, threads],
+  );
 
   function pushPaletteView(view: CommandPaletteView): void {
     setViewStack((previousViews) => [
@@ -1125,6 +1155,31 @@ function OpenCommandPaletteDialog() {
     openAddProjectFlow();
   }, [clearOpenIntent, openAddProjectFlow, openIntent]);
 
+  const splitThreadView: CommandPaletteView = {
+    addonIcon: <Columns2Icon className={ADDON_ICON_CLASS} />,
+    groups: [{ value: "split-threads", label: "Open in split view", items: splitThreadItems }],
+  };
+  useLayoutEffect(() => {
+    if (openIntent?.kind !== "split-thread") {
+      return;
+    }
+    clearOpenIntent();
+    if (splitThreadItems.length === 0) {
+      setOpen(false);
+      toastManager.add({
+        type: "info",
+        title: paneAnchor ? "No thread can join this split" : "Open a thread first",
+        description: paneAnchor
+          ? "Split view holds up to 4 threads from the same machine."
+          : "Split view starts from the thread you are viewing.",
+      });
+      return;
+    }
+    pushPaletteView(splitThreadView);
+    // Runs once per intent; the view captures the current items.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [openIntent]);
+
   const exportAction = useThreadExportAction(
     activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
   );
@@ -1160,6 +1215,18 @@ function OpenCommandPaletteDialog() {
       },
     },
   );
+
+  if (presentationTier !== "phone" && splitThreadItems.length > 0) {
+    actionItems.push({
+      kind: "submenu",
+      value: "action:open-in-split",
+      searchTerms: ["split", "side by side", "pane", "open beside", "compare"],
+      title: "Open thread in split view...",
+      icon: <Columns2Icon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "pane.split",
+      ...splitThreadView,
+    });
+  }
 
   actionItems.push({
     kind: "action",

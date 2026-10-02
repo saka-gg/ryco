@@ -20,6 +20,8 @@ import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
+import { PANE_DRAG_TYPE } from "../../chatPanes.logic";
+import { readPaneDragSource } from "../../chatPanesStore";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
 vi.mock("../../sidebarUndo", () => ({
@@ -135,6 +137,60 @@ describe("Inbox sidebar rendering and settlement", () => {
       );
       await expect.element(page.getByText("No tasks yet")).toBeInTheDocument();
       expect(document.querySelector('[data-testid="inbox-add-project-button"]')).toBeNull();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("drags a row into a split pane as its thread", async () => {
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: [
+        {
+          id: THREAD_ID,
+          environmentId: ENVIRONMENT_ID,
+          projectId: PROJECT_ID,
+          title: "Draggable task",
+          interactionMode: "default",
+          session: null,
+          createdAt: "2026-09-01T00:00:00.000Z",
+          archivedAt: null,
+          latestTurn: null,
+          branch: null,
+          worktreePath: null,
+          latestUserMessageAt: null,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        },
+      ],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      aiFocusEnabled: false,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    // Desktop only: the phone tier has no split panes to drop into.
+    await page.viewport(1280, 800);
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const row = document.querySelector<HTMLElement>('[data-testid="inbox-thread-row"]')!;
+      // The tier settles from a media-query event after the viewport change.
+      await expect.poll(() => row.draggable).toBe(true);
+      const transfer = new DataTransfer();
+      row.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: transfer }));
+      expect(JSON.parse(transfer.getData(PANE_DRAG_TYPE))).toEqual({
+        environmentId: ENVIRONMENT_ID,
+        threadId: THREAD_ID,
+      });
+      // Split panes read the source during dragover; dragend clears it.
+      expect(readPaneDragSource()).toEqual({ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID });
+      row.dispatchEvent(new DragEvent("dragend", { bubbles: true }));
+      expect(readPaneDragSource()).toBeNull();
     } finally {
       await mounted.unmount();
     }
