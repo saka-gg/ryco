@@ -1006,6 +1006,31 @@ describe("incremental orchestration updates", () => {
     ]);
   });
 
+  it("stores reserved object-property names as ordinary message ids", () => {
+    const thread = makeThread();
+    const events = ["__proto__", "constructor"].map((id, sequence) =>
+      makeEvent(
+        "thread.message-sent",
+        {
+          threadId: thread.id,
+          messageId: MessageId.make(id),
+          role: "assistant",
+          text: id,
+          turnId: null,
+          streaming: true,
+          createdAt: "2026-02-27T00:00:03.000Z",
+          updatedAt: "2026-02-27T00:00:03.000Z",
+        },
+        { sequence },
+      ),
+    );
+    const result = applyOrchestrationEvents(makeState(thread), events, localEnvironmentId);
+    expect(threadsOf(result)[0]?.messages.map((message) => message.text)).toEqual([
+      "__proto__",
+      "constructor",
+    ]);
+  });
+
   it("retains distinct new messages and applies the history cap within one batch", () => {
     const thread = makeThread();
     const state = makeState(thread);
@@ -1668,6 +1693,24 @@ describe("thread settlement state", () => {
       updatedAt,
     };
   }
+
+  it("treats reserved object-property names as snapshot keys", () => {
+    const snapshot = makeShellSnapshot(null, null);
+    const threads = ["__proto__", "constructor"].map((id) => ({
+      ...snapshot.threads[0]!,
+      id: ThreadId.make(id),
+      projectId: ProjectId.make(id),
+    }));
+    const result = syncServerShellSnapshot(
+      makeEmptyState(),
+      { ...snapshot, threads },
+      localEnvironmentId,
+    );
+    const environment = localEnvironmentStateOf(result);
+    expect(Object.keys(environment.threadShellById)).toEqual(["__proto__", "constructor"]);
+    for (const thread of threads)
+      expect(environment.threadIdsByProjectId[thread.projectId]).toEqual([thread.id]);
+  });
 
   it("builds bulk indexes once and keeps the last duplicate shell in its final project", () => {
     const snapshot = makeShellSnapshot(null, null);

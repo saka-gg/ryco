@@ -1551,15 +1551,15 @@ function applyThreadMessageSentEvent(
   const currentById = state.messageByThreadId[threadId] ?? {};
   const pendingMessages = state.pendingMessagesByThreadId[threadId] ?? [];
   const pendingMessage = pendingMessages.find((entry) => entry.id === message.id);
-  const existingMessage = currentById[message.id] ?? pendingMessage;
+  const alreadyStored = Object.hasOwn(currentById, message.id);
+  const existingMessage = (alreadyStored ? currentById[message.id] : undefined) ?? pendingMessage;
   const nextMessage = existingMessage ? mergeMessageUpdate(existingMessage, message) : message;
-  const alreadyStored = currentById[message.id] !== undefined;
   let nextIds = currentIds;
   // A replay batch can own its unpublished map across consecutive message
   // events. Single-event updates still copy, so published snapshots stay immutable.
   let nextById: Record<MessageId, ChatMessage> = ownedMessageMaps?.has(currentById)
     ? currentById
-    : { ...currentById };
+    : Object.assign(Object.create(null) as Record<MessageId, ChatMessage>, currentById);
   nextById[message.id] = nextMessage;
   let nextPendingMessagesByThreadId = state.pendingMessagesByThreadId;
 
@@ -1832,11 +1832,11 @@ function syncEnvironmentShellSnapshot(
     ...buildProjectState(nextProjects),
     ...buildWorktreeState(nextWorktrees),
     threadIds: [],
-    threadIdsByProjectId: {},
-    threadShellById: {},
-    threadSessionById: {},
-    threadTurnStateById: {},
-    sidebarThreadSummaryById: {},
+    threadIdsByProjectId: Object.create(null) as EnvironmentState["threadIdsByProjectId"],
+    threadShellById: Object.create(null) as EnvironmentState["threadShellById"],
+    threadSessionById: Object.create(null) as EnvironmentState["threadSessionById"],
+    threadTurnStateById: Object.create(null) as EnvironmentState["threadTurnStateById"],
+    sidebarThreadSummaryById: Object.create(null) as EnvironmentState["sidebarThreadSummaryById"],
     messageIdsByThreadId: retainThreadScopedRecord(state.messageIdsByThreadId, nextThreadIds),
     messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
     pendingMessagesByThreadId: retainThreadScopedRecord(
