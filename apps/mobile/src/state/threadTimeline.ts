@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
-import { buildThreadTimeline, type ThreadTimeline } from "./threadTimelineModel";
+import { createThreadTimelineBuilder, type ThreadTimeline } from "./threadTimelineModel";
 import { selectThreadByRef, useStore } from "./threadsRuntime";
 
 export { buildThreadTimeline } from "./threadTimelineModel";
@@ -18,5 +18,6 @@ export function useThreadTimeline(
   const thread = useStore((state) =>
     selectThreadByRef(state, scopeThreadRef(environmentId, threadId)),
   );
-  return useMemo(() => buildThreadTimeline(thread), [thread]);
+  const buildTimeline = useMemo(() => createThreadTimelineBuilder(), []);
+  return useMemo(() => buildTimeline(thread), [buildTimeline, thread]);
 }

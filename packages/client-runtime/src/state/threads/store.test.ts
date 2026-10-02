@@ -1006,6 +1006,72 @@ describe("incremental orchestration updates", () => {
     ]);
   });
 
+  it("retains distinct new messages and applies the history cap within one batch", () => {
+    const thread = makeThread();
+    const state = makeState(thread);
+    const events = Array.from({ length: 2005 }, (_, index) =>
+      makeEvent(
+        "thread.message-sent",
+        {
+          threadId: thread.id,
+          messageId: MessageId.make(`message-${index}`),
+          role: "assistant",
+          text: `text-${index}`,
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-02-27T00:00:03.000Z",
+          updatedAt: "2026-02-27T00:00:03.000Z",
+        },
+        { sequence: index + 1 },
+      ),
+    );
+    const actual = applyOrchestrationEvents(state, events, localEnvironmentId);
+    const expected = events.reduce(
+      (current, event) => applyOrchestrationEvent(current, event, localEnvironmentId),
+      state,
+    );
+    expect(threadsOf(actual)).toEqual(threadsOf(expected));
+    expect(threadsOf(actual)[0]?.messages).toHaveLength(2000);
+    expect(threadsOf(actual)[0]?.messages[0]?.text).toBe("text-5");
+  });
+
+  it("batches message updates without mutating published maps across event boundaries", () => {
+    const thread = makeThread();
+    const state = makeState(thread);
+    const previous = structuredClone(state);
+    Object.freeze(localEnvironmentStateOf(state).messageByThreadId[thread.id]);
+    const events = Array.from({ length: 100 }, (_, i) =>
+      makeEvent(
+        "thread.message-sent",
+        {
+          threadId: thread.id,
+          messageId: MessageId.make("stream"),
+          role: "assistant",
+          text: i === 99 ? "" : "x",
+          turnId: TurnId.make("turn"),
+          streaming: i !== 99,
+          createdAt: "2026-02-27T00:00:03.000Z",
+          updatedAt: "2026-02-27T00:00:03.000Z",
+        },
+        { sequence: i + 1 },
+      ),
+    );
+    const boundary = makeEvent("thread.meta-updated", {
+      threadId: thread.id,
+      title: "new",
+      updatedAt: "2026-02-27T00:00:03.000Z",
+    });
+    const mixed = [...events.slice(0, 50), boundary, ...events.slice(50)];
+    const expected = mixed.reduce(
+      (current, event) => applyOrchestrationEvent(current, event, localEnvironmentId),
+      state,
+    );
+    const actual = applyOrchestrationEvents(state, mixed, localEnvironmentId);
+    expect(threadsOf(actual)).toEqual(threadsOf(expected));
+    expect(state).toEqual(previous);
+    expect(threadsOf(actual)[0]?.messages[0]?.text).toBe("x".repeat(99));
+  });
+
   it("applies replay batches in sequence and updates session state", () => {
     const thread = makeThread({
       latestTurn: {
@@ -1602,6 +1668,26 @@ describe("thread settlement state", () => {
       updatedAt,
     };
   }
+
+  it("builds bulk indexes once and keeps the last duplicate shell in its final project", () => {
+    const snapshot = makeShellSnapshot(null, null);
+    const template = snapshot.threads[0]!;
+    const threads = Array.from({ length: 2000 }, (_, index) => ({
+      ...template,
+      id: ThreadId.make(`bulk-${index}`),
+    }));
+    const moved = { ...threads[0]!, projectId: ProjectId.make("project-2"), title: "moved" };
+    const result = syncServerShellSnapshot(
+      makeEmptyState(),
+      { ...snapshot, threads: [...threads, moved] },
+      localEnvironmentId,
+    );
+    const environment = localEnvironmentStateOf(result);
+    expect(environment.threadIds).toHaveLength(2000);
+    expect(environment.threadIdsByProjectId[template.projectId]).toHaveLength(1999);
+    expect(environment.threadIdsByProjectId[moved.projectId]).toEqual([moved.id]);
+    expect(environment.threadShellById[moved.id]?.title).toBe("moved");
+  });
 
   it("refreshes completion recency independently of general thread updates", () => {
     let state = makeEmptyState();
