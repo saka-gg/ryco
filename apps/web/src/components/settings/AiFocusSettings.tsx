@@ -41,7 +41,13 @@ import {
   resolveAiFocusEnvironmentRows,
   type AiFocusEnvironmentRow,
 } from "./AiFocusSettings.logic";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+  SettingsBlock,
+  SettingsEmpty,
+} from "./settingsLayout";
 import { refreshWebThreadPrioritiesNow } from "../../threadPriorityRefreshRuntime";
 
 function errorMessage(error: unknown): string {
@@ -366,9 +372,10 @@ export function AiFocusSettings() {
         {rows.length > 0 ? (
           rows.map((row) => <EnvironmentRow key={row.environmentId} row={row} />)
         ) : (
-          <SettingsRow
+          <SettingsEmpty
             title="No environments available"
-            description="Connect a node to configure its Inbox ranking model."
+            description="Connect a device to configure its Inbox ranking model."
+            className="py-8"
           />
         )}
       </SettingsSection>
@@ -378,22 +385,23 @@ export function AiFocusSettings() {
         title="Data sent to the selected model"
         icon={<InfoIcon className="size-3.5" />}
       >
-        <div className="px-5 py-4">
-          <p className="mb-3 text-xs text-muted-foreground">
+        <SettingsBlock>
+          <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
             Ranking sends only this bounded metadata from each environment. It does not send full
             chat history, file contents, or message responses.
           </p>
-          <ul className="grid gap-1.5 text-xs text-foreground/80 sm:grid-cols-2">
+          <ul className="grid gap-x-6 gap-y-1.5 text-xs text-foreground sm:grid-cols-2">
             {AI_FOCUS_DISCLOSURE_FIELDS.map((field) => (
-              <li key={field} className="flex gap-2">
-                <span aria-hidden className="text-muted-foreground">
-                  •
-                </span>
+              <li key={field} className="flex items-baseline gap-2">
+                <span
+                  aria-hidden
+                  className="size-1 shrink-0 translate-y-[-2px] rounded-full bg-muted-foreground/60"
+                />
                 <span>{field}</span>
               </li>
             ))}
           </ul>
-        </div>
+        </SettingsBlock>
       </SettingsSection>
     </SettingsPageContainer>
   );

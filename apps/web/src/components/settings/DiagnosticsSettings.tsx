@@ -20,7 +20,7 @@ import { ProcessDiagnosticsSection } from "./ProcessDiagnosticsSection";
 import { DetailedTraceDiagnostics, DiagnosticsTraceId } from "./DetailedTraceDiagnostics";
 import { DiagnosticsSupportSections } from "./DiagnosticsPanel";
 import { NotificationsTestSection } from "./NotificationsTestSection";
-import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
+import { SettingsPageContainer, SettingsSection, SettingsToolbar } from "./settingsLayout";
 import {
   durationBucketSeries,
   formatBytes,
@@ -99,7 +99,7 @@ function BarList({
 }) {
   const max = Math.max(...points.map((point) => point.value), 1);
   if (points.length === 0) {
-    return <p className="px-4 py-4 text-muted-foreground text-sm">No data yet.</p>;
+    return <p className="px-4 sm:px-5 py-4 text-muted-foreground text-sm">No data yet.</p>;
   }
 
   return (
@@ -107,7 +107,7 @@ function BarList({
       {points.map((point) => (
         <div
           key={point.label}
-          className="grid grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 px-4 py-2.5"
+          className="grid grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 px-4 sm:px-5 py-2.5"
         >
           <div className="min-w-0">
             <div className="mb-1 truncate text-[12px] font-medium">{point.label}</div>
@@ -137,11 +137,11 @@ function OverviewMetric({
   detail?: string | undefined;
 }) {
   return (
-    <div className="min-w-0 border-border/60 border-t px-4 py-3 first:border-t-0 sm:px-5">
-      <div className="truncate text-[11px] font-medium text-muted-foreground uppercase tracking-[0.08em]">
-        {label}
+    <div className="min-w-0 border-r border-b border-border/60 px-4 py-3 sm:px-5">
+      <div className="truncate text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 truncate text-[15px] font-semibold tracking-tight text-foreground tabular-nums">
+        {value}
       </div>
-      <div className="mt-1 truncate text-[15px] font-semibold text-foreground">{value}</div>
       {detail ? (
         <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{detail}</div>
       ) : null}
@@ -190,14 +190,16 @@ function SpanRows({
   showTraceId?: boolean;
 }) {
   if (spans.length === 0) {
-    return <p className="px-4 py-4 text-muted-foreground text-sm">No spans retained yet.</p>;
+    return (
+      <p className="px-4 sm:px-5 py-4 text-muted-foreground text-sm">No spans retained yet.</p>
+    );
   }
   return (
     <div className="divide-y divide-border/60">
       {spans.slice(0, 10).map((span) => (
         <div
           key={span.id}
-          className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_6rem_5rem] sm:items-start"
+          className="grid gap-2 px-4 sm:px-5 py-3 sm:grid-cols-[minmax(0,1fr)_6rem_5rem] sm:items-start"
         >
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
@@ -268,20 +270,20 @@ function TracingDiagnosticsSection({
     <SettingsSection title="Tracing diagnostics">
       <div className="grid gap-0 divide-y divide-border/60 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
         <div className="min-w-0">
-          <div className="border-border/60 border-b px-4 py-2 text-[12px] font-semibold">
+          <div className="border-border/60 border-b px-4 sm:px-5 py-2 text-[12px] font-semibold">
             Top span names
           </div>
           <BarList points={topSpanSeries(snapshot?.tracing.topSpanNames ?? [])} />
         </div>
         <div className="min-w-0">
-          <div className="border-border/60 border-b px-4 py-2 text-[12px] font-semibold">
+          <div className="border-border/60 border-b px-4 sm:px-5 py-2 text-[12px] font-semibold">
             Duration buckets
           </div>
           <BarList points={durationBucketSeries(snapshot?.tracing.durationBuckets ?? [])} />
         </div>
       </div>
       <div className="border-border/60 border-t">
-        <div className="border-border/60 border-b px-4 py-2 text-[12px] font-semibold">
+        <div className="border-border/60 border-b px-4 sm:px-5 py-2 text-[12px] font-semibold">
           Slowest spans
         </div>
         <SpanRows spans={snapshot?.tracing.slowestSpans ?? []} showTraceId={showTraceId} />
@@ -301,7 +303,10 @@ function FailuresSection({
     <SettingsSection title="Failures">
       <div className="divide-y divide-border/60">
         {(snapshot?.failures.latest ?? []).slice(0, 8).map((failure) => (
-          <div key={failure.id} className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_6rem]">
+          <div
+            key={failure.id}
+            className="grid gap-2 px-4 sm:px-5 py-3 sm:grid-cols-[minmax(0,1fr)_6rem]"
+          >
             <div className="min-w-0">
               <div className="flex min-w-0 items-center gap-2">
                 <Badge size="sm" variant="error">
@@ -322,7 +327,7 @@ function FailuresSection({
           </div>
         ))}
         {snapshot && snapshot.failures.latest.length === 0 ? (
-          <p className="px-4 py-4 text-muted-foreground text-sm">No failures retained.</p>
+          <p className="px-4 sm:px-5 py-4 text-muted-foreground text-sm">No failures retained.</p>
         ) : null}
       </div>
     </SettingsSection>
@@ -342,14 +347,14 @@ function LiveActivitySection({
     <SettingsSection title="Live activity">
       <div className="grid gap-0 divide-y divide-border/60 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
         <div className="min-w-0">
-          <div className="border-border/60 border-b px-4 py-2 text-[12px] font-semibold">
+          <div className="border-border/60 border-b px-4 sm:px-5 py-2 text-[12px] font-semibold">
             Providers
           </div>
           <div className="divide-y divide-border/60">
             {(snapshot?.liveProcesses.providers ?? []).map((provider) => (
               <div
                 key={provider.instanceId}
-                className="flex min-w-0 items-center justify-between gap-3 px-4 py-2.5"
+                className="flex min-w-0 items-center justify-between gap-3 px-4 sm:px-5 py-2.5"
               >
                 <div className="min-w-0">
                   <div className="truncate text-[13px] font-medium">
@@ -376,12 +381,15 @@ function LiveActivitySection({
           </div>
         </div>
         <div className="min-w-0">
-          <div className="border-border/60 border-b px-4 py-2 text-[12px] font-semibold">
+          <div className="border-border/60 border-b px-4 sm:px-5 py-2 text-[12px] font-semibold">
             Terminals and slow RPCs
           </div>
           <div className="divide-y divide-border/60">
             {(snapshot?.liveProcesses.terminals ?? []).map((terminal) => (
-              <div key={`${terminal.threadId}:${terminal.terminalId}`} className="px-4 py-2.5">
+              <div
+                key={`${terminal.threadId}:${terminal.terminalId}`}
+                className="px-4 sm:px-5 py-2.5"
+              >
                 <div className="flex min-w-0 items-center justify-between gap-3">
                   <span className="truncate text-[13px] font-medium">{terminal.terminalId}</span>
                   <Badge size="sm" variant={terminal.status === "error" ? "error" : "outline"}>
@@ -395,7 +403,7 @@ function LiveActivitySection({
               </div>
             ))}
             {slowRpcAcks.map((request) => (
-              <div key={request.requestId} className="px-4 py-2.5">
+              <div key={request.requestId} className="px-4 sm:px-5 py-2.5">
                 <div className="truncate text-[13px] font-medium">{request.tag}</div>
                 <div className="mt-1 font-mono text-[11px] text-muted-foreground">
                   slow ack / {relativeTimeLabel(request.startedAt, nowMs)}
@@ -403,7 +411,7 @@ function LiveActivitySection({
               </div>
             ))}
             {(snapshot?.liveProcesses.terminals.length ?? 0) === 0 && slowRpcAcks.length === 0 ? (
-              <p className="px-4 py-4 text-muted-foreground text-sm">
+              <p className="px-4 sm:px-5 py-4 text-muted-foreground text-sm">
                 No live terminal or slow RPC activity.
               </p>
             ) : null}
@@ -432,7 +440,7 @@ function LegacyDiagnosticsSections({
   return (
     <>
       <SettingsSection title="Overview">
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3">
+        <div className="-mr-px -mb-px grid sm:grid-cols-2 lg:grid-cols-3">
           <OverviewMetric
             label="Uptime"
             value={snapshot ? formatDuration(snapshot.uptimeMs) : "n/a"}
@@ -690,26 +698,44 @@ function DiagnosticsSettingsContent({
 
   return (
     <SettingsPageContainer>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <h1 className="text-base font-semibold">Diagnostics</h1>
-          <p className="mt-1 text-muted-foreground text-xs">
-            {snapshot
-              ? `Updated ${relativeTimeLabel(snapshot.generatedAt, nowMs)}`
-              : "Waiting for snapshot"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button size="xs" variant="outline" onClick={() => setPaused((value) => !value)}>
-            {paused ? <PlayIcon className="size-3.5" /> : <PauseIcon className="size-3.5" />}
-            {paused ? "Resume" : "Pause"}
-          </Button>
-          <Button size="xs" variant="outline" onClick={() => void refresh(true)} disabled={loading}>
-            <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
-            Refresh
-          </Button>
-        </div>
-      </div>
+      <SettingsToolbar
+        actions={
+          <>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => setPaused((value) => !value)}
+            >
+              {paused ? <PlayIcon className="size-3.5" /> : <PauseIcon className="size-3.5" />}
+              {paused ? "Resume" : "Pause"}
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => void refresh(true)}
+              disabled={loading}
+            >
+              <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
+              Refresh
+            </Button>
+          </>
+        }
+      >
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            aria-hidden
+            className={cn(
+              "size-1.5 rounded-full",
+              paused ? "bg-muted-foreground/50" : snapshot ? "bg-success" : "bg-warning",
+            )}
+          />
+          {snapshot
+            ? `${paused ? "Paused · " : "Live · "}updated ${relativeTimeLabel(snapshot.generatedAt, nowMs)}`
+            : "Waiting for snapshot"}
+        </span>
+      </SettingsToolbar>
 
       <DiagnosticsWarnings snapshot={snapshot} error={error} />
 
@@ -742,7 +768,7 @@ function DiagnosticsSettingsContent({
           <FailuresSection snapshot={snapshot} nowMs={nowMs} />
           <LiveActivitySection snapshot={snapshot} slowRpcAcks={slowRpcAcks} nowMs={nowMs} />
           <SettingsSection title="Performance now">
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3">
+            <div className="-mr-px -mb-px grid sm:grid-cols-2 lg:grid-cols-3">
               <OverviewMetric
                 label="Backend CPU"
                 value={

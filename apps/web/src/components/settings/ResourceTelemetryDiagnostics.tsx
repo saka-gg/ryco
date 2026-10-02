@@ -154,13 +154,13 @@ export function ResourceTelemetryDiagnostics({
           </Button>
         }
       >
-        <p className="px-4 py-3 text-xs text-muted-foreground">
+        <p className="px-4 sm:px-5 py-3 text-xs text-muted-foreground">
           {telemetry
             ? `Sampled ${relativeTimeLabel(telemetry.readAt)} · interval ${formatDuration(telemetry.sampleIntervalMs)}`
             : "Waiting for resource telemetry."}{" "}
           CPU may exceed 100% across cores. I/O availability depends on the platform.
         </p>
-        <dl className="grid grid-cols-2 divide-x divide-y border-t lg:grid-cols-3">
+        <dl className="grid grid-cols-2 gap-px border-t border-border/60 bg-border/60 lg:grid-cols-3">
           {[
             [
               "Current CPU",
@@ -191,11 +191,9 @@ export function ResourceTelemetryDiagnostics({
               telemetry?.speedLimitPercent == null ? "Unknown" : `${telemetry.speedLimitPercent}%`,
             ],
           ].map(([label, value]) => (
-            <div key={label} className="px-4 py-4">
-              <dt className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                {label}
-              </dt>
-              <dd className="mt-2 text-2xl font-semibold tabular-nums">{value}</dd>
+            <div key={label} className="bg-card px-4 py-4 sm:px-5">
+              <dt className="text-xs text-muted-foreground">{label}</dt>
+              <dd className="mt-1.5 text-xl font-semibold tracking-tight tabular-nums">{value}</dd>
             </div>
           ))}
         </dl>
@@ -212,13 +210,13 @@ export function ResourceTelemetryDiagnostics({
                   "Read / write total",
                   "Starts / exits",
                 ].map((label) => (
-                  <th className="px-4 py-2 font-medium" key={label}>
+                  <th className="px-4 sm:px-5 py-2 font-medium" key={label}>
                     {label}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y">
+            <tbody className="divide-y divide-border/60">
               {telemetry
                 ? Object.entries(telemetry.groups).map(([name, group]) => (
                     <tr key={name}>
@@ -261,7 +259,7 @@ export function ResourceTelemetryDiagnostics({
       </SettingsSection>
       <SettingsSection title="Host & collection">
         {health ? (
-          <div className="grid gap-3 border-t px-4 py-3 text-xs sm:grid-cols-2">
+          <div className="grid gap-3 border-t px-4 sm:px-5 py-3 text-xs sm:grid-cols-2">
             {(["native", "desktop"] as const).map((source) => (
               <div key={source}>
                 <strong className="capitalize">
@@ -288,7 +286,7 @@ export function ResourceTelemetryDiagnostics({
             </p>
           </div>
         ) : null}
-        <div className="border-t px-4 py-3 text-xs">
+        <div className="border-t px-4 sm:px-5 py-3 text-xs">
           <h3 className="text-xs font-medium">Power and background state</h3>
           {telemetry?.power ? (
             <dl className="mt-3 grid grid-cols-2 gap-3">
@@ -362,16 +360,16 @@ export function ResourceTelemetryDiagnostics({
         }
       >
         {error ? (
-          <p role="alert" className="px-4 py-3 text-xs text-destructive">
+          <p role="alert" className="px-4 sm:px-5 py-3 text-xs text-destructive">
             {error}
           </p>
         ) : null}
-        <p className="px-4 py-3 text-xs text-muted-foreground">
+        <p className="px-4 sm:px-5 py-3 text-xs text-muted-foreground">
           {history
             ? `${history.totalCpuTimeMs === undefined ? "Unavailable" : formatDuration(history.totalCpuTimeMs)} total CPU time · ${history.retainedSampleCount} retained samples · ${formatDuration(history.sampleIntervalMs)} sampling interval · checked ${relativeTimeLabel(history.readAt)}`
             : "Collecting resource history…"}
         </p>
-        <div className="grid gap-4 px-4 pb-4 sm:grid-cols-2">
+        <div className="grid gap-4 px-4 sm:px-5 pb-4 sm:grid-cols-2">
           {(["cpu", "memory", "read", "write"] as const).map((metric) => (
             <div key={metric}>
               <p className="mb-2 text-xs font-medium">
@@ -456,13 +454,13 @@ export function ResourceTelemetryDiagnostics({
                   "I/O read / write",
                   "Samples / last seen",
                 ].map((label) => (
-                  <th key={label} className="px-4 py-2 font-medium">
+                  <th key={label} className="px-4 sm:px-5 py-2 font-medium">
                     {label}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y">
+            <tbody className="divide-y divide-border/60">
               {history?.topProcesses.map((process) => (
                 <tr key={`${process.identity.pid}:${process.identity.startTimeMs}`}>
                   <td>
@@ -520,13 +518,13 @@ export function ResourceTelemetryDiagnostics({
                   "I/O rate / semantics",
                   "Wakeups / uptime",
                 ].map((label) => (
-                  <th key={label} className="px-4 py-2 font-medium">
+                  <th key={label} className="px-4 sm:px-5 py-2 font-medium">
                     {label}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y">
+            <tbody className="divide-y divide-border/60">
               {processes.map((process) => (
                 <tr key={`${process.identity.pid}:${process.identity.startTimeMs}`}>
                   <td className="max-w-80">
@@ -609,14 +607,14 @@ export function ResourceTelemetryDiagnostics({
           </table>
         </div>
         {processes.length === 0 ? (
-          <p className="px-4 py-3 text-xs text-muted-foreground">
+          <p className="px-4 sm:px-5 py-3 text-xs text-muted-foreground">
             No active processes in this sample. Show idle processes to include retained idle
             entries.
           </p>
         ) : null}
       </SettingsSection>
       <SettingsSection title="Instrumented application I/O">
-        <p className="px-4 py-3 text-xs text-muted-foreground">
+        <p className="px-4 sm:px-5 py-3 text-xs text-muted-foreground">
           Application read/write counters describe logical work and are separate from
           operating-system storage bytes.
         </p>
@@ -625,13 +623,13 @@ export function ResourceTelemetryDiagnostics({
             <thead className="border-y text-muted-foreground">
               <tr>
                 {["Component / operation", "Read", "Write", "Count", "Duration"].map((label) => (
-                  <th key={label} className="px-4 py-2 font-medium">
+                  <th key={label} className="px-4 sm:px-5 py-2 font-medium">
                     {label}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y">
+            <tbody className="divide-y divide-border/60">
               {telemetry?.attribution.entries.map((entry) => (
                 <tr key={`${entry.component}:${entry.operation}`}>
                   <td>
@@ -647,7 +645,7 @@ export function ResourceTelemetryDiagnostics({
           </table>
         </div>
         {!telemetry?.attribution.entries.length ? (
-          <p className="px-4 py-3 text-xs text-muted-foreground">
+          <p className="px-4 sm:px-5 py-3 text-xs text-muted-foreground">
             No logical I/O attribution captured.
           </p>
         ) : null}

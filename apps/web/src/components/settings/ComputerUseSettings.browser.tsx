@@ -60,7 +60,7 @@ it("keeps control opt-in, preserves remembered app denial and pairs only enabled
   await view.getByRole("switch", { name: "Enable computer use on this computer" }).click();
   await expect
     .element(view.getByRole("combobox", { name: "Access to Private.app" }))
-    .toHaveValue("block");
+    .toHaveTextContent("Block");
   await expect
     .element(view.getByRole("switch", { name: "Allow foreground takeover requests" }))
     .not.toBeChecked();
@@ -114,7 +114,9 @@ it("uses distinct permission badges and rechecks when returning from system sett
   await expect
     .element(view.getByRole("button", { name: "Accessibility Not granted" }))
     .toBeVisible();
-  await expect.element(view.getByText("Not granted", { exact: true })).toHaveClass("text-red-700");
+  await expect
+    .element(view.getByText("Not granted", { exact: true }))
+    .toHaveAttribute("data-tone", "error");
   await expect
     .element(view.getByRole("button", { name: "Screen recording Not checked" }))
     .toBeVisible();
@@ -132,5 +134,5 @@ it("uses distinct permission badges and rechecks when returning from system sett
     .toBeVisible();
   const badges = document.querySelectorAll('[data-permission-status="granted"]');
   expect(badges).toHaveLength(2);
-  expect(badges[0]?.classList.contains("text-emerald-700")).toBe(true);
+  expect(badges[0]?.getAttribute("data-tone")).toBe("success");
 });

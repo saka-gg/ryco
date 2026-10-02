@@ -287,7 +287,7 @@ export function ProviderModelsSection({
                         variant="ghost"
                         className={cn(
                           "size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground",
-                          isFavorite && "text-yellow-500 hover:text-yellow-600",
+                          isFavorite && "text-warning hover:text-warning/80",
                         )}
                         onClick={() => handleToggleFavorite(model.slug)}
                         aria-label={`${isFavorite ? "Remove" : "Add"} ${model.name} ${

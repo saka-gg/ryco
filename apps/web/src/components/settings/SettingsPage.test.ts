@@ -8,9 +8,9 @@ import {
   settingsSectionReachable,
   settingsSectionScope,
   settingsScopeLabel,
-  SETTINGS_DIALOG_SECTION_IDS,
-  SETTINGS_DIALOG_SECTION_LABELS,
-} from "./SettingsDialog";
+  SETTINGS_SECTION_IDS,
+  SETTINGS_SECTION_LABELS,
+} from "./SettingsPage";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
 import {
   DESKTOP_ONLY_SETTINGS_SECTIONS,
@@ -49,7 +49,7 @@ describe("the frozen phone surface keeps its existing section inventory", () => 
     // Set equality rather than "every label in this hardcoded array is present":
     // the latter is what let it through.
     expect([...PHONE_SETTINGS_SECTION_IDS].toSorted()).toEqual(
-      SETTINGS_DIALOG_SECTION_IDS.filter(
+      SETTINGS_SECTION_IDS.filter(
         // Integrations is a new desktop/web page; the phone tier remains frozen.
         (id) => id !== "integrations" && !DESKTOP_ONLY_SETTINGS_SECTIONS.has(id),
       ).toSorted(),
@@ -58,7 +58,7 @@ describe("the frozen phone surface keeps its existing section inventory", () => 
 
   it("has no duplicate entry on either surface", () => {
     for (const [where, ids] of [
-      ["desktop", SETTINGS_DIALOG_SECTION_IDS],
+      ["desktop", SETTINGS_SECTION_IDS],
       ["phone", PHONE_SETTINGS_SECTION_IDS],
     ] as const) {
       expect(new Set(ids).size, where).toBe(ids.length);
@@ -68,9 +68,7 @@ describe("the frozen phone surface keeps its existing section inventory", () => 
 
 describe("hosted settings capabilities", () => {
   it("declares the ownership scope of every settings section", () => {
-    expect(
-      SETTINGS_DIALOG_SECTION_IDS.map((section) => [section, settingsSectionScope(section)]),
-    ).toEqual(
+    expect(SETTINGS_SECTION_IDS.map((section) => [section, settingsSectionScope(section)])).toEqual(
       expect.arrayContaining([
         ["general", "mixed"],
         ["appearance", "browser"],
@@ -185,9 +183,9 @@ describe("§13.5's pointer names a section this dialog actually has", () => {
     // else ties that string to the shipped section, so renaming the nav item
     // would leave the copy naming a section that no longer exists — on the one
     // surface where an owner is performing a security check.
-    const label = SETTINGS_DIALOG_SECTION_LABELS.get("security");
+    const label = SETTINGS_SECTION_LABELS.get("security");
     expect(label, "the security section left the dialog").toBeDefined();
-    expect(E2EE_WEB_SAS_MORE).toContain(`Settings → Connections → ${label!}`);
+    expect(E2EE_WEB_SAS_MORE).toContain(`Settings → ${label!}`);
   });
 
   it("is findable by the search box that replaces the section list", () => {
@@ -227,9 +225,9 @@ describe("legacy token streaming search", () => {
 
 describe("MCP and integrations navigation", () => {
   it("keeps separate destinations and removes the standalone Computer Use tab", () => {
-    expect(SETTINGS_DIALOG_SECTION_LABELS.get("mcp-servers")).toBe("MCP");
-    expect(SETTINGS_DIALOG_SECTION_LABELS.get("integrations")).toBe("Integrations");
-    expect(SETTINGS_DIALOG_SECTION_IDS).not.toContain("computer-use");
+    expect(SETTINGS_SECTION_LABELS.get("mcp-servers")).toBe("MCP");
+    expect(SETTINGS_SECTION_LABELS.get("integrations")).toBe("Integrations");
+    expect(SETTINGS_SECTION_IDS).not.toContain("computer-use");
     expect(
       SETTINGS_SEARCH_INDEX.find((entry) => entry.title === "Private Agent Control")?.section,
     ).toBe("integrations");

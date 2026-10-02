@@ -772,9 +772,8 @@ export function NewWorktreeDialog(props: NewWorktreeDialogProps) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogPopup
-        className="project-glass-surface flex h-[90vh] max-h-[980px] w-full max-w-7xl flex-col p-0 sm:max-w-7xl"
+        className="flex h-[90vh] max-h-[980px] w-full max-w-7xl flex-col p-0 sm:max-w-7xl"
         onKeyDown={handleKeyDown}
-        surface="glass"
       >
         <DialogHeader className="border-border/60 border-b px-5 py-3">
           <DialogTitle className="text-base">New worktree</DialogTitle>

@@ -623,7 +623,7 @@ export function HubSection({
                   A fingerprint that wraps differently on the two screens a
                   reviewer holds side by side is a security-review finding, so
                   `mono` owns that decision in one place rather than here. */}
-              <DataList className="rounded-xl border border-border/60 bg-muted/20 p-3">
+              <DataList className="rounded-[min(var(--radius-lg),0.625rem)] bg-muted/40 p-3">
                 <DataListItem term="Label">{snapshot.enrollment.label}</DataListItem>
                 <DataListItem term="Platform">
                   {`${snapshot.enrollment.platformOs} · ${snapshot.enrollment.platformArch}`}
@@ -936,7 +936,7 @@ export function HubSection({
               {originSuggestion ? (
                 <button
                   type="button"
-                  className="ml-1 underline underline-offset-2"
+                  className="ml-1 break-all rounded-sm underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => {
                     setOriginDraft(originSuggestion);
                     setOriginError(null);
@@ -1041,7 +1041,7 @@ export function HubSection({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogClose>Keep it</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>Keep it</AlertDialogClose>
             <Button
               variant="destructive"
               disabled={pendingAction !== null}
@@ -1066,7 +1066,7 @@ export function HubSection({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogClose>Cancel</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
             <Button
               variant="destructive"
               disabled={hostedGitHubPending}
@@ -1098,18 +1098,20 @@ export function HubSection({
               reused; Ryco does not reopen the browser.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <Input
-            aria-label="Authenticator code"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            maxLength={16}
-            value={hostedGitHubTotpCode}
-            onChange={(event) =>
-              setHostedGitHubTotpCode(event.currentTarget.value.replace(/\D/gu, ""))
-            }
-          />
+          <div className="px-6 pb-4">
+            <Input
+              aria-label="Authenticator code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={16}
+              value={hostedGitHubTotpCode}
+              onChange={(event) =>
+                setHostedGitHubTotpCode(event.currentTarget.value.replace(/\D/gu, ""))
+              }
+            />
+          </div>
           <AlertDialogFooter>
-            <AlertDialogClose>Cancel</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
             <Button
               disabled={hostedGitHubPending || hostedGitHubTotpCode.length < 6}
               onClick={() => {

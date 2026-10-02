@@ -179,7 +179,7 @@ export const E2EE_WEB_SAS_ADVISORY =
  * for the same reason: a short form whose pointer a caller could drop is a short
  * form that silently becomes the only thing an owner is ever offered.
  *
- * IT NAMES A SECTION, SO THE SECTION HAS TO BE THERE. `SettingsDialog.test.ts`
+ * IT NAMES A SECTION, SO THE SECTION HAS TO BE THERE. `SettingsPage.test.ts`
  * asserts this sentence contains the label the settings nav actually draws for
  * `security`, so renaming the section fails a test instead of stranding the
  * pointer; {@link hostedE2eeVerificationPlacement} keeps it from being drawn for
@@ -187,8 +187,7 @@ export const E2EE_WEB_SAS_ADVISORY =
  * `settingsSearchIndex.ts` carries the section's rows, so a reader who searches
  * for what this sentence names is not told it does not exist.
  */
-export const E2EE_WEB_SAS_MORE =
-  "Settings → Connections → Node security explains what else this tab cannot check.";
+export const E2EE_WEB_SAS_MORE = "Settings → Security explains what else this tab cannot check.";
 
 /**
  * The long form, for the one surface an owner opens to read about this.

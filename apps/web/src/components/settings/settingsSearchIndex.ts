@@ -66,7 +66,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     title: "Device name",
     owner: "node",
     description: "Rename the selected device for everyone who can access it.",
-    keywords: "machine hostname node name rename",
+    keywords: "machine hostname node name rename icon",
+    targetId: "Device",
   },
   {
     section: "integrations",
@@ -81,6 +82,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     desktopCapability: "computerUse",
     title: "Computer use",
     owner: "client",
+    targetId: "Computer Use",
     description: "Control local apps and browsers, manage permissions, and pair a browser.",
     keywords:
       "accessibility screen recording capture cursor chrome brave edge app access foreground automation",
@@ -309,6 +311,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     section: "integrations",
     title: "Private Agent Control",
     owner: "node",
+    targetId: "Agent Control",
     description: "Pair local Codex or Claude MCP clients with scoped, revocable access.",
     keywords: "model context protocol tools pairing codex claude approval agent control",
   },
@@ -370,7 +373,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   // The section §13.5's copy points an owner at — "Settings → Security explains
   // what else this tab cannot check" — so the terms it sends them looking for
-  // have to resolve here. `SettingsDialog.test.ts` asserts they do.
+  // have to resolve here. `SettingsPage.test.ts` asserts they do.
   {
     section: "security",
     title: "Session code",

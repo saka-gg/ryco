@@ -177,7 +177,7 @@ describe("AppearanceSettingsPanel", () => {
     expect(
       JSON.parse(localStorage.getItem(APPEARANCE_PREFERENCES_STORAGE_KEY) ?? "{}").primaryColorMode,
     ).toBeUndefined();
-    await page.getByText("Use theme", { exact: true }).click();
+    await page.getByText("Use theme color", { exact: true }).click();
     await page.getByRole("radio", { name: "Use Teal as primary color" }).click();
     await page.getByRole("button", { name: "Set transparency to High" }).click();
 

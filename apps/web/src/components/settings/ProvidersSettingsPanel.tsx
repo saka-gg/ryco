@@ -65,6 +65,7 @@ import {
 import { buildProviderInstanceUpdatePatch } from "./SettingsPanels.logic";
 import {
   SettingResetButton,
+  SettingsEmpty,
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
@@ -527,7 +528,8 @@ export function ProvidersSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
-        title="Providers"
+        title="Instances"
+        description={`${rows.length} configured. Select one to edit its account, models, and environment.`}
         headerAction={
           <div className="flex items-center gap-1.5">
             <ProviderLastChecked lastCheckedAt={lastCheckedAt} />
@@ -552,34 +554,25 @@ export function ProvidersSettingsPanel() {
               />
               <TooltipPopup side="top">Refresh provider status</TooltipPopup>
             </Tooltip>
+            <Button
+              size="xs"
+              variant="outline"
+              className="ml-1"
+              onClick={() => setIsAddInstanceDialogOpen(true)}
+              aria-label="Add provider instance"
+            >
+              <PlusIcon />
+              Add
+            </Button>
           </div>
         }
       >
         <div className="grid min-h-[34rem] md:grid-cols-[minmax(13.5rem,0.75fr)_minmax(0,1.55fr)]">
-          <aside className="app-muted-surface min-w-0 border-b border-border/70 md:border-r md:border-b-0">
-            <div className="flex items-center justify-between gap-3 border-b border-border/70 px-3 py-3">
-              <div className="min-w-0">
-                <h3 className="text-[13px] font-semibold tracking-[-0.01em] text-foreground">
-                  Instances
-                </h3>
-                <p className="text-[11px] text-muted-foreground">{rows.length} configured</p>
-              </div>
-              <Button
-                size="xs"
-                variant="outline"
-                className="h-7 shrink-0 gap-1.5 px-2 text-xs"
-                onClick={() => setIsAddInstanceDialogOpen(true)}
-                aria-label="Add provider instance"
-              >
-                <PlusIcon className="size-3" />
-                Add
-              </Button>
-            </div>
-
+          <aside className="min-w-0 border-b border-border/70 bg-muted/30 md:border-r md:border-b-0">
             <nav
               aria-label="Provider instances"
               data-provider-instance-list
-              className="grid max-h-64 gap-1 overflow-y-auto p-2 md:max-h-[min(44rem,calc(100dvh-15rem))]"
+              className="grid max-h-64 gap-0.5 overflow-y-auto p-2 md:max-h-none"
             >
               {rows.map((row, index) => (
                 <ProviderInstanceListItem
@@ -712,14 +705,11 @@ export function ProvidersSettingsPanel() {
                 isUpdating={isUpdatingSelected}
               />
             ) : (
-              <div className="grid min-h-64 place-items-center px-6 py-12 text-center">
-                <div className="max-w-xs space-y-1">
-                  <h3 className="text-sm font-semibold text-foreground">No provider instances</h3>
-                  <p className="text-xs text-muted-foreground">
-                    Add an instance to configure a provider for this environment.
-                  </p>
-                </div>
-              </div>
+              <SettingsEmpty
+                title="No provider instances"
+                description="Add an instance to configure a provider on this device."
+                className="min-h-64 justify-center"
+              />
             )}
           </section>
         </div>
