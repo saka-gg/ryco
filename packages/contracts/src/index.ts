@@ -64,3 +64,6 @@ export * from "./sessionImport.ts";
 export * from "./claudeCache.ts";
 
 export * from "./storage.ts";
+export * from "./dailyRecap.ts";
+
+export * from "./localTasks.ts";

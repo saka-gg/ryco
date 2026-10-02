@@ -868,6 +868,25 @@ export interface LocalApi {
       input: AcpRegistryAuthenticateInput,
     ) => Promise<AcpRegistryAuthenticationResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
+    listLocalTasks?: (
+      input: import("./localTasks.ts").LocalTaskListInput,
+    ) => Promise<import("./localTasks.ts").LocalTaskListResult>;
+    getLocalTask?: (input: { taskId: string }) => Promise<import("./localTasks.ts").LocalTask>;
+    createLocalTask?: (
+      input: import("./localTasks.ts").LocalTaskCreateInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    updateLocalTask?: (
+      input: import("./localTasks.ts").LocalTaskUpdateInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    deleteLocalTask?: (
+      input: import("./localTasks.ts").LocalTaskDeleteInput,
+    ) => Promise<{ readonly deleted: true }>;
+    delegateLocalTask?: (
+      input: import("./localTasks.ts").LocalTaskDelegateInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    getDailyRecap?: (
+      input: import("./dailyRecap.ts").DailyRecapRequest,
+    ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;
     upsertKeybinding: (input: ServerUpsertKeybindingInput) => Promise<ServerUpsertKeybindingResult>;
     getSettings: () => Promise<ServerSettings>;
     getProjectPreferences?: (input: {
@@ -943,6 +962,25 @@ export interface EnvironmentApi {
       input: AcpRegistryAuthenticateInput,
     ) => Promise<AcpRegistryAuthenticationResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
+    listLocalTasks?: (
+      input: import("./localTasks.ts").LocalTaskListInput,
+    ) => Promise<import("./localTasks.ts").LocalTaskListResult>;
+    getLocalTask?: (input: { taskId: string }) => Promise<import("./localTasks.ts").LocalTask>;
+    createLocalTask?: (
+      input: import("./localTasks.ts").LocalTaskCreateInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    updateLocalTask?: (
+      input: import("./localTasks.ts").LocalTaskUpdateInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    deleteLocalTask?: (
+      input: import("./localTasks.ts").LocalTaskDeleteInput,
+    ) => Promise<{ readonly deleted: true }>;
+    delegateLocalTask?: (
+      input: import("./localTasks.ts").LocalTaskDelegateInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    getDailyRecap?: (
+      input: import("./dailyRecap.ts").DailyRecapRequest,
+    ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;
     getSettings: () => Promise<ServerSettings>;
     getProjectPreferences?: (input: {
       readonly projectId?: ProjectId;
