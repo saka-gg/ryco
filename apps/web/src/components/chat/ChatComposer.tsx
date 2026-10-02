@@ -104,7 +104,10 @@ import {
   getComposerProviderState,
   renderProviderTraitsChips,
   renderProviderTraitsMenuContent,
+  renderProviderModelTuning,
+  getProviderModelTuningSummary,
 } from "./composerProviderState";
+import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
 import { PhoneThreadDock, type PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
@@ -381,6 +384,7 @@ export interface ChatComposerProps {
     instanceId: ProviderInstanceId,
     model: string,
     options?: ReadonlyArray<ProviderOptionSelection>,
+    meta?: ModelPickMeta,
   ) => void;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
@@ -1034,7 +1038,7 @@ export const ChatComposer = memo(
     const traitsDisabled = !traitsMutationCapability.allowed;
     const traitsDisabledReason = traitsMutationCapability.reason;
 
-    const providerTraitsMenuContent = renderProviderTraitsMenuContent({
+    const providerTraitsInput = {
       hideAgent: enforceBuildMode,
       provider: selectedProvider,
       instanceId: selectedInstanceId,
@@ -1047,20 +1051,20 @@ export const ChatComposer = memo(
       onPromptChange: setPromptFromTraits,
       disabled: traitsDisabled,
       disabledReason: traitsDisabledReason,
+    };
+    const providerTraitsMenuContent = renderProviderTraitsMenuContent(providerTraitsInput);
+    const providerExtraTraitsMenuContent = renderProviderTraitsMenuContent({
+      ...providerTraitsInput,
+      omitTuning: true,
     });
-    const providerTraitsChips = renderProviderTraitsChips({
-      hideAgent: enforceBuildMode,
+    const providerTraitsChips = renderProviderTraitsChips(providerTraitsInput);
+    const providerModelTuning = renderProviderModelTuning(providerTraitsInput);
+    const providerModelTuningSummary = getProviderModelTuningSummary({
       provider: selectedProvider,
-      instanceId: selectedInstanceId,
-      ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
-      ...(routeKind === "draft" && draftId ? { draftId } : {}),
       model: selectedModel,
       models: selectedProviderModels,
       modelOptions: composerModelOptions?.[selectedInstanceId],
       prompt,
-      onPromptChange: setPromptFromTraits,
-      disabled: traitsDisabled,
-      disabledReason: traitsDisabledReason,
     });
     const pendingPrimaryAction = useMemo(
       () =>
@@ -2773,7 +2777,10 @@ export const ChatComposer = memo(
                 planSidebarLabel={planSidebarLabel}
                 planSidebarOpen={planSidebarOpen}
                 providerTraitsMenuContent={providerTraitsMenuContent}
+                providerExtraTraitsMenuContent={providerExtraTraitsMenuContent}
                 providerTraitsChips={providerTraitsChips}
+                providerModelTuning={providerModelTuning}
+                providerModelTuningSummary={providerModelTuningSummary}
                 onInteractionModeChange={handleInteractionModeChange}
                 onTogglePlanSidebar={togglePlanSidebar}
                 onRuntimeModeChange={handleRuntimeModeChange}

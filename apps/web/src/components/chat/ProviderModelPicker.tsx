@@ -4,7 +4,7 @@ import {
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { VariantProps } from "class-variance-authority";
 import { ChevronDownIcon } from "lucide-react";
 import { Button, buttonVariants } from "../ui/button";
@@ -12,6 +12,9 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { ModelPickerContent } from "./ModelPickerContent";
+import { ModelTriggerTraits } from "./ModelTriggerTraits";
+import type { ModelPickMeta } from "./modelPickerTuningBridge";
+import type { ModelTuningSummary } from "./modelTuning.logic";
 import { PhoneModelSheet } from "./PhoneModelSheet";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import {
@@ -66,6 +69,13 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
    * Never a raw error, identifier, ticket, or payload.
    */
   disabledReason?: string;
+  /**
+   * Tuning footer for the active model (the composer's effort dial). Desktop
+   * popover only; the phone sheet keeps its own controls.
+   */
+  tuning?: ReactNode;
+  /** Effort / fast / context readout shown in the trigger beside the model name. */
+  triggerTraits?: ModelTuningSummary | null;
   terminalOpen?: boolean;
   open?: boolean;
   triggerSize?: VariantProps<typeof buttonVariants>["size"];
@@ -76,6 +86,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     instanceId: ProviderInstanceId,
     model: string,
     options?: ReadonlyArray<ProviderOptionSelection>,
+    meta?: ModelPickMeta,
   ) => void;
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
@@ -131,12 +142,18 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     instanceId: ProviderInstanceId,
     model: string,
     options?: ReadonlyArray<ProviderOptionSelection>,
+    meta?: ModelPickMeta,
   ) => {
     if (props.disabled) return;
+    if (meta?.keepOpen) {
+      props.onInstanceModelChange(instanceId, model, options, meta);
+      return;
+    }
     if (options) props.onInstanceModelChange(instanceId, model, options);
     else props.onInstanceModelChange(instanceId, model);
     setIsMenuOpen(false);
   };
+  const traits = useSheet ? null : (props.triggerTraits ?? null);
 
   // Bounded before it reaches a `title`, so an unavailability reason can never
   // carry a raw error, identifier, ticket, or payload into the DOM.
@@ -147,7 +164,13 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
 
   const triggerButtonClassName = cn(
     "min-w-0 justify-start overflow-hidden whitespace-nowrap px-1.5 text-muted-foreground/70 hover:text-foreground/80 [&_svg]:mx-0",
-    props.compact ? "max-w-38 shrink-0 sm:max-w-40" : "max-w-44 shrink sm:max-w-52 sm:px-2",
+    props.compact
+      ? traits
+        ? "max-w-52 shrink-0 sm:max-w-56"
+        : "max-w-38 shrink-0 sm:max-w-40"
+      : traits
+        ? "max-w-72 shrink sm:max-w-80 sm:px-2"
+        : "max-w-44 shrink sm:max-w-52 sm:px-2",
     props.triggerClassName,
   );
 
@@ -157,7 +180,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     <span
       className={cn(
         "flex min-w-0 w-full box-border items-center gap-1.5 overflow-hidden",
-        props.compact ? "max-w-34 sm:pl-0.5" : undefined,
+        props.compact ? (traits ? "max-w-48 sm:pl-0.5" : "max-w-34 sm:pl-0.5") : undefined,
       )}
     >
       {activeEntry ? (
@@ -198,6 +221,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         </TooltipTrigger>
         <TooltipPopup side="top">{triggerLabel}</TooltipPopup>
       </Tooltip>
+      {traits ? <ModelTriggerTraits summary={traits} compact={props.compact ?? false} /> : null}
       <ChevronDownIcon aria-hidden="true" className="size-3 shrink-0 opacity-60" />
     </span>
   );
@@ -285,6 +309,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           {...(props.keybindings ? { keybindings: props.keybindings } : {})}
           modelOptionsByInstance={props.modelOptionsByInstance}
           terminalOpen={props.terminalOpen ?? false}
+          {...(props.tuning ? { tuning: props.tuning } : {})}
           onRequestClose={() => setIsMenuOpen(false)}
           onInstanceModelChange={handleInstanceModelChange}
         />

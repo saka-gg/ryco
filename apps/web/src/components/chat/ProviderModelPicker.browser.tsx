@@ -17,7 +17,11 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
+import type { ReactNode } from "react";
+
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { ModelTuningDial } from "./ModelTuningDial";
+import { resolveModelTuning, type ModelTuningSummary } from "./modelTuning.logic";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
   deriveProviderInstanceEntries,
@@ -264,6 +268,8 @@ function buildOpenCodeProvider(models: ServerProvider["models"]): ServerProvider
 async function mountPicker(props: {
   activeInstanceId?: ProviderInstanceId;
   model: string;
+  tuning?: ReactNode;
+  triggerTraits?: ModelTuningSummary | null;
   modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey?: string | null;
@@ -309,6 +315,8 @@ async function mountPicker(props: {
         modelOptionsByInstance={modelOptionsByInstance}
         {...(props.open !== undefined ? { open: props.open } : {})}
         triggerVariant={props.triggerVariant}
+        {...(props.tuning ? { tuning: props.tuning } : {})}
+        {...(props.triggerTraits ? { triggerTraits: props.triggerTraits } : {})}
         onInstanceModelChange={onInstanceModelChange}
       />
     </SettingsEditingScopeProvider>
@@ -1651,6 +1659,134 @@ describe("ProviderModelPicker", () => {
         // Disabled provider should not have its models shown
         expect(text).not.toContain("Claude Opus 4.6");
       });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("docks the tuning footer and keeps the picker open on a pointer pick", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      tuning: <div data-testid="tuning-probe">Tuning</div>,
+    });
+
+    try {
+      await page.getByRole("button").first().click();
+      await expect.element(page.getByTestId("tuning-probe")).toBeInTheDocument();
+
+      await page.getByText("Claude Sonnet 4.6").first().click();
+      expect(mounted.onInstanceModelChange).toHaveBeenCalledWith(
+        CLAUDE_INSTANCE_ID,
+        "claude-sonnet-4-6",
+        undefined,
+        { keepOpen: true },
+      );
+      await expect.element(page.getByTestId("tuning-probe")).toBeInTheDocument();
+
+      // Re-picking the active row confirms and closes.
+      await page.getByText("Claude Opus 4.6").first().click();
+      await expect.element(page.getByTestId("tuning-probe")).not.toBeInTheDocument();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("closes on a pointer pick when no tuning footer is docked", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+    });
+
+    try {
+      await page.getByRole("button").first().click();
+      await page.getByText("Claude Sonnet 4.6").first().click();
+      await vi.waitFor(() => {
+        expect(document.querySelector(".model-picker-list")).toBeNull();
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("steps the docked dial with the arrow keys from an empty search", async () => {
+    const onSelectEffort = vi.fn();
+    const tuning = resolveModelTuning({
+      caps: createModelCapabilities({
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Reasoning",
+            type: "select",
+            options: [
+              { id: "low", label: "Low" },
+              { id: "high", label: "High", isDefault: true },
+              { id: "max", label: "Max" },
+            ],
+          },
+        ],
+      }),
+      selections: undefined,
+      prompt: "",
+    })!;
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      tuning: (
+        <ModelTuningDial
+          tuning={tuning}
+          onSelectEffort={onSelectEffort}
+          onSetThinking={() => {}}
+          onSetFastMode={() => {}}
+          onSelectContextWindow={() => {}}
+          onReset={() => {}}
+        />
+      ),
+    });
+
+    try {
+      await page.getByRole("button").first().click();
+      const search = page.getByPlaceholder("Search models...");
+      await expect.element(search).toHaveFocus();
+      await userEvent.keyboard("{ArrowRight}");
+      expect(onSelectEffort).toHaveBeenLastCalledWith("max");
+      await userEvent.keyboard("{ArrowLeft}");
+      expect(onSelectEffort).toHaveBeenLastCalledWith("low");
+      // The dial names the active model and links back to its row.
+      await expect
+        .element(page.getByRole("button", { name: "Show Claude Opus 4.6 in the list" }))
+        .toBeInTheDocument();
+      // Typing a query hands the arrows back to the text field.
+      await userEvent.keyboard("son");
+      onSelectEffort.mockClear();
+      await userEvent.keyboard("{ArrowLeft}");
+      expect(onSelectEffort).not.toHaveBeenCalled();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows effort, fast mode and context beside the model name in the trigger", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      triggerTraits: {
+        level: { id: "high", label: "High", index: 2 },
+        fastMode: true,
+        contextWindowLabel: "1M",
+      },
+    });
+
+    try {
+      const traits = document.querySelector('[data-slot="model-trigger-traits"]');
+      expect(traits?.textContent).toContain("High");
+      expect(traits?.textContent).toContain("1M");
+      expect(traits?.querySelector('[data-reasoning-tone="high"]')).not.toBeNull();
+      expect(traits?.querySelector("svg")).not.toBeNull();
     } finally {
       await mounted.cleanup();
     }

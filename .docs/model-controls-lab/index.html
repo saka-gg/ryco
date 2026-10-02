@@ -1,0 +1,2605 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ryco · Model Controls Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* ============================================================
+         Registered properties (animatable custom props)
+         ============================================================ */
+      @property --t {
+        syntax: "<number>";
+        inherits: true;
+        initial-value: 0;
+      }
+      @property --ang {
+        syntax: "<angle>";
+        inherits: false;
+        initial-value: 0deg;
+      }
+
+      /* ============================================================
+         Tokens — mirrored from apps/web/src/index.css (Graphite dark,
+         neutral light). Level ramp mirrors ReasoningChip's tints.
+         ============================================================ */
+      :root {
+        color-scheme: light;
+        --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        --font-mono: "Geist Mono", "SF Mono", ui-monospace, Menlo, monospace;
+        --ease: cubic-bezier(0.16, 1, 0.3, 1);
+        --spring-snappy: cubic-bezier(0.3, 1.36, 0.44, 1);
+        --spring-gentle: cubic-bezier(0.22, 1, 0.36, 1);
+
+        --page: #ececef;
+        --background: #ffffff;
+        --foreground: #262626;
+        --card: #ffffff;
+        --popover: #ffffff;
+        --muted: rgba(0, 0, 0, 0.045);
+        --muted-fg: #66666b;
+        --faint-fg: #9a9aa0;
+        --accent: rgba(0, 0, 0, 0.065);
+        --border: rgba(0, 0, 0, 0.1);
+        --ring: #52525b;
+        --track: rgba(0, 0, 0, 0.06);
+        --notch: rgba(0, 0, 0, 0.22);
+        --dot-dim: #000000;
+        --glyph-dim: rgba(0, 0, 0, 0.16);
+        --shine: #c9c1ff;
+        --thumb: #ffffff;
+        --thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.18), 0 4px 12px rgba(0, 0, 0, 0.14);
+        --pop-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 18px 54px rgba(15, 23, 42, 0.14),
+          0 2px 10px rgba(15, 23, 42, 0.06);
+        --composer-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+
+        --lv-none: #64748b;
+        --lv-minimal: #64748b;
+        --lv-low: #64748b;
+        --lv-medium: #2563eb;
+        --lv-high: #4f46e5;
+        --lv-xhigh: #7c3aed;
+        --lv-max: #c026d3;
+        --lv-ultracode: #6d5ce8;
+        --lv-off: #71717a;
+        --lv-on: #0284c7;
+        --uc-1: #6d5ce8;
+        --uc-2: #9d90ff;
+        --uc-3: #ece8ff;
+        --fast: #b45309;
+        --fast-bg: rgba(234, 179, 8, 0.16);
+        --lv: var(--muted-fg);
+      }
+      .dark {
+        color-scheme: dark;
+        --page: #050506;
+        --background: #0b0b0c;
+        --foreground: #ececed;
+        --card: #121213;
+        --popover: #19191b;
+        --muted: rgba(255, 255, 255, 0.06);
+        --muted-fg: #a6a6ab;
+        --faint-fg: #6e6e75;
+        --accent: rgba(255, 255, 255, 0.09);
+        --border: rgba(255, 255, 255, 0.09);
+        --ring: #a1a1a6;
+        --track: rgba(255, 255, 255, 0.065);
+        --notch: rgba(255, 255, 255, 0.3);
+        --dot-dim: #ffffff;
+        --glyph-dim: rgba(255, 255, 255, 0.17);
+        --shine: #ffffff;
+        --thumb: #f4f4f5;
+        --thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 6px 18px rgba(0, 0, 0, 0.45);
+        --pop-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 22px 64px rgba(0, 0, 0, 0.55),
+          0 2px 12px rgba(0, 0, 0, 0.3);
+        --composer-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+
+        --lv-none: #94a3b8;
+        --lv-minimal: #94a3b8;
+        --lv-low: #94a3b8;
+        --lv-medium: #60a5fa;
+        --lv-high: #818cf8;
+        --lv-xhigh: #a78bfa;
+        --lv-max: #e879f9;
+        --lv-ultracode: #b3a8ff;
+        --lv-off: #8a8a90;
+        --lv-on: #38bdf8;
+        --uc-1: #6f63d9;
+        --uc-2: #b0a5ff;
+        --uc-3: #f3f0ff;
+        --fast: #facc15;
+        --fast-bg: rgba(250, 204, 21, 0.13);
+      }
+      [data-level="none"] { --lv: var(--lv-none); }
+      [data-level="minimal"] { --lv: var(--lv-minimal); }
+      [data-level="low"] { --lv: var(--lv-low); }
+      [data-level="medium"] { --lv: var(--lv-medium); }
+      [data-level="high"] { --lv: var(--lv-high); }
+      [data-level="xhigh"] { --lv: var(--lv-xhigh); }
+      [data-level="max"] { --lv: var(--lv-max); }
+      [data-level="ultracode"] { --lv: var(--lv-ultracode); }
+      [data-level="off"] { --lv: var(--lv-off); }
+      [data-level="on"] { --lv: var(--lv-on); }
+
+      [data-motion="off"] *,
+      [data-motion="off"] *::before,
+      [data-motion="off"] *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+
+      /* ============================================================
+         Base / lab chrome
+         ============================================================ */
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        font-family: var(--font-sans);
+        background: var(--page);
+        color: var(--foreground);
+        -webkit-font-smoothing: antialiased;
+        font-size: 14px;
+        line-height: 1.45;
+        min-height: 100vh;
+      }
+      button { font: inherit; color: inherit; }
+      .ic { width: 16px; height: 16px; flex: none; }
+      .ic.fill { fill: currentColor; }
+      .pv { width: 16px; height: 16px; flex: none; }
+      kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 16px;
+        height: 16px;
+        padding: 0 4px;
+        border-radius: 4px;
+        font-family: var(--font-sans);
+        font-size: 10px;
+        font-weight: 500;
+        color: var(--muted-fg);
+        background: var(--muted);
+        box-shadow: inset 0 0 0 1px var(--border);
+      }
+
+      .lab { max-width: 1120px; margin: 0 auto; padding: 28px 28px 64px; }
+      .lab-bar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+      .lab-title { font-size: 20px; font-weight: 600; letter-spacing: -0.015em; margin: 0; }
+      .lab-sub { margin: 4px 0 0; color: var(--muted-fg); font-size: 13.5px; max-width: 560px; }
+      .lab-controls { display: flex; align-items: center; gap: 8px; }
+      .lab-icon-btn {
+        height: 30px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px;
+        border-radius: 8px; border: 0; background: transparent; color: var(--muted-fg);
+        box-shadow: inset 0 0 0 1px var(--border); cursor: pointer; font-size: 12.5px;
+      }
+      .lab-icon-btn:hover { color: var(--foreground); background: var(--muted); }
+      .lab-icon-btn[aria-pressed="false"] { opacity: 0.7; }
+      .lab-tabs .seg-opt { height: 26px; padding: 0 12px; font-size: 12.5px; }
+      .lab-tabs .seg-opt b { font-weight: 600; margin-right: 5px; color: var(--faint-fg); }
+      .lab-tabs .seg-opt[aria-checked="true"] b { color: var(--muted-fg); }
+
+      .scenarios { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 18px 0 14px; font-size: 12.5px; color: var(--muted-fg); }
+      .scenarios > span { margin-right: 4px; }
+      .scenario {
+        height: 26px; padding: 0 10px; border-radius: 999px; border: 0; cursor: pointer;
+        background: transparent; color: var(--muted-fg); box-shadow: inset 0 0 0 1px var(--border);
+        font-size: 12px; display: inline-flex; align-items: center; gap: 6px;
+      }
+      .scenario:hover { color: var(--foreground); background: var(--muted); }
+      .scenario .pv { width: 12px; height: 12px; }
+
+      /* ============================================================
+         Stage — a faithful slice of the chat pane
+         ============================================================ */
+      .stage {
+        position: relative;
+        height: 640px;
+        border-radius: 14px;
+        background: var(--background);
+        box-shadow: inset 0 0 0 1px var(--border);
+        overflow: hidden;
+      }
+      .thread { max-width: 720px; margin: 0 auto; padding: 36px 24px 0; display: flex; flex-direction: column; gap: 18px; }
+      .msg-user {
+        align-self: flex-end; max-width: 78%; padding: 9px 14px; border-radius: 16px;
+        background: var(--muted); font-size: 14px;
+      }
+      .msg-assistant { font-size: 14px; color: var(--foreground); }
+      .msg-assistant p { margin: 0 0 10px; }
+      .msg-assistant code {
+        font-family: var(--font-mono); font-size: 12.5px; padding: 1px 5px; border-radius: 5px;
+        background: var(--muted);
+      }
+      .msg-meta { font-size: 12px; color: var(--faint-fg); }
+
+      .composer-dock { position: absolute; left: 0; right: 0; bottom: 0; padding: 0 24px 22px; }
+      .composer {
+        max-width: 720px; margin: 0 auto; border-radius: 20px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--border), var(--composer-shadow);
+      }
+      .composer textarea {
+        display: block; width: 100%; border: 0; outline: 0; resize: none; background: transparent;
+        font: inherit; font-size: 14px; color: var(--foreground); padding: 14px 16px 4px; min-height: 52px;
+      }
+      .composer textarea::placeholder { color: var(--faint-fg); }
+      .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 10px 10px; }
+      .cf-left { display: flex; align-items: center; gap: 2px; min-width: 0; }
+      .cf-right { display: flex; align-items: center; gap: 10px; }
+      .ghost-icon {
+        width: 28px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 8px;
+        background: transparent; color: var(--muted-fg); cursor: pointer;
+      }
+      .ghost-icon:hover, .ghost-chip:hover { background: var(--accent); color: var(--foreground); }
+      .ghost-chip {
+        height: 26px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 0;
+        border-radius: 8px; background: transparent; color: var(--muted-fg); font-size: 12.5px; cursor: pointer;
+        white-space: nowrap;
+      }
+      .ghost-chip .ic { width: 14px; height: 14px; }
+      .ctx-ring { width: 18px; height: 18px; color: var(--faint-fg); }
+      .send {
+        width: 30px; height: 30px; border-radius: 999px; border: 0; display: grid; place-items: center;
+        background: var(--foreground); color: var(--background); cursor: pointer;
+      }
+      .send .ic { width: 16px; height: 16px; }
+      .trigger-slot { display: inline-flex; min-width: 0; }
+
+      /* ============================================================
+         Shared bits: roll text, presence, shimmer, segmented
+         ============================================================ */
+      .roll { display: inline-grid; overflow: hidden; vertical-align: top; }
+      .roll > .roll-item { grid-area: 1 / 1; justify-self: start; white-space: nowrap; }
+      .roll.center > .roll-item { justify-self: center; }
+      .presence { display: inline-flex; align-items: center; overflow: hidden; flex: none; }
+      .presence[hidden] { display: none !important; }
+
+      .shimmer > .roll-item {
+        background-image: linear-gradient(
+          100deg, var(--lv) 0%, var(--lv) 42%, var(--shine) 50%, var(--lv) 58%, var(--lv) 100%
+        );
+        background-size: 300% 100%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        animation: text-sheen 3.2s linear infinite;
+      }
+      @keyframes text-sheen {
+        from { background-position: 0% 0; }
+        to { background-position: -150% 0; }
+      }
+
+      .seg {
+        position: relative; display: inline-flex; align-items: stretch; padding: 2px; border-radius: 8px;
+        background: var(--track); isolation: isolate;
+      }
+      .seg-opt {
+        position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center;
+        gap: 4px; height: 22px; padding: 0 8px; border: 0; background: transparent; border-radius: 6px;
+        font-size: 11.5px; font-weight: 500; color: var(--muted-fg); cursor: pointer; white-space: nowrap;
+        transition: color 0.2s;
+      }
+      .seg-opt:hover, .seg-opt[aria-checked="true"] { color: var(--foreground); }
+      .seg-opt:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+      .seg-opt .ic { width: 13px; height: 13px; }
+      .seg-ind {
+        position: absolute; z-index: 0; top: 2px; bottom: 2px; left: 0; width: 0; border-radius: 6px;
+        background: var(--background); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18), inset 0 0 0 1px var(--border);
+        transition:
+          transform 0.36s var(--spring-snappy), width 0.36s var(--spring-snappy),
+          background-color 0.25s, box-shadow 0.25s;
+      }
+      .dark .seg-ind { background: rgba(255, 255, 255, 0.11); }
+
+      .seg-lg { display: flex; width: 100%; }
+      .seg-lg .seg-opt { flex: 1 1 auto; height: 26px; font-size: 12px; padding: 0 8px; }
+      .seg-effort .seg-opt[aria-checked="true"] { color: var(--lv); }
+      .seg-ind[data-level] {
+        background: color-mix(in srgb, var(--lv) 15%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lv) 34%, transparent);
+      }
+      .seg-ind[data-level="fast"] {
+        background: var(--fast-bg);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fast) 32%, transparent);
+      }
+      .seg-opt[data-level="fast"][aria-checked="true"] { color: var(--fast); }
+      .seg-opt[data-level="fast"][aria-checked="true"] .ic { fill: currentColor; }
+      .seg-opt[data-level="on"][aria-checked="true"] { color: var(--lv-on); }
+      .ctx-bar {
+        display: inline-block; height: 3px; width: calc(var(--w) * 4px); border-radius: 2px;
+        background: currentColor; opacity: 0.45; margin-left: 2px;
+      }
+
+      /* Rotating lavender edge, shared by C's capsule + indicator */
+      .seg-ind[data-level="ultracode"]::before,
+      .cap.uc::before {
+        content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none;
+        background: conic-gradient(
+          from var(--ang), transparent 0deg, transparent 190deg, var(--uc-2) 270deg, var(--uc-3) 315deg,
+          var(--uc-2) 340deg, transparent 360deg
+        );
+        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor;
+        mask-composite: exclude;
+        animation: spin-ang 2.8s linear infinite;
+      }
+      @keyframes spin-ang { to { --ang: 360deg; } }
+
+      .spark {
+        position: absolute; width: 3px; height: 3px; border-radius: 50%; pointer-events: none; z-index: 30;
+        background: var(--uc-3); box-shadow: 0 0 6px 1px var(--lv-ultracode);
+      }
+
+      .pulse { animation: pulse-ring 0.9s var(--ease); }
+      @keyframes pulse-ring {
+        0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ring) 55%, transparent); }
+        100% { box-shadow: 0 0 0 8px transparent; }
+      }
+      .flash { animation: row-flash 1s var(--ease); }
+      @keyframes row-flash {
+        0%, 30% { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 45%, transparent); }
+        100% { box-shadow: inset 0 0 0 1px transparent; }
+      }
+
+      .switch {
+        position: relative; width: 34px; height: 20px; border-radius: 999px; border: 0; cursor: pointer;
+        background: var(--track); box-shadow: inset 0 0 0 1px var(--border); transition: background 0.2s; flex: none;
+      }
+      .switch .knob {
+        position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+        background: var(--thumb); box-shadow: var(--thumb-shadow); transition: transform 0.3s var(--spring-snappy);
+      }
+      .switch[aria-checked="true"] { background: var(--lv-on); }
+      .switch[aria-checked="true"] .knob { transform: translateX(14px); }
+
+      /* ============================================================
+         Inline trigger (A + B)
+         ============================================================ */
+      .trig {
+        display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 7px 0 6px;
+        border: 0; border-radius: 8px; background: transparent; cursor: pointer; white-space: nowrap;
+        color: color-mix(in srgb, var(--muted-fg) 88%, transparent); font-size: 12.5px; font-weight: 500;
+        transition: background 0.12s, color 0.12s;
+      }
+      .trig:hover, .trig[aria-expanded="true"] { background: var(--accent); color: var(--foreground); }
+      .trig:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+      .trig-icon { display: inline-grid; place-items: center; width: 16px; height: 16px; }
+      .trig-icon > * { grid-area: 1 / 1; }
+      .trig-chev { width: 12px; height: 12px; opacity: 0.55; }
+      .trig-level { gap: 5px; color: color-mix(in srgb, var(--lv) 88%, var(--foreground)); }
+      .trig-fast { color: var(--fast); }
+      .trig-fast .ic { width: 13px; height: 13px; }
+      .trig-ctx {
+        height: 17px; padding: 0 5px; border-radius: 5px; font-size: 10.5px; font-weight: 500;
+        color: var(--muted-fg); box-shadow: inset 0 0 0 1px var(--border); font-variant-numeric: tabular-nums;
+      }
+      .glyph { display: block; flex: none; }
+
+      /* ============================================================
+         Capsule trigger (C)
+         ============================================================ */
+      .cap {
+        position: relative; display: inline-flex; align-items: stretch; height: 26px; border-radius: 9px;
+        box-shadow: inset 0 0 0 1px var(--border); overflow: hidden; isolation: isolate;
+        transition: box-shadow 0.3s;
+      }
+      .cap.max { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lv-max) 40%, var(--border)); }
+      .cap.uc {
+        box-shadow:
+          inset 0 0 0 1px color-mix(in srgb, var(--lv-ultracode) 22%, var(--border)),
+          0 0 18px -8px var(--lv-ultracode);
+        overflow: visible;
+      }
+      .cap-seg {
+        position: relative; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border: 0;
+        background: transparent; color: color-mix(in srgb, var(--muted-fg) 88%, transparent); font-size: 12.5px;
+        font-weight: 500; cursor: pointer; white-space: nowrap; transition: background 0.12s, color 0.12s;
+      }
+      .cap-seg:first-child { padding-left: 6px; border-radius: 9px 0 0 9px; }
+      .cap-seg:not(:first-child)::before {
+        content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 1px; background: var(--border);
+      }
+      .cap-seg:hover, .cap-model[aria-expanded="true"] { background: var(--accent); color: var(--foreground); }
+      .cap-seg:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+      .cap-effort { color: color-mix(in srgb, var(--lv) 88%, var(--foreground)); }
+      .cap-effort:hover { color: var(--lv); }
+      .cap-fast .ic { width: 13px; height: 13px; }
+      .cap-fast[aria-pressed="true"] { color: var(--fast); background: var(--fast-bg); }
+      .cap-fast[aria-pressed="true"] .ic { fill: currentColor; }
+      .cap-ctx { font-size: 11px; font-variant-numeric: tabular-nums; }
+
+      /* ============================================================
+         Picker shell
+         ============================================================ */
+      .picker {
+        position: absolute; z-index: 20; width: min(400px, calc(100% - 24px)); display: flex; flex-direction: column;
+        border-radius: 12px; background: color-mix(in srgb, var(--popover) 94%, transparent);
+        -webkit-backdrop-filter: blur(22px) saturate(170%); backdrop-filter: blur(22px) saturate(170%);
+        box-shadow: inset 0 0 0 1px var(--border), var(--pop-shadow); overflow: hidden; transform-origin: 0% 100%;
+      }
+      .pk-top { display: flex; height: 248px; min-height: 0; }
+      .pk-rail {
+        width: 46px; flex: none; display: flex; flex-direction: column; gap: 4px; padding: 6px;
+        border-right: 1px solid var(--border);
+      }
+      .pk-rail button {
+        position: relative; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px;
+        border: 0; background: transparent; color: var(--muted-fg); cursor: pointer; transition: background 0.12s;
+      }
+      .pk-rail button:hover { background: var(--muted); }
+      .pk-rail button[aria-selected="true"] {
+        background: var(--background); color: var(--foreground);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 0 0 1px var(--border);
+      }
+      .pk-rail button[aria-selected="true"]::after {
+        content: ""; position: absolute; right: -7px; top: 50%; width: 2px; height: 18px; margin-top: -9px;
+        border-radius: 2px 0 0 2px; background: var(--foreground);
+      }
+      .pk-rail .ic, .pk-rail .pv { width: 17px; height: 17px; }
+      .pk-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .pk-search {
+        display: flex; align-items: center; gap: 8px; height: 40px; flex: none; padding: 0 12px;
+        border-bottom: 1px solid var(--border); color: var(--faint-fg);
+      }
+      .pk-search input {
+        flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font: inherit; font-size: 13px;
+        color: var(--foreground);
+      }
+      .pk-search input::placeholder { color: var(--faint-fg); }
+      .pk-list {
+        flex: 1; min-height: 0; overflow-y: auto; padding: 4px 6px;
+        background: color-mix(in srgb, var(--muted) 55%, transparent); scrollbar-width: thin;
+      }
+      .pk-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+      .pk-row + .pk-row { margin-top: 1px; }
+      .pk-row.hl { background: var(--muted); }
+      .pk-row[aria-selected="true"] { background: var(--accent); }
+      .pk-star {
+        margin-top: 1px; padding: 0; border: 0; background: transparent; color: var(--muted-fg); cursor: pointer;
+        opacity: 0.4; transition: opacity 0.15s; display: grid;
+      }
+      .pk-row:hover .pk-star { opacity: 1; }
+      .pk-star.on { opacity: 1; color: #eab308; }
+      .pk-star.on .ic { fill: currentColor; }
+      .pk-star .ic { width: 15px; height: 15px; }
+      .pk-row-main { flex: 1; min-width: 0; }
+      .pk-row-title { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 500; }
+      .pk-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pk-row-effort {
+        display: inline-flex; align-items: center; gap: 3px; font-size: 11.5px; font-weight: 500;
+        color: color-mix(in srgb, var(--lv) 75%, var(--muted-fg));
+      }
+      .pk-row-effort .ic { width: 11px; height: 11px; color: var(--fast); }
+      .pk-row-sub { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 11.5px; color: var(--muted-fg); }
+      .pk-row-sub .pv { width: 12px; height: 12px; }
+      .pk-empty { padding: 24px 0; text-align: center; font-size: 12px; color: var(--muted-fg); }
+      .tuning-host { position: relative; border-top: 1px solid var(--border); overflow: clip; }
+
+      /* ============================================================
+         A · Dial
+         ============================================================ */
+      .dial { padding: 10px 12px 10px; }
+      .dial-head { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; margin-bottom: 8px; }
+      .dial-side { width: 32px; }
+      .dial-fast, .dial-reset {
+        position: relative; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px;
+        border: 0; background: transparent; color: var(--muted-fg); cursor: pointer; transition: color 0.15s, background 0.15s;
+      }
+      .dial-fast:hover, .dial-reset:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
+      .dial-fast .ic, .dial-reset .ic { width: 17px; height: 17px; }
+      .dial-fast[aria-pressed="true"] { color: var(--fast); }
+      .dial-fast[aria-pressed="true"] .ic { fill: currentColor; }
+      .dial-fast.burst::after {
+        content: ""; position: absolute; inset: 4px; border-radius: 50%;
+        box-shadow: 0 0 0 1.5px var(--fast); animation: ring-out 0.6s var(--ease) forwards;
+      }
+      @keyframes ring-out {
+        from { transform: scale(0.6); opacity: 0.9; }
+        to { transform: scale(1.5); opacity: 0; }
+      }
+      .dial-reset:disabled { opacity: 0.28; cursor: default; }
+      .dial-title { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+      .dial-level { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; color: var(--lv); transition: color 0.25s; }
+      .dial-model {
+        display: inline-flex; align-items: center; gap: 1px; border: 0; background: none; padding: 0 2px;
+        font-size: 12px; color: var(--muted-fg); cursor: pointer; border-radius: 4px;
+      }
+      .dial-model:hover { color: var(--foreground); }
+      .dial-model .ic { width: 12px; height: 12px; opacity: 0.7; }
+
+      .dial-track {
+        --r: 20px;
+        position: relative; height: 36px; margin: 4px 0; border-radius: 999px; background: var(--track);
+        cursor: pointer; touch-action: none; outline: none;
+        transition: --t 0.5s var(--spring-snappy);
+      }
+      .dial-track.dragging { transition: none; cursor: grabbing; }
+      .dial-track:focus-visible .dial-thumb { box-shadow: var(--thumb-shadow), 0 0 0 3px color-mix(in srgb, var(--lv) 55%, transparent); }
+      .dial-fill {
+        position: absolute; left: 0; top: 0; bottom: 0; overflow: hidden; border-radius: 999px;
+        width: calc(2 * var(--r) + (100% - 2 * var(--r)) * clamp(0, var(--t), 1));
+        background: linear-gradient(90deg, color-mix(in srgb, var(--lv) 45%, transparent), var(--lv));
+        transition: box-shadow 0.4s;
+      }
+      .dial[data-level="max"] .dial-fill { box-shadow: 0 0 22px -4px var(--lv); }
+      .dial[data-level="ultracode"] .dial-fill {
+        background-image: linear-gradient(90deg, var(--uc-1), var(--uc-2) 40%, var(--uc-3) 50%, var(--uc-2) 60%, var(--uc-1));
+        background-size: 200% 100%;
+        animation: fill-sheen 2.8s linear infinite;
+        box-shadow: 0 0 26px -6px var(--uc-2);
+      }
+      @keyframes fill-sheen {
+        from { background-position: 0% 0; }
+        to { background-position: -200% 0; }
+      }
+      .dial-sparks { position: absolute; left: 0; top: 0; height: 100%; pointer-events: none; }
+      .dial-notch {
+        position: absolute; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%;
+        left: calc(var(--r) + (100% - 2 * var(--r)) * var(--i)); background: var(--notch); pointer-events: none;
+        transition: background 0.25s;
+      }
+      .dial-notch.lit { background: rgba(255, 255, 255, 0.72); }
+      .dial-thumb {
+        position: absolute; top: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%;
+        left: calc(var(--r) + (100% - 2 * var(--r)) * clamp(0, var(--t), 1));
+        background: var(--thumb); box-shadow: var(--thumb-shadow); transition: transform 0.18s var(--ease), box-shadow 0.2s;
+      }
+      .dial-track:hover .dial-thumb { transform: scale(1.04); }
+      .dial-track.dragging .dial-thumb { transform: scale(0.94); }
+      .dial[data-level="ultracode"] .dial-thumb::after,
+      .dial[data-level="max"] .dial-thumb::after {
+        content: ""; position: absolute; inset: -5px; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--lv);
+        animation: halo 1.9s var(--ease) infinite;
+      }
+      .dial[data-level="max"] .dial-thumb::after { animation-duration: 2.8s; }
+      @keyframes halo {
+        0% { transform: scale(0.88); opacity: 0.75; }
+        100% { transform: scale(1.4); opacity: 0; }
+      }
+      .dial-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; min-height: 26px; }
+      .kv { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted-fg); }
+      .kv b { font-weight: 500; color: var(--foreground); }
+      .kv i { font-style: normal; color: var(--faint-fg); }
+      .hint { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--faint-fg); }
+
+      /* ============================================================
+         B · Matrix
+         ============================================================ */
+      .mx { padding: 12px 14px 12px; }
+      .mx-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 15px; }
+      .mx-k { color: var(--muted-fg); font-weight: 500; }
+      .mx-level { color: var(--lv); font-weight: 600; transition: color 0.25s; }
+      .mx-spacer { flex: 1; }
+      .mx-model { font-size: 12px; color: var(--faint-fg); }
+      .mx-help { position: relative; }
+      .mx-help > button {
+        width: 26px; height: 26px; display: grid; place-items: center; border-radius: 7px; border: 0;
+        background: transparent; color: var(--muted-fg); cursor: pointer;
+      }
+      .mx-help > button:hover { color: var(--foreground); background: var(--muted); }
+      .mx-help > button .ic { width: 17px; height: 17px; }
+      .mx-card {
+        position: absolute; right: -4px; bottom: calc(100% + 6px); width: 260px; padding: 8px 10px; z-index: 5;
+        border-radius: 10px; background: var(--popover); box-shadow: inset 0 0 0 1px var(--border), var(--pop-shadow);
+        font-size: 12px; opacity: 0; transform: translateY(4px); pointer-events: none;
+        transition: opacity 0.16s, transform 0.2s var(--ease);
+      }
+      .mx-help:hover .mx-card, .mx-help:focus-within .mx-card { opacity: 1; transform: none; }
+      .mx-card div { display: flex; gap: 8px; padding: 3px 0; }
+      .mx-card b { width: 72px; flex: none; font-weight: 600; color: var(--lv); }
+      .mx-card span { color: var(--muted-fg); }
+      .mx-ends { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted-fg); margin-bottom: 6px; }
+      .mx-track {
+        position: relative; height: 44px; border-radius: 12px; background: var(--track); cursor: pointer;
+        touch-action: none; outline: none; transition: box-shadow 0.3s;
+      }
+      .mx-track:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--lv) 60%, transparent); }
+      .mx[data-level="ultracode"] .mx-track { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lv) 22%, transparent); }
+      .mx-track.dragging { cursor: grabbing; }
+      .mx-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .mx-thumb {
+        position: absolute; left: 0; top: 50%; width: 30px; height: 34px; border-radius: 9px;
+        background: var(--thumb); box-shadow: var(--thumb-shadow); will-change: transform; pointer-events: none;
+      }
+      .mx-rec { position: relative; height: 22px; font-size: 12px; color: var(--muted-fg); }
+      .mx-rec span { position: absolute; top: 4px; transform: translateX(-50%); white-space: nowrap; transition: left 0.3s var(--ease); }
+      .mx-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+      .mx-chip {
+        height: 26px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px 0 8px; border: 0;
+        border-radius: 8px; background: transparent; color: var(--muted-fg); box-shadow: inset 0 0 0 1px var(--border);
+        font-size: 12px; font-weight: 500; cursor: pointer; transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+      }
+      .mx-chip:hover { color: var(--foreground); }
+      .mx-chip .ic { width: 13px; height: 13px; }
+      .mx-chip[aria-pressed="true"] {
+        color: var(--fast); background: var(--fast-bg);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fast) 30%, transparent);
+      }
+      .mx-chip[aria-pressed="true"] .ic { fill: currentColor; }
+      .mx-think { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0 2px; }
+      .mx-think .t { font-size: 13px; font-weight: 500; }
+      .mx-think .d { font-size: 12px; color: var(--muted-fg); }
+
+      /* ============================================================
+         C · Segments (spec sheet)
+         ============================================================ */
+      .spec { display: flex; flex-direction: column; gap: 9px; padding: 10px 14px 12px; }
+      .spec-head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted-fg); }
+      .spec-title { font-weight: 600; color: var(--foreground); }
+      .spec-model { color: var(--faint-fg); }
+      .spec-reset {
+        margin-left: auto; height: 22px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px;
+        border: 0; border-radius: 6px; background: transparent; color: var(--muted-fg); font-size: 11.5px; cursor: pointer;
+      }
+      .spec-reset:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
+      .spec-reset:disabled { opacity: 0.35; cursor: default; }
+      .spec-reset .ic { width: 12px; height: 12px; }
+      .spec-row { display: grid; grid-template-columns: 56px 1fr; gap: 10px; align-items: start; }
+      .spec-label { font-size: 12px; line-height: 30px; color: var(--muted-fg); }
+      .spec-stack { min-width: 0; }
+      .spec-desc { display: grid; margin-top: 5px; font-size: 11.5px; color: var(--muted-fg); }
+      .spec-static { font-size: 12px; line-height: 30px; color: var(--muted-fg); }
+      .spec-static b { font-weight: 500; color: var(--foreground); }
+
+      /* ============================================================
+         Notes
+         ============================================================ */
+      .notes { margin-top: 26px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px; }
+      .notes h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--muted-fg); letter-spacing: 0.01em; }
+      .notes p { margin: 0; font-size: 13px; color: var(--foreground); opacity: 0.86; }
+      .notes-foot { margin-top: 22px; font-size: 12px; color: var(--faint-fg); max-width: 760px; }
+      @media (max-width: 860px) { .notes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    </style>
+  </head>
+  <body>
+    <div class="lab">
+      <header class="lab-bar">
+        <div>
+          <h1 class="lab-title">Composer model controls</h1>
+          <p class="lab-sub">
+            Three directions for folding reasoning effort, fast mode and context window into the model
+            picker. Hover or click the model control in the composer.
+          </p>
+        </div>
+        <div class="lab-controls">
+          <div id="tabs-slot"></div>
+          <button class="lab-icon-btn" id="theme-btn" type="button" aria-label="Toggle theme"></button>
+          <button class="lab-icon-btn" id="motion-btn" type="button" aria-pressed="true">Motion</button>
+        </div>
+      </header>
+
+      <div class="scenarios" id="scenarios"><span>Jump to</span></div>
+
+      <div class="stage" id="stage">
+        <div class="thread">
+          <div class="msg-user">Make provider hot reload keep live sessions instead of dropping them.</div>
+          <div class="msg-assistant">
+            <p>
+              Reloads currently tear down the instance before in-flight turns settle. I'll put a generation
+              counter on <code>ProviderInstanceRegistryLive</code> so a reload swaps the driver only once the
+              old generation drains, then add a regression test for a reload mid-turn.
+            </p>
+            <div class="msg-meta">Worked for 2m 14s · 3 files changed</div>
+          </div>
+        </div>
+        <div class="composer-dock">
+          <div class="composer">
+            <textarea rows="2" placeholder="Ask anything — @ to add context, / for commands"></textarea>
+            <div class="composer-footer">
+              <div class="cf-left">
+                <button class="ghost-icon" type="button" aria-label="Add context" id="plus-btn"></button>
+                <div class="trigger-slot" id="trigger-slot"></div>
+                <button class="ghost-chip" type="button" id="plan-chip"></button>
+                <button class="ghost-chip" type="button" id="access-chip"></button>
+              </div>
+              <div class="cf-right">
+                <svg class="ctx-ring" viewBox="0 0 20 20" aria-label="Context 32% used">
+                  <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-opacity=".28" stroke-width="2" />
+                  <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-dasharray="47.1" stroke-dashoffset="32" stroke-linecap="round" transform="rotate(-90 10 10)" />
+                </svg>
+                <button class="send" type="button" aria-label="Send" id="send-btn"></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="notes" id="notes"></section>
+      <p class="notes-foot">
+        Data is real: Claude options come from <code>apps/server/src/provider/model-manifest.json</code>, Codex
+        options from <code>CodexProvider.mapCodexModelCapabilities</code>. Each direction renders the existing
+        descriptors (effort / reasoningEffort select, fastMode boolean, contextWindow select, thinking boolean),
+        so none of them need contract changes. Keys: ↑↓ list, Enter pick &amp; close, ←→ effort (search empty),
+        Esc close, 1/2/3 switch direction.
+      </p>
+    </div>
+
+    <script>
+      /* ==========================================================
+         Utilities
+         ========================================================== */
+      const DPR = Math.min(2, window.devicePixelRatio || 1);
+      const EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
+      const GENTLE = "cubic-bezier(0.22, 1, 0.36, 1)";
+      const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+      const $ = (s, r = document) => r.querySelector(s);
+      let motion = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const motionOn = () => motion;
+
+      function h(tag, attrs, ...children) {
+        const el = document.createElement(tag);
+        if (attrs)
+          for (const [k, v] of Object.entries(attrs)) {
+            if (v == null || v === false) continue;
+            if (k === "class") el.className = v;
+            else if (k === "style") for (const [sk, sv] of Object.entries(v)) el.style.setProperty(sk, String(sv));
+            else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v);
+            else el.setAttribute(k, v === true ? "" : String(v));
+          }
+        for (const c of children.flat(Infinity)) {
+          if (c == null || c === false) continue;
+          el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        }
+        return el;
+      }
+
+      const PATHS = {
+        chevronDown: '<path d="m6 9 6 6 6-6"/>',
+        chevronRight: '<path d="m9 18 6-6-6-6"/>',
+        zap: '<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
+        star: '<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>',
+        search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+        rotateCcw: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+        help: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
+        brain: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>',
+        plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+        arrowUp: '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+        listTodo: '<rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
+        shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+        moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+        sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+      };
+      function icon(name, cls = "") {
+        const t = document.createElement("template");
+        t.innerHTML = `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${PATHS[name]}</svg>`;
+        return t.content.firstElementChild;
+      }
+      const CLAUDE_D =
+        "m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z";
+      const OPENAI_D =
+        "M239.184 106.203a64.716 64.716 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.716 64.716 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.665 64.665 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.767 64.767 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483Zm-97.56 136.338a48.397 48.397 0 0 1-31.105-11.255l1.535-.87 51.67-29.825a8.595 8.595 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601Zm-104.466-44.61a48.345 48.345 0 0 1-5.781-32.589l1.534.921 51.722 29.826a8.339 8.339 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803ZM23.549 85.38a48.499 48.499 0 0 1 25.58-21.333v61.39a8.288 8.288 0 0 0 4.195 7.316l62.874 36.272-21.845 12.636a.819.819 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405v.256Zm179.466 41.695-63.08-36.63L161.73 77.86a.819.819 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.544 8.544 0 0 0-4.4-7.213Zm21.742-32.69-1.535-.922-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.716.716 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391v.205ZM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87-51.67 29.825a8.595 8.595 0 0 0-4.246 7.367l-.051 72.697Zm11.868-25.58 28.138-16.217 28.188 16.218v32.434l-28.086 16.218-28.188-16.218-.052-32.434Z";
+      function providerIcon(id, cls = "") {
+        const t = document.createElement("template");
+        t.innerHTML =
+          id === "claude"
+            ? `<svg class="pv ${cls}" viewBox="0 0 256 257" aria-hidden="true"><path fill="#d97757" d="${CLAUDE_D}"/></svg>`
+            : `<svg class="pv ${cls}" viewBox="0 0 256 260" aria-hidden="true"><path fill="currentColor" d="${OPENAI_D}"/></svg>`;
+        return t.content.firstElementChild;
+      }
+
+      function mulberry32(a) {
+        return function () {
+          a |= 0;
+          a = (a + 0x6d2b79f5) | 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      /** Vertical roll between two labels; direction follows the change. */
+      function swapRoll(container, text, dir = 1, instant = false) {
+        if (container.dataset.text === text && container.childElementCount) return;
+        container.dataset.text = text;
+        const next = h("span", { class: "roll-item" }, text);
+        const current = [...container.children].filter((c) => !c.classList.contains("leaving"));
+        if (instant || !current.length || !motionOn() || !container.isConnected) {
+          container.replaceChildren(next);
+          return;
+        }
+        const w0 = container.getBoundingClientRect().width;
+        container.append(next);
+        const w1 = next.getBoundingClientRect().width;
+        const d = dir >= 0 ? 1 : -1;
+        for (const c of current) {
+          c.classList.add("leaving");
+          const a = c.animate(
+            [
+              { transform: "translateY(0)", opacity: 1, filter: "blur(0px)" },
+              { transform: `translateY(${-d * 85}%)`, opacity: 0, filter: "blur(3px)" },
+            ],
+            { duration: 200, easing: "cubic-bezier(.4,0,.7,1)", fill: "forwards" },
+          );
+          a.onfinish = () => c.remove();
+        }
+        next.animate(
+          [
+            { transform: `translateY(${d * 85}%)`, opacity: 0, filter: "blur(3px)" },
+            { transform: "translateY(0)", opacity: 1, filter: "blur(0px)" },
+          ],
+          { duration: 320, easing: GENTLE },
+        );
+        if (Math.abs(w1 - w0) > 0.5)
+          container.animate([{ width: `${w0}px` }, { width: `${w1}px` }], { duration: 320, easing: GENTLE });
+      }
+
+      /** Width-collapsing show/hide for inline pieces of a trigger. */
+      function setPresence(el, on, { gap = 6, instant = false } = {}) {
+        const intent = on ? "1" : "0";
+        if (el.dataset.on === intent) return false;
+        const first = el.dataset.on === undefined;
+        el.dataset.on = intent;
+        for (const a of el.getAnimations()) a.cancel();
+        if (first || instant || !motionOn() || !el.isConnected) {
+          el.hidden = !on;
+          return true;
+        }
+        if (on) {
+          el.hidden = false;
+          const w = el.getBoundingClientRect().width;
+          el.animate(
+            [
+              { width: "0px", marginLeft: `${-gap}px`, opacity: 0 },
+              { width: `${w}px`, marginLeft: "0px", opacity: 1 },
+            ],
+            { duration: 280, easing: GENTLE },
+          );
+        } else {
+          const w = el.getBoundingClientRect().width;
+          const a = el.animate(
+            [
+              { width: `${w}px`, marginLeft: "0px", opacity: 1 },
+              { width: "0px", marginLeft: `${-gap}px`, opacity: 0 },
+            ],
+            { duration: 200, easing: EASE },
+          );
+          a.onfinish = () => {
+            if (el.dataset.on === "0") el.hidden = true;
+          };
+        }
+        return true;
+      }
+
+      function popIcon(el) {
+        if (!motionOn() || !el) return;
+        el.animate(
+          [
+            { transform: "scale(.3) rotate(-30deg)", opacity: 0.2 },
+            { transform: "scale(1.3) rotate(8deg)", opacity: 1, offset: 0.55 },
+            { transform: "none", opacity: 1 },
+          ],
+          { duration: 420, easing: EASE },
+        );
+      }
+      function swapIcon(box, next) {
+        const prev = [...box.children];
+        box.append(next);
+        if (!prev.length || !motionOn()) {
+          prev.forEach((p) => p.remove());
+          return;
+        }
+        for (const p of prev) {
+          p.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(.5) rotate(-40deg)" }], {
+            duration: 180,
+            easing: EASE,
+            fill: "forwards",
+          }).onfinish = () => p.remove();
+        }
+        next.animate([{ opacity: 0, transform: "scale(.5) rotate(40deg)" }, { opacity: 1, transform: "none" }], {
+          duration: 320,
+          easing: EASE,
+        });
+      }
+      function spin(el) {
+        if (motionOn()) el.animate([{ transform: "rotate(0)" }, { transform: "rotate(-360deg)" }], { duration: 560, easing: GENTLE });
+      }
+      function retrigger(el, cls) {
+        el.classList.remove(cls);
+        void el.offsetWidth;
+        el.classList.add(cls);
+        el.addEventListener("animationend", () => el.classList.remove(cls), { once: true });
+      }
+      function animateHeight(el, mutate) {
+        const h0 = el.getBoundingClientRect().height;
+        mutate();
+        const h1 = el.getBoundingClientRect().height;
+        if (!motionOn()) return;
+        if (Math.abs(h1 - h0) > 1) el.animate([{ height: `${h0}px` }, { height: `${h1}px` }], { duration: 300, easing: GENTLE });
+        el.firstElementChild?.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], {
+          duration: 260,
+          easing: GENTLE,
+        });
+      }
+      /** Sparks radiating from an element, positioned inside `layer`. */
+      function burst(anchorEl, layer, count = 12) {
+        if (!motionOn() || !anchorEl || !layer) return;
+        const r = anchorEl.getBoundingClientRect();
+        const lr = layer.getBoundingClientRect();
+        const cx = r.left - lr.left + r.width / 2;
+        const cy = r.top - lr.top + r.height / 2;
+        for (let i = 0; i < count; i++) {
+          const p = h("span", { class: "spark" });
+          const ang = (i / count) * Math.PI * 2 + Math.random() * 0.5;
+          const dist = 12 + Math.random() * 14;
+          p.style.left = `${cx}px`;
+          p.style.top = `${cy}px`;
+          layer.append(p);
+          p.animate(
+            [
+              { transform: "translate(-50%,-50%) scale(1)", opacity: 1 },
+              {
+                transform: `translate(calc(-50% + ${Math.cos(ang) * (r.width / 2 + dist)}px), calc(-50% + ${Math.sin(ang) * (r.height / 2 + dist * 0.6)}px)) scale(.2)`,
+                opacity: 0,
+              },
+            ],
+            { duration: 520 + Math.random() * 260, easing: "cubic-bezier(.2,.7,.3,1)" },
+          ).onfinish = () => p.remove();
+        }
+      }
+
+      /** Segmented control with a sliding indicator; radiogroup semantics. */
+      function segmented(options, value, onChange, { label, cls = "" } = {}) {
+        const ind = h("span", { class: "seg-ind", "aria-hidden": "true" });
+        const el = h("div", { class: `seg ${cls}`, role: "radiogroup", "aria-label": label }, ind);
+        let cur = value;
+        let placed = false;
+        const btns = options.map((o) => {
+          const b = h(
+            "button",
+            { class: "seg-opt", type: "button", role: "radio", "aria-checked": "false", tabindex: "-1", "data-id": o.id, "data-level": o.level, title: o.title },
+            o.content ?? o.label,
+          );
+          b.addEventListener("click", () => onChange(o.id));
+          el.append(b);
+          return b;
+        });
+        el.addEventListener("keydown", (e) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const i = options.findIndex((o) => o.id === cur);
+          let j = e.key === "ArrowLeft" ? i - 1 : e.key === "ArrowRight" ? i + 1 : e.key === "Home" ? 0 : options.length - 1;
+          j = clamp(j, 0, options.length - 1);
+          onChange(options[j].id);
+          btns[j].focus();
+        });
+        function place(animate) {
+          const b = btns[options.findIndex((o) => o.id === cur)];
+          if (!b) return;
+          if (!b.offsetWidth) {
+            requestAnimationFrame(() => place(false));
+            return;
+          }
+          if (!animate || !placed || !motionOn()) ind.style.transition = "none";
+          ind.style.width = `${b.offsetWidth}px`;
+          ind.style.transform = `translateX(${b.offsetLeft - 2}px)`;
+          if (b.dataset.level) ind.dataset.level = b.dataset.level;
+          else delete ind.dataset.level;
+          void ind.offsetWidth;
+          ind.style.transition = "";
+          placed = true;
+        }
+        function sync(animate = true) {
+          for (const b of btns) {
+            const on = b.dataset.id === cur;
+            b.setAttribute("aria-checked", String(on));
+            b.tabIndex = on ? 0 : -1;
+          }
+          place(animate);
+        }
+        return {
+          el,
+          btns,
+          indicator: ind,
+          set(v) {
+            if (v === cur) return;
+            cur = v;
+            sync(true);
+          },
+          sync,
+          focus() {
+            btns[options.findIndex((o) => o.id === cur)]?.focus({ preventScroll: true });
+          },
+        };
+      }
+
+      function toggleSwitch(on, onChange, label) {
+        const el = h("button", { class: "switch", type: "button", role: "switch", "aria-checked": String(on), "aria-label": label }, h("span", { class: "knob" }));
+        el.addEventListener("click", () => onChange(el.getAttribute("aria-checked") !== "true"));
+        return { el, set: (v) => el.setAttribute("aria-checked", String(v)) };
+      }
+
+      /* ==========================================================
+         Catalog — mirrors model-manifest.json + Codex mapping
+         ========================================================== */
+      const LEVELS = {
+        none: { label: "None", seg: "None", desc: "No extended reasoning" },
+        minimal: { label: "Minimal", seg: "Min", desc: "Fastest replies, minimal deliberation" },
+        low: { label: "Low", seg: "Low", desc: "Quick edits and lookups" },
+        medium: { label: "Medium", seg: "Med", desc: "Balanced speed and depth" },
+        high: { label: "High", seg: "High", desc: "Thorough work on multi-file changes" },
+        xhigh: { label: "Extra High", short: "XHigh", seg: "XHigh", desc: "Extended reasoning for hard problems" },
+        max: { label: "Max", seg: "Max", desc: "Deepest reasoning, slowest turns" },
+        ultracode: { label: "Ultracode", seg: "Ultracode", desc: "Extra-high effort with Claude’s Ultracode mode" },
+      };
+      const shortLabel = (k) => LEVELS[k].short ?? LEVELS[k].label;
+      const CTX_LABEL = { "200k": "200K", "1m": "1M" };
+      const CTX_TOKENS = { "200k": 200000, "1m": 1000000 };
+      const CLAUDE_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracode"];
+      const CODEX_LEVELS = ["low", "medium", "high", "xhigh"];
+
+      const PROVIDERS = [
+        {
+          id: "claude",
+          name: "Claude",
+          models: [
+            { slug: "claude-fable-5-1", short: "Fable 5.1", effort: { levels: CLAUDE_LEVELS, def: "high" }, context: { options: ["200k", "1m"], def: "1m" } },
+            { slug: "claude-opus-5-5", short: "Opus 5.5", effort: { levels: CLAUDE_LEVELS, def: "medium" }, contextFixed: "1m" },
+            { slug: "claude-opus-5", short: "Opus 5", effort: { levels: CLAUDE_LEVELS, def: "high" }, fast: true, context: { options: ["200k", "1m"], def: "1m" } },
+            { slug: "claude-sonnet-5-5", short: "Sonnet 5.5", effort: { levels: CLAUDE_LEVELS, def: "high" }, context: { options: ["200k", "1m"], def: "200k" } },
+            { slug: "claude-haiku-4-5", short: "Haiku 4.5", thinking: { def: true } },
+          ],
+        },
+        {
+          id: "codex",
+          name: "Codex",
+          models: [
+            { slug: "gpt-5.6-sol", short: "GPT-5.6 Sol", effort: { levels: CODEX_LEVELS, def: "medium" }, fast: true },
+            { slug: "gpt-5.6-terra", short: "GPT-5.6 Terra", effort: { levels: CODEX_LEVELS, def: "medium" }, fast: true },
+            { slug: "gpt-5.6-luna", short: "GPT-5.6 Luna", effort: { levels: ["minimal", "low", "medium", "high"], def: "low" } },
+          ],
+        },
+      ];
+      const MODELS = new Map();
+      for (const p of PROVIDERS) for (const m of p.models) MODELS.set(`${p.id}/${m.slug}`, { ...m, key: `${p.id}/${m.slug}`, provider: p });
+      const capSig = (m) => JSON.stringify([m.effort?.levels, !!m.fast, m.context?.options, !!m.thinking, m.contextFixed]);
+      const defaultsFor = (m) => ({ effort: m.effort?.def, fast: false, context: m.context?.def, thinking: m.thinking?.def });
+
+      /* ==========================================================
+         Store
+         ========================================================== */
+      const state = {
+        active: "claude/claude-opus-5-5",
+        sel: new Map(),
+        favorites: [
+          { key: "claude/claude-opus-5-5", effort: "high" },
+          { key: "codex/gpt-5.6-sol", effort: "xhigh", fast: true },
+          { key: "claude/claude-fable-5-1", effort: "ultracode", context: "1m" },
+        ],
+        demo: "A",
+        rail: "claude",
+        query: "",
+        highlight: -1,
+      };
+      const activeModel = () => MODELS.get(state.active);
+      function sel(key = state.active) {
+        if (!state.sel.has(key)) state.sel.set(key, defaultsFor(MODELS.get(key)));
+        return state.sel.get(key);
+      }
+      sel().effort = "high";
+
+      const listeners = new Set();
+      const emit = (evt) => listeners.forEach((l) => l(evt));
+      function setOpt(field, value) {
+        const s = sel();
+        const prev = s[field];
+        if (prev === value) return;
+        s[field] = value;
+        emit({ type: field, prev, value });
+      }
+      function setModel(key, opts) {
+        const prev = state.active;
+        state.active = key;
+        const s = sel(key);
+        let changed = prev !== key;
+        if (opts)
+          for (const [k, v] of Object.entries(opts))
+            if (v !== undefined && s[k] !== v) {
+              s[k] = v;
+              changed = true;
+            }
+        if (changed) emit({ type: "model", prev, value: key });
+      }
+      function isDefault(key = state.active) {
+        const d = defaultsFor(MODELS.get(key));
+        const s = sel(key);
+        return d.effort === s.effort && !!d.fast === !!s.fast && d.context === s.context && d.thinking === s.thinking;
+      }
+      function resetDefaults() {
+        const prev = { ...sel() };
+        Object.assign(sel(), defaultsFor(activeModel()));
+        emit({ type: "reset", prev });
+      }
+      function effortIndex(m = activeModel(), s = sel()) {
+        return m.effort ? m.effort.levels.indexOf(s.effort) : -1;
+      }
+      function stepEffort(d) {
+        const m = activeModel();
+        if (m.effort) {
+          const i = effortIndex();
+          const j = clamp(i + d, 0, m.effort.levels.length - 1);
+          if (j !== i) setOpt("effort", m.effort.levels[j]);
+        } else if (m.thinking) setOpt("thinking", d > 0);
+      }
+      /** Level key the composer displays: an effort level, "on" for thinking, or null. */
+      function displayLevel(m = activeModel(), s = sel()) {
+        if (m.effort) return s.effort;
+        if (m.thinking) return s.thinking ? "on" : null;
+        return null;
+      }
+
+      /* ==========================================================
+         Picker shell (shared by all directions)
+         ========================================================== */
+      const stage = $("#stage");
+      const slot = $("#trigger-slot");
+      const picker = { el: null, open: false, sticky: false, dragging: false, hoverTimer: 0, closeTimer: 0 };
+      let triggerCtl = null;
+      let tuningCtl = null;
+      let currentItems = [];
+
+      function bindTrigger(el, { hover = true } = {}) {
+        el.addEventListener("pointerenter", (e) => {
+          if (!hover || e.pointerType !== "mouse") return;
+          clearTimeout(picker.closeTimer);
+          if (!picker.open) {
+            clearTimeout(picker.hoverTimer);
+            picker.hoverTimer = setTimeout(() => openPicker(), 170);
+          }
+        });
+        el.addEventListener("pointerleave", () => {
+          clearTimeout(picker.hoverTimer);
+          scheduleClose();
+        });
+        el.addEventListener("click", () => {
+          clearTimeout(picker.hoverTimer);
+          if (!picker.open) openPicker({ sticky: true });
+          else if (!picker.sticky) picker.sticky = true;
+          else closePicker();
+        });
+      }
+      function scheduleClose() {
+        if (!picker.open || picker.sticky || picker.dragging) return;
+        clearTimeout(picker.closeTimer);
+        picker.closeTimer = setTimeout(() => closePicker(), 260);
+      }
+      function positionPicker() {
+        if (!picker.el || !triggerCtl) return;
+        const a = triggerCtl.anchor.getBoundingClientRect();
+        const s = stage.getBoundingClientRect();
+        const w = picker.el.offsetWidth;
+        picker.el.style.left = `${clamp(a.left - s.left - 2, 12, s.width - w - 12)}px`;
+        picker.el.style.bottom = `${s.bottom - a.top + 8}px`;
+      }
+
+      function openPicker({ sticky = false, focus = "search" } = {}) {
+        clearTimeout(picker.closeTimer);
+        if (picker.open) {
+          if (sticky) picker.sticky = true;
+          if (focus === "tuning") tuningCtl?.focusPrimary?.(true);
+          return;
+        }
+        picker.open = true;
+        picker.sticky = sticky;
+        state.rail = activeModel().provider.id;
+        state.query = "";
+        state.highlight = -1;
+        const search = h("input", { type: "text", placeholder: "Search models…", "aria-label": "Search models", spellcheck: "false", autocomplete: "off" });
+        search.addEventListener("input", () => {
+          state.query = search.value;
+          state.highlight = 0;
+          renderList(true);
+        });
+        const el = h(
+          "div",
+          { class: "picker", role: "dialog", "aria-label": "Model and reasoning" },
+          h(
+            "div",
+            { class: "pk-top" },
+            h("nav", { class: "pk-rail", role: "tablist", "aria-label": "Providers" }),
+            h("div", { class: "pk-main" }, h("label", { class: "pk-search" }, icon("search"), search), h("div", { class: "pk-list", role: "listbox" })),
+          ),
+          h("div", { class: "tuning-host" }),
+        );
+        el.addEventListener("pointerenter", () => clearTimeout(picker.closeTimer));
+        el.addEventListener("pointerleave", () => scheduleClose());
+        el.addEventListener("pointerdown", () => {
+          picker.sticky = true;
+        });
+        el.addEventListener("keydown", onPickerKey);
+        picker.el = el;
+        stage.append(el);
+        renderRail();
+        renderList();
+        tuningCtl = DEMOS[state.demo].mountTuning($(".tuning-host", el));
+        positionPicker();
+        triggerCtl?.setExpanded(true);
+        if (motionOn())
+          el.animate(
+            [
+              { opacity: 0, transform: "translateY(6px) scale(.97)" },
+              { opacity: 1, transform: "none" },
+            ],
+            { duration: 240, easing: GENTLE },
+          );
+        if (focus === "tuning") tuningCtl?.focusPrimary?.(true);
+        else search.focus({ preventScroll: true });
+      }
+
+      function closePicker(immediate = false) {
+        if (!picker.open) return;
+        picker.open = false;
+        picker.dragging = false;
+        clearTimeout(picker.closeTimer);
+        clearTimeout(picker.hoverTimer);
+        const el = picker.el;
+        picker.el = null;
+        tuningCtl?.destroy();
+        tuningCtl = null;
+        triggerCtl?.setExpanded(false);
+        if (immediate || !motionOn()) {
+          el.remove();
+          return;
+        }
+        el.style.pointerEvents = "none";
+        el.animate(
+          [
+            { opacity: 1, transform: "none" },
+            { opacity: 0, transform: "translateY(4px) scale(.98)" },
+          ],
+          { duration: 140, easing: "ease-in", fill: "forwards" },
+        ).onfinish = () => el.remove();
+      }
+
+      function renderRail() {
+        const rail = $(".pk-rail", picker.el);
+        const entries = [{ id: "favorites", name: "Favorites" }, ...PROVIDERS];
+        rail.replaceChildren(
+          ...entries.map((p) =>
+            h(
+              "button",
+              {
+                type: "button",
+                role: "tab",
+                "aria-selected": String(state.rail === p.id),
+                "aria-label": p.name,
+                title: p.name,
+                onclick: () => {
+                  state.rail = p.id;
+                  state.query = "";
+                  $(".pk-search input", picker.el).value = "";
+                  state.highlight = -1;
+                  renderRail();
+                  renderList(true);
+                },
+              },
+              p.id === "favorites" ? icon("star") : providerIcon(p.id),
+            ),
+          ),
+        );
+      }
+
+      function listItems() {
+        const q = state.query.trim().toLowerCase();
+        if (q)
+          return [...MODELS.values()]
+            .filter((m) => `${m.short} ${m.slug} ${m.provider.name}`.toLowerCase().includes(q))
+            .map((m) => ({ key: m.key, model: m }));
+        if (state.rail === "favorites") return state.favorites.map((f) => ({ key: f.key, model: MODELS.get(f.key), fav: f }));
+        return PROVIDERS.find((p) => p.id === state.rail).models.map((m) => ({ key: `${state.rail}/${m.slug}`, model: MODELS.get(`${state.rail}/${m.slug}`) }));
+      }
+      const favMatches = (f) => {
+        const s = sel(f.key);
+        return f.key === state.active && (f.effort === undefined || s.effort === f.effort) && !!s.fast === !!f.fast;
+      };
+      function rowState(it) {
+        const m = it.model;
+        const selected = it.fav ? favMatches(it.fav) : it.key === state.active;
+        const isFav = !!it.fav || state.favorites.some((f) => f.key === it.key);
+        let level = null;
+        let fast = false;
+        if (it.fav) {
+          level = it.fav.effort ?? null;
+          fast = !!it.fav.fast;
+        } else if (it.key === state.active) {
+          level = displayLevel(m, sel(it.key));
+          fast = !!(m.fast && sel(it.key).fast);
+        }
+        return { selected, isFav, level, fast };
+      }
+      function effortTag(level, fast) {
+        if (!level) return null;
+        return h("span", { class: "pk-row-effort", "data-level": level }, level === "on" ? "Thinking" : shortLabel(level), fast ? icon("zap", "fill") : null);
+      }
+
+      function renderList(fade = false) {
+        if (!picker.open) return;
+        const list = $(".pk-list", picker.el);
+        const items = listItems();
+        const sig = items.map((i) => i.key + (i.fav ? `#${state.favorites.indexOf(i.fav)}` : "")).join("|") + (state.query ? "q" : "") + state.rail;
+        const showProvider = state.rail === "favorites" || !!state.query.trim();
+        if (state.highlight < 0 || state.highlight >= items.length) {
+          const si = items.findIndex((it) => rowState(it).selected);
+          state.highlight = si >= 0 ? si : 0;
+        }
+        // Patch in place when the row set is unchanged so hover/click targets survive updates.
+        if (list.dataset.sig === sig) {
+          currentItems = items;
+          [...list.children].forEach((row, i) => {
+            const it = items[i];
+            if (!it) return;
+            const st = rowState(it);
+            row.setAttribute("aria-selected", String(st.selected));
+            row.classList.toggle("hl", i === state.highlight);
+            row.querySelector(".pk-star").classList.toggle("on", st.isFav);
+            const old = row.querySelector(".pk-row-effort");
+            const next = effortTag(st.level, st.fast);
+            if (old && next) old.replaceWith(next);
+            else if (old) old.remove();
+            else if (next) row.querySelector(".pk-row-name").after(next);
+          });
+          return;
+        }
+        list.dataset.sig = sig;
+        currentItems = items;
+        const rows = items.map((it, i) => {
+          const m = it.model;
+          const st = rowState(it);
+          return h(
+            "div",
+            {
+              class: `pk-row${i === state.highlight ? " hl" : ""}`,
+              role: "option",
+              "aria-selected": String(st.selected),
+              onclick: () => choose(it, false),
+              onpointermove: () => setHighlight(i),
+            },
+            h(
+              "button",
+              {
+                class: `pk-star${st.isFav ? " on" : ""}`,
+                type: "button",
+                "aria-label": st.isFav ? "Remove from favorites" : "Add to favorites",
+                onclick: (e) => {
+                  e.stopPropagation();
+                  toggleFav(it);
+                },
+              },
+              icon("star"),
+            ),
+            h(
+              "div",
+              { class: "pk-row-main" },
+              h("div", { class: "pk-row-title" }, h("span", { class: "pk-row-name" }, m.short), effortTag(st.level, st.fast), i < 9 ? h("kbd", null, `⌘${i + 1}`) : null),
+              showProvider ? h("div", { class: "pk-row-sub" }, providerIcon(m.provider.id), m.provider.name) : null,
+            ),
+          );
+        });
+        list.replaceChildren(...rows);
+        if (!rows.length) list.append(h("div", { class: "pk-empty" }, "No models found"));
+        if (fade && motionOn()) list.animate([{ opacity: 0.35, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
+      }
+      function setHighlight(i) {
+        if (state.highlight === i || !picker.el) return;
+        state.highlight = i;
+        [...$(".pk-list", picker.el).children].forEach((r, j) => r.classList.toggle("hl", j === i));
+      }
+      function choose(it, forceClose) {
+        const wasActive = it.fav ? favMatches(it.fav) : it.key === state.active;
+        if (it.fav) setModel(it.key, { effort: it.fav.effort, fast: !!it.fav.fast, context: it.fav.context });
+        else setModel(it.key);
+        if (forceClose || wasActive) {
+          closePicker();
+          triggerCtl?.anchor.focus({ preventScroll: true });
+        }
+      }
+      function toggleFav(it) {
+        if (it.fav) state.favorites = state.favorites.filter((f) => f !== it.fav);
+        else if (state.favorites.some((f) => f.key === it.key)) state.favorites = state.favorites.filter((f) => f.key !== it.key);
+        else {
+          const m = it.model;
+          const s = sel(it.key);
+          state.favorites = [...state.favorites, { key: it.key, effort: m.effort ? s.effort : undefined, fast: !!(m.fast && s.fast), context: m.context ? s.context : undefined }];
+        }
+        renderList();
+      }
+      function revealActiveRow() {
+        if (!picker.open) return;
+        const m = activeModel();
+        if (state.query || state.rail !== m.provider.id) {
+          state.query = "";
+          $(".pk-search input", picker.el).value = "";
+          state.rail = m.provider.id;
+          state.highlight = -1;
+          renderRail();
+          renderList(true);
+        }
+        const row = picker.el.querySelector('.pk-row[aria-selected="true"]');
+        if (row) {
+          row.scrollIntoView({ block: "nearest", behavior: motionOn() ? "smooth" : "auto" });
+          retrigger(row, "flash");
+        }
+      }
+
+      function onPickerKey(e) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closePicker();
+          triggerCtl?.anchor.focus({ preventScroll: true });
+          return;
+        }
+        if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+          const it = currentItems[Number(e.key) - 1];
+          if (it) {
+            e.preventDefault();
+            choose(it, true);
+          }
+          return;
+        }
+        const inSearch = e.target.matches?.(".pk-search input");
+        if (!inSearch) return;
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          if (!currentItems.length) return;
+          const next = (state.highlight + (e.key === "ArrowDown" ? 1 : -1) + currentItems.length) % currentItems.length;
+          setHighlight(next);
+          $(".pk-list", picker.el).children[next]?.scrollIntoView({ block: "nearest" });
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          const it = currentItems[state.highlight];
+          if (it) choose(it, true);
+        } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !state.query) {
+          e.preventDefault();
+          stepEffort(e.key === "ArrowRight" ? 1 : -1);
+        }
+      }
+
+      document.addEventListener("pointerdown", (e) => {
+        if (!picker.open) return;
+        if (picker.el.contains(e.target) || slot.contains(e.target)) return;
+        closePicker();
+      });
+      window.addEventListener("resize", positionPicker);
+
+      /* ==========================================================
+         Shared inline trigger (A, B)
+         ========================================================== */
+      function mountInlineTrigger(target, { glyph = false } = {}) {
+        const iconBox = h("span", { class: "trig-icon" });
+        const name = h("span", { class: "roll" });
+        const g = glyph ? createGlyph() : null;
+        const levelText = h("span", { class: "roll" });
+        const level = h("span", { class: "trig-level presence", hidden: true }, g?.el, levelText);
+        const fast = h("span", { class: "trig-fast presence", hidden: true }, icon("zap", "fill"));
+        const ctxText = h("span", { class: "roll" });
+        const ctx = h("span", { class: "trig-ctx presence", hidden: true }, ctxText);
+        const btn = h(
+          "button",
+          { class: "trig", type: "button", "aria-haspopup": "dialog", "aria-expanded": "false" },
+          iconBox,
+          name,
+          level,
+          fast,
+          ctx,
+          icon("chevronDown", "trig-chev"),
+        );
+        target.append(btn);
+        bindTrigger(btn);
+        let lastProvider = null;
+        let lastIdx = -1;
+        function update(evt) {
+          const m = activeModel();
+          const s = sel();
+          const init = evt.type === "init";
+          if (lastProvider !== m.provider.id) {
+            swapIcon(iconBox, providerIcon(m.provider.id));
+            lastProvider = m.provider.id;
+          }
+          swapRoll(name, m.short, 1, init);
+          const lv = displayLevel(m, s);
+          setPresence(level, !!lv, { instant: init });
+          if (lv) {
+            level.dataset.level = lv;
+            const idx = effortIndex(m, s);
+            const dir = evt.type === "effort" || evt.type === "reset" ? Math.sign(idx - lastIdx) || 1 : 1;
+            lastIdx = idx;
+            swapRoll(levelText, lv === "on" ? "Thinking" : shortLabel(lv), dir, init);
+            levelText.classList.toggle("shimmer", lv === "ultracode");
+            if (g) {
+              g.el.style.display = m.effort ? "" : "none";
+              if (m.effort) g.set(idx, m.effort.levels.length, lv === "ultracode", !init);
+            }
+          }
+          const fastOn = !!(m.fast && s.fast);
+          if (setPresence(fast, fastOn, { instant: init }) && fastOn) popIcon(fast.firstChild);
+          setPresence(ctx, !!m.context, { instant: init });
+          if (m.context) swapRoll(ctxText, CTX_LABEL[s.context], s.context === "1m" ? 1 : -1, init);
+          if (evt.type === "theme" || evt.type === "motion") g?.refresh();
+          const parts = [m.provider.name, m.short, lv && (lv === "on" ? "thinking on" : `${LEVELS[lv]?.label} effort`), fastOn && "fast mode", m.context && `${CTX_LABEL[s.context]} context`];
+          btn.setAttribute("aria-label", parts.filter(Boolean).join(", "));
+        }
+        return {
+          anchor: btn,
+          update,
+          setExpanded: (v) => btn.setAttribute("aria-expanded", String(v)),
+          destroy() {
+            g?.destroy();
+            btn.remove();
+          },
+        };
+      }
+
+      /* ==========================================================
+         A · Dial
+         ========================================================== */
+      function runSparks(canvas, fill) {
+        const ctx = canvas.getContext("2d");
+        const parts = [];
+        let raf = 0;
+        let last = performance.now();
+        function frame(now) {
+          const dt = Math.min(50, now - last) / 16.67;
+          last = now;
+          const track = canvas.parentElement.parentElement;
+          const w = track.clientWidth;
+          const hh = track.clientHeight;
+          if (canvas.width !== Math.round(w * DPR)) {
+            canvas.width = Math.round(w * DPR);
+            canvas.height = Math.round(hh * DPR);
+            canvas.style.width = `${w}px`;
+          }
+          ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+          ctx.clearRect(0, 0, w, hh);
+          const fw = fill.clientWidth;
+          if (parts.length < Math.min(34, fw / 7) && Math.random() < 0.6)
+            parts.push({ x: 6 + Math.random() * Math.max(10, fw - 44), y: hh * (0.2 + Math.random() * 0.6), vx: 0.2 + Math.random() * 0.55, vy: (Math.random() - 0.5) * 0.1, life: 0, max: 45 + Math.random() * 70, r: 0.6 + Math.random() * 1.1 });
+          for (let i = parts.length - 1; i >= 0; i--) {
+            const p = parts[i];
+            p.life += dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            if (p.life > p.max || p.x > fw - 22) {
+              parts.splice(i, 1);
+              continue;
+            }
+            const a = Math.sin((Math.PI * p.life) / p.max);
+            ctx.globalAlpha = a * 0.95;
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+            ctx.fill();
+            if (p.r > 1.35) {
+              ctx.globalAlpha = a * 0.45;
+              ctx.fillRect(p.x - p.r * 2.6, p.y - 0.35, p.r * 5.2, 0.7);
+              ctx.fillRect(p.x - 0.35, p.y - p.r * 2.6, 0.7, p.r * 5.2);
+            }
+          }
+          ctx.globalAlpha = 1;
+          raf = requestAnimationFrame(frame);
+        }
+        raf = requestAnimationFrame(frame);
+        return () => {
+          cancelAnimationFrame(raf);
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        };
+      }
+
+      function mountTuningA(host) {
+        const root = h("div", { class: "dial" });
+        host.append(root);
+        let m, levels, field, n, sig;
+        let idx = 0;
+        let dragging = false;
+        let els = {};
+        let stopSparks = null;
+        const levelsOf = (mm) => (mm.effort ? mm.effort.levels : mm.thinking ? ["off", "on"] : []);
+        const curIdx = () => (field === "effort" ? levels.indexOf(sel().effort) : sel().thinking ? 1 : 0);
+        const labelOf = (i) => (field === "effort" ? LEVELS[levels[i]].label : levels[i] === "on" ? "Thinking" : "No thinking");
+
+        function build() {
+          stopSparks?.();
+          stopSparks = null;
+          root.replaceChildren();
+          m = activeModel();
+          levels = levelsOf(m);
+          field = m.effort ? "effort" : "thinking";
+          n = levels.length;
+          sig = capSig(m);
+          const s = sel();
+          const fastBtn = m.fast
+            ? h("button", { class: "dial-fast", type: "button", "aria-pressed": String(!!s.fast), "aria-label": "Fast mode", title: "Fast mode", onclick: () => setOpt("fast", !sel().fast) }, icon("zap"))
+            : h("span", { class: "dial-side" });
+          const levelEl = h("div", { class: "roll center dial-level", "aria-live": "polite" });
+          const modelBtn = h("button", { class: "dial-model", type: "button", title: "Show in list", onclick: revealActiveRow }, h("span", { class: "roll" }), icon("chevronRight"));
+          const resetBtn = h("button", { class: "dial-reset", type: "button", "aria-label": "Reset to model defaults", title: "Reset to defaults" }, icon("rotateCcw"));
+          resetBtn.addEventListener("click", () => {
+            spin(resetBtn.firstChild);
+            resetDefaults();
+          });
+          const track = h("div", { class: "dial-track", role: "slider", tabindex: "0", "aria-label": field === "effort" ? "Reasoning effort" : "Thinking", "aria-valuemin": "0", "aria-valuemax": String(n - 1) });
+          const canvas = h("canvas", { class: "dial-sparks" });
+          const fill = h("div", { class: "dial-fill" }, canvas);
+          track.append(fill);
+          const notches = levels.map((_, i) => {
+            const d = h("span", { class: "dial-notch", style: { "--i": n > 1 ? i / (n - 1) : 0 } });
+            track.append(d);
+            return d;
+          });
+          const thumb = h("div", { class: "dial-thumb" });
+          track.append(thumb);
+          bindDrag(track);
+          track.addEventListener("keydown", (e) => {
+            const map = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 };
+            if (map[e.key]) {
+              e.preventDefault();
+              e.stopPropagation();
+              commit(clamp(idx + map[e.key], 0, n - 1));
+            } else if (e.key === "Home" || e.key === "End") {
+              e.preventDefault();
+              commit(e.key === "Home" ? 0 : n - 1);
+            }
+          });
+          const foot = h("div", { class: "dial-foot" });
+          let ctxSeg = null;
+          if (m.context) {
+            ctxSeg = segmented(m.context.options.map((id) => ({ id, label: CTX_LABEL[id] })), s.context, (v) => setOpt("context", v), { label: "Context window" });
+            foot.append(h("div", { class: "kv" }, "Context", ctxSeg.el));
+          } else if (m.contextFixed) foot.append(h("div", { class: "kv" }, "Context", h("b", null, CTX_LABEL[m.contextFixed]), h("i", null, "fixed")));
+          else foot.append(h("span"));
+          foot.append(h("div", { class: "hint" }, h("kbd", null, "←"), h("kbd", null, "→"), field === "effort" ? "effort" : "thinking"));
+          root.append(h("div", { class: "dial-head" }, fastBtn, h("div", { class: "dial-title" }, levelEl, modelBtn), resetBtn), track, foot);
+          els = { fastBtn, levelEl, modelBtn, resetBtn, track, fill, canvas, notches, thumb, ctxSeg };
+          swapRoll(modelBtn.firstChild, m.short, 1, true);
+          idx = curIdx();
+          applyLevel(0, true);
+          ctxSeg?.sync(false);
+        }
+
+        function applyLevel(dir, instant = false) {
+          const k = levels[idx];
+          const prevK = root.dataset.level;
+          root.dataset.level = k;
+          if (!dragging) els.track.style.setProperty("--t", n > 1 ? idx / (n - 1) : 0);
+          els.notches.forEach((d, i) => d.classList.toggle("lit", i <= idx));
+          swapRoll(els.levelEl, labelOf(idx), dir, instant);
+          els.levelEl.classList.toggle("shimmer", k === "ultracode");
+          els.track.setAttribute("aria-valuenow", String(idx));
+          els.track.setAttribute("aria-valuetext", labelOf(idx));
+          els.resetBtn.disabled = isDefault();
+          const want = k === "ultracode" && motionOn();
+          if (want && !stopSparks) stopSparks = runSparks(els.canvas, els.fill);
+          if (!want && stopSparks) {
+            stopSparks();
+            stopSparks = null;
+          }
+          if (!instant && k === "ultracode" && prevK !== k && motionOn())
+            els.thumb.animate([{ transform: "scale(1)" }, { transform: "scale(1.18)" }, { transform: "scale(1)" }], { duration: 420, easing: EASE });
+        }
+        function syncFast(animate) {
+          if (!m.fast) return;
+          const on = !!sel().fast;
+          els.fastBtn.setAttribute("aria-pressed", String(on));
+          if (animate && on && motionOn()) {
+            retrigger(els.fastBtn, "burst");
+            popIcon(els.fastBtn.firstChild);
+          }
+        }
+        function commit(i) {
+          if (i === idx) return;
+          if (field === "effort") setOpt("effort", levels[i]);
+          else setOpt("thinking", i === 1);
+        }
+        function bindDrag(track) {
+          track.addEventListener("pointerdown", (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            track.focus({ preventScroll: true });
+            track.setPointerCapture(e.pointerId);
+            dragging = true;
+            picker.dragging = true;
+            track.classList.add("dragging");
+            const R = 20;
+            const move = (ev) => {
+              const r = track.getBoundingClientRect();
+              const t = clamp((ev.clientX - r.left - R) / (r.width - 2 * R), 0, 1);
+              track.style.setProperty("--t", t);
+              commit(Math.round(t * (n - 1)));
+            };
+            const up = () => {
+              dragging = false;
+              picker.dragging = false;
+              track.classList.remove("dragging");
+              track.style.setProperty("--t", n > 1 ? idx / (n - 1) : 0);
+              track.removeEventListener("pointermove", move);
+              track.removeEventListener("pointerup", up);
+              track.removeEventListener("pointercancel", up);
+            };
+            move(e);
+            track.addEventListener("pointermove", move);
+            track.addEventListener("pointerup", up);
+            track.addEventListener("pointercancel", up);
+          });
+        }
+        function resync() {
+          const ni = curIdx();
+          const dir = Math.sign(ni - idx);
+          idx = ni;
+          applyLevel(dir);
+        }
+        function update(evt) {
+          switch (evt.type) {
+            case "model": {
+              if (capSig(activeModel()) !== sig) {
+                animateHeight(host, build);
+                return;
+              }
+              m = activeModel();
+              swapRoll(els.modelBtn.firstChild, m.short, 1);
+              resync();
+              syncFast(false);
+              els.ctxSeg?.set(sel().context);
+              break;
+            }
+            case "effort":
+            case "thinking":
+              resync();
+              break;
+            case "fast":
+              syncFast(true);
+              els.resetBtn.disabled = isDefault();
+              break;
+            case "context":
+              els.ctxSeg?.set(sel().context);
+              els.resetBtn.disabled = isDefault();
+              break;
+            case "reset":
+              resync();
+              syncFast(false);
+              els.ctxSeg?.set(sel().context);
+              break;
+            case "motion":
+              applyLevel(0, true);
+              break;
+          }
+        }
+        build();
+        return {
+          update,
+          destroy() {
+            stopSparks?.();
+            root.remove();
+          },
+          focusPrimary(pulse) {
+            els.track.focus({ preventScroll: true });
+            if (pulse) retrigger(els.track, "pulse");
+          },
+        };
+      }
+
+      /* ==========================================================
+         B · Matrix
+         ========================================================== */
+      /** Tiny equalizer-shaped dot glyph for the composer trigger. */
+      function createGlyph() {
+        const W = 20;
+        const H = 14;
+        const el = h("canvas", { class: "glyph", width: W * DPR, height: H * DPR, "aria-hidden": "true" });
+        el.style.width = `${W}px`;
+        el.style.height = `${H}px`;
+        const ctx = el.getContext("2d");
+        const COLS = 6;
+        const HEIGHTS = [1, 2, 2, 3, 3, 4];
+        let lit = 0;
+        let target = 0;
+        let ultra = false;
+        let raf = 0;
+        let lv = "#888";
+        let dim = "rgba(255,255,255,.2)";
+        function readColors() {
+          const cs = getComputedStyle(el);
+          lv = cs.getPropertyValue("--lv").trim() || lv;
+          dim = cs.getPropertyValue("--glyph-dim").trim() || dim;
+        }
+        function draw(now) {
+          ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+          ctx.clearRect(0, 0, W, H);
+          for (let c = 0; c < COLS; c++) {
+            const on = clamp(lit - c, 0, 1);
+            for (let r = 0; r < HEIGHTS[c]; r++) {
+              const x = 2 + c * 3.2;
+              const y = H - 2 - r * 3.2;
+              ctx.globalAlpha = 1;
+              ctx.fillStyle = dim;
+              ctx.beginPath();
+              ctx.arc(x, y, 0.95, 0, Math.PI * 2);
+              ctx.fill();
+              if (on > 0) {
+                let a = on;
+                if (ultra) a *= 0.55 + 0.45 * Math.sin(now / 210 + c * 0.9 + r * 1.7);
+                ctx.globalAlpha = clamp(a, 0, 1);
+                ctx.fillStyle = lv;
+                ctx.beginPath();
+                ctx.arc(x, y, 1.1, 0, Math.PI * 2);
+                ctx.fill();
+              }
+            }
+          }
+          ctx.globalAlpha = 1;
+        }
+        function tick(now) {
+          lit += (target - lit) * 0.16;
+          if (Math.abs(target - lit) < 0.01) lit = target;
+          draw(now);
+          raf = ultra || lit !== target ? requestAnimationFrame(tick) : 0;
+        }
+        return {
+          el,
+          set(i, count, isUltra, animate) {
+            target = Math.max(1, Math.round(((i + 1) / count) * COLS));
+            ultra = isUltra && motionOn();
+            readColors();
+            if (!animate || !motionOn()) lit = target;
+            if (!raf) raf = requestAnimationFrame(tick);
+          },
+          refresh() {
+            readColors();
+            ultra = ultra && motionOn();
+            if (!raf) raf = requestAnimationFrame(tick);
+          },
+          destroy() {
+            cancelAnimationFrame(raf);
+          },
+        };
+      }
+
+      /** Claude-style dot field: density rises left→right, lit up to the thumb. */
+      function createMatrix({ track, canvas, thumb, count, index, onCommit, onLayout }) {
+        const ctx = canvas.getContext("2d");
+        const TW = 30;
+        const PAD = 5;
+        let w = 0;
+        let hh = 0;
+        let dots = [];
+        const n = count;
+        let idx = index;
+        let x = null;
+        let v = 0;
+        let target = 0;
+        let dragging = false;
+        let raf = 0;
+        let last = 0;
+        const t0 = performance.now();
+        let ripples = [];
+        let streakAt = -10;
+        let ultra = false;
+        let lvColor = "#888";
+        let dimColor = "#fff";
+        let shine = "#fff";
+        const now = () => (performance.now() - t0) / 1000;
+        const posFor = (i) => {
+          const lo = PAD + TW / 2;
+          const hi = w - PAD - TW / 2;
+          return lo + (hi - lo) * (n > 1 ? i / (n - 1) : 0);
+        };
+        function nearest(px) {
+          let best = 0;
+          let bd = Infinity;
+          for (let i = 0; i < n; i++) {
+            const d = Math.abs(posFor(i) - px);
+            if (d < bd) {
+              bd = d;
+              best = i;
+            }
+          }
+          return best;
+        }
+        function layout() {
+          const r = track.getBoundingClientRect();
+          if (!r.width) return;
+          w = r.width;
+          hh = r.height;
+          canvas.width = Math.round(w * DPR);
+          canvas.height = Math.round(hh * DPR);
+          dots = [];
+          const rng = mulberry32(11);
+          const sx = 6.5;
+          const sy = 6;
+          const cols = Math.floor((w - 14) / sx) + 1;
+          const rows = Math.floor((hh - 12) / sy) + 1;
+          const ox = (w - (cols - 1) * sx) / 2;
+          const oy = (hh - (rows - 1) * sy) / 2;
+          for (let c = 0; c < cols; c++) {
+            const u = c / (cols - 1);
+            const dens = 0.06 + 0.94 * Math.pow(u, 1.35);
+            for (let rr = 0; rr < rows; rr++) {
+              const roll = rng();
+              const ph = rng() * Math.PI * 2;
+              const jit = rng();
+              if (roll > dens) continue;
+              dots.push({ x: ox + c * sx, y: oy + rr * sy, u, ph, sz: 0.8 + 0.6 * u + 0.25 * jit });
+            }
+          }
+          target = posFor(idx);
+          if (x === null || !dragging) x = x === null ? target : x;
+          readColors();
+          onLayout?.(posFor);
+          if (!raf) {
+            last = performance.now();
+            raf = requestAnimationFrame(frame);
+          }
+        }
+        function readColors() {
+          const cs = getComputedStyle(track);
+          lvColor = cs.getPropertyValue("--lv").trim() || lvColor;
+          dimColor = cs.getPropertyValue("--dot-dim").trim() || dimColor;
+          shine = cs.getPropertyValue("--shine").trim() || shine;
+        }
+        function frame(ts) {
+          const dt = Math.min(0.05, (ts - last) / 1000);
+          last = ts;
+          if (!dragging) {
+            if (!motionOn()) {
+              x = target;
+              v = 0;
+            } else {
+              const a = 300 * (target - x) - 27 * v;
+              v += a * dt;
+              x += v * dt;
+              if (Math.abs(target - x) < 0.05 && Math.abs(v) < 0.05) {
+                x = target;
+                v = 0;
+              }
+            }
+          }
+          thumb.style.transform = `translate(${x - TW / 2}px, -50%)`;
+          draw(now());
+          raf = requestAnimationFrame(frame);
+        }
+        function draw(t) {
+          ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+          ctx.clearRect(0, 0, w, hh);
+          const mo = motionOn();
+          ripples = ripples.filter((r) => t - r.t < 1.1);
+          const sp = (t - streakAt) / 0.75;
+          const shimmerX = ultra && mo ? (((t % 2.4) / 2.4) * 1.5 - 0.25) * x : -9999;
+          for (const d of dots) {
+            const lit = d.x <= x + 2;
+            let boost = 0;
+            if (mo) {
+              for (const r of ripples) {
+                const age = t - r.t;
+                const dist = Math.abs(Math.hypot(d.x - r.x, (d.y - hh / 2) * 0.6) - age * 360);
+                boost += Math.exp(-(dist * dist) / 200) * (1 - age / 1.1) * (lit ? 1 : 0.45);
+              }
+              if (ultra && lit) {
+                const dx = d.x - shimmerX;
+                boost += Math.exp(-(dx * dx) / (2 * 22 * 22)) * 0.9;
+              }
+            }
+            const tw = mo ? Math.sin(t * (ultra ? 2.6 : 1.4) + d.ph) * (ultra ? 0.2 : 0.07) : 0;
+            const alpha = clamp((lit ? 0.62 + 0.38 * d.u + tw : 0.05 + 0.08 * d.u + tw * 0.4) + boost * 0.5, 0, 1);
+            const size = d.sz * (lit ? 1.12 : 0.9) * (1 + boost * 0.55 + (ultra && lit ? 0.1 : 0));
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = lit ? lvColor : dimColor;
+            if (sp >= 0 && sp < 1 && lit) {
+              const L = 20 * Math.sin(Math.PI * sp) * (0.3 + d.u);
+              ctx.globalAlpha = alpha * 0.55;
+              ctx.fillRect(d.x - L, d.y - size * 0.45, L, size * 0.9);
+              ctx.globalAlpha = alpha;
+            }
+            ctx.beginPath();
+            ctx.arc(d.x, d.y, size, 0, Math.PI * 2);
+            ctx.fill();
+            if (boost > 0.25 && lit) {
+              ctx.globalAlpha = Math.min(1, boost) * 0.65;
+              ctx.fillStyle = shine;
+              ctx.beginPath();
+              ctx.arc(d.x, d.y, size * 0.7, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+          ctx.globalAlpha = 1;
+        }
+        track.addEventListener("pointerdown", (e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          track.focus({ preventScroll: true });
+          track.setPointerCapture(e.pointerId);
+          dragging = true;
+          picker.dragging = true;
+          track.classList.add("dragging");
+          const move = (ev) => {
+            const r = track.getBoundingClientRect();
+            x = clamp(ev.clientX - r.left, posFor(0), posFor(n - 1));
+            v = 0;
+            const i = nearest(x);
+            if (i !== idx) onCommit(i);
+          };
+          const up = () => {
+            dragging = false;
+            picker.dragging = false;
+            target = posFor(idx);
+            track.classList.remove("dragging");
+            ripples.push({ x: target, t: now() });
+            track.removeEventListener("pointermove", move);
+            track.removeEventListener("pointerup", up);
+            track.removeEventListener("pointercancel", up);
+          };
+          move(e);
+          track.addEventListener("pointermove", move);
+          track.addEventListener("pointerup", up);
+          track.addEventListener("pointercancel", up);
+        });
+        const ro = new ResizeObserver(layout);
+        ro.observe(track);
+        return {
+          set(i) {
+            const changed = i !== idx;
+            idx = i;
+            target = posFor(i);
+            if (changed && !dragging && motionOn()) ripples.push({ x: target, t: now() });
+          },
+          setLevel(k) {
+            ultra = k === "ultracode";
+            readColors();
+          },
+          streak() {
+            if (motionOn()) streakAt = now();
+          },
+          refresh: readColors,
+          posFor,
+          destroy() {
+            cancelAnimationFrame(raf);
+            ro.disconnect();
+          },
+        };
+      }
+
+      function mountTuningB(host) {
+        const root = h("div", { class: "mx" });
+        host.append(root);
+        let m, sig, levels, n;
+        let idx = 0;
+        let els = {};
+        let mx = null;
+        function build() {
+          mx?.destroy();
+          mx = null;
+          root.replaceChildren();
+          els = {};
+          m = activeModel();
+          sig = capSig(m);
+          const s = sel();
+          const levelEl = h("span", { class: "roll mx-level", "aria-live": "polite" });
+          const help = m.effort
+            ? h(
+                "div",
+                { class: "mx-help" },
+                h("button", { type: "button", "aria-label": "About effort levels" }, icon("help")),
+                h("div", { class: "mx-card", role: "tooltip" }, m.effort.levels.map((k) => h("div", { "data-level": k }, h("b", null, LEVELS[k].label), h("span", null, LEVELS[k].desc)))),
+              )
+            : null;
+          root.append(h("div", { class: "mx-head" }, h("span", { class: "mx-k" }, m.effort ? "Effort" : "Thinking"), levelEl, h("span", { class: "mx-spacer" }), h("span", { class: "mx-model" }, m.short), help));
+          els.levelEl = levelEl;
+          if (m.effort) {
+            levels = m.effort.levels;
+            n = levels.length;
+            idx = levels.indexOf(s.effort);
+            const canvas = h("canvas", { class: "mx-canvas" });
+            const thumb = h("div", { class: "mx-thumb" });
+            const track = h("div", { class: "mx-track", role: "slider", tabindex: "0", "aria-label": "Reasoning effort", "aria-valuemin": "0", "aria-valuemax": String(n - 1) }, canvas, thumb);
+            const recLabel = h("span", null, "Recommended");
+            root.append(h("div", { class: "mx-ends" }, h("span", null, "Faster"), h("span", null, "Smarter")), track, h("div", { class: "mx-rec" }, recLabel));
+            track.addEventListener("keydown", (e) => {
+              const map = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 };
+              if (map[e.key]) {
+                e.preventDefault();
+                e.stopPropagation();
+                setOpt("effort", levels[clamp(idx + map[e.key], 0, n - 1)]);
+              }
+            });
+            els = { ...els, track, recLabel };
+            const defIdx = levels.indexOf(m.effort.def);
+            mx = createMatrix({
+              track,
+              canvas,
+              thumb,
+              count: n,
+              index: idx,
+              onCommit: (i) => setOpt("effort", levels[i]),
+              onLayout: (posFor) => {
+                recLabel.style.left = `${clamp(posFor(defIdx), 40, track.clientWidth - 40)}px`;
+              },
+            });
+          } else if (m.thinking) {
+            const sw = toggleSwitch(!!s.thinking, (v) => setOpt("thinking", v), "Extended thinking");
+            root.append(h("div", { class: "mx-think" }, h("div", null, h("div", { class: "t" }, "Extended thinking"), h("div", { class: "d" }, "Let the model reason before it answers")), sw.el));
+            els.sw = sw;
+          }
+          const foot = h("div", { class: "mx-foot" });
+          if (m.fast) {
+            const chip = h("button", { class: "mx-chip", type: "button", "aria-pressed": String(!!s.fast), onclick: () => setOpt("fast", !sel().fast) }, icon("zap"), "Fast mode");
+            foot.append(chip);
+            els.fastChip = chip;
+          } else foot.append(h("span"));
+          if (m.context) {
+            const seg = segmented(m.context.options.map((id) => ({ id, label: CTX_LABEL[id] })), s.context, (v) => setOpt("context", v), { label: "Context window" });
+            foot.append(h("div", { class: "kv" }, "Context", seg.el));
+            els.ctxSeg = seg;
+          } else if (m.contextFixed) foot.append(h("div", { class: "kv" }, "Context", h("b", null, CTX_LABEL[m.contextFixed]), h("i", null, "fixed")));
+          if (m.fast || m.context || m.contextFixed) root.append(foot);
+          applyLevel(0, true);
+          els.ctxSeg?.sync(false);
+        }
+        function applyLevel(dir, instant = false) {
+          const s = sel();
+          const k = m.effort ? s.effort : s.thinking ? "on" : "off";
+          root.dataset.level = k;
+          const label = m.effort ? LEVELS[k].label : s.thinking ? "On" : "Off";
+          swapRoll(els.levelEl, label, dir, instant);
+          els.levelEl.classList.toggle("shimmer", k === "ultracode");
+          if (m.effort) {
+            els.track.setAttribute("aria-valuenow", String(idx));
+            els.track.setAttribute("aria-valuetext", LEVELS[k].label);
+            mx.setLevel(k);
+            mx.set(idx);
+          } else els.sw?.set(!!s.thinking);
+        }
+        function resync() {
+          const ni = m.effort ? levels.indexOf(sel().effort) : 0;
+          const dir = Math.sign(ni - idx) || 1;
+          idx = ni;
+          applyLevel(dir);
+        }
+        function update(evt) {
+          switch (evt.type) {
+            case "model":
+              if (capSig(activeModel()) !== sig) {
+                animateHeight(host, build);
+                return;
+              }
+              m = activeModel();
+              $(".mx-model", root).textContent = m.short;
+              resync();
+              els.fastChip?.setAttribute("aria-pressed", String(!!sel().fast));
+              els.ctxSeg?.set(sel().context);
+              break;
+            case "effort":
+            case "thinking":
+              resync();
+              break;
+            case "fast":
+              els.fastChip?.setAttribute("aria-pressed", String(!!sel().fast));
+              if (sel().fast) {
+                mx?.streak();
+                popIcon(els.fastChip?.firstChild);
+              }
+              break;
+            case "context":
+              els.ctxSeg?.set(sel().context);
+              break;
+            case "reset":
+              resync();
+              els.fastChip?.setAttribute("aria-pressed", String(!!sel().fast));
+              els.ctxSeg?.set(sel().context);
+              break;
+            case "theme":
+            case "motion":
+              mx?.refresh();
+              break;
+          }
+        }
+        build();
+        return {
+          update,
+          destroy() {
+            mx?.destroy();
+            root.remove();
+          },
+          focusPrimary(pulse) {
+            const t = els.track ?? els.sw?.el;
+            t?.focus({ preventScroll: true });
+            if (pulse && t) retrigger(t, "pulse");
+          },
+        };
+      }
+
+      /* ==========================================================
+         C · Segments
+         ========================================================== */
+      function mountTriggerC(target) {
+        const iconBox = h("span", { class: "trig-icon" });
+        const name = h("span", { class: "roll" });
+        const modelSeg = h("button", { class: "cap-seg cap-model", type: "button", "aria-haspopup": "dialog", "aria-expanded": "false" }, iconBox, name, icon("chevronDown", "trig-chev"));
+        const effText = h("span", { class: "roll" });
+        const effortSeg = h("button", { class: "cap-seg cap-effort presence", type: "button", hidden: true }, effText);
+        const fastSeg = h("button", { class: "cap-seg cap-fast presence", type: "button", hidden: true, "aria-label": "Fast mode" }, icon("zap"));
+        const ctxText = h("span", { class: "roll" });
+        const ctxSeg = h("button", { class: "cap-seg cap-ctx presence", type: "button", hidden: true }, ctxText);
+        const cap = h("div", { class: "cap", role: "group", "aria-label": "Model controls" }, modelSeg, effortSeg, fastSeg, ctxSeg);
+        target.append(cap);
+        bindTrigger(modelSeg);
+        effortSeg.addEventListener("click", () => {
+          const m = activeModel();
+          if (!m.effort && m.thinking) {
+            setOpt("thinking", !sel().thinking);
+            return;
+          }
+          if (picker.open) {
+            picker.sticky = true;
+            tuningCtl?.focusPrimary?.(true);
+          } else openPicker({ sticky: true, focus: "tuning" });
+        });
+        let wheelAcc = 0;
+        effortSeg.addEventListener(
+          "wheel",
+          (e) => {
+            e.preventDefault();
+            wheelAcc += e.deltaY;
+            if (Math.abs(wheelAcc) > 30) {
+              stepEffort(wheelAcc < 0 ? 1 : -1);
+              wheelAcc = 0;
+            }
+          },
+          { passive: false },
+        );
+        effortSeg.addEventListener("keydown", (e) => {
+          if (e.key === "ArrowUp" || e.key === "ArrowRight") {
+            e.preventDefault();
+            stepEffort(1);
+          } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
+            e.preventDefault();
+            stepEffort(-1);
+          }
+        });
+        fastSeg.addEventListener("click", () => setOpt("fast", !sel().fast));
+        ctxSeg.addEventListener("click", () => {
+          const opts = activeModel().context.options;
+          setOpt("context", opts[(opts.indexOf(sel().context) + 1) % opts.length]);
+        });
+        let lastProvider = null;
+        let lastIdx = -1;
+        function update(evt) {
+          const m = activeModel();
+          const s = sel();
+          const init = evt.type === "init";
+          if (lastProvider !== m.provider.id) {
+            swapIcon(iconBox, providerIcon(m.provider.id));
+            lastProvider = m.provider.id;
+          }
+          swapRoll(name, m.short, 1, init);
+          const hasLevel = !!(m.effort || m.thinking);
+          setPresence(effortSeg, hasLevel, { gap: 0, instant: init });
+          let lv = null;
+          if (hasLevel) {
+            lv = m.effort ? s.effort : s.thinking ? "on" : "off";
+            effortSeg.dataset.level = lv;
+            const idx = effortIndex(m, s);
+            const dir = Math.sign(idx - lastIdx) || 1;
+            swapRoll(effText, m.effort ? shortLabel(lv) : s.thinking ? "Thinking" : "No thinking", dir, init);
+            effText.classList.toggle("shimmer", lv === "ultracode");
+            effortSeg.title = m.effort ? `Effort: ${LEVELS[lv].label} — scroll or use arrow keys to adjust` : "Toggle thinking";
+            effortSeg.setAttribute("aria-label", m.effort ? `Reasoning effort: ${LEVELS[lv].label}` : `Thinking ${s.thinking ? "on" : "off"}`);
+            if (!init && lv === "ultracode" && evt.type === "effort" && dir > 0) burst(effortSeg, stage, 10);
+            lastIdx = idx;
+          }
+          cap.classList.toggle("uc", lv === "ultracode");
+          cap.classList.toggle("max", lv === "max");
+          setPresence(fastSeg, !!m.fast, { gap: 0, instant: init });
+          const wasOn = fastSeg.getAttribute("aria-pressed") === "true";
+          fastSeg.setAttribute("aria-pressed", String(!!s.fast));
+          fastSeg.title = s.fast ? "Fast mode on" : "Fast mode off";
+          if (!wasOn && s.fast && !init) popIcon(fastSeg.firstChild);
+          setPresence(ctxSeg, !!m.context, { gap: 0, instant: init });
+          if (m.context) {
+            swapRoll(ctxText, CTX_LABEL[s.context], s.context === "1m" ? 1 : -1, init);
+            ctxSeg.title = `Context window: ${CTX_LABEL[s.context]} — click to switch`;
+            ctxSeg.setAttribute("aria-label", `Context window ${CTX_LABEL[s.context]}`);
+          }
+          modelSeg.setAttribute("aria-label", `${m.provider.name} ${m.short}`);
+        }
+        return {
+          anchor: cap,
+          update,
+          setExpanded: (v) => modelSeg.setAttribute("aria-expanded", String(v)),
+          destroy() {
+            cap.remove();
+          },
+        };
+      }
+
+      function mountTuningC(host) {
+        const root = h("div", { class: "spec" });
+        host.append(root);
+        let m, sig;
+        let els = {};
+        let lastIdx = 0;
+        const row = (label, content) => h("div", { class: "spec-row" }, h("div", { class: "spec-label" }, label), content);
+        const describe = (k) => `${LEVELS[k].desc}${k === m.effort.def ? " · default" : ""}`;
+        function build() {
+          root.replaceChildren();
+          els = {};
+          m = activeModel();
+          sig = capSig(m);
+          const s = sel();
+          const reset = h("button", { class: "spec-reset", type: "button", title: "Reset to model defaults" }, icon("rotateCcw"), "Defaults");
+          reset.addEventListener("click", () => {
+            spin(reset.firstChild);
+            resetDefaults();
+          });
+          const modelName = h("span", { class: "roll spec-model" });
+          root.append(h("div", { class: "spec-head" }, h("span", { class: "spec-title" }, "Tuning"), modelName, reset));
+          swapRoll(modelName, m.short, 1, true);
+          els.reset = reset;
+          els.modelName = modelName;
+          if (m.effort) {
+            const seg = segmented(
+              m.effort.levels.map((id) => ({ id, level: id, label: LEVELS[id].seg, title: LEVELS[id].label })),
+              s.effort,
+              (v) => setOpt("effort", v),
+              { label: "Reasoning effort", cls: "seg-lg seg-effort" },
+            );
+            const desc = h("div", { class: "roll spec-desc" });
+            root.append(row("Effort", h("div", { class: "spec-stack" }, seg.el, desc)));
+            els.effort = seg;
+            els.desc = desc;
+            lastIdx = effortIndex(m, s);
+          } else if (m.thinking) {
+            const seg = segmented(
+              [
+                { id: "off", label: "Off" },
+                { id: "on", level: "on", content: [icon("brain"), "On"] },
+              ],
+              s.thinking ? "on" : "off",
+              (v) => setOpt("thinking", v === "on"),
+              { label: "Thinking", cls: "seg-lg" },
+            );
+            root.append(row("Thinking", seg.el));
+            els.thinking = seg;
+          }
+          if (m.fast) {
+            const seg = segmented(
+              [
+                { id: "std", label: "Standard" },
+                { id: "fast", level: "fast", content: [icon("zap"), "Fast"] },
+              ],
+              s.fast ? "fast" : "std",
+              (v) => setOpt("fast", v === "fast"),
+              { label: "Speed", cls: "seg-lg seg-speed" },
+            );
+            root.append(row("Speed", seg.el));
+            els.fast = seg;
+          }
+          if (m.context) {
+            const seg = segmented(
+              m.context.options.map((id) => ({ id, content: [CTX_LABEL[id], h("span", { class: "ctx-bar", style: { "--w": CTX_TOKENS[id] / 200000 } })] })),
+              s.context,
+              (v) => setOpt("context", v),
+              { label: "Context window", cls: "seg-lg" },
+            );
+            root.append(row("Context", seg.el));
+            els.ctx = seg;
+          } else if (m.contextFixed) root.append(row("Context", h("div", { class: "spec-static" }, h("b", null, CTX_LABEL[m.contextFixed]), " · fixed for this model")));
+          for (const k of ["effort", "thinking", "fast", "ctx"]) els[k]?.sync(false);
+          applyEffort(0, true);
+        }
+        function applyEffort(dir, instant = false) {
+          const s = sel();
+          if (els.effort) {
+            els.effort.set(s.effort);
+            root.dataset.level = s.effort;
+            els.desc.dataset.level = s.effort;
+            swapRoll(els.desc, describe(s.effort), dir, instant);
+          }
+          els.thinking?.set(s.thinking ? "on" : "off");
+          els.reset.disabled = isDefault();
+        }
+        function syncAll(dir) {
+          const s = sel();
+          applyEffort(dir);
+          els.fast?.set(s.fast ? "fast" : "std");
+          els.ctx?.set(s.context);
+          els.reset.disabled = isDefault();
+        }
+        function update(evt) {
+          switch (evt.type) {
+            case "model":
+              if (capSig(activeModel()) !== sig) {
+                animateHeight(host, build);
+                return;
+              }
+              m = activeModel();
+              swapRoll(els.modelName, m.short, 1);
+              syncAll(1);
+              lastIdx = effortIndex();
+              break;
+            case "effort": {
+              const i = effortIndex();
+              const dir = Math.sign(i - lastIdx) || 1;
+              lastIdx = i;
+              applyEffort(dir);
+              if (sel().effort === "ultracode" && dir > 0) {
+                const ind = els.effort.indicator;
+                setTimeout(() => burst(ind, picker.el, 14), 160);
+              }
+              break;
+            }
+            case "thinking":
+              applyEffort(1);
+              break;
+            case "fast":
+              els.fast?.set(sel().fast ? "fast" : "std");
+              if (sel().fast) popIcon(els.fast?.btns[1].firstChild);
+              els.reset.disabled = isDefault();
+              break;
+            case "context":
+              els.ctx?.set(sel().context);
+              els.reset.disabled = isDefault();
+              break;
+            case "reset": {
+              const i = effortIndex();
+              const dir = Math.sign(i - lastIdx) || 1;
+              lastIdx = i;
+              syncAll(dir);
+              break;
+            }
+          }
+        }
+        build();
+        return {
+          update,
+          destroy() {
+            root.remove();
+          },
+          focusPrimary(pulse) {
+            const seg = els.effort ?? els.thinking ?? els.fast;
+            seg?.focus();
+            if (pulse && seg) retrigger(seg.el, "pulse");
+          },
+        };
+      }
+
+      /* ==========================================================
+         Directions + lab chrome
+         ========================================================== */
+      const DEMOS = {
+        A: {
+          name: "Dial",
+          mountTrigger: (t) => mountInlineTrigger(t),
+          mountTuning: mountTuningA,
+          notes: [
+            ["Composer", "One pill: provider, model, effort in its tint, a bolt when Fast is on, a context tag only when the model lets you choose. Each part rolls vertically in the direction of the change."],
+            ["Picker", "A Codex-style dial docked under the model list. Fast toggle top-left, reset top-right, and the model name doubles as a jump-to-row link. Context switch and ←→ hint underneath."],
+            ["Motion", "Spring-snapped thumb with live drag. Max adds a glow and a slow halo; Ultracode turns the fill into a moving lavender sheen with drifting sparks and a pulsing halo."],
+            ["Build", "Swaps ReasoningChip / FastModeChip / ContextWindowChip out of the footer and into the pill + picker. Descriptor logic in TraitsChips stays; the dial renders any select (or a boolean as two stops)."],
+          ],
+        },
+        B: {
+          name: "Matrix",
+          mountTrigger: (t) => mountInlineTrigger(t, { glyph: true }),
+          mountTuning: mountTuningB,
+          notes: [
+            ["Composer", "Model, then a six-column dot glyph that fills with effort, then the effort word. The glyph twinkles at Ultracode, so the state reads at a glance without colour alone."],
+            ["Picker", "Claude-style Faster ↔ Smarter dot field: dot density rises left to right and lights up to the thumb. “Recommended” marks the model default; Fast and Context sit below as compact controls."],
+            ["Motion", "Idle twinkle, a ripple from the thumb on every change, speed streaks through the lit dots when Fast turns on, and a travelling shimmer across the field at Ultracode."],
+            ["Build", "One canvas per surface, rAF only while the picker or an animated glyph is visible. Reduced motion freezes to the static field. Most visual, most code to keep crisp."],
+          ],
+        },
+        C: {
+          name: "Segments",
+          mountTrigger: mountTriggerC,
+          mountTuning: mountTuningC,
+          notes: [
+            ["Composer", "A segmented capsule where every part is its own control: model opens the picker, effort scrolls or arrow-steps in place (click opens tuning), bolt and context toggle directly. Fewest clicks."],
+            ["Picker", "A spec-sheet footer: Effort / Speed / Context rows with sliding indicators and a one-line description of the chosen level, so the levels explain themselves."],
+            ["Motion", "Indicators glide between options. Max tints the capsule edge; Ultracode wraps the capsule and its indicator in a rotating lavender edge and throws sparks on selection."],
+            ["Build", "Most reuse: one generic segmented renderer (select → segments, boolean → two stops) covers effort, speed, context, thinking and OpenCode-style variants without per-chip components."],
+          ],
+        },
+      };
+
+      function mountDemo(id) {
+        closePicker(true);
+        triggerCtl?.destroy();
+        slot.replaceChildren();
+        state.demo = id;
+        triggerCtl = DEMOS[id].mountTrigger(slot);
+        triggerCtl.update({ type: "init" });
+        tabs.set(id);
+        $("#notes").replaceChildren(...DEMOS[id].notes.map(([t, p]) => h("div", null, h("h3", null, t), h("p", null, p))));
+        history.replaceState(null, "", `#${id}`);
+      }
+
+      listeners.add((evt) => {
+        triggerCtl?.update(evt);
+        if (picker.open) {
+          tuningCtl?.update(evt);
+          renderList();
+        }
+      });
+
+      const tabs = segmented(
+        Object.entries(DEMOS).map(([id, d]) => ({ id, content: [h("b", null, id), d.name] })),
+        "A",
+        (id) => mountDemo(id),
+        { label: "Direction", cls: "lab-tabs" },
+      );
+      $("#tabs-slot").append(tabs.el);
+      tabs.sync(false);
+
+      const SCENARIOS = [
+        { label: "Opus 5.5 · High", key: "claude/claude-opus-5-5", opts: { effort: "high" } },
+        { label: "Opus 5 · Fast · 1M", key: "claude/claude-opus-5", opts: { effort: "high", fast: true, context: "1m" } },
+        { label: "Sonnet 5.5 · Max", key: "claude/claude-sonnet-5-5", opts: { effort: "max" } },
+        { label: "Fable 5.1 · Ultracode", key: "claude/claude-fable-5-1", opts: { effort: "ultracode" } },
+        { label: "GPT-5.6 Sol · Fast", key: "codex/gpt-5.6-sol", opts: { effort: "high", fast: true } },
+        { label: "Haiku 4.5 · Thinking", key: "claude/claude-haiku-4-5", opts: { thinking: true } },
+      ];
+      for (const sc of SCENARIOS) {
+        $("#scenarios").append(
+          h(
+            "button",
+            {
+              class: "scenario",
+              type: "button",
+              onclick: () => {
+                setModel(sc.key, sc.opts);
+                setTimeout(() => openPicker({ sticky: true }), 30);
+              },
+            },
+            providerIcon(MODELS.get(sc.key).provider.id),
+            sc.label,
+          ),
+        );
+      }
+
+      // Static composer furniture
+      $("#plus-btn").append(icon("plus"));
+      $("#plan-chip").append(icon("listTodo"), "Plan");
+      $("#access-chip").append(icon("shield"), "Full access");
+      $("#send-btn").append(icon("arrowUp"));
+
+      const themeBtn = $("#theme-btn");
+      function paintThemeBtn() {
+        const dark = document.documentElement.classList.contains("dark");
+        themeBtn.replaceChildren(icon(dark ? "moon" : "sun"), dark ? "Dark" : "Light");
+      }
+      themeBtn.addEventListener("click", () => {
+        document.documentElement.classList.toggle("dark");
+        paintThemeBtn();
+        requestAnimationFrame(() => emit({ type: "theme" }));
+      });
+      paintThemeBtn();
+
+      const motionBtn = $("#motion-btn");
+      function paintMotion() {
+        document.documentElement.dataset.motion = motion ? "on" : "off";
+        motionBtn.setAttribute("aria-pressed", String(motion));
+        motionBtn.textContent = motion ? "Motion on" : "Motion off";
+      }
+      motionBtn.addEventListener("click", () => {
+        motion = !motion;
+        paintMotion();
+        emit({ type: "motion" });
+      });
+      paintMotion();
+
+      document.addEventListener("keydown", (e) => {
+        if (e.target.matches?.("input, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+        const id = { 1: "A", 2: "B", 3: "C" }[e.key];
+        if (id) mountDemo(id);
+      });
+
+      const initial = location.hash.slice(1).toUpperCase();
+      mountDemo(DEMOS[initial] ? initial : "A");
+    </script>
+  </body>
+</html>

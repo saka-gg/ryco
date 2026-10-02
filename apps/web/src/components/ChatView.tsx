@@ -191,6 +191,7 @@ import {
   type DevicePromptAttachmentResolution,
 } from "../lib/devicePromptContext";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import type { ModelPickMeta } from "./chat/modelPickerTuningBridge";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -4454,8 +4455,14 @@ export default function ChatView(props: ChatViewProps) {
       instanceId: ProviderInstanceId,
       model: string,
       options?: ReadonlyArray<ProviderOptionSelection>,
+      meta?: ModelPickMeta,
     ) => {
       if (!activeThread) return;
+      // A pointer pick with the tuning dial docked keeps the picker open;
+      // pulling focus back to the composer would dismiss it.
+      const refocusComposer = () => {
+        if (!meta?.keepOpen) scheduleComposerFocus();
+      };
       // Look up the configured instance so model normalization and custom
       // model lookup stay scoped to that exact instance. Unknown instance ids
       // are rejected by returning early; the server remains authoritative too.
@@ -4467,12 +4474,12 @@ export default function ChatView(props: ChatViewProps) {
         entry.status !== "ready" ||
         entry.availability === "unavailable"
       ) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       const resolvedDriverKind = entry?.driver ?? null;
       if (providerSelectionPolicy.mode === "continuation-only" && lockedProvider === null) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       if (
@@ -4480,7 +4487,7 @@ export default function ChatView(props: ChatViewProps) {
         resolvedDriverKind !== null &&
         resolvedDriverKind !== lockedProvider
       ) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       if (lockedProvider !== null && activeThread.session?.providerInstanceId) {
@@ -4492,7 +4499,7 @@ export default function ChatView(props: ChatViewProps) {
           entry?.continuation?.groupKey &&
           currentEntry.continuation.groupKey !== entry.continuation.groupKey
         ) {
-          scheduleComposerFocus();
+          refocusComposer();
           return;
         }
       }
@@ -4503,7 +4510,7 @@ export default function ChatView(props: ChatViewProps) {
         model,
       );
       if (!resolvedModel) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       const nextModelSelection: ModelSelection = {
@@ -4519,7 +4526,7 @@ export default function ChatView(props: ChatViewProps) {
           targetSelection: nextModelSelection,
         })
       ) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       setComposerDraftModelSelection(
@@ -4536,7 +4543,7 @@ export default function ChatView(props: ChatViewProps) {
       if (normalizedInteractionMode !== interactionMode) {
         handleInteractionModeChange(normalizedInteractionMode);
       }
-      scheduleComposerFocus();
+      refocusComposer();
     },
     [
       activeThread,
