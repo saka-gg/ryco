@@ -1,27 +1,66 @@
 import type { SourceControlChangeRequestStackSummary } from "@ryco/contracts";
-import { GitForkIcon } from "lucide-react";
+import { ArrowUpRightIcon, GitForkIcon } from "lucide-react";
+import type { MouseEvent } from "react";
+
+import { openExternalLink } from "../../lib/openExternalLink";
+import { cn } from "../../lib/utils";
 import { resolveStateBadgeVariant } from "../sourceControl/stateBadgeVariants";
 import type { InboxPullRequest } from "./inboxPullRequests";
+import { InboxHint } from "./InboxRowHint";
+
+function openPullRequest(event: MouseEvent, url: string) {
+  // Chips live inside the row's open-thread button; the link wins.
+  event.preventDefault();
+  event.stopPropagation();
+  openExternalLink(url, "Unable to open pull request link");
+}
+
+function PullRequestHint(props: {
+  readonly pr: InboxPullRequest;
+  readonly label: string;
+  readonly providerName: string;
+}) {
+  return (
+    <span className="flex max-w-64 flex-col gap-0.5 py-0.5">
+      <span className="font-medium">{props.label}</span>
+      {props.pr.title ? (
+        <span className="truncate text-muted-foreground">{props.pr.title}</span>
+      ) : null}
+      {props.pr.url ? (
+        <span className="flex items-center gap-0.5 text-[11px] text-muted-foreground/80">
+          Open on {props.providerName}
+          <ArrowUpRightIcon aria-hidden className="size-3" />
+        </span>
+      ) : null}
+    </span>
+  );
+}
 
 /**
  * `inline` is the row's second line: only the thread's own change request,
- * colored text without a box, plus its stack position. `badges` lists the
- * whole stack for the hover card.
+ * colored text without a box, plus its stack position; hovering names it and
+ * clicking opens it. `badges` lists the whole stack for the hover card.
  */
 export function InboxPullRequestBadges(props: {
   readonly requests: readonly InboxPullRequest[];
   readonly stack: SourceControlChangeRequestStackSummary | null;
   readonly shortName: string;
+  readonly providerName?: string | undefined;
   readonly variant?: "inline" | "badges";
   readonly currentNumber?: number | null;
 }) {
   if (props.requests.length === 0) return null;
   const inline = props.variant === "inline";
+  const providerName = props.providerName ?? "the web";
   const shown = inline
     ? props.requests.filter(
         (pr) => pr.number === (props.currentNumber ?? props.requests[0]!.number),
       )
     : props.requests;
+  const stack = props.stack;
+  const stackLabel = stack
+    ? `Stack #${stack.number}, pull request ${stack.position} of ${stack.size}`
+    : null;
   return (
     <span
       className={
@@ -39,31 +78,66 @@ export function InboxPullRequestBadges(props: {
         });
         const label = `${props.shortName} #${pr.number} · ${variant.label ?? "Unknown"}`;
         const Icon = variant.Icon;
-        return (
-          <span
+        const url = pr.url;
+        if (inline) {
+          return (
+            <InboxHint
+              key={pr.number}
+              aria-label={label}
+              label={<PullRequestHint pr={pr} label={label} providerName={providerName} />}
+              className={cn(
+                "inline-flex shrink-0 items-center gap-0.5 rounded-sm text-[11px] font-medium tabular-nums",
+                variant.textClassName,
+                url && "cursor-pointer underline-offset-2 hover:underline",
+              )}
+              {...(url
+                ? { role: "link", onClick: (event: MouseEvent) => openPullRequest(event, url) }
+                : {})}
+            >
+              <Icon aria-hidden className="size-[11px]" />
+              <span>#{pr.number}</span>
+            </InboxHint>
+          );
+        }
+        const badgeClassName = `inline-flex shrink-0 items-center gap-1 rounded border px-1 py-0.5 text-[10px] leading-3 ${variant.compactClassName}`;
+        return url ? (
+          <a
             key={pr.number}
             aria-label={label}
-            className={
-              inline
-                ? `inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium tabular-nums ${variant.textClassName}`
-                : `inline-flex shrink-0 items-center gap-1 rounded border px-1 py-0.5 text-[10px] leading-3 ${variant.compactClassName}`
-            }
+            className={cn(badgeClassName, "transition-[filter] hover:brightness-125")}
+            href={url}
+            onClick={(event) => openPullRequest(event, url)}
           >
-            <Icon aria-hidden className={inline ? "size-[11px]" : "size-3"} />
+            <Icon aria-hidden className="size-3" />
+            <span>#{pr.number}</span>
+          </a>
+        ) : (
+          <span key={pr.number} aria-label={label} className={badgeClassName}>
+            <Icon aria-hidden className="size-3" />
             <span>#{pr.number}</span>
           </span>
         );
       })}
-      {props.stack ? (
-        <span
-          aria-label={`Stack #${props.stack.number}, pull request ${props.stack.position} of ${props.stack.size}`}
-          className={`inline-flex items-center gap-0.5 tabular-nums text-muted-foreground ${inline ? "text-[10.5px]" : "text-[10px]"}`}
-        >
-          <GitForkIcon aria-hidden className="size-3" />
-          {inline
-            ? `${props.stack.position}/${props.stack.size}`
-            : `Stack ${props.stack.position}/${props.stack.size}`}
-        </span>
+      {stack && stackLabel ? (
+        inline ? (
+          <InboxHint
+            aria-label={stackLabel}
+            label={`Stack #${stack.number} · ${props.shortName} ${stack.position} of ${stack.size}`}
+            className="inline-flex items-center gap-0.5 text-[10.5px] tabular-nums text-muted-foreground"
+          >
+            <GitForkIcon aria-hidden className="size-3" />
+            {`${stack.position}/${stack.size}`}
+          </InboxHint>
+        ) : (
+          // Inside the hover card a hint would close the card it sits in.
+          <span
+            aria-label={stackLabel}
+            className="inline-flex items-center gap-0.5 text-[10px] tabular-nums text-muted-foreground"
+          >
+            <GitForkIcon aria-hidden className="size-3" />
+            {`Stack ${stack.position}/${stack.size}`}
+          </span>
+        )
       ) : null}
     </span>
   );

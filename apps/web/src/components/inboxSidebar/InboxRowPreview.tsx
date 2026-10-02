@@ -24,6 +24,7 @@ export interface InboxRowPreviewPayload {
   readonly timestamp: string;
   readonly pullRequests: ReturnType<typeof resolveInboxPullRequests>;
   readonly changeRequestShortName: string;
+  readonly sourceControlName: string;
 }
 
 const STATUS_TONE = {
@@ -143,11 +144,16 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
               <span aria-hidden className="text-muted-foreground/40">
                 ·
               </span>
+              {/* The provider logo names the agent; the text names the model. */}
               <span className="flex min-w-0 items-center gap-1.5">
-                {ProviderIcon ? <ProviderIcon className="size-3 shrink-0" /> : null}
-                <span className="truncate">
-                  {row.modelLabel ? `${row.providerLabel} · ${row.modelLabel}` : row.providerLabel}
-                </span>
+                {ProviderIcon ? (
+                  <ProviderIcon
+                    aria-label={row.providerLabel}
+                    className="size-3 shrink-0"
+                    role="img"
+                  />
+                ) : null}
+                <span className="truncate">{row.modelLabel ?? row.providerLabel}</span>
               </span>
             </>
           ) : null}
@@ -155,6 +161,7 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
         {payload.pullRequests.requests.length > 0 ? (
           <InboxPullRequestBadges
             {...payload.pullRequests}
+            providerName={payload.sourceControlName}
             shortName={payload.changeRequestShortName}
           />
         ) : null}

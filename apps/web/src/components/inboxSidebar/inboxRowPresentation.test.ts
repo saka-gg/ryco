@@ -2,8 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import {
   formatInboxAge,
+  formatInboxDayTime,
   inboxAttentionDetail,
+  inboxGlyphHint,
   inboxGlyphLabel,
+  inboxTimeHint,
   resolveInboxGlyph,
   resolveInboxStateLine,
 } from "./inboxRowPresentation";
@@ -98,5 +101,59 @@ describe("formatInboxAge", () => {
     expect(formatInboxAge("2026-10-02T14:26:00.000Z")).toBe("6m");
     expect(formatInboxAge("2026-10-02T11:32:00.000Z")).toBe("3h");
     expect(formatInboxAge("2026-09-29T14:32:00.000Z")).toBe("3d");
+  });
+});
+
+describe("row hints", () => {
+  const hintRow = {
+    state: "idle" as const,
+    attention: null,
+    errorDetail: null,
+    statusLabel: "Idle",
+    runningSince: null,
+    latestTurnCompletedAt: null,
+  };
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-02T14:32:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("names the state and the fact behind the glyph", () => {
+    expect(
+      inboxGlyphHint(
+        { ...hintRow, state: "error", statusLabel: "Error", errorDetail: "Exited (1)" },
+        false,
+      ),
+    ).toBe("Error · Exited (1)");
+    expect(inboxGlyphHint({ ...hintRow, state: "needs-input", attention: "approval" }, false)).toBe(
+      "Needs approval · open the thread to respond",
+    );
+    expect(
+      inboxGlyphHint({ ...hintRow, latestTurnCompletedAt: "2026-10-02T14:26:00.000Z" }, true),
+    ).toBe("Completed 6m ago · not opened yet");
+    expect(inboxGlyphHint(hintRow, false)).toBe("Idle · nothing running");
+    const started = "2026-10-02T14:28:00.000Z";
+    expect(
+      inboxGlyphHint(
+        { ...hintRow, state: "working", statusLabel: "Working", runningSince: started },
+        false,
+      ),
+    ).toBe(`Working · started ${formatInboxDayTime(started)}`);
+  });
+
+  it("names the exact moment behind the compact time", () => {
+    const at = "2026-10-01T09:00:00.000Z";
+    const base = { runningSince: null, settled: false, snoozedUntil: null };
+    expect(inboxTimeHint(base, at)).toBe(`Last activity ${formatInboxDayTime(at)}`);
+    expect(inboxTimeHint({ ...base, settled: true }, at)).toBe(`Settled ${formatInboxDayTime(at)}`);
+    expect(inboxTimeHint({ ...base, snoozedUntil: at }, at)).toBe(
+      `Snoozed until ${formatInboxDayTime(at)}`,
+    );
+    expect(inboxTimeHint({ ...base, runningSince: at }, at)).toBe(
+      `Running since ${formatInboxDayTime(at)}`,
+    );
   });
 });

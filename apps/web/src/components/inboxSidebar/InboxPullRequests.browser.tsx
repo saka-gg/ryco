@@ -17,6 +17,10 @@ import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 const harness = vi.hoisted(() => ({
   detail: null as SourceControlChangeRequestDetail | null,
   query: vi.fn(),
+  openExternal: vi.fn((_url: string, _failureTitle: string) => undefined),
+}));
+vi.mock("../../lib/openExternalLink", () => ({
+  openExternalLink: (url: string, failureTitle: string) => harness.openExternal(url, failureTitle),
 }));
 vi.mock("../../rpc/useSourceControl", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../rpc/useSourceControl")>()),
@@ -40,6 +44,7 @@ afterEach(() => {
   resetGitStatusStateForTests();
   harness.detail = null;
   harness.query.mockClear();
+  harness.openExternal.mockClear();
 });
 
 it.each([null, "/repo/worktrees/feature"])(
@@ -152,6 +157,24 @@ it.each([null, "/repo/worktrees/feature"])(
           enabled: true,
         }),
       );
+      // Hovering the chip names that PR, and only that: the row card stays shut.
+      await page.getByLabelText("PR #42 · Open", { exact: true }).hover();
+      await vi.waitFor(() => {
+        const hint = [...document.querySelectorAll('[data-slot="tooltip-popup"]')].find((popup) =>
+          popup.textContent?.includes("Live PR"),
+        );
+        expect(hint?.textContent).toContain("PR #42 · Open");
+        expect(hint?.textContent).toContain("Open on");
+      });
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      expect(document.querySelector('[data-testid="inbox-preview"]')).toBeNull();
+      // Clicking it opens the pull request instead of the thread.
+      await page.getByLabelText("PR #42 · Open", { exact: true }).click();
+      expect(harness.openExternal).toHaveBeenCalledWith(
+        "https://github.com/acme/ryco/pull/42",
+        "Unable to open pull request link",
+      );
+      expect(props.onOpenThread).not.toHaveBeenCalled();
       harness.detail = {
         provider: "github",
         number: 42,

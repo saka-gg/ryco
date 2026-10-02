@@ -63,6 +63,8 @@ describe("inbox pull requests", () => {
         number: 42,
         state: "open",
         isDraft: false,
+        title: status.pr!.title,
+        url: status.pr!.url,
       });
     }
   });

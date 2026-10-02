@@ -1,5 +1,4 @@
 import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   CheckIcon,
   ClockIcon,
@@ -15,11 +14,15 @@ import { useMemo, useRef, useState } from "react";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useSettings } from "../../hooks/useSettings";
 import { useGitStatus } from "../../lib/gitStatusState";
+import { openExternalLink } from "../../lib/openExternalLink";
 import { cn, newCommandId } from "../../lib/utils";
 import { resolveSourceControlRefreshDelay } from "../../rpc/sourceControlRefreshPolicy";
 import { useSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
 import { sidebarUndo } from "../../sidebarUndo";
-import { resolveChangeRequestPresentation } from "../../sourceControlPresentation";
+import {
+  getSourceControlPresentation,
+  resolveChangeRequestPresentation,
+} from "../../sourceControlPresentation";
 import { formatElapsedClockLabel } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
 import { DeviceIcon } from "../DeviceIcon";
@@ -31,28 +34,28 @@ import {
   ContextMenuPopup,
   ContextMenuTrigger,
   Menu,
-  MenuItem,
   MenuPopup,
-  MenuSeparator,
-  MenuSub,
-  MenuSubPopup,
-  MenuSubTrigger,
   MenuTrigger,
 } from "../ui/menu";
 import { toastManager } from "../ui/toast";
 import { Tooltip, type TooltipCreateHandle, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
 import { resolveInboxPullRequest, resolveInboxPullRequests } from "./inboxPullRequests";
+import { InboxHint } from "./InboxRowHint";
 import { InboxProjectIcon, type InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
   formatInboxAge,
+  formatInboxDayTime,
+  inboxGlyphHint,
   inboxGlyphLabel,
+  inboxTimeHint,
   type InboxStateLine,
   resolveInboxGlyph,
   resolveInboxStateLine,
 } from "./inboxRowPresentation";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 import { InboxStatusGlyph } from "./InboxStatusGlyph";
+import { InboxThreadMenuItems } from "./InboxThreadMenu";
 import {
   INBOX_ROW_LEAVING_EVENT,
   readInboxMotionDurationMs,
@@ -111,9 +114,6 @@ function RunningClock(props: { readonly since: string }) {
   return <>{formatElapsedClockLabel(props.since, now)}</>;
 }
 
-const snoozeUntilLabel = (iso: string) =>
-  new Date(iso).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
-
 /**
  * Glyph row. Line 1: status glyph · title. Line 2: the project icon sits under
  * the glyph, then the state line, the change request and the time. Settled and
@@ -158,9 +158,12 @@ export function InboxThreadRow(props: {
       }),
   );
   const pullRequests = resolveInboxPullRequests(currentPr, detail.data);
-  const changeRequestShortName = resolveChangeRequestPresentation(
-    gitStatus.data?.sourceControlProvider,
-  ).shortName;
+  // The detail-enriched entry carries the title and link the menu needs.
+  const ownPullRequest =
+    pullRequests.requests.find((pr) => pr.number === currentPr?.number) ?? currentPr;
+  const sourceControlProvider = gitStatus.data?.sourceControlProvider;
+  const changeRequestShortName = resolveChangeRequestPresentation(sourceControlProvider).shortName;
+  const sourceControlName = getSourceControlPresentation(sourceControlProvider).providerName;
   const lastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[row.key]);
   const resting = row.settled || row.snoozedUntil !== null;
   const unseen =
@@ -175,8 +178,15 @@ export function InboxThreadRow(props: {
     ? (row.effectiveSettlementTimestamp ?? row.updatedAt)
     : row.updatedAt;
   const previewPayload = useMemo<InboxRowPreviewPayload>(
-    () => ({ row, unseen, timestamp, pullRequests, changeRequestShortName }),
-    [row, unseen, timestamp, pullRequests, changeRequestShortName],
+    () => ({
+      row,
+      unseen,
+      timestamp,
+      pullRequests,
+      changeRequestShortName,
+      sourceControlName,
+    }),
+    [row, unseen, timestamp, pullRequests, changeRequestShortName, sourceControlName],
   );
 
   const actionLabel = row.settled ? "Move to Active" : "Settle";
@@ -262,46 +272,20 @@ export function InboxThreadRow(props: {
     if (open) props.previewHandle.close();
   };
   const menuItems = (
-    <>
-      {props.threadActions?.listThreadMenuActions(row.key).map((item) => (
-        <MenuItem
-          key={item.id}
-          variant={item.destructive ? "destructive" : "default"}
-          disabled={!row.mutationEnabled && ["rename", "archive", "close"].includes(item.id)}
-          onClick={() =>
-            void props.threadActions?.performThreadMenuAction(
-              scopeThreadRef(row.environmentId, row.threadId),
-              item.id,
-            )
-          }
-        >
-          {item.label}
-        </MenuItem>
-      ))}
-      <MenuSeparator />
-      {row.snoozedUntil ? (
-        <MenuItem disabled={!row.canUnsnooze || pending} onClick={() => void handleSnooze(null)}>
-          Unsnooze
-        </MenuItem>
-      ) : (
-        <MenuSub>
-          <MenuSubTrigger disabled={!row.canSnooze || pending}>Snooze</MenuSubTrigger>
-          <MenuSubPopup>
-            {snoozePresets.map((preset) => (
-              <MenuItem key={preset.id} onClick={() => void handleSnooze(preset.snoozedUntil)}>
-                {preset.label}
-                <span className="ml-auto pl-4 text-xs text-muted-foreground">
-                  {snoozeUntilLabel(preset.snoozedUntil)}
-                </span>
-              </MenuItem>
-            ))}
-          </MenuSubPopup>
-        </MenuSub>
-      )}
-      <MenuItem disabled={!actionEnabled} onClick={() => void handleSettlement()}>
-        {actionLabel}
-      </MenuItem>
-    </>
+    <InboxThreadMenuItems
+      changeRequestShortName={changeRequestShortName}
+      pending={pending}
+      providerName={sourceControlName}
+      pullRequest={ownPullRequest}
+      row={row}
+      settleEnabled={actionEnabled}
+      settleLabel={actionLabel}
+      snoozePresets={snoozePresets}
+      threadActions={props.threadActions}
+      onOpenPullRequest={(url) => openExternalLink(url, "Unable to open pull request link")}
+      onSettle={() => void handleSettlement()}
+      onSnooze={(snoozedUntil) => void handleSnooze(snoozedUntil)}
+    />
   );
 
   const trustWarning = row.trustLabel === "Not verified" || row.trustLabel === "Identity conflict";
@@ -319,9 +303,13 @@ export function InboxThreadRow(props: {
     >
       <span className="flex h-[18px] items-center">
         {resting ? (
-          <InboxProjectIcon row={row} />
+          <InboxHint className="flex" label={row.projectLabel}>
+            <InboxProjectIcon row={row} />
+          </InboxHint>
         ) : (
-          <InboxStatusGlyph key={glyph} kind={glyph} label={glyphLabel} />
+          <InboxHint className="flex" label={inboxGlyphHint(row, unseen)}>
+            <InboxStatusGlyph key={glyph} kind={glyph} label={glyphLabel} />
+          </InboxHint>
         )}
       </span>
       <span
@@ -348,20 +336,22 @@ export function InboxThreadRow(props: {
           {row.showProject ? (
             <span className="max-w-20 truncate text-muted-foreground/60">{row.projectLabel}</span>
           ) : null}
-          {row.snoozedUntil ? (
-            <>
-              <ClockIcon aria-label="Snoozed until" className="size-3" />
-              {snoozeUntilLabel(row.snoozedUntil)}
-            </>
-          ) : (
-            formatInboxAge(timestamp)
-          )}
+          <InboxHint className="flex items-center gap-1" label={inboxTimeHint(row, timestamp)}>
+            {row.snoozedUntil ? (
+              <>
+                <ClockIcon aria-label="Snoozed until" className="size-3" />
+                {formatInboxDayTime(row.snoozedUntil)}
+              </>
+            ) : (
+              formatInboxAge(timestamp)
+            )}
+          </InboxHint>
         </span>
       ) : (
         <span className="col-span-3 grid min-w-0 grid-cols-[1.375rem_minmax(0,1fr)] items-center pt-px text-[11.5px] leading-4 text-muted-foreground">
-          <span className="flex items-center">
+          <InboxHint className="flex items-center" label={row.projectLabel}>
             <InboxProjectIcon row={row} />
-          </span>
+          </InboxHint>
           <span className="flex min-w-0 items-center gap-1.5">
             {row.showProject ? (
               <span className="max-w-[45%] shrink-0 truncate font-medium text-sidebar-foreground/70">
@@ -369,22 +359,26 @@ export function InboxThreadRow(props: {
               </span>
             ) : null}
             {row.showMachine ? (
-              <DeviceIcon
-                environmentId={row.environmentId}
-                label={row.machineLabel}
-                className="size-3 shrink-0 text-muted-foreground/70"
-              />
+              <InboxHint className="flex shrink-0" label={`On ${row.machineLabel}`}>
+                <DeviceIcon
+                  environmentId={row.environmentId}
+                  label={row.machineLabel}
+                  className="size-3 text-muted-foreground/70"
+                />
+              </InboxHint>
             ) : null}
             {trustWarning ? (
-              <ShieldAlertIcon
-                aria-label={row.trustLabel ?? undefined}
-                className={cn(
-                  "size-3 shrink-0",
-                  row.trustLabel === "Identity conflict"
-                    ? "text-destructive-foreground"
-                    : "text-warning-foreground",
-                )}
-              />
+              <InboxHint className="flex shrink-0" label={row.trustLabel}>
+                <ShieldAlertIcon
+                  aria-label={row.trustLabel ?? undefined}
+                  className={cn(
+                    "size-3",
+                    row.trustLabel === "Identity conflict"
+                      ? "text-destructive-foreground"
+                      : "text-warning-foreground",
+                  )}
+                />
+              </InboxHint>
             ) : null}
             <StateLine
               key={line.kind === "workspace" ? "workspace" : `${line.kind}:${line.text}`}
@@ -394,16 +388,20 @@ export function InboxThreadRow(props: {
             <InboxPullRequestBadges
               {...pullRequests}
               currentNumber={currentPr?.number ?? null}
+              providerName={sourceControlName}
               shortName={changeRequestShortName}
               variant="inline"
             />
-            <span className="shrink-0 tabular-nums text-muted-foreground/70">
+            <InboxHint
+              className="shrink-0 tabular-nums text-muted-foreground/70"
+              label={inboxTimeHint(row, timestamp)}
+            >
               {row.runningSince ? (
                 <RunningClock since={row.runningSince} />
               ) : (
                 formatInboxAge(timestamp)
               )}
-            </span>
+            </InboxHint>
           </span>
         </span>
       )}
@@ -471,11 +469,13 @@ export function InboxThreadRow(props: {
             >
               <MoreHorizontalIcon className="size-3.5" />
             </MenuTrigger>
-            <MenuPopup align="start">{menuItems}</MenuPopup>
+            <MenuPopup align="end" className="min-w-56">
+              {menuItems}
+            </MenuPopup>
           </Menu>
         </div>
       </ContextMenuTrigger>
-      <ContextMenuPopup>{menuItems}</ContextMenuPopup>
+      <ContextMenuPopup className="min-w-56">{menuItems}</ContextMenuPopup>
     </ContextMenu>
   );
 }

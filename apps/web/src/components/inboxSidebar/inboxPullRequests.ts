@@ -2,7 +2,11 @@ import type { SourceControlChangeRequestDetail, VcsStatusResult } from "@ryco/co
 import { resolveThreadPr } from "../ThreadStatusIndicators";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 
-export type InboxPullRequest = NonNullable<InboxSidebarRow["pullRequest"]>;
+/** Title and link arrive with live source control; projected rows carry only number and state. */
+export type InboxPullRequest = NonNullable<InboxSidebarRow["pullRequest"]> & {
+  readonly title?: string | undefined;
+  readonly url?: string | undefined;
+};
 
 export function resolveInboxPullRequest(
   row: Pick<InboxSidebarRow, "branchLabel" | "pullRequest">,
@@ -14,6 +18,8 @@ export function resolveInboxPullRequest(
     number: live.number,
     state: live.state,
     isDraft: row.pullRequest?.number === live.number && row.pullRequest.isDraft,
+    title: live.title,
+    url: live.url || undefined,
   };
 }
 
@@ -25,7 +31,13 @@ export function resolveInboxPullRequests(
   if (!detail || detail.number !== current.number) {
     return { requests: [current], stack: null };
   }
-  const selected = { ...current, state: detail.state, isDraft: detail.isDraft === true };
+  const selected: InboxPullRequest = {
+    ...current,
+    state: detail.state,
+    isDraft: detail.isDraft === true,
+    title: detail.title,
+    url: detail.url,
+  };
   const stack = detail.provider === "github" ? (detail.stack ?? null) : null;
   if (!stack) return { requests: [selected], stack: null };
   const requests: InboxPullRequest[] = stack.entries.map((entry) =>

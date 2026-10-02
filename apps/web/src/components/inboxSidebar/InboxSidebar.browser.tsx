@@ -533,7 +533,10 @@ describe("Inbox sidebar rendering and settlement", () => {
         expect(popup.textContent).not.toContain("gpt-5.4");
         expect(popup.textContent).toContain("Ryco");
         expect(rowElement.querySelector('[aria-label="PR #42 · Draft"]') !== null).toBe(isWorktree);
-        expect(popup.textContent).toContain("Codex · GPT-5.4");
+        // The provider logo names the agent; the text is just the model.
+        expect(popup.textContent).toContain("GPT-5.4");
+        expect(popup.textContent).not.toContain("Codex ·");
+        expect(popup.querySelector('[aria-label="Codex"]')).not.toBeNull();
         expect(popup.textContent).toContain("Why focused? Now.");
         expect(popup.textContent).toContain("A release decision is waiting on this task.");
         expect(popup.textContent).toContain("GPT-5.4 · ranked");

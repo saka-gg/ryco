@@ -7,7 +7,7 @@ import type {
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { ChevronDownIcon, ChevronRightIcon, SearchIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -19,6 +19,7 @@ import { Input } from "../ui/input";
 import { SidebarContent } from "../ui/sidebar";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipCreateHandle, TooltipPopup } from "../ui/tooltip";
+import { InboxHintContext } from "./InboxRowHint";
 import { InboxRowPreview, type InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
   buildInboxSidebarModel,
@@ -185,159 +186,195 @@ export function InboxSidebar(props: InboxSidebarProps) {
     orderSignature,
   });
   const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
+  // Precise hints (glyph, PR, time, machine) share one gliding tooltip; while
+  // one is hovered the row's card stays closed, so each says exactly one thing.
+  const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
+  const previewSuppressedRef = useRef(false);
+  const hintContext = useMemo(
+    () => ({
+      handle: hintHandle,
+      setPreviewSuppressed: (suppressed: boolean) => {
+        previewSuppressedRef.current = suppressed;
+        if (suppressed) previewHandle.close();
+      },
+    }),
+    [hintHandle, previewHandle],
+  );
 
   return (
     <InboxMotionContext value={gateRef}>
-      <SidebarContent className="gap-0 px-2 pb-2" data-testid="inbox-sidebar">
-        <div className="sticky top-0 z-10 space-y-1.5 bg-sidebar px-0.5 pb-2 pt-1">
-          <label className="relative block">
-            <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
-            <Input
-              aria-label="Search inbox"
-              className="bg-sidebar shadow-none [&_[data-slot=input]]:pl-8"
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search tasks"
-              size="sm"
-              type="search"
-              value={query}
-            />
-          </label>
-          <div className="grid grid-cols-2 gap-1.5">
-            <select
-              aria-label="Filter Inbox by machine"
-              className="h-7 min-w-0 rounded-md border border-input bg-sidebar px-2 text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onChange={(event) =>
-                setEnvironmentId(event.target.value ? (event.target.value as EnvironmentId) : null)
-              }
-              value={environmentId ?? ""}
-            >
-              <option value="">All machines</option>
-              {props.environments.map((environment) => (
-                <option key={environment.environmentId} value={environment.environmentId}>
-                  {environment.label}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="Filter Inbox by status"
-              className="h-7 min-w-0 rounded-md border border-input bg-sidebar px-2 text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onChange={(event) => setStatus(event.target.value as InboxSidebarStatusFilter)}
-              value={status}
-            >
-              {STATUS_FILTERS.map((filter) => (
-                <option key={filter.value} value={filter.value}>
-                  {filter.label}
-                </option>
-              ))}
-            </select>
+      <InboxHintContext value={hintContext}>
+        <SidebarContent className="gap-0 px-2 pb-2" data-testid="inbox-sidebar">
+          <div className="sticky top-0 z-10 space-y-1.5 bg-sidebar px-0.5 pb-2 pt-1">
+            <label className="relative block">
+              <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
+              <Input
+                aria-label="Search inbox"
+                className="bg-sidebar shadow-none [&_[data-slot=input]]:pl-8"
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search tasks"
+                size="sm"
+                type="search"
+                value={query}
+              />
+            </label>
+            <div className="grid grid-cols-2 gap-1.5">
+              <select
+                aria-label="Filter Inbox by machine"
+                className="h-7 min-w-0 rounded-md border border-input bg-sidebar px-2 text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onChange={(event) =>
+                  setEnvironmentId(
+                    event.target.value ? (event.target.value as EnvironmentId) : null,
+                  )
+                }
+                value={environmentId ?? ""}
+              >
+                <option value="">All machines</option>
+                {props.environments.map((environment) => (
+                  <option key={environment.environmentId} value={environment.environmentId}>
+                    {environment.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Filter Inbox by status"
+                className="h-7 min-w-0 rounded-md border border-input bg-sidebar px-2 text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onChange={(event) => setStatus(event.target.value as InboxSidebarStatusFilter)}
+                value={status}
+              >
+                {STATUS_FILTERS.map((filter) => (
+                  <option key={filter.value} value={filter.value}>
+                    {filter.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-        </div>
 
-        {sections.length === 0 ? (
-          <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-4 text-center">
-            <p className="text-xs font-medium text-sidebar-foreground">
-              {hasFilters ? "No matching tasks" : "No tasks yet"}
-            </p>
-            <p className="text-[11px] leading-4 text-muted-foreground">
-              {hasFilters
-                ? "Try a different search or clear a filter."
-                : "Open a project and start a task to see it here."}
-            </p>
-          </div>
-        ) : (
-          <div
-            ref={listRef}
-            className="relative"
-            onPointerLeave={onPointerLeave}
-            onPointerMove={onPointerMove}
-          >
+          {sections.length === 0 ? (
+            <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-4 text-center">
+              <p className="text-xs font-medium text-sidebar-foreground">
+                {hasFilters ? "No matching tasks" : "No tasks yet"}
+              </p>
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                {hasFilters
+                  ? "Try a different search or clear a filter."
+                  : "Open a project and start a task to see it here."}
+              </p>
+            </div>
+          ) : (
             <div
-              ref={highlightRef}
-              aria-hidden
-              className="pointer-events-none absolute inset-x-0 top-0 rounded-lg bg-sidebar-accent opacity-0 scale-[0.985] transition-[transform,height,opacity,scale] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-gentle) motion-reduce:transition-none data-[visible=true]:scale-100 data-[visible=true]:opacity-100"
-              data-visible="false"
-            />
-            {sections.map((section) => {
-              const collapsible = section.key === "settled" || section.key === "snoozed";
-              const expanded = isExpanded(section.key);
-              return (
-                <section
-                  key={section.key}
-                  aria-labelledby={`inbox-section-${section.key}`}
-                  className="pb-2"
-                >
-                  {collapsible ? (
-                    <button
-                      aria-expanded={expanded}
-                      className="flex w-full items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left outline-none hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
-                      onClick={() =>
-                        section.key === "snoozed"
-                          ? setSnoozedOpen((open) => !open)
-                          : setSettledOpen((open) => !open)
-                      }
-                      type="button"
-                    >
-                      {expanded ? (
-                        <ChevronDownIcon aria-hidden className="size-3 text-muted-foreground/55" />
-                      ) : (
-                        <ChevronRightIcon aria-hidden className="size-3 text-muted-foreground/55" />
-                      )}
-                      <h2
-                        id={`inbox-section-${section.key}`}
-                        className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/65"
+              ref={listRef}
+              className="relative"
+              onPointerLeave={onPointerLeave}
+              onPointerMove={onPointerMove}
+            >
+              <div
+                ref={highlightRef}
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 top-0 rounded-lg bg-sidebar-accent opacity-0 scale-[0.985] transition-[transform,height,opacity,scale] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-gentle) motion-reduce:transition-none data-[visible=true]:scale-100 data-[visible=true]:opacity-100"
+                data-visible="false"
+              />
+              {sections.map((section) => {
+                const collapsible = section.key === "settled" || section.key === "snoozed";
+                const expanded = isExpanded(section.key);
+                return (
+                  <section
+                    key={section.key}
+                    aria-labelledby={`inbox-section-${section.key}`}
+                    className="pb-2"
+                  >
+                    {collapsible ? (
+                      <button
+                        aria-expanded={expanded}
+                        className="flex w-full items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left outline-none hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
+                        onClick={() =>
+                          section.key === "snoozed"
+                            ? setSnoozedOpen((open) => !open)
+                            : setSettledOpen((open) => !open)
+                        }
+                        type="button"
                       >
-                        {section.title}
-                      </h2>
-                      <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/45">
-                        {section.rows.length}
-                      </span>
-                    </button>
-                  ) : (
-                    <div className="flex items-center gap-2 px-2.5 py-1.5">
-                      <h2
-                        id={`inbox-section-${section.key}`}
-                        className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/65"
-                      >
-                        {section.title}
-                      </h2>
-                      <span className="text-[10px] tabular-nums text-muted-foreground/45">
-                        {section.rows.length}
-                      </span>
-                    </div>
-                  )}
-                  {expanded ? (
-                    <div className="space-y-px">
-                      {section.rows.map((row) => (
-                        <InboxThreadRow
-                          key={row.key}
-                          threadActions={props.threadActions}
-                          active={props.activeThreadKey === row.key}
-                          motionEnabled={motionEnabled}
-                          previewHandle={previewHandle}
-                          onOpen={() =>
-                            props.onOpenThread(scopeThreadRef(row.environmentId, row.threadId))
-                          }
-                          onSetSettlement={setThreadSettlement}
-                          row={row}
-                        />
-                      ))}
-                    </div>
-                  ) : null}
-                </section>
-              );
-            })}
-          </div>
-        )}
-        {/* One card for every row: it glides between hovered rows and
-          cross-fades its content instead of popping per row. */}
-        <Tooltip handle={previewHandle}>
-          {({ payload }) => (
-            <TooltipPopup align="start" side="right" sideOffset={10}>
-              {payload ? <InboxRowPreview payload={payload} /> : null}
-            </TooltipPopup>
+                        {expanded ? (
+                          <ChevronDownIcon
+                            aria-hidden
+                            className="size-3 text-muted-foreground/55"
+                          />
+                        ) : (
+                          <ChevronRightIcon
+                            aria-hidden
+                            className="size-3 text-muted-foreground/55"
+                          />
+                        )}
+                        <h2
+                          id={`inbox-section-${section.key}`}
+                          className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/65"
+                        >
+                          {section.title}
+                        </h2>
+                        <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/45">
+                          {section.rows.length}
+                        </span>
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-2 px-2.5 py-1.5">
+                        <h2
+                          id={`inbox-section-${section.key}`}
+                          className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/65"
+                        >
+                          {section.title}
+                        </h2>
+                        <span className="text-[10px] tabular-nums text-muted-foreground/45">
+                          {section.rows.length}
+                        </span>
+                      </div>
+                    )}
+                    {expanded ? (
+                      <div className="space-y-px">
+                        {section.rows.map((row) => (
+                          <InboxThreadRow
+                            key={row.key}
+                            threadActions={props.threadActions}
+                            active={props.activeThreadKey === row.key}
+                            motionEnabled={motionEnabled}
+                            previewHandle={previewHandle}
+                            onOpen={() =>
+                              props.onOpenThread(scopeThreadRef(row.environmentId, row.threadId))
+                            }
+                            onSetSettlement={setThreadSettlement}
+                            row={row}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </section>
+                );
+              })}
+            </div>
           )}
-        </Tooltip>
-      </SidebarContent>
+          {/* One card for every row: it glides between hovered rows and
+          cross-fades its content instead of popping per row. */}
+          <Tooltip
+            handle={previewHandle}
+            onOpenChange={(open, details) => {
+              if (open && previewSuppressedRef.current) details.cancel();
+            }}
+          >
+            {({ payload }) => (
+              <TooltipPopup align="start" side="right" sideOffset={10}>
+                {payload ? <InboxRowPreview payload={payload} /> : null}
+              </TooltipPopup>
+            )}
+          </Tooltip>
+          <Tooltip handle={hintHandle}>
+            {({ payload }) => (
+              <TooltipPopup side="top" sideOffset={6}>
+                {payload}
+              </TooltipPopup>
+            )}
+          </Tooltip>
+        </SidebarContent>
+      </InboxHintContext>
     </InboxMotionContext>
   );
 }
