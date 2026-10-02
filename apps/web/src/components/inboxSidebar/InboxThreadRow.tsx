@@ -38,13 +38,14 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { toastManager } from "../ui/toast";
-import { Tooltip, type TooltipCreateHandle, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
 import {
   resolveInboxChangeStats,
   resolveInboxPullRequest,
   resolveInboxPullRequests,
 } from "./inboxPullRequests";
+import type { InboxPreviewHandle } from "./InboxHoverLayer";
 import { InboxHint } from "./InboxRowHint";
 import { InboxProjectIcon, type InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
@@ -71,7 +72,6 @@ export type InboxThreadActions = Pick<
   ReturnType<typeof useThreadMenuActions>,
   "listThreadMenuActions" | "performThreadMenuAction"
 >;
-export type InboxPreviewHandle = ReturnType<typeof TooltipCreateHandle<InboxRowPreviewPayload>>;
 
 const LINE_TONE: Record<InboxStateLine["kind"], string> = {
   attention: "font-medium text-warning-foreground",
@@ -441,7 +441,8 @@ export function InboxThreadRow(props: {
         <TooltipTrigger
           handle={props.previewHandle}
           payload={previewPayload}
-          closeDelay={80}
+          // Long enough to cross the row's actions and the gap into the card.
+          closeDelay={280}
           delay={300}
           render={navigationButton}
         />

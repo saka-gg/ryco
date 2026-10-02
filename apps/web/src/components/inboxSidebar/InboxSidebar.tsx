@@ -7,7 +7,7 @@ import type {
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { ChevronDownIcon, ChevronRightIcon, SearchIcon } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -18,9 +18,9 @@ import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
 import { Input } from "../ui/input";
 import { SidebarContent } from "../ui/sidebar";
 import { toastManager } from "../ui/toast";
-import { Tooltip, TooltipCreateHandle, TooltipPopup } from "../ui/tooltip";
-import { InboxHintContext } from "./InboxRowHint";
-import { InboxRowPreview, type InboxRowPreviewPayload } from "./InboxRowPreview";
+import { TooltipCreateHandle } from "../ui/tooltip";
+import { InboxHoverLayer } from "./InboxHoverLayer";
+import type { InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
   buildInboxSidebarModel,
   type InboxSidebarEnvironment,
@@ -186,25 +186,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
     orderSignature,
   });
   const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
-  // Precise hints (glyph, PR, time, machine) share one gliding tooltip; while
-  // one is hovered the row's card stays closed, so each says exactly one thing.
   const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
-  const previewSuppressedRef = useRef(false);
-  const hintContext = useMemo(
-    () => ({
-      handle: hintHandle,
-      setPreviewSuppressed: (suppressed: boolean) => {
-        previewSuppressedRef.current = suppressed;
-        if (suppressed) previewHandle.close();
-      },
-    }),
-    [hintHandle, previewHandle],
-  );
 
   return (
     <InboxMotionContext value={gateRef}>
-      <InboxHintContext value={hintContext}>
-        <SidebarContent className="gap-0 px-2 pb-2" data-testid="inbox-sidebar">
+      <SidebarContent className="gap-0 px-2 pb-2" data-testid="inbox-sidebar">
+        <InboxHoverLayer hintHandle={hintHandle} previewHandle={previewHandle}>
           <div className="sticky top-0 z-10 space-y-1.5 bg-sidebar px-0.5 pb-2 pt-1">
             <label className="relative block">
               <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
@@ -352,29 +339,8 @@ export function InboxSidebar(props: InboxSidebarProps) {
               })}
             </div>
           )}
-          {/* One card for every row: it glides between hovered rows and
-          cross-fades its content instead of popping per row. */}
-          <Tooltip
-            handle={previewHandle}
-            onOpenChange={(open, details) => {
-              if (open && previewSuppressedRef.current) details.cancel();
-            }}
-          >
-            {({ payload }) => (
-              <TooltipPopup align="start" side="right" sideOffset={10}>
-                {payload ? <InboxRowPreview payload={payload} /> : null}
-              </TooltipPopup>
-            )}
-          </Tooltip>
-          <Tooltip handle={hintHandle}>
-            {({ payload }) => (
-              <TooltipPopup side="top" sideOffset={6}>
-                {payload}
-              </TooltipPopup>
-            )}
-          </Tooltip>
-        </SidebarContent>
-      </InboxHintContext>
+        </InboxHoverLayer>
+      </SidebarContent>
     </InboxMotionContext>
   );
 }
