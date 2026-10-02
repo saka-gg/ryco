@@ -1696,11 +1696,12 @@ describe("thread settlement state", () => {
 
   it("treats reserved object-property names as snapshot keys", () => {
     const snapshot = makeShellSnapshot(null, null);
-    const threads = ["__proto__", "constructor"].map((id) => ({
-      ...snapshot.threads[0]!,
-      id: ThreadId.make(id),
-      projectId: ProjectId.make(id),
-    }));
+    const threads = ["__proto__", "constructor"].map((id) =>
+      Object.assign({}, snapshot.threads[0]!, {
+        id: ThreadId.make(id),
+        projectId: ProjectId.make(id),
+      }),
+    );
     const result = syncServerShellSnapshot(
       makeEmptyState(),
       { ...snapshot, threads },
