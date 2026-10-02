@@ -6,51 +6,31 @@ export type InboxHintHandle = ReturnType<typeof TooltipCreateHandle<ReactNode>>;
 
 interface InboxHintContextValue {
   readonly handle: InboxHintHandle;
-  /** While a hint is hovered the row's preview card stays closed. */
-  readonly setPreviewSuppressed: (suppressed: boolean) => void;
+  /** Hints stand down while the row card is open (see InboxHoverLayer). */
+  readonly disabled: boolean;
 }
 
 export const InboxHintContext = createContext<InboxHintContextValue | null>(null);
 
 /**
- * A precise target inside an inbox row (status glyph, change request, time,
- * machine). Every hint shares one tooltip that glides from target to target;
- * hovering one names that exact thing instead of opening the row's card.
+ * A precise target inside an inbox row. Every hint shares one tooltip that
+ * glides from target to target; hovering one names that exact thing.
  */
 export function InboxHint({
   label,
   children,
-  onPointerEnter,
-  onPointerLeave,
   ...props
 }: { readonly label: ReactNode } & ComponentProps<"span">) {
   const context = useContext(InboxHintContext);
-  if (!context) {
-    return (
-      <span onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave} {...props}>
-        {children}
-      </span>
-    );
-  }
+  if (!context) return <span {...props}>{children}</span>;
   return (
     <TooltipTrigger
       closeDelay={60}
       delay={260}
+      disabled={context.disabled}
       handle={context.handle}
       payload={label}
-      render={
-        <span
-          {...props}
-          onPointerEnter={(event) => {
-            context.setPreviewSuppressed(true);
-            onPointerEnter?.(event);
-          }}
-          onPointerLeave={(event) => {
-            context.setPreviewSuppressed(false);
-            onPointerLeave?.(event);
-          }}
-        />
-      }
+      render={<span {...props} />}
     >
       {children}
     </TooltipTrigger>

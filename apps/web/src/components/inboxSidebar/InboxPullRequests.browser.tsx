@@ -258,6 +258,33 @@ it.each([null, "/repo/worktrees/feature"])(
           ),
         );
       }
+
+      // On the way into an open card the pointer crosses the row's PR chip:
+      // the card stays, and the chip's own hint stays quiet.
+      const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      await page
+        .getByTestId("inbox-thread-row")
+        .getByLabelText("PR #42 · Merged", { exact: true })
+        .hover();
+      await pause(450);
+      expect(document.querySelector('[data-testid="inbox-preview"]')).not.toBeNull();
+      expect(
+        [...document.querySelectorAll('[data-slot="tooltip-popup"]')].some((popup) =>
+          popup.textContent?.includes("Open on"),
+        ),
+      ).toBe(false);
+      // Inside the card it stays open and its links work.
+      await page.getByTestId("inbox-preview").hover();
+      await pause(450);
+      expect(document.querySelector('[data-testid="inbox-preview"]')).not.toBeNull();
+      await page
+        .getByTestId("inbox-preview")
+        .getByLabelText("PR #41 · Closed", { exact: true })
+        .click();
+      expect(harness.openExternal).toHaveBeenLastCalledWith(
+        "https://github.com/acme/ryco/pull/41",
+        "Unable to open pull request link",
+      );
     } finally {
       await mounted.unmount();
       host.remove();
