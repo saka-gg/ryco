@@ -2,7 +2,7 @@
 
 import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
 import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
-import { useRelativeTimeTick } from "./settingsLayout";
+import { SETTINGS_CONTROL_WIDTH, SettingsRow, useRelativeTimeTick } from "./settingsLayout";
 
 import {
   ArrowUpCircleIcon,
@@ -24,6 +24,7 @@ import {
   type ServerProviderRateLimitWindow,
 } from "@ryco/contracts";
 
+import { ColorSwatchPicker } from "./ColorSwatchPicker";
 import { cn } from "../../lib/utils";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
@@ -165,86 +166,14 @@ function ProviderAccentColorPicker(props: {
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
 }) {
-  const [draft, setDraft] = useState(props.value ?? "");
-  const [isEditing, setIsEditing] = useState(false);
-  const draftColor = normalizeProviderAccentColor(draft);
-
-  useEffect(() => {
-    if (isEditing) return;
-    setDraft(props.value ?? "");
-  }, [isEditing, props.value]);
-
-  const commitDraft = () => {
-    setIsEditing(false);
-    props.onCommit(draftColor ?? "");
-  };
-
-  const commitSwatch = (swatch: string) => {
-    setIsEditing(false);
-    setDraft(swatch);
-    props.onCommit(swatch);
-  };
-
   return (
-    <div className="grid gap-2">
-      <span className="text-xs font-medium text-foreground">Accent color</span>
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <input
-          type="color"
-          value={draftColor ?? PROVIDER_ACCENT_SWATCHES[0]}
-          onFocus={() => setIsEditing(true)}
-          onInput={(event) => {
-            setIsEditing(true);
-            setDraft(event.currentTarget.value);
-          }}
-          onChange={(event) => {
-            setIsEditing(true);
-            setDraft(event.currentTarget.value);
-          }}
-          onBlur={commitDraft}
-          aria-label={`Accent color for ${props.displayName}`}
-          className="h-8 w-10 cursor-pointer rounded border border-input bg-background p-0.5"
-        />
-        <div className="flex flex-wrap gap-1.5">
-          {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
-            const selected = draftColor?.toLowerCase() === swatch;
-            return (
-              <button
-                key={swatch}
-                type="button"
-                className={cn(
-                  "size-6 cursor-pointer rounded-full border transition",
-                  selected
-                    ? "border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
-                    : "border-black/10 hover:scale-105 dark:border-white/20",
-                )}
-                style={{ backgroundColor: swatch }}
-                onClick={() => commitSwatch(swatch)}
-                aria-label={`Use ${swatch} accent`}
-              />
-            );
-          })}
-        </div>
-        {draftColor ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="h-7 px-2 text-xs text-muted-foreground"
-            onClick={() => {
-              setIsEditing(false);
-              setDraft("");
-              props.onCommit("");
-            }}
-          >
-            Clear
-          </Button>
-        ) : null}
-      </div>
-      <span className="text-xs text-muted-foreground">
-        Used to distinguish this instance in picker rails and model lists.
-      </span>
-    </div>
+    <ColorSwatchPicker
+      ariaLabel={`Accent color for ${props.displayName}`}
+      value={normalizeProviderAccentColor(props.value ?? "") ?? null}
+      swatches={PROVIDER_ACCENT_SWATCHES}
+      defaultOption={{ label: "No accent" }}
+      onChange={(next) => props.onCommit(next ?? "")}
+    />
   );
 }
 
@@ -678,7 +607,7 @@ export function ProviderInstanceCard({
         <Button
           size="xs"
           variant="ghost"
-          className="h-7 gap-1.5 px-2 text-xs text-muted-foreground hover:text-destructive"
+          className="text-muted-foreground hover:text-destructive-foreground"
           onClick={onDelete}
           aria-label={`Delete provider instance ${instanceId}`}
         >
@@ -832,30 +761,33 @@ export function ProviderInstanceCard({
           />
         ) : null}
 
-        <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-          <label htmlFor={`provider-instance-${instanceId}-display-name`} className="block">
-            <span className="text-xs font-medium text-foreground">Display name</span>
+        <SettingsRow
+          title={
+            <label htmlFor={`provider-instance-${instanceId}-display-name`}>Display name</label>
+          }
+          description="Optional label shown in the provider list."
+          control={
             <DraftInput
               id={`provider-instance-${instanceId}-display-name`}
-              className="mt-1.5"
+              className={SETTINGS_CONTROL_WIDTH.md}
               value={instance.displayName ?? ""}
               onCommit={updateDisplayName}
               placeholder={driverOption?.label ?? "Instance label"}
               spellCheck={false}
             />
-            <span className="mt-1 block text-xs text-muted-foreground">
-              Optional label shown in the provider list.
-            </span>
-          </label>
-        </div>
+          }
+        />
 
-        <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+        <SettingsRow
+          title="Accent color"
+          description="Distinguishes this instance in picker rails and model lists."
+        >
           <ProviderAccentColorPicker
             displayName={displayName}
             value={accentColor}
             onCommit={updateAccentColor}
           />
-        </div>
+        </SettingsRow>
 
         <div className="border-t border-border/60 px-4 py-3 sm:px-5">
           <ProviderEnvironmentSection

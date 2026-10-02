@@ -16,7 +16,6 @@ import type {
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
 
-import { cn } from "../../lib/utils";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { readEnvironmentApi } from "../../environmentApi";
 import { ensureLocalApi } from "../../localApi";
@@ -27,7 +26,12 @@ import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+  SettingsBlock,
+} from "./settingsLayout";
 
 function pluginStatusKey(status: OpinionatedPluginStatus): string {
   return `${status.pluginId}:${status.targetKind}:${status.providerInstanceId ?? "global"}`;
@@ -116,7 +120,7 @@ function PluginTargetRow({
 }) {
   const canInstall = status.canInstall && status.state !== "installed";
   return (
-    <div className="flex flex-col gap-3 border-t border-border/50 px-4 py-3 first:border-t-0 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+    <div className="flex flex-col gap-3 border-t border-border/60 py-3 first:border-t-0 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 space-y-1">
         <div className="flex min-h-5 flex-wrap items-center gap-2">
           {statusIcon(status)}
@@ -138,7 +142,10 @@ function PluginTargetRow({
         {status.manualSteps.length > 0 ? (
           <div className="space-y-1 pt-1">
             {status.manualSteps.map((step) => (
-              <p key={step} className="font-mono text-[11px] leading-relaxed text-muted-foreground">
+              <p
+                key={step}
+                className="break-words font-mono text-[11px] leading-relaxed text-muted-foreground"
+              >
                 {step}
               </p>
             ))}
@@ -384,10 +391,10 @@ export function OpinionatedPluginsSettingsPanel() {
         }
       >
         {plugins.length === 0 && isLoading ? (
-          <div className="flex items-center gap-2 px-5 py-4 text-xs text-muted-foreground">
+          <SettingsBlock className="flex items-center gap-2 text-xs text-muted-foreground">
             <LoaderIcon className="size-3.5 animate-spin" />
             Loading plugin status
-          </div>
+          </SettingsBlock>
         ) : null}
 
         {plugins.map((plugin) => {
@@ -424,14 +431,9 @@ export function OpinionatedPluginsSettingsPanel() {
                 </Button>
               }
             >
-              <div
-                className={cn(
-                  "mt-4 border-t border-border/60",
-                  pluginStatuses.length === 0 ? "px-5 py-4" : "",
-                )}
-              >
+              <div className="rounded-[min(var(--radius-lg),0.625rem)] bg-muted/40 px-3">
                 {pluginStatuses.length === 0 ? (
-                  <p className="text-xs text-muted-foreground/80">
+                  <p className="py-3 text-xs text-muted-foreground">
                     No compatible provider instances detected.
                   </p>
                 ) : (

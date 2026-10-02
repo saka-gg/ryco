@@ -202,7 +202,7 @@ export function PullRequestThreadDialog({
         }
       }}
     >
-      <DialogPopup className="project-glass-surface max-w-xl" surface="glass">
+      <DialogPopup className="max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <SourceControlIcon className="size-4" />

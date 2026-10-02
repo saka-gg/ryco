@@ -646,7 +646,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
           }
         }}
       >
-        <DialogPopup className="project-glass-surface max-w-md" surface="glass">
+        <DialogPopup className="max-w-md">
           <DialogHeader>
             <DialogTitle>
               {folderDialog?.mode === "rename" ? "Rename folder" : "New project folder"}

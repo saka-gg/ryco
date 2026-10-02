@@ -88,7 +88,7 @@ export function ProcessDiagnosticsSection({
   const tree = snapshot?.processTree;
   return (
     <SettingsSection title="Live descendant processes">
-      <div className="grid grid-cols-2 gap-4 px-4 py-4 text-xs lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 px-4 sm:px-5 py-4 text-xs lg:grid-cols-4">
         <div>
           Child processes
           <div className="mt-1 font-mono">{tree?.processes.length ?? "Unavailable"}</div>
@@ -109,24 +109,24 @@ export function ProcessDiagnosticsSection({
           </div>
         </div>
       </div>
-      <p className="px-4 pb-3 text-xs text-muted-foreground">
+      <p className="px-4 sm:px-5 pb-3 text-xs text-muted-foreground">
         Live children of the selected server. The server and desktop shell are excluded.{" "}
         {tree
           ? `Checked ${relativeTimeLabel(tree.readAt)}.`
           : "This server has not supplied process diagnostics."}
       </p>
       {tree?.error ? (
-        <p role="alert" className="px-4 pb-3 text-xs text-destructive">
+        <p role="alert" className="px-4 sm:px-5 pb-3 text-xs text-destructive">
           {tree.error}
         </p>
       ) : null}
       {message ? (
-        <p role="status" className="px-4 pb-3 text-xs">
+        <p role="status" className="px-4 sm:px-5 pb-3 text-xs">
           {message}
         </p>
       ) : null}
       {!allowed ? (
-        <p className="px-4 pb-3 text-xs text-muted-foreground">
+        <p className="px-4 sm:px-5 pb-3 text-xs text-muted-foreground">
           {capability.reason ?? "Process controls require a connected owner session."}
         </p>
       ) : null}
@@ -135,7 +135,7 @@ export function ProcessDiagnosticsSection({
           <thead className="border-y text-muted-foreground">
             <tr>
               {["Process", "PID / Parent", "CPU", "RSS", "Status / Age", "Actions"].map((label) => (
-                <th key={label} className="px-4 py-2 font-medium">
+                <th key={label} className="px-4 sm:px-5 py-2 font-medium">
                   {label}
                 </th>
               ))}
@@ -191,7 +191,9 @@ export function ProcessDiagnosticsSection({
         </table>
       </div>
       {tree?.processes.length === 0 ? (
-        <p className="px-4 py-4 text-sm text-muted-foreground">No live descendant processes.</p>
+        <p className="px-4 sm:px-5 py-4 text-sm text-muted-foreground">
+          No live descendant processes.
+        </p>
       ) : null}
     </SettingsSection>
   );

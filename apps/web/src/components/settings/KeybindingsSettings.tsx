@@ -10,14 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  AlertTriangleIcon,
-  KeyboardIcon,
-  PlusIcon,
-  SearchIcon,
-  Undo2Icon,
-  XIcon,
-} from "lucide-react";
+import { AlertTriangleIcon, PlusIcon, SearchIcon, Undo2Icon, XIcon } from "lucide-react";
 import {
   type KeybindingCommand,
   type KeybindingRule,
@@ -56,11 +49,18 @@ import {
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { useSettingsTarget } from "../../settingsTarget";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
+import { Badge } from "../ui/badge";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "../ui/input-group";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingsEmpty,
+  SettingsNotice,
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
 
 type DraftRule = KeybindingRule & { __id: string };
 
@@ -519,31 +519,21 @@ export function KeybindingsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="grid size-9 place-items-center rounded-lg bg-accent text-foreground/70">
-            <KeyboardIcon className="size-4" />
-          </span>
-          <div>
-            <h1 className="text-lg font-semibold tracking-tight">Keybindings</h1>
-            <p className="text-xs text-muted-foreground">
-              Click any shortcut and press a new combination to rebind. Press Esc to cancel,
-              Backspace to clear.
-            </p>
-          </div>
-        </div>
-        <Button
-          variant="outline"
-          size="xs"
-          onClick={() => void handleRestoreAllDefaults()}
-          disabled={draft.length === 0}
-        >
-          <Undo2Icon className="size-3.5" />
-          Restore defaults
-        </Button>
-      </div>
-
-      <SettingsSection title="Configuration file">
+      <SettingsSection
+        title="Configuration file"
+        headerAction={
+          <Button
+            variant="ghost"
+            size="xs"
+            className="text-muted-foreground hover:text-foreground"
+            onClick={() => void handleRestoreAllDefaults()}
+            disabled={draft.length === 0}
+          >
+            <Undo2Icon />
+            Restore defaults
+          </Button>
+        }
+      >
         <SettingsRow
           title="Keybindings file"
           description="Open the persisted `keybindings.json` file to edit advanced bindings directly."
@@ -584,37 +574,49 @@ export function KeybindingsSettingsPanel() {
       </SettingsSection>
 
       {issues.length > 0 ? (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
-          <div className="flex-1 space-y-0.5">
-            {issues.map((issue) => (
-              <p key={`${issue.kind}-${issue.message}`}>{issue.message}</p>
-            ))}
-            {keybindingsConfigPath ? (
-              <p className="opacity-70">
-                Edit <code className="rounded bg-amber-500/20 px-1">{keybindingsConfigPath}</code>{" "}
-                to resolve.
-              </p>
-            ) : null}
-          </div>
-        </div>
+        <SettingsNotice
+          tone="warning"
+          title={
+            issues.length === 1 ? "A keybinding needs attention" : "Some keybindings need attention"
+          }
+        >
+          {issues.map((issue) => (
+            <p key={`${issue.kind}-${issue.message}`}>{issue.message}</p>
+          ))}
+          {keybindingsConfigPath ? (
+            <p className="mt-1">
+              Edit{" "}
+              <code className="break-all font-mono text-foreground">{keybindingsConfigPath}</code>{" "}
+              to resolve.
+            </p>
+          ) : null}
+        </SettingsNotice>
       ) : null}
 
-      <div className="relative">
-        <SearchIcon className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
-        <Input
-          type="search"
-          placeholder="Search by command, shortcut, or when…"
-          className="pl-9"
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
-        />
+      <div className="flex flex-col gap-2">
+        <InputGroup>
+          <InputGroupAddon>
+            <SearchIcon />
+          </InputGroupAddon>
+          <InputGroupInput
+            type="search"
+            aria-label="Search keybindings"
+            placeholder="Search by command, shortcut, or when…"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+          />
+        </InputGroup>
+        <p className="px-0.5 text-xs text-muted-foreground">
+          Click a shortcut and press a new combination to rebind. Esc cancels, Backspace clears.
+        </p>
       </div>
 
       {totalVisibleRows === 0 ? (
-        <div className="rounded-lg border border-dashed border-border/60 px-6 py-12 text-center text-sm text-muted-foreground">
-          No commands match your search.
-        </div>
+        <SettingsEmpty
+          icon={<SearchIcon />}
+          title="No commands match your search"
+          description="Try a command name, a key like ⌘K, or a context such as terminal."
+        />
       ) : (
         groups.map((group) => (
           <SettingsSection key={group.category.id} title={group.category.label}>
@@ -661,20 +663,20 @@ const CommandRow = memo(function CommandRow({
         context.rowRefs.current.set(row.command, node);
       }}
       className={cn(
-        "group flex flex-col gap-2 border-t border-border/60 px-4 py-3 first:border-t-0 transition-colors data-[flash=true]:bg-amber-500/10 sm:px-5",
+        "group flex flex-col gap-2 border-t border-border/60 px-4 py-3.5 first:border-t-0 transition-colors duration-300 data-[flash=true]:bg-primary/8 sm:px-5",
       )}
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-[13px] font-medium tracking-tight text-foreground">
-              {row.title}
-            </span>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[13px] font-medium text-foreground">{row.title}</span>
             <StatusPill status={row.status} />
           </div>
-          <code className="block truncate text-[10px] text-muted-foreground/60">{row.command}</code>
+          <code className="mt-0.5 block truncate font-mono text-[11px] text-muted-foreground">
+            {row.command}
+          </code>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
           {ruleEntries.length === 0 ? (
             <ShortcutChip
               key="placeholder"
@@ -737,7 +739,7 @@ const CommandRow = memo(function CommandRow({
       </div>
 
       {visibleConflicts.length > 0 ? (
-        <div className="animate-in fade-in slide-in-from-top-1 flex flex-col gap-1 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive-foreground/90">
+        <div className="settings-subsections-enter flex flex-col gap-1 rounded-[min(var(--radius-md),0.5rem)] border border-destructive/28 bg-destructive/6 px-2.5 py-1.5 text-[11px] text-destructive-foreground">
           {visibleConflicts.map((conflict) => (
             <ConflictLine
               key={`${conflict.key}-${conflict.otherCommand}`}
@@ -759,16 +761,9 @@ const CommandRow = memo(function CommandRow({
 function StatusPill({ status }: { status: CommandRowData["status"] }) {
   if (status === "default") return null;
   return (
-    <span
-      className={cn(
-        "rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.06em]",
-        status === "modified"
-          ? "bg-amber-500/15 text-amber-300"
-          : "bg-indigo-500/15 text-indigo-300",
-      )}
-    >
+    <Badge size="sm" variant={status === "modified" ? "warning" : "info"}>
       {status === "modified" ? "Modified" : "Custom"}
-    </span>
+    </Badge>
   );
 }
 
@@ -935,14 +930,13 @@ function ShortcutChip({
         onClick={startRecording}
         onKeyDown={onChipKeyDown}
         className={cn(
-          "inline-flex h-6 items-center gap-1 rounded-md border px-2 font-mono text-[11px] transition-all duration-150",
+          "inline-flex h-6 items-center gap-1 rounded-[min(var(--radius-md),0.4rem)] border px-2 font-mono text-[11px] transition-[background-color,border-color,color] duration-150",
           isRecording
-            ? "kb-chip-recording border-indigo-500/60 bg-indigo-500/15 text-indigo-100 shadow-[0_0_0_4px_rgba(99,102,241,0.18)]"
+            ? "keybinding-chip-recording border-primary/60 bg-primary/10 text-foreground"
             : savedFlash
-              ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-100"
+              ? "border-success/50 bg-success/12 text-foreground"
               : "border-border bg-muted/60 text-foreground hover:bg-muted",
         )}
-        style={isRecording ? { animation: "keybindings-pulse 1.4s ease-in-out infinite" } : {}}
       >
         {isRecording ? (
           <span className="text-[11px] tracking-[0.04em]">Press shortcut…</span>
@@ -970,7 +964,6 @@ function ShortcutChip({
           <XIcon className="size-3 text-muted-foreground/60 hover:text-destructive" />
         </button>
       ) : null}
-      <PanelStyles />
     </span>
   );
 }
@@ -1004,7 +997,7 @@ function WhenChip({ currentWhen, onChange, disabled }: WhenChipProps) {
             type="button"
             disabled={disabled}
             className={cn(
-              "inline-flex h-5 items-center gap-1 rounded bg-muted/40 px-1.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50",
+              "inline-flex h-5 items-center gap-1 rounded-[min(var(--radius-sm),0.3rem)] bg-muted/50 px-1.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50",
               currentWhen === undefined && "italic opacity-70",
             )}
             aria-label={`When: ${description}`}
@@ -1038,21 +1031,6 @@ function WhenChip({ currentWhen, onChange, disabled }: WhenChipProps) {
         ))}
       </MenuPopup>
     </Menu>
-  );
-}
-
-function PanelStyles() {
-  // Inline the keyframes so we don't need to register them in CSS.
-  return (
-    <style>
-      {`@keyframes keybindings-pulse {
-        0%, 100% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
-        50% { box-shadow: 0 0 0 8px rgba(99, 102, 241, 0.30); }
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .kb-chip-recording { animation: none !important; }
-      }`}
-    </style>
   );
 }
 

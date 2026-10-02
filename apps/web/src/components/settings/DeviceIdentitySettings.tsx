@@ -42,17 +42,22 @@ export function DeviceIdentitySettings() {
     }
   };
   return (
-    <SettingsSection title="Device" owner="node" className="mx-6 mt-5 mb-3">
+    <SettingsSection title="Device" owner="node">
       <SettingsRow
-        title="Device name"
+        title="Name"
         scope={target.nodeLabel}
-        description="Shown to everyone who can access this device. Renaming keeps its projects, conversations, and connections."
+        description="Shown to everyone who can reach this device. Renaming keeps its projects, conversations, and connections."
         control={
-          canRename ? (
-            <Button variant="outline" onClick={() => setRenaming(true)}>
-              Rename device
-            </Button>
-          ) : undefined
+          <>
+            <span className="min-w-0 truncate text-[13px] text-muted-foreground">
+              {target.nodeLabel}
+            </span>
+            {canRename ? (
+              <Button size="xs" variant="outline" onClick={() => setRenaming(true)}>
+                Rename
+              </Button>
+            ) : null}
+          </>
         }
         status={
           !canRename ? (

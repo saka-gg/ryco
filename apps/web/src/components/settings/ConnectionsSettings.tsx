@@ -57,6 +57,7 @@ import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Group, GroupSeparator } from "../ui/group";
 import { AnimatedHeight } from "../AnimatedHeight";
@@ -318,7 +319,7 @@ function formatDesktopSshConnectionError(error: unknown): string {
 }
 
 /** Direct row in the card – same pattern as the Provider / ACP-agent list rows. */
-const ITEM_ROW_CLASSNAME = "border-t border-border/60 px-4 py-4 first:border-t-0 sm:px-5";
+const ITEM_ROW_CLASSNAME = "border-t border-border/60 px-4 py-3.5 first:border-t-0 sm:px-5";
 const ENDPOINT_ROW_CLASSNAME = "border-t border-border/60 px-4 py-2.5 first:border-t-0 sm:px-5";
 
 const ITEM_ROW_INNER_CLASSNAME =
@@ -333,7 +334,7 @@ function accessRowClassName(_presentation: AccessSectionPresentation) {
 function endpointRowClassName(presentation: AccessSectionPresentation, isAvailable: boolean) {
   if (presentation === "endpoint-rail") {
     return cn(
-      "relative border-t border-border/60 px-4 py-3 first:border-t-0 sm:px-5",
+      "relative border-t border-border/60 px-4 py-3.5 first:border-t-0 sm:px-5",
       !isAvailable && "bg-muted/20",
     );
   }
@@ -746,9 +747,11 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           <div className="flex min-h-5 items-center gap-1.5">
             <ConnectionStatusDot
               tooltipText={`Link created at ${formatAccessTimestamp(pairingLink.createdAt)}`}
-              dotClassName="bg-amber-400"
+              dotClassName="bg-warning"
             />
-            <h3 className="text-sm font-medium text-foreground">{primaryLabel}</h3>
+            <h3 className="min-w-0 truncate text-[13px] font-medium text-foreground">
+              {primaryLabel}
+            </h3>
             <Popover>
               {shareablePairingUrl ? (
                 <>
@@ -945,11 +948,13 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
               dotClassName={isLive ? "bg-success" : "bg-muted-foreground/30"}
               pingClassName={null}
             />
-            <h3 className="text-sm font-medium text-foreground">{primaryLabel}</h3>
+            <h3 className="min-w-0 truncate text-[13px] font-medium text-foreground">
+              {primaryLabel}
+            </h3>
             {clientSession.current ? (
-              <span className="text-[10px] text-muted-foreground/80 rounded-md border border-border/50 bg-muted/50 px-1 py-0.5">
+              <Badge size="sm" variant="outline" className="shrink-0">
                 Current session
-              </span>
+              </Badge>
             ) : null}
           </div>
           <p className="text-xs text-muted-foreground">
@@ -1176,7 +1181,7 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
       ) : null}
       <div className="flex min-h-6 min-w-0 flex-col gap-2 sm:-my-0.5 sm:flex-row sm:items-center">
         <div className="flex min-w-0 items-baseline gap-3">
-          <h3 className="shrink-0 text-sm leading-5 font-medium text-foreground">
+          <h3 className="shrink-0 text-[13px] leading-5 font-medium text-foreground">
             {endpoint.label}
           </h3>
           {shouldShowEndpointUrl ? (
@@ -1188,25 +1193,27 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
             </p>
           ) : null}
           {!isAvailable ? (
-            <span className="shrink-0 rounded-md border border-border/70 px-1 py-0.5 text-[10px] text-muted-foreground">
+            <Badge size="sm" variant="outline" className="shrink-0">
               Setup required
-            </span>
+            </Badge>
           ) : null}
           {hostedCompatibilityLabel ? (
             <span
-              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-1 py-0.5 text-[10px] text-amber-700 dark:text-amber-300"
+              className="inline-flex shrink-0"
               title={hostedCompatibilityDescription ?? undefined}
             >
-              <TriangleAlertIcon aria-hidden className="size-3" />
-              {hostedCompatibilityLabel}
+              <Badge size="sm" variant="warning">
+                <TriangleAlertIcon aria-hidden />
+                {hostedCompatibilityLabel}
+              </Badge>
             </span>
           ) : null}
         </div>
         <div className="ml-auto flex min-h-6 shrink-0 items-center justify-end gap-2">
           {isDefault ? (
-            <span className="rounded-md border border-primary/30 bg-primary/10 px-1 py-0.5 text-[10px] text-primary">
+            <Badge size="sm" variant="info">
               Default
-            </span>
+            </Badge>
           ) : null}
           {needsTailscaleSetup ? (
             <Button
@@ -1261,7 +1268,7 @@ function NetworkAccessDescription({
       <span className="min-w-0 truncate">{endpoint.httpBaseUrl}</span>
       {hostedHttpsCompatibilityLabel(endpoint.compatibility.hostedHttpsApp) ? (
         <span
-          className="inline-flex shrink-0 items-center gap-1 text-[11px] text-amber-700 dark:text-amber-300"
+          className="inline-flex shrink-0 items-center gap-1 text-[11px] text-warning-foreground"
           title={
             hostedHttpsCompatibilityDescription(endpoint.compatibility.hostedHttpsApp) ?? undefined
           }
@@ -1362,7 +1369,9 @@ function SavedBackendListRow({
                 connectionState === "connecting" ? "bg-warning/60 duration-2000" : null
               }
             />
-            <h3 className="text-sm font-medium text-foreground">{displayLabel}</h3>
+            <h3 className="min-w-0 truncate text-[13px] font-medium text-foreground">
+              {displayLabel}
+            </h3>
           </div>
           {metadataBits.length > 0 ? (
             <p className="text-xs text-muted-foreground">{metadataBits.join(" · ")}</p>
@@ -1422,10 +1431,10 @@ const DesktopSshHostRow = memo(function DesktopSshHostRow({
   const buttonLabel = connectingHostAlias === target.alias ? "Adding…" : "Add environment";
 
   return (
-    <div className="border-t border-border/60 px-4 py-3 first:border-t-0 sm:px-5">
+    <div className="border-t border-border/60 px-4 py-3.5 first:border-t-0 sm:px-5">
       <div className={ITEM_ROW_INNER_CLASSNAME}>
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-sm font-medium text-foreground">{target.alias}</h3>
+          <h3 className="truncate text-[13px] font-medium text-foreground">{target.alias}</h3>
           {showAddress ? <p className="truncate text-xs text-muted-foreground">{address}</p> : null}
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">

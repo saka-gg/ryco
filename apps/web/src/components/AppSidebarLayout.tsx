@@ -20,6 +20,7 @@ import {
 } from "../shortcutModifierState";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
+import { SettingsRouteBridge } from "./SettingsRouteBridge";
 
 const THREAD_SIDEBAR_WIDTH_STORAGE_KEY = "chat_thread_sidebar_width";
 const THREAD_SIDEBAR_OPEN_STORAGE_KEY = "chat_thread_sidebar_open";
@@ -35,39 +36,36 @@ function readPersistedThreadSidebarOpen(): boolean {
   }
 }
 
-const LazySettingsDialog = lazy(() =>
-  import("./settings/SettingsDialog").then((module) => ({ default: module.SettingsDialog })),
-);
 const LazyPhoneSettingsSurface = lazy(() =>
   import("./shell/phone/PhoneSettingsSurface").then((module) => ({
     default: module.PhoneSettingsSurface,
   })),
 );
 
-export function LazySettingsDialogMount() {
+/**
+ * Where settings are presented. Every tier but phone shows them as the
+ * `/settings` page, kept in step with the settings store by
+ * `SettingsRouteBridge`; the frozen phone tier keeps its full-screen sheet,
+ * driven by the same store, so a mid-open tier flip re-presents the same
+ * section in the other presentation.
+ */
+export function SettingsSurfaceMount() {
   const open = useSettingsDialogStore((s) => s.open);
   const presentationTier = usePresentationTier();
-  const [hasOpened, setHasOpened] = useState(open);
+  // Mount the sheet's chunk on its first phone-tier open and keep it after, so
+  // its close animation can run.
+  const [phoneSheetMounted, setPhoneSheetMounted] = useState(false);
+  if (open && presentationTier === "phone" && !phoneSheetMounted) setPhoneSheetMounted(true);
 
-  useEffect(() => {
-    if (open) {
-      setHasOpened(true);
-    }
-  }, [open]);
-
-  if (!hasOpened) {
-    return null;
-  }
-
-  // The settings presentation forks at the tier seam: the desktop dialog
-  // stays exactly as it is, while the phone tier renders the full-screen
-  // paged settings surface. The settings dialog store (open state and
-  // section) is shared, so a mid-open tier flip re-presents the same section
-  // in the other presentation.
   return (
-    <Suspense fallback={null}>
-      {presentationTier === "phone" ? <LazyPhoneSettingsSurface /> : <LazySettingsDialog />}
-    </Suspense>
+    <>
+      <SettingsRouteBridge />
+      {phoneSheetMounted && presentationTier === "phone" ? (
+        <Suspense fallback={null}>
+          <LazyPhoneSettingsSurface />
+        </Suspense>
+      ) : null}
+    </>
   );
 }
 
@@ -312,7 +310,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
       ) : null}
       {children}
       {isDesktopTier ? <CollapsedAppSidebarChrome sidebarOpen={sidebarOpen} /> : null}
-      <LazySettingsDialogMount />
+      <SettingsSurfaceMount />
     </SidebarProvider>
   );
 }

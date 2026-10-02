@@ -132,7 +132,7 @@ describe("McpServersSettings provider capabilities", () => {
     await expect
       .element(page.getByRole("button", { name: "Toggle tools inventory" }))
       .not.toBeInTheDocument();
-    await expect.element(page.getByText("Live health is not reported by Claude.")).toBeVisible();
+    await expect.element(page.getByText(/Claude doesn.t report live health/)).toBeVisible();
   });
 
   it("keeps stored secret values out of the form and sends an explicit clear mutation", async () => {

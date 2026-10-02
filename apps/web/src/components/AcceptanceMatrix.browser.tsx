@@ -847,9 +847,9 @@ const PROVING_TESTS: readonly ProvingCell[] = [
     test: "preserves open settings across a mid-size rotation tier flip",
   },
   {
-    cell: "settings desktop dialog",
+    cell: "settings desktop page",
     file: "CVPhoneSurfaces",
-    test: "keeps the desktop settings dialog presentation on desktop viewports",
+    test: "presents settings as a page on desktop viewports and returns to the thread",
   },
   { cell: "settings desktop panels", file: "SP", test: "persists the diff behavior toggles" },
   {
