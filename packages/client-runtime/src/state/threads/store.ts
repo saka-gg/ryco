@@ -1527,6 +1527,7 @@ function applyThreadMessageSentEvent(
   state: EnvironmentState,
   event: Extract<OrchestrationEvent, { type: "thread.message-sent" }>,
   environmentId: EnvironmentId,
+  ownedMessageMaps?: WeakSet<object>,
 ): EnvironmentState {
   const message = mapMessage(environmentId, {
     id: event.payload.messageId,
@@ -1550,16 +1551,19 @@ function applyThreadMessageSentEvent(
   const currentById = state.messageByThreadId[threadId] ?? {};
   const pendingMessages = state.pendingMessagesByThreadId[threadId] ?? [];
   const pendingMessage = pendingMessages.find((entry) => entry.id === message.id);
-  const existingMessage = currentById[message.id] ?? pendingMessage;
+  const alreadyStored = Object.hasOwn(currentById, message.id);
+  const existingMessage = (alreadyStored ? currentById[message.id] : undefined) ?? pendingMessage;
   const nextMessage = existingMessage ? mergeMessageUpdate(existingMessage, message) : message;
   let nextIds = currentIds;
-  let nextById: Record<MessageId, ChatMessage> = {
-    ...currentById,
-    [message.id]: nextMessage,
-  };
+  // A replay batch can own its unpublished map across consecutive message
+  // events. Single-event updates still copy, so published snapshots stay immutable.
+  let nextById: Record<MessageId, ChatMessage> = ownedMessageMaps?.has(currentById)
+    ? currentById
+    : Object.assign(Object.create(null) as Record<MessageId, ChatMessage>, currentById);
+  nextById[message.id] = nextMessage;
   let nextPendingMessagesByThreadId = state.pendingMessagesByThreadId;
 
-  if (!currentById[message.id] && !currentIds.includes(message.id)) {
+  if (!alreadyStored && !currentIds.includes(message.id)) {
     nextIds = [...currentIds, message.id];
     if (nextIds.length > MAX_THREAD_MESSAGES) {
       const retainedIds = nextIds.slice(-MAX_THREAD_MESSAGES);
@@ -1570,6 +1574,8 @@ function applyThreadMessageSentEvent(
       nextIds = retainedIds;
     }
   }
+
+  ownedMessageMaps?.add(nextById);
 
   if (pendingMessage) {
     const nextPendingMessages = pendingMessages.filter((entry) => entry.id !== message.id);
@@ -1821,16 +1827,16 @@ function syncEnvironmentShellSnapshot(
     mapWorktree(worktree, environmentId),
   );
   const nextThreadIds = new Set(snapshot.threads.map((thread) => thread.id));
-  let nextState: EnvironmentState = {
+  const nextState: EnvironmentState = {
     ...state,
     ...buildProjectState(nextProjects),
     ...buildWorktreeState(nextWorktrees),
     threadIds: [],
-    threadIdsByProjectId: {},
-    threadShellById: {},
-    threadSessionById: {},
-    threadTurnStateById: {},
-    sidebarThreadSummaryById: {},
+    threadIdsByProjectId: Object.create(null) as EnvironmentState["threadIdsByProjectId"],
+    threadShellById: Object.create(null) as EnvironmentState["threadShellById"],
+    threadSessionById: Object.create(null) as EnvironmentState["threadSessionById"],
+    threadTurnStateById: Object.create(null) as EnvironmentState["threadTurnStateById"],
+    sidebarThreadSummaryById: Object.create(null) as EnvironmentState["sidebarThreadSummaryById"],
     messageIdsByThreadId: retainThreadScopedRecord(state.messageIdsByThreadId, nextThreadIds),
     messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
     pendingMessagesByThreadId: retainThreadScopedRecord(
@@ -1863,8 +1869,21 @@ function syncEnvironmentShellSnapshot(
     hydratedFromCacheAt: undefined,
   };
 
+  // These containers belong exclusively to the new snapshot. Build them once,
+  // then publish atomically instead of copying every growing index per thread.
   for (const thread of snapshot.threads) {
-    nextState = writeThreadShellState(nextState, mapThreadShell(thread, environmentId));
+    const mapped = mapThreadShell(thread, environmentId);
+    if (!Object.hasOwn(nextState.threadShellById, thread.id)) {
+      nextState.threadIds.push(thread.id);
+    }
+    nextState.threadShellById[thread.id] = mapped.shell;
+    nextState.threadSessionById[thread.id] = mapped.session;
+    nextState.threadTurnStateById[thread.id] = mapped.turnState;
+    nextState.sidebarThreadSummaryById[thread.id] = mapped.summary;
+  }
+  for (const threadId of nextState.threadIds) {
+    const projectId = nextState.threadShellById[threadId]!.projectId;
+    (nextState.threadIdsByProjectId[projectId] ??= []).push(threadId);
   }
 
   return nextState;
@@ -2750,10 +2769,27 @@ export function applyOrchestrationEvents(
   const perfEnabled = runtime.observability.performanceEnabled();
   const startedAt = perfEnabled ? runtime.clock.now() : 0;
   const currentEnvironmentState = getStoredEnvironmentState(state, environmentId);
-  const nextEnvironmentState = events.reduce(
-    (nextState, event) => applyEnvironmentOrchestrationEvent(nextState, event, environmentId),
-    currentEnvironmentState,
-  );
+  let nextEnvironmentState = currentEnvironmentState;
+  let ownedMessageMaps = new WeakSet<object>();
+  for (const event of events) {
+    if (event.type === "thread.message-sent") {
+      nextEnvironmentState = applyThreadMessageSentEvent(
+        nextEnvironmentState,
+        event,
+        environmentId,
+        ownedMessageMaps,
+      );
+    } else {
+      // Other event handlers may derive/cache an intermediate thread. Stop
+      // mutating that generation before crossing an event-type boundary.
+      ownedMessageMaps = new WeakSet<object>();
+      nextEnvironmentState = applyEnvironmentOrchestrationEvent(
+        nextEnvironmentState,
+        event,
+        environmentId,
+      );
+    }
+  }
   const nextState = commitEnvironmentState(state, environmentId, nextEnvironmentState);
   if (perfEnabled) {
     runtime.observability.recordPerformance("web.store.orchestration.events.apply", events, {

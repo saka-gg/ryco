@@ -1,5 +1,6 @@
-import Migration0069 from "./Migrations/069_LocalTasks.ts";
-import Migration0068 from "./Migrations/068_DailyRecapIndexes.ts";
+import Migration0070 from "./Migrations/070_LocalTasks.ts";
+import Migration0069 from "./Migrations/069_DailyRecapIndexes.ts";
+import Migration0068 from "./Migrations/068_ProjectionMessageSearch.ts";
 import Migration0066 from "./Migrations/066_StorageLifecycle.ts";
 import Migration0067 from "./Migrations/067_SessionImportRecovery.ts";
 import Migration0062 from "./Migrations/062_SessionImports.ts";
@@ -161,8 +162,9 @@ export const migrationEntries = [
   [65, "OptionalUserInput", Migration0065],
   [66, "StorageLifecycle", Migration0066],
   [67, "SessionImportRecovery", Migration0067],
-  [68, "DailyRecapIndexes", Migration0068],
-  [69, "LocalTasks", Migration0069],
+  [68, "ProjectionMessageSearch", Migration0068],
+  [69, "DailyRecapIndexes", Migration0069],
+  [70, "LocalTasks", Migration0070],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

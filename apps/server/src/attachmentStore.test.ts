@@ -184,7 +184,7 @@ describe("attachmentStore", () => {
     }
   });
 
-  it("rejects changed and symlinked persisted attachments", () => {
+  it("rejects changed and symlinked persisted attachments", async () => {
     const attachmentsDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-attachment-store-"));
     const attachment = {
       type: "file" as const,
@@ -197,7 +197,7 @@ describe("attachmentStore", () => {
       const attachmentPath = path.join(attachmentsDir, `${attachment.id}.bin`);
       fs.writeFileSync(attachmentPath, Buffer.from("changed"));
 
-      expect(readPersistedAttachment({ attachmentsDir, attachment })).toEqual({
+      expect(await readPersistedAttachment({ attachmentsDir, attachment })).toEqual({
         ok: false,
         reason: "Attachment 'notes.txt' changed after upload; expected 3 bytes but found 7.",
       });
@@ -206,7 +206,7 @@ describe("attachmentStore", () => {
       const targetPath = path.join(attachmentsDir, "target.bin");
       fs.writeFileSync(targetPath, Buffer.from("abc"));
       fs.symlinkSync(targetPath, attachmentPath);
-      expect(readPersistedAttachment({ attachmentsDir, attachment })).toEqual({
+      expect(await readPersistedAttachment({ attachmentsDir, attachment })).toEqual({
         ok: false,
         reason: "Attachment 'notes.txt' is not a regular file.",
       });
@@ -215,7 +215,7 @@ describe("attachmentStore", () => {
     }
   });
 
-  it("reads validated bytes from the same safe descriptor", () => {
+  it("reads validated bytes from the same safe descriptor", async () => {
     const attachmentsDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-attachment-store-"));
     const attachment = {
       type: "file" as const,
@@ -226,7 +226,7 @@ describe("attachmentStore", () => {
     };
     try {
       fs.writeFileSync(path.join(attachmentsDir, `${attachment.id}.bin`), Buffer.from("abc"));
-      const result = readPersistedAttachment({ attachmentsDir, attachment });
+      const result = await readPersistedAttachment({ attachmentsDir, attachment });
       expect(result.ok).toBe(true);
       if (result.ok) {
         expect(result.sizeBytes).toBe(3);

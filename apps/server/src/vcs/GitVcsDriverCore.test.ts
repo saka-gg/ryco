@@ -431,7 +431,8 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         yield* git(cwd, ["add", "feature.txt"]);
         yield* git(cwd, ["commit", "-m", "feature commit"]);
 
-        const status = yield* (yield* GitVcsDriver.GitVcsDriver).statusDetails(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const status = yield* driver.statusDetails(cwd);
 
         // The change is fully committed, so the working tree is clean but the
         // committed-vs-base diff still reflects it.
@@ -441,6 +442,20 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           insertions: 2,
           deletions: 0,
         });
+        const repeated = yield* driver.statusDetails(cwd);
+        assert.strictEqual(repeated.committed, status.committed);
+        yield* writeTextFile(cwd, "feature.txt", "line1\nline2\nline3\n");
+        const dirty = yield* driver.statusDetails(cwd);
+        assert.strictEqual(dirty.committed, status.committed);
+        assert.equal(dirty.workingTree.insertions, 1);
+        yield* git(cwd, ["add", "feature.txt"]);
+        yield* git(cwd, ["commit", "-m", "another feature commit"]);
+        const advanced = yield* driver.statusDetails(cwd);
+        assert.equal(advanced.committed?.insertions, 3);
+        assert.notStrictEqual(advanced.committed, status.committed);
+        yield* git(cwd, ["branch", "-f", "main", "HEAD"]);
+        const movedBase = yield* driver.statusDetails(cwd);
+        assert.equal(movedBase.committed?.insertions, 0);
       }),
     );
 

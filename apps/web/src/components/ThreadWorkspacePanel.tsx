@@ -22,7 +22,15 @@ import {
   XIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent,
+} from "react";
 
 import {
   APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
@@ -78,10 +86,10 @@ import { ScrollArea } from "./ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import ChatMarkdown from "./ChatMarkdown";
 import type { DiffPanelMode } from "./DiffPanelShell";
-import DiffPanel from "./DiffPanel";
-import PreviewPanel from "./PreviewPanel";
-import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
-import SimulatorPanel from "./device/SimulatorPanel";
+const DiffPanel = lazy(() => import("./DiffPanel"));
+const PreviewPanel = lazy(() => import("./PreviewPanel"));
+const ThreadTerminalDrawer = lazy(() => import("./ThreadTerminalDrawer"));
+const SimulatorPanel = lazy(() => import("./device/SimulatorPanel"));
 
 function statusBucket(status: ThreadSubagentStatus): "idle" | "in_progress" | "review" | "done" {
   if (status === "running") return "in_progress";
@@ -1205,55 +1213,64 @@ export default function ThreadWorkspacePanel(props: {
         role="tabpanel"
         aria-labelledby={activeTabKey ? workspaceTabId(activeTabKey) : undefined}
       >
-        {activeMode === "review" ? (
-          <DiffPanel mode={props.mode} />
-        ) : activeMode === "files" ? (
-          <PreviewPanel mode={props.mode} />
-        ) : activeMode === "terminal" ? (
-          <WorkspaceTerminalPanel />
-        ) : activeMode === "browser" && !isPhoneSurface ? (
-          <WorkspaceBrowserPanel />
-        ) : activeMode === "simulator" && !isPhoneSurface ? (
-          <SimulatorPanel
-            environmentId={workspaceThreadRef?.environmentId ?? null}
-            threadId={workspaceThreadRef?.threadId ?? null}
-          />
-        ) : activeMode === "agents" && !isPhoneSurface ? (
-          // The Agents workspace stays off the frozen phone tier; a phone
-          // route that lands here falls back to the launcher.
-          <AgentsPanel
-            model={agentPanelModel}
-            environmentId={workspaceThreadRef?.environmentId ?? null}
-            threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
-            onOpenAgent={openRuntimeAgent}
-            subagents={subagents}
-            selectedAgentId={agentKey}
-            onBack={() => navigateSearch((previous) => buildOpenAgentsSearch(previous))}
-          />
-        ) : activeMode === "agent" ? (
-          <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />
-        ) : (
-          <WorkspaceLauncher
-            onOpenSideChat={() => {
-              if (workspaceThreadRef && activeThread)
-                useSideChatStore
-                  .getState()
-                  .open(scopedThreadKey(workspaceThreadRef), activeThread.modelSelection);
-            }}
-            tabs={tabs}
-            activeThread={activeThread}
-            onSelectTab={selectTab}
-            showAgents={!isPhoneSurface}
-            showSimulator={
-              !isPhoneSurface &&
-              Boolean(
-                workspaceThreadRef && readEnvironmentApi(workspaceThreadRef.environmentId)?.device,
-              )
-            }
-            isPhoneSurface={isPhoneSurface}
-            liveAgentCount={agentPanelModel.liveCount}
-          />
-        )}
+        <Suspense
+          fallback={
+            <div role="status" className="p-4 text-sm text-muted-foreground">
+              Loading workspace…
+            </div>
+          }
+        >
+          {activeMode === "review" ? (
+            <DiffPanel mode={props.mode} />
+          ) : activeMode === "files" ? (
+            <PreviewPanel mode={props.mode} />
+          ) : activeMode === "terminal" ? (
+            <WorkspaceTerminalPanel />
+          ) : activeMode === "browser" && !isPhoneSurface ? (
+            <WorkspaceBrowserPanel />
+          ) : activeMode === "simulator" && !isPhoneSurface ? (
+            <SimulatorPanel
+              environmentId={workspaceThreadRef?.environmentId ?? null}
+              threadId={workspaceThreadRef?.threadId ?? null}
+            />
+          ) : activeMode === "agents" && !isPhoneSurface ? (
+            // The Agents workspace stays off the frozen phone tier; a phone
+            // route that lands here falls back to the launcher.
+            <AgentsPanel
+              model={agentPanelModel}
+              environmentId={workspaceThreadRef?.environmentId ?? null}
+              threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
+              onOpenAgent={openRuntimeAgent}
+              subagents={subagents}
+              selectedAgentId={agentKey}
+              onBack={() => navigateSearch((previous) => buildOpenAgentsSearch(previous))}
+            />
+          ) : activeMode === "agent" ? (
+            <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />
+          ) : (
+            <WorkspaceLauncher
+              onOpenSideChat={() => {
+                if (workspaceThreadRef && activeThread)
+                  useSideChatStore
+                    .getState()
+                    .open(scopedThreadKey(workspaceThreadRef), activeThread.modelSelection);
+              }}
+              tabs={tabs}
+              activeThread={activeThread}
+              onSelectTab={selectTab}
+              showAgents={!isPhoneSurface}
+              showSimulator={
+                !isPhoneSurface &&
+                Boolean(
+                  workspaceThreadRef &&
+                  readEnvironmentApi(workspaceThreadRef.environmentId)?.device,
+                )
+              }
+              isPhoneSurface={isPhoneSurface}
+              liveAgentCount={agentPanelModel.liveCount}
+            />
+          )}
+        </Suspense>
       </div>
     </div>
   );
