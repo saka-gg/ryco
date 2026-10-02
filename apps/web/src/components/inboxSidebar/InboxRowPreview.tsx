@@ -6,7 +6,8 @@ import { DeviceIcon } from "../DeviceIcon";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { InboxContextHandoffPreview } from "./InboxContextHandoffPreview";
 import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
-import type { resolveInboxPullRequests } from "./inboxPullRequests";
+import { InboxChangeStatsLine } from "./InboxChangeStats";
+import type { InboxChangeStats, resolveInboxPullRequests } from "./inboxPullRequests";
 import {
   inboxAttentionDetail,
   inboxGlyphLabel,
@@ -25,6 +26,7 @@ export interface InboxRowPreviewPayload {
   readonly pullRequests: ReturnType<typeof resolveInboxPullRequests>;
   readonly changeRequestShortName: string;
   readonly sourceControlName: string;
+  readonly changeStats: InboxChangeStats | null;
 }
 
 const STATUS_TONE = {
@@ -158,12 +160,18 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
             </>
           ) : null}
         </div>
-        {payload.pullRequests.requests.length > 0 ? (
-          <InboxPullRequestBadges
-            {...payload.pullRequests}
-            providerName={payload.sourceControlName}
-            shortName={payload.changeRequestShortName}
-          />
+        {payload.pullRequests.requests.length > 0 || payload.changeStats ? (
+          // Change request, checks and diff share one line, wrapping for stacks.
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            {payload.pullRequests.requests.length > 0 ? (
+              <InboxPullRequestBadges
+                {...payload.pullRequests}
+                providerName={payload.sourceControlName}
+                shortName={payload.changeRequestShortName}
+              />
+            ) : null}
+            {payload.changeStats ? <InboxChangeStatsLine stats={payload.changeStats} /> : null}
+          </div>
         ) : null}
         {row.trustLabel || row.roleLabel ? (
           <div className="flex flex-wrap items-center gap-1">

@@ -4,6 +4,7 @@ import type { MouseEvent } from "react";
 
 import { openExternalLink } from "../../lib/openExternalLink";
 import { cn } from "../../lib/utils";
+import type { CheckRollupSummary } from "../projectExplorer/prCheckStatus";
 import { resolveStateBadgeVariant } from "../sourceControl/stateBadgeVariants";
 import type { InboxPullRequest } from "./inboxPullRequests";
 import { InboxHint } from "./InboxRowHint";
@@ -19,12 +20,19 @@ function PullRequestHint(props: {
   readonly pr: InboxPullRequest;
   readonly label: string;
   readonly providerName: string;
+  readonly checks: CheckRollupSummary | null;
 }) {
   return (
     <span className="flex max-w-64 flex-col gap-0.5 py-0.5">
       <span className="font-medium">{props.label}</span>
       {props.pr.title ? (
         <span className="truncate text-muted-foreground">{props.pr.title}</span>
+      ) : null}
+      {props.checks ? (
+        <span className={cn("text-[11px]", props.checks.view.iconClassName)}>
+          {props.checks.view.label}
+          {props.checks.active > 0 ? ` · ${props.checks.passed}/${props.checks.total}` : ""}
+        </span>
       ) : null}
       {props.pr.url ? (
         <span className="flex items-center gap-0.5 text-[11px] text-muted-foreground/80">
@@ -48,6 +56,8 @@ export function InboxPullRequestBadges(props: {
   readonly providerName?: string | undefined;
   readonly variant?: "inline" | "badges";
   readonly currentNumber?: number | null;
+  /** Checks of the thread's own change request, named in its hint. */
+  readonly currentChecks?: CheckRollupSummary | null;
 }) {
   if (props.requests.length === 0) return null;
   const inline = props.variant === "inline";
@@ -64,9 +74,7 @@ export function InboxPullRequestBadges(props: {
   return (
     <span
       className={
-        inline
-          ? "flex shrink-0 items-center gap-1"
-          : "flex w-full min-w-0 flex-wrap items-center gap-1"
+        inline ? "flex shrink-0 items-center gap-1" : "flex min-w-0 flex-wrap items-center gap-1"
       }
       data-testid="inbox-pr-badges"
     >
@@ -84,7 +92,14 @@ export function InboxPullRequestBadges(props: {
             <InboxHint
               key={pr.number}
               aria-label={label}
-              label={<PullRequestHint pr={pr} label={label} providerName={providerName} />}
+              label={
+                <PullRequestHint
+                  checks={props.currentChecks ?? null}
+                  label={label}
+                  pr={pr}
+                  providerName={providerName}
+                />
+              }
               className={cn(
                 "inline-flex shrink-0 items-center gap-0.5 rounded-sm text-[11px] font-medium tabular-nums",
                 variant.textClassName,

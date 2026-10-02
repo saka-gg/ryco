@@ -188,6 +188,18 @@ it.each([null, "/repo/worktrees/feature"])(
         body: "",
         comments: [],
         truncated: false,
+        additions: 212,
+        deletions: 58,
+        changedFiles: 9,
+        checkRollup: ["lint", "test", "build"].map((name) => ({
+          kind: "check-run" as const,
+          name,
+          status: Option.some("COMPLETED"),
+          conclusion: Option.some(name === "test" ? "FAILURE" : "SUCCESS"),
+          url: Option.none(),
+          startedAt: Option.none(),
+          completedAt: Option.none(),
+        })),
         stack: {
           number: 7,
           size: 4,
@@ -224,6 +236,15 @@ it.each([null, "/repo/worktrees/feature"])(
         expect(document.querySelector('[data-testid="inbox-preview"]')).not.toBeNull(),
       );
       const card = document.querySelector<HTMLElement>('[data-testid="inbox-preview"]')!;
+      // Checks as dots plus one verdict, then the pull request's diff.
+      await vi.waitFor(() => {
+        const stats = card.querySelector<HTMLElement>('[data-testid="inbox-preview-stats"]');
+        expect(stats?.textContent).toContain("1 failing");
+        expect(stats?.textContent).toContain("+212");
+        expect(stats?.textContent).toContain("−58");
+        expect(stats?.textContent).toContain("9 files");
+        expect(stats?.querySelector('[role="img"]')?.getAttribute("aria-label")).toBeTruthy();
+      });
       for (const [number, state, color] of [
         [41, "Closed", "rose"],
         [42, "Merged", "violet"],

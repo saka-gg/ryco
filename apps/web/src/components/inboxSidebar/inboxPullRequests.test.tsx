@@ -3,7 +3,11 @@ import { Option } from "effect";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
-import { resolveInboxPullRequest, resolveInboxPullRequests } from "./inboxPullRequests";
+import {
+  resolveInboxChangeStats,
+  resolveInboxPullRequest,
+  resolveInboxPullRequests,
+} from "./inboxPullRequests";
 
 const status: VcsStatusResult = {
   isRepo: true,
@@ -115,4 +119,74 @@ describe("inbox pull requests", () => {
       expect(html).toContain(`text-${color}-`);
     },
   );
+});
+
+describe("inbox change stats", () => {
+  const current = { number: 42, state: "open" as const, isDraft: false };
+  const passing = {
+    kind: "check-run" as const,
+    name: "ci",
+    status: Option.some("COMPLETED"),
+    conclusion: Option.some("SUCCESS"),
+    url: Option.none(),
+    startedAt: Option.none(),
+    completedAt: Option.none(),
+  };
+
+  it("reads checks and diff from the pull request's detail", () => {
+    const stats = resolveInboxChangeStats({
+      current,
+      detail: { ...detail, checkRollup: [passing], additions: 212, deletions: 58, changedFiles: 9 },
+      status,
+      branchLabel: "feature",
+    });
+    expect(stats).toMatchObject({
+      scope: "pull-request",
+      additions: 212,
+      deletions: 58,
+      changedFiles: 9,
+    });
+    expect(stats?.checks).toMatchObject({ passed: 1, total: 1 });
+  });
+
+  it("falls back to the checked-out branch's uncommitted changes", () => {
+    const dirty = {
+      ...status,
+      hasWorkingTreeChanges: true,
+      workingTree: {
+        files: [{ path: "a.ts", insertions: 12, deletions: 3 }],
+        insertions: 12,
+        deletions: 3,
+      },
+    };
+    expect(
+      resolveInboxChangeStats({
+        current: null,
+        detail: null,
+        status: dirty,
+        branchLabel: "feature",
+      }),
+    ).toEqual({
+      scope: "working-tree",
+      checks: null,
+      additions: 12,
+      deletions: 3,
+      changedFiles: 1,
+    });
+    // Another thread's branch must not borrow the checkout's numbers.
+    expect(
+      resolveInboxChangeStats({ current: null, detail: null, status: dirty, branchLabel: "other" }),
+    ).toBeNull();
+  });
+
+  it("ignores a detail for a different pull request", () => {
+    expect(
+      resolveInboxChangeStats({
+        current: { ...current, number: 7 },
+        detail: { ...detail, additions: 1, deletions: 1 },
+        status: null,
+        branchLabel: "feature",
+      }),
+    ).toBeNull();
+  });
 });

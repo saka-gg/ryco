@@ -40,7 +40,11 @@ import {
 import { toastManager } from "../ui/toast";
 import { Tooltip, type TooltipCreateHandle, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
-import { resolveInboxPullRequest, resolveInboxPullRequests } from "./inboxPullRequests";
+import {
+  resolveInboxChangeStats,
+  resolveInboxPullRequest,
+  resolveInboxPullRequests,
+} from "./inboxPullRequests";
 import { InboxHint } from "./InboxRowHint";
 import { InboxProjectIcon, type InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
@@ -161,6 +165,12 @@ export function InboxThreadRow(props: {
   // The detail-enriched entry carries the title and link the menu needs.
   const ownPullRequest =
     pullRequests.requests.find((pr) => pr.number === currentPr?.number) ?? currentPr;
+  const changeStats = resolveInboxChangeStats({
+    current: currentPr,
+    detail: detail.data,
+    status: gitStatus.data ?? null,
+    branchLabel: row.branchLabel,
+  });
   const sourceControlProvider = gitStatus.data?.sourceControlProvider;
   const changeRequestShortName = resolveChangeRequestPresentation(sourceControlProvider).shortName;
   const sourceControlName = getSourceControlPresentation(sourceControlProvider).providerName;
@@ -185,8 +195,9 @@ export function InboxThreadRow(props: {
       pullRequests,
       changeRequestShortName,
       sourceControlName,
+      changeStats,
     }),
-    [row, unseen, timestamp, pullRequests, changeRequestShortName, sourceControlName],
+    [row, unseen, timestamp, pullRequests, changeRequestShortName, sourceControlName, changeStats],
   );
 
   const actionLabel = row.settled ? "Move to Active" : "Settle";
@@ -387,6 +398,7 @@ export function InboxThreadRow(props: {
             />
             <InboxPullRequestBadges
               {...pullRequests}
+              currentChecks={changeStats?.checks ?? null}
               currentNumber={currentPr?.number ?? null}
               providerName={sourceControlName}
               shortName={changeRequestShortName}
