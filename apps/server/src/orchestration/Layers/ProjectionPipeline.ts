@@ -200,6 +200,16 @@ const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsFor
     Effect.succeed(input.attachments.length === 0 ? [] : input.attachments),
 );
 
+/** The later of two ISO timestamps (null-tolerant). */
+function laterIsoTimestamp(current: string | null, next: string): string {
+  if (current === null) return next;
+  const currentMs = Date.parse(current);
+  const nextMs = Date.parse(next);
+  if (!Number.isFinite(currentMs)) return next;
+  if (!Number.isFinite(nextMs)) return current;
+  return nextMs > currentMs ? next : current;
+}
+
 function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
   if (typeof payload !== "object" || payload === null) {
     return null;
@@ -1803,9 +1813,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                   : existingTurn.value.state === "error"
                     ? "error"
                     : "completed",
+              // Progress updates complete before the turn does; the turn ends
+              // with its latest completed message, not its first.
               completedAt: event.payload.streaming
                 ? existingTurn.value.completedAt
-                : (existingTurn.value.completedAt ?? event.payload.updatedAt),
+                : laterIsoTimestamp(existingTurn.value.completedAt, event.payload.updatedAt),
               startedAt: existingTurn.value.startedAt ?? event.payload.createdAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.createdAt,
             });

@@ -2032,6 +2032,177 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* Transcript chapters (WorkChapterRow): steps grow in, scroll out of the live
+   ticker, settle with a drawn check; the live node breathes and its rail
+   carries a travelling highlight. Every loop is transform/opacity only, so the
+   compositor runs it without repainting text. */
+@keyframes chapter-step-enter {
+  from {
+    opacity: 0;
+    max-height: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    max-height: 40px;
+    transform: none;
+  }
+}
+
+@keyframes chapter-step-leave {
+  from {
+    max-height: 40px;
+  }
+  to {
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes chapter-roll-in {
+  from {
+    opacity: 0;
+    transform: translateY(70%);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes chapter-glyph-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes chapter-glyph-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes chapter-node-halo {
+  0% {
+    opacity: 0.5;
+    transform: scale(0.6);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+@keyframes chapter-rail-flow {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(50%);
+  }
+}
+
+@keyframes chapter-think-breathe {
+  50% {
+    opacity: 0.6;
+    transform: scale(0.72) rotate(45deg);
+  }
+}
+
+@keyframes turn-fold-mark-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.chapter-step-enter {
+  overflow: hidden;
+  animation: chapter-step-enter 420ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.chapter-step-leave {
+  overflow: hidden;
+  animation: chapter-step-leave 360ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.chapter-verb,
+.chapter-count {
+  display: inline-block;
+  animation: chapter-roll-in 340ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.chapter-glyph-draw {
+  stroke-dasharray: 1;
+  animation: chapter-glyph-draw 380ms cubic-bezier(0.22, 1, 0.36, 1) 60ms backwards;
+}
+
+.chapter-glyph-pop {
+  animation: chapter-glyph-pop 360ms cubic-bezier(0.3, 1.36, 0.44, 1);
+}
+
+.chapter-node-live::after {
+  position: absolute;
+  inset: -4px;
+  border: 1px solid var(--color-foreground);
+  border-radius: 9999px;
+  content: "";
+  opacity: 0;
+  animation: chapter-node-halo 1.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.chapter-rail-flow {
+  top: -100%;
+  height: 200%;
+  background: linear-gradient(
+    to bottom,
+    transparent calc(50% - 28px),
+    color-mix(in oklab, var(--color-foreground) 55%, transparent) 50%,
+    transparent calc(50% + 28px)
+  );
+  animation: chapter-rail-flow 1.8s linear infinite;
+}
+
+.chapter-think-breathe {
+  transform-origin: center;
+  animation: chapter-think-breathe 1.4s ease-in-out infinite;
+}
+
+.turn-fold-mark {
+  animation: turn-fold-mark-spin 6s linear infinite;
+}
+
+:root[data-ryco-motion-paused] :is(.chapter-rail-flow, .chapter-think-breathe, .turn-fold-mark),
+:root[data-ryco-motion-paused] .chapter-node-live::after {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chapter-step-enter,
+  .chapter-step-leave,
+  .chapter-verb,
+  .chapter-count,
+  .chapter-glyph-draw,
+  .chapter-glyph-pop,
+  .chapter-node-live::after,
+  .chapter-rail-flow,
+  .chapter-think-breathe,
+  .turn-fold-mark {
+    animation: none;
+  }
+}
+
 /* Keep the desktop draft mounted while reclaiming transcript space at rest. */
 [data-chat-composer-compact] [data-testid="composer-editor"] {
   transition:

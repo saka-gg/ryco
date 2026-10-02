@@ -4988,6 +4988,7 @@ export default function ChatView(props: ChatViewProps) {
                 {...(presentationTier !== "phone"
                   ? { onInspectContextHandoff: openContextHandoffInspection }
                   : {})}
+                providerDriverKind={selectedProvider}
               />
             ) : (
               <div aria-hidden className="flex min-h-0 flex-1" />
