@@ -431,31 +431,27 @@ describe("ChatView Navigation (full app)", () => {
       );
       expect(row).toBeDefined();
       expect(siblingRow).toBeDefined();
-      expect(row?.textContent).toContain("Studio Mac");
-      expect(row?.textContent).toContain("Project");
+      // One machine, one project: both are implicit on the row (the hover
+      // card names them); the row carries the status glyph and the branch.
+      expect(row?.textContent).not.toContain("Studio Mac");
       expect(row?.textContent).toContain("main");
-      expect(row?.textContent).toContain("Idle");
-      expect(row?.className).toContain("hover:-translate-y-px");
-      expect(row?.className).toContain("motion-reduce:translate-none");
-      expect(row?.className).toContain("group/row");
+      expect(row?.querySelector("[data-inbox-glyph]")?.getAttribute("aria-label")).toBe("Idle");
 
-      expect(row?.querySelector('[class*="group-hover/row:opacity-100"]')).toBeNull();
-      expect(siblingRow?.querySelector('[class*="group-hover/row:opacity-100"]')).toBeNull();
-
-      // Tailwind v4 guards hover utilities with `(hover: hover)`. Linux
-      // headless Chromium can still report no hover device even though
-      // Playwright can dispatch a mouse; exercise the motion only when the
-      // same media query that guards the production CSS is active.
-      if (
-        window.matchMedia("(hover: hover)").matches &&
-        !window.matchMedia("(prefers-reduced-motion: reduce)").matches
-      ) {
-        const restingTranslate = getComputedStyle(row!).translate;
-        await rowLocator.hover();
-        await vi.waitFor(() => {
-          expect(getComputedStyle(row!).translate).not.toBe(restingTranslate);
-        });
-      }
+      // Hover is one highlight gliding between rows, not a per-row lift.
+      const highlight = document.querySelector<HTMLElement>(
+        '[data-testid="inbox-sidebar"] [data-visible]',
+      )!;
+      expect(highlight.dataset.visible).toBe("false");
+      await rowLocator.hover();
+      await vi.waitFor(() => expect(highlight.dataset.visible).toBe("true"));
+      const shell = row!.closest<HTMLElement>("[data-inbox-row-key]")!;
+      expect(highlight.style.height).toBe(`${shell.offsetHeight}px`);
+      expect(highlight.style.transform).toBe(`translateY(${shell.offsetTop}px)`);
+      await page.getByTestId("inbox-thread-row").nth(rows.indexOf(siblingRow!)).hover();
+      const siblingShell = siblingRow!.closest<HTMLElement>("[data-inbox-row-key]")!;
+      await vi.waitFor(() =>
+        expect(highlight.style.transform).toBe(`translateY(${siblingShell.offsetTop}px)`),
+      );
 
       await rowLocator.click();
       await vi.waitFor(() => {

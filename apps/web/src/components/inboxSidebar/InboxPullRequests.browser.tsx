@@ -184,9 +184,23 @@ it.each([null, "/repo/worktrees/feature"])(
         },
       };
       emit({ ...status, pr: { ...status.pr!, state: "merged" } });
+      const row = host.querySelector<HTMLElement>('[data-testid="inbox-thread-row"]')!;
+      // The row carries only its own change request and the stack position.
       await expect
         .element(page.getByLabelText("Stack #7, pull request 2 of 4", { exact: true }))
         .toBeVisible();
+      await expect.element(page.getByLabelText("PR #42 · Merged", { exact: true })).toBeVisible();
+      expect(row.querySelector('[aria-label="PR #42 · Merged"]')?.className).toContain(
+        "text-violet-",
+      );
+      expect(row.querySelector('[aria-label="PR #41 · Closed"]')).toBeNull();
+      expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+      // The hover card lists the whole stack in its states' colors.
+      await page.getByTestId("inbox-thread-row").hover();
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-testid="inbox-preview"]')).not.toBeNull(),
+      );
+      const card = document.querySelector<HTMLElement>('[data-testid="inbox-preview"]')!;
       for (const [number, state, color] of [
         [41, "Closed", "rose"],
         [42, "Merged", "violet"],
@@ -194,13 +208,12 @@ it.each([null, "/repo/worktrees/feature"])(
         [44, "Open", "emerald"],
       ] as const) {
         const label = `PR #${number} · ${state}`;
-        await expect.element(page.getByLabelText(label, { exact: true })).toBeVisible();
-        expect(host.querySelector(`[aria-label="${label}"]`)?.className).toContain(
-          `text-${color}-`,
+        await vi.waitFor(() =>
+          expect(card.querySelector(`[aria-label="${label}"]`)?.className).toContain(
+            `text-${color}-`,
+          ),
         );
       }
-      const row = host.querySelector<HTMLElement>('[data-testid="inbox-thread-row"]')!;
-      expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
     } finally {
       await mounted.unmount();
       host.remove();

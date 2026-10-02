@@ -6,8 +6,10 @@ import type { EnvironmentApi } from "@ryco/contracts";
 import {
   EnvironmentId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   WorktreeId,
 } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -85,6 +87,183 @@ describe("Inbox sidebar rendering and settlement", () => {
         "Recent",
       ]);
       expect(document.querySelectorAll('[data-testid="inbox-thread-row"]')).toHaveLength(2);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("glides a finishing thread into Recent and morphs its glyph, but paints still on mount", async () => {
+    const base = {
+      environmentId: ENVIRONMENT_ID,
+      projectId: PROJECT_ID,
+      interactionMode: "default" as const,
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      branch: "main",
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    };
+    const turn = (state: "running" | "completed") => ({
+      turnId: TurnId.make("turn-busy"),
+      state,
+      requestedAt: "2026-09-01T00:00:00.000Z",
+      startedAt: "2026-09-01T00:00:01.000Z",
+      completedAt: state === "completed" ? "2026-09-01T00:05:00.000Z" : null,
+      assistantMessageId: null,
+    });
+    const threads = (busyState: "running" | "completed") => [
+      { ...base, id: ThreadId.make("busy"), title: "Busy task", latestTurn: turn(busyState) },
+      // Finished later and never opened: first in Recent, the busy row travels
+      // below it, and its completed check is already there on mount.
+      {
+        ...base,
+        id: ThreadId.make("older"),
+        title: "Older task",
+        latestTurn: {
+          ...turn("completed"),
+          turnId: TurnId.make("turn-older"),
+          completedAt: "2026-09-01T00:10:00.000Z",
+        },
+        latestCompletedTurnAt: "2026-09-01T00:10:00.000Z",
+      },
+    ];
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: threads("running"),
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      aiFocusEnabled: false,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const busyShell = () =>
+        document.querySelector<HTMLElement>(`[data-inbox-row-key="${ENVIRONMENT_ID}:busy"]`)!;
+      const glyph = () => busyShell().querySelector<HTMLElement>("[data-inbox-glyph]")!;
+      expect(glyph().dataset.inboxGlyph).toBe("working");
+      // A fresh sidebar paints still: nothing animates in on mount, including
+      // the completed check's stroke (the working spinner is a loop, not entry).
+      const olderGlyph = document.querySelector<HTMLElement>(
+        `[data-inbox-row-key="${ENVIRONMENT_ID}:older"] [data-inbox-glyph]`,
+      )!;
+      expect(olderGlyph.dataset.inboxGlyph).toBe("completed");
+      expect(olderGlyph.getAnimations({ subtree: true })).toHaveLength(0);
+      expect(glyph().getAnimations()).toHaveLength(0);
+      expect(busyShell().closest("section")?.querySelector("h2")?.textContent).toBe("Active now");
+
+      await mounted.rerender(<InboxSidebar {...props} threads={threads("completed")} />);
+      expect(busyShell().closest("section")?.querySelector("h2")?.textContent).toBe("Recent");
+      expect(busyShell().previousElementSibling?.getAttribute("data-inbox-row-key")).toBe(
+        `${ENVIRONMENT_ID}:older`,
+      );
+      expect(glyph().dataset.inboxGlyph).toBe("completed");
+      expect(glyph().getAttribute("aria-label")).toBe("Completed");
+      expect(glyph().getAnimations().length).toBeGreaterThan(0);
+      expect(busyShell().getAnimations().length).toBeGreaterThan(0);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("says what each state needs on line 2 and keeps resting rows to one line", async () => {
+    const base = {
+      environmentId: ENVIRONMENT_ID,
+      projectId: PROJECT_ID,
+      interactionMode: "default" as const,
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      latestTurn: null,
+      branch: "feat/glyph",
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    };
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [
+        {
+          environmentId: ENVIRONMENT_ID,
+          label: "This device",
+          connectionState: "connected",
+          stale: false,
+          role: "owner",
+          trust: "unverified",
+          deliveryUnknown: false,
+          threadSettlementSupported: true,
+          threadSnoozeSupported: true,
+          mutationReady: true,
+          shellCurrent: true,
+        },
+      ],
+      threads: [
+        { ...base, id: ThreadId.make("ask"), title: "Ask task", hasPendingApprovals: true },
+        {
+          ...base,
+          id: ThreadId.make("broken"),
+          title: "Broken task",
+          session: {
+            provider: ProviderDriverKind.make("codex"),
+            status: "error",
+            orchestrationStatus: "error",
+            lastError: "Provider exited (code 1)",
+            createdAt: "2026-09-01T00:00:00.000Z",
+            updatedAt: "2026-09-01T00:00:00.000Z",
+          },
+        },
+        {
+          ...base,
+          id: ThreadId.make("done"),
+          title: "Done task",
+          settledOverride: "settled",
+          settledAt: "2026-09-01T00:00:00.000Z",
+        },
+      ],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      aiFocusEnabled: false,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const row = (id: string) =>
+        document.querySelector<HTMLElement>(
+          `[data-inbox-row-key="${ENVIRONMENT_ID}:${id}"] [data-testid="inbox-thread-row"]`,
+        )!;
+      expect(row("ask").textContent).toContain("Needs approval");
+      expect(row("ask").querySelector("[data-inbox-glyph]")?.getAttribute("aria-label")).toBe(
+        "Needs approval",
+      );
+      expect(row("broken").textContent).toContain("Provider exited (code 1)");
+      // Trust warnings stay on the row, not only in the card.
+      expect(row("ask").querySelector('[aria-label="Not verified"]')).not.toBeNull();
+      // Blocked settlement still explains itself.
+      await page.getByRole("button", { name: "Settle Ask task" }).hover();
+      await expect
+        .element(page.getByText("Resolve the pending approval first."))
+        .toBeInTheDocument();
+
+      await page.getByRole("button", { name: /Settled/ }).click();
+      const resting = row("done");
+      expect(resting.querySelector("[data-inbox-glyph]")).toBeNull();
+      expect(resting.textContent).toContain("Done task");
+      expect(resting.textContent).not.toContain("feat/glyph");
+      expect(resting.getBoundingClientRect().height).toBeLessThan(32);
     } finally {
       await mounted.unmount();
     }
@@ -289,36 +468,34 @@ describe("Inbox sidebar rendering and settlement", () => {
           '[data-testid="inbox-thread-row-shell"]',
         )!;
         const popup = document.querySelector<HTMLElement>('[data-slot="tooltip-popup"]')!;
-        const contextHeader = rowElement.firstElementChild as HTMLElement;
-        const deviceIcon = contextHeader.querySelector("[data-device-icon]")!;
+        // Glyph row: the status glyph and the project icon share one column,
+        // and the second line starts where the title starts.
+        const glyph = rowElement.querySelector<HTMLElement>("[data-inbox-glyph]")!;
+        expect(glyph.getAttribute("aria-label")).toBe("Idle");
+        const [glyphCell, title, secondLine] = [...rowElement.children] as HTMLElement[];
+        const projectCell = secondLine!.firstElementChild as HTMLElement;
+        const lineContent = secondLine!.lastElementChild as HTMLElement;
         for (const width of [240, 280, 320, 480]) {
           host.style.width = `${width}px`;
-          const headerBounds = contextHeader.getBoundingClientRect();
-          const iconBounds = deviceIcon.getBoundingClientRect();
-          expect(headerBounds.height).toBeLessThanOrEqual(18);
-          expect(iconBounds.top).toBeGreaterThanOrEqual(headerBounds.top);
-          expect(iconBounds.bottom).toBeLessThanOrEqual(headerBounds.bottom);
-          const iconCenter = (iconBounds.top + iconBounds.bottom) / 2;
-          for (const label of [
-            deviceIcon.parentElement!.firstElementChild!,
-            deviceIcon.nextElementSibling!,
-          ]) {
-            const labelBounds = label.getBoundingClientRect();
-            expect(Math.abs(iconCenter - (labelBounds.top + labelBounds.bottom) / 2)).toBeLessThan(
-              0.5,
-            );
-          }
+          const glyphBounds = glyphCell!.getBoundingClientRect();
+          const projectBounds = projectCell.getBoundingClientRect();
+          expect(Math.abs(glyphBounds.left - projectBounds.left)).toBeLessThan(0.5);
+          expect(
+            Math.abs(
+              title!.getBoundingClientRect().left - lineContent.getBoundingClientRect().left,
+            ),
+          ).toBeLessThan(0.5);
+          expect(title!.getBoundingClientRect().height).toBeLessThanOrEqual(18);
           expect(rowElement.scrollWidth).toBeLessThanOrEqual(rowElement.clientWidth);
         }
         host.style.width = "320px";
+        expect(rowElement.getBoundingClientRect().height).toBeLessThan(56);
         expect(getComputedStyle(rowElement).willChange).toBe("auto");
         expect(getComputedStyle(rowShell).contentVisibility).toBe("auto");
-        expect(getComputedStyle(rowShell).containIntrinsicBlockSize).toContain("76px");
-        expect(
-          [...rowElement.children].some(
-            (child) => child.classList.contains("absolute") && child.classList.contains("left-0"),
-          ),
-        ).toBe(false);
+        expect(getComputedStyle(rowShell).containIntrinsicBlockSize).toContain("52px");
+        // One machine: the machine is implicit on the row and named in the card.
+        expect(rowElement.textContent).not.toContain("This device");
+        expect(rowElement.querySelector("[data-device-icon]")).toBeNull();
         await vi.waitFor(() =>
           expect(popup.querySelector('[data-testid="inbox-context-handoff"]')).not.toBeNull(),
         );
@@ -345,16 +522,16 @@ describe("Inbox sidebar rendering and settlement", () => {
         const previewStatus = popup.querySelector<HTMLElement>(
           '[data-testid="inbox-preview-status"]',
         )!;
-        expect(previewStatus.textContent).toBeTruthy();
-        expect(previewTitle.getBoundingClientRect().right).toBeLessThan(
-          previewStatus.getBoundingClientRect().left,
+        expect(previewStatus.textContent).toBe("Idle");
+        expect(previewStatus.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+          previewTitle.getBoundingClientRect().top,
         );
-        expect(getComputedStyle(previewTitle).textOverflow).toBe("ellipsis");
+        expect(getComputedStyle(previewTitle).webkitLineClamp).toBe("2");
         expect(
           rowElement.querySelector(isWorktree ? ".lucide-git-fork" : ".lucide-git-branch"),
         ).not.toBeNull();
         expect(popup.textContent).not.toContain("gpt-5.4");
-        expect(rowElement.textContent).toContain("Ryco");
+        expect(popup.textContent).toContain("Ryco");
         expect(rowElement.querySelector('[aria-label="PR #42 · Draft"]') !== null).toBe(isWorktree);
         expect(popup.textContent).toContain("Codex · GPT-5.4");
         expect(popup.textContent).toContain("Why focused? Now.");
