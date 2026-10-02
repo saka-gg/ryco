@@ -164,6 +164,9 @@ interface ClaudeTurnState {
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
   nextSyntheticAssistantBlockIndex: number;
+  /** Open thinking blocks by stream index; each one is a reasoning item. */
+  readonly reasoningBlocks: Map<number, { readonly itemId: string }>;
+  reasoningBlockCount: number;
 }
 
 interface AssistantTextBlockState {
@@ -2497,17 +2500,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           return;
         }
         const streamKind = streamKindFromDeltaType(event.delta.type);
+        // Thinking deltas belong to their own reasoning item, never to a text
+        // block that happens to share the stream index.
+        const reasoningBlock =
+          event.delta.type === "thinking_delta"
+            ? context.turnState.reasoningBlocks.get(event.index)
+            : undefined;
         const assistantBlockEntry =
           event.delta.type === "text_delta"
             ? yield* ensureAssistantTextBlock(context, event.index)
-            : context.turnState.assistantTextBlocks.get(event.index)
-              ? {
-                  blockIndex: event.index,
-                  block: context.turnState.assistantTextBlocks.get(
-                    event.index,
-                  ) as AssistantTextBlockState,
-                }
-              : undefined;
+            : undefined;
         if (assistantBlockEntry?.block && event.delta.type === "text_delta") {
           assistantBlockEntry.block.emittedTextDelta = true;
         }
@@ -2523,7 +2525,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ? {
                 itemId: asRuntimeItemId(assistantBlockEntry.block.itemId),
               }
-            : {}),
+            : reasoningBlock
+              ? { itemId: asRuntimeItemId(reasoningBlock.itemId) }
+              : {}),
           payload: {
             streamKind,
             delta: deltaText,
@@ -2647,6 +2651,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       }
+      if (block.type === "thinking" && context.turnState) {
+        const turnState = context.turnState;
+        turnState.reasoningBlockCount += 1;
+        const itemId = `${turnState.turnId}:thinking:${turnState.reasoningBlockCount}`;
+        turnState.reasoningBlocks.set(index, { itemId });
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEventForContext(context, {
+          type: "item.started",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          turnId: asCanonicalTurnId(turnState.turnId),
+          itemId: asRuntimeItemId(itemId),
+          payload: { itemType: "reasoning", status: "inProgress", title: "Reasoning" },
+          providerRefs: nativeProviderRefs(context),
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/stream_event/content_block_start",
+            payload: message,
+          },
+        });
+        return;
+      }
       if (
         block.type !== "tool_use" &&
         block.type !== "server_tool_use" &&
@@ -2726,6 +2754,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (event.type === "content_block_stop") {
       const { index } = event;
+      const reasoningBlock = context.turnState?.reasoningBlocks.get(index);
+      if (reasoningBlock && context.turnState) {
+        context.turnState.reasoningBlocks.delete(index);
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEventForContext(context, {
+          type: "item.completed",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          turnId: asCanonicalTurnId(context.turnState.turnId),
+          itemId: asRuntimeItemId(reasoningBlock.itemId),
+          payload: { itemType: "reasoning", status: "completed", title: "Reasoning" },
+          providerRefs: nativeProviderRefs(context),
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/stream_event/content_block_stop",
+            payload: message,
+          },
+        });
+        return;
+      }
       const assistantBlock = context.turnState?.assistantTextBlocks.get(index);
       if (assistantBlock) {
         assistantBlock.streamClosed = true;
@@ -2975,6 +3025,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         assistantTextBlockOrder: [],
         capturedProposedPlanKeys: new Set(),
         nextSyntheticAssistantBlockIndex: -1,
+        reasoningBlocks: new Map(),
+        reasoningBlockCount: 0,
       };
       context.session = {
         ...context.session,
@@ -4416,7 +4468,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
       const claudeBinaryPath = claudeSettings.binaryPath;
-      const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
+      // Claude Code forces thinking display to "omitted" in SDK sessions unless
+      // the display is set explicitly on the command line. Ryco renders the
+      // thinking in the transcript, so ask for summaries — unless the user's
+      // own launch args already choose a display.
+      const extraArgs = {
+        "thinking-display": "summarized",
+        ...parseCliArgs(claudeSettings.launchArgs).flags,
+      };
       const modelSelection =
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
       const caps = getClaudeModelCapabilities(modelSelection?.model);
@@ -4792,6 +4851,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       assistantTextBlockOrder: [],
       capturedProposedPlanKeys: new Set(),
       nextSyntheticAssistantBlockIndex: -1,
+      reasoningBlocks: new Map(),
+      reasoningBlockCount: 0,
     };
 
     const updatedAt = yield* nowIso;

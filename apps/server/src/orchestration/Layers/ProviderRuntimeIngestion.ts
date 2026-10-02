@@ -55,6 +55,13 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { increment, providerRuntimeStaleEventsTotal } from "../../observability/Metrics.ts";
 import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
 import { capActivityData } from "../activityDataCap.ts";
+import {
+  REASONING_LIVE_FLUSH_INTERVAL_MS,
+  ReasoningTracker,
+  buildReasoningActivity,
+  historyReasoningActivities,
+  type ReasoningSegment,
+} from "../reasoningActivity.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
@@ -169,6 +176,11 @@ type RuntimeIngestionInput =
     }
   | {
       source: "liveAssistantFlush";
+      key: string;
+      generation: number;
+    }
+  | {
+      source: "reasoningFlush";
       key: string;
       generation: number;
     };
@@ -2086,15 +2098,143 @@ const make = Effect.gen(function* () {
     },
   );
 
+  // Reasoning blocks: one upserted activity per block (see reasoningActivity.ts).
+  const reasoningTracker = new ReasoningTracker();
+
+  const writeReasoningActivity = (segment: ReasoningSegment, final: boolean) =>
+    Effect.gen(function* () {
+      const commandId = providerCommandId(
+        segment.lastEvent,
+        "reasoning-activity",
+        `${segment.activityId}:${segment.flushCount}`,
+      );
+      const activity = buildReasoningActivity(segment, { final });
+      reasoningTracker.markWritten(segment);
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId,
+        threadId: segment.threadId,
+        activity,
+        createdAt: segment.updatedAt,
+      });
+    });
+
+  const scheduleReasoningFlush = (segment: ReasoningSegment) =>
+    Effect.gen(function* () {
+      const enqueue = enqueueRuntimeInput;
+      if (!enqueue || segment.flushScheduled) {
+        return;
+      }
+      segment.flushScheduled = true;
+      yield* Effect.forkScoped(
+        Effect.sleep(Duration.millis(REASONING_LIVE_FLUSH_INTERVAL_MS)).pipe(
+          Effect.andThen(
+            enqueue({ source: "reasoningFlush", key: segment.key, generation: segment.generation }),
+          ),
+        ),
+      );
+    }).pipe(Effect.asVoid);
+
+  const flushReasoningSegment = (input: { key: string; generation: number }) =>
+    Effect.gen(function* () {
+      const segment = reasoningTracker.get(input.key);
+      if (!segment || segment.generation !== input.generation || !segment.dirty) {
+        if (segment && segment.generation === input.generation) segment.flushScheduled = false;
+        return;
+      }
+      yield* writeReasoningActivity(segment, false);
+    });
+
+  const writeClosedReasoning = (segments: ReadonlyArray<ReasoningSegment>) =>
+    Effect.forEach(segments, (segment) => writeReasoningActivity(segment, true), {
+      discard: true,
+    });
+
+  /**
+   * Opens, streams and closes reasoning blocks for one runtime event. Runs
+   * before assistant text is handled so a block closes ahead of the
+   * paragraph it led to.
+   */
+  const projectReasoningForEvent = (
+    event: ProviderRuntimeEvent,
+    threadId: ThreadId,
+    interruptedTurnId: TurnId | undefined,
+  ) =>
+    Effect.gen(function* () {
+      const turnId = toTurnId(event.turnId) ?? null;
+      if (
+        event.type === "content.delta" &&
+        (event.payload.streamKind === "reasoning_text" ||
+          event.payload.streamKind === "reasoning_summary_text")
+      ) {
+        if (event.payload.delta.length === 0) return;
+        const { segment, created } = reasoningTracker.appendDelta({
+          event,
+          threadId,
+          streamKind: event.payload.streamKind,
+          delta: event.payload.delta,
+          summaryIndex: event.payload.summaryIndex,
+        });
+        if (created) {
+          yield* writeReasoningActivity(segment, false);
+        } else {
+          yield* scheduleReasoningFlush(segment);
+        }
+        return;
+      }
+      if (event.type === "item.started" && event.payload.itemType === "reasoning") {
+        const { segment, created } = reasoningTracker.open(threadId, event);
+        if (created) yield* writeReasoningActivity(segment, false);
+        return;
+      }
+      if (event.type === "item.completed" && event.payload.itemType === "reasoning") {
+        yield* writeReasoningActivity(reasoningTracker.complete(threadId, event), true);
+        return;
+      }
+      if (
+        (event.type === "content.delta" && event.payload.streamKind === "assistant_text") ||
+        (event.type === "item.started" && event.payload.itemType !== "reasoning") ||
+        event.type === "request.opened" ||
+        event.type === "user-input.requested"
+      ) {
+        yield* writeClosedReasoning(reasoningTracker.closeImplicit(threadId, turnId, event));
+        return;
+      }
+      if (event.type === "turn.completed" || event.type === "turn.aborted") {
+        yield* writeClosedReasoning(reasoningTracker.closeTurn(threadId, turnId, event));
+        return;
+      }
+      if (interruptedTurnId !== undefined) {
+        yield* writeClosedReasoning(reasoningTracker.closeTurn(threadId, interruptedTurnId, event));
+      }
+      if (event.type === "session.exited") {
+        yield* writeClosedReasoning(reasoningTracker.closeThread(threadId, event));
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider runtime ingestion failed to project reasoning", {
+              eventId: event.eventId,
+              eventType: event.type,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       if (
         event.turnId &&
-        ((event.type === "content.delta" && event.payload.streamKind === "assistant_text") ||
+        ((event.type === "content.delta" &&
+          (event.payload.streamKind === "assistant_text" ||
+            event.payload.streamKind === "reasoning_text" ||
+            event.payload.streamKind === "reasoning_summary_text")) ||
           ((event.type === "item.started" ||
             event.type === "item.completed" ||
             event.type === "item.updated") &&
-            event.payload.itemType === "assistant_message")) &&
+            (event.payload.itemType === "assistant_message" ||
+              event.payload.itemType === "reasoning"))) &&
         Option.isSome(
           yield* Cache.getOption(
             restoredTurns,
@@ -2388,6 +2528,10 @@ const make = Effect.gen(function* () {
             });
           }
         }
+      }
+
+      if (!isSubagentProviderThread) {
+        yield* projectReasoningForEvent(event, thread.id, reconciledInterruptedTurnId);
       }
 
       const assistantDelta = isAssistantTextDeltaEvent(event) ? event.payload.delta : undefined;
@@ -3008,7 +3152,10 @@ const make = Effect.gen(function* () {
       const messages = historyMessagesToRestore(thread, input.history, now, userMessageIdsByTurn);
       const activities = missingHistoryActivities(
         thread.activities,
-        input.history.items.flatMap((event) => runtimeEventToActivities(event)),
+        input.history.items.flatMap((event) => [
+          ...runtimeEventToActivities(event),
+          ...historyReasoningActivities(thread.id, event),
+        ]),
       );
       for (const request of derivePendingThreadRequests(thread.activities)) {
         if (
@@ -3075,11 +3222,13 @@ const make = Effect.gen(function* () {
         ? processRuntimeEvent(input.event)
         : input.source === "domain"
           ? processDomainEvent(input.event)
-          : flushLiveAssistantDeltaBuffer({
-              key: input.key,
-              generation: input.generation,
-              commandTag: "assistant-delta-coalesced-interval",
-            }).pipe(Effect.asVoid);
+          : input.source === "reasoningFlush"
+            ? flushReasoningSegment(input)
+            : flushLiveAssistantDeltaBuffer({
+                key: input.key,
+                generation: input.generation,
+                commandTag: "assistant-delta-coalesced-interval",
+              }).pipe(Effect.asVoid);
 
   const processInputSafely = (input: RuntimeIngestionInput) =>
     processInput(input).pipe(
@@ -3091,7 +3240,7 @@ const make = Effect.gen(function* () {
           source: input.source,
           ...(input.source === "history"
             ? { threadId: input.threadId }
-            : input.source === "liveAssistantFlush"
+            : input.source === "liveAssistantFlush" || input.source === "reasoningFlush"
               ? { flushKey: input.key, flushGeneration: input.generation }
               : { eventId: input.event.eventId, eventType: input.event.type }),
           cause: Cause.pretty(cause),

@@ -514,9 +514,12 @@ describe("deriveMessagesTimelineRows", () => {
         row.kind === "message" && row.message.role === "assistant",
     );
 
-    expect(assistantRows).toHaveLength(2);
-    expect(assistantRows[0]?.showAssistantCopyButton).toBe(false);
-    expect(assistantRows[1]?.showAssistantCopyButton).toBe(true);
+    // Commentary inside the expanded turn becomes a chapter; only the final
+    // answer stays a message row, and it alone offers copy.
+    expect(rows.map((row) => row.kind)).toEqual(["message", "turn-fold", "chapter", "message"]);
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]?.message.id).toBe("assistant-final");
+    expect(assistantRows[0]?.showAssistantCopyButton).toBe(true);
   });
 
   it("starts a running turn expanded and replaces the standalone working row", () => {
@@ -569,7 +572,20 @@ describe("deriveMessagesTimelineRows", () => {
       revertTurnCountByUserMessageId: new Map(),
     });
 
-    expect(rows.map((row) => row.kind)).toEqual(["message", "turn-fold", "message", "work"]);
+    expect(rows.map((row) => row.kind)).toEqual(["message", "turn-fold", "chapter"]);
+    expect(rows[2]).toEqual(
+      expect.objectContaining({
+        kind: "chapter",
+        id: "chapter:assistant-1",
+        status: "active",
+        endedAt: null,
+        isFirstInTurn: true,
+        isLastInTurn: true,
+      }),
+    );
+    expect(rows[2]?.kind === "chapter" ? rows[2].entries.map((entry) => entry.id) : []).toEqual([
+      "work-1",
+    ]);
     expect(rows[1]).toEqual(
       expect.objectContaining({
         kind: "turn-fold",
@@ -1021,6 +1037,293 @@ describe("deriveMessagesTimelineRows", () => {
       marker,
     });
     expect(deriveTimelineMinimapItems(rows)).toEqual([]);
+  });
+});
+
+describe("chapter rows", () => {
+  const turnId = TurnId.make("turn-ch");
+  const userEntry = {
+    id: "user-entry",
+    kind: "message" as const,
+    createdAt: "2026-01-01T00:00:00Z",
+    message: {
+      id: "user-1" as never,
+      role: "user" as const,
+      text: "Fix it",
+      turnId: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      streaming: false,
+    },
+  };
+  const assistant = (id: string, createdAt: string, text: string, streaming = false) => ({
+    id: `${id}-entry`,
+    kind: "message" as const,
+    createdAt,
+    message: {
+      id: id as never,
+      role: "assistant" as const,
+      text,
+      turnId,
+      createdAt,
+      ...(streaming ? {} : { completedAt: createdAt }),
+      streaming,
+    },
+  });
+  const work = (id: string, createdAt: string, overrides: Partial<WorkLogEntry> = {}) => ({
+    id: `${id}-entry`,
+    kind: "work" as const,
+    createdAt,
+    entry: makeWorkEntry({ id, createdAt, turnId, ...overrides }),
+  });
+  const thinking = (id: string, createdAt: string) =>
+    work(id, createdAt, { tone: "thinking", itemType: "reasoning", label: "Reasoning" });
+  const baseInput = {
+    isWorking: false,
+    activeTurnStartedAt: null,
+    turnDiffSummaryByAssistantMessageId: new Map(),
+    revertTurnCountByUserMessageId: new Map(),
+  };
+  const chapters = (rows: ReturnType<typeof deriveMessagesTimelineRows>) =>
+    rows.filter(
+      (row): row is Extract<(typeof rows)[number], { kind: "chapter" }> => row.kind === "chapter",
+    );
+
+  it("groups each update with the steps after it and closes chapters on the next update", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...baseInput,
+      timelineEntries: [
+        userEntry,
+        assistant("c1", "2026-01-01T00:00:02Z", "Looking at the client."),
+        work("w1", "2026-01-01T00:00:03Z"),
+        work("w2", "2026-01-01T00:00:04Z"),
+        assistant("c2", "2026-01-01T00:00:10Z", "Found it; editing."),
+        work("w3", "2026-01-01T00:00:11Z"),
+        assistant("final", "2026-01-01T00:00:20Z", "Done."),
+      ],
+      latestTurn: {
+        turnId,
+        state: "completed",
+        startedAt: "2026-01-01T00:00:01Z",
+        completedAt: "2026-01-01T00:00:21Z",
+      },
+      turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+    });
+
+    expect(rows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:settled:turn-ch",
+      "chapter:c1",
+      "chapter:c2",
+      "final-entry",
+    ]);
+    const [first, second] = chapters(rows);
+    expect(first?.entries.map((entry) => entry.id)).toEqual(["w1", "w2"]);
+    expect(second?.entries.map((entry) => entry.id)).toEqual(["w3"]);
+    expect(first).toMatchObject({
+      status: "done",
+      expanded: false,
+      isFirstInTurn: true,
+      isLastInTurn: false,
+      startedAt: "2026-01-01T00:00:02Z",
+      // A finished chapter runs until the next one starts…
+      endedAt: "2026-01-01T00:00:10Z",
+    });
+    // …and the last one until the turn completed.
+    expect(second).toMatchObject({ isLastInTurn: true, endedAt: "2026-01-01T00:00:21Z" });
+  });
+
+  it("never ends a turn before its last output, even when the stored end is too early", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...baseInput,
+      timelineEntries: [
+        userEntry,
+        assistant("c1", "2026-01-01T00:00:05Z", "Looking."),
+        work("w1", "2026-01-01T00:00:06Z"),
+        assistant("c2", "2026-01-01T00:00:30Z", "Searching."),
+        work("w2", "2026-01-01T00:00:31Z"),
+        assistant("final", "2026-01-01T00:01:50Z", "Done."),
+      ],
+      // Older projections stamped completion at the first finished message.
+      latestTurn: {
+        turnId,
+        state: "completed",
+        startedAt: "2026-01-01T00:00:01Z",
+        completedAt: "2026-01-01T00:00:05Z",
+      },
+      turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+    });
+    expect(rows.find((row) => row.kind === "turn-fold")).toMatchObject({
+      label: "Worked for 1m 49s",
+    });
+    expect(chapters(rows).at(-1)).toMatchObject({ endedAt: "2026-01-01T00:01:50Z" });
+  });
+
+  it("leaves approval lifecycle rows to the composer's approval card", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...baseInput,
+      isWorking: true,
+      runningTurnId: turnId,
+      activeTurnStartedAt: "2026-01-01T00:00:01Z",
+      timelineEntries: [
+        assistant("c1", "2026-01-01T00:00:02Z", "Looking."),
+        work("approval", "2026-01-01T00:00:03Z", {
+          tone: "info",
+          label: "Command approval requested",
+          requestKind: "command",
+          detail: '/bin/zsh -lc "sed -n 1,40p a.ts"',
+          approvalLifecycle: true,
+        }),
+        work("w1", "2026-01-01T00:00:04Z"),
+      ],
+    });
+    expect(chapters(rows)[0]?.entries.map((entry) => entry.id)).toEqual(["w1"]);
+  });
+
+  it("moves thinking that precedes an update into that update's chapter", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...baseInput,
+      isWorking: true,
+      runningTurnId: turnId,
+      activeTurnStartedAt: "2026-01-01T00:00:01Z",
+      latestTurn: {
+        turnId,
+        state: "running",
+        startedAt: "2026-01-01T00:00:01Z",
+        completedAt: null,
+      },
+      timelineEntries: [
+        thinking("t1", "2026-01-01T00:00:01Z"),
+        assistant("c1", "2026-01-01T00:00:03Z", "Plan."),
+        work("w1", "2026-01-01T00:00:04Z"),
+        thinking("t2", "2026-01-01T00:00:05Z"),
+        assistant("c2", "2026-01-01T00:00:08Z", "Next.", true),
+      ],
+    });
+
+    const [first, second] = chapters(rows);
+    expect(first?.entries.map((entry) => entry.id)).toEqual(["t1", "w1"]);
+    expect(first?.startedAt).toBe("2026-01-01T00:00:01Z");
+    expect(second?.entries.map((entry) => entry.id)).toEqual(["t2"]);
+    expect(first?.status).toBe("done");
+    expect(second?.status).toBe("active");
+  });
+
+  it("opens a chapter without a paragraph when work comes first", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...baseInput,
+      isWorking: true,
+      runningTurnId: turnId,
+      activeTurnStartedAt: "2026-01-01T00:00:01Z",
+      timelineEntries: [work("w1", "2026-01-01T00:00:02Z"), work("w2", "2026-01-01T00:00:03Z")],
+    });
+    expect(chapters(rows)).toEqual([
+      expect.objectContaining({ id: "chapter:w1", message: null, status: "active" }),
+    ]);
+  });
+
+  it("keeps a turn the user watched finish expanded, and folds it on a fresh load", () => {
+    const entries = [
+      userEntry,
+      assistant("c1", "2026-01-01T00:00:02Z", "Looking."),
+      work("w1", "2026-01-01T00:00:03Z"),
+      assistant("final", "2026-01-01T00:00:09Z", "Done."),
+    ];
+    const latestTurn = {
+      turnId,
+      state: "completed" as const,
+      startedAt: "2026-01-01T00:00:01Z",
+      completedAt: "2026-01-01T00:00:10Z",
+    };
+    const watched = deriveMessagesTimelineRows({
+      ...baseInput,
+      timelineEntries: entries,
+      latestTurn,
+      liveSettledTurnIds: new Set([turnId]),
+    });
+    expect(watched.map((row) => row.kind)).toEqual(["message", "turn-fold", "chapter", "message"]);
+
+    const fresh = deriveMessagesTimelineRows({
+      ...baseInput,
+      timelineEntries: entries,
+      latestTurn,
+    });
+    expect(fresh.map((row) => row.kind)).toEqual(["message", "turn-fold", "message"]);
+
+    // Folding the turn while it ran is a choice that survives it settling.
+    const foldedWhileRunning = deriveMessagesTimelineRows({
+      ...baseInput,
+      timelineEntries: entries,
+      latestTurn,
+      liveSettledTurnIds: new Set([turnId]),
+      turnFoldExpandedById: { "turn-fold:running:turn-ch": false },
+    });
+    expect(foldedWhileRunning.map((row) => row.kind)).toEqual(["message", "turn-fold", "message"]);
+  });
+
+  it("opens a chapter that holds a search hit and honours stored expansion", () => {
+    const input = {
+      ...baseInput,
+      timelineEntries: [
+        assistant("c1", "2026-01-01T00:00:02Z", "Looking."),
+        work("w1", "2026-01-01T00:00:03Z"),
+        assistant("c2", "2026-01-01T00:00:04Z", "Editing."),
+        work("w2", "2026-01-01T00:00:05Z"),
+        assistant("final", "2026-01-01T00:00:09Z", "Done."),
+      ],
+      turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+    };
+    const revealed = chapters(
+      deriveMessagesTimelineRows({ ...input, revealedMessageIds: new Set(["c2"]) }),
+    );
+    expect(revealed.map((row) => row.expanded)).toEqual([false, true]);
+
+    const stored = chapters(
+      deriveMessagesTimelineRows({
+        ...input,
+        workGroupExpandedById: { "chapter:c1": true, "chapter:c1:steps": true },
+      }),
+    );
+    expect(stored[0]).toMatchObject({ expanded: true, stepsExpanded: true });
+  });
+
+  it("preserves an unchanged chapter row across rebuilds", () => {
+    const input = {
+      ...baseInput,
+      timelineEntries: [
+        assistant("c1", "2026-01-01T00:00:02Z", "Looking."),
+        work("w1", "2026-01-01T00:00:03Z"),
+        assistant("final", "2026-01-01T00:00:09Z", "Done."),
+      ],
+      turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+    };
+    const first = computeStableMessagesTimelineRows(deriveMessagesTimelineRows(input), {
+      byId: new Map(),
+      result: [],
+    });
+    const second = computeStableMessagesTimelineRows(
+      deriveMessagesTimelineRows({
+        ...input,
+        timelineEntries: input.timelineEntries.map((entry) => ({ ...entry })),
+      }),
+      first,
+    );
+    expect(second).toBe(first);
+  });
+
+  it("feeds the minimap the latest chapter paragraph while a turn runs", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...baseInput,
+      isWorking: true,
+      runningTurnId: turnId,
+      activeTurnStartedAt: "2026-01-01T00:00:01Z",
+      timelineEntries: [
+        userEntry,
+        assistant("c1", "2026-01-01T00:00:02Z", "First update."),
+        work("w1", "2026-01-01T00:00:03Z"),
+        assistant("c2", "2026-01-01T00:00:04Z", "Second update.", true),
+      ],
+    });
+    expect(deriveTimelineMinimapItems(rows)[0]?.assistantText).toBe("Second update.");
   });
 });
 

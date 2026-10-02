@@ -884,6 +884,26 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("asks Claude Code for summarized thinking explicitly", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-thinking-display"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      // SDK sessions fall back to omitted thinking unless the CLI flag is set.
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.extraArgs?.["thinking-display"], "summarized");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("normalizes a retired ultrathink selection without injecting a prompt keyword", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -1305,6 +1325,98 @@ describe("ClaudeAdapterLive", () => {
       if (turnCompleted?.type === "turn.completed") {
         assert.equal(String(turnCompleted.turnId), String(turn.turnId));
         assert.equal(turnCompleted.payload.state, "completed");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("emits a reasoning item lifecycle around each thinking block", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 9).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-thinking-items"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      const streamEvent = (uuid: string, event: Record<string, unknown>) =>
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-thinking-items",
+          uuid,
+          parent_tool_use_id: null,
+          event,
+        } as unknown as SDKMessage);
+
+      streamEvent("thinking-start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking", thinking: "", signature: "" },
+      });
+      streamEvent("thinking-delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "Check the reconnect path." },
+      });
+      streamEvent("thinking-stop", { type: "content_block_stop", index: 0 });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-thinking-items",
+        uuid: "result-thinking-items",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.deepEqual(
+        runtimeEvents.map((event) => event.type),
+        [
+          "session.started",
+          "session.configured",
+          "session.state.changed",
+          "turn.started",
+          "thread.started",
+          "item.started",
+          "content.delta",
+          "item.completed",
+          "turn.completed",
+        ],
+      );
+
+      const started = runtimeEvents.find((event) => event.type === "item.started");
+      const delta = runtimeEvents.find((event) => event.type === "content.delta");
+      const completed = runtimeEvents.find((event) => event.type === "item.completed");
+      assert.equal(started?.type === "item.started" ? started.payload.itemType : null, "reasoning");
+      assert.equal(
+        completed?.type === "item.completed" ? completed.payload.itemType : null,
+        "reasoning",
+      );
+      // One item id ties the block's start, its text and its end together.
+      assert.ok(started?.itemId);
+      assert.equal(String(delta?.itemId), String(started?.itemId));
+      assert.equal(String(completed?.itemId), String(started?.itemId));
+      assert.equal(String(started?.turnId), String(turn.turnId));
+      if (delta?.type === "content.delta") {
+        assert.equal(delta.payload.streamKind, "reasoning_text");
+        assert.equal(delta.payload.delta, "Check the reconnect path.");
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

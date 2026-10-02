@@ -701,6 +701,96 @@ describe("deriveWorkLogEntries", () => {
     expect(entries[0]?.lastActivityAt).toBe("2026-02-23T00:00:03.000Z");
   });
 
+  it("marks approval lifecycle rows so narrative views can leave them out", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "approval-1",
+          kind: "approval.requested",
+          summary: "Command approval requested",
+          tone: "approval",
+          payload: { requestId: "req-1", requestKind: "command", detail: "bun lint" },
+        }),
+        makeActivity({
+          id: "tool-1",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          kind: "tool.completed",
+          summary: "Ran command",
+          payload: { itemType: "command_execution", command: "bun lint" },
+        }),
+      ],
+      undefined,
+    );
+    expect(entries.find((entry) => entry.id === "approval-1")?.approvalLifecycle).toBe(true);
+    expect(entries.find((entry) => entry.id === "tool-1")?.approvalLifecycle).toBeUndefined();
+  });
+
+  it("projects a reasoning block as a thinking entry with its text and timing", () => {
+    const live = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "reasoning:thread-1:turn-1:item:rs-1",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          kind: "reasoning",
+          summary: "Tracing reconnects",
+          tone: "info",
+          turnId: "turn-1",
+          payload: {
+            itemType: "reasoning",
+            providerItemId: "rs-1",
+            text: "…the timer never resets",
+            headline: "Tracing reconnects",
+            streaming: true,
+            startedAt: "2026-02-23T00:00:01.000Z",
+            updatedAt: "2026-02-23T00:00:04.000Z",
+          },
+        }),
+      ],
+      undefined,
+    );
+    expect(live).toEqual([
+      expect.objectContaining({
+        id: "reasoning:thread-1:turn-1:item:rs-1",
+        tone: "thinking",
+        itemType: "reasoning",
+        label: "Tracing reconnects",
+        detail: "Tracing reconnects",
+        output: "…the timer never resets",
+        startedAt: "2026-02-23T00:00:01.000Z",
+        lastActivityAt: "2026-02-23T00:00:04.000Z",
+      }),
+    ]);
+    expect(live[0]?.completed).toBeUndefined();
+
+    const settled = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "reasoning:thread-1:turn-1:block:1",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          kind: "reasoning",
+          summary: "Reasoning",
+          tone: "info",
+          payload: {
+            itemType: "reasoning",
+            text: "Full thought.",
+            streaming: false,
+            startedAt: "2026-02-23T00:00:01.000Z",
+            updatedAt: "2026-02-23T00:00:06.000Z",
+            completedAt: "2026-02-23T00:00:06.000Z",
+          },
+        }),
+      ],
+      undefined,
+    );
+    expect(settled[0]).toMatchObject({
+      label: "Reasoning",
+      output: "Full thought.",
+      completed: true,
+      lastActivityAt: "2026-02-23T00:00:06.000Z",
+    });
+    expect(settled[0]?.detail).toBeUndefined();
+  });
+
   it("omits task.started but shows task.progress and task.completed", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

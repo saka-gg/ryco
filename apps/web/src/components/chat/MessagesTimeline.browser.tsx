@@ -787,7 +787,7 @@ describe("MessagesTimeline", () => {
     }
   });
 
-  it("renders live file edits as non-expandable rows with text-only shimmer", async () => {
+  it("streams a live edit as an Editing step that settles with its diff", async () => {
     const turnId = TurnId.make("turn-1");
     const editEntry = {
       id: "work-1",
@@ -813,46 +813,28 @@ describe("MessagesTimeline", () => {
         timelineEntries={[editEntry]}
       />,
     );
+    const step = () => document.querySelector<HTMLElement>("[data-chapter-step-kind='edit']");
 
     try {
-      await expect.element(page.getByText("Editing src/app.ts")).toBeVisible();
+      await expect.element(page.getByText("Editing", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("src/app.ts", { exact: true })).toBeVisible();
+      expect(step()?.dataset.chapterStepStatus).toBe("running");
+      // Stats of an edit still in flight are not reported anywhere yet.
       await expect.element(page.getByText("+255")).not.toBeInTheDocument();
-      await expect.element(page.getByText("-12")).not.toBeInTheDocument();
-
-      const fileEditRow = document.querySelector<HTMLElement>("[data-file-edit-work-row='true']");
-      const editText = document.querySelector<HTMLElement>(".chat-file-edit-text");
-
-      expect(fileEditRow).not.toBeNull();
-      expect(fileEditRow!.closest("[role='button']")).toBeNull();
-      expect(fileEditRow!.dataset.fileEditWorkState).toBe("editing");
-      expect(editText).not.toBeNull();
-      expect(editText!.className).toContain("chat-file-edit-text--active");
 
       await screen.rerender(
         <MessagesTimeline
           {...buildProps()}
           activeTurnId={turnId}
           isWorking
-          timelineEntries={[
-            {
-              ...editEntry,
-              entry: {
-                ...editEntry.entry,
-                completed: true,
-              },
-            },
-          ]}
+          timelineEntries={[{ ...editEntry, entry: { ...editEntry.entry, completed: true } }]}
         />,
       );
 
-      await expect.element(page.getByText("Edited src/app.ts")).toBeVisible();
-      await expect.element(page.getByText("+255")).toBeVisible();
-      await expect.element(page.getByText("-12")).toBeVisible();
-
-      const completedRow = document.querySelector<HTMLElement>("[data-file-edit-work-row='true']");
-      const completedText = document.querySelector<HTMLElement>(".chat-file-edit-text");
-      expect(completedRow?.dataset.fileEditWorkState).toBe("completed");
-      expect(completedText?.className).not.toContain("chat-file-edit-text--active");
+      await expect.element(page.getByText("Edited", { exact: true })).toBeVisible();
+      expect(step()?.dataset.chapterStepStatus).toBe("completed");
+      await expect.element(page.getByText("+255").first()).toBeVisible();
+      await expect.element(page.getByText("−12").first()).toBeVisible();
     } finally {
       await screen.unmount();
     }
@@ -1182,16 +1164,16 @@ describe("MessagesTimeline", () => {
     const screen = await render(<MessagesTimeline {...props} timelineEntries={runningEntries} />);
 
     try {
-      const runningFold = page.getByRole("button", { name: /Working for/ });
+      const runningFold = page.getByRole("button", { name: /^Working/ });
       await expect.element(runningFold).toBeVisible();
       await expect.element(runningFold).toHaveAttribute("aria-expanded", "true");
+      // The live chapter: its paragraph and its steps, newest last.
       await expect
         .element(page.getByText("I am checking the current implementation."))
         .toBeVisible();
-      await expect
-        .element(page.getByText("Latest command · bun typecheck"))
-        .not.toBeInTheDocument();
-      await expect.element(page.getByText("Ran 2 tool calls · Running")).toBeVisible();
+      await expect.element(page.getByText("Latest command", { exact: true })).toBeVisible();
+      const liveChapter = document.querySelector<HTMLElement>("[data-chapter-status='active']");
+      expect(liveChapter?.dataset.chapterOpen).toBe("true");
 
       runningFold.element().focus();
       await userEvent.keyboard("{Enter}");
@@ -1241,10 +1223,10 @@ describe("MessagesTimeline", () => {
         />,
       );
 
+      // Folded while running, so it stays folded once it settles.
       const settledFold = page.getByRole("button", { name: "Worked for 40s" });
       await expect.element(settledFold).toBeVisible();
       await expect.element(settledFold).toHaveAttribute("aria-expanded", "false");
-      await expect.element(page.getByText("Response • Worked for 40s")).not.toBeInTheDocument();
       await expect.element(page.getByText("The redesign is complete.")).toBeVisible();
       await expect
         .element(page.getByText("I am checking the current implementation."))
@@ -1252,27 +1234,26 @@ describe("MessagesTimeline", () => {
 
       await settledFold.click();
       await expect.element(settledFold).toHaveAttribute("aria-expanded", "true");
-      await expect
-        .element(page.getByText("I am checking the current implementation."))
-        .toBeVisible();
-      await expect.element(page.getByText("Ran 2 tool calls · Running")).toBeVisible();
-
-      const previousToolsToggle = page.getByRole("button", {
-        name: "Ran 2 tool calls · Running",
+      // Finished chapters fold to one line: the paragraph as a title, no steps.
+      const chapterLine = page.getByRole("button", {
+        name: /I am checking the current implementation\./,
       });
-      previousToolsToggle.element().focus();
-      await userEvent.keyboard(" ");
-      await expect.element(page.getByText("First command · rg -n Working")).toBeVisible();
-      await expect.element(page.getByText("Latest command · bun typecheck")).toBeVisible();
-      await expect.element(previousToolsToggle).toHaveAttribute("aria-expanded", "true");
-      await userEvent.keyboard(" ");
-      await expect.element(page.getByText("First command · rg -n Working")).not.toBeInTheDocument();
+      await expect.element(chapterLine).toBeVisible();
       await expect
-        .element(page.getByText("Latest command · bun typecheck"))
+        .element(page.getByText("Latest command", { exact: true }))
         .not.toBeInTheDocument();
-      // The recap keeps its label in both states — the chevron carries the
-      // open/closed meaning, so the row does not rewrite itself on toggle.
-      await expect.element(previousToolsToggle).toHaveAttribute("aria-expanded", "false");
+
+      chapterLine.element().focus();
+      await userEvent.keyboard("{Enter}");
+      await expect.element(page.getByText("First command", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Latest command", { exact: true })).toBeVisible();
+
+      const foldChapter = page.getByRole("button", { name: "Fold chapter" });
+      await foldChapter.click();
+      await expect
+        .element(page.getByText("First command", { exact: true }))
+        .not.toBeInTheDocument();
+      await expect.element(chapterLine).toBeVisible();
     } finally {
       await screen.unmount();
     }

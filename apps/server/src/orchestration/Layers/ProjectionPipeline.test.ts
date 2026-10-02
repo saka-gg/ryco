@@ -1688,6 +1688,90 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("ends a turn at its latest completed assistant message, not its first", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const at = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, "0")}.000Z`;
+      const threadId = ThreadId.make("thread-turn-end");
+      const turnId = TurnId.make("turn-turn-end");
+      let sequence = 0;
+      const base = () => {
+        sequence += 1;
+        return {
+          eventId: EventId.make(`evt-turn-end-${sequence}`),
+          occurredAt: at(sequence),
+          commandId: CommandId.make(`cmd-turn-end-${sequence}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-turn-end-${sequence}`),
+          metadata: {},
+        };
+      };
+
+      yield* eventStore.append({
+        ...base(),
+        type: "project.created",
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-turn-end"),
+        payload: {
+          projectId: ProjectId.make("project-turn-end"),
+          title: "Project",
+          workspaceRoot: "/tmp/project-turn-end",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: at(0),
+          updatedAt: at(0),
+        },
+      });
+      yield* eventStore.append({
+        ...base(),
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-turn-end"),
+          title: "Thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: at(0),
+          updatedAt: at(0),
+        },
+      });
+      const assistant = (messageId: string, second: number) => ({
+        ...base(),
+        type: "thread.message-sent" as const,
+        aggregateKind: "thread" as const,
+        aggregateId: threadId,
+        payload: {
+          threadId,
+          messageId: MessageId.make(messageId),
+          role: "assistant" as const,
+          text: messageId,
+          turnId,
+          streaming: false,
+          createdAt: at(second),
+          updatedAt: at(second),
+        },
+      });
+      // A progress update at 5s, then the final answer at 40s.
+      yield* eventStore.append(assistant("assistant-progress", 5));
+      yield* eventStore.append(assistant("assistant-final", 40));
+
+      yield* projectionPipeline.bootstrap;
+
+      const turns = yield* sql<{ readonly completedAt: string | null }>`
+        SELECT completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE turn_id = 'turn-turn-end'
+      `;
+      assert.equal(turns[0]?.completedAt, at(40));
+    }),
+  );
+
   it.effect("keeps accumulated assistant text when completion payload text is empty", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;

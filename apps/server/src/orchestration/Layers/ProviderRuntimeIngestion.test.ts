@@ -1834,6 +1834,127 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("projects a Codex reasoning item into one upserted activity that keeps its start time", async () => {
+    const harness = await createHarness();
+    const startedAt = "2026-01-01T00:00:01.000Z";
+    const completedAt = "2026-01-01T00:00:07.000Z";
+    const base = {
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning"),
+      itemId: asItemId("rs-1"),
+    } as const;
+
+    harness.emit({
+      ...base,
+      type: "item.started",
+      eventId: asEventId("evt-reasoning-started"),
+      createdAt: startedAt,
+      payload: { itemType: "reasoning", status: "inProgress", title: "Reasoning" },
+    });
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-delta"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: {
+        streamKind: "reasoning_summary_text",
+        delta: "**Tracing reconnects**\n\nThe timer never resets.",
+        summaryIndex: 0,
+      },
+    });
+    harness.emit({
+      ...base,
+      type: "item.completed",
+      eventId: asEventId("evt-reasoning-completed"),
+      createdAt: completedAt,
+      payload: {
+        itemType: "reasoning",
+        status: "completed",
+        data: {
+          item: {
+            id: "rs-1",
+            summary: ["**Tracing reconnects**\n\nThe timer never resets after a handshake."],
+            content: [],
+          },
+        },
+      },
+    });
+
+    const expectedActivityId = "reasoning:thread-1:turn-reasoning:item:rs-1";
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === expectedActivityId &&
+          (activity.payload as Record<string, unknown> | null)?.streaming === false,
+      ),
+    );
+    const activities = thread.activities.filter(
+      (entry: ProviderRuntimeTestActivity) => entry.id === expectedActivityId,
+    );
+    expect(activities).toHaveLength(1);
+    expect(activities[0]?.kind).toBe("reasoning");
+    expect(activities[0]?.createdAt).toBe(startedAt);
+    expect(activities[0]?.payload).toMatchObject({
+      itemType: "reasoning",
+      providerItemId: "rs-1",
+      text: "**Tracing reconnects**\n\nThe timer never resets after a handshake.",
+      headline: "Tracing reconnects",
+      startedAt,
+      completedAt,
+      streaming: false,
+    });
+  });
+
+  it("closes an itemless reasoning block when the agent starts writing", async () => {
+    const harness = await createHarness();
+    const base = {
+      provider: ProviderDriverKind.make("cursor"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-thoughts"),
+    } as const;
+
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("evt-thought-1"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: { streamKind: "reasoning_text", delta: "Look at the fixture " },
+    });
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("evt-thought-2"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: { streamKind: "reasoning_text", delta: "before the handler." },
+    });
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("evt-thought-answer"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      itemId: asItemId("answer-1"),
+      payload: { streamKind: "assistant_text", delta: "The fixture is missing a snapshot." },
+    });
+
+    const expectedActivityId = "reasoning:thread-1:turn-thoughts:block:1";
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === expectedActivityId &&
+          (activity.payload as Record<string, unknown> | null)?.streaming === false,
+      ),
+    );
+    const activity = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.id === expectedActivityId,
+    );
+    expect(activity?.payload).toMatchObject({
+      text: "Look at the fixture before the handler.",
+      startedAt: "2026-01-01T00:00:01.000Z",
+      completedAt: "2026-01-01T00:00:03.000Z",
+    });
+  });
+
   it("routes child assistant streams to subagent activities without main-chat messages", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();
