@@ -2081,3 +2081,354 @@ label:has(> select#reasoning-effort) select {
   height: auto;
   margin: 0 auto;
 }
+
+/* ---------------------------------------------------------------------------
+   Model tuning: reasoning tones, rolling labels and the picker's effort dial
+   (ModelTuningDial.tsx, ModelTriggerTraits.tsx, RollingText.tsx).
+   --------------------------------------------------------------------------- */
+@property --model-dial-t {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+:root {
+  --reasoning-tone-low: var(--color-slate-500);
+  --reasoning-tone-medium: var(--color-blue-600);
+  --reasoning-tone-high: var(--color-indigo-600);
+  --reasoning-tone-xhigh: var(--color-violet-600);
+  --reasoning-tone-max: var(--color-fuchsia-600);
+  --reasoning-tone-ultra: var(--color-pink-600);
+  --reasoning-tone-ultracode: #6d5ce8;
+  --reasoning-tone-thinking: var(--color-sky-600);
+  --reasoning-tone-off: var(--color-zinc-500);
+  --reasoning-tone-shine: #c9c1ff;
+  --ultracode-sheen-1: #6d5ce8;
+  --ultracode-sheen-2: #9d90ff;
+  --ultracode-sheen-3: #ece8ff;
+  --fast-mode-tone: var(--color-amber-600);
+  --model-dial-track: color-mix(in srgb, var(--color-black) 6%, transparent);
+  --model-dial-notch: color-mix(in srgb, var(--color-black) 22%, transparent);
+  --model-dial-thumb: var(--color-white);
+  --model-dial-thumb-shadow: 0 1px 2px rgb(0 0 0 / 0.18), 0 4px 12px rgb(0 0 0 / 0.14);
+}
+.dark {
+  --reasoning-tone-low: var(--color-slate-400);
+  --reasoning-tone-medium: var(--color-blue-400);
+  --reasoning-tone-high: var(--color-indigo-400);
+  --reasoning-tone-xhigh: var(--color-violet-400);
+  --reasoning-tone-max: var(--color-fuchsia-400);
+  --reasoning-tone-ultra: var(--color-pink-400);
+  --reasoning-tone-ultracode: #b3a8ff;
+  --reasoning-tone-thinking: var(--color-sky-400);
+  --reasoning-tone-off: var(--color-zinc-400);
+  --reasoning-tone-shine: #ffffff;
+  --ultracode-sheen-1: #6f63d9;
+  --ultracode-sheen-2: #b0a5ff;
+  --ultracode-sheen-3: #f3f0ff;
+  --fast-mode-tone: var(--color-yellow-400);
+  --model-dial-track: color-mix(in srgb, var(--color-white) 6.5%, transparent);
+  --model-dial-notch: color-mix(in srgb, var(--color-white) 30%, transparent);
+  --model-dial-thumb: #f4f4f5;
+  --model-dial-thumb-shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 6px 18px rgb(0 0 0 / 0.45);
+}
+
+[data-reasoning-tone] {
+  --reasoning-tone: var(--reasoning-tone-low);
+  --reasoning-tone-text: color-mix(in srgb, var(--reasoning-tone) 88%, var(--foreground));
+}
+[data-reasoning-tone="medium"] {
+  --reasoning-tone: var(--reasoning-tone-medium);
+}
+[data-reasoning-tone="high"] {
+  --reasoning-tone: var(--reasoning-tone-high);
+}
+[data-reasoning-tone="xhigh"] {
+  --reasoning-tone: var(--reasoning-tone-xhigh);
+}
+[data-reasoning-tone="max"] {
+  --reasoning-tone: var(--reasoning-tone-max);
+}
+[data-reasoning-tone="ultra"] {
+  --reasoning-tone: var(--reasoning-tone-ultra);
+}
+[data-reasoning-tone="ultracode"] {
+  --reasoning-tone: var(--reasoning-tone-ultracode);
+}
+[data-reasoning-tone="thinking"] {
+  --reasoning-tone: var(--reasoning-tone-thinking);
+}
+[data-reasoning-tone="off"] {
+  --reasoning-tone: var(--reasoning-tone-off);
+}
+
+/* Rolling labels: the old value leaves in the direction of travel. */
+.rolling-text {
+  display: inline-grid;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+.rolling-text > * {
+  grid-area: 1 / 1;
+  justify-self: start;
+  white-space: nowrap;
+}
+.rolling-text[data-align="center"] > * {
+  justify-self: center;
+}
+.rolling-text > [data-roll-phase="enter"] {
+  animation: rolling-text-in var(--app-motion-duration-stack, 260ms)
+    var(--app-motion-spring-gentle, ease-out) both;
+}
+.rolling-text > [data-roll-phase="leave"] {
+  animation: rolling-text-out var(--app-motion-duration-pop, 200ms) cubic-bezier(0.4, 0, 0.7, 1)
+    forwards;
+}
+.rolling-text > [data-roll-direction="up"] {
+  --rolling-text-from: 85%;
+  --rolling-text-to: -85%;
+}
+.rolling-text > [data-roll-direction="down"] {
+  --rolling-text-from: -85%;
+  --rolling-text-to: 85%;
+}
+@keyframes rolling-text-in {
+  from {
+    transform: translateY(var(--rolling-text-from));
+    opacity: 0;
+    filter: blur(3px);
+  }
+}
+@keyframes rolling-text-out {
+  to {
+    transform: translateY(var(--rolling-text-to));
+    opacity: 0;
+    filter: blur(3px);
+  }
+}
+
+/* Ultracode label: a slow light sweep through the tone. */
+.reasoning-tone-shimmer {
+  background-image: linear-gradient(
+    100deg,
+    var(--reasoning-tone) 0%,
+    var(--reasoning-tone) 42%,
+    var(--reasoning-tone-shine) 50%,
+    var(--reasoning-tone) 58%,
+    var(--reasoning-tone) 100%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: reasoning-tone-sheen 3.2s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+@keyframes reasoning-tone-sheen {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: -150% 0;
+  }
+}
+
+.model-trigger-pop,
+.model-dial-pop {
+  animation: model-tuning-pop calc(var(--app-motion-duration-pop, 200ms) * 2.1)
+    var(--app-motion-ease) both;
+}
+@keyframes model-tuning-pop {
+  0% {
+    transform: scale(0.3) rotate(-30deg);
+    opacity: 0.2;
+  }
+  55% {
+    transform: scale(1.3) rotate(8deg);
+    opacity: 1;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* The dial: the thumb rides --model-dial-t (0..1) between the end stops. */
+.model-dial-track {
+  --model-dial-r: 15px;
+  position: relative;
+  height: 26px;
+  border-radius: 9999px;
+  background: var(--model-dial-track);
+  cursor: pointer;
+  touch-action: none;
+  outline: none;
+  transition: --model-dial-t calc(var(--app-motion-duration-stack, 260ms) * 1.9)
+    var(--app-motion-spring-snappy);
+}
+.model-dial-track[data-dragging] {
+  transition: none;
+  cursor: grabbing;
+}
+.model-dial-track[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.55;
+}
+.model-dial-fill {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  width: calc(
+    2 * var(--model-dial-r) + (100% - 2 * var(--model-dial-r)) * clamp(0, var(--model-dial-t), 1)
+  );
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--reasoning-tone) 45%, transparent),
+    var(--reasoning-tone)
+  );
+  transition: box-shadow 0.4s;
+}
+.model-dial[data-reasoning-tone="max"] .model-dial-fill {
+  box-shadow: 0 0 18px -3px var(--reasoning-tone);
+}
+.model-dial[data-reasoning-tone="ultracode"] .model-dial-fill {
+  background-image: linear-gradient(
+    90deg,
+    var(--ultracode-sheen-1),
+    var(--ultracode-sheen-2) 40%,
+    var(--ultracode-sheen-3) 50%,
+    var(--ultracode-sheen-2) 60%,
+    var(--ultracode-sheen-1)
+  );
+  background-size: 200% 100%;
+  box-shadow: 0 0 20px -5px var(--ultracode-sheen-2);
+  animation: model-dial-sheen 2.8s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+@keyframes model-dial-sheen {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.model-dial-sparks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  pointer-events: none;
+}
+.model-dial-notch {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--model-dial-r) + (100% - 2 * var(--model-dial-r)) * var(--model-dial-i));
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 9999px;
+  background: var(--model-dial-notch);
+  pointer-events: none;
+  transition: background-color 0.25s;
+}
+.model-dial-notch[data-lit] {
+  background: rgb(255 255 255 / 0.72);
+}
+.model-dial-thumb {
+  position: absolute;
+  top: 50%;
+  left: calc(
+    var(--model-dial-r) + (100% - 2 * var(--model-dial-r)) * clamp(0, var(--model-dial-t), 1)
+  );
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 9999px;
+  background: var(--model-dial-thumb);
+  box-shadow: var(--model-dial-thumb-shadow);
+  pointer-events: none;
+  transition:
+    transform var(--app-motion-duration-chip, 120ms) var(--app-motion-ease),
+    box-shadow 0.2s;
+}
+.model-dial-track:not([aria-disabled="true"]):hover .model-dial-thumb {
+  transform: scale(1.04);
+}
+.model-dial-track[data-dragging] .model-dial-thumb {
+  transform: scale(0.94);
+}
+.model-dial-track:focus-visible .model-dial-thumb {
+  box-shadow:
+    var(--model-dial-thumb-shadow),
+    0 0 0 3px color-mix(in srgb, var(--reasoning-tone) 55%, transparent);
+}
+.model-dial[data-reasoning-tone="max"] .model-dial-thumb::after,
+.model-dial[data-reasoning-tone="ultracode"] .model-dial-thumb::after {
+  position: absolute;
+  inset: -4px;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 1.5px var(--reasoning-tone);
+  content: "";
+  animation: model-dial-halo 1.9s var(--app-motion-ease) infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+.model-dial[data-reasoning-tone="max"] .model-dial-thumb::after {
+  animation-duration: 2.8s;
+}
+@keyframes model-dial-halo {
+  0% {
+    transform: scale(0.88);
+    opacity: 0.75;
+  }
+  100% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
+}
+.model-dial-burst {
+  position: absolute;
+  inset: 3px;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 1.5px var(--fast-mode-tone);
+  pointer-events: none;
+  animation: model-dial-ring-out calc(var(--app-motion-duration-pop, 200ms) * 3)
+    var(--app-motion-ease) forwards;
+}
+@keyframes model-dial-ring-out {
+  from {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+.model-dial-spin {
+  animation: model-dial-spin calc(var(--app-motion-duration-stack, 260ms) * 2.1)
+    var(--app-motion-spring-gentle);
+}
+@keyframes model-dial-spin {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+:root[data-ryco-motion-paused] :is(.reasoning-tone-shimmer, .model-dial-fill) {
+  animation-play-state: paused;
+}
+:root[data-ryco-motion-paused] .model-dial-thumb::after {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .model-dial-track {
+    transition: none;
+  }
+  .model-dial-thumb::after,
+  .model-dial-burst {
+    display: none;
+  }
+}

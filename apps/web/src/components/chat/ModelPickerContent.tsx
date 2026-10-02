@@ -16,13 +16,31 @@ import {
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
 import { resolveSelectableModel } from "@ryco/shared/model";
-import { memo, useMemo, useState, useCallback, useLayoutEffect, useRef } from "react";
+import {
+  memo,
+  useMemo,
+  useState,
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  type ReactNode,
+} from "react";
 import { SearchIcon } from "lucide-react";
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
 import { buildModelPickerSearchText, scoreModelPickerSearch } from "./modelPickerSearch";
 import { Combobox, ComboboxEmpty, ComboboxInput, ComboboxList } from "../ui/combobox";
-import { ModelEsque, PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
+import {
+  ModelEsque,
+  PROVIDER_ICON_BY_PROVIDER,
+  getTriggerDisplayModelName,
+} from "./providerIconUtils";
+import {
+  ModelPickerTuningBridgeContext,
+  type ModelPickMeta,
+  type ModelPickerTuningBridge,
+  type TuningStepper,
+} from "./modelPickerTuningBridge";
 import {
   modelPickerJumpCommandForIndex,
   modelPickerJumpIndexFromCommand,
@@ -88,11 +106,19 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
    */
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
   terminalOpen: boolean;
+  /**
+   * Footer docked under the list that tunes the active model (the composer's
+   * effort dial). When present, a pointer pick switches models without
+   * closing so the footer can be adjusted next; Enter, jump shortcuts and
+   * re-picking the active row still close.
+   */
+  tuning?: ReactNode;
   onRequestClose?: () => void;
   onInstanceModelChange: (
     instanceId: ProviderInstanceId,
     model: string,
     options?: ReadonlyArray<ProviderOptionSelection>,
+    meta?: ModelPickMeta,
   ) => void;
 }) {
   const {
@@ -410,7 +436,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   ]);
 
   const handleModelSelect = useCallback(
-    (modelSlug: string, instanceId: ProviderInstanceId, favorite?: ModelFavorite) => {
+    (
+      modelSlug: string,
+      instanceId: ProviderInstanceId,
+      favorite?: ModelFavorite,
+      keepOpen = false,
+    ) => {
+      const meta = keepOpen ? { keepOpen: true } : undefined;
       const options = modelOptionsByInstance.get(instanceId);
       if (!options) {
         return;
@@ -437,9 +469,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             },
             capabilitiesByModelKey.get(providerModelKey(instanceId, resolvedModel)),
           );
-          onInstanceModelChange(instanceId, resolvedModel, selection.options ?? []);
+          onInstanceModelChange(instanceId, resolvedModel, selection.options ?? [], meta);
         } else {
-          onInstanceModelChange(instanceId, resolvedModel);
+          onInstanceModelChange(instanceId, resolvedModel, undefined, meta);
         }
       }
     },
@@ -619,141 +651,199 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         model.favorite.reasoningEffort === currentFavorite.reasoningEffort),
   );
 
+  const hasTuning = props.tuning !== undefined && props.tuning !== null;
+  const stepperRef = useRef<TuningStepper | null>(null);
+  const activeModelLabel = useMemo(() => {
+    const active = flatModels.find(
+      (model) => model.instanceId === props.activeInstanceId && model.slug === props.model,
+    );
+    return active ? getTriggerDisplayModelName(active) : null;
+  }, [flatModels, props.activeInstanceId, props.model]);
+  const revealActiveModel = useCallback(() => {
+    setSearchQuery("");
+    if (!isLocked || showLockedInstanceSidebar) setSelectedInstanceId(props.activeInstanceId);
+    window.requestAnimationFrame(() => {
+      const selected = listRegionRef.current?.querySelector<HTMLElement>("[data-selected]");
+      selected?.scrollIntoView({ block: "nearest" });
+      focusSearchInput();
+    });
+  }, [focusSearchInput, isLocked, props.activeInstanceId, showLockedInstanceSidebar]);
+  const tuningBridge = useMemo<ModelPickerTuningBridge>(
+    () => ({
+      activeModelLabel,
+      revealActiveModel,
+      registerStepper: (stepper) => {
+        stepperRef.current = stepper;
+      },
+    }),
+    [activeModelLabel, revealActiveModel],
+  );
+
   if (!paneFocused) return null;
+
+  const pickerBody = (
+    <div
+      className={cn(
+        "relative flex min-h-0 overflow-hidden",
+        hasTuning ? "h-72 w-full" : "h-screen max-h-96 w-screen max-w-100",
+        isLocked && !showLockedInstanceSidebar ? "flex-col" : "flex-row",
+      )}
+    >
+      {/* Locked provider header (only shown in locked mode) */}
+      {isLocked && !showLockedInstanceSidebar && LockedProviderIcon && lockedHeaderLabel && (
+        <div className="flex items-center gap-2 px-4 py-3 border-b">
+          <LockedProviderIcon className="size-5 shrink-0" />
+          <span className="font-medium text-sm">{lockedHeaderLabel}</span>
+        </div>
+      )}
+
+      {/* Sidebar (only in unlocked mode) */}
+      {showSidebar && (
+        <ModelPickerSidebar
+          selectedInstanceId={selectedInstanceId}
+          onSelectInstance={handleSelectInstance}
+          instanceEntries={sidebarInstanceEntries}
+          showFavorites={!isLocked}
+          showComingSoon={!isLocked}
+        />
+      )}
+
+      {/* Main content area */}
+      <Combobox
+        inline
+        items={allModelKeys}
+        filteredItems={filteredModelKeys}
+        filter={null}
+        autoHighlight
+        open
+        value={selectedRow ? itemKey(selectedRow) : null}
+        onItemHighlighted={(modelKey) => {
+          highlightedModelKeyRef.current = typeof modelKey === "string" ? modelKey : null;
+        }}
+        onValueChange={(modelKey, eventDetails) => {
+          if (typeof modelKey !== "string") {
+            return;
+          }
+          const target = filteredModelByKey.get(modelKey);
+          if (!target) return;
+          // With a tuning footer, a pointer pick of another row switches the
+          // model in place; keyboard picks and re-picking the active row close.
+          const pointerPick =
+            hasTuning && !(eventDetails.event instanceof KeyboardEvent) && selectedRow !== target;
+          handleModelSelect(target.slug, target.instanceId, target.favorite, pointerPick);
+        }}
+      >
+        <div
+          className={cn(
+            "flex min-h-0 flex-1 flex-col overflow-hidden",
+            isLocked && !showLockedInstanceSidebar ? "min-w-0" : showSidebar && "border-l",
+          )}
+        >
+          {/* Search bar */}
+          <div className="border-b px-3 py-2">
+            <ComboboxInput
+              ref={searchInputRef}
+              className="[&_input]:font-sans rounded-md"
+              inputClassName="border-0 shadow-none ring-0 focus-visible:ring-0"
+              placeholder="Search models..."
+              showTrigger={false}
+              startAddon={<SearchIcon className="size-4 shrink-0 text-muted-foreground/50" />}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  props.onRequestClose?.();
+                  return;
+                }
+                if (
+                  (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+                  searchQuery.length === 0 &&
+                  stepperRef.current?.(e.key === "ArrowRight" ? 1 : -1)
+                ) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  return;
+                }
+                if (e.key === "Enter" && highlightedModelKeyRef.current) {
+                  (e as typeof e & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const target = filteredModelByKey.get(highlightedModelKeyRef.current);
+                  if (target) handleModelSelect(target.slug, target.instanceId, target.favorite);
+                  return;
+                }
+                e.stopPropagation();
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              size="sm"
+            />
+          </div>
+
+          {/* Model list */}
+          <div
+            ref={listRegionRef}
+            className="relative min-h-0 flex-1 before:pointer-events-none before:absolute before:inset-0 before:bg-muted/40"
+          >
+            <ComboboxList className="model-picker-list size-full divide-y px-2 py-1">
+              {filteredModelKeys.map((modelKey, index) => {
+                const model = filteredModelByKey.get(modelKey);
+                const row = rowStateByKey.get(modelKey);
+                if (!model || !row) {
+                  return null;
+                }
+                return (
+                  <ModelListRow
+                    key={modelKey}
+                    index={index}
+                    model={model}
+                    instanceId={model.instanceId}
+                    driverKind={model.driverKind}
+                    providerDisplayName={model.instanceDisplayName}
+                    providerAccentColor={model.instanceAccentColor}
+                    value={modelKey}
+                    effortLabel={row.effortLabel}
+                    isFavorite={row.isFavorite}
+                    showProvider={!isLocked || showLockedInstanceSidebar}
+                    preferShortName={!isLocked}
+                    useTriggerLabel={isLocked && !showLockedInstanceSidebar}
+                    jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
+                    onToggleFavorite={() =>
+                      updateClientModelFavorites((current) =>
+                        toggleModelFavorite(current, row.favorite),
+                      )
+                    }
+                  />
+                );
+              })}
+            </ComboboxList>
+          </div>
+          <ComboboxEmpty className="not-empty:py-6 empty:h-0 text-xs font-normal leading-snug">
+            No models found
+          </ComboboxEmpty>
+        </div>
+      </Combobox>
+    </div>
+  );
 
   return (
     <TooltipProvider delay={0}>
-      <div
-        className={cn(
-          "selection-glass-surface relative flex h-screen max-h-96 w-screen max-w-100 overflow-hidden rounded-lg border text-popover-foreground",
-          isLocked && !showLockedInstanceSidebar ? "flex-col" : "flex-row",
-        )}
-      >
-        {/* Locked provider header (only shown in locked mode) */}
-        {isLocked && !showLockedInstanceSidebar && LockedProviderIcon && lockedHeaderLabel && (
-          <div className="flex items-center gap-2 px-4 py-3 border-b">
-            <LockedProviderIcon className="size-5 shrink-0" />
-            <span className="font-medium text-sm">{lockedHeaderLabel}</span>
+      {hasTuning ? (
+        <div className="selection-glass-surface relative flex w-screen max-w-100 flex-col overflow-hidden rounded-lg border text-popover-foreground">
+          {pickerBody}
+          <div className="border-t" data-slot="model-picker-tuning">
+            <ModelPickerTuningBridgeContext.Provider value={tuningBridge}>
+              {props.tuning}
+            </ModelPickerTuningBridgeContext.Provider>
           </div>
-        )}
-
-        {/* Sidebar (only in unlocked mode) */}
-        {showSidebar && (
-          <ModelPickerSidebar
-            selectedInstanceId={selectedInstanceId}
-            onSelectInstance={handleSelectInstance}
-            instanceEntries={sidebarInstanceEntries}
-            showFavorites={!isLocked}
-            showComingSoon={!isLocked}
-          />
-        )}
-
-        {/* Main content area */}
-        <Combobox
-          inline
-          items={allModelKeys}
-          filteredItems={filteredModelKeys}
-          filter={null}
-          autoHighlight
-          open
-          value={selectedRow ? itemKey(selectedRow) : null}
-          onItemHighlighted={(modelKey) => {
-            highlightedModelKeyRef.current = typeof modelKey === "string" ? modelKey : null;
-          }}
-          onValueChange={(modelKey) => {
-            if (typeof modelKey !== "string") {
-              return;
-            }
-            const target = filteredModelByKey.get(modelKey);
-            if (target) handleModelSelect(target.slug, target.instanceId, target.favorite);
-          }}
-        >
-          <div
-            className={cn(
-              "flex min-h-0 flex-1 flex-col overflow-hidden",
-              isLocked && !showLockedInstanceSidebar ? "min-w-0" : showSidebar && "border-l",
-            )}
-          >
-            {/* Search bar */}
-            <div className="border-b px-3 py-2">
-              <ComboboxInput
-                ref={searchInputRef}
-                className="[&_input]:font-sans rounded-md"
-                inputClassName="border-0 shadow-none ring-0 focus-visible:ring-0"
-                placeholder="Search models..."
-                showTrigger={false}
-                startAddon={<SearchIcon className="size-4 shrink-0 text-muted-foreground/50" />}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    props.onRequestClose?.();
-                    return;
-                  }
-                  if (e.key === "Enter" && highlightedModelKeyRef.current) {
-                    (
-                      e as typeof e & { preventBaseUIHandler?: () => void }
-                    ).preventBaseUIHandler?.();
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const target = filteredModelByKey.get(highlightedModelKeyRef.current);
-                    if (target) handleModelSelect(target.slug, target.instanceId, target.favorite);
-                    return;
-                  }
-                  e.stopPropagation();
-                }}
-                onMouseDown={(e) => e.stopPropagation()}
-                onTouchStart={(e) => e.stopPropagation()}
-                size="sm"
-              />
-            </div>
-
-            {/* Model list */}
-            <div
-              ref={listRegionRef}
-              className="relative min-h-0 flex-1 before:pointer-events-none before:absolute before:inset-0 before:bg-muted/40"
-            >
-              <ComboboxList className="model-picker-list size-full divide-y px-2 py-1">
-                {filteredModelKeys.map((modelKey, index) => {
-                  const model = filteredModelByKey.get(modelKey);
-                  const row = rowStateByKey.get(modelKey);
-                  if (!model || !row) {
-                    return null;
-                  }
-                  return (
-                    <ModelListRow
-                      key={modelKey}
-                      index={index}
-                      model={model}
-                      instanceId={model.instanceId}
-                      driverKind={model.driverKind}
-                      providerDisplayName={model.instanceDisplayName}
-                      providerAccentColor={model.instanceAccentColor}
-                      value={modelKey}
-                      effortLabel={row.effortLabel}
-                      isFavorite={row.isFavorite}
-                      showProvider={!isLocked || showLockedInstanceSidebar}
-                      preferShortName={!isLocked}
-                      useTriggerLabel={isLocked && !showLockedInstanceSidebar}
-                      jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
-                      onToggleFavorite={() =>
-                        updateClientModelFavorites((current) =>
-                          toggleModelFavorite(current, row.favorite),
-                        )
-                      }
-                    />
-                  );
-                })}
-              </ComboboxList>
-            </div>
-            <ComboboxEmpty className="not-empty:py-6 empty:h-0 text-xs font-normal leading-snug">
-              No models found
-            </ComboboxEmpty>
-          </div>
-        </Combobox>
-      </div>
+        </div>
+      ) : (
+        <div className="selection-glass-surface relative flex overflow-hidden rounded-lg border text-popover-foreground">
+          {pickerBody}
+        </div>
+      )}
     </TooltipProvider>
   );
 });

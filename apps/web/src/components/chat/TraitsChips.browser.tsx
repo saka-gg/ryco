@@ -74,9 +74,7 @@ describe("TraitsChips", () => {
             ]),
           ]),
         ]}
-        prompt=""
         modelOptions={[{ id: "agent", value: "plan" }]}
-        onPromptChange={() => {}}
         onModelOptionsChange={() => {}}
       />,
     );
@@ -84,8 +82,7 @@ describe("TraitsChips", () => {
     await expect.element(page.getByRole("button", { name: /variant/i })).toBeInTheDocument();
   });
 
-  it("renders Reasoning + Fast + Context chips when all capabilities are present", async () => {
-    const onModelOptionsChange = vi.fn();
+  it("renders nothing when every option belongs to the model picker's tuning dial", async () => {
     mounted = await render(
       <TraitsChips
         provider={provider}
@@ -94,7 +91,6 @@ describe("TraitsChips", () => {
           modelWith([
             selectDescriptor("effort", "Reasoning", [
               { id: "low", label: "Low" },
-              { id: "medium", label: "Medium" },
               { id: "high", label: "High", isDefault: true },
             ]),
             booleanDescriptor("fastMode", "Fast Mode"),
@@ -102,20 +98,17 @@ describe("TraitsChips", () => {
               { id: "200k", label: "200k", isDefault: true },
               { id: "1m", label: "1M" },
             ]),
+            booleanDescriptor("thinking", "Thinking"),
           ]),
         ]}
-        prompt=""
         modelOptions={undefined}
-        onPromptChange={() => {}}
-        onModelOptionsChange={onModelOptionsChange}
+        onModelOptionsChange={() => {}}
       />,
     );
-    await expect.element(page.getByRole("button", { name: /reasoning/i })).toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: /fast mode/i })).toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: /context window/i })).toBeInTheDocument();
+    expect(document.querySelector("button")).toBeNull();
   });
 
-  it("omits Fast chip when capability is absent", async () => {
+  it("renders agent and variant chips beside dial-owned options", async () => {
     mounted = await render(
       <TraitsChips
         provider={provider}
@@ -123,31 +116,8 @@ describe("TraitsChips", () => {
         models={[
           modelWith([
             selectDescriptor("effort", "Reasoning", [
-              { id: "low", label: "Low" },
               { id: "high", label: "High", isDefault: true },
             ]),
-            selectDescriptor("contextWindow", "Context Window", [
-              { id: "200k", label: "200k", isDefault: true },
-            ]),
-          ]),
-        ]}
-        prompt=""
-        modelOptions={undefined}
-        onPromptChange={() => {}}
-        onModelOptionsChange={() => {}}
-      />,
-    );
-    await expect.element(page.getByRole("button", { name: /reasoning/i })).toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: /fast mode/i })).not.toBeInTheDocument();
-  });
-
-  it("renders a generic chip for unknown select descriptors (OpenCode variant)", async () => {
-    mounted = await render(
-      <TraitsChips
-        provider={provider}
-        model="test-model"
-        models={[
-          modelWith([
             selectDescriptor("variant", "Variant", [
               { id: "small", label: "Small" },
               { id: "large", label: "Large", isDefault: true },
@@ -155,30 +125,44 @@ describe("TraitsChips", () => {
             selectDescriptor("agent", "Agent", [{ id: "build", label: "Build", isDefault: true }]),
           ]),
         ]}
-        prompt=""
         modelOptions={undefined}
-        onPromptChange={() => {}}
         onModelOptionsChange={() => {}}
       />,
     );
     await expect.element(page.getByRole("button", { name: /variant/i })).toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: /agent/i })).toBeInTheDocument();
+    await expect.element(page.getByRole("button", { name: /reasoning/i })).not.toBeInTheDocument();
   });
 
-  it("renders only the Thinking chip for Haiku-like capability", async () => {
+  it("keeps dial-owned selections when an agent is chosen", async () => {
+    const onModelOptionsChange = vi.fn();
     mounted = await render(
       <TraitsChips
-        provider={provider}
+        provider={ProviderDriverKind.make("opencode")}
         model="test-model"
-        models={[modelWith([booleanDescriptor("thinking", "Thinking")])]}
-        prompt=""
-        modelOptions={undefined}
-        onPromptChange={() => {}}
-        onModelOptionsChange={() => {}}
+        models={[
+          modelWith([
+            selectDescriptor("effort", "Reasoning", [
+              { id: "low", label: "Low" },
+              { id: "high", label: "High", isDefault: true },
+            ]),
+            selectDescriptor("agent", "Agent", [
+              { id: "build", label: "Build", isDefault: true },
+              { id: "plan", label: "Plan" },
+            ]),
+          ]),
+        ]}
+        modelOptions={[{ id: "effort", value: "low" }]}
+        onModelOptionsChange={onModelOptionsChange}
       />,
     );
-    await expect.element(page.getByRole("button", { name: /thinking/i })).toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: /reasoning/i })).not.toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: /fast mode/i })).not.toBeInTheDocument();
+    await page.getByRole("button", { name: /agent/i }).click();
+    await page.getByRole("menuitemradio", { name: "Plan" }).click();
+    await vi.waitFor(() => {
+      expect(onModelOptionsChange).toHaveBeenCalledWith([
+        { id: "effort", value: "low" },
+        { id: "agent", value: "plan" },
+      ]);
+    });
   });
 });

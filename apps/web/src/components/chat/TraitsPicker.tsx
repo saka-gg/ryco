@@ -2,8 +2,6 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceId,
   type ProviderOptionDescriptor,
-  type ProviderOptionSelection,
-  type ScopedThreadRef,
   type ServerProviderModel,
 } from "@ryco/contracts";
 import {
@@ -13,7 +11,7 @@ import {
   getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
 } from "@ryco/shared/model";
-import { memo, useCallback, useState } from "react";
+import { memo, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
 import { ChevronDownIcon } from "lucide-react";
 import { Button, buttonVariants } from "../ui/button";
@@ -26,25 +24,18 @@ import {
   MenuSeparator as MenuDivider,
   MenuTrigger,
 } from "../ui/menu";
-import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
+import { isTuningDescriptor, reasoningTone } from "./modelTuning.logic";
 import { applyDescriptorSelection, replaceDescriptorCurrentValue } from "./traitsMenuLogic";
-import { getReasoningLevelMenuClassName } from "./ReasoningChip";
+import {
+  useProviderOptionsUpdater,
+  type ProviderOptions,
+  type ProviderOptionsPersistence,
+} from "./useProviderOptionsUpdater";
 import { boundedDisabledReason } from "~/lib/boundedReason";
 import { cn } from "~/lib/utils";
 
-type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
-
-type TraitsPersistence =
-  | {
-      threadRef?: ScopedThreadRef;
-      draftId?: DraftId;
-      onModelOptionsChange?: never;
-    }
-  | {
-      threadRef?: undefined;
-      onModelOptionsChange: (nextOptions: ProviderOptions | undefined) => void;
-    };
+type TraitsPersistence = ProviderOptionsPersistence;
 
 function getDescriptorStringValue(
   descriptor: Extract<ProviderOptionDescriptor, { type: "select" }> | null,
@@ -64,19 +55,26 @@ function getSelectedTraits(
   modelOptions: ProviderOptions | null | undefined,
   allowPromptInjectedEffort: boolean,
   hideAgent: boolean,
+  omitTuning: boolean,
 ) {
   const caps = getProviderModelCapabilities(models, model, provider);
   const descriptors = getProviderOptionDescriptors({
     caps,
     selections: modelOptions,
   });
+  // `omitTuning` hides what the model picker's dial owns, so a menu shown
+  // beside the dial carries only the remaining options (agent, variants).
+  const visible = (descriptor: ProviderOptionDescriptor) =>
+    !(omitTuning && isTuningDescriptor(descriptor));
   const selectDescriptors = descriptors.filter(
     (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> =>
-      descriptor.type === "select" && !(hideAgent && descriptor.id === "agent"),
+      descriptor.type === "select" &&
+      visible(descriptor) &&
+      !(hideAgent && descriptor.id === "agent"),
   );
   const booleanDescriptors = descriptors.filter(
     (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "boolean" }> =>
-      descriptor.type === "boolean",
+      descriptor.type === "boolean" && visible(descriptor),
   );
   const primarySelectDescriptor = selectDescriptors[0] ?? null;
   const contextWindowDescriptor =
@@ -139,6 +137,7 @@ function getTraitsSectionVisibility(input: {
   modelOptions: ProviderOptions | null | undefined;
   allowPromptInjectedEffort?: boolean;
   hideAgent?: boolean;
+  omitTuning?: boolean;
 }) {
   const selected = getSelectedTraits(
     input.provider,
@@ -148,6 +147,7 @@ function getTraitsSectionVisibility(input: {
     input.modelOptions,
     input.allowPromptInjectedEffort ?? true,
     input.hideAgent ?? false,
+    input.omitTuning ?? false,
   );
 
   const showEffort = selected.primarySelectDescriptor !== null;
@@ -175,6 +175,7 @@ export function shouldRenderTraitsControls(input: {
   modelOptions: ProviderOptions | null | undefined;
   allowPromptInjectedEffort?: boolean;
   hideAgent?: boolean;
+  omitTuning?: boolean;
 }): boolean {
   return getTraitsSectionVisibility(input).hasAnyControls;
 }
@@ -189,6 +190,8 @@ export interface TraitsMenuContentProps {
   modelOptions?: ProviderOptions | null | undefined;
   allowPromptInjectedEffort?: boolean;
   hideAgent?: boolean;
+  /** Leave out the options the model picker's tuning dial owns. */
+  omitTuning?: boolean;
   /**
    * Renders the disabled presentation and blocks every option change. The
    * traits-side equivalent of `ProviderModelPicker`'s `disabled`: call sites
@@ -216,29 +219,18 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   modelOptions,
   allowPromptInjectedEffort = true,
   hideAgent = false,
+  omitTuning = false,
   disabled = false,
   disabledReason,
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
-  const setProviderModelOptions = useComposerDraftStore((store) => store.setProviderModelOptions);
-  const updateModelOptions = useCallback(
-    (nextOptions: ProviderOptions | undefined) => {
-      if ("onModelOptionsChange" in persistence) {
-        persistence.onModelOptionsChange(nextOptions);
-        return;
-      }
-      const threadTarget = persistence.threadRef ?? persistence.draftId;
-      if (!threadTarget) {
-        return;
-      }
-      setProviderModelOptions(threadTarget, provider, nextOptions, {
-        ...(instanceId ? { instanceId } : {}),
-        model,
-        persistSticky: true,
-      });
-    },
-    [instanceId, model, persistence, provider, setProviderModelOptions],
-  );
+  const updateModelOptions = useProviderOptionsUpdater({
+    ...persistence,
+    provider,
+    instanceId,
+    model,
+    disabled,
+  });
   const {
     descriptors,
     selectDescriptors,
@@ -255,6 +247,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     modelOptions,
     allowPromptInjectedEffort,
     hideAgent,
+    omitTuning,
   });
   const boundedReason = disabled && disabledReason ? boundedDisabledReason(disabledReason) : null;
   const updateDescriptors = (nextDescriptors: ReadonlyArray<ProviderOptionDescriptor>) => {
@@ -323,11 +316,16 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                   value={option.id}
                   className={
                     descriptor.id === primarySelectDescriptor?.id
-                      ? getReasoningLevelMenuClassName(option.id)
+                      ? "text-(--reasoning-tone-text)"
                       : undefined
                   }
                   data-reasoning-level={
                     descriptor.id === primarySelectDescriptor?.id ? option.id : undefined
+                  }
+                  data-reasoning-tone={
+                    descriptor.id === primarySelectDescriptor?.id
+                      ? reasoningTone(option.id)
+                      : undefined
                   }
                   disabled={
                     disabled ||
