@@ -1010,6 +1010,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         headSelector,
         state: "open",
         limit: 1,
+        includeStackSummary: false,
       });
       const normalizedPullRequests = pullRequests.map(toPullRequestInfo);
 
@@ -1045,6 +1046,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         headSelector,
         state: "all",
         limit: 20,
+        includeStackSummary: false,
       });
 
       for (const pr of pullRequests.map(toPullRequestInfo)) {

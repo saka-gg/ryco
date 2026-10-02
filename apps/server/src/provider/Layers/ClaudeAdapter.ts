@@ -158,6 +158,8 @@ interface ClaudeResumeState {
 
 interface ClaudeTurnState {
   readonly turnId: TurnId;
+  /** Only user-initiated turns have a prompt UUID; synthetic turns preserve legacy completion. */
+  readonly promptUuid?: string;
   readonly startedAt: string;
   readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
@@ -270,6 +272,8 @@ interface ClaudeSessionContext {
    * sides of the linkage have arrived.
    */
   readonly subagentModelByToolUseId: Map<string, string>;
+  /** Snapshot-only tool calls need the same parent attribution as streamed calls. */
+  readonly subagentParentByToolUseId: Map<string, string>;
   /**
    * Last emitted workflow-member fingerprint per member slot. A coordinator
    * task_progress repeats the FULL member array every tick; without a
@@ -348,38 +352,16 @@ export interface ClaudeAdapterLiveOptions {
 
 const CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP = 256;
 
-function rememberClaudeSubagentLaunchInput(
-  context: ClaudeSessionContext,
+function rememberClaudeSubagentAttribution<A>(
+  cache: Map<string, A>,
   toolUseId: string,
-  input: Record<string, unknown>,
+  value: A,
 ): void {
-  if (
-    !context.subagentLaunchInputByToolUseId.has(toolUseId) &&
-    context.subagentLaunchInputByToolUseId.size >= CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP
-  ) {
-    const oldestToolUseId = context.subagentLaunchInputByToolUseId.keys().next().value;
-    if (oldestToolUseId !== undefined) {
-      context.subagentLaunchInputByToolUseId.delete(oldestToolUseId);
-    }
+  if (!cache.has(toolUseId) && cache.size >= CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP) {
+    const oldestToolUseId = cache.keys().next().value;
+    if (oldestToolUseId !== undefined) cache.delete(oldestToolUseId);
   }
-  context.subagentLaunchInputByToolUseId.set(toolUseId, input);
-}
-
-function rememberClaudeSubagentModel(
-  context: ClaudeSessionContext,
-  toolUseId: string,
-  model: string,
-): void {
-  if (
-    !context.subagentModelByToolUseId.has(toolUseId) &&
-    context.subagentModelByToolUseId.size >= CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP
-  ) {
-    const oldestToolUseId = context.subagentModelByToolUseId.keys().next().value;
-    if (oldestToolUseId !== undefined) {
-      context.subagentModelByToolUseId.delete(oldestToolUseId);
-    }
-  }
-  context.subagentModelByToolUseId.set(toolUseId, model);
+  cache.set(toolUseId, value);
 }
 
 function claudeSubagentLaunchModel(input: Record<string, unknown> | undefined): string | undefined {
@@ -2564,7 +2546,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : undefined;
         context.inFlightTools.set(event.index, nextTool);
         if (nextTool.itemType === "collab_agent_tool_call" && parsedInput) {
-          rememberClaudeSubagentLaunchInput(context, nextTool.itemId, parsedInput);
+          rememberClaudeSubagentAttribution(
+            context.subagentLaunchInputByToolUseId,
+            nextTool.itemId,
+            parsedInput,
+          );
         }
 
         if (
@@ -2716,7 +2702,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       context.inFlightTools.set(index, tool);
       if (itemType === "collab_agent_tool_call") {
-        rememberClaudeSubagentLaunchInput(context, itemId, toolInput);
+        rememberClaudeSubagentAttribution(
+          context.subagentLaunchInputByToolUseId,
+          itemId,
+          toolInput,
+        );
       }
 
       const stamp = yield* makeEventStamp();
@@ -2964,10 +2954,54 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const owningTaskId = agentIdForParentToolUse(context.taskAgents, assistantParentToolUseId);
       const snapshotModel = trimmedClaudeString(message.message.model);
       const owningAgent = owningTaskId ? context.taskAgents.get(owningTaskId) : undefined;
-      if (owningAgent && snapshotModel) {
+      if (owningAgent && snapshotModel && owningAgent.model !== snapshotModel) {
         owningAgent.model = snapshotModel;
-      } else if (snapshotModel) {
-        rememberClaudeSubagentModel(context, assistantParentToolUseId, snapshotModel);
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEventForContext(context, {
+          ...stamp,
+          type: "task.updated",
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+          providerRefs: nativeProviderRefs(context),
+          payload: {
+            taskId: RuntimeTaskId.make(owningAgent.taskId),
+            ...taskLinkageFor(context.taskAgents, owningAgent.taskId),
+          },
+        });
+        const existingSubagent = context.subagentByTaskId.get(owningAgent.taskId);
+        if (existingSubagent) {
+          const subagent = { ...existingSubagent, model: snapshotModel };
+          context.subagentByTaskId.set(owningAgent.taskId, subagent);
+          yield* emitClaudeSubagentUpdated(context, { subagent, raw: message });
+        }
+      } else if (!owningAgent && snapshotModel) {
+        rememberClaudeSubagentAttribution(
+          context.subagentModelByToolUseId,
+          assistantParentToolUseId,
+          snapshotModel,
+        );
+      }
+      // The SDK may deliver subagent tool calls only in full snapshots.
+      for (const block of message.message.content) {
+        if (block.type !== "tool_use") continue;
+        rememberClaudeSubagentAttribution(
+          context.subagentParentByToolUseId,
+          block.id,
+          assistantParentToolUseId,
+        );
+        if (
+          classifyToolItemType(block.name) === "collab_agent_tool_call" &&
+          block.input !== null &&
+          typeof block.input === "object" &&
+          !Array.isArray(block.input)
+        ) {
+          rememberClaudeSubagentAttribution(
+            context.subagentLaunchInputByToolUseId,
+            block.id,
+            block.input as Record<string, unknown>,
+          );
+        }
       }
       context.lastAssistantUuid = message.uuid;
       yield* updateResumeCursor(context);
@@ -3099,6 +3133,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     if (message.type !== "result") {
       return;
+    }
+
+    const promptUuid = context.turnState?.promptUuid;
+    // Resuming can produce a result for a background notification before the
+    // queued user prompt runs. Prefer explicit correlation; older CLIs omit it.
+    if (promptUuid !== undefined) {
+      const promptUuids = message.user_message_uuids?.length
+        ? message.user_message_uuids
+        : message.user_message_uuid
+          ? [message.user_message_uuid]
+          : undefined;
+      if (
+        promptUuids
+          ? !promptUuids.includes(promptUuid)
+          : message.origin !== undefined && message.origin.kind !== "human"
+      ) {
+        yield* Effect.logInfo("claude.turn.result-for-other-prompt", {
+          threadId: context.session.threadId,
+          turnId: context.turnState?.turnId,
+          origin: message.origin?.kind,
+        });
+        return;
+      }
     }
 
     const status = turnStatusFromResult(message);
@@ -3467,7 +3524,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               (tool) => tool.itemId === message.tool_use_id,
             )
           : undefined;
-        const owningAgentId = launchingTool?.agentId;
+        const parentToolUseId = message.tool_use_id
+          ? context.subagentParentByToolUseId.get(message.tool_use_id)
+          : undefined;
+        const owningAgentId =
+          launchingTool?.agentId ?? agentIdForParentToolUse(context.taskAgents, parentToolUseId);
+        if (message.tool_use_id) context.subagentParentByToolUseId.delete(message.tool_use_id);
         // Model/effort: the Agent tool's input carries explicit overrides.
         // The subagent's own assistant snapshot is authoritative for its API
         // model and may arrive before or after task_started. Never fill a
@@ -4694,6 +4756,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         taskAgents: new Map(),
         subagentLaunchInputByToolUseId: new Map(),
         subagentModelByToolUseId: new Map(),
+        subagentParentByToolUseId: new Map(),
         workflowMemberFingerprints: new Map(),
         workflowPhasesByTaskId: new Map(),
         liveTaskIds: new Set(),
@@ -4842,9 +4905,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    const turnId = TurnId.make(yield* Effect.sync(() => crypto.randomUUID()));
+    const promptUuid = yield* Effect.sync(() => crypto.randomUUID());
+    const turnId = TurnId.make(promptUuid);
     const turnState: ClaudeTurnState = {
       turnId,
+      promptUuid,
       startedAt: yield* nowIso,
       items: [],
       assistantTextBlocks: new Map(),
@@ -4899,7 +4964,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     yield* Queue.offer(context.promptQueue, {
       type: "message",
-      message,
+      message: { ...message, uuid: promptUuid },
     }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
 
     if (context.agentControl) {

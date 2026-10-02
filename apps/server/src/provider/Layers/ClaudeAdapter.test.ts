@@ -5155,13 +5155,244 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  for (const foreignResult of [
+    { origin: { kind: "task-notification" } },
+    { origin: { kind: "human" }, user_message_uuids: ["another-prompt"] },
+    { user_message_uuid: "another-prompt" },
+    { origin: { kind: "task-notification" }, user_message_uuids: [] },
+  ]) {
+    it.effect(
+      `keeps a resumed compact turn open for its own result: ${JSON.stringify(foreignResult)}`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const eventsFiber = yield* adapter.streamEvents.pipe(
+            Stream.takeUntil((event) => event.type === "session.exited"),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* adapter.startSession({
+            runtimeSessionId: RuntimeSessionId.make("result-attribution"),
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+            resumeCursor: { resume: "11111111-1111-4111-8111-111111111111" },
+          });
+          const turn = yield* adapter.sendTurn({
+            threadId: THREAD_ID,
+            input: "/compact",
+            attachments: [],
+          });
+          const prompt = yield* Effect.promise(() =>
+            readFirstPromptMessage(harness.getLastCreateQueryInput()),
+          );
+          harness.query.emit({
+            type: "result",
+            subtype: "error_during_execution",
+            errors: ["background failure"],
+            num_turns: 0,
+            session_id: "sdk-session",
+            ...foreignResult,
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "system",
+            subtype: "compact_boundary",
+            uuid: "boundary",
+            session_id: "sdk-session",
+            compact_metadata: { trigger: "manual", pre_tokens: 175_000, post_tokens: 42_000 },
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            result: "compacted",
+            num_turns: 1,
+            session_id: "sdk-session",
+            user_message_uuids: ["batched-prompt", turn.turnId],
+          } as unknown as SDKMessage);
+          harness.query.finish();
+          const events = Array.from(yield* Fiber.join(eventsFiber));
+          const completions = events.filter((event) => event.type === "turn.completed");
+          assert.equal(completions.length, 1);
+          assert.equal(completions[0]?.payload.state, "completed");
+          assert.equal(completions[0]?.turnId, turn.turnId);
+          const boundary = events.find(
+            (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+          );
+          assert.equal(boundary?.turnId, turn.turnId);
+          assert.isBelow(events.indexOf(boundary!), events.indexOf(completions[0]!));
+          assert.isFalse(events.some((event) => event.type === "runtime.error"));
+          assert.equal(String(prompt?.uuid), turn.turnId);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  for (const resultKind of ["legacy", "human", "single-uuid", "batch-uuid", "synthetic"] as const) {
+    it.effect(`completes compatible Claude results: ${resultKind}`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "session.exited"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("compatible-result"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const turn =
+          resultKind === "synthetic"
+            ? undefined
+            : yield* adapter.sendTurn({
+                threadId: THREAD_ID,
+                input: "continue",
+                attachments: [],
+              });
+        if (resultKind === "synthetic") {
+          harness.query.emit({
+            type: "assistant",
+            parent_tool_use_id: null,
+            uuid: "background-reply",
+            session_id: "sdk-session",
+            message: {
+              id: "background-reply",
+              model: "claude-sonnet-4-6",
+              content: [{ type: "text", text: "Background report" }],
+              usage: {},
+            },
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          result: "done",
+          num_turns: 1,
+          session_id: "sdk-session",
+          ...(resultKind === "human" ? { origin: { kind: "human" }, user_message_uuids: [] } : {}),
+          ...(resultKind === "single-uuid" ? { user_message_uuid: turn?.turnId } : {}),
+          ...(resultKind === "batch-uuid"
+            ? {
+                origin: { kind: "task-notification" },
+                user_message_uuids: ["other-prompt", turn?.turnId],
+              }
+            : {}),
+          ...(resultKind === "synthetic"
+            ? { origin: { kind: "task-notification" }, user_message_uuids: ["provider-prompt"] }
+            : {}),
+        } as unknown as SDKMessage);
+        harness.query.finish();
+        const completions = Array.from(yield* Fiber.join(eventsFiber)).filter(
+          (event) => event.type === "turn.completed",
+        );
+        assert.equal(completions.length, 1);
+        assert.equal(completions[0]?.payload.state, "completed");
+        if (turn) assert.equal(completions[0]?.turnId, turn.turnId);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  it.effect(
+    "publishes subagent model changes immediately and links snapshot-only nested tools",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "session.exited"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("nested-snapshot"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "delegate", attachments: [] });
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "parent-agent",
+          tool_use_id: "parent-tool",
+          task_type: "local_agent",
+          description: "Parent",
+          uuid: "parent",
+          session_id: "sdk-session",
+        } as unknown as SDKMessage);
+        const snapshot = {
+          type: "assistant",
+          parent_tool_use_id: "parent-tool",
+          uuid: "snapshot",
+          session_id: "sdk-session",
+          message: {
+            model: "claude-sonnet-4-6",
+            content: [
+              {
+                type: "tool_use",
+                id: "nested-tool",
+                name: "Agent",
+                input: { model: "haiku", effort: "low" },
+              },
+              { type: "tool_use", id: "shell-tool", name: "Bash", input: { command: "sleep 1" } },
+            ],
+          },
+        } as unknown as SDKMessage;
+        harness.query.emit(snapshot);
+        harness.query.emit(snapshot);
+        for (const [id, toolId, type] of [
+          ["nested-agent", "nested-tool", "local_agent"],
+          ["nested-shell", "shell-tool", "local_bash"],
+        ]) {
+          harness.query.emit({
+            type: "system",
+            subtype: "task_started",
+            task_id: id,
+            tool_use_id: toolId,
+            task_type: type,
+            description: id,
+            uuid: id,
+            session_id: "sdk-session",
+          } as unknown as SDKMessage);
+        }
+        harness.query.finish();
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const updates = events.filter((event) => event.type === "task.updated");
+        assert.equal(updates.length, 1);
+        assert.equal(updates[0]?.payload.model, "claude-sonnet-4-6");
+        assert.equal(updates[0]?.payload.status, undefined);
+        const subagentUpdates = events.filter((event) => event.type === "subagent.updated");
+        assert.equal(subagentUpdates.length, 1);
+        assert.equal(subagentUpdates[0]?.payload.subagent.model, "claude-sonnet-4-6");
+        assert.equal(subagentUpdates[0]?.payload.status, undefined);
+        const nested = events.find(
+          (event) => event.type === "task.started" && event.payload.taskId === "nested-agent",
+        );
+        assert.equal(nested?.type, "task.started");
+        if (nested?.type === "task.started") {
+          assert.equal(nested.payload.agentId, "parent-agent");
+          assert.equal(nested.payload.model, "haiku");
+          assert.equal(nested.payload.effort, "low");
+        }
+        const shell = events.find(
+          (event) => event.type === "task.started" && event.payload.taskId === "nested-shell",
+        );
+        assert.equal(shell?.type, "task.started");
+        if (shell?.type === "task.started") assert.equal(shell.payload.agentId, "parent-agent");
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   it.effect("subagent snapshots refine model linkage without guessing from the parent", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
 
       const taskEventsFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.type.startsWith("task.")),
+        Stream.filter((event) => event.type === "task.started" || event.type === "task.progress"),
         Stream.take(2),
         Stream.runCollect,
         Effect.forkChild,
@@ -5249,7 +5480,7 @@ describe("ClaudeAdapterLive", () => {
         Effect.forkChild,
       );
       const taskEventsFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.type.startsWith("task.")),
+        Stream.filter((event) => event.type === "task.started" || event.type === "task.progress"),
         Stream.take(2),
         Stream.runCollect,
         Effect.forkChild,

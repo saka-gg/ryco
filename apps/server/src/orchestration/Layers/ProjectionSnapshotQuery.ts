@@ -884,6 +884,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // Order these latest-turn joins by the thread key so SQLite scans threads
+  // and directly looks up each latest turn, rather than scanning all turn history.
   const listLatestTurnRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionLatestTurnDbRowSchema,
@@ -905,7 +907,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ON turns.thread_id = threads.thread_id
           AND turns.turn_id = threads.latest_turn_id
         WHERE threads.latest_turn_id IS NOT NULL
-        ORDER BY turns.thread_id ASC
+        ORDER BY threads.thread_id ASC
       `,
   });
 
@@ -931,7 +933,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           AND turns.turn_id = threads.latest_turn_id
         WHERE threads.deleted_at IS NULL
           AND threads.latest_turn_id IS NOT NULL
-        ORDER BY turns.thread_id ASC
+        ORDER BY threads.thread_id ASC
       `,
   });
 

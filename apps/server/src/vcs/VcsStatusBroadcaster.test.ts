@@ -731,6 +731,88 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(makeTestLayer(state)));
   });
 
+  it.effect(
+    "hydrates stale subscribers without repeating remote metadata for existing ones",
+    () => {
+      const state = {
+        currentLocalStatus: baseLocalStatus,
+        currentRemoteStatus: baseRemoteStatus as VcsStatusRemoteResult | null,
+        localStatusCalls: 0,
+        remoteStatusCalls: 0,
+        localInvalidationCalls: 0,
+        remoteInvalidationCalls: 0,
+      };
+      return Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const events: VcsStatusStreamEvent[] = [];
+        const hydrated = yield* Deferred.make<void>();
+        const changed = yield* Deferred.make<void>();
+        const cleared = yield* Deferred.make<void>();
+        yield* broadcaster.streamStatus({ cwd: "/repo" }).pipe(
+          Stream.runForEach((event) => {
+            events.push(event);
+            if (event._tag === "localUpdated") return Effect.void;
+            if (event.remote?.behindCount === 2) return Deferred.succeed(changed, undefined);
+            if (event.remote !== null) return Deferred.succeed(hydrated, undefined);
+            if (events.length > 2) return Deferred.succeed(cleared, undefined);
+            return Effect.void;
+          }),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(hydrated);
+        yield* TestClock.adjust(Duration.seconds(31));
+
+        const newSubscriberEvents = yield* broadcaster
+          .streamStatus(
+            { cwd: "/repo" },
+            { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(30)) },
+          )
+          .pipe(Stream.take(2), Stream.runCollect);
+        assert.deepStrictEqual(Array.from(newSubscriberEvents), [
+          { _tag: "snapshot", local: baseLocalStatus, remote: null },
+          { _tag: "snapshot", local: baseLocalStatus, remote: baseRemoteStatus },
+        ]);
+
+        // Let the local cache expire too: the next poll then emits remoteUpdated
+        // instead of snapshot. Equality must compare status, not the event tag.
+        yield* TestClock.adjust(Duration.seconds(31));
+        state.currentLocalStatus = { ...baseLocalStatus, refName: "feature/updated" };
+        yield* broadcaster.refreshLocalStatus("/repo");
+        yield* broadcaster.refreshStatus("/repo");
+        yield* TestClock.adjust(Duration.seconds(31));
+        const pollScope = yield* Scope.make();
+        yield* broadcaster
+          .streamStatus(
+            { cwd: "/repo" },
+            { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(30)) },
+          )
+          .pipe(Stream.runDrain, Effect.forkIn(pollScope));
+        yield* TestClock.adjust(Duration.seconds(30));
+        yield* Scope.close(pollScope, Exit.void);
+        state.currentRemoteStatus = { ...baseRemoteStatus, behindCount: 2 };
+        yield* broadcaster.refreshStatus("/repo");
+        yield* Deferred.await(changed);
+        assert.equal(events.length, 4);
+        assert.equal(events[2]?._tag, "snapshot");
+        assert.deepStrictEqual(events[3], {
+          _tag: "snapshot",
+          local: state.currentLocalStatus,
+          remote: state.currentRemoteStatus,
+        });
+
+        state.currentRemoteStatus = null;
+        yield* broadcaster.refreshStatus("/repo");
+        yield* Deferred.await(cleared);
+        assert.deepStrictEqual(events[4], {
+          _tag: "snapshot",
+          local: state.currentLocalStatus,
+          remote: null,
+        });
+        assert.equal(events.length, 5);
+      }).pipe(Effect.provide(makeTestLayer(state)));
+    },
+  );
+
   it.effect("releases a remote poller when stream construction is interrupted", () => {
     const state = {
       currentLocalStatus: baseLocalStatus,

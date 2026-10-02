@@ -538,6 +538,22 @@ export const layer = Layer.effect(
             yield* options?.afterRemotePollerRetained ?? Effect.void;
           }
 
+          // Cache expiry triggers a shared publication so newly attached streams can
+          // hydrate after their initial remote:null snapshot. Existing subscribers
+          // must not receive that same value as an application change every poll.
+          let deliveredLocal: string | undefined;
+          let deliveredRemote: string | undefined;
+          const isChanged = (event: VcsStatusStreamEvent): boolean => {
+            const local =
+              event._tag === "remoteUpdated" ? deliveredLocal : fingerprintStatusPart(event.local);
+            const remote =
+              event._tag === "localUpdated" ? deliveredRemote : fingerprintStatusPart(event.remote);
+            const changed = local !== deliveredLocal || remote !== deliveredRemote;
+            deliveredLocal = local;
+            deliveredRemote = remote;
+            return changed;
+          };
+
           return Stream.concat(
             Stream.make({
               _tag: "snapshot" as const,
@@ -556,7 +572,7 @@ export const layer = Layer.effect(
                 Stream.map((event) => event.event),
               ),
             ),
-          );
+          ).pipe(Stream.filter(isChanged));
         }),
       );
 
