@@ -95,6 +95,12 @@ type TraceTailState = {
   remainder: string;
 };
 
+class CommittedDiffCacheKey extends Data.Class<{
+  cwd: string;
+  baseCommit: string;
+  headCommit: string;
+}> {}
+
 class StatusRemoteRefreshCacheKey extends Data.Class<{
   gitCommonDir: string;
   remoteName: string;
@@ -1280,9 +1286,32 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
   });
 
-  // Committed changes on this branch vs its base, using three-dot (merge-base)
-  // range semantics so it matches what a PR shows. Independent of push state,
-  // so committed-but-unpushed work is still counted.
+  const committedDiffCache = yield* Cache.makeWith(
+    Effect.fn("readCommittedDiff")(function* (key: CommittedDiffCacheKey) {
+      const result = yield* executeGit("GitVcsDriver.readCommittedAgainstBase.diff", key.cwd, [
+        "diff",
+        "--numstat",
+        `${key.baseCommit}...${key.headCommit}`,
+      ]);
+      let insertions = 0;
+      let deletions = 0;
+      const files = parseNumstatEntries(result.stdout)
+        .map((entry) => {
+          insertions += entry.insertions;
+          deletions += entry.deletions;
+          return { path: entry.path, insertions: entry.insertions, deletions: entry.deletions };
+        })
+        .toSorted((a, b) => a.path.localeCompare(b.path));
+      return { files, insertions, deletions };
+    }),
+    {
+      capacity: 128,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.minutes(5) : Duration.zero),
+    },
+  );
+
+  // Pin both ends before looking up the expensive three-dot diff. Ref changes
+  // invalidate immediately, while working-tree status remains uncached.
   const readCommittedAgainstBase = Effect.fn("readCommittedAgainstBase")(function* (
     cwd: string,
     refName: string,
@@ -1290,30 +1319,32 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const baseRef = yield* resolveBaseBranchForNoUpstream(cwd, refName).pipe(
       Effect.catch(() => Effect.succeed(null)),
     );
-    if (!baseRef) {
+    if (!baseRef) return emptyDiffTotals();
+    const commits = yield* runGitStdout("GitVcsDriver.readCommittedAgainstBase.resolve", cwd, [
+      "rev-parse",
+      "--revs-only",
+      "--end-of-options",
+      `${baseRef}^{commit}`,
+      "HEAD^{commit}",
+    ]).pipe(Effect.map((stdout) => stdout.trim().split(/\r?\n/)));
+    const [baseCommit, headCommit] = commits;
+    if (
+      commits.length !== 2 ||
+      !baseCommit ||
+      !headCommit ||
+      !/^[a-f0-9]{40,64}$/.test(baseCommit) ||
+      !/^[a-f0-9]{40,64}$/.test(headCommit)
+    ) {
       return emptyDiffTotals();
     }
-
-    const result = yield* executeGit(
-      "GitVcsDriver.readCommittedAgainstBase.diff",
-      cwd,
-      ["diff", "--numstat", `${baseRef}...HEAD`],
-      { allowNonZeroExit: true },
+    return yield* Cache.get(
+      committedDiffCache,
+      new CommittedDiffCacheKey({
+        cwd: path.resolve(cwd),
+        baseCommit,
+        headCommit,
+      }),
     );
-    if (result.exitCode !== 0) {
-      return emptyDiffTotals();
-    }
-
-    let insertions = 0;
-    let deletions = 0;
-    const files = parseNumstatEntries(result.stdout)
-      .map((entry) => {
-        insertions += entry.insertions;
-        deletions += entry.deletions;
-        return { path: entry.path, insertions: entry.insertions, deletions: entry.deletions };
-      })
-      .toSorted((a, b) => a.path.localeCompare(b.path));
-    return { files, insertions, deletions };
   });
 
   const readBranchRecency = Effect.fn("readBranchRecency")(function* (cwd: string) {

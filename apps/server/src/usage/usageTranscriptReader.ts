@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off
+import { createHash } from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -7,7 +8,11 @@ import * as NodePath from "node:path";
 import type { UsageProviderKind } from "@ryco/contracts";
 
 import { parseClaudeTranscriptLine } from "./claudeTranscript.ts";
-import { initialCodexTranscriptState, parseCodexTranscriptLine } from "./codexTranscript.ts";
+import {
+  initialCodexTranscriptState,
+  parseCodexTranscriptLine,
+  type CodexTranscriptState,
+} from "./codexTranscript.ts";
 import { mightCarryUsage, type UsageRecord } from "./usageRecord.ts";
 
 export const USAGE_TRANSCRIPT_LIMITS = {
@@ -111,6 +116,8 @@ export interface UsageTranscriptReadResult {
   readonly skippedLineCount: number;
   readonly malformedLineCount: number;
   readonly limited: boolean;
+  /** Complete lines reused after validating their byte prefix. */
+  readonly reusedLineCount: number;
 }
 function isJson(line: string): boolean {
   try {
@@ -121,20 +128,89 @@ function isJson(line: string): boolean {
   }
 }
 
+interface TranscriptCheckpoint {
+  readonly provider: UsageProviderKind;
+  readonly device: number;
+  readonly inode: number;
+  readonly offset: number;
+  readonly digest: string;
+  readonly state: CodexTranscriptState;
+  readonly records: readonly UsageRecord[];
+  readonly skippedLineCount: number;
+  readonly malformedLineCount: number;
+  readonly lineCount: number;
+  readonly retainedBytes: number;
+}
+
+/** Keep parser checkpoints in memory only; never persist provider transcript state. */
+export function createUsageTranscriptReader() {
+  const checkpoints = new Map<string, TranscriptCheckpoint>();
+  let retainedRecords = 0;
+  let retainedBytes = 0;
+  return async (filePath: string, provider: UsageProviderKind, signal?: AbortSignal) => {
+    const previous = checkpoints.get(filePath);
+    const remove = (key: string) => {
+      const entry = checkpoints.get(key);
+      if (entry) {
+        retainedRecords -= entry.records.length;
+        retainedBytes -= entry.retainedBytes;
+      }
+      checkpoints.delete(key);
+    };
+    const result = await readTranscript(filePath, provider, signal, previous, (checkpoint) => {
+      remove(filePath);
+      checkpoints.set(filePath, checkpoint);
+      retainedRecords += checkpoint.records.length;
+      retainedBytes += checkpoint.retainedBytes;
+      while (checkpoints.size > 0) {
+        if (
+          checkpoints.size <= 128 &&
+          retainedRecords <= USAGE_TRANSCRIPT_LIMITS.records &&
+          retainedBytes <= 32 * 1024 * 1024
+        )
+          break;
+        const oldest = checkpoints.keys().next().value;
+        if (oldest === undefined) break;
+        remove(oldest);
+      }
+    });
+    if (result === null || result.limited) remove(filePath);
+    return result;
+  };
+}
+
 /** Bounded lines: readline's unbounded accumulation is unsafe for partial files. */
 export async function readUsageTranscript(
   filePath: string,
   provider: UsageProviderKind,
   signal?: AbortSignal,
 ): Promise<UsageTranscriptReadResult | null> {
+  return readTranscript(filePath, provider, signal);
+}
+
+async function readTranscript(
+  filePath: string,
+  provider: UsageProviderKind,
+  signal?: AbortSignal,
+  previous?: TranscriptCheckpoint,
+  checkpoint?: (value: TranscriptCheckpoint) => void,
+): Promise<UsageTranscriptReadResult | null> {
   if (provider !== "claude" && provider !== "codex") return null;
-  const records: UsageRecord[] = [];
+  let records: UsageRecord[] = [];
   const started = Date.now();
-  const codexState = initialCodexTranscriptState();
+  let codexState = initialCodexTranscriptState();
+  let recordBytes = 0;
   let skippedLineCount = 0,
     malformedLineCount = 0,
     lineCount = 0,
+    reusedLineCount = 0,
     limited = false;
+  const appendRecord = (record: UsageRecord) => {
+    records.push(record);
+    // Conservatively budget UTF-16 strings and fixed record/object overhead.
+    recordBytes +=
+      256 + 2 * (record.model.length + record.sessionId.length + (record.dedupeKey?.length ?? 0));
+  };
   const consume = (line: string) => {
     const carriesUsage = mightCarryUsage(line, provider);
     if (provider === "claude") {
@@ -143,7 +219,7 @@ export async function readUsageTranscript(
         return;
       }
       const record = parseClaudeTranscriptLine(line);
-      if (record !== null) records.push(record);
+      if (record !== null) appendRecord(record);
       else if (isJson(line)) skippedLineCount++;
       else malformedLineCount++;
     } else {
@@ -153,7 +229,7 @@ export async function readUsageTranscript(
         return;
       }
       const record = parseCodexTranscriptLine(line, codexState);
-      if (record !== null) records.push(record);
+      if (record !== null) appendRecord(record);
       else if (!isJson(line)) malformedLineCount++;
       else if (carriesUsage) skippedLineCount++;
     }
@@ -175,48 +251,123 @@ export async function readUsageTranscript(
     )
       return null;
     if (!before.isFile() || before.size > USAGE_TRANSCRIPT_LIMITS.fileBytes) {
-      return { records, skippedLineCount, malformedLineCount, limited: true };
+      return { records, skippedLineCount, malformedLineCount, limited: true, reusedLineCount };
     }
-    const stream = file.createReadStream({
-      encoding: "utf8",
-      autoClose: false,
-      end: USAGE_TRANSCRIPT_LIMITS.fileBytes,
-      ...(signal === undefined ? {} : { signal }),
-    });
-    let pending = "",
+
+    let offset = 0;
+    let prefixHash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    if (
+      previous &&
+      previous.provider === provider &&
+      previous.device === before.dev &&
+      previous.inode === before.ino &&
+      previous.offset <= before.size
+    ) {
+      // Metadata cannot prove an append: validate every old byte, without decoding JSON.
+      while (offset < previous.offset) {
+        signal?.throwIfAborted();
+        const { bytesRead } = await file.read(
+          buffer,
+          0,
+          Math.min(buffer.length, previous.offset - offset),
+          offset,
+        );
+        if (bytesRead === 0) return null;
+        prefixHash.update(buffer.subarray(0, bytesRead));
+        offset += bytesRead;
+        if (Date.now() - started >= 2_000)
+          return { records, skippedLineCount, malformedLineCount, limited: true, reusedLineCount };
+      }
+      if (prefixHash.copy().digest("hex") === previous.digest) {
+        records = [...previous.records];
+        recordBytes =
+          previous.retainedBytes -
+          2 *
+            (previous.state.model.length +
+              previous.state.sessionId.length +
+              (previous.state.lastUsageSignature?.length ?? 0));
+        codexState = { ...previous.state };
+        skippedLineCount = previous.skippedLineCount;
+        malformedLineCount = previous.malformedLineCount;
+        lineCount = reusedLineCount = previous.lineCount;
+      } else {
+        offset = 0;
+        prefixHash = createHash("sha256");
+      }
+    }
+    let completeOffset = offset;
+    let pending = Buffer.alloc(0),
       discarding = false;
-    for await (const chunk of stream) {
+    while (offset < before.size) {
       signal?.throwIfAborted();
       if (Date.now() - started >= 2_000) {
         limited = true;
         break;
       }
-      const parts = String(chunk).split("\n");
-      for (let index = 0; index < parts.length; index++) {
-        const part = parts[index]!;
-        if (
-          !discarding &&
-          Buffer.byteLength(pending) + Buffer.byteLength(part) > USAGE_TRANSCRIPT_LIMITS.lineBytes
-        ) {
+      const { bytesRead } = await file.read(
+        buffer,
+        0,
+        Math.min(buffer.length, before.size - offset),
+        offset,
+      );
+      if (bytesRead === 0) return null;
+      let cursor = 0;
+      while (cursor < bytesRead) {
+        const found = buffer.indexOf(10, cursor);
+        const newline = found >= 0 && found < bytesRead ? found : -1;
+        const end = newline === -1 ? bytesRead : newline;
+        const segment = buffer.subarray(cursor, end);
+        if (!discarding && pending.length + segment.length > USAGE_TRANSCRIPT_LIMITS.lineBytes) {
           discarding = true;
-          pending = "";
+          pending = Buffer.alloc(0);
           limited = true;
           malformedLineCount++;
         }
-        if (!discarding) pending += part;
-        if (index < parts.length - 1) {
+        if (!discarding) {
+          pending = pending.length === 0 ? Buffer.from(segment) : Buffer.concat([pending, segment]);
+        }
+        if (newline !== -1) {
           if (++lineCount > USAGE_TRANSCRIPT_LIMITS.records) {
             limited = true;
             break;
           }
-          if (!discarding) consume(pending);
-          pending = "";
+          if (!discarding) {
+            prefixHash.update(pending).update("\n");
+            consume(pending.toString("utf8"));
+          }
+          completeOffset = offset + newline + 1;
+          pending = Buffer.alloc(0);
           discarding = false;
         }
+        cursor = end + (newline === -1 ? 0 : 1);
       }
+      offset += bytesRead;
       if (lineCount > USAGE_TRANSCRIPT_LIMITS.records) break;
     }
-    if (pending && !limited) consume(pending);
+    // The checkpoint ends at the last newline. A final line can be valid JSON today
+    // and receive more bytes tomorrow, so its result and parser state are provisional.
+    const nextCheckpoint: TranscriptCheckpoint | undefined = limited
+      ? undefined
+      : {
+          provider,
+          device: before.dev,
+          inode: before.ino,
+          offset: completeOffset,
+          digest: prefixHash.digest("hex"),
+          state: { ...codexState },
+          records: pending.length === 0 ? records : [...records],
+          skippedLineCount,
+          malformedLineCount,
+          lineCount,
+          retainedBytes:
+            recordBytes +
+            2 *
+              (codexState.model.length +
+                codexState.sessionId.length +
+                (codexState.lastUsageSignature?.length ?? 0)),
+        };
+    if (pending.length > 0 && !limited) consume(pending.toString("utf8"));
     const after = await file.stat();
     const pathAfter = await NodeFSP.lstat(filePath);
     if (
@@ -228,11 +379,12 @@ export async function readUsageTranscript(
       pathAfter.isSymbolicLink()
     )
       return null;
+    if (nextCheckpoint) checkpoint?.(nextCheckpoint);
   } catch {
     signal?.throwIfAborted();
     return null;
   } finally {
     await file?.close();
   }
-  return { records, skippedLineCount, malformedLineCount, limited };
+  return { records, skippedLineCount, malformedLineCount, limited, reusedLineCount };
 }

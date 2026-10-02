@@ -1,7 +1,7 @@
 import type { Thread } from "@ryco/client-runtime/state/threads";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildThreadTimeline } from "./threadTimelineModel";
+import { buildThreadTimeline, createThreadTimelineBuilder } from "./threadTimelineModel";
 
 function thread(overrides: Partial<Thread>): Thread {
   return {
@@ -15,6 +15,22 @@ function thread(overrides: Partial<Thread>): Thread {
 }
 
 describe("buildThreadTimeline", () => {
+  it("reuses activity derivation and unchanged entries across text updates", () => {
+    const build = createThreadTimelineBuilder();
+    const initial = thread({
+      messages: [
+        { id: "message", role: "assistant", text: "a", createdAt: "2026-07-24T09:00:00.000Z" },
+      ] as unknown as Thread["messages"],
+    });
+    const first = build(initial)!;
+    const updated = { ...initial, messages: [{ ...initial.messages[0]!, text: "ab" }] };
+    const second = build(updated)!;
+    expect(second.viewModel).toBe(first.viewModel);
+    expect(second).toEqual(buildThreadTimeline(updated));
+    expect(build(updated)!.timeline).toBe(second.timeline);
+    expect(build({ ...updated, activities: [] })!.viewModel).not.toBe(second.viewModel);
+  });
+
   it("returns null for a missing thread", () => {
     expect(buildThreadTimeline(null)).toBeNull();
   });

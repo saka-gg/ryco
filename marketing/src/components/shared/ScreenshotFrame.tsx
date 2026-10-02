@@ -2,6 +2,7 @@
  * Wraps a real product screenshot in tasteful window chrome so captures look
  * intentional in a marketing context. Reusable across versions.
  */
+import { screenshotImageProps } from "@/lib/screenshotAssets";
 import { cn } from "@/lib/cn";
 
 export interface ScreenshotFrameProps {
@@ -62,7 +63,9 @@ export function ScreenshotFrame({
 
   const img = (
     <img
-      src={src}
+      {...screenshotImageProps(src)}
+      decoding="async"
+      fetchPriority={loading === "eager" ? "high" : undefined}
       alt={alt}
       loading={loading}
       draggable={false}

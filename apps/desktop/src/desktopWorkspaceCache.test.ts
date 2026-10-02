@@ -55,6 +55,21 @@ afterEach(() => {
 });
 
 describe("Desktop workspace metadata cache", () => {
+  it("serializes reads with pending writes and persists purges across restarts", async () => {
+    const file = temporaryFile();
+    const cache = createDesktopWorkspaceMetadataCache(file);
+    const item = record("local");
+    const writing = cache.replace(item);
+    const reading = cache.load(item.namespace);
+    const purging = cache.purgeEnvironment(item.namespace);
+    const after = cache.load(item.namespace);
+    await writing;
+    expect(await reading).toEqual(item);
+    await purging;
+    expect(await after).toBeNull();
+    expect(await createDesktopWorkspaceMetadataCache(file).load(item.namespace)).toBeNull();
+  });
+
   it("keeps colliding resource ids in exact environment namespaces", async () => {
     const cache = createDesktopWorkspaceMetadataCache(temporaryFile());
     await cache.replace(record("local", 10));

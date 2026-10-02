@@ -1,13 +1,6 @@
 import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  existsSync,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-} from "node:fs";
+import { constants, existsSync } from "node:fs";
+import { lstat, open, type FileHandle } from "node:fs/promises";
 
 import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -169,18 +162,18 @@ function attachmentByteLimit(attachment: ChatAttachment): number {
  * symlink swap between validation and read, including on platforms without a
  * useful O_NOFOLLOW flag.
  */
-export function readPersistedAttachment(input: {
+export async function readPersistedAttachment(input: {
   readonly attachmentsDir: string;
   readonly attachment: ChatAttachment;
-}): PersistedAttachmentRead {
+}): Promise<PersistedAttachmentRead> {
   const attachmentPath = resolveAttachmentPath(input);
   if (!attachmentPath) {
     return { ok: false, reason: `Invalid attachment id '${input.attachment.id}'.` };
   }
 
-  let descriptor: number | undefined;
+  let descriptor: FileHandle | undefined;
   try {
-    const pathInfo = lstatSync(attachmentPath);
+    const pathInfo = await lstat(attachmentPath);
     if (!pathInfo.isFile()) {
       return {
         ok: false,
@@ -188,8 +181,8 @@ export function readPersistedAttachment(input: {
       };
     }
     const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-    descriptor = openSync(attachmentPath, constants.O_RDONLY | noFollow);
-    const openedInfo = fstatSync(descriptor);
+    descriptor = await open(attachmentPath, constants.O_RDONLY | noFollow);
+    const openedInfo = await descriptor.stat();
     if (
       !openedInfo.isFile() ||
       openedInfo.dev !== pathInfo.dev ||
@@ -215,8 +208,17 @@ export function readPersistedAttachment(input: {
       };
     }
 
-    const bytes = readFileSync(descriptor);
-    const completedInfo = fstatSync(descriptor);
+    // Cap allocation and reads even if another process grows the file after
+    // fstat. The extra byte distinguishes a changed file from the expected EOF.
+    const buffer = Buffer.allocUnsafe(openedInfo.size + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const read = await descriptor.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+      if (read.bytesRead === 0) break;
+      bytesRead += read.bytesRead;
+    }
+    const bytes = buffer.subarray(0, bytesRead);
+    const completedInfo = await descriptor.stat();
     if (
       completedInfo.dev !== openedInfo.dev ||
       completedInfo.ino !== openedInfo.ino ||
@@ -236,7 +238,7 @@ export function readPersistedAttachment(input: {
     };
   } finally {
     if (descriptor !== undefined) {
-      closeSync(descriptor);
+      await descriptor.close();
     }
   }
 }

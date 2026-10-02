@@ -49,7 +49,7 @@ import { resolveNativeUsageSources } from "./usageNativeSources.ts";
 import { resolveUsageSourceIdentity } from "./usageSourceIdentity.ts";
 import {
   listUsageTranscriptFiles,
-  readUsageTranscript,
+  createUsageTranscriptReader,
   type UsageTranscriptFile,
 } from "./usageTranscriptReader.ts";
 import { readBoundedUsageFile } from "./usageFileReader.ts";
@@ -176,6 +176,7 @@ const makeUsageService = Effect.gen(function* () {
   const scanCachePath = path.join(usageStateDir, "scan-cache.json");
   const ratesCachePath = path.join(usageStateDir, "pricing-cache.json");
   const scanCache: UsageScanCache = new Map();
+  const readTranscript = createUsageTranscriptReader();
   let scanCacheLoaded = false;
   let scanCacheDirty = false;
   let rates: UsageRateTable = new Map();
@@ -368,9 +369,7 @@ const makeUsageService = Effect.gen(function* () {
       };
     }
 
-    const read = yield* Effect.promise((signal) =>
-      readUsageTranscript(file.path, provider, signal),
-    );
+    const read = yield* Effect.promise((signal) => readTranscript(file.path, provider, signal));
     if (read === null) {
       return {
         records: [],
