@@ -1,8 +1,10 @@
 import { useCallback, useMemo, useRef } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { scopedProjectKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { ScopedProjectRef } from "@ryco/contracts";
+import { WS_METHODS, type ScopedProjectRef } from "@ryco/contracts";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
+import { useCommandPaletteStore } from "../../commandPaletteStore";
+import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useSidebarProjectDialogs } from "../sidebar/SidebarProjectDialogOwner";
 import type { useThreadActions } from "../../hooks/useThreadActions";
 import { useSettings } from "../../hooks/useSettings";
@@ -22,6 +24,8 @@ export function ConnectedInboxSidebar(
 ) {
   const router = useRouter();
   const projectDialogs = useSidebarProjectDialogs();
+  const openAddProject = useCommandPaletteStore((store) => store.openAddProject);
+  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
   const openProjectSettings = useCallback(
     (projectRef: ScopedProjectRef) => {
       const member = props.projectGroups
@@ -82,7 +86,11 @@ export function ConnectedInboxSidebar(
     : undefined;
   return (
     <>
-      <InboxSidebar {...props} threadActions={actions} />
+      <InboxSidebar
+        {...props}
+        threadActions={actions}
+        onAddProject={addProjectCapability.allowed ? openAddProject : undefined}
+      />
       <Dialog
         open={Boolean(renaming)}
         onOpenChange={(open) => {
