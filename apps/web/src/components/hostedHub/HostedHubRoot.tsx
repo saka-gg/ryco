@@ -70,6 +70,7 @@ import {
 } from "../../hostedHub/hubRoutes";
 import { hubPageTitle } from "../../hubBranding";
 import {
+  getHostedNodeRouteNotice,
   selectHostedNodeRoute,
   parseHostedScopedThreadPath,
   useHostedNodeRouteNotice,
@@ -208,7 +209,13 @@ export function HostedHubRoot() {
   );
   const routeNotice = useHostedNodeRouteNotice();
   useHostedNodeRouteOrchestrator();
-  useEffect(() => startHostedWorkspaceCoordinator(), []);
+  useEffect(
+    () =>
+      startHostedWorkspaceCoordinator({
+        canDiscoverHome: () => getHostedNodeRouteNotice() === null,
+      }),
+    [],
+  );
   // The single browser lifecycle owner, above the presentation-tier seam: the
   // tier shells mount no lifecycle listeners of their own.
   useHostedBrowserLifecycle();

@@ -334,6 +334,8 @@ export function startHostedWorkspaceCoordinator(input?: {
   readonly setInterval?: (callback: () => void, delayMs: number) => unknown;
   readonly clearInterval?: (timer: unknown) => void;
   readonly hubOrigin?: string;
+  /** The root can show a route-error directory at `/` instead of the workspace. */
+  readonly canDiscoverHome?: () => boolean;
 }): () => void {
   const cache = input?.cache ?? getBrowserWorkspaceMetadataCache();
   const now = input?.now ?? Date.now;
@@ -524,6 +526,7 @@ export function startHostedWorkspaceCoordinator(input?: {
       route.nodeId === null &&
       route.logicalPathname === "/" &&
       !route.malformed &&
+      input?.canDiscoverHome?.() !== false &&
       state.accountStatus === "authenticated" &&
       state.account?.id === activeAccountId &&
       accountKey === JSON.stringify([hubOrigin, activeAccountId]) &&
