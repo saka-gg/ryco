@@ -1,4 +1,4 @@
-import { PANE_DRAG_TYPE } from "../../chatPanes.logic";
+import { endPaneDrag, startPaneDrag } from "../../chatPanesStore";
 import { ArchiveIcon, CloudIcon, PinIcon, TerminalIcon, XIcon } from "lucide-react";
 import React, { memo, useCallback, useMemo } from "react";
 import type { ScopedThreadRef } from "@ryco/contracts";
@@ -455,13 +455,8 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
         onKeyDown={handleRowKeyDown}
         onContextMenu={handleRowContextMenu}
         draggable={!isMobile && !thread.draftId && renamingThreadKey !== threadKey}
-        onDragStart={(event) => {
-          event.dataTransfer.setData(
-            PANE_DRAG_TYPE,
-            JSON.stringify({ environmentId: thread.environmentId, threadId: thread.id }),
-          );
-          event.dataTransfer.effectAllowed = "copyMove";
-        }}
+        onDragStart={(event) => startPaneDrag(event.dataTransfer, threadRef, "copyMove")}
+        onDragEnd={endPaneDrag}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
           {prStatus && PrStatusIcon && (

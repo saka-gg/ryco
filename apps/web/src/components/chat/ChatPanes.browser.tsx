@@ -16,7 +16,7 @@ import { page } from "vite-plus/test/browser";
 import { render, cleanup } from "vitest-browser-react";
 import { ChatPanes } from "./ChatPanes";
 import { usePaneEffect, usePaneThreadRef, usePaneCloseGuard } from "./PaneFocus";
-import { CHAT_PANES_STORAGE_KEY, useChatPanesStore } from "../../chatPanesStore";
+import { CHAT_PANES_STORAGE_KEY, startPaneDrag, useChatPanesStore } from "../../chatPanesStore";
 import { PANE_DRAG_TYPE, decodePaneLayout, paneLeaves, type PaneNode } from "../../chatPanes.logic";
 vi.mock("../previewFileSessions", () => ({ flushPreviewFiles: vi.fn(async () => true) }));
 let preventClose = false;
@@ -262,4 +262,94 @@ it("keeps layout changes usable when persistent storage rejects a write", async 
   } finally {
     reject.mockRestore();
   }
+});
+
+function dragOver(source: typeof a, target: Element, side: "right" | "left") {
+  const rect = target.getBoundingClientRect();
+  const transfer = new DataTransfer();
+  startPaneDrag(transfer, source, "copyMove");
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    dataTransfer: transfer,
+    clientX: side === "right" ? rect.right - 2 : rect.left + 2,
+    clientY: rect.top + rect.height / 2,
+  };
+  const event = new DragEvent("dragover", init);
+  target.dispatchEvent(event);
+  return { transfer, init, event };
+}
+const pane = (id: string) =>
+  [...document.querySelectorAll("[data-pane-thread]")].find((node) =>
+    node.getAttribute("data-pane-thread")?.endsWith(id),
+  )!;
+const threadC = { ...a, threadId: ThreadId.make("c") },
+  threadD = { ...a, threadId: ThreadId.make("d") };
+
+it("previews why a drop is refused and leaves the layout alone", async () => {
+  await mount();
+  const store = useChatPanesStore.getState();
+  store.open(b, "right", a);
+  // b already sits beside a: a second horizontal split of b is refused.
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(2);
+  const { event } = dragOver(threadC, pane("b"), "right");
+  expect(event.dataTransfer!.dropEffect).toBe("none");
+  await expect.element(page.getByText("Drop on the top or bottom edge")).toBeInTheDocument();
+  expect(document.querySelector("[data-pane-drop]")?.getAttribute("data-pane-drop")).toBe(
+    "refused",
+  );
+  store.open(threadC, "bottom", a);
+  store.open(threadD, "bottom", b);
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(4);
+  const before = useChatPanesStore.getState().root;
+  const { transfer, init } = dragOver({ ...a, threadId: ThreadId.make("e") }, pane("a"), "left");
+  await expect
+    .element(page.getByText("Split view holds 4 threads · close one first"))
+    .toBeVisible();
+  pane("a").dispatchEvent(new DragEvent("drop", { ...init, dataTransfer: transfer }));
+  expect(useChatPanesStore.getState().root).toBe(before);
+  // An accepted edge says what happens instead.
+  store.setRoot({ kind: "thread", ref: a });
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(1);
+  dragOver(b, pane("a"), "right");
+  await expect.element(page.getByText("Open here")).toBeInTheDocument();
+});
+
+it("resets a divider to an even split on double-click", async () => {
+  await mount();
+  useChatPanesStore.getState().open(b, "right", a);
+  const divider = page.getByRole("separator");
+  await expect.element(divider).toBeVisible();
+  divider.element().dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  await expect.poll(() => useChatPanesStore.getState().root).toMatchObject({ ratio: 0.75 });
+  await divider.dblClick();
+  await expect.poll(() => useChatPanesStore.getState().root).toMatchObject({ ratio: 0.5 });
+});
+
+it("cycles and closes panes from the keyboard controller", async () => {
+  const router = await mount();
+  useChatPanesStore.getState().open(b, "right", a);
+  await expect.element(page.getByRole("textbox", { name: "Draft b" })).toBeVisible();
+  const controller = () => useChatPanesStore.getState().controller!;
+  expect(controller().focusSibling(1)).toBe(true);
+  await expect.poll(() => router.state.location.pathname).toBe("/pane-test/b");
+  expect(controller().focusSibling(1)).toBe(true);
+  await expect.poll(() => router.state.location.pathname).toBe("/pane-test/a");
+  expect(controller().closeFocused()).toBe(true);
+  await expect.poll(() => paneLeaves(useChatPanesStore.getState().root!)).toHaveLength(1);
+  // A lone pane leaves the shortcuts to the rest of the app.
+  await expect.poll(() => controller().focusSibling(1)).toBe(false);
+  expect(controller().closeFocused()).toBe(false);
+});
+
+it("pushes a closed pane out and releases it once the exit ends", async () => {
+  await mount();
+  useChatPanesStore.getState().open(b, "right", a);
+  await expect.element(page.getByRole("button", { name: "Close pane 2" })).toBeVisible();
+  await page.getByRole("button", { name: "Close pane 2" }).click();
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(1);
+  // The closed pane is inert while it leaves, then unmounts.
+  const leaving = document.querySelector("[data-pane-leaving]");
+  if (leaving) expect(leaving.hasAttribute("inert")).toBe(true);
+  await expect.poll(() => document.querySelectorAll("[data-pane-leaving]").length).toBe(0);
 });

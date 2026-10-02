@@ -40,6 +40,10 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+alt+p", command: "thread.pinToggle", when: "!terminalFocus" },
   { key: "mod+shift+[", command: "thread.previous" },
   { key: "mod+shift+]", command: "thread.next" },
+  { key: "mod+\\", command: "pane.split", when: "!terminalFocus" },
+  { key: "mod+shift+\\", command: "pane.close", when: "!terminalFocus" },
+  { key: "mod+alt+]", command: "pane.focusNext" },
+  { key: "mod+alt+[", command: "pane.focusPrevious" },
   ...THREAD_JUMP_KEYBINDING_COMMANDS.map((command, index) => ({
     key: `mod+${index + 1}`,
     command,

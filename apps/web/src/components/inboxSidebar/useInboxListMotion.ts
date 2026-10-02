@@ -10,6 +10,8 @@ import {
   useSyncExternalStore,
 } from "react";
 
+import { readMotionDurationMs } from "../../lib/perf/motion";
+
 /** Row shells carry this attribute; the hook positions and animates them. */
 export const INBOX_ROW_KEY_ATTRIBUTE = "data-inbox-row-key";
 /** Dispatched (bubbling) by a row that starts leaving, so the highlight lets go. */
@@ -19,13 +21,7 @@ const GENTLE = "cubic-bezier(0.22, 1, 0.36, 1)";
 
 /** The house stack duration; appearance preferences zero it for reduced motion. */
 export function readInboxMotionDurationMs(): number {
-  if (typeof document === "undefined") return 0;
-  const raw = getComputedStyle(document.documentElement)
-    .getPropertyValue("--app-motion-duration-stack")
-    .trim();
-  const value = Number.parseFloat(raw);
-  if (!Number.isFinite(value)) return 260;
-  return raw.endsWith("ms") ? value : value * 1000;
+  return readMotionDurationMs("--app-motion-duration-stack", 260);
 }
 
 /**

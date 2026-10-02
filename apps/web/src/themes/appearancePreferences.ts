@@ -688,6 +688,8 @@ function buildMotionCssVariables(reducedMotion: boolean): string {
     // duration-200, which is what previously exempted them from the OS
     // setting entirely.
     ["--app-motion-duration-pop", `${200 * scale}ms`],
+    // Split chat panes: geometry, enter and exit share one pacing.
+    ["--app-motion-duration-pane", `${360 * scale}ms`],
   ]
     .map(([name, value]) => `${name}: ${value};`)
     .join(" ");
