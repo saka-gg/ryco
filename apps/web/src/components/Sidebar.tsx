@@ -1402,6 +1402,7 @@ export default function Sidebar() {
             environments={inboxEnvironments}
             localQueuedThreadKeys={localQueuedThreadKeys}
             pinnedThreadKeys={pinnedThreadKeys}
+            primaryEnvironmentId={primaryEnvironmentId}
             onOpenThread={navigateToThread}
             projects={projects}
             projectGroups={sidebarProjects}

@@ -2224,6 +2224,51 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* Inbox rows (InboxSidebar): running glyphs spin, settling strikes the title
+   through. Enter motion (glyph morph, line roll, row moves) runs through WAAPI
+   in useInboxListMotion. Transform/opacity only. */
+.inbox-glyph-spin {
+  animation: turn-fold-mark-spin 0.9s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.inbox-glyph-spin-slow {
+  animation: turn-fold-mark-spin 3s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.inbox-row-title::after {
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 1px;
+  background: currentColor;
+  content: "";
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform calc(var(--app-motion-duration-stack, 260ms) * 1.5)
+    cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+[data-settling] .inbox-row-title::after {
+  transform: scaleX(1);
+}
+
+:root[data-ryco-motion-paused] :is(.inbox-glyph-spin, .inbox-glyph-spin-slow) {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inbox-glyph-spin,
+  .inbox-glyph-spin-slow {
+    animation: none;
+  }
+
+  .inbox-row-title::after {
+    transition: none;
+  }
+}
+
 /* Keep the desktop draft mounted while reclaiming transcript space at rest. */
 [data-chat-composer-compact] [data-testid="composer-editor"] {
   transition:

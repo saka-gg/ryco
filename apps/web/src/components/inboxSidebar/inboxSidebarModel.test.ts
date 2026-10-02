@@ -139,6 +139,7 @@ function build(input: {
   aiFocusEnabled?: boolean;
   autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   pinnedThreadKeys?: ReadonlySet<string>;
+  primaryEnvironmentId?: EnvironmentId | null;
   nowMs?: number;
 }) {
   return buildInboxSidebarSections({
@@ -152,6 +153,9 @@ function build(input: {
       ? { autoSettleAfterDays: input.autoSettleAfterDays }
       : {}),
     ...(input.pinnedThreadKeys !== undefined ? { pinnedThreadKeys: input.pinnedThreadKeys } : {}),
+    ...(input.primaryEnvironmentId !== undefined
+      ? { primaryEnvironmentId: input.primaryEnvironmentId }
+      : {}),
     ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
   });
 }
@@ -707,5 +711,127 @@ describe("hosted inbox capability resolution", () => {
   it("does not borrow capabilities when no node config has arrived", () => {
     const initial = environment(ENV_A, { threadSettlementSupported: false });
     expect(applyInboxServerConfig(initial, null)).toBe(initial);
+  });
+});
+
+describe("glyph row facts", () => {
+  const rows = (input: Parameters<typeof build>[0]) =>
+    build(input).flatMap((section) => section.rows);
+  const running = (startedAt: string | null): Partial<SidebarThreadSummary> => ({
+    latestTurn: {
+      turnId: TurnId.make("turn-running"),
+      state: "running",
+      requestedAt: "2026-08-23T10:00:00.000Z",
+      startedAt,
+      completedAt: null,
+      assistantMessageId: null,
+    },
+  });
+
+  it("names what a needs-input thread waits on", () => {
+    const [approval, input, plan] = rows({
+      threads: [
+        thread("approval", { hasPendingApprovals: true }),
+        thread("input", { hasPendingUserInput: true }),
+        thread("plan", {
+          interactionMode: "plan",
+          hasActionableProposedPlan: true,
+          latestTurn: {
+            turnId: TurnId.make("turn-plan"),
+            state: "completed",
+            requestedAt: "2026-08-23T10:00:00.000Z",
+            startedAt: "2026-08-23T10:00:01.000Z",
+            completedAt: "2026-08-23T10:00:05.000Z",
+            assistantMessageId: null,
+          },
+        }),
+      ],
+    }).toSorted((left, right) => left.title.localeCompare(right.title));
+    expect([approval?.attention, input?.attention, plan?.attention]).toEqual([
+      "approval",
+      "input",
+      "plan",
+    ]);
+  });
+
+  it("keeps attention, error text and the run clock scoped to their state", () => {
+    const [failed] = rows({
+      threads: [
+        thread("failed", {
+          session: {
+            provider: ProviderDriverKind.make("codex"),
+            status: "error",
+            orchestrationStatus: "error",
+            lastError: "  Provider exited (code 1)  ",
+            createdAt: "2026-08-23T10:00:00.000Z",
+            updatedAt: "2026-08-23T10:00:00.000Z",
+          },
+        }),
+      ],
+    });
+    expect(failed).toMatchObject({
+      state: "error",
+      errorDetail: "Provider exited (code 1)",
+      attention: null,
+      runningSince: null,
+    });
+
+    const [working] = rows({ threads: [thread("working", running("2026-08-23T10:00:02.000Z"))] });
+    expect(working).toMatchObject({
+      state: "working",
+      runningSince: "2026-08-23T10:00:02.000Z",
+      errorDetail: null,
+    });
+    const [queued] = rows({ threads: [thread("queued", running(null))] });
+    expect(queued?.runningSince).toBe("2026-08-23T10:00:00.000Z");
+  });
+
+  it("exposes the latest turn completion for unseen-work checks", () => {
+    const [done] = rows({
+      threads: [
+        thread("done", {
+          latestTurn: {
+            turnId: TurnId.make("turn-done"),
+            state: "completed",
+            requestedAt: "2026-08-23T10:00:00.000Z",
+            startedAt: "2026-08-23T10:00:01.000Z",
+            completedAt: "2026-08-23T10:04:00.000Z",
+            assistantMessageId: null,
+          },
+        }),
+      ],
+    });
+    expect(done?.latestTurnCompletedAt).toBe("2026-08-23T10:04:00.000Z");
+  });
+
+  it("labels machines only when threads span machines, never the primary one", () => {
+    const local = thread("local");
+    const remote = thread("remote", { environmentId: ENV_B });
+    expect(rows({ threads: [local] }).map((row) => row.showMachine)).toEqual([false]);
+    expect(
+      rows({ threads: [remote], primaryEnvironmentId: ENV_A }).map((row) => row.showMachine),
+    ).toEqual([false]);
+    const mixed = rows({ threads: [local, remote], primaryEnvironmentId: ENV_A });
+    expect(Object.fromEntries(mixed.map((row) => [row.title, row.showMachine]))).toEqual({
+      local: false,
+      remote: true,
+    });
+    const hosted = rows({ threads: [local, remote], primaryEnvironmentId: null });
+    expect(hosted.every((row) => row.showMachine)).toBe(true);
+  });
+
+  it("names the project only once the inbox spans projects", () => {
+    expect(rows({ threads: [thread("one"), thread("two")] }).some((row) => row.showProject)).toBe(
+      false,
+    );
+    const other = ProjectId.make("project-other");
+    const sections = buildInboxSidebarSections({
+      projects: [project(ENV_A), { ...project(ENV_A), id: other, name: "Hub" }],
+      worktrees: [],
+      threads: [thread("one"), thread("two", { projectId: other })],
+      environments: [environment(ENV_A)],
+      filters: ALL_FILTERS,
+    });
+    expect(sections.flatMap((section) => section.rows).every((row) => row.showProject)).toBe(true);
   });
 });

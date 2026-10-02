@@ -286,12 +286,20 @@ export function useThreadJumpHintVisibility(): {
 }
 
 export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
-  if (!thread.latestTurn?.completedAt) return false;
-  const completedAt = Date.parse(thread.latestTurn.completedAt);
-  if (Number.isNaN(completedAt)) return false;
-  if (!thread.lastVisitedAt) return true;
+  return isCompletionUnseen(thread.latestTurn?.completedAt, thread.lastVisitedAt);
+}
 
-  const lastVisitedAt = Date.parse(thread.lastVisitedAt);
+/** A completed turn is unseen until the thread is visited after it finished. */
+export function isCompletionUnseen(
+  completedAtIso: string | null | undefined,
+  lastVisitedAtIso: string | null | undefined,
+): boolean {
+  if (!completedAtIso) return false;
+  const completedAt = Date.parse(completedAtIso);
+  if (Number.isNaN(completedAt)) return false;
+  if (!lastVisitedAtIso) return true;
+
+  const lastVisitedAt = Date.parse(lastVisitedAtIso);
   if (Number.isNaN(lastVisitedAt)) return true;
   return completedAt > lastVisitedAt;
 }

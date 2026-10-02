@@ -35,6 +35,9 @@ export type InboxSidebarThreadState =
   | "offline"
   | "idle";
 
+/** What a needs-input thread is waiting on. */
+export type InboxSidebarAttention = "approval" | "input" | "plan";
+
 export type InboxSidebarSectionKey =
   | "pinned"
   | "focus"
@@ -90,6 +93,18 @@ export interface InboxSidebarRow {
   readonly contextLabel: string;
   readonly state: InboxSidebarThreadState;
   readonly statusLabel: string;
+  /** Set only while `state` is "needs-input". */
+  readonly attention: InboxSidebarAttention | null;
+  /** Provider error text, set only while `state` is "error". */
+  readonly errorDetail: string | null;
+  /** Start of the running turn, set only while `state` is "working". */
+  readonly runningSince: string | null;
+  /** Completion of the latest turn; compared against the last visit for unseen work. */
+  readonly latestTurnCompletedAt: string | null;
+  /** The machine is implicit when every thread lives on the primary environment. */
+  readonly showMachine: boolean;
+  /** Project icons fall back to a folder, so the name is shown once projects differ. */
+  readonly showProject: boolean;
   readonly updatedAt: string;
   readonly providerDriver: ProviderDriverKind | null;
   readonly providerLabel: string | null;
@@ -141,6 +156,8 @@ export interface BuildInboxSidebarInput {
   readonly aiFocusEnabled?: boolean;
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly pinnedThreadKeys?: ReadonlySet<string>;
+  /** The environment rows are implicitly about; other machines are labelled. */
+  readonly primaryEnvironmentId?: EnvironmentId | null;
   readonly nowMs?: number;
 }
 
@@ -231,6 +248,19 @@ function resolveThreadState(
   if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
   return "idle";
+}
+
+function resolveAttention(thread: SidebarThreadSummary): InboxSidebarAttention {
+  const activity = deriveThreadActivityStatus(thread);
+  if (activity === "approval") return "approval";
+  if (activity === "plan-ready") return "plan";
+  return "input";
+}
+
+function resolveRunningSince(thread: SidebarThreadSummary): string | null {
+  const turn = thread.latestTurn;
+  // Background liveness has no turn clock; the row falls back to recency.
+  return turn?.state === "running" ? (turn.startedAt ?? turn.requestedAt) : null;
 }
 
 function statusLabel(
@@ -380,6 +410,17 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     nowMs: input.nowMs ?? Date.now(),
   });
 
+  const threadEnvironmentIds = new Set(input.threads.map((thread) => thread.environmentId));
+  const singleEnvironment = threadEnvironmentIds.size <= 1;
+  const projectNameByKey = new Map(
+    input.projects.map((project) => [`${project.environmentId}:${project.id}`, project.name]),
+  );
+  const threadProjectNames = new Set(
+    input.threads.map(
+      (thread) => projectNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null,
+    ),
+  );
+  const singleProject = threadProjectNames.size <= 1;
   const rows: InboxSidebarRow[] = [];
   for (const entry of [...inbox.focus, ...inbox.active, ...inbox.settled, ...inbox.snoozed]) {
     const thread = entry.thread;
@@ -440,6 +481,14 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       contextLabel,
       state,
       statusLabel: statusLabel(state, environment),
+      attention: state === "needs-input" ? resolveAttention(thread) : null,
+      errorDetail: state === "error" ? thread.session?.lastError?.trim() || null : null,
+      runningSince: state === "working" ? resolveRunningSince(thread) : null,
+      latestTurnCompletedAt: thread.latestTurn?.completedAt ?? null,
+      showProject: !singleProject,
+      showMachine:
+        !singleEnvironment &&
+        (input.primaryEnvironmentId == null || thread.environmentId !== input.primaryEnvironmentId),
       updatedAt: timestamp(thread),
       providerDriver,
       providerLabel:
