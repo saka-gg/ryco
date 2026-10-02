@@ -6,7 +6,7 @@ import type {
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
-import { ChevronDownIcon, ChevronRightIcon, SearchIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, ListFilterIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
@@ -15,6 +15,7 @@ import { PREFERS_REDUCED_MOTION_QUERY, shouldEnableAutoAnimate } from "../../lib
 import { newCommandId } from "../../lib/utils";
 import { sidebarUndo } from "../../sidebarUndo";
 import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
+import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { SidebarContent } from "../ui/sidebar";
 import { toastManager } from "../ui/toast";
@@ -45,6 +46,8 @@ export interface InboxSidebarProps {
   /** Rows on other machines are labelled; this one is implicit. */
   readonly primaryEnvironmentId?: EnvironmentId | null | undefined;
   readonly onOpenThread: (threadRef: ScopedThreadRef) => void;
+  /** Offered from the empty state when no project exists yet; omit when adding is unavailable. */
+  readonly onAddProject?: (() => void) | undefined;
 }
 
 const STATUS_FILTERS: ReadonlyArray<{
@@ -163,6 +166,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
   }, []);
   const sections = model.sections;
   const hasFilters = query.trim().length > 0 || environmentId !== null || status !== "all";
+  const hasNoProjects = props.projects.length === 0;
   const isExpanded = (key: string) =>
     (key !== "settled" && key !== "snoozed") ||
     (key === "snoozed" ? snoozedOpen : settledOpen) ||
@@ -194,12 +198,14 @@ export function InboxSidebar(props: InboxSidebarProps) {
         <InboxHoverLayer hintHandle={hintHandle} previewHandle={previewHandle}>
           <div className="sticky top-0 z-10 space-y-1.5 bg-sidebar px-0.5 pb-2 pt-1">
             <label className="relative block">
-              <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
+              {/* "Filter", not "Search": the command palette above searches
+                  everything, this only narrows the list below. */}
+              <ListFilterIcon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
               <Input
-                aria-label="Search inbox"
+                aria-label="Filter inbox"
                 className="bg-sidebar shadow-none [&_[data-slot=input]]:pl-8"
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search tasks"
+                placeholder="Filter tasks"
                 size="sm"
                 type="search"
                 value={query}
@@ -241,13 +247,30 @@ export function InboxSidebar(props: InboxSidebarProps) {
           {sections.length === 0 ? (
             <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-4 text-center">
               <p className="text-xs font-medium text-sidebar-foreground">
-                {hasFilters ? "No matching tasks" : "No tasks yet"}
+                {hasFilters
+                  ? "No matching tasks"
+                  : hasNoProjects
+                    ? "No projects yet"
+                    : "No tasks yet"}
               </p>
               <p className="text-[11px] leading-4 text-muted-foreground">
                 {hasFilters
-                  ? "Try a different search or clear a filter."
-                  : "Open a project and start a task to see it here."}
+                  ? "Change or clear a filter to see more tasks."
+                  : hasNoProjects
+                    ? "Add a folder or clone a repository to start your first task."
+                    : "Open a project and start a task to see it here."}
               </p>
+              {!hasFilters && hasNoProjects && props.onAddProject ? (
+                <Button
+                  className="mt-1"
+                  data-testid="inbox-add-project-button"
+                  onClick={props.onAddProject}
+                  size="xs"
+                  variant="outline"
+                >
+                  Add project
+                </Button>
+              ) : null}
             </div>
           ) : (
             <div

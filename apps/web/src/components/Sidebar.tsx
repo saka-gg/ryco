@@ -103,7 +103,7 @@ import { SidebarProjectsContent, PROJECT_ROOT_DROP_ID } from "./sidebar/SidebarP
 import { SidebarProjectItem } from "./sidebar/SidebarProjectItem";
 import { SidebarProjectDialogProvider } from "./sidebar/SidebarProjectDialogOwner";
 import { SidebarChromeHeader, SidebarChromeFooter } from "./sidebar/SidebarChrome";
-import { SidebarNewThreadButton } from "./sidebar/SidebarNewThreadButton";
+import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
 import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
 import {
@@ -1326,10 +1326,11 @@ export default function Sidebar() {
         onModeChange={handleSidebarModeChange}
       />
 
-      <SidebarNewThreadButton
-        shortcutLabel={newThreadShortcutLabel}
-        disabled={newThreadTargetProject === null}
-        onClick={startNewThreadFromSidebar}
+      <SidebarPrimaryActions
+        newThreadShortcutLabel={newThreadShortcutLabel}
+        newThreadDisabled={newThreadTargetProject === null}
+        onNewThread={startNewThreadFromSidebar}
+        searchShortcutLabel={commandPaletteShortcutLabel}
       />
 
       <SidebarProjectDialogProvider
@@ -1360,7 +1361,6 @@ export default function Sidebar() {
             handleProjectDragEnd={handleProjectDragEnd}
             handleProjectDragCancel={handleProjectDragCancel}
             projectTreeRows={projectTreeRows}
-            commandPaletteShortcutLabel={commandPaletteShortcutLabel}
             attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
             projectsLength={projects.length}
             renderProjectRow={(project, dragHandleProps, onNewFolderWithProject) => (

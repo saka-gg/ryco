@@ -315,7 +315,13 @@ describe("ChatView Navigation (full app)", () => {
 
       await expect.element(page.getByTestId("inbox-sidebar")).toBeInTheDocument();
       expect(projectTrigger?.checkVisibility()).toBe(false);
-      await page.getByRole("searchbox", { name: "Search inbox" }).fill("preserved search");
+      // The command palette (and with it Add project) stays one click away in Inbox.
+      expect(
+        document
+          .querySelector<HTMLElement>('[data-testid="command-palette-trigger"]')
+          ?.checkVisibility(),
+      ).toBe(true);
+      await page.getByRole("searchbox", { name: "Filter inbox" }).fill("preserved search");
       expect(useUiStateStore.getState().sidebarMode).toBe("inbox");
 
       const showProjectsButton = page.getByRole("button", { name: "Show Projects sidebar" });
@@ -333,7 +339,7 @@ describe("ChatView Navigation (full app)", () => {
       await waitForWsRequestsToSettle();
       await showInboxButton.click();
       await expect
-        .element(page.getByRole("searchbox", { name: "Search inbox" }))
+        .element(page.getByRole("searchbox", { name: "Filter inbox" }))
         .toHaveValue("preserved search");
       expect(countStableRequests()).toEqual(stableRequestCountsBeforeSwitch);
     } finally {

@@ -92,6 +92,54 @@ describe("Inbox sidebar rendering and settlement", () => {
     }
   });
 
+  it("offers Add project from the empty state only while no project exists", async () => {
+    const onAddProject = vi.fn();
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: [],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      aiFocusEnabled: false,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+      onAddProject,
+    };
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      await expect.element(page.getByText("No projects yet")).toBeInTheDocument();
+      await page.getByRole("button", { name: "Add project" }).click();
+      expect(onAddProject).toHaveBeenCalledTimes(1);
+
+      // Adding is unavailable (e.g. a hosted role without projects.add): no dead button.
+      await mounted.rerender(<InboxSidebar {...props} onAddProject={undefined} />);
+      expect(document.querySelector('[data-testid="inbox-add-project-button"]')).toBeNull();
+
+      await mounted.rerender(
+        <InboxSidebar
+          {...props}
+          projects={[
+            {
+              id: PROJECT_ID,
+              environmentId: ENVIRONMENT_ID,
+              name: "Project",
+              cwd: "/repo",
+              defaultModelSelection: null,
+              scripts: [],
+            },
+          ]}
+        />,
+      );
+      await expect.element(page.getByText("No tasks yet")).toBeInTheDocument();
+      expect(document.querySelector('[data-testid="inbox-add-project-button"]')).toBeNull();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
   it("glides a finishing thread into Recent and morphs its glyph, but paints still on mount", async () => {
     const base = {
       environmentId: ENVIRONMENT_ID,
