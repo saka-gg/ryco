@@ -38,6 +38,7 @@ import {
 } from "./MessagesTimeline.logic";
 import {
   CHAPTER_TALLY_KINDS,
+  CHAPTER_TICKER_WINDOW,
   chapterFallbackTitle,
   chapterTitleFromMessage,
   deriveChapterStepDisplay,
@@ -69,7 +70,8 @@ export interface WorkChapterRowProps {
 /** Rail geometry: node sits on a 1px line 7px from the row's left edge. */
 const NODE_CENTER_OPEN_PX = 12;
 const NODE_CENTER_FOLDED_PX = 15;
-const STEP_LEAVE_MS = 360;
+/** Matches `.chapter-step-leave` in index.css. */
+const STEP_LEAVE_MS = 380;
 
 const TALLY_ICON: Record<ChapterTallyKind, LucideIcon> = {
   read: FileTextIcon,
@@ -187,7 +189,18 @@ function ChapterBody(
   const showAll = !live || row.stepsExpanded;
   const ticker = selectTickerEntries(row.entries);
   const visible = showAll ? row.entries : ticker.visible;
-  const leaving = useLeavingSteps(visible, live && !showAll);
+  const leavingIds = useLeavingStepIds(row.entries, visible, live && !showAll);
+  const visibleIds = new Set(visible.map((entry) => entry.id));
+  // Leaving steps are the oldest on screen, so chapter order is render order.
+  // Both kinds share one keyed list: a step that scrolls out keeps its DOM
+  // node and only swaps its motion class, instead of remounting (which
+  // replayed every enter animation inside it).
+  const steps =
+    leavingIds.size === 0
+      ? visible
+      : row.entries.filter((entry) => visibleIds.has(entry.id) || leavingIds.has(entry.id));
+  const showEarlierToggle = live && ticker.hiddenCount > 0;
+  const earlierToggleMounted = useMountedWhile(showEarlierToggle);
 
   return (
     <div className="pb-0.5">
@@ -204,51 +217,50 @@ function ChapterBody(
         </div>
       ) : null}
 
-      {live && ticker.hiddenCount > 0 ? (
-        <button
-          type="button"
-          onClick={props.onShowAllSteps}
-          className="flex h-6 cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground/55 transition-colors hover:text-muted-foreground"
-        >
-          <ChevronUpIcon
-            aria-hidden
-            className={cn("size-3 transition-transform", row.stepsExpanded && "rotate-180")}
-          />
-          {row.stepsExpanded
-            ? "Show recent steps"
-            : `${ticker.hiddenCount} earlier ${ticker.hiddenCount === 1 ? "step" : "steps"}`}
-        </button>
-      ) : null}
+      {/* Grows in with the shared disclosure motion: popping in at full height
+          while the first step scrolls out read as the steps jumping down. */}
+      <DisclosureRegion open={showEarlierToggle}>
+        {earlierToggleMounted ? (
+          <button
+            type="button"
+            onClick={props.onShowAllSteps}
+            className="flex h-6 cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground/55 transition-colors hover:text-muted-foreground"
+          >
+            <ChevronUpIcon
+              aria-hidden
+              className={cn("size-3 transition-transform", row.stepsExpanded && "rotate-180")}
+            />
+            {row.stepsExpanded
+              ? "Show recent steps"
+              : `${ticker.hiddenCount} earlier ${ticker.hiddenCount === 1 ? "step" : "steps"}`}
+          </button>
+        ) : null}
+      </DisclosureRegion>
 
-      {visible.length > 0 || leaving.length > 0 ? (
+      {steps.length > 0 ? (
         <div className="flex flex-col">
-          {leaving.map((entry) => (
-            <div key={`leaving:${entry.id}`} className="chapter-step-leave" aria-hidden>
+          {steps.map((entry) => {
+            const leaving = leavingIds.has(entry.id);
+            // Only the three-row ticker fades by age; `visible` is that window.
+            const age = leaving
+              ? 3
+              : live && !showAll
+                ? visible.length - 1 - visible.indexOf(entry)
+                : 0;
+            return (
               <ChapterStepRow
+                key={entry.id}
                 entry={entry}
                 workspaceRoot={props.workspaceRoot}
                 routeThreadKey={props.routeThreadKey}
                 markdownCwd={props.markdownCwd}
                 environmentId={props.environmentId}
-                animateIn={false}
-                age={3}
+                motion={leaving ? "leave" : live ? "enter" : "none"}
+                age={age}
                 renderEntryPanel={props.renderEntryPanel}
               />
-            </div>
-          ))}
-          {visible.map((entry, index) => (
-            <ChapterStepRow
-              key={entry.id}
-              entry={entry}
-              workspaceRoot={props.workspaceRoot}
-              routeThreadKey={props.routeThreadKey}
-              markdownCwd={props.markdownCwd}
-              environmentId={props.environmentId}
-              animateIn={live}
-              age={live && !showAll ? visible.length - 1 - index : 0}
-              renderEntryPanel={props.renderEntryPanel}
-            />
-          ))}
+            );
+          })}
         </div>
       ) : null}
 
@@ -306,44 +318,83 @@ function useMountedWhile(open: boolean): boolean {
   return open || lingering;
 }
 
+const NO_LEAVING_STEPS: ReadonlySet<string> = new Set();
+
 /**
- * Steps that just scrolled out of the live ticker stay mounted briefly in a
- * collapsing state, so the window keeps a constant height as a new step grows
- * in below it instead of jumping by a row.
+ * Ids of steps that just scrolled out of the live ticker. They stay mounted
+ * for one collapse animation while the new step grows in below, so the window
+ * keeps a constant height instead of jumping by a row.
+ *
+ * Only steps still in the chapter (now behind "N earlier steps") leave this
+ * way; a step that vanished from the chapter altogether was replaced or
+ * removed, and animating it out would show a ghost row. A step already
+ * leaving keeps leaving when the window shifts again, so a burst of steps
+ * never cuts a collapse short.
  */
-function useLeavingSteps(
+function useLeavingStepIds(
+  entries: ReadonlyArray<WorkLogEntry>,
   visible: ReadonlyArray<WorkLogEntry>,
   enabled: boolean,
-): ReadonlyArray<WorkLogEntry> {
+): ReadonlySet<string> {
   const visibleKey = visible.map((entry) => entry.id).join("\u0000");
-  // "Previous props in state": when the window shifts, the steps that fell out
-  // of it are kept for one collapse animation, then dropped by the timer.
+  // "Previous props in state": when the window shifts, the steps that fell
+  // out of it are recorded here; a per-step timer drops each one.
   const [tracked, setTracked] = useState<{
     key: string;
-    visible: ReadonlyArray<WorkLogEntry>;
-    leaving: ReadonlyArray<WorkLogEntry>;
-  }>({ key: visibleKey, visible, leaving: [] });
+    visibleIds: ReadonlyArray<string>;
+    leavingIds: ReadonlyArray<string>;
+  }>(() => ({ key: visibleKey, visibleIds: visible.map((entry) => entry.id), leavingIds: [] }));
   if (tracked.key !== visibleKey) {
-    const visibleIds = new Set(visible.map((entry) => entry.id));
-    const exited = enabled
-      ? tracked.visible.filter((entry) => !visibleIds.has(entry.id)).slice(-2)
+    const nextVisibleIds = visible.map((entry) => entry.id);
+    const stillVisible = new Set(nextVisibleIds);
+    const inChapter = new Set(entries.map((entry) => entry.id));
+    const leaves = (id: string) => !stillVisible.has(id) && inChapter.has(id);
+    const leavingIds = enabled
+      ? [
+          ...tracked.leavingIds.filter(leaves),
+          ...tracked.visibleIds.filter((id) => leaves(id) && !tracked.leavingIds.includes(id)),
+        ].slice(-CHAPTER_TICKER_WINDOW)
       : [];
-    setTracked({ key: visibleKey, visible, leaving: exited });
+    setTracked({ key: visibleKey, visibleIds: nextVisibleIds, leavingIds });
   }
 
+  const timersRef = useRef(new Map<string, number>());
   useEffect(() => {
-    if (tracked.leaving.length === 0) return;
-    const timeout = window.setTimeout(
-      () =>
-        setTracked((current) =>
-          current.leaving.length === 0 ? current : { ...current, leaving: [] },
-        ),
-      STEP_LEAVE_MS + 20,
-    );
-    return () => window.clearTimeout(timeout);
-  }, [tracked.leaving]);
+    const timers = timersRef.current;
+    for (const [id, timeout] of timers) {
+      if (!tracked.leavingIds.includes(id)) {
+        window.clearTimeout(timeout);
+        timers.delete(id);
+      }
+    }
+    for (const id of tracked.leavingIds) {
+      if (timers.has(id)) continue;
+      timers.set(
+        id,
+        window.setTimeout(() => {
+          timers.delete(id);
+          setTracked((current) =>
+            current.leavingIds.includes(id)
+              ? { ...current, leavingIds: current.leavingIds.filter((other) => other !== id) }
+              : current,
+          );
+        }, STEP_LEAVE_MS + 40),
+      );
+    }
+  }, [tracked.leavingIds]);
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      for (const timeout of timers.values()) window.clearTimeout(timeout);
+      timers.clear();
+    };
+  }, []);
 
-  return enabled ? tracked.leaving : [];
+  return useMemo(
+    () =>
+      enabled && tracked.leavingIds.length > 0 ? new Set(tracked.leavingIds) : NO_LEAVING_STEPS,
+    [enabled, tracked.leavingIds],
+  );
 }
 
 function ChapterRail(props: {
@@ -448,7 +499,8 @@ const ChapterStepRow = memo(function ChapterStepRow(props: {
   routeThreadKey: string;
   markdownCwd: string | undefined;
   environmentId: EnvironmentId;
-  animateIn: boolean;
+  /** Live ticker rows grow in and, once scrolled out, collapse away. */
+  motion: "enter" | "leave" | "none";
   /** 0 = newest; older ticker rows fade back. */
   age: number;
   renderEntryPanel: (entry: WorkLogEntry, panelId: string) => ReactNode;
@@ -465,60 +517,68 @@ const ChapterStepRow = memo(function ChapterStepRow(props: {
 
   const toggle = () => setExpanded(routeThreadKey, entry.id, !isOpen);
   const reasoning = isReasoningWorkEntry(entry);
+  const leaving = props.motion === "leave";
 
   return (
     <div
       className={cn(
         "transition-opacity duration-500",
-        props.animateIn && "chapter-step-enter",
+        props.motion === "enter" && "chapter-step-enter",
+        leaving && "chapter-step-leave",
         props.age === 1 && "opacity-80",
         props.age === 2 && "opacity-55",
         props.age >= 3 && "opacity-35",
       )}
       data-chapter-step-kind={display.kind}
       data-chapter-step-status={display.status}
+      data-chapter-step-leaving={leaving ? "true" : undefined}
+      aria-hidden={leaving ? true : undefined}
+      inert={leaving}
     >
-      <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={isOpen}
-        aria-controls={panelId}
-        onClick={toggle}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            toggle();
+      {/* Single grid track: the enter/leave motion animates its height. */}
+      <div className="chapter-step-body">
+        <div
+          role="button"
+          tabIndex={0}
+          aria-expanded={isOpen}
+          aria-controls={panelId}
+          onClick={toggle}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              toggle();
+            }
+          }}
+          className="group/step -mx-2 flex min-h-[30px] w-[calc(100%+1rem)] cursor-pointer items-center gap-2.5 rounded-lg px-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 hover:bg-accent/50"
+          title={
+            entry.rawCommand ??
+            entry.command ??
+            (entry.changedFiles && entry.changedFiles.length > 0
+              ? entry.changedFiles.join("\n")
+              : undefined)
           }
-        }}
-        className="group/step -mx-2 flex min-h-[30px] w-[calc(100%+1rem)] cursor-pointer items-center gap-2.5 rounded-lg px-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 hover:bg-accent/50"
-        title={
-          entry.rawCommand ??
-          entry.command ??
-          (entry.changedFiles && entry.changedFiles.length > 0
-            ? entry.changedFiles.join("\n")
-            : undefined)
-        }
-      >
-        <StepStatusGlyph kind={display.kind} status={display.status} />
-        <StepLabel display={display} />
-        <StepMeta display={display} />
+        >
+          <StepStatusGlyph kind={display.kind} status={display.status} />
+          <StepLabel display={display} />
+          <StepMeta display={display} />
+        </div>
+        <DisclosureRegion open={isOpen} contentClassName="min-w-0 pl-[26px]">
+          {keepPanelMounted ? (
+            reasoning ? (
+              <div id={panelId} className="pt-1 pb-2 text-[13px] text-muted-foreground/80">
+                <ChatMarkdown
+                  text={reasoningEntryText(entry) || "_No reasoning text was shared._"}
+                  cwd={props.markdownCwd}
+                  environmentId={props.environmentId}
+                  isStreaming={!entry.completed}
+                />
+              </div>
+            ) : (
+              props.renderEntryPanel(entry, panelId)
+            )
+          ) : null}
+        </DisclosureRegion>
       </div>
-      <DisclosureRegion open={isOpen} contentClassName="min-w-0 pl-[26px]">
-        {keepPanelMounted ? (
-          reasoning ? (
-            <div id={panelId} className="pt-1 pb-2 text-[13px] text-muted-foreground/80">
-              <ChatMarkdown
-                text={reasoningEntryText(entry) || "_No reasoning text was shared._"}
-                cwd={props.markdownCwd}
-                environmentId={props.environmentId}
-                isStreaming={!entry.completed}
-              />
-            </div>
-          ) : (
-            props.renderEntryPanel(entry, panelId)
-          )
-        ) : null}
-      </DisclosureRegion>
     </div>
   );
 });

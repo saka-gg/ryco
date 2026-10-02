@@ -1212,7 +1212,16 @@ function collapseDerivedWorkLogEntries(
     }
     const previous = collapsed.at(-1);
     if (previous && shouldCollapseToolLifecycleEntries(previous, entry)) {
-      collapsed[collapsed.length - 1] = mergeDerivedWorkLogEntries(previous, entry);
+      // One tool call is one row from its first lifecycle event on: it keeps
+      // that event's id and position while updates stream in and when it
+      // settles. Adopting each update's id re-keyed the row on every event
+      // (a remount, lost expansion state, a ghost row in the live chapter)
+      // and its completion time could move it past steps started meanwhile.
+      collapsed[collapsed.length - 1] = {
+        ...mergeDerivedWorkLogEntries(previous, entry),
+        id: previous.id,
+        createdAt: previous.createdAt,
+      };
       continue;
     }
     collapsed.push(entry);

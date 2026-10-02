@@ -2035,26 +2035,30 @@ label:has(> select#reasoning-effort) select {
 /* Transcript chapters (WorkChapterRow): steps grow in, scroll out of the live
    ticker, settle with a drawn check; the live node breathes and its rail
    carries a travelling highlight. Every loop is transform/opacity only, so the
-   compositor runs it without repainting text. */
+   compositor runs it without repainting text.
+
+   Step enter and leave are mirror images on one curve and duration: while a
+   step scrolls out of the live ticker and the next grows in, their heights
+   always sum to one row, so the chapter (and the list measuring it) never
+   wobbles. Opacity eases to/from whatever the row's age fade is. */
 @keyframes chapter-step-enter {
   from {
+    grid-template-rows: 0fr;
     opacity: 0;
-    max-height: 0;
     transform: translateY(4px);
   }
   to {
-    opacity: 1;
-    max-height: 40px;
+    grid-template-rows: 1fr;
     transform: none;
   }
 }
 
 @keyframes chapter-step-leave {
   from {
-    max-height: 40px;
+    grid-template-rows: 1fr;
   }
   to {
-    max-height: 0;
+    grid-template-rows: 0fr;
     opacity: 0;
     transform: translateY(-6px);
   }
@@ -2127,14 +2131,26 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
-.chapter-step-enter {
-  overflow: hidden;
-  animation: chapter-step-enter 420ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+.chapter-step-enter,
+.chapter-step-leave {
+  display: grid;
+  grid-template-rows: 1fr;
 }
 
+/* The grid track clips vertically only, so a row's hover wash (which bleeds
+   past the text column) is never cut off at the sides. */
+:is(.chapter-step-enter, .chapter-step-leave) > .chapter-step-body {
+  min-height: 0;
+  overflow-y: clip;
+}
+
+.chapter-step-enter {
+  animation: chapter-step-enter 380ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+/* Keep in sync with STEP_LEAVE_MS in WorkChapterRow.tsx. */
 .chapter-step-leave {
-  overflow: hidden;
-  animation: chapter-step-leave 360ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: chapter-step-leave 380ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
 .chapter-verb,
@@ -2189,6 +2205,11 @@ label:has(> select#reasoning-effort) select {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Without the collapse a leaving step would just sit there; drop it. */
+  .chapter-step-leave {
+    display: none;
+  }
+
   .chapter-step-enter,
   .chapter-step-leave,
   .chapter-verb,

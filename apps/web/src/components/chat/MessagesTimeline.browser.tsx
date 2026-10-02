@@ -4,13 +4,19 @@ import {
   ContextHandoffId,
   EnvironmentId,
   MessageId,
+  type OrchestrationThreadActivity,
   ProviderDriverKind,
   ProviderInstanceId,
   TurnId,
 } from "@ryco/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
-import type { ContextHandoffTimelineEntry } from "../../session-logic";
+import {
+  deriveThreadActivityViewModel,
+  deriveTimelineEntries,
+  type ContextHandoffTimelineEntry,
+} from "../../session-logic";
+import type { ChatMessage } from "../../types";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -835,6 +841,111 @@ describe("MessagesTimeline", () => {
       expect(step()?.dataset.chapterStepStatus).toBe("completed");
       await expect.element(page.getByText("+255").first()).toBeVisible();
       await expect.element(page.getByText("−12").first()).toBeVisible();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps live ticker steps mounted through updates, settling, and scrolling out", async () => {
+    const turnId = TurnId.make("turn-ticker");
+    // Real activities through the real projection: every lifecycle event of a
+    // tool call carries its own activity id, which is what used to re-key the
+    // step (a remount, plus a ghost copy collapsing in the leaving slot).
+    const command = (id: string, kind: string, callId: string, second: number, text: string) =>
+      ({
+        id,
+        kind,
+        tone: "tool",
+        summary: "Ran command",
+        payload: { itemType: "command_execution", providerItemId: callId, detail: text },
+        turnId,
+        createdAt: `2026-04-13T12:00:${String(second).padStart(2, "0")}.000Z`,
+      }) as unknown as OrchestrationThreadActivity;
+    const commentary = {
+      id: MessageId.make("message-ticker"),
+      role: "assistant",
+      text: "Checking the sidebar before mocking it up.",
+      turnId,
+      createdAt: "2026-04-13T12:00:01.000Z",
+      completedAt: "2026-04-13T12:00:01.000Z",
+      streaming: false,
+    } as ChatMessage;
+    const timelineFor = (activities: OrchestrationThreadActivity[]) =>
+      deriveTimelineEntries(
+        [commentary],
+        [],
+        deriveThreadActivityViewModel(activities, turnId).workLogEntries,
+      );
+    const props = {
+      ...buildProps(),
+      isWorking: true,
+      activeTurnInProgress: true,
+      activeTurnId: turnId,
+      latestTurn: {
+        turnId,
+        state: "running" as const,
+        startedAt: "2026-04-13T12:00:00.000Z",
+        completedAt: null,
+      },
+      activeTurnStartedAt: "2026-04-13T12:00:00.000Z",
+    };
+    const settled = [
+      command("a-start", "tool.updated", "call-a", 2, "rg -n one src"),
+      command("a-done", "tool.completed", "call-a", 3, "rg -n one src"),
+      command("b-start", "tool.updated", "call-b", 4, "rg -n two src"),
+      command("b-done", "tool.completed", "call-b", 5, "rg -n two src"),
+      command("c-start", "tool.updated", "call-c", 6, "rg -n three src"),
+      command("c-done", "tool.completed", "call-c", 7, "rg -n three src"),
+    ];
+    const screen = await render(
+      <MessagesTimeline {...props} timelineEntries={timelineFor(settled)} />,
+    );
+    const steps = () => [
+      ...document.querySelectorAll<HTMLElement>(
+        "[data-chapter-status='active'] [data-chapter-step-kind]",
+      ),
+    ];
+
+    try {
+      await expect.poll(() => steps().length).toBe(3);
+      const [oldest, middle, newest] = steps();
+
+      const started = [
+        ...settled,
+        command("d-start", "tool.updated", "call-d", 8, "rg -n four src"),
+      ];
+      await screen.rerender(<MessagesTimeline {...props} timelineEntries={timelineFor(started)} />);
+      // The oldest step scrolls out in place; nothing that stays remounts.
+      expect(steps()).toHaveLength(4);
+      expect(steps().slice(0, 3)).toEqual([oldest, middle, newest]);
+      expect(oldest?.dataset.chapterStepLeaving).toBe("true");
+      const running = steps()[3]!;
+      expect(running.dataset.chapterStepStatus).toBe("running");
+
+      // Output streams in, then the call settles: still the same row, and no
+      // ghost of it appears in the leaving slot.
+      const streamed = [
+        ...started,
+        command("d-update", "tool.updated", "call-d", 9, "rg -n four src"),
+      ];
+      await screen.rerender(
+        <MessagesTimeline {...props} timelineEntries={timelineFor(streamed)} />,
+      );
+      const done = [
+        ...streamed,
+        command("d-done", "tool.completed", "call-d", 10, "rg -n four src"),
+      ];
+      await screen.rerender(<MessagesTimeline {...props} timelineEntries={timelineFor(done)} />);
+      expect(steps()[3]).toBe(running);
+      expect(running.dataset.chapterStepStatus).toBe("completed");
+      expect(steps().filter((step) => step.dataset.chapterStepLeaving === "true")).toEqual([
+        oldest,
+      ]);
+
+      // Once its collapse has played, the scrolled-out step unmounts.
+      await expect.poll(() => oldest?.isConnected, { timeout: 2_000 }).toBe(false);
+      expect(steps()).toEqual([middle, newest, running]);
+      await expect.element(page.getByRole("button", { name: "1 earlier step" })).toBeVisible();
     } finally {
       await screen.unmount();
     }
