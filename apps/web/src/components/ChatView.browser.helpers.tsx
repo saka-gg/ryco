@@ -1,4 +1,3 @@
-import { batchLaunchStore } from "../batchLaunchStore";
 import { useChatPanesStore } from "../chatPanesStore";
 
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
@@ -2616,7 +2615,6 @@ export function setupChatViewBrowserSuite() {
     await parkPointer(4, 4);
     await setViewport(DEFAULT_VIEWPORT);
     localStorage.clear();
-    await batchLaunchStore.refresh();
     useChatPanesStore.setState({ root: null, activeRef: null });
     usePromptStashStore.setState({ entries: [] });
     document.body.innerHTML = "";
