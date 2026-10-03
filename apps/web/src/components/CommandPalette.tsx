@@ -1,5 +1,7 @@
 "use client";
 
+import { useAppKeybindings } from "../appKeybindings";
+
 import { useParams } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -7,7 +9,6 @@ import { useCommandPaletteStore } from "../commandPaletteStore";
 import { ComposerHandleContext } from "../composerHandleContext";
 import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../keybindings";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { useServerKeybindings } from "../rpc/serverState";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
@@ -44,7 +45,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
   const open = useCommandPaletteStore((store) => store.open);
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const toggleOpen = useCommandPaletteStore((store) => store.toggleOpen);
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings();
   const composerHandleRef = useRef<ChatComposerHandle | null>(null);
   const routeTarget = useParams({
     strict: false,

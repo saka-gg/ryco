@@ -83,9 +83,16 @@ export const SCRIPT_RUN_COMMAND_PATTERN = Schema.TemplateLiteral([
   Schema.Literal(".run"),
 ]);
 
+/** Client-owned script commands include the environment and project identity. */
+export const SCOPED_SCRIPT_RUN_COMMAND = Schema.String.check(
+  Schema.isMaxLength(2048),
+  Schema.isPattern(/^projectScript\.[^/]+\/[^/]+\/[a-z0-9][a-z0-9-]{0,23}\.run$/),
+);
+
 export const KeybindingCommand = Schema.Union([
   Schema.Literals(STATIC_KEYBINDING_COMMANDS),
   SCRIPT_RUN_COMMAND_PATTERN,
+  SCOPED_SCRIPT_RUN_COMMAND,
 ]);
 export type KeybindingCommand = typeof KeybindingCommand.Type;
 
@@ -173,3 +180,12 @@ export class KeybindingsConfigError extends Schema.TaggedError<KeybindingsConfig
     return `Unable to parse keybindings config at ${this.configPath}: ${this.detail}`;
   }
 }
+
+/** Local preferences only. An empty rules array retains defaults; disabled commands do not. */
+export const AppKeybindings = Schema.Struct({
+  rules: KeybindingsConfig,
+  disabledCommands: Schema.Array(KeybindingCommand).check(
+    Schema.isMaxLength(MAX_KEYBINDINGS_COUNT),
+  ),
+});
+export type AppKeybindings = typeof AppKeybindings.Type;

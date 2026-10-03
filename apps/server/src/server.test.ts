@@ -2895,39 +2895,39 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("routes websocket rpc server.upsertKeybinding", () =>
+  it.effect("rejects legacy websocket keybinding mutations", () =>
     Effect.gen(function* () {
-      const rule: KeybindingRule = {
-        command: "terminal.toggle",
-        key: "ctrl+k",
-      };
-      const resolved: ResolvedKeybindingRule = {
-        command: "terminal.toggle",
-        shortcut: {
-          key: "k",
-          metaKey: false,
-          ctrlKey: true,
-          shiftKey: false,
-          altKey: false,
-          modKey: true,
-        },
-      };
-
+      let writes = 0;
       yield* buildAppUnderTest({
         layers: {
           keybindings: {
-            upsertKeybindingRule: () => Effect.succeed([resolved]),
+            upsertKeybindingRule: () =>
+              Effect.sync(() => {
+                writes++;
+                return [];
+              }),
+            replaceCustomKeybindings: () =>
+              Effect.sync(() => {
+                writes++;
+                return [];
+              }),
           },
         },
       });
-
       const wsUrl = yield* getWsServerUrl("/ws");
-      const response = yield* Effect.scoped(
-        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverUpsertKeybinding](rule)),
-      );
-
-      assert.deepEqual(response.issues, []);
-      assert.deepEqual(response.keybindings, [resolved]);
+      const upsert = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.serverUpsertKeybinding]({ command: "terminal.toggle", key: "ctrl+k" }),
+        ),
+      ).pipe(Effect.exit);
+      const replace = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.keybindingsReplaceCustom]({ rules: [] }),
+        ),
+      ).pipe(Effect.exit);
+      assert.equal(upsert._tag, "Failure");
+      assert.equal(replace._tag, "Failure");
+      assert.equal(writes, 0);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

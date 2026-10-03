@@ -657,6 +657,12 @@ export interface DesktopBridge {
   };
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
+  /** Installation-owned non-secret shortcut document, independent of every backend. */
+  appKeybindings?: {
+    read: () => Promise<string | null>;
+    write: (document: string) => Promise<void>;
+    onChanged: (listener: () => void) => () => void;
+  };
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   getSavedEnvironmentRegistry: () => Promise<readonly PersistedSavedEnvironmentRecord[]>;

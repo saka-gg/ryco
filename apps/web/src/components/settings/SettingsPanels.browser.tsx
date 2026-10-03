@@ -1342,7 +1342,7 @@ describe("GeneralSettingsPanel observability", () => {
     expect(confirm).toHaveBeenCalledTimes(2);
   });
 
-  it("disables the keybindings file opener when no editor is available", async () => {
+  it("edits locally without depending on a node editor", async () => {
     installSettingsNativeApi();
     setServerConfigSnapshot({
       ...createBaseServerConfig(),
@@ -1355,8 +1355,9 @@ describe("GeneralSettingsPanel observability", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("No available editors found.")).toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: "Open file" })).toBeDisabled();
+    await expect.element(page.getByText("Saved in this app")).toBeInTheDocument();
+    await expect.element(page.getByRole("button", { name: "Restore defaults" })).toBeEnabled();
+    expect(page.getByRole("button", { name: "Open file" }).elements()).toHaveLength(0);
   });
 
   it("labels the default editor file-manager option as Finder on macOS", async () => {

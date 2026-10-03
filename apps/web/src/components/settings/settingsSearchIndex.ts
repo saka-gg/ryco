@@ -324,9 +324,9 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "keybindings",
-    title: "Keybindings file",
-    owner: "node",
-    description: "Customize shortcuts via the keybindings configuration file.",
+    title: "Keyboard shortcuts",
+    owner: "client",
+    description: "Customize app shortcuts locally or import legacy node bindings.",
     keywords: "shortcuts hotkeys keyboard",
   },
   {

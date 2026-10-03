@@ -68,6 +68,8 @@ import {
 } from "./desktopSettings.ts";
 import {
   readClientSettings,
+  readAppKeybindings,
+  writeAppKeybindings,
   readSavedEnvironmentRegistry,
   readSavedEnvironmentSecret,
   removeSavedEnvironmentSecret,
@@ -2713,6 +2715,26 @@ function registerIpcHandlers(): void {
     writeDesktopSettings(DESKTOP_SETTINGS_PATH, next);
     desktopSettings = next;
     for (const guard of quitShortcutGuards) guard.reset();
+  });
+
+  const appKeybindingsPath = Path.join(Path.dirname(CLIENT_SETTINGS_PATH), "app-keybindings.json");
+  ipcMain.removeHandler("desktop:app-keybindings-read");
+  ipcMain.handle("desktop:app-keybindings-read", () => readAppKeybindings(appKeybindingsPath));
+  ipcMain.removeHandler("desktop:app-keybindings-write");
+  ipcMain.handle("desktop:app-keybindings-write", (event, document: unknown) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (
+      !owner ||
+      event.senderFrame !== event.sender.mainFrame ||
+      typeof document !== "string" ||
+      document.length > 1024 * 1024
+    ) {
+      throw new Error("Invalid app keybindings write.");
+    }
+    writeAppKeybindings(appKeybindingsPath, document);
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window !== owner) window.webContents.send("desktop:app-keybindings-changed");
+    }
   });
 
   ipcMain.removeHandler(GET_CLIENT_SETTINGS_CHANNEL);
