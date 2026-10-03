@@ -60,7 +60,7 @@ describe("web Vite config", () => {
 
     const excluded = (path: string) => REACT_COMPILER_EXCLUDE.some((pattern) => pattern.test(path));
     expect(excluded("/repo/apps/web/src/routeTree.gen.ts")).toBe(true);
-    expect(excluded("/repo/apps/web/src/workers/liquidGlass.worker.ts")).toBe(true);
+    expect(excluded("/repo/apps/web/src/workers/example.worker.ts")).toBe(true);
     expect(excluded("/repo/apps/web/src/components/ChatView.logic.ts")).toBe(true);
     expect(excluded("/repo/apps/web/src/components/ChatView.tsx")).toBe(false);
   });

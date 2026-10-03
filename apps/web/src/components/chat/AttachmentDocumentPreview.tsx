@@ -69,16 +69,23 @@ export function AttachmentDocumentPreview({
   attachment,
   open,
   onOpenChange,
+  morphOrigin,
 }: {
   attachment: PreviewDocumentAttachment;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** The attachment card the preview grows out of and folds back into. */
+  morphOrigin?: () => HTMLElement | null;
 }) {
   const src = attachment.previewUrl;
   const kind = attachmentPreviewKind(attachment);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogPopup className="h-[80dvh] max-w-5xl overflow-hidden" bottomStickOnMobile={false}>
+      <DialogPopup
+        className="h-[80dvh] max-w-5xl overflow-hidden"
+        bottomStickOnMobile={false}
+        {...(morphOrigin ? { morph: { origin: morphOrigin } } : {})}
+      >
         <DialogHeader className="shrink-0 border-b pr-12">
           <DialogTitle className="truncate text-base" title={attachment.name}>
             {attachment.name}
@@ -130,6 +137,7 @@ export function AttachmentPreviewButton({
   initiallyOpen?: boolean;
 }) {
   const [open, setOpen] = useState(initiallyOpen);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
   const localResource = useRef<string | undefined>(undefined);
   const [localSource, setLocalSource] = useState<string>();
   useEffect(
@@ -150,6 +158,7 @@ export function AttachmentPreviewButton({
   return (
     <>
       <Button
+        ref={buttonRef}
         variant="ghost"
         size="sm"
         aria-label={`Preview ${attachment.name}`}
@@ -161,6 +170,8 @@ export function AttachmentPreviewButton({
         attachment={{ ...attachment, previewUrl: localSource ?? attachment.previewUrl }}
         open={open}
         onOpenChange={changeOpen}
+        // The whole attachment card, not just its Preview button.
+        morphOrigin={() => buttonRef.current?.parentElement ?? buttonRef.current}
       />
     </>
   );

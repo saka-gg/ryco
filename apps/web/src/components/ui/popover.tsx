@@ -3,6 +3,14 @@
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 
 import { cn } from "~/lib/utils";
+import {
+  MORPH_SURFACE_ATTRIBUTE,
+  POPOVER_MORPH_POPUP_CLASS_NAME,
+  POPOVER_MORPH_PROFILE,
+  type AttachSurfaceMorphOptions,
+  type SurfaceMorphProp,
+  useSurfaceMorphRef,
+} from "./surfaceMorph";
 
 const PopoverCreateHandle = PopoverPrimitive.createHandle;
 
@@ -16,6 +24,28 @@ function PopoverTrigger({ className, children, ...props }: PopoverPrimitive.Trig
   );
 }
 
+/**
+ * Where a morphing popover's ghost lives: beside the positioner (which may be
+ * transformed, so a fixed ghost inside it would be offset), at its z-index and
+ * just before it in DOM order so the popup paints over the ghost. The surface
+ * is the descendant marked `data-morph-surface` when the popup itself is
+ * transparent chrome around a custom panel (the model picker).
+ */
+function popoverMorphHost(popup: HTMLElement): Omit<AttachSurfaceMorphOptions, "profile"> {
+  const surface = popup.querySelector<HTMLElement>(`[${MORPH_SURFACE_ATTRIBUTE}]`) ?? popup;
+  const positioner = popup.closest<HTMLElement>('[data-slot="popover-positioner"]');
+  if (!positioner?.parentElement) return { surface, deferToNextFrame: true };
+  return {
+    surface,
+    deferToNextFrame: true,
+    ghostHost: {
+      parent: positioner.parentElement,
+      before: positioner,
+      zIndex: getComputedStyle(positioner).zIndex,
+    },
+  };
+}
+
 function PopoverPopup({
   children,
   className,
@@ -27,6 +57,8 @@ function PopoverPopup({
   surface = "default",
   anchor,
   viewportClassName,
+  morph,
+  ref,
   ...props
 }: PopoverPrimitive.Popup.Props & {
   side?: PopoverPrimitive.Positioner.Props["side"];
@@ -42,7 +74,13 @@ function PopoverPopup({
    * edges — list-style popovers whose rows carry their own padding need this.
    */
   viewportClassName?: string;
+  /** Grow out of (and fold back into) a control; see `surfaceMorph.ts`. */
+  morph?: SurfaceMorphProp;
 }) {
+  const popupRef = useSurfaceMorphRef(morph, ref, {
+    profile: POPOVER_MORPH_PROFILE,
+    resolveHost: popoverMorphHost,
+  });
   return (
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Positioner
@@ -65,9 +103,11 @@ function PopoverPopup({
                 "w-fit text-balance rounded-md text-xs",
                 surface === "default" && "shadow-md/5 before:rounded-[calc(var(--radius-md)-1px)]",
               ),
+            morph && POPOVER_MORPH_POPUP_CLASS_NAME,
             className,
           )}
           data-slot="popover-popup"
+          ref={popupRef}
           {...props}
         >
           <PopoverPrimitive.Viewport

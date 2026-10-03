@@ -34,6 +34,7 @@ export function ProviderInstanceListItem(props: {
       data-settings-section={presentation.displayName}
       data-settings-action
       data-provider-instance-row
+      data-provider-instance-id={props.instanceId}
       aria-current={props.selected ? "true" : undefined}
       aria-controls={props.editorId}
       aria-label={`Edit ${presentation.displayName} ${kindLabel.toLowerCase()} provider instance`}

@@ -48,7 +48,7 @@ export function ThreadMessageSearchBar({
   return (
     <div className="pointer-events-none absolute inset-x-0 top-[calc(var(--chat-header-clearance,0px)+0.75rem)] z-30 flex justify-center px-3">
       <form
-        className="pointer-events-auto flex h-9 w-full max-w-md items-center gap-1 rounded-lg border border-border/80 bg-popover/96 px-1.5 shadow-lg/12 backdrop-blur"
+        className="selection-glass-surface pointer-events-auto flex h-9 w-full max-w-md items-center gap-1 rounded-lg border px-1.5"
         data-thread-message-search="true"
         onSubmit={(event) => {
           event.preventDefault();

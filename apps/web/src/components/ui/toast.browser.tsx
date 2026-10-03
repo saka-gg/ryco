@@ -68,13 +68,13 @@ describe("semantic toast surfaces", () => {
       expect(style.getPropertyValue("--app-toast-tone").trim()).not.toBe("");
       expect(style.getPropertyValue("--app-toast-tone-strength").trim()).toBe("8%");
       expect(style.getPropertyValue("--app-toast-tone-border-strength").trim()).toBe("32%");
-      expect(root!.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(2);
+      expect(root!.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(0);
       const close = root!.querySelector<HTMLElement>('[data-slot="toast-close"]');
       expect(close).toBeDefined();
       expect(getComputedStyle(close!).getPropertyValue("--app-toast-tone").trim()).toBe(
         style.getPropertyValue("--app-toast-tone").trim(),
       );
-      expect(close!.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(2);
+      expect(close!.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(0);
       return style.backgroundColor;
     });
 
@@ -85,7 +85,7 @@ describe("semantic toast surfaces", () => {
     const loadingStyle = getComputedStyle(loading!);
     expect(loadingStyle.getPropertyValue("--app-toast-tone").trim()).toBe("");
     expect(loadingStyle.getPropertyValue("--app-toast-tone-strength").trim()).toBe("");
-    expect(loading!.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(2);
+    expect(loading!.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(0);
     expect(semanticBackgrounds).not.toContain(loadingStyle.backgroundColor);
   });
 });

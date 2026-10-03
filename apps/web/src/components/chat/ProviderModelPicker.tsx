@@ -4,7 +4,7 @@ import {
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { VariantProps } from "class-variance-authority";
 import { ChevronDownIcon } from "lucide-react";
 import { Button, buttonVariants } from "../ui/button";
@@ -91,6 +91,8 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
+  // The picker grows out of (and folds back into) its trigger chip.
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
   // A call site that opted in gets a bottom sheet on the phone tier instead of
   // the two-pane popover. The desktop popover, its search autofocus, and its
   // keyboard navigation are untouched: `ModelPickerContent` simply never mounts
@@ -278,6 +280,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       }}
     >
       <PopoverTrigger
+        ref={triggerRef}
         openOnHover={props.openOnHover ?? false}
         delay={150}
         closeDelay={200}
@@ -296,6 +299,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       </PopoverTrigger>
       <PopoverPopup
         align="start"
+        morph={{ origin: () => triggerRef.current }}
         className="border-0 bg-transparent p-0 shadow-none before:hidden [--viewport-inline-padding:0] *:data-[slot=popover-viewport]:p-0"
       >
         <ModelPickerContent

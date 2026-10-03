@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ryco · Flat Surfaces & Motion Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="directions.css" />
+  </head>
+  <body>
+    <div class="lab">
+      <header class="lab-bar">
+        <div class="lab-id">
+          <h1 class="lab-title">Flat surfaces &amp; motion</h1>
+          <p class="lab-sub">
+            Composer, popovers and the Add action dialog without liquid glass. Same thread, same
+            data, three directions. Everything is clickable.
+          </p>
+        </div>
+        <nav class="lab-tabs" role="tablist" aria-label="Direction">
+          <span class="lab-tabs-thumb" aria-hidden="true"></span>
+          <button role="tab" data-dir="today" type="button">Today</button>
+          <button role="tab" data-dir="a" type="button">A · Hairline</button>
+          <button role="tab" data-dir="b" type="button">B · Morph</button>
+          <button role="tab" data-dir="c" type="button">C · Dock</button>
+        </nav>
+        <div class="lab-controls">
+          <button class="lab-btn" id="theme-btn" type="button" title="Toggle theme"></button>
+          <button
+            class="lab-btn"
+            id="speed-btn"
+            type="button"
+            aria-pressed="false"
+            title="Slow motion"
+          >
+            ¼× slow-mo
+          </button>
+          <button
+            class="lab-btn"
+            id="reduce-btn"
+            type="button"
+            aria-pressed="false"
+            title="Reduced motion"
+          >
+            Reduce motion
+          </button>
+          <button class="lab-btn" id="notes-btn" type="button" aria-pressed="true">Notes</button>
+        </div>
+      </header>
+      <main class="lab-main" id="lab-main">
+        <section class="stage" id="stage" aria-label="Mockup"></section>
+        <aside class="notes" id="notes" aria-label="Direction notes"></aside>
+      </main>
+    </div>
+    <script src="brand.js"></script>
+    <script src="core.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
