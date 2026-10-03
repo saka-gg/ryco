@@ -63,6 +63,19 @@ describe("changeRequestReadinessTier", () => {
     ).toBe("conflicting");
   });
 
+  it("never ranks a merge the host refuses as ready (list rows that carry a merge state)", () => {
+    for (const mergeStateStatus of ["blocked", "behind"] as const) {
+      expect(
+        changeRequestReadinessTier(cr(1, { reviewDecision: "approved", mergeStateStatus })),
+      ).toBe("open");
+    }
+    expect(changeRequestReadinessTier(cr(2, { mergeStateStatus: "dirty" }))).toBe("conflicting");
+    expect(changeRequestReadinessTier(cr(3, { mergeStateStatus: "draft" }))).toBe("draft");
+    expect(
+      changeRequestReadinessTier(cr(4, { reviewDecision: "approved", mergeStateStatus: "clean" })),
+    ).toBe("ready");
+  });
+
   it("treats a change request without checks as green", () => {
     expect(changeRequestReadinessTier(cr(1, { checkRollup: [], reviewDecision: "approved" }))).toBe(
       "ready",

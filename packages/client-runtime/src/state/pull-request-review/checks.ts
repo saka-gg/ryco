@@ -41,6 +41,11 @@ export interface ChangeRequestCheck {
   readonly durationMs: number | null;
   /** Earlier runs of the same check that this one replaced. */
   readonly supersededRuns: number;
+  /**
+   * Branch protection requires this check to pass before merging. Null when
+   * the host did not say, which is not the same as optional.
+   */
+  readonly required: boolean | null;
 }
 
 export interface ChangeRequestChecksSegment {
@@ -54,12 +59,22 @@ export interface ChangeRequestChecksSummary {
   readonly groups: Readonly<Record<ChangeRequestCheckGroup, ReadonlyArray<ChangeRequestCheck>>>;
   /** Non-empty groups in display order: attention, running, completed, skipped. */
   readonly segments: ReadonlyArray<ChangeRequestChecksSegment>;
-  readonly counts: Readonly<Record<ChangeRequestCheckState, number>> & { readonly total: number };
+  readonly counts: Readonly<Record<ChangeRequestCheckState, number>> & {
+    readonly total: number;
+    /** Checks the host marks as required, in any state. */
+    readonly required: number;
+  };
   readonly overall: ChangeRequestChecksOverall;
   /** e.g. "3 of 12 running · 1 failed", "All checks passed", "No checks reported". */
   readonly description: string;
-  /** Checks in the attention group, for "fix" affordances. */
+  /** Checks in the attention group, required ones first, for "fix" affordances. */
   readonly failing: ReadonlyArray<ChangeRequestCheck>;
+  /** Failing checks the host requires: these block the merge. */
+  readonly failingRequired: ReadonlyArray<ChangeRequestCheck>;
+  /** Failing checks the host says are optional. A check it said nothing about is in neither. */
+  readonly failingOptional: ReadonlyArray<ChangeRequestCheck>;
+  /** The host said which checks are required (some check is marked either way). */
+  readonly requiredKnown: boolean;
 }
 
 const GROUP_ORDER: ReadonlyArray<ChangeRequestCheckGroup> = [
@@ -111,6 +126,26 @@ function stateForToken(token: string): ChangeRequestCheckState | null {
   }
 }
 
+const WORKFLOW_JOB_URL_PATTERNS: ReadonlyArray<RegExp> = [
+  // GitHub Actions: `…/actions/runs/<run>/job/<id>` (also `/jobs/<id>`).
+  /\/actions\/runs\/\d+\/jobs?\/(\d+)/u,
+  // GitLab CI: `…/<project>/-/jobs/<id>`.
+  /\/-\/jobs\/(\d+)(?:[/?#]|$)/u,
+];
+
+/**
+ * The host's job id in a check's link, for hosts whose checks are workflow
+ * jobs the page lists (GitHub Actions, GitLab CI); null for any other link.
+ */
+export function workflowJobIdFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  for (const pattern of WORKFLOW_JOB_URL_PATTERNS) {
+    const id = pattern.exec(url)?.[1];
+    if (id) return id;
+  }
+  return null;
+}
+
 /**
  * A check run reports `status` plus a `conclusion` once it finished; a status
  * context reports one state. The conclusion wins when present.
@@ -149,6 +184,13 @@ interface RollupRun {
   readonly at: number | null;
 }
 
+interface CollapsedRuns {
+  readonly run: RollupRun;
+  readonly superseded: number;
+  /** The newest run's answer, else any earlier run's (required-ness follows the check name). */
+  readonly required: boolean | null;
+}
+
 /** A tie goes to the later entry: hosts list a re-run after the run it repeats. */
 function isAtLeastAsNew(candidate: number | null, kept: number | null): boolean {
   if (candidate === null) return kept === null;
@@ -164,7 +206,7 @@ function isAtLeastAsNew(candidate: number | null, kept: number | null): boolean 
 export function summarizeChangeRequestChecks(
   rollup: ReadonlyArray<SourceControlCheckRollupItem> | null | undefined,
 ): ChangeRequestChecksSummary {
-  const newest = new Map<string, { run: RollupRun; superseded: number }>();
+  const newest = new Map<string, CollapsedRuns>();
   (rollup ?? []).forEach((item, index) => {
     const id = `${item.workflowName ?? ""}\u0000${item.name}`;
     const run: RollupRun = {
@@ -172,14 +214,17 @@ export function summarizeChangeRequestChecks(
       index,
       at: epochMillis(item.startedAt) ?? epochMillis(item.completedAt),
     };
+    const required = item.isRequired ?? null;
     const kept = newest.get(id);
     if (kept === undefined) {
-      newest.set(id, { run, superseded: 0 });
+      newest.set(id, { run, superseded: 0, required });
     } else {
+      const replaces = isAtLeastAsNew(run.at, kept.run.at);
       // Re-setting an existing key keeps its first position in the Map.
       newest.set(id, {
-        run: isAtLeastAsNew(run.at, kept.run.at) ? run : kept.run,
+        run: replaces ? run : kept.run,
         superseded: kept.superseded + 1,
+        required: replaces ? (required ?? kept.required) : (kept.required ?? required),
       });
     }
   });
@@ -190,7 +235,7 @@ export function summarizeChangeRequestChecks(
   }
 
   const checks: ChangeRequestCheck[] = [];
-  for (const [id, { run, superseded }] of newest) {
+  for (const [id, { run, superseded, required }] of newest) {
     const { item } = run;
     const state = classifyCheckState({
       status: optionalValue(item.status),
@@ -219,6 +264,7 @@ export function summarizeChangeRequestChecks(
           ? Math.max(0, completedAtMs - startedAtMs)
           : null,
       supersededRuns: superseded,
+      required,
     });
   }
 
@@ -253,6 +299,7 @@ export function summarizeChangeRequestChecks(
           ? "pending"
           : "passing";
 
+  const failingRequired = groups.attention.filter((check) => check.required === true);
   return {
     checks,
     groups,
@@ -260,10 +307,17 @@ export function summarizeChangeRequestChecks(
       group,
       count: groups[group].length,
     })),
-    counts: { ...counts, total: checks.length },
+    counts: {
+      ...counts,
+      total: checks.length,
+      required: checks.filter((check) => check.required === true).length,
+    },
     overall,
     description: describeChecks(checks.length, counts),
-    failing: groups.attention,
+    failing: [...failingRequired, ...groups.attention.filter((check) => check.required !== true)],
+    failingRequired,
+    failingOptional: groups.attention.filter((check) => check.required === false),
+    requiredKnown: checks.some((check) => check.required !== null),
   };
 }
 

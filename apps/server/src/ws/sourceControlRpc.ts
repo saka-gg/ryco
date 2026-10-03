@@ -9,8 +9,14 @@ import {
 
 import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
 import {
+  getChangeRequestHostCapabilities,
+  type ChangeRequestHostRequest,
+} from "@ryco/shared/sourceControl";
+
+import {
   normalizeSourceBranch,
   parseSourceControlOwnerRef,
+  requireChangeRequestCapability,
   unsupportedChangeRequestOperation,
   type OptionalChangeRequestOperation,
   type SourceControlProviderShape,
@@ -73,19 +79,30 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
     toGitManagerError,
   } = ctx;
 
-  /** Resolve the provider for `cwd` and call an optional change request method, failing clearly when absent. */
+  /**
+   * Resolve the provider for `cwd`, failing fast (before the provider loads)
+   * when the host capability matrix says it cannot serve `request`.
+   */
+  const resolveCapableProvider = (cwd: string, request: ChangeRequestHostRequest) =>
+    sourceControlRegistry
+      .resolve({ cwd })
+      .pipe(Effect.tap((provider) => requireChangeRequestCapability(provider.kind, request)));
+
+  /** Resolve a capable provider for `cwd` and call an optional change request method, failing clearly when absent. */
   const callOptionalChangeRequestMethod = <I, A>(
     cwd: string,
-    operation: OptionalChangeRequestOperation,
+    request: ChangeRequestHostRequest & { readonly operation: OptionalChangeRequestOperation },
     select: (
       provider: SourceControlProviderShape,
     ) => ((input: I) => Effect.Effect<A, SourceControlProviderError>) | undefined,
     input: I,
   ) =>
-    sourceControlRegistry.resolve({ cwd }).pipe(
+    resolveCapableProvider(cwd, request).pipe(
       Effect.flatMap((provider) => {
         const method = select(provider);
-        return method ? method(input) : unsupportedChangeRequestOperation(provider.kind, operation);
+        return method
+          ? method(input)
+          : unsupportedChangeRequestOperation(provider.kind, request.operation);
       }),
     );
 
@@ -263,14 +280,21 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "source-control",
         },
       ),
-    [WS_METHODS.sourceControlListChangeRequests]: ({ cwd, state, limit, query, involvement }) =>
-      observeRpcEffect(
+    [WS_METHODS.sourceControlListChangeRequests]: ({ cwd, state, limit, query, involvement }) => {
+      const trimmedQuery = query?.trim() ?? "";
+      // Involvement is a server-side filtered list; a bare query is the host's search.
+      const request: ChangeRequestHostRequest =
+        involvement !== undefined
+          ? { operation: "listChangeRequests", involvement, query: trimmedQuery }
+          : trimmedQuery.length > 0
+            ? { operation: "searchChangeRequests" }
+            : { operation: "listChangeRequests" };
+      return observeRpcEffect(
         WS_METHODS.sourceControlListChangeRequests,
         ownerEffect(
           WS_METHODS.sourceControlListChangeRequests,
-          sourceControlRegistry.resolve({ cwd }).pipe(
+          resolveCapableProvider(cwd, request).pipe(
             Effect.flatMap((provider) => {
-              const trimmedQuery = query?.trim() ?? "";
               if (involvement !== undefined) {
                 // Involvement is a server-side search: state and query combine with it.
                 return provider.listChangeRequests({
@@ -307,13 +331,14 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         {
           "rpc.aggregate": "source-control",
         },
-      ),
+      );
+    },
     [WS_METHODS.sourceControlSearchChangeRequests]: ({ cwd, query, limit }) =>
       observeRpcEffect(
         WS_METHODS.sourceControlSearchChangeRequests,
         ownerEffect(
           WS_METHODS.sourceControlSearchChangeRequests,
-          sourceControlRegistry.resolve({ cwd }).pipe(
+          resolveCapableProvider(cwd, { operation: "searchChangeRequests" }).pipe(
             Effect.flatMap((provider) =>
               provider.searchChangeRequests({
                 cwd,
@@ -363,7 +388,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlAddChangeRequestComment,
         ownerEffect(
           WS_METHODS.sourceControlAddChangeRequestComment,
-          sourceControlRegistry.resolve({ cwd }).pipe(
+          resolveCapableProvider(cwd, { operation: "addChangeRequestComment" }).pipe(
             Effect.flatMap((provider) =>
               provider.addChangeRequestComment({
                 cwd,
@@ -390,7 +415,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlAddChangeRequestCommentReaction,
         ownerEffect(
           WS_METHODS.sourceControlAddChangeRequestCommentReaction,
-          sourceControlRegistry.resolve({ cwd }).pipe(
+          resolveCapableProvider(cwd, { operation: "addChangeRequestCommentReaction" }).pipe(
             Effect.flatMap((provider) =>
               provider.addChangeRequestCommentReaction({
                 cwd,
@@ -414,7 +439,8 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlGetChangeRequestFilesViewed,
           sourceControlRegistry.resolve({ cwd: input.cwd }).pipe(
             Effect.flatMap((provider) =>
-              provider.getChangeRequestFilesViewed
+              provider.getChangeRequestFilesViewed &&
+              getChangeRequestHostCapabilities(provider.kind).viewedFiles
                 ? provider.getChangeRequestFilesViewed(input)
                 : Effect.succeed({
                     provider: provider.kind,
@@ -432,7 +458,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlSetChangeRequestFileViewed,
         ownerEffect(
           WS_METHODS.sourceControlSetChangeRequestFileViewed,
-          sourceControlRegistry.resolve({ cwd: input.cwd }).pipe(
+          resolveCapableProvider(input.cwd, { operation: "setChangeRequestFileViewed" }).pipe(
             Effect.flatMap((provider) =>
               provider.setChangeRequestFileViewed
                 ? provider.setChangeRequestFileViewed(input)
@@ -453,7 +479,10 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlGetChangeRequestDiff,
         ownerEffect(
           WS_METHODS.sourceControlGetChangeRequestDiff,
-          sourceControlRegistry.resolve({ cwd: input.cwd }).pipe(
+          resolveCapableProvider(input.cwd, {
+            operation: "getChangeRequestDiff",
+            commitSha: input.commitSha,
+          }).pipe(
             Effect.flatMap((provider) =>
               provider.getChangeRequestDiff({
                 cwd: input.cwd,
@@ -477,7 +506,12 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlMergeChangeRequest,
           callOptionalChangeRequestMethod(
             input.cwd,
-            "mergeChangeRequest",
+            {
+              operation: "mergeChangeRequest",
+              mergeMethod: input.mergeMethod,
+              deleteBranch: input.deleteBranch,
+              expectedHeadSha: input.expectedHeadSha,
+            },
             (provider) => provider.mergeChangeRequest,
             input,
           ).pipe(
@@ -501,7 +535,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlGetChangeRequestActivity,
           callOptionalChangeRequestMethod(
             input.cwd,
-            "getChangeRequestActivity",
+            { operation: "getChangeRequestActivity" },
             (provider) => provider.getChangeRequestActivity,
             input,
           ),
@@ -515,7 +549,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlGetChangeRequestFileContents,
           callOptionalChangeRequestMethod(
             input.cwd,
-            "getChangeRequestFileContents",
+            { operation: "getChangeRequestFileContents" },
             (provider) => provider.getChangeRequestFileContents,
             input,
           ),
@@ -529,7 +563,11 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlSubmitChangeRequestReview,
           callOptionalChangeRequestMethod(
             input.cwd,
-            "submitChangeRequestReview",
+            {
+              operation: "submitChangeRequestReview",
+              event: input.event,
+              commentCount: input.comments.length,
+            },
             (provider) => provider.submitChangeRequestReview,
             input,
           ).pipe(Effect.tap(() => refreshLinkedChangeRequest(input.cwd, input.reference))),
@@ -543,7 +581,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlReplyToReviewThread,
           callOptionalChangeRequestMethod(
             input.cwd,
-            "replyToReviewThread",
+            { operation: "replyToReviewThread" },
             (provider) => provider.replyToReviewThread,
             input,
           ).pipe(Effect.tap(() => refreshLinkedChangeRequest(input.cwd, input.reference))),
@@ -557,7 +595,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlSetReviewThreadResolved,
           callOptionalChangeRequestMethod(
             input.cwd,
-            "setReviewThreadResolved",
+            { operation: "setReviewThreadResolved" },
             (provider) => provider.setReviewThreadResolved,
             input,
           ).pipe(Effect.tap(() => refreshLinkedChangeRequest(input.cwd, input.reference))),
@@ -571,7 +609,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlUpdateChangeRequestComment,
           callOptionalChangeRequestMethod(
             input.cwd,
-            "updateChangeRequestComment",
+            { operation: "updateChangeRequestComment", action: input.action },
             (provider) => provider.updateChangeRequestComment,
             input,
           ).pipe(Effect.tap(() => refreshLinkedChangeRequest(input.cwd, input.reference))),
@@ -585,7 +623,13 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           WS_METHODS.sourceControlUpdateChangeRequest,
           callOptionalChangeRequestMethod(
             input.cwd,
-            "updateChangeRequest",
+            {
+              operation: "updateChangeRequest",
+              action: input.action.kind,
+              ...(input.action.kind === "update-branch"
+                ? { updateBranchMethod: input.action.method }
+                : {}),
+            },
             (provider) => provider.updateChangeRequest,
             input,
           ).pipe(
@@ -608,7 +652,10 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         ownerEffect(
           WS_METHODS.sourceControlCreateChangeRequest,
           Effect.gen(function* () {
-            const provider = yield* sourceControlRegistry.resolve({ cwd: input.cwd });
+            const provider = yield* resolveCapableProvider(input.cwd, {
+              operation: "createChangeRequest",
+              draft: input.draft,
+            });
             yield* withSourceControlBodyFile(
               ctx.fileSystem,
               {

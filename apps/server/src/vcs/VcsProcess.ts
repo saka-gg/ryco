@@ -21,6 +21,11 @@ export interface VcsProcessInput {
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;
   readonly truncateOutputAtMaxBytes?: boolean;
+  /**
+   * Over `maxOutputBytes`, keep the last bytes of stdout instead of the first
+   * (logs, whose end is what matters); `stdoutTruncated` reports the cut.
+   */
+  readonly keepOutputTail?: boolean;
 }
 
 export interface VcsProcessOutput {
@@ -86,12 +91,14 @@ export const collectText = Effect.fn("VcsProcess.collectText")(function* (input:
   readonly stream: Stream.Stream<Uint8Array, VcsError>;
   readonly maxOutputBytes?: number;
   readonly truncateOutputAtMaxBytes?: boolean;
+  readonly keepOutputTail?: boolean;
 }) {
   const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   return yield* collectUint8StreamText({
     stream: input.stream,
     maxBytes: maxOutputBytes,
     truncatedMarker: input.truncateOutputAtMaxBytes ? OUTPUT_TRUNCATED_MARKER : null,
+    keepTail: input.keepOutputTail === true,
   });
 });
 
@@ -167,6 +174,7 @@ export const make = Effect.fn("makeVcsProcess")(function* () {
               stream: child.stdout,
               maxOutputBytes,
               truncateOutputAtMaxBytes: input.truncateOutputAtMaxBytes ?? false,
+              keepOutputTail: input.keepOutputTail ?? false,
             }),
             collectText({
               operation: input.operation,

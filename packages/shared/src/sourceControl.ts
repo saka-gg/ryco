@@ -1,4 +1,9 @@
 import type {
+  ChangeRequestInvolvement,
+  ChangeRequestReviewEvent,
+  ChangeRequestUpdateAction,
+  ChangeRequestUpdateActionKind,
+  SourceControlChangeRequestMergeMethod,
   SourceControlCommentAuthorRole,
   SourceControlProviderInfo,
   SourceControlProviderKind,
@@ -147,6 +152,700 @@ export function getChangeRequestTerminologyForKind(
     shortLabel: presentation.shortName,
     singular: presentation.longName,
   };
+}
+
+/**
+ * Link to one commit of a change request on its host, or null where the
+ * host's URL scheme for it is not known.
+ */
+export function changeRequestCommitUrl(
+  kind: SourceControlProviderKind,
+  changeRequestUrl: string | null | undefined,
+  oid: string,
+): string | null {
+  if (!changeRequestUrl) return null;
+  switch (kind) {
+    case "github":
+      return `${changeRequestUrl.replace(/\/+$/u, "")}/commits/${oid}`;
+    case "gitlab":
+    case "forgejo":
+    case "azure-devops":
+    case "bitbucket":
+    case "unknown":
+      return null;
+  }
+}
+
+// ── Change request host capabilities ─────────────────────────────────
+//
+// The single source of truth for what each host implements for change
+// requests (the pull requests page and its RPCs). The web hides every control
+// whose capability is false (SPEC §8: "mutations for providers that don't
+// implement them — those controls are hidden"); the server fails fast with a
+// clear message before calling a provider for them.
+//
+// An entry states what works TODAY. Flip a flag in the same change that
+// implements it (provider code, fixtures shaped like the host's API, tests),
+// never ahead of it. `.docs/pr-lab/PROVIDERS.md` maps every flag to the host
+// endpoint that would back it.
+
+/** Review verdicts a host accepts from `submitChangeRequestReview`. */
+export interface ChangeRequestReviewSubmitCapabilities {
+  /** `event: "comment"`: a review that only comments (also "Comment now" on a line). */
+  readonly comment: boolean;
+  readonly approve: boolean;
+  readonly requestChanges: boolean;
+  /**
+   * The viewer's unsubmitted host-side review is reported
+   * (`ChangeRequestActivity.pendingReview`) and submitted along with the
+   * page's drafts.
+   */
+  readonly pendingReview: boolean;
+}
+
+export interface ChangeRequestMergeHostCapabilities {
+  /** Methods `mergeChangeRequest` accepts; empty when the host cannot merge from Ryco. */
+  readonly methods: ReadonlySet<SourceControlChangeRequestMergeMethod>;
+  /** `deleteBranch`: delete the head branch after a successful merge. */
+  readonly deleteBranch: boolean;
+  /** `expectedHeadSha`: refuse the merge when the head moved since the user looked. */
+  readonly expectedHeadSha: boolean;
+}
+
+/**
+ * What a host's list rows can say about readiness (the row's second line and
+ * whether a stack layer counts as landable):
+ * - `verdict`: rows carry everything the merge verdict reads, so a row may
+ *   read "Ready to merge".
+ * - `blockers`: rows carry only some blockers (conflicts, drafts, failing or
+ *   running checks, requested changes); a row with none of them reads "Open",
+ *   never "Ready to merge", since what the row lacks (reviews, policies) may
+ *   still block it.
+ * - `none`: rows state only open, draft, merged or closed.
+ */
+export type ChangeRequestListReadiness = "verdict" | "blockers" | "none";
+
+/** How `update-branch` brings the head up to date with its base. */
+export type ChangeRequestUpdateBranchMethod = Extract<
+  ChangeRequestUpdateAction,
+  { readonly kind: "update-branch" }
+>["method"];
+
+/**
+ * How often an open, idle change request re-reads its detail and activity
+ * (the `watching` refresh phase): `standard`, or `slow` for hosts where each
+ * read fans out into many CLI processes (`az` starts a Python process per
+ * call; GitLab's detail and activity are 6–8 `glab api` calls each).
+ */
+export type ChangeRequestIdleRefresh = "standard" | "slow";
+
+export interface ChangeRequestCreateCapabilities {
+  /** `createChangeRequest`. */
+  readonly supported: boolean;
+  /** `createChangeRequest{draft: true}`. */
+  readonly draft: boolean;
+}
+
+export interface ChangeRequestHostCapabilities {
+  // ── Lists ──
+  /**
+   * Server-side involvement filters (`listChangeRequests{involvement}`:
+   * authored, review requested, …), combinable with state and a free-text
+   * `query`. Drives the list's groups and the "Review requested" / "Yours"
+   * filters.
+   */
+  readonly involvementFilters: boolean;
+  /** Host search (`searchChangeRequests`): the list's fallback when nothing loaded matches. */
+  readonly search: boolean;
+
+  // ── Reading one change request ──
+  /** `getChangeRequestActivity`: timeline, review threads, and the viewer's permissions. */
+  readonly activity: boolean;
+  /** `getChangeRequestDiff` returns the real unified diff (false: it is an empty stub). */
+  readonly diff: boolean;
+  /** `getChangeRequestDiff{commitSha}`: the Files tab's commit scope. */
+  readonly commitDiffs: boolean;
+  /** `getChangeRequestFileContents`: hunk expansion in the diff. */
+  readonly fileContents: boolean;
+  /** The detail carries `checkRollup`: the merge section's checks line and the Checks tab. */
+  readonly checkRollup: boolean;
+  /** List rows carry `checkRollup`: row check glyphs and the "Failing checks" filter. */
+  readonly listCheckRollup: boolean;
+  /**
+   * The detail carries merge readiness (mergeability, merge state, review
+   * decision, reviewer states): the merge verdict, its status lines, the next
+   * action and the merge controls. Without it the page states no verdict.
+   */
+  readonly mergeReadiness: boolean;
+  /** What list rows say about readiness (see `ChangeRequestListReadiness`). */
+  readonly listReadiness: ChangeRequestListReadiness;
+  /** How often an open, idle change request is re-read (see `ChangeRequestIdleRefresh`). */
+  readonly idleRefresh: ChangeRequestIdleRefresh;
+  /** `listWorkflowRuns` + `getWorkflowRunJobs`: the Checks tab's workflow → job → step tree. */
+  readonly workflowRuns: boolean;
+  /** `getWorkflowJobLog`: step logs and "Fix with agent" log tails. */
+  readonly workflowJobLogs: boolean;
+  /** `rerunWorkflow`: "Re-run failed" and "Re-run job". */
+  readonly rerunWorkflows: boolean;
+  /** The detail carries host-native stacks (`stack`): stack section, chip, spines, merge-through. */
+  readonly stacks: boolean;
+  /** `getChangeRequestFilesViewed` / `setChangeRequestFileViewed` with host storage. */
+  readonly viewedFiles: boolean;
+
+  // ── Conversation ──
+  /** `addChangeRequestComment`: the timeline composer. */
+  readonly comment: boolean;
+  /** `addChangeRequestCommentReaction`. */
+  readonly reactions: boolean;
+  /** `updateChangeRequestComment{action: "edit"}`. */
+  readonly editComments: boolean;
+  /** `updateChangeRequestComment{action: "delete"}`. */
+  readonly deleteComments: boolean;
+
+  // ── Review ──
+  /** New line-anchored comments in a review (`submitChangeRequestReview{comments}`): the diff gutter. */
+  readonly lineComments: boolean;
+  /** `replyToReviewThread`. */
+  readonly replyToThreads: boolean;
+  /** `setReviewThreadResolved`. */
+  readonly resolveThreads: boolean;
+  readonly submitReview: ChangeRequestReviewSubmitCapabilities;
+
+  // ── Lifecycle and merge ──
+  /** `updateChangeRequest` action kinds the host applies (auto-merge lives here, not under `merge`). */
+  readonly lifecycle: ReadonlySet<ChangeRequestUpdateActionKind>;
+  /**
+   * The `update-branch` methods the host applies: merging the base in,
+   * rebasing onto it, or both. Empty exactly when `lifecycle` lacks
+   * `update-branch`.
+   */
+  readonly updateBranchMethods: ReadonlySet<ChangeRequestUpdateBranchMethod>;
+  readonly merge: ChangeRequestMergeHostCapabilities;
+
+  // ── Checkout and create ──
+  /** `checkoutChangeRequest`: worktree checkout, which every agent hand-off needs. */
+  readonly checkout: boolean;
+  readonly create: ChangeRequestCreateCapabilities;
+}
+
+const ALL_LIFECYCLE_ACTIONS: ReadonlySet<ChangeRequestUpdateActionKind> = new Set([
+  "edit",
+  "set-draft",
+  "close",
+  "reopen",
+  "reviewers",
+  "labels",
+  "assignees",
+  "update-branch",
+  "auto-merge",
+  "delete-branch",
+]);
+
+/**
+ * One entry per provider kind, each spelled out in full (no shared base), so
+ * one host's entry can change without touching another's. Keep the
+ * `── <kind> ──` / `── end <kind> ──` delimiters.
+ */
+const CHANGE_REQUEST_HOST_CAPABILITIES: Record<
+  SourceControlProviderKind,
+  ChangeRequestHostCapabilities
+> = {
+  // ── github ──────────────────────────────────────────────────────────
+  // `gh` CLI (GraphQL + REST): everything the page offers.
+  github: {
+    involvementFilters: true,
+    search: true,
+    activity: true,
+    diff: true,
+    commitDiffs: true,
+    fileContents: true,
+    checkRollup: true,
+    listCheckRollup: true,
+    mergeReadiness: true,
+    listReadiness: "verdict",
+    idleRefresh: "standard",
+    workflowRuns: true,
+    workflowJobLogs: true,
+    rerunWorkflows: true,
+    stacks: true,
+    viewedFiles: true,
+    comment: true,
+    reactions: true,
+    editComments: true,
+    deleteComments: true,
+    lineComments: true,
+    replyToThreads: true,
+    resolveThreads: true,
+    submitReview: { comment: true, approve: true, requestChanges: true, pendingReview: true },
+    lifecycle: ALL_LIFECYCLE_ACTIONS,
+    updateBranchMethods: new Set(["merge", "rebase"]),
+    merge: {
+      methods: new Set(["merge", "squash", "rebase"]),
+      deleteBranch: true,
+      expectedHeadSha: true,
+    },
+    checkout: true,
+    create: { supported: true, draft: true },
+  },
+  // ── end github ──────────────────────────────────────────────────────
+
+  // ── gitlab ──────────────────────────────────────────────────────────
+  // `glab` CLI + REST v4 (`glab api`): lists with involvement filters and
+  // pipelines, readiness, diffs, activity (notes, discussions, events),
+  // draft-note reviews with approve / request changes, lifecycle, merge, CI.
+  // No reactions (reading award emoji is one request per note), no host
+  // viewed state, no stacks. `update-branch` only rebases (`PUT .../rebase`):
+  // GitLab cannot merge the target branch into the source from its API.
+  // List rows carry `detailed_merge_status`, so they state the verdict.
+  gitlab: {
+    involvementFilters: true,
+    search: true,
+    activity: true,
+    diff: true,
+    commitDiffs: true,
+    fileContents: true,
+    checkRollup: true,
+    listCheckRollup: true,
+    mergeReadiness: true,
+    listReadiness: "verdict",
+    idleRefresh: "slow",
+    workflowRuns: true,
+    workflowJobLogs: true,
+    rerunWorkflows: true,
+    stacks: false,
+    viewedFiles: false,
+    comment: true,
+    reactions: false,
+    editComments: true,
+    deleteComments: true,
+    lineComments: true,
+    replyToThreads: true,
+    resolveThreads: true,
+    submitReview: { comment: true, approve: true, requestChanges: true, pendingReview: true },
+    lifecycle: new Set([
+      "edit",
+      "set-draft",
+      "close",
+      "reopen",
+      "reviewers",
+      "labels",
+      "assignees",
+      "update-branch",
+      "auto-merge",
+      "delete-branch",
+    ]),
+    updateBranchMethods: new Set(["rebase"]),
+    merge: {
+      methods: new Set(["merge", "squash", "rebase"]),
+      deleteBranch: true,
+      expectedHeadSha: true,
+    },
+    checkout: true,
+    create: { supported: true, draft: true },
+  },
+  // ── end gitlab ──────────────────────────────────────────────────────
+
+  // ── bitbucket ───────────────────────────────────────────────────────
+  // Bitbucket Cloud REST 2.0 (apps/server/src/sourceControl/bitbucket*):
+  // involvement lists (authored / review requested), search, activity
+  // (timeline rebuilt from the activity log, threads, viewer), diffs incl.
+  // single commits, hunk expansion, comments, threads, approve / request
+  // changes, edit / draft / decline / reviewers / branch deletion, merges with
+  // a head pre-check, checkout, drafts. No reactions, labels, assignees,
+  // reopen, update-branch, auto-merge or publishing pending comments. The
+  // detail carries readiness and build statuses; list rows cannot (one extra
+  // read per row), so they state only open / draft / merged / closed.
+  bitbucket: {
+    involvementFilters: true,
+    search: true,
+    activity: true,
+    diff: true,
+    commitDiffs: true,
+    fileContents: true,
+    checkRollup: true,
+    listCheckRollup: false,
+    mergeReadiness: true,
+    listReadiness: "none",
+    idleRefresh: "standard",
+    workflowRuns: false,
+    workflowJobLogs: false,
+    rerunWorkflows: false,
+    stacks: false,
+    viewedFiles: false,
+    comment: true,
+    reactions: false,
+    editComments: true,
+    deleteComments: true,
+    lineComments: true,
+    replyToThreads: true,
+    resolveThreads: true,
+    submitReview: { comment: true, approve: true, requestChanges: true, pendingReview: false },
+    lifecycle: new Set(["edit", "set-draft", "close", "reviewers", "delete-branch"]),
+    updateBranchMethods: new Set(),
+    merge: {
+      methods: new Set(["merge", "squash", "rebase"]),
+      deleteBranch: true,
+      expectedHeadSha: true,
+    },
+    checkout: true,
+    create: { supported: true, draft: true },
+  },
+  // ── end bitbucket ───────────────────────────────────────────────────
+
+  // ── forgejo ─────────────────────────────────────────────────────────
+  // Forgejo / Gitea REST v1 (Forgejo 7+): timeline, positional review
+  // threads, reviews (pending reviews absorbed), readiness from commit
+  // statuses and base branch protection. Drafts are `WIP:` title prefixes.
+  // Not in the API: resolving conversations, viewed files, auto-merge state,
+  // and Actions jobs/logs before Forgejo 16. List rows carry the head's
+  // combined status and mergeability, not reviews (one more read per row).
+  forgejo: {
+    involvementFilters: true,
+    search: true,
+    activity: true,
+    diff: true,
+    commitDiffs: true,
+    fileContents: true,
+    checkRollup: true,
+    listCheckRollup: true,
+    mergeReadiness: true,
+    listReadiness: "blockers",
+    idleRefresh: "standard",
+    workflowRuns: false,
+    workflowJobLogs: false,
+    rerunWorkflows: false,
+    stacks: false,
+    viewedFiles: false,
+    comment: true,
+    reactions: true,
+    editComments: true,
+    deleteComments: true,
+    lineComments: true,
+    replyToThreads: true,
+    resolveThreads: false,
+    submitReview: { comment: true, approve: true, requestChanges: true, pendingReview: true },
+    lifecycle: new Set([
+      "edit",
+      "set-draft",
+      "close",
+      "reopen",
+      "reviewers",
+      "labels",
+      "assignees",
+      "update-branch",
+      "delete-branch",
+    ]),
+    updateBranchMethods: new Set(["merge", "rebase"]),
+    merge: {
+      methods: new Set(["merge", "squash", "rebase"]),
+      deleteBranch: true,
+      expectedHeadSha: true,
+    },
+    checkout: true,
+    create: { supported: true, draft: true },
+  },
+  // ── end forgejo ─────────────────────────────────────────────────────
+
+  // ── azure-devops ────────────────────────────────────────────────────
+  // `az repos` + `az devops invoke` (Git REST 7.1): threads, iterations,
+  // votes, completion. Diffs and file contents come from local git (Azure has
+  // no REST hunk diff). No reactions (likes only), assignees, update-branch,
+  // pending reviews, CI runs or check rollups yet. List rows carry merge
+  // conflicts and votes but not branch policies, so they never read ready.
+  "azure-devops": {
+    involvementFilters: true,
+    search: true,
+    activity: true,
+    diff: true,
+    commitDiffs: true,
+    fileContents: true,
+    checkRollup: false,
+    listCheckRollup: false,
+    mergeReadiness: true,
+    listReadiness: "blockers",
+    idleRefresh: "slow",
+    workflowRuns: false,
+    workflowJobLogs: false,
+    rerunWorkflows: false,
+    stacks: false,
+    viewedFiles: false,
+    comment: true,
+    reactions: false,
+    editComments: true,
+    deleteComments: true,
+    lineComments: true,
+    replyToThreads: true,
+    resolveThreads: true,
+    submitReview: { comment: true, approve: true, requestChanges: true, pendingReview: false },
+    lifecycle: new Set([
+      "edit",
+      "set-draft",
+      "close",
+      "reopen",
+      "reviewers",
+      "labels",
+      "auto-merge",
+      "delete-branch",
+    ]),
+    updateBranchMethods: new Set(),
+    merge: {
+      methods: new Set(["merge", "squash", "rebase"]),
+      deleteBranch: true,
+      expectedHeadSha: true,
+    },
+    checkout: true,
+    create: { supported: true, draft: true },
+  },
+  // ── end azure-devops ────────────────────────────────────────────────
+
+  // ── unknown ─────────────────────────────────────────────────────────
+  // No registered provider: nothing works.
+  unknown: {
+    involvementFilters: false,
+    search: false,
+    activity: false,
+    diff: false,
+    commitDiffs: false,
+    fileContents: false,
+    checkRollup: false,
+    listCheckRollup: false,
+    mergeReadiness: false,
+    listReadiness: "none",
+    idleRefresh: "standard",
+    workflowRuns: false,
+    workflowJobLogs: false,
+    rerunWorkflows: false,
+    stacks: false,
+    viewedFiles: false,
+    comment: false,
+    reactions: false,
+    editComments: false,
+    deleteComments: false,
+    lineComments: false,
+    replyToThreads: false,
+    resolveThreads: false,
+    submitReview: { comment: false, approve: false, requestChanges: false, pendingReview: false },
+    lifecycle: new Set(),
+    updateBranchMethods: new Set(),
+    merge: { methods: new Set(), deleteBranch: false, expectedHeadSha: false },
+    checkout: false,
+    create: { supported: false, draft: false },
+  },
+  // ── end unknown ─────────────────────────────────────────────────────
+};
+
+/** What `kind` implements for change requests (see `ChangeRequestHostCapabilities`). */
+export function getChangeRequestHostCapabilities(
+  kind: SourceControlProviderKind,
+): ChangeRequestHostCapabilities {
+  return CHANGE_REQUEST_HOST_CAPABILITIES[kind];
+}
+
+/** The host accepts `event` from `submitChangeRequestReview`. */
+export function supportsChangeRequestReviewEvent(
+  capabilities: ChangeRequestHostCapabilities,
+  event: ChangeRequestReviewEvent,
+): boolean {
+  switch (event) {
+    case "comment":
+      return capabilities.submitReview.comment;
+    case "approve":
+      return capabilities.submitReview.approve;
+    case "request_changes":
+      return capabilities.submitReview.requestChanges;
+  }
+}
+
+/** The host accepts at least one review verdict (the Review button and popover exist). */
+export function canSubmitChangeRequestReview(capabilities: ChangeRequestHostCapabilities): boolean {
+  const { comment, approve, requestChanges } = capabilities.submitReview;
+  return comment || approve || requestChanges;
+}
+
+/** The host merges change requests from Ryco with at least one method. */
+export function canMergeChangeRequests(capabilities: ChangeRequestHostCapabilities): boolean {
+  return capabilities.merge.methods.size > 0;
+}
+
+/**
+ * The method a one-click "Update branch" uses: merging the base in where the
+ * host can (it keeps the branch's history), else rebasing; null when the host
+ * cannot update branches.
+ */
+export function preferredUpdateBranchMethod(
+  capabilities: Pick<ChangeRequestHostCapabilities, "updateBranchMethods">,
+): ChangeRequestUpdateBranchMethod | null {
+  if (capabilities.updateBranchMethods.has("merge")) return "merge";
+  if (capabilities.updateBranchMethods.has("rebase")) return "rebase";
+  return null;
+}
+
+/** A change request call, described by the inputs that decide whether a host supports it. */
+export type ChangeRequestHostRequest =
+  | {
+      readonly operation: "listChangeRequests";
+      readonly involvement?: ChangeRequestInvolvement | undefined;
+      readonly query?: string | undefined;
+    }
+  | { readonly operation: "searchChangeRequests" }
+  | { readonly operation: "getChangeRequestDiff"; readonly commitSha?: string | undefined }
+  | { readonly operation: "createChangeRequest"; readonly draft?: boolean | undefined }
+  | { readonly operation: "getChangeRequestActivity" }
+  | { readonly operation: "getChangeRequestFileContents" }
+  | { readonly operation: "getChangeRequestFilesViewed" }
+  | { readonly operation: "setChangeRequestFileViewed" }
+  | { readonly operation: "addChangeRequestComment" }
+  | { readonly operation: "addChangeRequestCommentReaction" }
+  | { readonly operation: "updateChangeRequestComment"; readonly action: "edit" | "delete" }
+  | {
+      readonly operation: "submitChangeRequestReview";
+      readonly event: ChangeRequestReviewEvent;
+      /** Line comments sent with the review. */
+      readonly commentCount: number;
+    }
+  | { readonly operation: "replyToReviewThread" }
+  | { readonly operation: "setReviewThreadResolved" }
+  | {
+      readonly operation: "updateChangeRequest";
+      readonly action: ChangeRequestUpdateActionKind;
+      /** `update-branch`'s method. */
+      readonly updateBranchMethod?: ChangeRequestUpdateBranchMethod | undefined;
+    }
+  | {
+      readonly operation: "mergeChangeRequest";
+      readonly mergeMethod: SourceControlChangeRequestMergeMethod;
+      readonly deleteBranch?: boolean | undefined;
+      readonly expectedHeadSha?: string | undefined;
+    }
+  | { readonly operation: "listWorkflowRuns" }
+  | { readonly operation: "getWorkflowRunJobs" }
+  | { readonly operation: "getWorkflowJobLog" }
+  | { readonly operation: "rerunWorkflow" };
+
+const UPDATE_ACTION_PHRASES: Record<
+  ChangeRequestUpdateActionKind,
+  (presentation: ChangeRequestPresentation) => string
+> = {
+  edit: (p) => `editing ${p.pluralLongName}`,
+  "set-draft": (p) => `draft ${p.pluralLongName}`,
+  close: (p) => `closing ${p.pluralLongName}`,
+  reopen: (p) => `reopening ${p.pluralLongName}`,
+  reviewers: () => "requesting reviewers",
+  labels: (p) => `labeling ${p.pluralLongName}`,
+  assignees: (p) => `assigning ${p.pluralLongName}`,
+  "update-branch": () => "updating branches from their base",
+  "auto-merge": () => "auto-merge",
+  "delete-branch": () => "deleting head branches",
+};
+
+/** What the request needs that the host lacks, as a phrase ("approving reviews"); null when supported. */
+function unsupportedChangeRequestFeature(
+  capabilities: ChangeRequestHostCapabilities,
+  presentation: ChangeRequestPresentation,
+  request: ChangeRequestHostRequest,
+): string | null {
+  const plural = presentation.pluralLongName;
+  switch (request.operation) {
+    case "listChangeRequests":
+      if (request.involvement !== undefined && !capabilities.involvementFilters) {
+        return `filtering ${plural} by involvement`;
+      }
+      if (
+        request.query !== undefined &&
+        request.query.trim().length > 0 &&
+        !capabilities.involvementFilters
+      ) {
+        return `searching within filtered ${plural} lists`;
+      }
+      return null;
+    case "searchChangeRequests":
+      return capabilities.search ? null : `searching ${plural}`;
+    case "getChangeRequestDiff":
+      return request.commitSha !== undefined && !capabilities.commitDiffs
+        ? "single-commit diffs"
+        : null;
+    case "createChangeRequest":
+      if (!capabilities.create.supported) return `opening ${plural}`;
+      return request.draft === true && !capabilities.create.draft
+        ? `opening draft ${plural}`
+        : null;
+    case "getChangeRequestActivity":
+      return capabilities.activity ? null : "the review timeline";
+    case "getChangeRequestFileContents":
+      return capabilities.fileContents ? null : "expanding diff context";
+    case "getChangeRequestFilesViewed":
+    case "setChangeRequestFileViewed":
+      return capabilities.viewedFiles ? null : "marking files viewed";
+    case "addChangeRequestComment":
+      return capabilities.comment ? null : `commenting on ${plural}`;
+    case "addChangeRequestCommentReaction":
+      return capabilities.reactions ? null : "comment reactions";
+    case "updateChangeRequestComment":
+      if (request.action === "edit") return capabilities.editComments ? null : "editing comments";
+      return capabilities.deleteComments ? null : "deleting comments";
+    case "submitChangeRequestReview":
+      if (!supportsChangeRequestReviewEvent(capabilities, request.event)) {
+        return request.event === "approve"
+          ? "approving reviews"
+          : request.event === "request_changes"
+            ? "requesting changes in reviews"
+            : "submitting reviews";
+      }
+      return request.commentCount > 0 && !capabilities.lineComments ? "line comments" : null;
+    case "replyToReviewThread":
+      return capabilities.replyToThreads ? null : "replying to review threads";
+    case "setReviewThreadResolved":
+      return capabilities.resolveThreads ? null : "resolving review threads";
+    case "updateChangeRequest":
+      if (!capabilities.lifecycle.has(request.action)) {
+        return UPDATE_ACTION_PHRASES[request.action](presentation);
+      }
+      return request.action === "update-branch" &&
+        request.updateBranchMethod !== undefined &&
+        !capabilities.updateBranchMethods.has(request.updateBranchMethod)
+        ? request.updateBranchMethod === "merge"
+          ? "updating branches by merging the base in"
+          : "updating branches by rebasing"
+        : null;
+    case "mergeChangeRequest":
+      if (!canMergeChangeRequests(capabilities)) return `merging ${plural}`;
+      if (!capabilities.merge.methods.has(request.mergeMethod)) {
+        return `the ${request.mergeMethod} merge method`;
+      }
+      if (request.deleteBranch === true && !capabilities.merge.deleteBranch) {
+        return "deleting the head branch after a merge";
+      }
+      return request.expectedHeadSha !== undefined && !capabilities.merge.expectedHeadSha
+        ? "refusing merges when the head moved"
+        : null;
+    case "listWorkflowRuns":
+    case "getWorkflowRunJobs":
+      return capabilities.workflowRuns ? null : "workflow runs";
+    case "getWorkflowJobLog":
+      return capabilities.workflowJobLogs ? null : "workflow logs";
+    case "rerunWorkflow":
+      return capabilities.rerunWorkflows ? null : "re-running workflows";
+  }
+}
+
+/**
+ * Why `kind` cannot serve `request`, as one sentence ("GitLab does not
+ * support approving reviews."), or null when the matrix says it can. The
+ * server fails with this before calling the provider.
+ */
+export function describeUnsupportedChangeRequestRequest(
+  kind: SourceControlProviderKind,
+  request: ChangeRequestHostRequest,
+): string | null {
+  const presentation = resolveChangeRequestPresentationForKind(kind);
+  const feature = unsupportedChangeRequestFeature(
+    getChangeRequestHostCapabilities(kind),
+    presentation,
+    request,
+  );
+  if (feature === null) return null;
+  const host = kind === "unknown" ? "This source control provider" : presentation.providerName;
+  return `${host} does not support ${feature}.`;
 }
 
 export interface ClassifySourceControlCommentAuthorRoleInput {

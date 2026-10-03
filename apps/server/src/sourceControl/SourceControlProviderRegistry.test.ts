@@ -569,8 +569,9 @@ describe("change request page forwarding", () => {
 });
 
 describe("unsupported change request options", () => {
+  // A host with none of these options (GitLab now supports them all).
   const base = {
-    kind: "gitlab",
+    kind: "unknown",
     listChangeRequests: () => Effect.succeed([]),
     getChangeRequestDiff: () => Effect.succeed("diff"),
     createChangeRequest: () => Effect.void,
@@ -591,11 +592,11 @@ describe("unsupported change request options", () => {
       const query = yield* guarded
         .listChangeRequests({ cwd: "/repo", headSelector: "", state: "open", query: "bug" })
         .pipe(Effect.flip);
-      assert.include(query.detail, "Searching");
+      assert.include(query.detail, "searching within filtered change requests lists");
       const commit = yield* guarded
         .getChangeRequestDiff({ cwd: "/repo", reference: "7", commitSha: "abc" })
         .pipe(Effect.flip);
-      assert.include(commit.detail, "Single-commit");
+      assert.include(commit.detail, "single-commit diffs");
       const draft = yield* guarded
         .createChangeRequest({
           cwd: "/repo",
@@ -606,7 +607,7 @@ describe("unsupported change request options", () => {
           draft: true,
         })
         .pipe(Effect.flip);
-      assert.include(draft.detail, "draft");
+      assert.include(draft.detail, "opening change requests");
     }),
   );
 

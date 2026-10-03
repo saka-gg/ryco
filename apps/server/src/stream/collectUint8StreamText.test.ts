@@ -35,4 +35,29 @@ describe("collectUint8StreamText", () => {
       });
     }),
   );
+
+  it.effect("keeps the last bytes in tail mode, starting on a whole character", () =>
+    Effect.gen(function* () {
+      const result = yield* collectUint8StreamText({
+        // "é" is two bytes; the last 4 bytes start inside it.
+        stream: Stream.make(
+          encoder.encode("start "),
+          encoder.encode("mid é"),
+          encoder.encode("end"),
+        ),
+        maxBytes: 4,
+        keepTail: true,
+        truncatedMarker: "[truncated]",
+      });
+
+      assert.deepStrictEqual(result, { text: "end", bytes: 3, truncated: true });
+
+      const whole = yield* collectUint8StreamText({
+        stream: Stream.make(encoder.encode("ab"), encoder.encode("cd")),
+        maxBytes: 4,
+        keepTail: true,
+      });
+      assert.deepStrictEqual(whole, { text: "abcd", bytes: 4, truncated: false });
+    }),
+  );
 });

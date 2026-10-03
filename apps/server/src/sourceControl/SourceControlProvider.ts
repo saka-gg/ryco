@@ -42,6 +42,10 @@ import {
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryVisibility,
 } from "@ryco/contracts";
+import {
+  describeUnsupportedChangeRequestRequest,
+  type ChangeRequestHostRequest,
+} from "@ryco/shared/sourceControl";
 
 export interface SourceControlProviderContext {
   readonly provider: SourceControlProviderInfo;
@@ -89,35 +93,21 @@ export function sourceControlRefFromInput(input: {
 }
 
 /**
- * Fail when a caller asks for list/diff/create semantics this provider cannot
- * honor. Ignoring them would silently return unfiltered lists, whole-PR diffs,
+ * Fail fast when the host capability matrix (`getChangeRequestHostCapabilities`)
+ * says `kind` cannot serve `request`, before any provider is loaded or called.
+ * Silently ignoring an option would return unfiltered lists, whole-PR diffs,
  * or non-draft change requests, which is worse than a clear error.
  */
-export function rejectUnsupportedChangeRequestOptions(
+export function requireChangeRequestCapability(
   kind: SourceControlProviderKind,
-  operation: string,
-  options: {
-    readonly involvement?: ChangeRequestInvolvement | undefined;
-    readonly query?: string | undefined;
-    readonly commitSha?: string | undefined;
-    readonly draft?: boolean | undefined;
-  },
+  request: ChangeRequestHostRequest,
 ): Effect.Effect<void, SourceControlProviderError> {
-  const unsupported = (detail: string) =>
-    Effect.fail(new SourceControlProviderError({ provider: kind, operation, detail }));
-  if (options.involvement !== undefined) {
-    return unsupported(`Filtering by involvement is not supported for ${kind} repositories.`);
-  }
-  if (options.query !== undefined && options.query.trim().length > 0) {
-    return unsupported(`Searching change request lists is not supported for ${kind} repositories.`);
-  }
-  if (options.commitSha !== undefined) {
-    return unsupported(`Single-commit diffs are not supported for ${kind} repositories.`);
-  }
-  if (options.draft === true) {
-    return unsupported(`Creating draft change requests is not supported for ${kind} repositories.`);
-  }
-  return Effect.void;
+  const detail = describeUnsupportedChangeRequestRequest(kind, request);
+  return detail === null
+    ? Effect.void
+    : Effect.fail(
+        new SourceControlProviderError({ provider: kind, operation: request.operation, detail }),
+      );
 }
 
 /** Optional change request operations a provider may not implement. */
@@ -142,6 +132,7 @@ const OPTIONAL_CHANGE_REQUEST_OPERATION_LABELS: Record<OptionalChangeRequestOper
   updateChangeRequest: "updating change requests",
 };
 
+/** The provider has no method for `operation` (the matrix may still list it as unsupported). */
 export function unsupportedChangeRequestOperation(
   kind: SourceControlProviderKind,
   operation: OptionalChangeRequestOperation,
@@ -377,9 +368,11 @@ export interface SourceControlProviderShape {
 }
 
 /**
- * Wrap a provider that has no server-side involvement filter, list search,
- * single-commit diff, or draft creation so callers asking for them get a
- * clear error instead of silently broader results.
+ * Guard the options of a provider's required list/diff/create methods with the
+ * capability matrix, so every caller (not only the ws handlers) asking for an
+ * involvement filter, list search, single-commit diff, or draft the host does
+ * not support gets a clear error instead of silently broader results. Flip the
+ * host's flag in `@ryco/shared/sourceControl` when the provider implements it.
  */
 export function withUnsupportedChangeRequestOptionGuards(
   provider: SourceControlProviderShape,
@@ -387,16 +380,19 @@ export function withUnsupportedChangeRequestOptionGuards(
   return {
     ...provider,
     listChangeRequests: (input) =>
-      rejectUnsupportedChangeRequestOptions(provider.kind, "listChangeRequests", {
+      requireChangeRequestCapability(provider.kind, {
+        operation: "listChangeRequests",
         involvement: input.involvement,
         query: input.query,
       }).pipe(Effect.andThen(() => provider.listChangeRequests(input))),
     getChangeRequestDiff: (input) =>
-      rejectUnsupportedChangeRequestOptions(provider.kind, "getChangeRequestDiff", {
+      requireChangeRequestCapability(provider.kind, {
+        operation: "getChangeRequestDiff",
         commitSha: input.commitSha,
       }).pipe(Effect.andThen(() => provider.getChangeRequestDiff(input))),
     createChangeRequest: (input) =>
-      rejectUnsupportedChangeRequestOptions(provider.kind, "createChangeRequest", {
+      requireChangeRequestCapability(provider.kind, {
+        operation: "createChangeRequest",
         draft: input.draft,
       }).pipe(Effect.andThen(() => provider.createChangeRequest(input))),
   };

@@ -210,6 +210,128 @@ describe("pull request page handlers", () => {
     }),
   );
 
+  it.effect("fails fast from the host capability matrix before reaching the provider", () =>
+    Effect.gen(function* () {
+      const unreachable = () => Effect.die("must not reach the provider");
+      const providerFor = (kind: "azure-devops" | "bitbucket" | "unknown") =>
+        makeContext({
+          kind,
+          listChangeRequests: unreachable,
+          getChangeRequestDiff: unreachable,
+          submitChangeRequestReview: unreachable,
+          updateChangeRequest: unreachable,
+          mergeChangeRequest: unreachable,
+          getChangeRequestFilesViewed: unreachable,
+          listWorkflowRuns: unreachable,
+        }).handlers;
+      const detailOf = (error: unknown) =>
+        Schema.is(SourceControlProviderError)(error) ? error.detail : String(error);
+      const run = <A, E>(effect: Effect.Effect<A, E, never>) =>
+        effect.pipe(Effect.flip, Effect.map(detailOf));
+      const provide = Effect.provide(handlerLayer);
+      const azure = providerFor("azure-devops");
+      const bitbucket = providerFor("bitbucket");
+      const unknown = providerFor("unknown");
+
+      expect(
+        yield* run(
+          azure[WS_METHODS.sourceControlUpdateChangeRequest]({
+            cwd: "/repo",
+            reference: "7",
+            action: { kind: "update-branch", method: "merge", expectedHeadSha: "abc1234" },
+          }).pipe(provide),
+        ),
+      ).toBe("Azure DevOps does not support updating branches from their base.");
+      expect(
+        yield* run(
+          azure[WS_METHODS.sourceControlUpdateChangeRequest]({
+            cwd: "/repo",
+            reference: "7",
+            action: { kind: "assignees", add: ["octocat"], remove: [] },
+          }).pipe(provide),
+        ),
+      ).toBe("Azure DevOps does not support assigning pull requests.");
+      expect(
+        yield* run(
+          bitbucket[WS_METHODS.sourceControlUpdateChangeRequest]({
+            cwd: "/repo",
+            reference: "7",
+            action: { kind: "reopen" },
+          }).pipe(provide),
+        ),
+      ).toBe("Bitbucket does not support reopening pull requests.");
+      expect(
+        yield* run(
+          unknown[WS_METHODS.sourceControlListChangeRequests]({
+            cwd: "/repo",
+            state: "open",
+            involvement: "review-requested",
+          }).pipe(provide),
+        ),
+      ).toBe(
+        "This source control provider does not support filtering change requests by involvement.",
+      );
+      expect(
+        yield* run(
+          unknown[WS_METHODS.sourceControlGetChangeRequestDiff]({
+            cwd: "/repo",
+            reference: "7",
+            commitSha: "abc1234",
+          }).pipe(provide),
+        ),
+      ).toBe("This source control provider does not support single-commit diffs.");
+      expect(
+        yield* run(
+          unknown[WS_METHODS.sourceControlSubmitChangeRequestReview]({
+            cwd: "/repo",
+            reference: "7",
+            event: "approve",
+            comments: [],
+            expectedHeadSha: "abc1234",
+          }).pipe(provide),
+        ),
+      ).toBe("This source control provider does not support approving reviews.");
+      expect(
+        yield* run(
+          unknown[WS_METHODS.sourceControlMergeChangeRequest]({
+            cwd: "/repo",
+            reference: "7",
+            mergeMethod: "squash",
+          }).pipe(provide),
+        ),
+      ).toBe("This source control provider does not support merging change requests.");
+      // Viewed files degrade to "unsupported" storage rather than failing the Files tab.
+      expect(
+        yield* azure[WS_METHODS.sourceControlGetChangeRequestFilesViewed]({
+          cwd: "/repo",
+          reference: "7",
+        }).pipe(provide),
+      ).toEqual({
+        provider: "azure-devops",
+        capability: { storage: "unsupported" },
+        headSha: null,
+        files: [],
+      });
+    }),
+  );
+
+  it.effect("gates update-branch on the host's update methods", () =>
+    Effect.gen(function* () {
+      const { handlers } = makeContext({
+        kind: "gitlab",
+        updateChangeRequest: () => Effect.die("must not reach the provider"),
+      });
+      const error = yield* handlers[WS_METHODS.sourceControlUpdateChangeRequest]({
+        cwd: "/repo",
+        reference: "7",
+        action: { kind: "update-branch", method: "merge", expectedHeadSha: "abc1234" },
+      }).pipe(Effect.flip, Effect.provide(handlerLayer));
+      expect(Schema.is(SourceControlProviderError)(error) ? error.detail : String(error)).toBe(
+        "GitLab does not support updating branches by merging the base in.",
+      );
+    }),
+  );
+
   it.effect("fails clearly when the provider lacks a page capability", () =>
     Effect.gen(function* () {
       const { handlers } = makeContext({ kind: "gitlab" });

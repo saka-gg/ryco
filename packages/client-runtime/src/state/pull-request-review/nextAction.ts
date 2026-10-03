@@ -87,7 +87,9 @@ export type ChangeRequestMergeActionDetail = Pick<
 >;
 
 /** The host lets this merge through right now (non-required checks may still fail). */
-function hostAllowsMerge(detail: Pick<ChangeRequestNextActionDetail, "mergeStateStatus">): boolean {
+export function changeRequestHostAllowsMerge(
+  detail: Pick<ChangeRequestNextActionDetail, "mergeStateStatus">,
+): boolean {
   return (
     detail.mergeStateStatus === "clean" ||
     detail.mergeStateStatus === "unstable" ||
@@ -135,7 +137,7 @@ export function deriveChangeRequestNextAction(
   const checks = checksSummary ?? summarizeChangeRequestChecks(detail.checkRollup);
   const canUpdate = viewer?.canUpdate ?? true;
   const canMerge = viewer?.canMerge ?? true;
-  const allowsMerge = hostAllowsMerge(detail);
+  const allowsMerge = changeRequestHostAllowsMerge(detail);
 
   if (detail.state === "merged") {
     return {
@@ -290,7 +292,7 @@ export function deriveChangeRequestMergeAction(
   detail: ChangeRequestMergeActionDetail,
   activity?: ChangeRequestNextActionActivity | null,
 ): ChangeRequestNextAction {
-  return deriveMergeAction(detail, activity?.viewer ?? null, hostAllowsMerge(detail));
+  return deriveMergeAction(detail, activity?.viewer ?? null, changeRequestHostAllowsMerge(detail));
 }
 
 function deriveMergeAction(

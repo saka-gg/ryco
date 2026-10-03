@@ -230,7 +230,7 @@ function editReviewerStates(
     .filter((reviewer) => !(removed.has(lower(reviewer.login)) && reviewer.state === "requested"))
     .map((reviewer) =>
       added.has(lower(reviewer.login)) && reviewer.state !== "requested"
-        ? { ...reviewer, state: "requested" as const }
+        ? Object.assign({}, reviewer, { state: "requested" as const })
         : reviewer,
     );
   const present = new Set(kept.map((reviewer) => lower(reviewer.login)));

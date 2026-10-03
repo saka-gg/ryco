@@ -75,7 +75,10 @@ import { ProjectionWorktreeRepository } from "../persistence/Services/Projection
 import { refreshWorktreeSourceControlState } from "../sourceControl/refreshWorktreeSourceControlState.ts";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
-import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
+import {
+  requireChangeRequestCapability,
+  type SourceControlProviderShape,
+} from "../sourceControl/SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { BootstrapCredentialService } from "../auth/Services/BootstrapCredentialService.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
@@ -834,6 +837,10 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       ) => Effect.Effect<A, SourceControlProviderError> | undefined;
     }) =>
       sourceControlRegistry.resolve({ cwd: input.cwd }).pipe(
+        // Hosts the capability matrix lists without CI fail before the provider loads.
+        Effect.tap((provider) =>
+          requireChangeRequestCapability(provider.kind, { operation: input.operation }),
+        ),
         Effect.flatMap((provider) => {
           const effect = input.invoke(provider);
           if (effect) return effect;

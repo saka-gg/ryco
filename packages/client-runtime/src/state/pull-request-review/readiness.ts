@@ -45,6 +45,7 @@ type RankableChangeRequest = Pick<
   | "state"
   | "isDraft"
   | "mergeability"
+  | "mergeStateStatus"
   | "reviewDecision"
   | "checkRollup"
   | "additions"
@@ -61,9 +62,13 @@ type SearchableChangeRequest = Pick<
 export function changeRequestReadinessTier(
   entry: RankableChangeRequest,
 ): ChangeRequestReadinessTier {
-  if (entry.mergeability === "conflicting") return "conflicting";
+  if (entry.mergeability === "conflicting" || entry.mergeStateStatus === "dirty") {
+    return "conflicting";
+  }
   if (entry.state !== "open") return "finished";
-  if (entry.isDraft === true) return "draft";
+  if (entry.isDraft === true || entry.mergeStateStatus === "draft") return "draft";
+  // A merge the host refuses (behind, or a rule it enforces) is not ready, whatever else is green.
+  if (entry.mergeStateStatus === "blocked" || entry.mergeStateStatus === "behind") return "open";
   // No checks reported is not a failure: a repository without CI is green.
   const overall = summarizeChangeRequestChecks(entry.checkRollup).overall;
   const green = overall === "passing" || overall === "none";

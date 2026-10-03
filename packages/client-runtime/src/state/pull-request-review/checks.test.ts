@@ -2,7 +2,11 @@ import type { SourceControlCheckRollupItem } from "@ryco/contracts";
 import { DateTime, Option } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { classifyCheckState, summarizeChangeRequestChecks } from "./checks.ts";
+import {
+  classifyCheckState,
+  summarizeChangeRequestChecks,
+  workflowJobIdFromUrl,
+} from "./checks.ts";
 
 function check(
   name: string,
@@ -13,6 +17,7 @@ function check(
     readonly startedAt?: string;
     readonly completedAt?: string;
     readonly url?: string;
+    readonly isRequired?: boolean;
   } = {},
 ): SourceControlCheckRollupItem {
   return {
@@ -26,8 +31,26 @@ function check(
     completedAt: input.completedAt
       ? Option.some(DateTime.makeUnsafe(input.completedAt))
       : Option.none(),
+    ...(input.isRequired !== undefined ? { isRequired: input.isRequired } : {}),
   };
 }
+
+describe("workflowJobIdFromUrl", () => {
+  it("reads GitHub Actions and GitLab CI job links only", () => {
+    expect(
+      workflowJobIdFromUrl("https://github.com/o/r/actions/runs/18214433871/job/52004433871"),
+    ).toBe("52004433871");
+    expect(workflowJobIdFromUrl("https://gitlab.example.com/group/project/-/jobs/91")).toBe("91");
+    expect(workflowJobIdFromUrl("https://gitlab.example.com/group/project/-/jobs/91/raw")).toBe(
+      "91",
+    );
+    expect(workflowJobIdFromUrl("https://gitlab.example.com/group/project/-/pipelines/47")).toBe(
+      null,
+    );
+    expect(workflowJobIdFromUrl("https://ci.example.com/job/build/12")).toBe(null);
+    expect(workflowJobIdFromUrl(null)).toBe(null);
+  });
+});
 
 describe("classifyCheckState", () => {
   it("prefers the conclusion and normalizes host tokens", () => {
@@ -143,6 +166,52 @@ describe("summarizeChangeRequestChecks", () => {
     ]);
     expect(failing.description).toBe("1 of 2 failing");
     expect(failing.overall).toBe("failing");
+  });
+
+  it("counts required checks and lists required failures first", () => {
+    const summary = summarizeChangeRequestChecks([
+      check("lint", { conclusion: "failure", isRequired: false }),
+      check("e2e", { conclusion: "failure" }),
+      check("typecheck", { conclusion: "failure", isRequired: true }),
+      check("build", { conclusion: "success", isRequired: true }),
+      check("deploy", { status: "in_progress", isRequired: true }),
+    ]);
+    expect(summary.requiredKnown).toBe(true);
+    expect(summary.counts.required).toBe(3);
+    expect(summary.checks.map((entry) => entry.required)).toEqual([false, null, true, true, true]);
+    expect(summary.failing.map((entry) => entry.name)).toEqual(["typecheck", "lint", "e2e"]);
+    expect(summary.failingRequired.map((entry) => entry.name)).toEqual(["typecheck"]);
+    // A check the host said nothing about is neither required nor optional.
+    expect(summary.failingOptional.map((entry) => entry.name)).toEqual(["lint"]);
+    // The host's order stays in the groups.
+    expect(summary.groups.attention.map((entry) => entry.name)).toEqual([
+      "lint",
+      "e2e",
+      "typecheck",
+    ]);
+  });
+
+  it("reports required-ness as unknown when the host did not say", () => {
+    const summary = summarizeChangeRequestChecks([check("lint", { conclusion: "failure" })]);
+    expect(summary.requiredKnown).toBe(false);
+    expect(summary.counts.required).toBe(0);
+    expect(summary.checks[0]?.required).toBeNull();
+    expect(summary.failingRequired).toEqual([]);
+    expect(summary.failingOptional).toEqual([]);
+  });
+
+  it("keeps a check's required-ness across a re-run the host has not marked yet", () => {
+    const summary = summarizeChangeRequestChecks([
+      check("test", {
+        conclusion: "failure",
+        startedAt: "2026-01-01T10:00:00Z",
+        isRequired: true,
+      }),
+      check("test", { status: "in_progress", startedAt: "2026-01-01T11:00:00Z" }),
+    ]);
+    expect(summary.checks.map((entry) => [entry.state, entry.required])).toEqual([
+      ["running", true],
+    ]);
   });
 
   it("computes durations only for finished checks", () => {

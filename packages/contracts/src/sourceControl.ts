@@ -92,6 +92,12 @@ export const SourceControlCheckRollupItem = Schema.Struct({
   url: Schema.Option(TrimmedNonEmptyString),
   startedAt: Schema.Option(Schema.DateTimeUtc),
   completedAt: Schema.Option(Schema.DateTimeUtc),
+  /**
+   * The base branch's protection requires this check to pass before merging.
+   * Absent when the host did not say (list rows, hosts without the concept,
+   * or a failed lookup), which is not the same as `false`.
+   */
+  isRequired: Schema.optional(Schema.Boolean),
 });
 export type SourceControlCheckRollupItem = typeof SourceControlCheckRollupItem.Type;
 
@@ -178,6 +184,12 @@ export const ChangeRequest = Schema.Struct({
   headRepositoryOwnerLogin: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   headSha: Schema.optional(TrimmedNonEmptyString),
   mergeability: Schema.optional(SourceControlChangeRequestMergeability),
+  /**
+   * Why it can or cannot merge right now. Always on the detail where the host
+   * reports readiness; on list rows only where the list payload carries it
+   * (GitLab's `detailed_merge_status`).
+   */
+  mergeStateStatus: Schema.optional(SourceControlChangeRequestMergeStateStatus),
   checkRollup: Schema.optional(Schema.Array(SourceControlCheckRollupItem)),
   stackSummary: Schema.optional(SourceControlChangeRequestStackSummary),
   createdAt: Schema.optional(Schema.DateTimeUtc),
@@ -379,7 +391,6 @@ export const SourceControlChangeRequestDetail = Schema.Struct({
   mergeCapabilities: Schema.optional(SourceControlChangeRequestMergeCapabilities),
   /** Per-reviewer latest state, including pending (requested) reviewers. */
   reviewerStates: Schema.optional(Schema.Array(SourceControlChangeRequestReviewer)),
-  mergeStateStatus: Schema.optional(SourceControlChangeRequestMergeStateStatus),
   autoMerge: Schema.optional(Schema.NullOr(SourceControlChangeRequestAutoMerge)),
   closedAt: Schema.optional(Schema.DateTimeUtc),
   mergedAt: Schema.optional(Schema.DateTimeUtc),
@@ -423,6 +434,12 @@ export const SourceControlWorkflowRun = Schema.Struct({
   branch: Schema.Option(TrimmedNonEmptyString),
   event: Schema.optional(TrimmedNonEmptyString),
   commit: SourceControlWorkflowRunCommit,
+  /**
+   * The change request head this run verifies when `commit` is not the head
+   * itself but a merge of it into the target (GitLab merged-results and
+   * merge-train pipelines). Absent when the run is on the head commit.
+   */
+  sourceHeadOid: Schema.optional(TrimmedNonEmptyString),
   actor: Schema.Option(TrimmedNonEmptyString),
   status: TrimmedNonEmptyString,
   conclusion: Schema.Option(TrimmedNonEmptyString),
