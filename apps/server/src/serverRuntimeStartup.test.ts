@@ -54,7 +54,6 @@ import { ProviderAdapterRequestError } from "./provider/Errors.ts";
 import { ProviderService, type ProviderServiceShape } from "./provider/Services/ProviderService.ts";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import {
-  getAutoBootstrapDefaultModelSelection,
   launchStartupHeartbeat,
   makeCommandGate,
   reconcileOrphanedProviderSessions,
@@ -76,7 +75,10 @@ const startupWorkspaceSnapshot = (input: {
         id: ProjectId.make("startup-project"),
         title: "Startup project",
         workspaceRoot: input.projectRoot,
-        defaultModelSelection: getAutoBootstrapDefaultModelSelection(),
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: DEFAULT_MODEL,
+        },
         scripts: [],
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z",
@@ -196,13 +198,6 @@ const runOrphanedSessionReconciliation = (input: {
       dispatch: input.dispatch,
     } as unknown as OrchestrationEngineShape),
   );
-
-it("uses the canonical Codex default for auto-bootstrapped model selection", () => {
-  assert.deepStrictEqual(getAutoBootstrapDefaultModelSelection(), {
-    instanceId: ProviderInstanceId.make("codex"),
-    model: DEFAULT_MODEL,
-  });
-});
 
 it.effect("repairs orphaned provider sessions while preserving resumable binding state", () => {
   const orphan = orphanedSessionThread({
@@ -637,7 +632,10 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
               id: bootstrapProjectId,
               title: "Startup Project",
               workspaceRoot: "/tmp/startup-project",
-              defaultModelSelection: getAutoBootstrapDefaultModelSelection(),
+              defaultModelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: DEFAULT_MODEL,
+              },
               scripts: [],
               createdAt: "2026-01-01T00:00:00.000Z",
               updatedAt: "2026-01-01T00:00:00.000Z",
@@ -680,63 +678,72 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
   });
 });
 
-it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when missing", () =>
-  Effect.gen(function* () {
-    const dispatchCalls = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
-    const targets = yield* resolveAutoBootstrapWelcomeTargets.pipe(
-      Effect.provideService(ServerConfig, {
-        cwd: "/tmp/startup-project",
-        autoBootstrapProjectFromCwd: true,
-      } as never),
-      Effect.provideService(ProjectionSnapshotQuery, {
-        getCommandReadModel: () => Effect.die("unused"),
-        getSnapshot: () => Effect.die("unused"),
-        getShellSnapshot: () => Effect.die("unused"),
-        getSnapshotSequence: () => Effect.die("unused"),
-        getCounts: () => Effect.die("unused"),
-        getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
-        getProjectShellById: () => Effect.die("unused"),
-        getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
-        getThreadCheckpointContext: () => Effect.succeed(Option.none()),
-        getThreadShellById: () => Effect.die("unused"),
-        getThreadDetailById: () => Effect.die("unused"),
-        searchThreadMessages: () => Effect.die("unused"),
-      }),
-      Effect.provideService(OrchestrationEngineService, {
-        readEvents: () => Stream.empty,
-        readEventsPage: (fromSequenceExclusive) =>
-          Effect.succeed({
-            events: [],
-            nextSequence: fromSequenceExclusive,
-            hasMore: false,
-          }),
-        dispatch: (command) =>
-          Ref.update(dispatchCalls, (calls) => [...calls, command]).pipe(
-            Effect.as({ sequence: 1 }),
-          ),
-        streamDomainEvents: Stream.empty,
-        subscribeDomainEvents: Effect.gen(function* () {
-          const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
-          return yield* PubSub.subscribe(pubsub);
+it.effect(
+  "resolveAutoBootstrapWelcomeTargets creates a project and thread on the node default when missing",
+  () =>
+    Effect.gen(function* () {
+      const dispatchCalls = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const targets = yield* resolveAutoBootstrapWelcomeTargets.pipe(
+        Effect.provideService(ServerConfig, {
+          cwd: "/tmp/startup-project",
+          autoBootstrapProjectFromCwd: true,
+        } as never),
+        Effect.provideService(ProjectionSnapshotQuery, {
+          getCommandReadModel: () => Effect.die("unused"),
+          getSnapshot: () => Effect.die("unused"),
+          getShellSnapshot: () => Effect.die("unused"),
+          getSnapshotSequence: () => Effect.die("unused"),
+          getCounts: () => Effect.die("unused"),
+          getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+          getProjectShellById: () => Effect.die("unused"),
+          getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+          getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          getThreadShellById: () => Effect.die("unused"),
+          getThreadDetailById: () => Effect.die("unused"),
+          searchThreadMessages: () => Effect.die("unused"),
         }),
-      } satisfies OrchestrationEngineShape),
-      Effect.provide(
-        Layer.merge(
-          ServerSettingsService.layerTest({ defaultAgentTokenMode: "aggressive" }),
-          NodeServices.layer,
+        Effect.provideService(OrchestrationEngineService, {
+          readEvents: () => Stream.empty,
+          readEventsPage: (fromSequenceExclusive) =>
+            Effect.succeed({
+              events: [],
+              nextSequence: fromSequenceExclusive,
+              hasMore: false,
+            }),
+          dispatch: (command) =>
+            Ref.update(dispatchCalls, (calls) => [...calls, command]).pipe(
+              Effect.as({ sequence: 1 }),
+            ),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.gen(function* () {
+            const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
+            return yield* PubSub.subscribe(pubsub);
+          }),
+        } satisfies OrchestrationEngineShape),
+        Effect.provide(
+          Layer.merge(
+            ServerSettingsService.layerTest({
+              defaultAgentTokenMode: "aggressive",
+              initialModelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: "gpt-node-default",
+              },
+            }),
+            NodeServices.layer,
+          ),
         ),
-      ),
-    );
+      );
 
-    assert.equal(typeof targets.bootstrapProjectId, "string");
-    assert.equal(typeof targets.bootstrapThreadId, "string");
-    const commands = yield* Ref.get(dispatchCalls);
-    assert.deepStrictEqual(
-      commands.map((command) => command.type),
-      ["project.create", "thread.create"],
-    );
-    assert.deepInclude(commands[1], { type: "thread.create", tokenMode: "aggressive" });
-  }),
+      assert.equal(typeof targets.bootstrapProjectId, "string");
+      assert.equal(typeof targets.bootstrapThreadId, "string");
+      const commands = yield* Ref.get(dispatchCalls);
+      assert.deepStrictEqual(
+        commands.map((command) => command.type),
+        ["project.create", "thread.create"],
+      );
+      assert.deepInclude(commands[1], { type: "thread.create", tokenMode: "aggressive" });
+      assert.deepNestedInclude(commands[1], { "modelSelection.model": "gpt-node-default" });
+    }),
 );
 
 it.effect("clears orphaned requests in inactive sessions but preserves live callbacks", () => {
