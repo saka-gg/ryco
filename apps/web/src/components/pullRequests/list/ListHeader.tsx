@@ -1,7 +1,17 @@
-import { ChevronDownIcon, ListFilterIcon, LoaderCircleIcon, SearchIcon, XIcon } from "lucide-react";
+import { WS_METHODS } from "@ryco/contracts";
+import { resolveChangeRequestPresentation } from "@ryco/shared/sourceControl";
+import {
+  ChevronDownIcon,
+  ListFilterIcon,
+  LoaderCircleIcon,
+  PlusIcon,
+  SearchIcon,
+  XIcon,
+} from "lucide-react";
 import { useMemo, useRef, useState, type RefObject } from "react";
 
 import { isElectron } from "../../../env";
+import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
 import { cn } from "../../../lib/utils";
 import {
   Combobox,
@@ -28,6 +38,8 @@ import {
   MenuTrigger,
 } from "../../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../ui/tooltip";
+import { CreatePullRequestDialog } from "../create/CreatePullRequestDialog";
+import type { CreatePullRequestTarget } from "../create/createPullRequestDialogStore";
 import { PULL_REQUESTS_BAR_CLASS, usePullRequestsLeadingInsetClass } from "../PullRequestBar";
 import { KeyHint } from "../primitives";
 import { usePullRequestsPage } from "../PullRequestsPageContext";
@@ -40,8 +52,8 @@ import {
   type PullRequestsStateFilter,
 } from "../pullRequestsSearch";
 import {
+  availablePullRequestOnlyOptions,
   PULL_REQUEST_FILTER_RESET,
-  PULL_REQUEST_ONLY_OPTIONS,
   PULL_REQUEST_SORT_OPTIONS,
   PULL_REQUEST_STATE_OPTIONS,
   pullRequestFilterChips,
@@ -61,7 +73,8 @@ const ICON_BUTTON_CLASS =
 
 /**
  * The list's 52px bar: one search field (led by the repository when there is
- * more than one to choose from) and the filter menu. In the docked and fill
+ * more than one to choose from), the filter menu and, where the host opens
+ * change requests from Ryco, "New pull request". In the docked and fill
  * layouts it owns the window's top-left corner, so it carries the collapsed
  * sidebar inset and the drag region.
  */
@@ -97,7 +110,66 @@ export function ListHeader(props: {
         onFocusRows={props.onFocusRows}
       />
       <FilterMenu />
+      <NewPullRequestButton />
     </header>
+  );
+}
+
+/**
+ * A quiet icon button that opens the create dialog for the page's checkout.
+ * Hidden where the host can't open change requests or the session can't.
+ */
+function NewPullRequestButton() {
+  const { repository, model, nav } = usePullRequestsPage();
+  const allowed = useHostedRpcCapability(WS_METHODS.sourceControlCreateChangeRequest).allowed;
+  const [open, setOpen] = useState(false);
+  const target = useMemo<CreatePullRequestTarget | null>(
+    () =>
+      repository
+        ? {
+            environmentId: repository.environmentId,
+            cwd: repository.cwd,
+            repositoryName: repository.name,
+          }
+        : null,
+    [repository],
+  );
+  if (!target || !allowed || !model.capabilities.create.supported) return null;
+  const label = `New ${resolveChangeRequestPresentation(model.provider).longName}`;
+  const show = (number: number) => {
+    setOpen(false);
+    nav.selectPullRequest(number, { push: true });
+  };
+  return (
+    <>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              aria-label={label}
+              aria-haspopup="dialog"
+              className={ICON_BUTTON_CLASS}
+              onClick={() => setOpen(true)}
+            >
+              <PlusIcon aria-hidden className="size-3.5" />
+            </button>
+          }
+        />
+        <TooltipPopup side="bottom" sideOffset={4}>
+          {label}
+        </TooltipPopup>
+      </Tooltip>
+      <CreatePullRequestDialog
+        open={open}
+        onOpenChange={setOpen}
+        target={target}
+        provider={model.provider}
+        capabilities={model.capabilities}
+        onCreated={(created) => show(created.number)}
+        onOpenExisting={show}
+      />
+    </>
   );
 }
 
@@ -296,9 +368,10 @@ function FilterMenu() {
   const labels = model.list.labels;
   const selectedLabels = new Set(search.label ?? []);
   const active = pullRequestFilterChips(search, labels).length > 0;
-  const onlyOptions = PULL_REQUEST_ONLY_OPTIONS.filter(
-    (option) => !option.needsInvolvement || model.list.involvementSupported,
-  );
+  const onlyOptions = availablePullRequestOnlyOptions({
+    involvementSupported: model.list.involvementSupported,
+    checkRollup: model.capabilities.listCheckRollup,
+  });
   return (
     <Menu>
       <Tooltip>

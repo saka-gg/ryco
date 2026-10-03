@@ -36,6 +36,7 @@ import {
   ArrowLeftIcon,
   ArrowUpIcon,
   BarChart3Icon,
+  GitPullRequestCreateIcon,
   GitPullRequestIcon,
   CircleAlertIcon,
   Columns2Icon,
@@ -53,6 +54,8 @@ import {
   SquarePenIcon,
 } from "lucide-react";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -132,9 +135,11 @@ import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteResults } from "./CommandPaletteResults";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
+import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
 import {
   buildPullRequestRepositoryOptions,
   pullRequestRepositoryQualifier,
+  type PullRequestRepositoryOption,
 } from "./pullRequests/pullRequestRepositories.logic";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
 import {
@@ -393,9 +398,20 @@ function errorMessage(error: unknown): string {
   return "An error occurred.";
 }
 
+// "New pull request…" opens its dialog after the palette closes, so the host
+// lives beside the palette (and loads with the first request).
+const LazyCreatePullRequestDialogHost = lazy(() =>
+  import("./pullRequests/create/CreatePullRequestDialogHost").then((module) => ({
+    default: module.CreatePullRequestDialogHost,
+  })),
+);
+
 export function CommandPaletteDialog() {
   const open = useCommandPaletteStore((store) => store.open);
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
+  const createPullRequestRequested = useCreatePullRequestDialogStore(
+    (store) => store.request !== null,
+  );
 
   useEffect(() => {
     return () => {
@@ -403,7 +419,16 @@ export function CommandPaletteDialog() {
     };
   }, [setOpen]);
 
-  return open ? <OpenCommandPaletteDialog /> : null;
+  return (
+    <>
+      {open ? <OpenCommandPaletteDialog /> : null}
+      {createPullRequestRequested ? (
+        <Suspense fallback={null}>
+          <LazyCreatePullRequestDialogHost />
+        </Suspense>
+      ) : null}
+    </>
+  );
 }
 
 function OpenCommandPaletteDialog() {
@@ -411,6 +436,10 @@ function OpenCommandPaletteDialog() {
   const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
   const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics);
   const pullRequestsCapability = useHostedRpcCapability(WS_METHODS.sourceControlListChangeRequests);
+  const createPullRequestCapability = useHostedRpcCapability(
+    WS_METHODS.sourceControlCreateChangeRequest,
+  );
+  const openCreatePullRequest = useCreatePullRequestDialogStore((store) => store.openFor);
   const navigate = useNavigate();
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const openIntent = useCommandPaletteStore((store) => store.openIntent);
@@ -799,40 +828,77 @@ function OpenCommandPaletteDialog() {
   // One entry per checkout the pull requests page can read, labelled like
   // the page's repository switcher (environment only when checkouts share a name).
   const { snapshots: logicalProjects } = useLogicalProjectSnapshots();
-  const pullRequestRepositoryItems = useMemo<CommandPaletteActionItem[]>(() => {
-    const options = buildPullRequestRepositoryOptions(logicalProjects);
-    const projectByKey = new Map(
-      projects.map((project) => [`${project.environmentId}\0${project.id}`, project] as const),
-    );
-    return options.map((option) => {
-      const environment = pullRequestRepositoryQualifier(option, options);
-      const project = projectByKey.get(`${option.environmentId}\0${option.projectId}`);
-      return {
-        kind: "action",
-        value: `pull-requests-in:${option.environmentId}:${option.projectId}`,
-        searchTerms: [option.name, option.cwd, ...(environment ? [environment] : [])],
-        title: environment ? `${option.name} · ${environment}` : option.name,
-        description: option.cwd,
-        icon: (
-          <ProjectFavicon
-            environmentId={option.environmentId}
-            cwd={option.cwd}
-            projectId={option.projectId}
-            customAvatarContentHash={project?.customAvatarContentHash ?? null}
-            className={ITEM_ICON_CLASS}
-          />
-        ),
-        run: async () => {
-          await navigate(
-            buildPullRequestsPageLocation({
-              environmentId: option.environmentId,
-              projectId: option.projectId,
-            }),
-          );
-        },
-      };
-    });
-  }, [logicalProjects, navigate, projects]);
+  const pullRequestRepositoryOptions = useMemo(
+    () => buildPullRequestRepositoryOptions(logicalProjects),
+    [logicalProjects],
+  );
+  /** One palette row per checkout, as the page's repository switcher labels it. */
+  const buildPullRequestRepositoryItems = useCallback(
+    (
+      valuePrefix: string,
+      run: (option: PullRequestRepositoryOption) => Promise<void>,
+    ): CommandPaletteActionItem[] => {
+      const options = pullRequestRepositoryOptions;
+      const projectByKey = new Map(
+        projects.map((project) => [`${project.environmentId}\0${project.id}`, project] as const),
+      );
+      return options.map((option) => {
+        const environment = pullRequestRepositoryQualifier(option, options);
+        const project = projectByKey.get(`${option.environmentId}\0${option.projectId}`);
+        return {
+          kind: "action",
+          value: `${valuePrefix}:${option.environmentId}:${option.projectId}`,
+          searchTerms: [option.name, option.cwd, ...(environment ? [environment] : [])],
+          title: environment ? `${option.name} · ${environment}` : option.name,
+          description: option.cwd,
+          icon: (
+            <ProjectFavicon
+              environmentId={option.environmentId}
+              cwd={option.cwd}
+              projectId={option.projectId}
+              customAvatarContentHash={project?.customAvatarContentHash ?? null}
+              className={ITEM_ICON_CLASS}
+            />
+          ),
+          run: () => run(option),
+        };
+      });
+    },
+    [projects, pullRequestRepositoryOptions],
+  );
+  const pullRequestRepositoryItems = useMemo(
+    () =>
+      buildPullRequestRepositoryItems("pull-requests-in", async (option) => {
+        await navigate(
+          buildPullRequestsPageLocation({
+            environmentId: option.environmentId,
+            projectId: option.projectId,
+          }),
+        );
+      }),
+    [buildPullRequestRepositoryItems, navigate],
+  );
+  // The create dialog opens over whatever is on screen; the new request then
+  // opens on the pull requests page.
+  const startCreatePullRequest = useCallback(
+    (option: PullRequestRepositoryOption) => {
+      setOpen(false);
+      openCreatePullRequest({
+        environmentId: option.environmentId,
+        projectId: option.projectId,
+        cwd: option.cwd,
+        repositoryName: option.name,
+      });
+    },
+    [openCreatePullRequest, setOpen],
+  );
+  const newPullRequestRepositoryItems = useMemo(
+    () =>
+      buildPullRequestRepositoryItems("new-pull-request-in", async (option) => {
+        startCreatePullRequest(option);
+      }),
+    [buildPullRequestRepositoryItems, startCreatePullRequest],
+  );
 
   const projectThreadItems = useMemo(
     () =>
@@ -1418,6 +1484,44 @@ function OpenCommandPaletteDialog() {
         ],
         ...(pullRequestsCapability.reason ? { description: pullRequestsCapability.reason } : {}),
         disabled: !pullRequestsCapability.allowed,
+      });
+    }
+    // One checkout: straight to the dialog. Several: pick the checkout first.
+    const onlyPullRequestRepository =
+      pullRequestRepositoryOptions.length === 1 ? pullRequestRepositoryOptions[0] : undefined;
+    const newPullRequestCommon = {
+      searchTerms: [
+        "new pull request",
+        "create pull request",
+        "open pull request",
+        "pr",
+        "merge request",
+      ],
+      title: "New pull request…",
+      icon: <GitPullRequestCreateIcon className={ITEM_ICON_CLASS} />,
+      ...(createPullRequestCapability.reason
+        ? { description: createPullRequestCapability.reason }
+        : {}),
+      disabled: !createPullRequestCapability.allowed,
+    };
+    if (onlyPullRequestRepository) {
+      actionItems.push({
+        kind: "action",
+        value: "action:new-pull-request",
+        ...newPullRequestCommon,
+        run: async () => {
+          startCreatePullRequest(onlyPullRequestRepository);
+        },
+      });
+    } else if (newPullRequestRepositoryItems.length > 1) {
+      actionItems.push({
+        kind: "submenu",
+        value: "action:new-pull-request",
+        ...newPullRequestCommon,
+        addonIcon: <GitPullRequestCreateIcon className={ADDON_ICON_CLASS} />,
+        groups: [
+          { value: "repositories", label: "Repositories", items: newPullRequestRepositoryItems },
+        ],
       });
     }
   }
