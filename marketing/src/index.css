@@ -1,20 +1,37 @@
 @import "tailwindcss";
 
 /*
-  Global, version-agnostic base. Each version under src/versions/* owns its own
-  palette, typography and motion — keep this file minimal so the five art
-  directions can diverge as hard as possible.
+  Ryco marketing. One dark canvas, one accent ("ignition" orange), three faces:
+  Archivo (variable width + weight) for kinetic display type, DM Sans (the app's
+  own UI face) for body and the coded product replica, Geist Mono for code.
 */
 
 @theme {
-  --font-sans: "Inter", "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, "SF Mono", Menlo, monospace;
-  --font-display: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-serif: "Instrument Serif", Georgia, "Times New Roman", serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: "Archivo", "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", ui-monospace, Menlo, monospace;
+
+  --color-canvas: #09090a;
+  --color-raise: #111113;
+  --color-ink: #f1f0ec;
+  --color-accent: #ff5c28;
+  --color-accent-ink: #1a0802;
+
+  /* The coded app replica uses the real app's dark tokens. */
+  --color-app: #121213;
+  --color-app-side: #0d0d0e;
+  --color-app-card: #19191b;
+  --color-app-pop: #1f1f21;
+  --color-app-fg: #e4e4e5;
+  --color-app-muted: #9a9aa1;
+  --color-app-indigo: #5b5bf0;
+
+  --ease-ryco: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 :root {
   color-scheme: dark;
+  /* z-index scale: content 0, stage overlays 10, nav 50, grain 60. */
 }
 
 * {
@@ -30,14 +47,149 @@ body,
   width: 100%;
 }
 
-body {
-  background: #0a0a0b;
-  color: #fafafa;
-  font-family: var(--font-sans);
-  overflow-x: hidden;
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+.lenis.lenis-stopped {
+  overflow: clip;
 }
 
-/* Respect reduced-motion globally; version animations should gate on this too. */
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  overflow-x: clip;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+  color: #fff;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-canvas);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  border: 2px solid var(--color-canvas);
+}
+
+/* Display type: Archivo with its width axis exposed to motion. */
+.font-display {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" var(--wdth, 100);
+  font-optical-sizing: auto;
+}
+
+/* Film grain: one static, fixed, non-interactive layer (never on scrolling
+   content, never animated: a moving full-screen layer costs every frame). */
+.grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+/* SplitText line masks: keep descenders inside the clip. */
+.split-line {
+  padding-bottom: 0.08em;
+  margin-bottom: -0.08em;
+}
+
+/* ---------------------------------------------------------------------------
+   Coded product replica (the Stage). Loops here are tiny, CSS-only, and rely
+   on base values so the reduced-motion block below freezes them cleanly.
+   --------------------------------------------------------------------------- */
+.ry-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  translate: 1px 0.2em;
+  background: currentColor;
+  animation: ry-blink 1s steps(1) infinite;
+}
+.ry-block-caret {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.1em;
+  translate: 0 0.2em;
+  background: currentColor;
+  animation: ry-blink 1s steps(1) infinite;
+}
+@keyframes ry-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.ry-spin {
+  animation: ry-spin 0.9s linear infinite;
+}
+@keyframes ry-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+/* "Working" shimmer, the same treatment the app gives in-flight tool rows. */
+.ry-shimmer {
+  background: linear-gradient(
+      100deg,
+      rgba(255, 255, 255, 0.38) 20%,
+      rgba(255, 255, 255, 0.95) 40%,
+      rgba(255, 255, 255, 0.38) 60%
+    )
+    0 0 / 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: ry-shimmer 1.8s linear infinite;
+}
+@keyframes ry-shimmer {
+  from {
+    background-position: 125% 0;
+  }
+  to {
+    background-position: -125% 0;
+  }
+}
+
+.ry-pulse {
+  animation: ry-pulse 2.4s var(--ease-ryco) infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+@keyframes ry-pulse {
+  0% {
+    opacity: 0.55;
+    scale: 1;
+  }
+  70%,
+  100% {
+    opacity: 0;
+    scale: 2.6;
+  }
+}
+
+/* Off-screen loop containers (usePauseOffscreenLoops) freeze in place. */
+[data-idle],
+[data-idle] * {
+  animation-play-state: paused !important;
+}
+
+/* Respect reduced motion globally: every loop above collapses to its base. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -47,152 +199,16 @@ body {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-}
-
-::selection {
-  background: rgba(125, 125, 255, 0.35);
-}
-
-/* Thin, unobtrusive scrollbar shared across versions. */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
-  border-radius: 999px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.24);
-}
-
-/* ==========================================================================
-   v4 "Kinetic" — looping concept-SVG step icons + terminal caret.
-   These rely ONLY on default base values (dashoffset 0, opacity 1, no
-   transform) so the prefers-reduced-motion guard above freezes them to a
-   clean, fully-drawn static state. Nothing is hidden up front.
-   ========================================================================== */
-.ryco-proc .node,
-.ryco-proc .arrow,
-.ryco-proc .play,
-.ryco-proc .orbit {
-  transform-box: fill-box;
-  transform-origin: center;
-}
-/* trace: draw the stroke in and back out, seam-free (alternate) */
-.ryco-proc [data-trace] {
-  stroke-dasharray: var(--len, 120);
-  animation: ryco-proc-trace 3.4s ease-in-out infinite alternate;
-}
-.ryco-install .arrow {
-  animation: ryco-proc-bob 2.6s ease-in-out infinite;
-}
-.ryco-launch .play {
-  animation: ryco-proc-pulse 2.2s ease-in-out infinite;
-}
-.ryco-worktree .node {
-  animation: ryco-proc-pulse 2.6s ease-in-out infinite;
-}
-.ryco-ship .orbit {
-  animation: ryco-proc-spin 9s linear infinite;
-}
-
-@keyframes ryco-proc-trace {
-  from {
-    stroke-dashoffset: var(--len, 120);
-  }
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-@keyframes ryco-proc-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-@keyframes ryco-proc-bob {
-  0%,
-  100% {
-    transform: translateY(-3px);
-  }
-  50% {
-    transform: translateY(3px);
-  }
-}
-@keyframes ryco-proc-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* v4 toolkit — always-on feature icons. Same base-value contract as above, so
-   the reduced-motion guard freezes them fully drawn. */
-.ryco-feat .pulse,
-.ryco-feat .scan {
-  transform-box: fill-box;
-  transform-origin: center;
-}
-.ryco-feat [data-trace] {
-  stroke-dasharray: var(--len, 120);
-  animation: ryco-proc-trace 3.2s ease-in-out infinite alternate;
-}
-.ryco-feat .pulse {
-  animation: ryco-proc-pulse 2.4s ease-in-out infinite;
-}
-.ryco-feat .blink {
-  animation: ryco-caret-blink 1.1s steps(1) infinite;
-}
-.ryco-feat .scan {
-  animation: ryco-feat-scan 3s ease-in-out infinite;
-}
-.ryco-feat .flow {
-  stroke-dasharray: 4 9;
-  animation: ryco-feat-flow 1.4s linear infinite;
-}
-@keyframes ryco-feat-scan {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(15px);
-  }
-}
-@keyframes ryco-feat-flow {
-  to {
-    stroke-dashoffset: -26;
-  }
-}
-
-/* Blinking caret for the kinetic terminal. */
-.ryco-caret {
-  display: inline-block;
-  width: 0.55em;
-  height: 1.05em;
-  translate: 0 0.18em;
-  background: currentColor;
-  animation: ryco-caret-blink 1.05s steps(1) infinite;
-}
-@keyframes ryco-caret-blink {
-  50% {
+  .ry-pulse {
     opacity: 0;
   }
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .changelog-intro {
-    animation: changelog-enter 700ms cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-
-  .changelog-visual {
-    animation: changelog-enter 850ms 100ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation: changelog-enter 700ms var(--ease-ryco) both;
   }
 }
-
 @keyframes changelog-enter {
   from {
     opacity: 0;

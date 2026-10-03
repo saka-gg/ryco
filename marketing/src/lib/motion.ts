@@ -1,115 +1,131 @@
 /**
- * Shared motion helpers. Versions may use these or roll their own — they exist
- * so common patterns (scroll reveal, parallax, GSAP context cleanup) are not
- * reimplemented five times. All helpers no-op under prefers-reduced-motion.
+ * The motion kernel: one GSAP registration, the house eases, a scoped-context
+ * hook, a reduced-motion hook, and Lenis smooth scroll wired into the GSAP
+ * ticker so ScrollTrigger and the smoothed scroll never disagree on a frame.
+ *
+ * Every hook here no-ops under prefers-reduced-motion; components render their
+ * settled state up front and only *animate from* it, so nothing is ever hidden
+ * when motion is off.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { SplitText } from "gsap/SplitText";
+import { DrawSVGPlugin } from "gsap/DrawSVGPlugin";
+import { CustomEase } from "gsap/CustomEase";
+import { ScrambleTextPlugin } from "gsap/ScrambleTextPlugin";
+import { Flip } from "gsap/Flip";
+import Lenis from "lenis";
 
-gsap.registerPlugin(ScrollTrigger);
+gsap.registerPlugin(ScrollTrigger, SplitText, DrawSVGPlugin, CustomEase, ScrambleTextPlugin, Flip);
+
+/* The Ryco app's own house curve (--app-motion-ease), so the site and the
+   product move with the same hand. */
+CustomEase.create("ryco", "0.16, 1, 0.3, 1");
+CustomEase.create("ryco.inOut", "0.76, 0, 0.24, 1");
+gsap.defaults({ ease: "ryco", duration: 0.9 });
 
 export const prefersReducedMotion = () =>
   typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/** Live reduced-motion preference (re-renders if the OS setting flips). */
+export function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(prefersReducedMotion);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const on = () => setReduced(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return reduced;
+}
+
+const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
 /**
- * Run GSAP code inside a scoped context bound to a container ref. The callback
- * receives the gsap instance; everything is reverted automatically on unmount.
+ * Run GSAP setup inside a context scoped to the returned ref. Everything the
+ * callback creates (tweens, ScrollTriggers, SplitTexts) is reverted on unmount.
+ * Skipped entirely under reduced motion.
  */
-export function useGsapContext(
-  setup: (ctx: { gsap: typeof gsap; ScrollTrigger: typeof ScrollTrigger }) => void,
+export function useGsap<T extends HTMLElement = HTMLDivElement>(
+  setup: (scope: T) => void | (() => void),
   deps: ReadonlyArray<unknown> = [],
 ) {
-  const scope = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (prefersReducedMotion()) return;
-    const ctx = gsap.context(() => setup({ gsap, ScrollTrigger }), scope);
-    return () => ctx.revert();
+  const scope = useRef<T>(null);
+  useIsoLayoutEffect(() => {
+    const el = scope.current;
+    if (!el || prefersReducedMotion()) return;
+    let cleanup: void | (() => void);
+    const ctx = gsap.context(() => {
+      cleanup = setup(el);
+    }, el);
+    return () => {
+      cleanup?.();
+      ctx.revert();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
   return scope;
 }
 
-/**
- * Pointer-driven 3D tilt. Every `[data-tilt]` element inside the scope leans
- * toward the cursor on a perspective plane and eases back on leave; an optional
- * `[data-glare]` child gets a soft highlight that tracks the pointer. Per-element
- * strength via `data-tilt-max` (degrees). No-ops for coarse pointers and reduced
- * motion, so touch + accessibility users just get the flat card.
- */
-export function useTilt(scopeRef: React.RefObject<HTMLElement | null>, selector = "[data-tilt]") {
+/* ------------------------------ smooth scroll ------------------------------ */
+
+let lenis: Lenis | null = null;
+export const getLenis = () => lenis;
+
+/** Mount once at the page root. Native scroll under reduced motion. */
+export function useSmoothScroll() {
   useEffect(() => {
     if (prefersReducedMotion()) return;
-    if (window.matchMedia("(pointer: coarse)").matches) return;
-    const root = scopeRef.current;
-    if (!root) return;
-
-    const cleanups: Array<() => void> = [];
-    root.querySelectorAll<HTMLElement>(selector).forEach((el) => {
-      const max = Number(el.dataset.tiltMax ?? 8);
-      const glare = el.querySelector<HTMLElement>("[data-glare]");
-      gsap.set(el, { transformPerspective: 900, transformStyle: "preserve-3d" });
-      const rotX = gsap.quickTo(el, "rotationX", { duration: 0.6, ease: "power3" });
-      const rotY = gsap.quickTo(el, "rotationY", { duration: 0.6, ease: "power3" });
-
-      const move = (e: PointerEvent) => {
-        const r = el.getBoundingClientRect();
-        const px = (e.clientX - r.left) / r.width - 0.5; // -0.5 … 0.5
-        const py = (e.clientY - r.top) / r.height - 0.5;
-        rotY(px * max * 2);
-        rotX(-py * max * 2);
-        if (glare) {
-          glare.style.setProperty("--gx", `${(px + 0.5) * 100}%`);
-          glare.style.setProperty("--gy", `${(py + 0.5) * 100}%`);
-        }
-      };
-      const enter = () => {
-        gsap.to(el, { scale: 1.015, duration: 0.5, ease: "power3" });
-        if (glare) gsap.to(glare, { opacity: 1, duration: 0.4 });
-      };
-      const leave = () => {
-        rotX(0);
-        rotY(0);
-        gsap.to(el, { scale: 1, duration: 0.6, ease: "power3" });
-        if (glare) gsap.to(glare, { opacity: 0, duration: 0.5 });
-      };
-
-      el.addEventListener("pointerenter", enter);
-      el.addEventListener("pointermove", move);
-      el.addEventListener("pointerleave", leave);
-      cleanups.push(() => {
-        el.removeEventListener("pointerenter", enter);
-        el.removeEventListener("pointermove", move);
-        el.removeEventListener("pointerleave", leave);
-        gsap.set(el, { clearProps: "transform" });
-      });
+    const instance = new Lenis({
+      lerp: 0.1,
+      wheelMultiplier: 1,
+      anchors: { offset: -72 },
     });
-    return () => cleanups.forEach((c) => c());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeRef, selector]);
+    lenis = instance;
+    instance.on("scroll", ScrollTrigger.update);
+    const tick = (time: number) => instance.raf(time * 1000);
+    /* first in the tick: scroll before any tween dirties layout, so Lenis's
+       scrollTo never forces a synchronous layout flush */
+    gsap.ticker.add(tick, false, true);
+    gsap.ticker.lagSmoothing(0);
+    return () => {
+      gsap.ticker.remove(tick);
+      instance.destroy();
+      lenis = null;
+    };
+  }, []);
 }
 
 /**
- * Reveal children matching `selector` on scroll with a staggered rise.
+ * CSS loops (spinners, carets, relay dashes) keep invalidating layers every
+ * frame even when nobody can see them. Every `[data-loops]` element gets
+ * `data-idle` while it is off screen, which pauses all animations inside it
+ * (see index.css). Starts idle, so nothing ticks until it scrolls into view.
  */
-export function useScrollReveal(
-  selector = "[data-reveal]",
-  opts: { y?: number; stagger?: number; duration?: number } = {},
-) {
-  return useGsapContext(({ gsap }) => {
-    const { y = 28, stagger = 0.08, duration = 0.8 } = opts;
-    const els = gsap.utils.toArray<HTMLElement>(selector);
+export function usePauseOffscreenLoops() {
+  useEffect(() => {
+    const els = document.querySelectorAll<HTMLElement>("[data-loops]");
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) e.target.toggleAttribute("data-idle", !e.isIntersecting);
+      },
+      { rootMargin: "120px 0px" },
+    );
     els.forEach((el) => {
-      gsap.from(el, {
-        opacity: 0,
-        y,
-        duration,
-        ease: "power3.out",
-        stagger,
-        scrollTrigger: { trigger: el, start: "top 85%", once: true },
-      });
+      el.setAttribute("data-idle", "");
+      io.observe(el);
     });
-  });
+    return () => io.disconnect();
+  }, []);
 }
 
-export { gsap, ScrollTrigger };
+/** Scroll to an in-page anchor through Lenis when it's running. */
+export function scrollToId(id: string) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (lenis) lenis.scrollTo(el, { offset: -72 });
+  else el.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth" });
+}
+
+export { gsap, ScrollTrigger, SplitText, Flip };
