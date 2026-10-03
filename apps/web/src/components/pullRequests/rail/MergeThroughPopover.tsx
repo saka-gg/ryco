@@ -1,5 +1,3 @@
-import { Radio as RadioPrimitive } from "@base-ui/react/radio";
-import { RadioGroup as RadioGroupPrimitive } from "@base-ui/react/radio-group";
 import type {
   SourceControlChangeRequestMergeMethod,
   SourceControlChangeRequestStack,
@@ -12,9 +10,10 @@ import { pullRequestMergeConfirmation } from "../../projectExplorer/pullRequestS
 import { Button } from "../../ui/button";
 import { Checkbox } from "../../ui/checkbox";
 import { Popover, PopoverDescription, PopoverPopup, PopoverTitle } from "../../ui/popover";
+import { rovingRadioGroup } from "../../ui/roving-radio-group";
 import { Spinner } from "../../ui/spinner";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
-import { usePullRequestSelection } from "../PullRequestsPageContext";
+import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import { FACT_TONE_TEXT } from "./FactGlyph";
 import { isHeadMovedError, MERGE_METHOD_LABEL, mergeMethodOptions } from "./mergeFacts.logic";
 import { StackBaseFoot, SpineCell, StackMark, useStackSpine } from "./StackLayerList";
@@ -82,6 +81,7 @@ function MergeThroughForm(props: {
 }) {
   const model = useMergeModel();
   const selection = usePullRequestSelection();
+  const { capabilities } = usePullRequestsPage().model;
   const stack = model?.detail.stack ?? null;
   const [picked, setPicked] = useState<number | null>(() =>
     stack ? defaultMergeThroughLayer(stack, props.initialThrough ?? selection.number) : null,
@@ -117,15 +117,31 @@ function MergeThroughForm(props: {
         })
       : null;
   const blocked = plan === null || plan.blocker !== null || count === 0;
+  // Merged layers are shown on the spine but are not choices.
+  const layerPlans = new Map(
+    spine.rows
+      .filter(({ entry }) => entry.state !== "merged")
+      .map(({ entry }) => [entry.number, stackMergeThroughPlan(stack, entry.number)] as const),
+  );
+  const layerGroup = rovingRadioGroup({
+    options: [...layerPlans].map(([number, layerPlan]) => ({
+      value: String(number),
+      disabled: layerPlan.blocker !== null,
+    })),
+    value: through === null ? null : String(through),
+    onChange: (value) => setPicked(Number(value)),
+  });
 
   const submit = async () => {
     if (blocked || throughEntry === null) return;
     try {
       const result = await merge.mutateAsync({
         mergeMethod: method,
-        deleteBranch: deleteBranches,
+        ...(capabilities.merge.deleteBranch ? { deleteBranch: deleteBranches } : {}),
         // Only the selected layer's head is known here; other layers merge as the host sees them.
-        ...(throughEntry.number === selection.number ? { expectedHeadSha: selection.headSha } : {}),
+        ...(throughEntry.number === selection.number && capabilities.merge.expectedHeadSha
+          ? { expectedHeadSha: selection.headSha }
+          : {}),
       });
       if (result.outcome === "enqueued") {
         toastManager.add(
@@ -163,16 +179,15 @@ function MergeThroughForm(props: {
           Merge into <span className="font-mono text-xs">{stack.baseRefName}</span>
         </PopoverTitle>
       </div>
-      <RadioGroupPrimitive
+      <div
+        role="radiogroup"
         aria-label="Merge through"
-        value={through === null ? "" : String(through)}
-        onValueChange={(value) => setPicked(Number(value))}
         className="flex flex-col px-2"
+        onKeyDown={layerGroup.onKeyDown}
       >
         {spine.rows.map(({ entry, above, below }) => {
           const word = stackLayerWord(entry);
-          const layerPlan =
-            entry.state === "merged" ? null : stackMergeThroughPlan(stack, entry.number);
+          const layerPlan = layerPlans.get(entry.number) ?? null;
           const reason = layerPlan?.blocker ?? null;
           const disabled = entry.state === "merged" || reason !== null;
           // The state word already explains a layer that blocks itself; a
@@ -221,33 +236,36 @@ function MergeThroughForm(props: {
               {entry.state === "merged" ? (
                 <span className="size-3.5 shrink-0" />
               ) : (
-                <RadioPrimitive.Root
-                  value={String(entry.number)}
-                  disabled={disabled}
+                <button
+                  {...layerGroup.radio(String(entry.number))}
                   aria-label={`Merge through #${entry.number}`}
                   className="relative inline-flex size-3.5 shrink-0 items-center justify-center rounded-full border border-input bg-background outline-none transition-colors duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring data-checked:border-foreground data-disabled:opacity-40"
                 >
-                  <RadioPrimitive.Indicator className="block size-1.5 rounded-full bg-foreground data-unchecked:hidden" />
-                </RadioPrimitive.Root>
+                  {checked ? (
+                    <span aria-hidden className="block size-1.5 rounded-full bg-foreground" />
+                  ) : null}
+                </button>
               )}
             </label>
           );
         })}
         <StackBaseFoot baseRefName={stack.baseRefName} above={spine.footAbove} />
-      </RadioGroupPrimitive>
+      </div>
       <div className="mt-2 flex flex-col gap-3 border-t border-border/60 px-4 pt-3 pb-4">
         <MethodSegment
           value={method}
-          options={mergeMethodOptions(model.detail)}
+          options={mergeMethodOptions(model.detail, capabilities.merge.methods)}
           onChange={model.setMethod}
         />
-        <label className="flex cursor-pointer items-center gap-2 text-xs text-foreground/85">
-          <Checkbox
-            checked={deleteBranches}
-            onCheckedChange={(checked) => setDeleteBranches(checked === true)}
-          />
-          Delete merged branches
-        </label>
+        {capabilities.merge.deleteBranch ? (
+          <label className="flex cursor-pointer items-center gap-2 text-xs text-foreground/85">
+            <Checkbox
+              checked={deleteBranches}
+              onCheckedChange={(checked) => setDeleteBranches(checked === true)}
+            />
+            Delete merged branches
+          </label>
+        ) : null}
         {confirmation ? (
           <PopoverDescription className="text-xs leading-relaxed text-muted-foreground">
             {plan?.blocker ?? confirmation.description}
@@ -274,19 +292,28 @@ function MethodSegment(props: {
   readonly options: ReturnType<typeof mergeMethodOptions>;
   readonly onChange: (method: SourceControlChangeRequestMergeMethod) => void;
 }) {
+  const group = rovingRadioGroup({
+    options: props.options.map((option) => ({
+      value: option.method,
+      disabled: option.disabledReason !== null,
+    })),
+    value: props.value,
+    onChange: props.onChange,
+  });
   return (
-    <div role="radiogroup" aria-label="Merge method" className="flex items-center gap-0.5">
+    <div
+      role="radiogroup"
+      aria-label="Merge method"
+      className="flex items-center gap-0.5"
+      onKeyDown={group.onKeyDown}
+    >
       {props.options.map((option) => {
         const selected = option.method === props.value;
         return (
           <button
             key={option.method}
-            type="button"
-            role="radio"
-            aria-checked={selected}
-            disabled={option.disabledReason !== null}
+            {...group.radio(option.method)}
             title={option.disabledReason ?? MERGE_METHOD_LABEL[option.method]}
-            onClick={() => props.onChange(option.method)}
             className={cn(
               "h-6 rounded-md px-2 text-xs outline-hidden transition-colors duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-45",
               selected

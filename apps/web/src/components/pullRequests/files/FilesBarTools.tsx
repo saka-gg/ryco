@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 
 import { useDiffLayout, type DiffRenderMode } from "../../../hooks/useDiffLayout";
 import { cn } from "../../../lib/utils";
+import { rovingRadioGroup, type RovingRadioOption } from "../../ui/roving-radio-group";
 import {
   Menu,
   MenuCheckboxItem,
@@ -37,6 +38,10 @@ import {
 } from "./pullRequestFilesStore";
 
 const ALL_COMMITS = "__all__";
+const DIFF_LAYOUT_OPTIONS: ReadonlyArray<RovingRadioOption<DiffRenderMode>> = [
+  { value: "stacked" },
+  { value: "split" },
+];
 /**
  * Off Conversation the bar also carries the stack chip and the next action,
  * so the Files tools fold into "View" before the bar's own compact width.
@@ -70,8 +75,10 @@ function ToolTooltip(props: {
  * "View" menu so the bar keeps a single line.
  */
 export function FilesBarTools() {
-  const { layout, nav } = usePullRequestsPage();
+  const { layout, nav, model } = usePullRequestsPage();
   const selection = usePullRequestSelection();
+  // Without single-commit diffs there is no commit scope to pick.
+  const scopable = model.capabilities.commitDiffs;
   const commits = selection.detail.data?.commits ?? [];
   const commitSha = nav.search.commit ?? null;
   const [diffLayout, setDiffLayout] = useDiffLayout();
@@ -82,7 +89,7 @@ export function FilesBarTools() {
   const scope = (sha: string | null) => nav.scopeToCommit(sha ?? undefined);
   const toggleLayout = () => setDiffLayout(diffLayout === "split" ? "stacked" : "split");
 
-  usePullRequestsShortcut("c", () => setMenuOpen(true), { tab: "files" });
+  usePullRequestsShortcut("c", () => setMenuOpen(true), { tab: "files", enabled: scopable });
   usePullRequestsShortcut("u", toggleLayout, { tab: "files" });
   usePullRequestsShortcut("f", () => toggleFileTree(layout.treeDocked), { tab: "files" });
 
@@ -91,6 +98,7 @@ export function FilesBarTools() {
       <ViewMenu
         open={menuOpen}
         onOpenChange={setMenuOpen}
+        scopable={scopable}
         commits={commits}
         commitSha={commitSha}
         onScope={scope}
@@ -102,24 +110,34 @@ export function FilesBarTools() {
     );
   }
 
+  const layoutGroup = rovingRadioGroup<DiffRenderMode>({
+    options: DIFF_LAYOUT_OPTIONS,
+    value: diffLayout === "split" ? "split" : "stacked",
+    onChange: setDiffLayout,
+  });
+
   return (
     <div className="flex items-center gap-0.5">
-      <CommitScopeMenu
-        open={menuOpen}
-        onOpenChange={setMenuOpen}
-        commits={commits}
-        commitSha={commitSha}
-        onScope={scope}
-      />
-      <div role="radiogroup" aria-label="Diff layout" className="flex items-center">
+      {scopable ? (
+        <CommitScopeMenu
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          commits={commits}
+          commitSha={commitSha}
+          onScope={scope}
+        />
+      ) : null}
+      <div
+        role="radiogroup"
+        aria-label="Diff layout"
+        className="flex items-center"
+        onKeyDown={layoutGroup.onKeyDown}
+      >
         <ToolTooltip label="Unified" shortcut="U">
           <button
-            type="button"
-            role="radio"
-            aria-checked={diffLayout !== "split"}
+            {...layoutGroup.radio("stacked")}
             aria-label="Unified diff"
             data-pressed={diffLayout !== "split"}
-            onClick={() => setDiffLayout("stacked")}
             className={TOOL_BUTTON_CLASS}
           >
             <Rows2Icon className="size-3.5" />
@@ -127,12 +145,9 @@ export function FilesBarTools() {
         </ToolTooltip>
         <ToolTooltip label="Split" shortcut="U">
           <button
-            type="button"
-            role="radio"
-            aria-checked={diffLayout === "split"}
+            {...layoutGroup.radio("split")}
             aria-label="Split diff"
             data-pressed={diffLayout === "split"}
-            onClick={() => setDiffLayout("split")}
             className={TOOL_BUTTON_CLASS}
           >
             <Columns2Icon className="size-3.5" />
@@ -259,6 +274,8 @@ function CommitRadioItems(props: {
 function ViewMenu(props: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
+  /** The host serves single-commit diffs (the commit submenu exists). */
+  readonly scopable: boolean;
   readonly commits: ReadonlyArray<SourceControlChangeRequestCommit>;
   readonly commitSha: string | null;
   readonly onScope: (sha: string | null) => void;
@@ -297,21 +314,25 @@ function ViewMenu(props: {
         </TooltipPopup>
       </Tooltip>
       <MenuPopup align="end" className="min-w-56">
-        <MenuSub>
-          <MenuSubTrigger>
-            <GitCommitHorizontalIcon aria-hidden />
-            <span className="flex-1">{scoped ? scoped.shortOid : "All commits"}</span>
-            <MenuShortcut>C</MenuShortcut>
-          </MenuSubTrigger>
-          <MenuSubPopup className="w-[20rem] max-w-[calc(100vw-2rem)]">
-            <CommitRadioItems
-              commits={props.commits}
-              commitSha={props.commitSha}
-              onScope={props.onScope}
-            />
-          </MenuSubPopup>
-        </MenuSub>
-        <MenuSeparator />
+        {props.scopable ? (
+          <>
+            <MenuSub>
+              <MenuSubTrigger>
+                <GitCommitHorizontalIcon aria-hidden />
+                <span className="flex-1">{scoped ? scoped.shortOid : "All commits"}</span>
+                <MenuShortcut>C</MenuShortcut>
+              </MenuSubTrigger>
+              <MenuSubPopup className="w-[20rem] max-w-[calc(100vw-2rem)]">
+                <CommitRadioItems
+                  commits={props.commits}
+                  commitSha={props.commitSha}
+                  onScope={props.onScope}
+                />
+              </MenuSubPopup>
+            </MenuSub>
+            <MenuSeparator />
+          </>
+        ) : null}
         <MenuGroup>
           <MenuGroupLabel>Layout</MenuGroupLabel>
           <MenuRadioGroup
