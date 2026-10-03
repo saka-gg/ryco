@@ -10,6 +10,7 @@ import { SOURCE_CONTROL_DETAIL_BODY_MAX_BYTES } from "@ryco/contracts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 import { parseGitHubAuthStatus } from "./gitHubAuthStatus.ts";
+import type * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubSourceControlProvider from "./GitHubSourceControlProvider.ts";
 
 const processResult = (
@@ -48,6 +49,13 @@ function makeProvider(github: Partial<GitHubCli.GitHubCliShape>) {
             Effect.fail(
               new GitHubCli.GitHubCliError({
                 operation: "getRepositoryMergeCapabilities",
+                detail: "not configured in this test",
+              }),
+            ),
+          getPullRequestRequiredChecks: () =>
+            Effect.fail(
+              new GitHubCli.GitHubCliError({
+                operation: "getPullRequestRequiredChecks",
                 detail: "not configured in this test",
               }),
             ),
@@ -846,6 +854,109 @@ it.effect("keeps core detail readable when stack metadata lookup fails", () =>
       squash: false,
       rebase: false,
     });
+  }),
+);
+
+const rollupItem = (
+  kind: "check-run" | "status-context",
+  name: string,
+  url: string,
+): GitHubPullRequests.NormalizedGitHubCheckRollupItem => ({
+  kind,
+  name,
+  status: Option.some("COMPLETED"),
+  conclusion: Option.some("FAILURE"),
+  url: Option.some(url),
+  startedAt: Option.none(),
+  completedAt: Option.none(),
+});
+
+const detailWithChecks = {
+  ...githubPullRequestDetail,
+  headSha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+  checkRollup: [
+    rollupItem("check-run", "Typecheck", "https://github.com/owner/repo/actions/runs/1/job/11"),
+    rollupItem("check-run", "Bundle", "https://github.com/owner/repo/actions/runs/1/job/12"),
+    rollupItem("status-context", "deploy/preview", "https://deploy.example.com/42"),
+  ],
+} satisfies GitHubCli.GitHubPullRequestDetail;
+
+it.effect("marks the detail's required checks on the head commit", () =>
+  Effect.gen(function* () {
+    let requiredInput:
+      | Parameters<GitHubCli.GitHubCliShape["getPullRequestRequiredChecks"]>[0]
+      | null = null;
+    const provider = yield* makeProvider({
+      getPullRequestDetail: () => Effect.succeed(detailWithChecks),
+      getPullRequestRequiredChecks: (input) => {
+        requiredInput = input;
+        return Effect.succeed([
+          {
+            kind: "check-run",
+            name: "Typecheck",
+            url: "https://github.com/owner/repo/actions/runs/1/job/11",
+            isRequired: true,
+          },
+          {
+            kind: "check-run",
+            name: "Bundle",
+            url: "https://github.com/owner/repo/actions/runs/1/job/12",
+            isRequired: false,
+          },
+        ]);
+      },
+    });
+
+    const detail = yield* provider.getChangeRequestDetail({ cwd: "/repo", reference: "42" });
+    assert.deepStrictEqual(requiredInput, {
+      cwd: "/repo",
+      host: "github.com",
+      repository: "owner/repo",
+      number: 42,
+      headSha: detailWithChecks.headSha,
+    });
+    assert.deepStrictEqual(
+      detail.checkRollup?.map((item) => [item.name, item.isRequired]),
+      [
+        ["Typecheck", true],
+        ["Bundle", false],
+        // Not in the lookup: unknown, not optional.
+        ["deploy/preview", undefined],
+      ],
+    );
+  }),
+);
+
+it.effect("leaves checks unmarked when the required-checks lookup fails", () =>
+  Effect.gen(function* () {
+    const provider = yield* makeProvider({
+      getPullRequestDetail: () => Effect.succeed(detailWithChecks),
+    });
+    const detail = yield* provider.getChangeRequestDetail({ cwd: "/repo", reference: "42" });
+    assert.equal(detail.checkRollup?.length, 3);
+    assert.isTrue(detail.checkRollup?.every((item) => item.isRequired === undefined));
+  }),
+);
+
+it.effect("skips the required-checks lookup without checks or a head", () =>
+  Effect.gen(function* () {
+    let lookups = 0;
+    const { headSha: _headSha, ...detailWithoutHead } = detailWithChecks;
+    const provider = yield* makeProvider({
+      getPullRequestDetail: (input) =>
+        Effect.succeed(
+          input.reference === "42"
+            ? { ...githubPullRequestDetail, headSha: "a1b2c3d4e5f6" }
+            : detailWithoutHead,
+        ),
+      getPullRequestRequiredChecks: () => {
+        lookups += 1;
+        return Effect.succeed([]);
+      },
+    });
+    yield* provider.getChangeRequestDetail({ cwd: "/repo", reference: "42" });
+    yield* provider.getChangeRequestDetail({ cwd: "/repo", reference: "43" });
+    assert.equal(lookups, 0);
   }),
 );
 

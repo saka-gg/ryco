@@ -48,6 +48,7 @@ import * as GitHubPullRequestActivity from "./gitHubPullRequestActivity.ts";
 import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubPullRequestStacks from "./gitHubPullRequestStacks.ts";
+import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
 import {
   decodeGitHubReactionGroupsBySubjectJson,
   formatGitHubReactionGroupsDecodeError,
@@ -290,6 +291,18 @@ export interface GitHubCliShape {
     readonly repository: string;
     readonly host: string;
   }) => Effect.Effect<GitHubRepositoryMergeCapabilities, GitHubCliError>;
+
+  /** Which checks on `headSha` the pull request's base branch requires (paged, bounded). */
+  readonly getPullRequestRequiredChecks: (input: {
+    readonly cwd: string;
+    readonly repository: string;
+    readonly host: string;
+    readonly number: number;
+    readonly headSha: string;
+  }) => Effect.Effect<
+    ReadonlyArray<GitHubRequiredChecks.NormalizedGitHubRequiredCheck>,
+    GitHubCliError
+  >;
 
   readonly mergePullRequestAsync: (input: {
     readonly cwd: string;
@@ -1551,6 +1564,57 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       ),
     );
 
+  const getPullRequestRequiredChecks: GitHubCliShape["getPullRequestRequiredChecks"] = (input) =>
+    Effect.gen(function* () {
+      const operation = "getPullRequestRequiredChecks";
+      const parts = repositoryParts(input.repository);
+      if (!parts) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: "GitHub repository must be in owner/repository form.",
+        });
+      }
+      const checks: GitHubRequiredChecks.NormalizedGitHubRequiredCheck[] = [];
+      const seenCursors = new Set<string>();
+      let after: string | null = null;
+      for (let page = 0; page < GitHubRequiredChecks.GITHUB_REQUIRED_CHECKS_MAX_PAGES; page += 1) {
+        const result: VcsProcess.VcsProcessOutput = yield* execute({
+          cwd: input.cwd,
+          args: [
+            "api",
+            "graphql",
+            "--hostname",
+            input.host,
+            "-f",
+            `query=${GitHubRequiredChecks.GITHUB_REQUIRED_CHECKS_QUERY}`,
+            "-f",
+            `owner=${parts.owner}`,
+            "-f",
+            `repo=${parts.name}`,
+            "-F",
+            `number=${input.number}`,
+            "-f",
+            `oid=${input.headSha}`,
+            "-F",
+            `first=${GitHubRequiredChecks.GITHUB_REQUIRED_CHECKS_PAGE_SIZE}`,
+            ...(after ? ["-f", `after=${after}`] : []),
+          ],
+        });
+        const decoded: GitHubRequiredChecks.DecodedGitHubRequiredChecksPage =
+          yield* githubResultOrError(
+            GitHubRequiredChecks.decodeGitHubRequiredChecksPageJson(result.stdout.trim()),
+            operation,
+          );
+        checks.push(...decoded.checks);
+        const cursor = decoded.endCursor;
+        // Past the last page (or a cursor GitHub repeats), the rest stay unmarked.
+        if (!decoded.hasNextPage || !cursor || seenCursors.has(cursor)) break;
+        seenCursors.add(cursor);
+        after = cursor;
+      }
+      return checks;
+    });
+
   const mergePullRequestAsync: GitHubCliShape["mergePullRequestAsync"] = (input) =>
     Effect.gen(function* () {
       const endpoint = `repos/${input.repository}/pulls/${input.number}/merge-async`;
@@ -2389,6 +2453,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     getPullRequestStack,
     getPullRequestStackSummaries,
     getRepositoryMergeCapabilities,
+    getPullRequestRequiredChecks,
     mergePullRequestAsync,
     deleteBranch,
     getPullRequestTarget,

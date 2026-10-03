@@ -30,6 +30,8 @@ export interface NormalizedGitHubCheckRollupItem {
   readonly url: Option.Option<string>;
   readonly startedAt: Option.Option<DateTime.Utc>;
   readonly completedAt: Option.Option<DateTime.Utc>;
+  /** Set by the detail's required-checks lookup (`gitHubRequiredChecks.ts`), never by `gh pr`. */
+  readonly isRequired?: boolean;
 }
 
 export interface NormalizedGitHubPullRequestRecord {

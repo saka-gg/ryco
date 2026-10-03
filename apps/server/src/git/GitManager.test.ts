@@ -674,6 +674,10 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
         Effect.fail(
           new GitHubCliError({ operation: "getRepositoryMergeCapabilities", detail: "stub" }),
         ),
+      getPullRequestRequiredChecks: () =>
+        Effect.fail(
+          new GitHubCliError({ operation: "getPullRequestRequiredChecks", detail: "stub" }),
+        ),
       mergePullRequestAsync: () =>
         Effect.fail(new GitHubCliError({ operation: "mergePullRequestAsync", detail: "stub" })),
       getPullRequestDiff: () =>

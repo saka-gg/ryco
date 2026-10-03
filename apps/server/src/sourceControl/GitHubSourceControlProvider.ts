@@ -34,6 +34,7 @@ import {
 import * as GitHubIssues from "./gitHubIssues.ts";
 import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
+import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import { withSourceControlBodyFile } from "./sourceControlBodyFile.ts";
 export { githubDiscovery as discovery } from "./SourceControlProviderDiscoveryCatalog.ts";
@@ -502,6 +503,33 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       );
     };
 
+  /**
+   * Which rollup checks are required, read on the head the rollup describes.
+   * Skipped without checks to mark; a failed lookup leaves every check
+   * unmarked (unknown, which is not the same as optional).
+   */
+  const readRequiredChecks = (input: {
+    readonly cwd: string;
+    readonly host: string;
+    readonly repository: string;
+    readonly detail: GitHubCli.GitHubPullRequestDetail;
+  }): Effect.Effect<ReadonlyArray<GitHubRequiredChecks.NormalizedGitHubRequiredCheck>> => {
+    const { detail } = input;
+    const headSha = detail.headSha;
+    if (!headSha || !detail.checkRollup || detail.checkRollup.length === 0) {
+      return Effect.succeed([]);
+    }
+    return invokeGitHubEffect("getPullRequestRequiredChecks", () =>
+      github.getPullRequestRequiredChecks({
+        cwd: input.cwd,
+        host: input.host,
+        repository: input.repository,
+        number: detail.number,
+        headSha,
+      }),
+    ).pipe(Effect.orElseSucceed(() => []));
+  };
+
   const getChangeRequestDetail: SourceControlProvider.SourceControlProviderShape["getChangeRequestDetail"] =
     (input) =>
       Effect.gen(function* () {
@@ -539,13 +567,27 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
                 onFailure: () => ({ ok: false as const }),
               }),
             ),
+            requiredChecks: readRequiredChecks({
+              cwd: input.cwd,
+              host: identity.host,
+              repository: identity.nameWithOwner,
+              detail: raw,
+            }),
           },
-          { concurrency: 2 },
+          { concurrency: 3 },
         );
         const stack = enhancements.stack.ok ? enhancements.stack.value : null;
         const capabilities = enhancements.capabilities.ok ? enhancements.capabilities.value : null;
         return {
           ...detail,
+          ...(detail.checkRollup && enhancements.requiredChecks.length > 0
+            ? {
+                checkRollup: GitHubRequiredChecks.applyGitHubRequiredChecks(
+                  detail.checkRollup,
+                  enhancements.requiredChecks,
+                ),
+              }
+            : {}),
           ...(stack ? { stack } : {}),
           stackMetadataIncomplete: !enhancements.stack.ok,
           ...(capabilities
