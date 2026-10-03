@@ -41,7 +41,7 @@ export function PullRequestTimeline(props: {
   const selection = usePullRequestSelection();
   const activity = selection.activity;
 
-  if (!model.supportsReview) return <DetailCommentsTimeline />;
+  if (!model.capabilities.activity) return <DetailCommentsTimeline />;
   if (activity.data) {
     return (
       <ActivityTimeline
@@ -87,9 +87,17 @@ function ActivityTimeline({
     [activity.timeline, activity.reviewThreads],
   );
   const viewer = activity.viewer;
+  const capabilities = model.capabilities;
+  // Commenting needs the host's comment write and the viewer (who is writing).
+  const canComment = viewer !== null && capabilities.comment;
   const actions = useMemo<PostActions>(
-    () => ({ canReact: viewer !== null, onQuote: viewer !== null ? onQuote : undefined }),
-    [onQuote, viewer],
+    () => ({
+      canReact: viewer !== null && capabilities.reactions,
+      canEdit: capabilities.editComments,
+      canDelete: capabilities.deleteComments,
+      onQuote: canComment ? onQuote : undefined,
+    }),
+    [canComment, capabilities, onQuote, viewer],
   );
   const state = detail?.state ?? selection.summary?.state ?? "open";
   const url = detail?.url ?? selection.summary?.url ?? null;
@@ -102,7 +110,7 @@ function ActivityTimeline({
       {entries.map((entry) => (
         <TimelineEntry key={entry.id} entry={entry} actions={actions} />
       ))}
-      {viewer && selection.draftKey ? (
+      {viewer && canComment && selection.draftKey ? (
         <TimelineItem
           size="post"
           node={
@@ -112,7 +120,7 @@ function ActivityTimeline({
           <TimelineComposer
             ref={composerRef}
             draftKey={selection.draftKey}
-            canClose={viewer.canUpdate && state === "open"}
+            canClose={viewer.canUpdate && state === "open" && capabilities.lifecycle.has("close")}
           />
         </TimelineItem>
       ) : null}
@@ -186,7 +194,7 @@ function detailCommentItem(comment: SourceControlIssueComment, index: number): C
   };
 }
 
-const READ_ONLY_ACTIONS: PostActions = { canReact: false };
+const READ_ONLY_ACTIONS: PostActions = { canReact: false, canEdit: false, canDelete: false };
 
 function DetailCommentsTimeline() {
   const { model } = usePullRequestsPage();

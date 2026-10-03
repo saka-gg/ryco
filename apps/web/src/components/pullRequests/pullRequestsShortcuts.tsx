@@ -1,4 +1,12 @@
-import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 
 import { shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
 import type { PullRequestsTab } from "./pullRequestsSearch";
@@ -63,7 +71,9 @@ export function PullRequestsShortcutsProvider(props: {
 }) {
   const shortcutsRef = useRef<PullRequestsShortcut[]>([]);
   const tabRef = useRef(props.tab);
-  tabRef.current = props.tab;
+  useLayoutEffect(() => {
+    tabRef.current = props.tab;
+  }, [props.tab]);
 
   const registry = useMemo<ShortcutRegistry>(
     () => ({
@@ -115,7 +125,9 @@ export function usePullRequestsShortcut(
 ): void {
   const registry = useContext(ShortcutRegistryContext);
   const runRef = useRef(run);
-  runRef.current = run;
+  useLayoutEffect(() => {
+    runRef.current = run;
+  });
   const enabled = options?.enabled ?? true;
   const tab = options?.tab;
   useEffect(() => {

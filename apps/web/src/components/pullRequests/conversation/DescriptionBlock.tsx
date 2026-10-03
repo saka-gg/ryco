@@ -64,7 +64,9 @@ export function DescriptionBlock() {
   const { model } = usePullRequestsPage();
   const selection = usePullRequestSelection();
   const detail = selection.detail.data;
-  const canUpdate = model.supportsReview && (selection.activity.data?.viewer?.canUpdate ?? false);
+  const canUpdate =
+    model.capabilities.lifecycle.has("edit") &&
+    (selection.activity.data?.viewer?.canUpdate ?? false);
   const target = selection.mutationTarget;
   const update = useUpdateChangeRequestMutation(target);
   const [editing, setEditing] = useState(false);

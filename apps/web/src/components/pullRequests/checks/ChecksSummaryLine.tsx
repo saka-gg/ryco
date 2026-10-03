@@ -8,8 +8,9 @@ import { checksSummarySegments, type ChecksCounts, type ChecksSummarySegment } f
 import { RollingCount } from "./checksUi";
 
 /**
- * The tab's one line of totals — "1 failing · 8 passed · 1 running" — over
- * exactly the rows listed below it, plus a ghost "Re-run failed" when a
+ * The tab's one line of totals — "1 failing · 8 passed · 1 running · 4
+ * required" — over exactly the rows listed below it (the last only where the
+ * host marks required checks), plus a ghost "Re-run failed" when a
  * finished run has failed jobs. No title: the bar already says "Checks".
  */
 

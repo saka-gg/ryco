@@ -1,3 +1,4 @@
+import { preferredUpdateBranchMethod } from "@ryco/shared/sourceControl";
 import type { RefObject } from "react";
 
 import { cn } from "../../../lib/utils";
@@ -17,6 +18,7 @@ import { useMergeModel } from "./useMergeModel";
  * In the band it folds to verdict + button on one line and the lines in a row.
  */
 export function MergeSection(props: { readonly layout: "rail" | "band" }) {
+  const { model: page } = usePullRequestsPage();
   const selection = usePullRequestSelection();
   const model = useMergeModel();
   const commands = useMergeCommands(model);
@@ -26,6 +28,8 @@ export function MergeSection(props: { readonly layout: "rail" | "band" }) {
     enabled: true,
     orderSignature: model?.lines.map((line) => line.key).join(",") ?? "",
   });
+  // A host that reports no merge readiness gets no verdict rather than a guessed one.
+  if (!page.capabilities.mergeReadiness) return null;
   if (!model) {
     // A failed detail read is reported by the reader; the rail stays quiet.
     return selection.detail.error && !selection.detail.isLoading ? null : (
@@ -148,7 +152,7 @@ function StatusLineRow(props: {
   readonly commands: MergeCommands;
   readonly layout: "rail" | "band";
 }) {
-  const { nav } = usePullRequestsPage();
+  const { nav, model } = usePullRequestsPage();
   const handoff = usePullRequestAgentHandoff();
   const { line, layout } = props;
   const target = line.target;
@@ -166,16 +170,20 @@ function StatusLineRow(props: {
         return;
     }
   };
-  // Agent fixes need a hand-off; branch updates need the mutation, not an agent.
+  // Agent fixes need a hand-off; branch updates need the host's mutation, not an agent.
   const fix =
-    line.fix && (line.fix.kind === "update-branch" || handoff.available) ? line.fix : null;
+    line.fix &&
+    (line.fix.kind === "update-branch"
+      ? preferredUpdateBranchMethod(model.capabilities) !== null
+      : handoff.available)
+      ? line.fix
+      : null;
   const body = (
     <>
       <FactGlyph key={line.tone} tone={line.tone} />
       <span
         className={cn(
           "min-w-0 truncate",
-          layout === "rail" && "flex-1",
           line.tone === "success" || line.tone === "neutral"
             ? "text-foreground/80"
             : "text-foreground",
@@ -183,6 +191,13 @@ function StatusLineRow(props: {
       >
         {line.text}
       </span>
+      {/* Stays whole while a long check name truncates before it. */}
+      {line.note ? (
+        <span className="shrink-0 text-[11px] text-muted-foreground">
+          <span className="sr-only">, </span>
+          {line.note}
+        </span>
+      ) : null}
     </>
   );
   const meta = line.meta ? (

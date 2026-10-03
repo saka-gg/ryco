@@ -78,6 +78,7 @@ import {
   resolveWorkflowRunJobsPhase,
   shouldRefreshSourceControlOnLifecycle,
   workflowRunJobsContradictRun,
+  type SourceControlRefreshPhase,
 } from "./sourceControlRefreshPolicy";
 
 export {
@@ -221,16 +222,18 @@ export function useSourceControlChangeRequestDiff(
  * otherwise only refreshes on demand, lifecycle recovery, or invalidation.
  */
 export function useSourceControlChangeRequestActivity(
-  input: SourceControlChangeRequestActivityInput & { readonly active?: boolean },
+  input: SourceControlChangeRequestActivityInput & {
+    /** Poll cadence (default `settled`: lifecycle refreshes and mutations only). */
+    readonly phase?: Exclude<SourceControlRefreshPhase, "discovery">;
+  },
 ): SourceControlQueryState<ChangeRequestActivity> {
   const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
-  const active = input.active ?? false;
+  const phase = input.phase ?? "settled";
   return useWatchedQuery(
     changeRequestActivityBinding,
     input,
-    () =>
-      resolveSourceControlRefreshDelay({ mode: refreshMode, phase: active ? "active" : "settled" }),
-    active,
+    () => resolveSourceControlRefreshDelay({ mode: refreshMode, phase }),
+    phase,
   );
 }
 

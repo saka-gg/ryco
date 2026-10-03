@@ -22,6 +22,7 @@ import {
   checksJobMemoryKey,
   isChecksJobExpanded,
   isCompletedStatus,
+  isHeadWorkflowRun,
   resolveChecksJobParam,
   type ChecksJobEntry,
   type ChecksWorkflowEntry,
@@ -51,10 +52,14 @@ export function ChecksTab() {
   const { model, nav, readerKey } = usePullRequestsPage();
   const selection = usePullRequestSelection();
   const { environmentId, cwd } = model;
-  const actionsSupported = model.provider?.kind === "github";
+  const { capabilities } = model;
+  // Workflow runs (job → step → log) where the host serves them; the rollup alone otherwise.
+  const actionsSupported = capabilities.workflowRuns;
   const providerName = model.provider?.name ?? "the web";
   const prState = selection.detail.data?.state ?? selection.summary?.state ?? null;
   const actionable = actionsSupported && prState === "open";
+  const canRerun = actionable && capabilities.rerunWorkflows;
+  const logsAvailable = actionsSupported && capabilities.workflowJobLogs;
   const headSha = selection.headSha;
   const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
 
@@ -78,7 +83,7 @@ export function ChecksTab() {
       }),
   );
   const runs = actionsSupported ? (runsQuery.data?.runs ?? null) : null;
-  const headRuns = (runs ?? []).filter((run) => headSha === null || run.commit.oid === headSha);
+  const headRuns = (runs ?? []).filter((run) => isHeadWorkflowRun(run, headSha));
   const headRunSignature = headRuns.map((run) => run.runId).join(",");
   const headRunIds = useMemo(
     () => (headRunSignature ? headRunSignature.split(",") : []),
@@ -194,6 +199,8 @@ export function ChecksTab() {
       pullRequestNumber: selection.number,
       providerName,
       actionable,
+      canRerun,
+      logsAvailable,
       jobsLoading: jobsBatch.isLoading,
       handoff,
       resolvePath,
@@ -205,12 +212,14 @@ export function ChecksTab() {
     }),
     [
       actionable,
+      canRerun,
       cwd,
       environmentId,
       flash,
       handoff,
       isExpanded,
       jobsBatch.isLoading,
+      logsAvailable,
       providerName,
       registerRunRerun,
       resolvePath,
@@ -276,14 +285,19 @@ export function ChecksTab() {
         {loading ? (
           <ChecksSkeleton />
         ) : !hasRows ? (
-          <ChecksEmpty error={selection.detail.error !== null && selection.detail.data === null} />
+          <ChecksEmpty
+            error={selection.detail.error !== null && selection.detail.data === null}
+            unsupportedHost={
+              capabilities.checkRollup || capabilities.workflowRuns ? null : providerName
+            }
+          />
         ) : (
           <ChecksTabContext.Provider value={context}>
             <InboxMotionContext.Provider value={motion.gateRef}>
               <ChecksSummaryLine
                 counts={checks.counts}
                 onRerunFailed={
-                  actionable && checks.rerunnableRunIds.length > 0 ? () => void rerunFailed() : null
+                  canRerun && checks.rerunnableRunIds.length > 0 ? () => void rerunFailed() : null
                 }
                 rerunPending={rerunPending}
                 rerunJobCount={rerunJobCount}
@@ -348,13 +362,19 @@ function ChecksSkeleton() {
   );
 }
 
-function ChecksEmpty(props: { readonly error: boolean }) {
+function ChecksEmpty(props: {
+  readonly error: boolean;
+  /** The host's name when its provider reports no checks at all (not "no checks ran"). */
+  readonly unsupportedHost: string | null;
+}) {
   return (
     <div className="flex min-h-12 items-center gap-2.5 pr-1 pl-1 text-[13px] text-muted-foreground">
       <CheckStateGlyph overall="none" />
-      {props.error
-        ? "Couldn't load checks for this pull request."
-        : "No checks have reported on the latest commit."}
+      {props.unsupportedHost !== null
+        ? `Ryco can't read checks from ${props.unsupportedHost} yet.`
+        : props.error
+          ? "Couldn't load checks for this pull request."
+          : "No checks have reported on the latest commit."}
     </div>
   );
 }

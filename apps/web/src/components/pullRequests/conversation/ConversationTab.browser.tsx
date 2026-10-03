@@ -25,6 +25,7 @@ import {
   sourceControlRpcMock,
   type BuildTestPullRequestsModelInput,
 } from "../testing/PullRequestsTestProvider";
+import { READ_ONLY_HOST_CAPABILITIES } from "../testing/readOnlyHost";
 import { ConversationTab } from "./ConversationTab";
 import { DESCRIPTION_CHANGED_MESSAGE } from "./descriptionTaskQueue";
 
@@ -48,7 +49,8 @@ async function renderConversation(
       width={options.width ?? 887}
       height={860}
       search={options.search}
-      supportsReview={options.supportsReview}
+      host={options.host}
+      capabilities={options.capabilities}
       detailState={options.detailState}
       activityState={options.activityState}
     >
@@ -381,7 +383,10 @@ describe("ConversationTab", () => {
   });
 
   it("falls back to the detail's comments on hosts without the activity read", async () => {
-    const screen = await renderConversation({ supportsReview: false });
+    const screen = await renderConversation({
+      host: "gitlab",
+      capabilities: READ_ONLY_HOST_CAPABILITIES,
+    });
     await expect
       .element(screen.getByText("Tried this against the sandbox repo", { exact: false }))
       .toBeInTheDocument();

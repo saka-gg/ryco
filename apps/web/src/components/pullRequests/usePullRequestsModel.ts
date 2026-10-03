@@ -14,6 +14,7 @@ import type { PullRequestRepositoryOption } from "./pullRequestRepositories.logi
 import { usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
 import {
   assemblePullRequestSelection,
+  derivePullRequestsCapabilities,
   describePullRequestsListError,
   derivePullRequestSelectionChecks,
   derivePullRequestSelectionNextAction,
@@ -82,11 +83,11 @@ export function usePullRequestsModel(input: {
         : null,
     [providerBaseUrl, providerKind, providerName],
   );
-  const supportsReview = provider?.kind === "github";
+  const capabilities = useMemo(() => derivePullRequestsCapabilities(provider), [provider]);
   const state = resolvePullRequestsStateFilter(search);
   const pollInterval = useMemo(() => listPollInterval(refreshMode), [refreshMode]);
   const listInput = { environmentId, cwd, state, limit: PULL_REQUESTS_LIST_LIMIT } as const;
-  const involvementEnabled = repository !== null && supportsReview;
+  const involvementEnabled = repository !== null && capabilities.involvementFilters;
   const foldedGroups = usePullRequestsLayoutStore((state) => state.foldedGroups);
 
   const stateList = useSourceControlChangeRequestList(
@@ -107,7 +108,9 @@ export function usePullRequestsModel(input: {
   // so groups, `ordered` and `byNumber` keep their identity (memoized rows
   // stay put).
   const involvementSupported =
-    supportsReview && authoredList.error === null && reviewRequestedList.error === null;
+    capabilities.involvementFilters &&
+    authoredList.error === null &&
+    reviewRequestedList.error === null;
   const labelKey = (search.label ?? []).join("\u0000");
   const listSearch = useMemo<PullRequestsSearch>(
     () => ({
@@ -162,15 +165,23 @@ export function usePullRequestsModel(input: {
     (data) =>
       resolveSourceControlRefreshDelay({
         mode: refreshMode,
-        phase: pullRequestSelectionRefreshPhase({ detail: data, summary }),
+        phase: pullRequestSelectionRefreshPhase({
+          detail: data,
+          summary,
+          idleRefresh: capabilities.idleRefresh,
+        }),
       }),
   );
   const activity = useSourceControlChangeRequestActivity({
     environmentId,
     cwd,
     reference,
-    enabled: repository !== null && reference !== null && supportsReview,
-    active: pullRequestSelectionRefreshPhase({ detail: detail.data, summary }) === "active",
+    enabled: repository !== null && reference !== null && capabilities.activity,
+    phase: pullRequestSelectionRefreshPhase({
+      detail: detail.data,
+      summary,
+      idleRefresh: capabilities.idleRefresh,
+    }),
   });
 
   // Each piece memoizes on data, not on the query wrappers (which change on
@@ -203,7 +214,7 @@ export function usePullRequestsModel(input: {
   );
 
   return useMemo(
-    () => ({ environmentId, cwd, provider, supportsReview, list, selection }),
-    [cwd, environmentId, list, provider, selection, supportsReview],
+    () => ({ environmentId, cwd, provider, capabilities, list, selection }),
+    [capabilities, cwd, environmentId, list, provider, selection],
   );
 }

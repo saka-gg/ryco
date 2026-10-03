@@ -6,6 +6,7 @@ import type {
 import {
   checkStateGroup,
   classifyCheckState,
+  workflowJobIdFromUrl,
   type ChangeRequestCheck,
   type ChangeRequestCheckGroup,
   type ChangeRequestCheckState,
@@ -46,6 +47,8 @@ export interface ChecksJobEntry {
   readonly runId: string | null;
   /** First failing step, for the auto-opened log. */
   readonly failingStep: SourceControlWorkflowStep | null;
+  /** The host requires this job to pass before merging ("Required" tag). */
+  readonly required: boolean;
 }
 
 export interface ChecksWorkflowEntry {
@@ -75,6 +78,8 @@ export interface ChecksCounts {
   readonly passed: number;
   readonly skipped: number;
   readonly total: number;
+  /** Listed rows the host requires, in any state. */
+  readonly required: number;
 }
 
 export type ChecksSection =
@@ -159,7 +164,8 @@ function jobEntryFromJob(
   job: SourceControlWorkflowJob,
   runId: string,
   key: string,
-  fallbackUrl: string | null,
+  /** The rollup's check run for this job: its link and required-ness. */
+  rollupCheck: ChangeRequestCheck | undefined,
 ): ChecksJobEntry {
   const state = workflowItemState(job);
   const group = checkStateGroup(state);
@@ -170,7 +176,7 @@ function jobEntryFromJob(
     group,
     durationMs: group === "running" ? null : jobDurationMs(job),
     startedAtMs: epochMillis(job.startedAt),
-    url: Option.getOrNull(job.url) ?? fallbackUrl,
+    url: Option.getOrNull(job.url) ?? rollupCheck?.url ?? null,
     job,
     runId,
     failingStep:
@@ -178,6 +184,7 @@ function jobEntryFromJob(
         ? (job.steps.find((step) => checkStateGroup(workflowItemState(step)) === "attention") ??
           null)
         : null,
+    required: rollupCheck?.required === true,
   };
 }
 
@@ -193,6 +200,7 @@ function jobEntryFromCheck(check: ChangeRequestCheck, key: string): ChecksJobEnt
     job: null,
     runId: null,
     failingStep: null,
+    required: check.required === true,
   };
 }
 
@@ -229,14 +237,24 @@ function workflowEntry(input: {
 }
 
 function emptyCounts(): { -readonly [K in keyof ChecksCounts]: ChecksCounts[K] } {
-  return { failing: 0, actionRequired: 0, running: 0, passed: 0, skipped: 0, total: 0 };
+  return {
+    failing: 0,
+    actionRequired: 0,
+    running: 0,
+    passed: 0,
+    skipped: 0,
+    total: 0,
+    required: 0,
+  };
 }
 
-function countState(
+function countRow(
   counts: { -readonly [K in keyof ChecksCounts]: ChecksCounts[K] },
   state: ChangeRequestCheckState,
+  required: boolean,
 ) {
   counts.total += 1;
+  if (required) counts.required += 1;
   switch (state) {
     case "failure":
     case "cancelled":
@@ -261,6 +279,15 @@ function countState(
 }
 
 /**
+ * The run verifies `headSha`: it ran on the head, or on a merge of the head
+ * into the target (GitLab merged-results and merge-train pipelines, which
+ * name the head they verify in `sourceHeadOid`). Unknown heads keep every run.
+ */
+export function isHeadWorkflowRun(run: SourceControlWorkflowRun, headSha: string | null): boolean {
+  return headSha === null || run.commit.oid === headSha || run.sourceHeadOid === headSha;
+}
+
+/**
  * @param rollup  The selected change request's checks summary (detail rollup).
  * @param runs    Workflow runs for the change request, or null while unknown
  *                (loading, or a host without Actions).
@@ -274,9 +301,7 @@ export function buildPullRequestChecksModel(input: {
   readonly headSha: string | null;
 }): PullRequestChecksModel {
   const { rollup, jobsByRunId, headSha } = input;
-  const headRuns = (input.runs ?? []).filter(
-    (run) => headSha === null || run.commit.oid === headSha,
-  );
+  const headRuns = (input.runs ?? []).filter((run) => isHeadWorkflowRun(run, headSha));
 
   // Rollup check runs by workflow, in host order.
   const rollupByWorkflow = new Map<string, ChangeRequestCheck[]>();
@@ -309,7 +334,7 @@ export function buildPullRequestChecksModel(input: {
                 job,
                 run.runId,
                 keys[index] ?? job.name,
-                rollupJobs.find((check) => check.name === job.name)?.url ?? null,
+                rollupJobs.find((check) => check.name === job.name),
               ),
             ),
             jobsLoaded: true,
@@ -381,9 +406,11 @@ export function buildPullRequestChecksModel(input: {
 
   const counts = emptyCounts();
   for (const workflow of orderedWorkflows) {
-    for (const job of workflow.jobs) countState(counts, job.state);
+    for (const job of workflow.jobs) countRow(counts, job.state, job.required);
   }
-  for (const status of statuses) countState(counts, status.check.state);
+  for (const status of statuses) {
+    countRow(counts, status.check.state, status.check.required === true);
+  }
 
   const overall: ChangeRequestChecksOverall =
     counts.total === 0
@@ -417,13 +444,16 @@ export function buildPullRequestChecksModel(input: {
 // ── Summary line ─────────────────────────────────────────────────────
 
 export interface ChecksSummarySegment {
-  readonly key: "failing" | "action-required" | "passed" | "running" | "skipped";
+  readonly key: "failing" | "action-required" | "passed" | "running" | "skipped" | "required";
   readonly count: number;
   readonly label: string;
   readonly tone: "destructive" | "warning" | "muted";
 }
 
-/** "1 failing · 8 passed · 1 running"; zero counts are left out. */
+/**
+ * "1 failing · 8 passed · 1 running · 4 required"; zero counts are left out,
+ * so a host that does not mark required checks never shows the last one.
+ */
 export function checksSummarySegments(counts: ChecksCounts): ReadonlyArray<ChecksSummarySegment> {
   const segments: ChecksSummarySegment[] = [];
   const push = (
@@ -439,6 +469,7 @@ export function checksSummarySegments(counts: ChecksCounts): ReadonlyArray<Check
   push("passed", counts.passed, "passed", "muted");
   push("running", counts.running, "running", "muted");
   push("skipped", counts.skipped, "skipped", "muted");
+  push("required", counts.required, "required", "muted");
   return segments;
 }
 
@@ -460,19 +491,17 @@ export function formatWorkflowDuration(ms: number | null | undefined): string | 
 
 // ── Deep links (`job` URL param) ─────────────────────────────────────
 
-const JOB_URL_ID = /\/actions\/runs\/\d+\/jobs?\/(\d+)/u;
-
 /**
  * The `job` URL value that opens a rollup check on the Checks tab: the
- * Actions job id when the check links to one, otherwise `workflow/name`.
- * Use with `nav.revealJob` (e.g. the rail's "View failing check").
+ * host's job id when the check links to one (Actions, GitLab CI), otherwise
+ * `workflow/name`. Use with `nav.revealJob` (e.g. the rail's "View failing check").
  */
 export function pullRequestCheckJobParam(check: {
   readonly name: string;
   readonly workflowName: string | null;
   readonly url: string | null;
 }): string {
-  const jobId = check.url ? JOB_URL_ID.exec(check.url)?.[1] : undefined;
+  const jobId = workflowJobIdFromUrl(check.url);
   if (jobId) return jobId;
   return check.workflowName ? `${check.workflowName}/${check.name}` : check.name;
 }
@@ -491,7 +520,7 @@ export function resolveChecksJobParam(
   // Job ids first: from loaded jobs, then from the rollup's check-run links.
   for (const workflow of model.workflows) {
     for (const job of workflow.jobs) {
-      const jobId = job.job?.jobId ?? (job.url ? JOB_URL_ID.exec(job.url)?.[1] : undefined);
+      const jobId = job.job?.jobId ?? workflowJobIdFromUrl(job.url);
       if (jobId === param) return { workflowKey: workflow.key, jobKey: job.key };
     }
   }

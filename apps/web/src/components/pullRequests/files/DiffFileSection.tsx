@@ -66,8 +66,18 @@ export interface DiffRenderSettings {
   readonly theme: "light" | "dark";
   readonly diffStyle: "unified" | "split";
   readonly loadDiffFiles: FileDiffContentsLoader | undefined;
-  readonly commenting: { readonly enabled: boolean; readonly reason: string | undefined };
-  readonly ask: { readonly enabled: boolean; readonly reason: string | undefined };
+  /** `supported`: the host takes line comments (else the chip's Comment is hidden). */
+  readonly commenting: {
+    readonly supported: boolean;
+    readonly enabled: boolean;
+    readonly reason: string | undefined;
+  };
+  /** `supported`: the host allows agent hand-offs (else the chip's Ask agent is hidden). */
+  readonly ask: {
+    readonly supported: boolean;
+    readonly enabled: boolean;
+    readonly reason: string | undefined;
+  };
   readonly mode: ReviewThreadAnchorMode;
   readonly headSha: string | null;
   readonly reviewStarted: boolean;
@@ -263,10 +273,12 @@ export const DiffFileSection = memo(function DiffFileSection(props: DiffFileSect
           ) : null}
         </div>
       </div>
-      {chip && selectionTarget ? (
+      {chip && selectionTarget && (settings.commenting.supported || settings.ask.supported) ? (
         <SelectionChip
           label={lineCommentTargetLabel(selectionTarget)}
           style={chip}
+          showComment={settings.commenting.supported}
+          showAsk={settings.ask.supported}
           canComment={settings.commenting.enabled}
           commentUnavailableReason={settings.commenting.reason}
           canAsk={settings.ask.enabled}

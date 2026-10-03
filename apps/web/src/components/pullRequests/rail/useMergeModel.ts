@@ -7,6 +7,8 @@ import type {
 import type { ChangeRequestNextAction } from "@ryco/client-runtime/state/pull-request-review";
 import { useMemo } from "react";
 
+import { preferredUpdateBranchMethod } from "@ryco/shared/sourceControl";
+
 import { usePullRequestAgentHandoff } from "../agentHandoff";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import {
@@ -14,7 +16,7 @@ import {
   deriveMergeVerdict,
   deriveNextActionButton,
   deriveNextActionMenu,
-  isNavigationCommand,
+  hostSupportsCommand,
   resolveMergeMethod,
   type MergeStatusLine,
   type MergeVerdict,
@@ -24,7 +26,6 @@ import {
 import { usePullRequestRailStore } from "./railStore";
 
 const EMPTY_THREADS: ReadonlyArray<ChangeRequestReviewThread> = [];
-const EMPTY_MENU: NextActionMenuModel = { methods: null, deleteBranchDefault: null, items: [] };
 
 export interface MergeModel {
   readonly detail: SourceControlChangeRequestDetail;
@@ -39,8 +40,6 @@ export interface MergeModel {
   /** "Delete branch after merge": the user's choice, else the repository setting. */
   readonly deleteBranch: boolean;
   setDeleteBranch(value: boolean): void;
-  /** The host implements lifecycle mutations (GitHub). */
-  readonly supportsMutations: boolean;
 }
 
 /**
@@ -66,44 +65,48 @@ export function useMergeModel(): MergeModel | null {
   const setMergeMethod = usePullRequestRailStore((state) => state.setMergeMethod);
   const setDeleteBranchChoice = usePullRequestRailStore((state) => state.setDeleteBranch);
 
+  const capabilities = model.capabilities;
   return useMemo<MergeModel | null>(() => {
-    if (!detail || !nextAction) return null;
+    // Without readiness facts from the host there is no verdict or next step to state.
+    if (!detail || !nextAction || !capabilities.mergeReadiness) return null;
     const input = { detail, viewer, checks: selection.checks, nextAction, threads };
-    const method = resolveMergeMethod(detail, preferredMethod);
-    const derived = deriveNextActionButton({ ...input, method });
-    // Hosts without lifecycle mutations keep only the steps that navigate.
-    const button =
-      derived && (model.supportsReview || isNavigationCommand(derived.command)) ? derived : null;
-    const menu = model.supportsReview
-      ? deriveNextActionMenu({
-          ...input,
-          button,
-          method,
-          supportsMutations: model.supportsReview,
-          agentsAvailable: handoff.available,
-        })
-      : EMPTY_MENU;
+    const method = resolveMergeMethod(detail, preferredMethod, capabilities.merge.methods);
+    const derived = deriveNextActionButton({
+      ...input,
+      method,
+      updateBranchMethod: preferredUpdateBranchMethod(capabilities),
+    });
+    // A step the host cannot take is not offered; navigation always is.
+    const button = derived && hostSupportsCommand(derived.command, capabilities) ? derived : null;
+    const menu = deriveNextActionMenu({
+      ...input,
+      button,
+      method,
+      capabilities,
+      agentsAvailable: handoff.available,
+    });
     return {
       detail,
       viewer,
       nextAction,
       verdict: deriveMergeVerdict(input),
-      lines: deriveMergeStatusLines(input),
+      lines: deriveMergeStatusLines(input, { checkRollup: capabilities.checkRollup }),
       button,
       menu,
       method,
       setMethod: (next) => setMergeMethod(repositoryKey, next),
-      deleteBranch: deleteBranchChoice ?? menu.deleteBranchDefault ?? false,
+      deleteBranch:
+        capabilities.merge.deleteBranch &&
+        (deleteBranchChoice ?? menu.deleteBranchDefault ?? false),
       setDeleteBranch: (value) => {
         if (readerKey) setDeleteBranchChoice(readerKey, value);
       },
-      supportsMutations: model.supportsReview,
     };
   }, [
+    capabilities,
     deleteBranchChoice,
     detail,
     handoff.available,
-    model.supportsReview,
     nextAction,
     preferredMethod,
     readerKey,

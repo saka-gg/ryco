@@ -1,4 +1,5 @@
 import type { ChangeRequestUpdateAction } from "@ryco/contracts";
+import { preferredUpdateBranchMethod } from "@ryco/shared/sourceControl";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import {
@@ -67,6 +68,7 @@ export function useMergeCommands(model: MergeModel | null): MergeCommands {
     reference: selection.reference,
   });
   const requestPicker = usePullRequestRailStore((state) => state.requestPicker);
+  const headGuard = pageModel.capabilities.merge.expectedHeadSha;
   const [pending, setPending] = useState<NextActionCommand["type"] | null>(null);
   const inFlightRef = useRef(false);
 
@@ -197,7 +199,8 @@ export function useMergeCommands(model: MergeModel | null): MergeCommands {
               ...(current.menu.deleteBranchDefault !== null
                 ? { deleteBranch: current.deleteBranch }
                 : {}),
-              expectedHeadSha: headSha,
+              // Hosts that cannot guard the head are not asked to.
+              ...(headGuard ? { expectedHeadSha: headSha } : {}),
             });
             if (result.outcome === "enqueued") {
               toastManager.add(
@@ -215,7 +218,7 @@ export function useMergeCommands(model: MergeModel | null): MergeCommands {
           return;
       }
     },
-    [handoff, merge, mutate, nav, requestPicker, updateWith],
+    [handoff, headGuard, merge, mutate, nav, requestPicker, updateWith],
   );
 
   const runFix = useCallback(
@@ -234,14 +237,17 @@ export function useMergeCommands(model: MergeModel | null): MergeCommands {
         case "resolve-conflicts":
           void run({ type: "resolve-with-agent" });
           return;
-        case "update-branch":
-          void run({ type: "update-branch", method: "merge" });
+        case "update-branch": {
+          // The host's own way to update (GitLab only rebases).
+          const method = preferredUpdateBranchMethod(pageModel.capabilities);
+          if (method) void run({ type: "update-branch", method });
           return;
+        }
         case undefined:
           return;
       }
     },
-    [handoff, run],
+    [handoff, pageModel.capabilities, run],
   );
 
   return { pending, run, runFix };

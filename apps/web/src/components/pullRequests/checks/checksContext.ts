@@ -19,8 +19,12 @@ export interface ChecksTabContextValue {
   readonly pullRequestNumber: number;
   /** The host's name, for "Open on GitHub". */
   readonly providerName: string;
-  /** Re-runs and agent fixes only make sense on an open change request. */
+  /** Agent fixes only make sense on an open change request. */
   readonly actionable: boolean;
+  /** Open, and the host re-runs workflows (`capabilities.rerunWorkflows`). */
+  readonly canRerun: boolean;
+  /** The host serves job logs (`capabilities.workflowJobLogs`). */
+  readonly logsAvailable: boolean;
   /** The run list is still loading its jobs (rows show step skeletons). */
   readonly jobsLoading: boolean;
   readonly handoff: PullRequestAgentHandoff;

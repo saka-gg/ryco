@@ -16,6 +16,10 @@ const CHIP_ACTION_CLASS =
 export function SelectionChip(props: {
   readonly label: string;
   readonly style: CSSProperties;
+  /** The host takes line comments; false hides "Comment" (not just disables it). */
+  readonly showComment?: boolean | undefined;
+  /** Agent hand-offs exist on this host; false hides "Ask agent". */
+  readonly showAsk?: boolean | undefined;
   readonly canComment: boolean;
   readonly commentUnavailableReason?: string | undefined;
   readonly canAsk: boolean;
@@ -31,21 +35,25 @@ export function SelectionChip(props: {
       style={props.style}
       className="pr-chip-in absolute z-30 flex items-center gap-0.5 rounded-lg border border-border/70 bg-popover p-0.5 shadow-lg/5"
     >
-      <ChipAction
-        enabled={props.canComment}
-        reason={props.commentUnavailableReason}
-        onClick={props.onComment}
-        label="Comment"
-        icon={<MessageSquarePlusIcon className="size-3.5" />}
-      />
-      <ChipAction
-        enabled={props.canAsk}
-        reason={props.askUnavailableReason}
-        onClick={props.onAsk}
-        label="Ask agent"
-        icon={<SparklesIcon className="size-3.5" />}
-        hint="A"
-      />
+      {props.showComment === false ? null : (
+        <ChipAction
+          enabled={props.canComment}
+          reason={props.commentUnavailableReason}
+          onClick={props.onComment}
+          label="Comment"
+          icon={<MessageSquarePlusIcon className="size-3.5" />}
+        />
+      )}
+      {props.showAsk === false ? null : (
+        <ChipAction
+          enabled={props.canAsk}
+          reason={props.askUnavailableReason}
+          onClick={props.onAsk}
+          label="Ask agent"
+          icon={<SparklesIcon className="size-3.5" />}
+          hint="A"
+        />
+      )}
     </div>
   );
 }

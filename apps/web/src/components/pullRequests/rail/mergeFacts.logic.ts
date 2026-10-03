@@ -5,11 +5,18 @@ import type {
   SourceControlChangeRequestMergeMethod,
 } from "@ryco/contracts";
 import {
+  changeRequestHostAllowsMerge,
   deriveChangeRequestMergeAction,
+  workflowJobIdFromUrl,
   type ChangeRequestCheck,
   type ChangeRequestChecksSummary,
   type ChangeRequestNextAction,
 } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  canMergeChangeRequests,
+  type ChangeRequestHostCapabilities,
+  type ChangeRequestUpdateBranchMethod,
+} from "@ryco/shared/sourceControl";
 
 /**
  * Pure derivations behind the merge section: the verdict line, the status
@@ -186,14 +193,18 @@ export interface MergeStatusLine {
   readonly meta: string | null;
   readonly target: MergeStatusLineTarget | null;
   readonly fix: MergeStatusLineFix | null;
+  /**
+   * Muted word after the text when the host's required checks change what the
+   * line means: the failing check is "Required" (it blocks), or every failing
+   * or running check is "Optional" (the merge need not wait). Absent when the
+   * host does not say which checks are required.
+   */
+  readonly note?: "Required" | "Optional";
 }
 
-const JOB_URL_PATTERN = /\/actions\/runs\/\d+\/jobs?\/(\d+)/u;
-
-/** GitHub Actions job id from a check-run URL (`…/actions/runs/1/job/2`). */
+/** The workflow job a check run links to (Actions `…/job/2`, GitLab `…/-/jobs/2`). */
 export function checkJobId(check: Pick<ChangeRequestCheck, "url" | "kind">): string | null {
-  if (check.kind !== "check-run" || !check.url) return null;
-  return JOB_URL_PATTERN.exec(check.url)?.[1] ?? null;
+  return check.kind === "check-run" ? workflowJobIdFromUrl(check.url) : null;
 }
 
 function checksTarget(check: ChangeRequestCheck | undefined): MergeStatusLineTarget {
@@ -205,16 +216,34 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
-function checksLine(checks: ChangeRequestChecksSummary): MergeStatusLine {
+/** Every check listed is one the host says is optional (none unknown). */
+function allOptional(
+  checks: ChangeRequestChecksSummary,
+  listed: ReadonlyArray<ChangeRequestCheck>,
+): boolean {
+  return checks.requiredKnown && listed.every((check) => check.required === false);
+}
+
+/**
+ * @param hostAllowsMerge The host lets the merge through now. Only then may a
+ *   line call checks "Optional": a rollup lists only checks that reported, so
+ *   a required check the host still expects is absent from it, and a merge
+ *   the host blocks may be waiting on exactly that.
+ */
+function checksLine(checks: ChangeRequestChecksSummary, hostAllowsMerge: boolean): MergeStatusLine {
   const total = checks.counts.total;
   const settled = checks.checks.filter((check) => check.group !== "running").length;
   const passed = checks.groups.completed.length + checks.groups.skipped.length;
   switch (checks.overall) {
     case "failing": {
-      const [worst, ...others] = checks.failing;
+      // A required failure is the blocker, so the line names it (and its peers) alone;
+      // the optional ones stay in the count and on the Checks tab.
+      const required = checks.failingRequired.length > 0;
+      const optional = !required && hostAllowsMerge && allOptional(checks, checks.failing);
+      const [worst, ...others] = required ? checks.failingRequired : checks.failing;
       return {
         key: "checks",
-        tone: "danger",
+        tone: optional ? "warning" : "danger",
         text: worst
           ? others.length > 0
             ? `${worst.label} +${others.length}`
@@ -223,17 +252,26 @@ function checksLine(checks: ChangeRequestChecksSummary): MergeStatusLine {
         meta: `${passed}/${total}`,
         target: checksTarget(worst),
         fix: { kind: "fix-check", label: "Fix" },
+        ...(required
+          ? { note: "Required" as const }
+          : optional
+            ? { note: "Optional" as const }
+            : {}),
       };
     }
-    case "pending":
+    case "pending": {
+      const running = checks.groups.running;
       return {
         key: "checks",
         tone: "progress",
-        text: `${plural(checks.groups.running.length, "check")} running`,
+        text: `${plural(running.length, "check")} running`,
         meta: `${settled}/${total}`,
-        target: checksTarget(checks.groups.running[0]),
+        target: checksTarget(running.find((check) => check.required === true) ?? running[0]),
         fix: null,
+        // Only optional checks still run: the merge does not wait on them.
+        ...(hostAllowsMerge && allOptional(checks, running) ? { note: "Optional" as const } : {}),
       };
+    }
     case "passing":
       return {
         key: "checks",
@@ -390,9 +428,18 @@ const TONE_RANK: Record<FactTone, number> = {
  * change request, most urgent first so the eye lands on what blocks the merge.
  * Closed and merged change requests have none.
  */
-export function deriveMergeStatusLines(input: MergeFactsInput): ReadonlyArray<MergeStatusLine> {
+export function deriveMergeStatusLines(
+  input: MergeFactsInput,
+  options?: {
+    /** The host reports check rollups (default true); without them there is no checks line. */
+    readonly checkRollup?: boolean | undefined;
+  },
+): ReadonlyArray<MergeStatusLine> {
   if (input.detail.state !== "open") return [];
-  const lines: MergeStatusLine[] = [checksLine(input.checks)];
+  const lines: MergeStatusLine[] =
+    options?.checkRollup === false
+      ? []
+      : [checksLine(input.checks, changeRequestHostAllowsMerge(input.detail))];
   if (input.detail.isDraft !== true) {
     const reviews = reviewsLine(input);
     if (reviews) lines.push(reviews);
@@ -449,10 +496,16 @@ export interface MergeMethodOption {
   readonly disabledReason: string | null;
 }
 
+/**
+ * The merge methods to offer: the ones the host's provider can merge with
+ * (`hostMethods`; others are not shown at all), each disabled with a reason
+ * when this repository turns it off.
+ */
 export function mergeMethodOptions(
   detail: Pick<MergeFactsDetail, "mergeCapabilities">,
+  hostMethods?: ReadonlySet<SourceControlChangeRequestMergeMethod>,
 ): ReadonlyArray<MergeMethodOption> {
-  return MERGE_METHODS.map((method) => ({
+  return MERGE_METHODS.filter((method) => hostMethods?.has(method) ?? true).map((method) => ({
     method,
     label: MERGE_METHOD_LABEL[method],
     disabledReason:
@@ -462,12 +515,15 @@ export function mergeMethodOptions(
   }));
 }
 
-/** The preferred method when the host allows it, else the first it allows. */
+/** The preferred method when the host and repository allow it, else the first they allow. */
 export function resolveMergeMethod(
   detail: Pick<MergeFactsDetail, "mergeCapabilities">,
   preferred: SourceControlChangeRequestMergeMethod | null,
+  hostMethods?: ReadonlySet<SourceControlChangeRequestMergeMethod>,
 ): SourceControlChangeRequestMergeMethod {
-  const allowed = mergeMethodOptions(detail).filter((option) => option.disabledReason === null);
+  const allowed = mergeMethodOptions(detail, hostMethods).filter(
+    (option) => option.disabledReason === null,
+  );
   if (preferred && allowed.some((option) => option.method === preferred)) return preferred;
   return allowed[0]?.method ?? preferred ?? "squash";
 }
@@ -543,7 +599,11 @@ function mergeButton(
  * deleted, a closed request the viewer cannot reopen).
  */
 export function deriveNextActionButton(
-  input: MergeFactsInput & { readonly method: SourceControlChangeRequestMergeMethod },
+  input: MergeFactsInput & {
+    readonly method: SourceControlChangeRequestMergeMethod;
+    /** How "Update branch" updates (`preferredUpdateBranchMethod`; default merge). */
+    readonly updateBranchMethod?: ChangeRequestUpdateBranchMethod | null | undefined;
+  },
 ): NextActionButtonSpec | null {
   const { detail, viewer, nextAction, checks, threads, method } = input;
   const canAct = nextAction.viewerCanAct;
@@ -556,13 +616,15 @@ export function deriveNextActionButton(
         command: { type: "checkout-worktree" },
         disabledReason: null,
       };
-    case "update-branch":
+    case "update-branch": {
+      const updateMethod = input.updateBranchMethod ?? "merge";
       return {
-        label: "Update branch",
+        label: updateMethod === "rebase" ? "Update with rebase" : "Update branch",
         variant: filledWhen(canAct),
-        command: { type: "update-branch", method: "merge" },
+        command: { type: "update-branch", method: updateMethod },
         disabledReason: lacking("update this branch"),
       };
+    }
     case "mark-ready":
       return {
         label: "Mark ready for review",
@@ -671,6 +733,48 @@ export interface NextActionMenuModel {
   readonly items: ReadonlyArray<NextActionMenuItem>;
 }
 
+/**
+ * The host implements what `command` does. Navigation always works; every
+ * other step needs its capability (the button and menu hide the rest).
+ */
+export function hostSupportsCommand(
+  command: NextActionCommand,
+  capabilities: ChangeRequestHostCapabilities,
+): boolean {
+  switch (command.type) {
+    case "reveal-job":
+    case "open-checks":
+    case "open-files":
+    case "reveal-thread":
+      return true;
+    case "checkout-worktree":
+    case "resolve-with-agent":
+      return capabilities.checkout;
+    case "update-branch":
+      return (
+        capabilities.lifecycle.has("update-branch") &&
+        capabilities.updateBranchMethods.has(command.method)
+      );
+    case "set-draft":
+      return capabilities.lifecycle.has("set-draft");
+    case "request-review":
+      return capabilities.lifecycle.has("reviewers");
+    case "enable-auto-merge":
+    case "disable-auto-merge":
+      return capabilities.lifecycle.has("auto-merge");
+    case "merge":
+      return canMergeChangeRequests(capabilities);
+    case "merge-stack":
+      return capabilities.stacks && canMergeChangeRequests(capabilities);
+    case "delete-branch":
+      return capabilities.lifecycle.has("delete-branch");
+    case "reopen":
+      return capabilities.lifecycle.has("reopen");
+    case "close":
+      return capabilities.lifecycle.has("close");
+  }
+}
+
 /** Commands that only move around the page (safe on hosts without lifecycle mutations). */
 export function isNavigationCommand(command: NextActionCommand): boolean {
   switch (command.type) {
@@ -715,20 +819,21 @@ export function deriveNextActionMenu(
     readonly button: NextActionButtonSpec | null;
     /** The merge method the merge item and button use. */
     readonly method: SourceControlChangeRequestMergeMethod;
-    /** The host implements review/lifecycle mutations (GitHub). */
-    readonly supportsMutations: boolean;
+    /** What the host implements; steps it cannot take are left out. */
+    readonly capabilities: ChangeRequestHostCapabilities;
     /** Agent hand-offs can start a thread. */
     readonly agentsAvailable: boolean;
   },
 ): NextActionMenuModel {
-  const { detail, viewer, nextAction, button } = input;
-  if (detail.state !== "open" || !input.supportsMutations) {
+  const { detail, viewer, nextAction, button, capabilities } = input;
+  if (detail.state !== "open") {
     return { methods: null, deleteBranchDefault: null, items: [] };
   }
   const canUpdate = viewer?.canUpdate ?? true;
   const items: NextActionMenuItem[] = [];
   const add = (command: NextActionCommand, label: string, hint: string | null = null) => {
     if (button && sameCommand(button.command, command)) return;
+    if (!hostSupportsCommand(command, capabilities)) return;
     items.push({ command, label, hint, destructive: command.type === "close" });
   };
 
@@ -781,11 +886,14 @@ export function deriveNextActionMenu(
     add({ type: "close" }, "Close pull request");
   }
 
-  const mergeRelevant = viewer?.canMerge ?? true;
+  const mergeRelevant = (viewer?.canMerge ?? true) && canMergeChangeRequests(capabilities);
   return {
-    methods: mergeRelevant && detail.mergeCapabilities ? mergeMethodOptions(detail) : null,
+    methods:
+      mergeRelevant && detail.mergeCapabilities
+        ? mergeMethodOptions(detail, capabilities.merge.methods)
+        : null,
     deleteBranchDefault:
-      mergeRelevant && detail.isCrossRepository !== true
+      mergeRelevant && capabilities.merge.deleteBranch && detail.isCrossRepository !== true
         ? (detail.deleteBranchOnMerge ?? false)
         : null,
     items,

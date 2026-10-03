@@ -80,8 +80,12 @@ interface Post {
 export interface PostActions {
   /** Quote into the timeline composer. */
   readonly onQuote?: ((markdown: string) => void) | undefined;
-  /** Reactions need a host that implements them (GitHub). */
+  /** The host implements reactions (and the viewer is known). */
   readonly canReact: boolean;
+  /** The host edits comments; the post's own `viewerCanUpdate` still decides. */
+  readonly canEdit: boolean;
+  /** The host deletes comments; the post's own `viewerCanDelete` still decides. */
+  readonly canDelete: boolean;
 }
 
 const REACTIONS: ReadonlyArray<{
@@ -109,7 +113,7 @@ function isEdited(createdAt: DateTime.Utc, updatedAt: DateTime.Utc | undefined):
   );
 }
 
-function commentPost(item: CommentItem): Post {
+function commentPost(item: CommentItem, actions: PostActions): Post {
   return {
     id: item.id,
     commentKind: "issue-comment",
@@ -121,12 +125,12 @@ function commentPost(item: CommentItem): Post {
     edited: isEdited(item.createdAt, item.updatedAt),
     url: item.url,
     reactions: item.reactions ?? [],
-    viewerCanUpdate: item.viewerCanUpdate === true,
-    viewerCanDelete: item.viewerCanDelete === true,
+    viewerCanUpdate: actions.canEdit && item.viewerCanUpdate === true,
+    viewerCanDelete: actions.canDelete && item.viewerCanDelete === true,
   };
 }
 
-function reviewPost(review: ChangeRequestTimelineReviewItem): Post {
+function reviewPost(review: ChangeRequestTimelineReviewItem, actions: PostActions): Post {
   return {
     id: review.id,
     commentKind: "review",
@@ -138,7 +142,7 @@ function reviewPost(review: ChangeRequestTimelineReviewItem): Post {
     edited: false,
     url: review.url,
     reactions: review.reactions ?? [],
-    viewerCanUpdate: review.viewerCanUpdate === true,
+    viewerCanUpdate: actions.canEdit && review.viewerCanUpdate === true,
     viewerCanDelete: false,
   };
 }
@@ -498,7 +502,7 @@ export const CommentEntry = memo(function CommentEntry(props: {
   readonly item: CommentItem;
   readonly actions: PostActions;
 }) {
-  const post = commentPost(props.item);
+  const post = commentPost(props.item, props.actions);
   const state = usePost(post);
   const [showHidden, setShowHidden] = useState(false);
   const hidden = props.item.isMinimized === true && !showHidden;
@@ -569,7 +573,7 @@ export const ReviewEntry = memo(function ReviewEntry(props: {
   readonly threads: ReadonlyArray<ChangeRequestReviewThread>;
   readonly actions: PostActions;
 }) {
-  const post = reviewPost(props.review);
+  const post = reviewPost(props.review, props.actions);
   const state = usePost(post);
   const verdict = VERDICTS[props.review.state];
   const hasBody = hasVisibleBody(post.body) || state.editing;

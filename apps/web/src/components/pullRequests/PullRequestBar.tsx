@@ -16,6 +16,7 @@ import {
   PencilIcon,
   SparklesIcon,
 } from "lucide-react";
+import { canSubmitChangeRequestReview } from "@ryco/shared/sourceControl";
 import { useLayoutEffect, useMemo, useState } from "react";
 
 import { isElectron } from "../../env";
@@ -47,7 +48,11 @@ import { usePullRequestAgentHandoff } from "./agentHandoff";
 import { FilesBarTools } from "./files/FilesBarTools";
 import { ReviewButton } from "./files/ReviewButton";
 import { KeyHint } from "./primitives";
-import { usePullRequestSelection, usePullRequestsPage } from "./PullRequestsPageContext";
+import {
+  usePullRequestHostName,
+  usePullRequestSelection,
+  usePullRequestsPage,
+} from "./PullRequestsPageContext";
 import { READER_TAB_SELECTOR_ATTRIBUTE } from "./pullRequestsFocus";
 import { usePullRequestReaderStore, usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
 import type { PullRequestsTab } from "./pullRequestsSearch";
@@ -152,6 +157,7 @@ export function PullRequestBar(props: {
   const foldSecondary = layout.readerWidth < BAR_FOLD_SECONDARY_MAX_READER;
   const dense = layout.barCompact;
   const agent = useAgentPromptItems();
+  const hostName = usePullRequestHostName();
   const owner = layout.leadingRegion === "reader";
   const insetClass = usePullRequestsLeadingInsetClass(owner, "pl-3");
   const setShortcutsOpen = usePullRequestsLayoutStore((state) => state.setShortcutsOpen);
@@ -252,12 +258,12 @@ export function PullRequestBar(props: {
             <NextActionButton size="sm" />
           </>
         ) : null}
-        {tab === "files" ? <FilesBarTools /> : null}
-        {model.supportsReview ? <ReviewButton /> : null}
-        {foldSecondary ? null : <AgentMenu agent={agent} />}
+        {tab === "files" && model.capabilities.diff ? <FilesBarTools /> : null}
+        {canSubmitChangeRequestReview(model.capabilities) ? <ReviewButton /> : null}
+        {foldSecondary || !agent.supported ? null : <AgentMenu agent={agent} />}
         {url && !foldSecondary ? (
           <BarIconButton
-            label="Open on GitHub"
+            label={`Open on ${hostName}`}
             shortcut="O"
             onClick={() => openExternalLink(url, "Unable to open pull request")}
           >
@@ -268,6 +274,7 @@ export function PullRequestBar(props: {
           onShowShortcuts={() => setShortcutsOpen(true)}
           foldedAgent={foldSecondary ? agent : null}
           foldedExternalUrl={foldSecondary ? url : null}
+          hostName={hostName}
         />
       </div>
     </header>
@@ -293,6 +300,9 @@ function useRolledTitle(
 ): { readonly number: string; readonly title: string; readonly direction: RollDirection } {
   const [startFrom, setStartFrom] = useState(rollFrom);
   useLayoutEffect(() => {
+    // RollingText rolls on a change it has rendered, so the left layer's title
+    // commits once and is swapped before paint: a deliberate second pass.
+    // oxlint-disable-next-line react/set-state-in-effect -- see above
     if (startFrom !== null) setStartFrom(null);
   }, [startFrom]);
   return {
@@ -311,6 +321,8 @@ interface AgentPromptItem {
 
 /** The ✧ menu's hand-offs, shared by the standalone menu and the folded overflow. */
 function useAgentPromptItems(): {
+  /** The host can check the change request out (hand-offs exist at all). */
+  readonly supported: boolean;
   readonly available: boolean;
   readonly unavailableReason: string | undefined;
   readonly items: ReadonlyArray<AgentPromptItem>;
@@ -352,6 +364,7 @@ function useAgentPromptItems(): {
     { enabled: handoff.available },
   );
   return {
+    supported: handoff.supported,
     available: handoff.available,
     unavailableReason: handoff.unavailableReason,
     items,
@@ -401,12 +414,19 @@ function OverflowMenu(props: {
   /** Narrow bars fold the agent menu and the external link in here. */
   readonly foldedAgent: ReturnType<typeof useAgentPromptItems> | null;
   readonly foldedExternalUrl: string | null;
+  readonly hostName: string;
 }) {
   const { nav, readerKey, model } = usePullRequestsPage();
   const selection = usePullRequestSelection();
   const detail = selection.detail.data;
   const viewer = selection.activity.data?.viewer ?? null;
-  const canUpdate = model.supportsReview && (viewer?.canUpdate ?? false);
+  const lifecycle = model.capabilities.lifecycle;
+  // Viewer permissions come from the activity read; the host must apply the action too.
+  const viewerCanUpdate = viewer?.canUpdate ?? false;
+  const canEditTitle = viewerCanUpdate && lifecycle.has("edit");
+  const canSetDraft = viewerCanUpdate && lifecycle.has("set-draft");
+  const canClose = viewerCanUpdate && lifecycle.has("close");
+  const canReopen = viewerCanUpdate && lifecycle.has("reopen");
   const handoff = usePullRequestAgentHandoff();
   const update = useUpdateChangeRequestMutation(selection.mutationTarget);
   const requestTitleEdit = usePullRequestReaderStore((state) => state.requestTitleEdit);
@@ -437,11 +457,15 @@ function OverflowMenu(props: {
   };
 
   const editTitle = () => {
-    if (!readerKey || !canUpdate) return false;
+    if (!readerKey || !canEditTitle) return false;
     nav.setTab("conversation");
     requestTitleEdit(readerKey);
   };
-  usePullRequestsShortcut("e", () => editTitle(), { enabled: canUpdate });
+  usePullRequestsShortcut("e", () => editTitle(), { enabled: canEditTitle });
+  const showLifecycle =
+    canEditTitle ||
+    (state === "open" && (canSetDraft || canClose)) ||
+    (state === "closed" && canReopen);
 
   return (
     <>
@@ -474,7 +498,7 @@ function OverflowMenu(props: {
               }
             >
               <ExternalLinkIcon aria-hidden />
-              Open on GitHub
+              Open on {props.hostName}
               <MenuShortcut>O</MenuShortcut>
             </MenuItem>
           ) : null}
@@ -490,19 +514,26 @@ function OverflowMenu(props: {
               Copy branch name
             </MenuItem>
           ) : null}
-          <MenuItem disabled={!handoff.available} onClick={() => void handoff.openWorktreeThread()}>
-            <FolderGit2Icon aria-hidden />
-            Check out in a worktree
-          </MenuItem>
-          {canUpdate ? (
+          {handoff.supported ? (
+            <MenuItem
+              disabled={!handoff.available}
+              onClick={() => void handoff.openWorktreeThread()}
+            >
+              <FolderGit2Icon aria-hidden />
+              Check out in a worktree
+            </MenuItem>
+          ) : null}
+          {showLifecycle ? (
             <>
               <MenuSeparator />
-              <MenuItem onClick={() => editTitle()}>
-                <PencilIcon aria-hidden />
-                Edit title
-                <MenuShortcut>E</MenuShortcut>
-              </MenuItem>
-              {state === "open" ? (
+              {canEditTitle ? (
+                <MenuItem onClick={() => editTitle()}>
+                  <PencilIcon aria-hidden />
+                  Edit title
+                  <MenuShortcut>E</MenuShortcut>
+                </MenuItem>
+              ) : null}
+              {state === "open" && canSetDraft ? (
                 <MenuItem
                   disabled={update.isPending}
                   onClick={() =>
@@ -520,12 +551,12 @@ function OverflowMenu(props: {
                   {isDraft ? "Mark ready for review" : "Convert to draft"}
                 </MenuItem>
               ) : null}
-              {state === "open" ? (
+              {state === "open" && canClose ? (
                 <MenuItem variant="destructive" onClick={() => setConfirmClose(true)}>
                   <GitPullRequestClosedIcon aria-hidden />
                   Close pull request
                 </MenuItem>
-              ) : state === "closed" ? (
+              ) : state === "closed" && canReopen ? (
                 <MenuItem
                   disabled={update.isPending}
                   onClick={() => void run({ kind: "reopen" }, "Could not reopen the pull request")}

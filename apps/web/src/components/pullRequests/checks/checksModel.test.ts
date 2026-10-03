@@ -4,6 +4,15 @@ import { Option } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
+  GITLAB_FIXTURE_EXTERNAL_STATUS,
+  GITLAB_FIXTURE_FAILING_JOB,
+  GITLAB_FIXTURE_PIPELINE_NAME,
+  GITLAB_FIXTURE_RUN_ID,
+  gitLabFixtureDetail,
+  gitLabFixtureJobs,
+  gitLabFixtureRun,
+} from "../testing/gitLabCheckFixtures";
+import {
   FIXTURE_703_FAILING_JOB,
   fixtureDetail,
   fixtureWorkflowRunJobs,
@@ -39,7 +48,13 @@ function modelFor(number: number, options: { readonly runs?: boolean; readonly j
 
 function check(
   name: string,
-  input: { workflowName?: string; status?: string; conclusion?: string; kind?: string },
+  input: {
+    workflowName?: string;
+    status?: string;
+    conclusion?: string;
+    kind?: string;
+    isRequired?: boolean;
+  },
 ): SourceControlCheckRollupItem {
   return {
     kind: (input.kind ?? "check-run") as SourceControlCheckRollupItem["kind"],
@@ -50,6 +65,7 @@ function check(
     url: Option.none(),
     startedAt: Option.none(),
     completedAt: Option.none(),
+    ...(input.isRequired !== undefined ? { isRequired: input.isRequired } : {}),
   };
 }
 
@@ -86,6 +102,8 @@ describe("buildPullRequestChecksModel", () => {
       passed: 8,
       skipped: 0,
       total: 9,
+      // The fixture host does not mark required checks.
+      required: 0,
     });
     expect(model.overall).toBe("failing");
     expect(model.rerunnableRunIds).toEqual([FIXTURE_703_FAILING_JOB.runId]);
@@ -149,6 +167,88 @@ describe("buildPullRequestChecksModel", () => {
     expect(model.counts.total).toBe(2);
   });
 
+  it("tags required jobs and statuses, before and after the jobs load", () => {
+    const detail = fixtureDetail(703);
+    const requiredNames = new Set([FIXTURE_703_FAILING_JOB.name, "Typecheck", "Vercel – ryco-web"]);
+    const rollup = summarizeChangeRequestChecks(
+      detail.checkRollup?.map((item) => ({ ...item, isRequired: requiredNames.has(item.name) })),
+    );
+    const runs = fixtureWorkflowRuns(703).runs;
+    const loadedJobs = new Map(
+      runs.map((run) => [run.runId, fixtureWorkflowRunJobs(run.runId).jobs] as const),
+    );
+    for (const jobsByRunId of [new Map(), loadedJobs]) {
+      const model = buildPullRequestChecksModel({
+        rollup,
+        runs,
+        jobsByRunId,
+        headSha: detail.headSha ?? null,
+      });
+      const required = model.workflows.flatMap((workflow) =>
+        workflow.jobs.filter((job) => job.required).map((job) => job.name),
+      );
+      expect(required).toEqual([FIXTURE_703_FAILING_JOB.name, "Typecheck"]);
+      expect(model.statuses.map((status) => status.check.required)).toEqual([true]);
+      expect(model.counts.required).toBe(3);
+    }
+  });
+
+  it("counts a required status context without a workflow", () => {
+    const model = buildPullRequestChecksModel({
+      rollup: summarizeChangeRequestChecks([
+        check("deploy", { kind: "status-context", status: "failure", isRequired: true }),
+        check("docs", { kind: "status-context", status: "success", isRequired: false }),
+      ]),
+      runs: null,
+      jobsByRunId: new Map(),
+      headSha: null,
+    });
+    expect(model.counts).toMatchObject({ failing: 1, passed: 1, required: 1 });
+  });
+
+  it("lists GitLab jobs once, under their merged-results pipeline", () => {
+    // GitLab's rollup carries the head pipeline's jobs as its check runs; the
+    // pipeline ran on a merge commit and names the head it verifies.
+    const detail = gitLabFixtureDetail();
+    const rollup = summarizeChangeRequestChecks(detail.checkRollup);
+    const run = gitLabFixtureRun();
+    expect(run.commit.oid).not.toBe(detail.headSha);
+    for (const jobsByRunId of [
+      new Map<string, ReadonlyArray<SourceControlWorkflowJob>>(),
+      new Map([[GITLAB_FIXTURE_RUN_ID, gitLabFixtureJobs()]]),
+    ]) {
+      const model = buildPullRequestChecksModel({
+        rollup,
+        runs: [run],
+        jobsByRunId,
+        headSha: detail.headSha ?? null,
+      });
+      expect(model.workflows.map((workflow) => [workflow.name, workflow.run?.runId])).toEqual([
+        [GITLAB_FIXTURE_PIPELINE_NAME, GITLAB_FIXTURE_RUN_ID],
+      ]);
+      expect(model.workflows[0]?.jobs).toHaveLength(9);
+      expect(model.workflows[0]?.jobs[0]?.name).toBe(GITLAB_FIXTURE_FAILING_JOB.name);
+      expect(model.statuses.map((status) => status.check.name)).toEqual([
+        GITLAB_FIXTURE_EXTERNAL_STATUS,
+      ]);
+      expect(model.counts).toMatchObject({ failing: 1, passed: 9, total: 10 });
+      expect(model.rerunnableRunIds).toEqual([GITLAB_FIXTURE_RUN_ID]);
+    }
+    // The rail's "View failing check" link resolves to the listed job.
+    const failing = rollup.failing[0]!;
+    expect(pullRequestCheckJobParam(failing)).toBe(GITLAB_FIXTURE_FAILING_JOB.jobId);
+    const model = buildPullRequestChecksModel({
+      rollup,
+      runs: [run],
+      jobsByRunId: new Map([[GITLAB_FIXTURE_RUN_ID, gitLabFixtureJobs()]]),
+      headSha: detail.headSha ?? null,
+    });
+    expect(resolveChecksJobParam(model, GITLAB_FIXTURE_FAILING_JOB.jobId)).toEqual({
+      workflowKey: `${GITLAB_FIXTURE_PIPELINE_NAME}#0`,
+      jobKey: GITLAB_FIXTURE_FAILING_JOB.name,
+    });
+  });
+
   it("reports no checks for an empty rollup", () => {
     const model = buildPullRequestChecksModel({
       rollup: summarizeChangeRequestChecks([]),
@@ -171,14 +271,17 @@ describe("checksSummarySegments", () => {
       passed: 8,
       skipped: 2,
       total: 12,
+      required: 4,
     });
     expect(segments.map((segment) => `${segment.count} ${segment.label}`)).toEqual([
       "1 failing",
       "8 passed",
       "1 running",
       "2 skipped",
+      "4 required",
     ]);
     expect(segments[0]?.tone).toBe("destructive");
+    expect(segments.at(-1)?.tone).toBe("muted");
   });
 });
 

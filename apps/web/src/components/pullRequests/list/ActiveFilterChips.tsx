@@ -1,5 +1,5 @@
 import { XIcon } from "lucide-react";
-import { useRef } from "react";
+import { useMemo, useState } from "react";
 
 import { cn } from "../../../lib/utils";
 import { usePullRequestsPage } from "../PullRequestsPageContext";
@@ -19,11 +19,15 @@ const CHIP_CLASS =
  */
 export function ActiveFilterChips() {
   const { nav, model } = usePullRequestsPage();
-  const chips = pullRequestFilterChips(nav.search, model.list.labels);
-  const lastChipsRef = useRef<ReadonlyArray<PullRequestFilterChip>>(chips);
-  if (chips.length > 0) lastChipsRef.current = chips;
+  const chips = useMemo(
+    () => pullRequestFilterChips(nav.search, model.list.labels),
+    [model.list.labels, nav.search],
+  );
+  // The last chips shown, remembered during render, so the row closes on them.
+  const [lastChips, setLastChips] = useState<ReadonlyArray<PullRequestFilterChip>>(chips);
+  if (chips.length > 0 && chips !== lastChips) setLastChips(chips);
   const open = chips.length > 0;
-  const shown = open ? chips : lastChipsRef.current;
+  const shown = open ? chips : lastChips;
   return (
     <div
       data-open={open}

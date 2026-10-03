@@ -7,7 +7,15 @@ import {
   selectReviewDraft,
   type ReviewDraftComment,
 } from "@ryco/client-runtime/state/pull-request-review";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { useDiffFileNavigation } from "../../../hooks/useDiffFileNavigation";
@@ -23,7 +31,11 @@ import {
 import { DiffWorkerPoolProvider } from "../../DiffWorkerPoolProvider";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { usePullRequestAgentHandoff } from "../agentHandoff";
-import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
+import {
+  usePullRequestHostName,
+  usePullRequestSelection,
+  usePullRequestsPage,
+} from "../PullRequestsPageContext";
 import { usePullRequestsLayoutStore } from "../pullRequestsLayoutStore";
 import { usePullRequestsShortcut } from "../pullRequestsShortcuts";
 import type { DiffFileActions, DiffRenderSettings } from "./DiffFileSection";
@@ -50,7 +62,11 @@ import {
   type LineCommentTarget,
 } from "./pullRequestFiles.logic";
 import { useFileTreeShown, usePullRequestFilesUiStore } from "./pullRequestFilesStore";
-import { PullRequestDiffStream, type DiffStreamState } from "./PullRequestDiffStream";
+import {
+  DiffUnavailable,
+  PullRequestDiffStream,
+  type DiffStreamState,
+} from "./PullRequestDiffStream";
 import { useFilesViewed } from "./useFilesViewed";
 import { usePullRequestDiffFiles } from "./usePullRequestDiffFiles";
 
@@ -130,6 +146,8 @@ function scrollOffsetOf(scroller: HTMLElement, element: HTMLElement): number {
  * Files: no other tab renders a diff.
  */
 export function FilesTab() {
+  const { model } = usePullRequestsPage();
+  if (!model.capabilities.diff) return <FilesUnavailable />;
   return (
     <DiffWorkerPoolProvider>
       <FilesTabContent />
@@ -137,10 +155,26 @@ export function FilesTab() {
   );
 }
 
+/** A host whose provider cannot produce the diff: no tree, no reads, a way out. */
+function FilesUnavailable() {
+  const selection = usePullRequestSelection();
+  const hostName = usePullRequestHostName();
+  return (
+    <div className="relative flex min-h-0 min-w-0 flex-1">
+      <DiffUnavailable
+        hostName={hostName}
+        url={selection.detail.data?.url ?? selection.summary?.url ?? null}
+      />
+    </div>
+  );
+}
+
 function FilesTabContent() {
   const { nav, layout, model } = usePullRequestsPage();
+  const capabilities = model.capabilities;
   const selection = usePullRequestSelection();
   const handoff = usePullRequestAgentHandoff();
+  const hostName = usePullRequestHostName();
   const { resolvedTheme } = useTheme();
   const [diffLayout] = useDiffLayout();
   const commitSha = nav.search.commit ?? null;
@@ -172,7 +206,8 @@ function FilesTabContent() {
     cwd: model.cwd,
     reference: selection.reference,
     headSha,
-    active: active && headSha !== null,
+    // Hosts without viewed storage are never asked.
+    active: active && headSha !== null && capabilities.viewedFiles,
   });
 
   // ── Threads and drafts ──────────────────────────────────────────────
@@ -272,8 +307,9 @@ function FilesTabContent() {
 
   // ── Review capabilities ─────────────────────────────────────────────
   const viewer = activity?.viewer ?? null;
-  const commentingReason = !model.supportsReview
-    ? "Reviews aren’t available for this host"
+  const commentingSupported = capabilities.lineComments;
+  const commentingReason = !commentingSupported
+    ? "Line comments aren’t available for this host"
     : commitSha
       ? "Comments are off while viewing a single commit"
       : !diffHeadSha || !draftKey
@@ -284,7 +320,8 @@ function FilesTabContent() {
   const reviewStarted = draft.comments.length > 0;
 
   const loadDiffFiles = useMemo(() => {
-    if (!diffHeadSha) return undefined;
+    // Hunk expansion reads both sides' contents; hosts without that read get none.
+    if (!diffHeadSha || !capabilities.fileContents) return undefined;
     if (!commitSha) {
       return createChangeRequestDiffFilesLoader({
         environmentId: model.environmentId,
@@ -307,6 +344,7 @@ function FilesTabContent() {
         })
       : undefined;
   }, [
+    capabilities.fileContents,
     commitSha,
     detail?.commits,
     diffHeadSha,
@@ -321,8 +359,16 @@ function FilesTabContent() {
       theme: resolvedTheme,
       diffStyle: diffLayout === "split" ? "split" : "unified",
       loadDiffFiles,
-      commenting: { enabled: commentingReason === undefined, reason: commentingReason },
-      ask: { enabled: handoff.available, reason: handoff.unavailableReason },
+      commenting: {
+        supported: commentingSupported,
+        enabled: commentingReason === undefined,
+        reason: commentingReason,
+      },
+      ask: {
+        supported: handoff.supported,
+        enabled: handoff.available,
+        reason: handoff.unavailableReason,
+      },
       mode: commitSha ? "original" : "current",
       headSha: diffHeadSha,
       reviewStarted,
@@ -332,10 +378,12 @@ function FilesTabContent() {
     }),
     [
       commentingReason,
+      commentingSupported,
       commitSha,
       diffHeadSha,
       diffLayout,
       handoff.available,
+      handoff.supported,
       handoff.unavailableReason,
       loadDiffFiles,
       pullRequestUrl,
@@ -374,9 +422,9 @@ function FilesTabContent() {
   );
 
   // Pierre reports the gutter drag's range as a line selection right after it
-  // opens the composer; the open composer owns its file's highlight.
+  // opens the composer; the open composer owns its file's highlight. Mirrors
+  // `composer`: `openComposerAt` is the only writer of both.
   const composerRef = useRef(composer);
-  composerRef.current = composer;
   // What the composer holds, outside React state: it survives the composer
   // remounting (a theme change, a file's patch changing under it) without a
   // page render per keystroke.
@@ -418,10 +466,9 @@ function FilesTabContent() {
       }),
     );
   };
-  const parkLatest = useRef(parkOrphanedComposer);
-  parkLatest.current = parkOrphanedComposer;
+  const onComposerOrphaned = useEffectEvent(parkOrphanedComposer);
   useEffect(() => {
-    if (composerOrphaned) parkLatest.current();
+    if (composerOrphaned) onComposerOrphaned();
   }, [composerOrphaned]);
 
   const actions: DiffFileActions = {
@@ -513,7 +560,9 @@ function FilesTabContent() {
       }),
   };
   const actionsRef = useRef(actions);
-  actionsRef.current = actions;
+  useLayoutEffect(() => {
+    actionsRef.current = actions;
+  });
 
   // ── Deep links: file / line / side / thread ─────────────────────────
   const revealRef = useRef<{ key: string; controller: AbortController } | null>(null);
@@ -529,7 +578,7 @@ function FilesTabContent() {
   // A thread link waits for the conversations (on a cold link they arrive
   // after the diff); without them it falls back to the link's file and line.
   const threadsSettled =
-    allThreads !== undefined || !model.supportsReview || selection.activity.error !== null;
+    allThreads !== undefined || !capabilities.activity || selection.activity.error !== null;
   const reveal = async (signal: AbortSignal) => {
     let path = search.file ?? null;
     let line = search.line ?? null;
@@ -610,8 +659,7 @@ function FilesTabContent() {
     if (threadId === null) flashDiffLine(target);
     else flashElement(target);
   };
-  const revealLatest = useRef(reveal);
-  revealLatest.current = reveal;
+  const revealFromLink = useEffectEvent(reveal);
   useEffect(() => {
     if (!active || files.status !== "ready") return;
     if (!search.file && !search.thread) return;
@@ -620,7 +668,7 @@ function FilesTabContent() {
     revealRef.current?.controller.abort();
     const controller = new AbortController();
     revealRef.current = { key: revealKey, controller };
-    void revealLatest.current(controller.signal);
+    void revealFromLink(controller.signal);
   }, [active, files.status, revealKey, search.file, search.thread, threadsSettled]);
   useEffect(() => () => revealRef.current?.controller.abort(), []);
 
@@ -631,25 +679,24 @@ function FilesTabContent() {
   const filterRef = useRef<HTMLInputElement>(null);
   const overlayRef = useRef<HTMLElement>(null);
   const overlayOpen = !layout.treeDocked && treeShown;
-  const treeDockedRef = useRef(layout.treeDocked);
-  treeDockedRef.current = layout.treeDocked;
   // Each reader (one pull request) mounts its own Files tab: start with overlays closed.
   useEffect(() => {
     usePullRequestFilesUiStore.getState().setTreeOverlayOpen(false);
     usePullRequestFilesUiStore.getState().setCommitMenuOpen(false);
   }, []);
 
-  // Stable, so scroll-spy renders reach only the two tree rows whose plate moves.
+  // Stable (it changes only when the tree docks or undocks), so scroll-spy
+  // renders reach only the two tree rows whose plate moves.
   const selectFromTree = useCallback(
     (path: string) => {
       setOpen(path, true);
       scrollToSection(viewportRef.current, path);
-      if (treeDockedRef.current) return;
+      if (layout.treeDocked) return;
       // The overlay closes over the file it opened: focus follows to that file.
       if (overlayRef.current?.contains(document.activeElement)) focusHeaderRef.current = path;
       setTreeOverlayOpen(false);
     },
-    [setOpen, setTreeOverlayOpen],
+    [layout.treeDocked, setOpen, setTreeOverlayOpen],
   );
   const dismissOverlay = useCallback(() => setTreeOverlayOpen(false), [setTreeOverlayOpen]);
 
@@ -869,6 +916,7 @@ function FilesTabContent() {
         actionsRef={actionsRef}
         viewportRef={viewportRef}
         filesUrl={pullRequestUrl ? `${pullRequestUrl}/files` : null}
+        hostName={hostName}
         commitScoped={commitSha !== null}
         onRetry={() =>
           invalidateSourceControl({ environmentId: model.environmentId, cwd: model.cwd })

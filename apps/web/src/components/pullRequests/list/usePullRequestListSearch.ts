@@ -1,5 +1,5 @@
 import type { ChangeRequest } from "@ryco/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { openExternalLink } from "../../../lib/openExternalLink";
 import { useSourceControlChangeRequestSearch } from "../../../rpc/useSourceControl";
@@ -53,7 +53,9 @@ export function usePullRequestListSearch(): PullRequestListSearch {
   // What this field last committed, to tell its own commits from history moves.
   const lastCommittedRef = useRef(committed);
   const navRef = useRef(nav);
-  navRef.current = nav;
+  useLayoutEffect(() => {
+    navRef.current = nav;
+  });
 
   useEffect(() => {
     if (committed === lastCommittedRef.current) return;
@@ -90,7 +92,9 @@ export function usePullRequestListSearch(): PullRequestListSearch {
   );
 
   const textRef = useRef(text);
-  textRef.current = text;
+  useLayoutEffect(() => {
+    textRef.current = text;
+  });
   const flush = useCallback(() => {
     if (timerRef.current === null) return;
     clearTimeout(timerRef.current);
@@ -128,9 +132,11 @@ export function usePullRequestListSearch(): PullRequestListSearch {
   }, [repositoryKey]);
 
   const knownUrlsRef = useRef<ReadonlyMap<number, ChangeRequest>>(model.list.byNumber);
-  knownUrlsRef.current = model.list.byNumber;
   const repositoryRef = useRef({ repository, repositories });
-  repositoryRef.current = { repository, repositories };
+  useLayoutEffect(() => {
+    knownUrlsRef.current = model.list.byNumber;
+    repositoryRef.current = { repository, repositories };
+  });
 
   const open = useCallback(
     (target: PullRequestLinkTarget) => {
@@ -185,6 +191,7 @@ export function usePullRequestListSearch(): PullRequestListSearch {
   const query = committed.trim();
   const localEmpty = model.list.groups.length === 0;
   const serverActive =
+    model.capabilities.search &&
     query.length >= PULL_REQUEST_SERVER_SEARCH_MIN_LENGTH &&
     localEmpty &&
     !model.list.isLoading &&

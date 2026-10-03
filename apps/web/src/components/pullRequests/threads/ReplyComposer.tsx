@@ -16,7 +16,10 @@ export { SUBMIT_SHORTCUT_LABEL };
  * next to the actions so the draft is never lost. While it sends, the field
  * is read-only rather than disabled, so it keeps focus (and the caret).
  */
-export function CommentField(props: {
+export function CommentField({
+  textareaRef,
+  ...props
+}: {
   readonly value: string;
   readonly onChange: (value: string) => void;
   readonly placeholder: string;
@@ -53,7 +56,7 @@ export function CommentField(props: {
   return (
     <div className="flex flex-col">
       <textarea
-        ref={props.textareaRef}
+        ref={textareaRef}
         aria-label={props.ariaLabel}
         placeholder={props.placeholder}
         value={props.value}

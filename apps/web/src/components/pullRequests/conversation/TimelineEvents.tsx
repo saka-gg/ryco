@@ -67,37 +67,56 @@ function andList(parts: ReadonlyArray<ReactNode>): ReactNode {
 // ── Commit runs ──────────────────────────────────────────────────────
 
 function CommitRow(props: { readonly commit: ChangeRequestTimelineCommitItem }) {
-  const { nav } = usePullRequestsPage();
+  const { nav, model } = usePullRequestsPage();
   const { commit } = props;
   const overall = commitChecksOverall(commit.checkState);
+  const content = (
+    <>
+      <Sha className="shrink-0 text-muted-foreground">{commit.shortOid}</Sha>
+      <span className="min-w-0 flex-1 truncate">{commit.messageHeadline}</span>
+      {overall ? <CheckStateGlyph overall={overall} label={CHECKS_OVERALL_LABEL[overall]} /> : null}
+    </>
+  );
+  const rowClass =
+    "-mx-1.5 flex h-7 w-[calc(100%+0.75rem)] min-w-0 items-center gap-2.5 rounded-md px-1.5 text-left text-[13px] text-foreground/90";
+  // Hosts without single-commit diffs show the commit without the Files link.
   return (
     <li>
-      <button
-        type="button"
-        onClick={() => nav.scopeToCommit(commit.oid)}
-        title={`Show changes in ${commit.shortOid}`}
-        className="-mx-1.5 flex h-7 w-[calc(100%+0.75rem)] min-w-0 items-center gap-2.5 rounded-md px-1.5 text-left text-[13px] text-foreground/90 outline-hidden transition-colors duration-(--app-motion-duration-chip) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <Sha className="shrink-0 text-muted-foreground">{commit.shortOid}</Sha>
-        <span className="min-w-0 flex-1 truncate">{commit.messageHeadline}</span>
-        {overall ? (
-          <CheckStateGlyph overall={overall} label={CHECKS_OVERALL_LABEL[overall]} />
-        ) : null}
-      </button>
+      {model.capabilities.commitDiffs ? (
+        <button
+          type="button"
+          onClick={() => nav.scopeToCommit(commit.oid)}
+          title={`Show changes in ${commit.shortOid}`}
+          className={cn(
+            rowClass,
+            "outline-hidden transition-colors duration-(--app-motion-duration-chip) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+          )}
+        >
+          {content}
+        </button>
+      ) : (
+        <div className={rowClass}>{content}</div>
+      )}
     </li>
   );
 }
 
 /** A lone commit inside its event line: sha, headline and checks; scopes Files to it. */
 function InlineCommit(props: { readonly commit: ChangeRequestTimelineCommitItem }) {
-  const { nav } = usePullRequestsPage();
+  const { nav, model } = usePullRequestsPage();
   const { commit } = props;
   const overall = commitChecksOverall(commit.checkState);
+  const scopable = model.capabilities.commitDiffs;
+  const Root = scopable ? "button" : "span";
   return (
-    <button
-      type="button"
-      onClick={() => nav.scopeToCommit(commit.oid)}
-      title={`Show changes in ${commit.shortOid}`}
+    <Root
+      {...(scopable
+        ? {
+            type: "button" as const,
+            onClick: () => nav.scopeToCommit(commit.oid),
+            title: `Show changes in ${commit.shortOid}`,
+          }
+        : {})}
       className="group/commit inline-flex min-w-0 items-center gap-1.5 self-center rounded-[4px] text-left outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
     >
       <Sha className="shrink-0 transition-colors duration-(--app-motion-duration-chip) group-hover/commit:text-foreground">
@@ -113,7 +132,7 @@ function InlineCommit(props: { readonly commit: ChangeRequestTimelineCommitItem 
           className="size-3"
         />
       ) : null}
-    </button>
+    </Root>
   );
 }
 

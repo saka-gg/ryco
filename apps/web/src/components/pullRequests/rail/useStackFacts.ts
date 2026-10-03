@@ -1,4 +1,5 @@
 import type { SourceControlChangeRequestStack } from "@ryco/contracts";
+import { canMergeChangeRequests } from "@ryco/shared/sourceControl";
 import { useCallback, useMemo } from "react";
 
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
@@ -33,16 +34,19 @@ export function useStackFacts(): StackFacts | null {
     },
     [currentNumber, nav],
   );
+  const capabilities = model.capabilities;
   return useMemo(() => {
-    if (!stack || stack.entries.length < 2) return null;
+    // Only hosts with native stacks show one (the detail of others carries none).
+    if (!capabilities.stacks || !stack || stack.entries.length < 2) return null;
     return {
       stack,
       assessment: assessStack(stack),
       position: stackPositionLabel(stack),
       incomplete,
-      canMergeThrough: model.supportsReview && !incomplete && (viewer?.canMerge ?? true),
+      canMergeThrough:
+        canMergeChangeRequests(capabilities) && !incomplete && (viewer?.canMerge ?? true),
       currentNumber,
       selectLayer,
     };
-  }, [currentNumber, incomplete, model.supportsReview, selectLayer, stack, viewer?.canMerge]);
+  }, [capabilities, currentNumber, incomplete, selectLayer, stack, viewer?.canMerge]);
 }

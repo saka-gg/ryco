@@ -13,10 +13,8 @@ export function useFocusAfterReveal(input: {
   readonly open: boolean;
   readonly shellRef: RefObject<HTMLElement | null>;
   readonly targetRef: RefObject<HTMLElement | null>;
-  /** Re-run for a new reveal of an already-open shell. */
-  readonly token?: unknown;
 }): void {
-  const { open, shellRef, targetRef, token } = input;
+  const { open, shellRef, targetRef } = input;
   useEffect(() => {
     if (!open) return;
     const focus = () => {
@@ -49,5 +47,5 @@ export function useFocusAfterReveal(input: {
       shell?.removeEventListener("animationend", onEnd);
       window.clearTimeout(timer);
     };
-  }, [open, shellRef, targetRef, token]);
+  }, [open, shellRef, targetRef]);
 }

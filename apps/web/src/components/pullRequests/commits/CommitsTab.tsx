@@ -1,9 +1,14 @@
+import { changeRequestCommitUrl } from "@ryco/shared/sourceControl";
 import { memo, useMemo, useState } from "react";
 
 import { cn } from "../../../lib/utils";
 import { Skeleton } from "../../ui/skeleton";
 import { useTabScrollMemory } from "../checks/checksUi";
-import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
+import {
+  usePullRequestHostName,
+  usePullRequestSelection,
+  usePullRequestsPage,
+} from "../PullRequestsPageContext";
 import { CommitRow, ForcePushMarker } from "./CommitRow";
 import { buildCommitDays, formatCommitDay, type CommitDay } from "./commitsModel";
 
@@ -16,6 +21,7 @@ import { buildCommitDays, formatCommitDay, type CommitDay } from "./commitsModel
 export function CommitsTab() {
   const { model, nav } = usePullRequestsPage();
   const selection = usePullRequestSelection();
+  const hostName = usePullRequestHostName();
   const detail = selection.detail.data;
   const timeline = selection.activity.data?.timeline;
   const days = useMemo(
@@ -32,12 +38,18 @@ export function CommitsTab() {
   const loading =
     !hasRows &&
     ((selection.detail.isLoading && detail === null) ||
-      (model.supportsReview && selection.activity.isLoading && !selection.activity.data));
+      (model.capabilities.activity && selection.activity.isLoading && !selection.activity.data));
   const failed = !hasRows && !loading && selection.detail.error !== null && detail === null;
   const { ref: scrollRef, onScroll } = useTabScrollMemory("commits", hasRows);
   const scopedCommit = nav.search.commit ?? null;
-  const pullRequestUrl =
-    model.provider?.kind === "github" ? (detail?.url ?? selection.summary?.url ?? null) : null;
+  const pullRequestUrl = detail?.url ?? selection.summary?.url ?? null;
+  const providerKind = model.provider?.kind ?? "unknown";
+  const commitUrlFor = useMemo(
+    () => (oid: string) => changeRequestCommitUrl(providerKind, pullRequestUrl, oid),
+    [providerKind, pullRequestUrl],
+  );
+  // Rows scope Files to their commit only where the host serves single-commit diffs.
+  const onScope = model.capabilities.commitDiffs ? nav.scopeToCommit : null;
   // Day names ("Today") are read against the time the tab opened.
   const [nowMs] = useState(() => Date.now());
 
@@ -61,8 +73,9 @@ export function CommitsTab() {
               day={day}
               label={formatCommitDay(day.dayMs, nowMs)}
               scopedCommit={scopedCommit}
-              pullRequestUrl={pullRequestUrl}
-              onScope={nav.scopeToCommit}
+              commitUrlFor={commitUrlFor}
+              hostName={hostName}
+              onScope={onScope}
             />
           ))
         )}
@@ -75,8 +88,9 @@ const CommitDayGroup = memo(function CommitDayGroup(props: {
   readonly day: CommitDay;
   readonly label: string;
   readonly scopedCommit: string | null;
-  readonly pullRequestUrl: string | null;
-  readonly onScope: (oid: string) => void;
+  readonly commitUrlFor: (oid: string) => string | null;
+  readonly hostName: string;
+  readonly onScope: ((oid: string) => void) | null;
 }) {
   return (
     <section aria-label={props.label} className="pt-5 first:pt-3">
@@ -90,7 +104,8 @@ const CommitDayGroup = memo(function CommitDayGroup(props: {
               key={item.key}
               commit={item}
               scoped={props.scopedCommit !== null && item.oid.startsWith(props.scopedCommit)}
-              pullRequestUrl={props.pullRequestUrl}
+              commitUrl={props.commitUrlFor(item.oid)}
+              hostName={props.hostName}
               onScope={props.onScope}
             />
           ) : (

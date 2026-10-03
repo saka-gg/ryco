@@ -151,6 +151,8 @@ export const sourceControlRpcMock = {
   queryOverrides: {} as Partial<Record<SourceControlRpcReadHook, QueryOverride>>,
   /** Replace a mutation's behaviour (skips the default store update). */
   mutationOverrides: {} as Partial<Record<SourceControlRpcMutationHook, MutationOverride>>,
+  /** Jobs to serve for a run id instead of the fixtures' (e.g. another host's run). */
+  workflowRunJobs: {} as Record<string, SourceControlWorkflowRunJobsResult["jobs"]>,
   callsTo(hook: SourceControlRpcMutationHook): ReadonlyArray<SourceControlRpcMockCall> {
     return sourceControlRpcMock.calls.filter((call) => call.hook === hook);
   },
@@ -160,6 +162,7 @@ export const sourceControlRpcMock = {
     sourceControlRpcMock.queries.length = 0;
     sourceControlRpcMock.queryOverrides = {};
     sourceControlRpcMock.mutationOverrides = {};
+    sourceControlRpcMock.workflowRunJobs = {};
     seenQueries.clear();
     pullRequestFixtureStore.reset();
   },
@@ -216,6 +219,11 @@ function emptyRuns(): SourceControlWorkflowRunListResult {
     headSha: Option.none(),
     runs: [],
   };
+}
+
+function runJobs(runId: string): SourceControlWorkflowRunJobsResult {
+  const jobs = sourceControlRpcMock.workflowRunJobs[runId];
+  return jobs ? { provider: "github", runId, jobs } : fixtureWorkflowRunJobs(runId);
 }
 
 function workflowRunsFor(
@@ -504,7 +512,7 @@ export function createSourceControlRpcMock(original?: object): Record<string, un
       useFixtureQuery("useSourceControlWorkflowRuns", input, () => workflowRunsFor(input)),
     useSourceControlWorkflowRunJobs: (input: SourceControlWorkflowRunJobsInput) =>
       useFixtureQuery("useSourceControlWorkflowRunJobs", input, () =>
-        input.runId ? fixtureWorkflowRunJobs(input.runId) : null,
+        input.runId ? runJobs(input.runId) : null,
       ),
     useSourceControlWorkflowRunJobsBatch: (input: {
       readonly runIds: ReadonlyArray<string>;
@@ -514,8 +522,7 @@ export function createSourceControlRpcMock(original?: object): Record<string, un
       return useMemo(() => {
         const jobsByRunId = new Map<string, SourceControlWorkflowRunJobsResult["jobs"]>();
         if (input.enabled) {
-          for (const runId of input.runIds)
-            jobsByRunId.set(runId, fixtureWorkflowRunJobs(runId).jobs);
+          for (const runId of input.runIds) jobsByRunId.set(runId, runJobs(runId).jobs);
         }
         return { jobsByRunId, isLoading: false };
         // oxlint-disable-next-line react-hooks/exhaustive-deps

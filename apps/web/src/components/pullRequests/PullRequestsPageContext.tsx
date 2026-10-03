@@ -146,6 +146,12 @@ export function usePullRequestsPage(): PullRequestsPageContextValue {
   return value;
 }
 
+/** The host's name for "Open on …" and "… on GitHub" copy. */
+export function usePullRequestHostName(): string {
+  const { model } = usePullRequestsPage();
+  return model.provider?.name ?? "the host";
+}
+
 /** The selected change request; throws when nothing is selected (reader-only areas). */
 export function usePullRequestSelection() {
   const { model } = usePullRequestsPage();

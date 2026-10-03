@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 vi.mock("~/rpc/useSourceControl", async (importOriginal) => {
   const { createSourceControlRpcMock } =
@@ -41,8 +41,11 @@ let navigate: ((search: PullRequestsSearch) => void) | null = null;
 function Probe(props: { readonly initial: PullRequestsSearch }) {
   const [, setTick] = useState(0);
   const [search, setSearch] = useState(props.initial);
-  rerender = () => setTick((tick) => tick + 1);
-  navigate = setSearch;
+  // Hand the test its controls once mounted (writing module state is an effect).
+  useEffect(() => {
+    rerender = () => setTick((tick) => tick + 1);
+    navigate = setSearch;
+  }, []);
   seen.push(usePullRequestsModel({ repository: fixtureRepositoryOption, search }));
   return null;
 }

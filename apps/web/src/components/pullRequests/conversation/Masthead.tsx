@@ -69,7 +69,9 @@ function EditableTitle() {
   const selection = usePullRequestSelection();
   const detail = selection.detail.data;
   const title = detail?.title ?? selection.summary?.title ?? `#${selection.number}`;
-  const canUpdate = model.supportsReview && (selection.activity.data?.viewer?.canUpdate ?? false);
+  const canUpdate =
+    model.capabilities.lifecycle.has("edit") &&
+    (selection.activity.data?.viewer?.canUpdate ?? false);
   const update = useUpdateChangeRequestMutation(selection.mutationTarget);
   const [editing, setEditing] = useState(false);
 

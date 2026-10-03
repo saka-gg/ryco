@@ -72,6 +72,11 @@ export interface PullRequestAgentHandoffRequest {
 }
 
 export interface PullRequestAgentHandoff {
+  /**
+   * The host can check the change request out (`capabilities.checkout`), which
+   * every hand-off needs. False: hand-off entry points are hidden, not disabled.
+   */
+  readonly supported: boolean;
   readonly available: boolean;
   /** Why hand-offs are unavailable (shown in tooltips when `available` is false). */
   readonly unavailableReason?: string;
@@ -334,14 +339,18 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
 
   const dispatchAllowed = dispatchCapability.allowed;
   const dispatchReason = dispatchCapability.reason;
+  const supported = model.capabilities.checkout;
+  const hostName = model.provider?.name ?? "This host";
   return useMemo<PullRequestAgentHandoff>(() => {
-    const unavailableReason = !repository
-      ? "Choose a repository first."
-      : !target
-        ? "Select a pull request first."
-        : !dispatchAllowed
-          ? (dispatchReason ?? "Agent threads are unavailable on this connection.")
-          : undefined;
+    const unavailableReason = !supported
+      ? `${hostName} change requests can’t be checked out here.`
+      : !repository
+        ? "Choose a repository first."
+        : !target
+          ? "Select a pull request first."
+          : !dispatchAllowed
+            ? (dispatchReason ?? "Agent threads are unavailable on this connection.")
+            : undefined;
 
     const guard = async (failure: string, run: () => Promise<void>) => {
       if (inFlightRef.current) return;
@@ -368,6 +377,7 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
     };
     // A row's pull request: only the repository has to be resolved.
     const requireTargetFor = (pullRequest: PullRequestWorktreeTarget) => {
+      if (!supported) throw new Error(unavailableReason ?? "Checkout is unavailable here.");
       if (!repository) throw new Error("Choose a repository first.");
       const projectRef = scopeProjectRef(repository.environmentId, repository.projectId);
       const api = readEnvironmentApi(projectRef.environmentId);
@@ -405,6 +415,7 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
     };
 
     return {
+      supported,
       available: unavailableReason === undefined,
       ...(unavailableReason ? { unavailableReason } : {}),
       start: (request) =>
@@ -507,5 +518,5 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
           }
         }),
     };
-  }, [dispatchAllowed, dispatchReason, repository, target]);
+  }, [dispatchAllowed, dispatchReason, hostName, repository, supported, target]);
 }

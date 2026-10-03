@@ -63,9 +63,11 @@ export const SuggestionBlock = memo(function SuggestionBlock(props: {
       </div>
       <div className="overflow-x-auto py-1 font-mono text-[12px] leading-5">
         {(props.baseLines ?? []).map((line, index) => (
+          // oxlint-disable-next-line react/no-array-index-key -- suggestion lines are positional
           <SuggestionLine key={`base-${index}`} kind="del" text={line} />
         ))}
         {props.lines.map((line, index) => (
+          // oxlint-disable-next-line react/no-array-index-key -- suggestion lines are positional
           <SuggestionLine key={`next-${index}`} kind="add" text={line} />
         ))}
       </div>

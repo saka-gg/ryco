@@ -28,11 +28,25 @@ export const PULL_REQUEST_ONLY_OPTIONS: ReadonlyArray<{
   readonly label: string;
   /** Needs the host's involvement reads (review requested / authored). */
   readonly needsInvolvement: boolean;
+  /** Needs check rollups on list rows (`capabilities.listCheckRollup`). */
+  readonly needsCheckRollup: boolean;
 }> = [
-  { value: "review", label: "Review requested", needsInvolvement: true },
-  { value: "mine", label: "Yours", needsInvolvement: true },
-  { value: "failing", label: "Failing checks", needsInvolvement: false },
+  { value: "review", label: "Review requested", needsInvolvement: true, needsCheckRollup: false },
+  { value: "mine", label: "Yours", needsInvolvement: true, needsCheckRollup: false },
+  { value: "failing", label: "Failing checks", needsInvolvement: false, needsCheckRollup: true },
 ];
+
+/** The "only" filters this list can apply (the others would always come up empty). */
+export function availablePullRequestOnlyOptions(input: {
+  readonly involvementSupported: boolean;
+  readonly checkRollup: boolean;
+}): typeof PULL_REQUEST_ONLY_OPTIONS {
+  return PULL_REQUEST_ONLY_OPTIONS.filter(
+    (option) =>
+      (!option.needsInvolvement || input.involvementSupported) &&
+      (!option.needsCheckRollup || input.checkRollup),
+  );
+}
 
 export const PULL_REQUEST_SORT_OPTIONS: ReadonlyArray<{
   readonly value: PullRequestsSort;

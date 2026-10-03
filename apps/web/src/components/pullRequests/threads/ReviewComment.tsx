@@ -27,9 +27,11 @@ export const ReviewCommentBody = memo(function ReviewCommentBody(props: {
     <div className="flex min-w-0 flex-col gap-2">
       {segments.map((segment, index) =>
         segment.kind === "markdown" ? (
+          // oxlint-disable-next-line react/no-array-index-key -- body segments are positional
           <MarkdownView key={index} text={segment.text} className="text-[13px] leading-[1.55]" />
         ) : (
           <SuggestionBlock
+            // oxlint-disable-next-line react/no-array-index-key -- body segments are positional
             key={index}
             lines={segment.lines}
             baseLines={props.suggestionBase ?? null}

@@ -71,6 +71,8 @@ export interface PullRequestRowProps {
   readonly onCopyLink: (url: string) => void;
   /** Check this row's pull request out into a worktree; absent when unavailable. */
   readonly onCheckoutWorktree?: ((entry: ChangeRequest) => void) | undefined;
+  /** The host can check change requests out (false hides "Check out in worktree"). */
+  readonly canCheckout?: boolean | undefined;
 }
 
 export const PullRequestRow = memo(function PullRequestRow(props: PullRequestRowProps) {
@@ -175,13 +177,15 @@ export const PullRequestRow = memo(function PullRequestRow(props: PullRequestRow
           <ExternalLinkIcon aria-hidden />
           Open on {props.providerName}
         </MenuItem>
-        <MenuItem
-          disabled={!props.onCheckoutWorktree}
-          onClick={() => props.onCheckoutWorktree?.(entry)}
-        >
-          <FolderGit2Icon aria-hidden />
-          Check out in worktree
-        </MenuItem>
+        {props.canCheckout === false ? null : (
+          <MenuItem
+            disabled={!props.onCheckoutWorktree}
+            onClick={() => props.onCheckoutWorktree?.(entry)}
+          >
+            <FolderGit2Icon aria-hidden />
+            Check out in worktree
+          </MenuItem>
+        )}
       </ContextMenuPopup>
     </ContextMenu>
   );

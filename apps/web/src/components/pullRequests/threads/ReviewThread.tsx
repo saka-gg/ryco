@@ -123,8 +123,11 @@ export const ReviewThread = memo(function ReviewThread({
   const first = thread.comments[0];
   const location = threadLocationLabel(thread);
   const baseLines = suggestionBaseLines(thread);
-  const canReact = model.supportsReview && selection.activity.data?.viewer != null;
-  const canResolve = resolved ? thread.viewerCanUnresolve : thread.viewerCanResolve;
+  const capabilities = model.capabilities;
+  const canReact = capabilities.reactions && selection.activity.data?.viewer != null;
+  const canReply = capabilities.replyToThreads && thread.viewerCanReply;
+  const canResolve =
+    capabilities.resolveThreads && (resolved ? thread.viewerCanUnresolve : thread.viewerCanResolve);
   const hiddenCount = Math.max(0, thread.totalComments - thread.comments.length);
 
   const setResolved = async (next: boolean) => {
@@ -299,7 +302,9 @@ export const ReviewThread = memo(function ReviewThread({
                     suggestionBase={baseLines}
                     onApplySuggestion={handoff.available && !resolved ? applySuggestion : undefined}
                     applyUnavailableReason={
-                      handoff.available ? undefined : handoff.unavailableReason
+                      handoff.available || !handoff.supported
+                        ? undefined
+                        : handoff.unavailableReason
                     }
                   />
                 }
@@ -311,7 +316,7 @@ export const ReviewThread = memo(function ReviewThread({
               </p>
             ) : null}
           </div>
-          {thread.viewerCanReply || canResolve || handoff.available ? (
+          {canReply || canResolve || handoff.available ? (
             <div
               ref={replyShellRef}
               className={cn(
@@ -321,7 +326,7 @@ export const ReviewThread = memo(function ReviewThread({
             >
               <div className="min-h-0 overflow-hidden" inert={replyOpen}>
                 <div className="flex items-center gap-1 px-1.5 py-1.5">
-                  {thread.viewerCanReply ? (
+                  {canReply ? (
                     <button
                       type="button"
                       data-thread-control="reply"
@@ -350,15 +355,17 @@ export const ReviewThread = memo(function ReviewThread({
                       {resolved ? "Unresolve" : "Resolve"}
                     </Button>
                   ) : null}
-                  <AskAgentButton
-                    available={handoff.available}
-                    reason={handoff.unavailableReason}
-                    onClick={askAgent}
-                  />
+                  {handoff.supported ? (
+                    <AskAgentButton
+                      available={handoff.available}
+                      reason={handoff.unavailableReason}
+                      onClick={askAgent}
+                    />
+                  ) : null}
                 </div>
               </div>
               <div className="min-h-0 overflow-hidden" inert={!replyOpen}>
-                {thread.viewerCanReply ? (
+                {canReply ? (
                   <ReplyComposer
                     textareaRef={replyFieldRef}
                     onCancel={closeReply}

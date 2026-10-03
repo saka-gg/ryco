@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   usePrimaryEnvironmentDescriptor,
@@ -10,6 +10,7 @@ import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../../environments/runtime";
+import { useEvent } from "../../hooks/useEvent";
 import { useLogicalProjectSnapshots } from "../../hooks/useLogicalProjectSnapshots";
 import {
   selectBootstrapCompleteForEnvironment,
@@ -35,7 +36,10 @@ import {
   type PullRequestEnvironmentSync,
 } from "./pullRequestRepositories.logic";
 import { pullRequestReaderKey, usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
-import { createPullRequestsNavigation } from "./pullRequestsNavigation";
+import {
+  createPullRequestsNavigation,
+  type PullRequestsNavigationDeps,
+} from "./pullRequestsNavigation";
 import { resolvePullRequestsTab, type PullRequestsSearch } from "./pullRequestsSearch";
 import { PullRequestsShortcutsProvider } from "./pullRequestsShortcuts";
 import { PullRequestsPageShortcuts } from "./PullRequestsPageShortcuts";
@@ -154,12 +158,13 @@ function useRequestedEnvironment(env: string | undefined): {
 function useHeldFor(active: boolean, delayMs: number): boolean {
   const [elapsed, setElapsed] = useState(false);
   useEffect(() => {
-    if (!active) {
-      setElapsed(false);
-      return;
-    }
+    if (!active) return;
     const timer = window.setTimeout(() => setElapsed(true), delayMs);
-    return () => window.clearTimeout(timer);
+    // Turning inactive starts the next hold over.
+    return () => {
+      window.clearTimeout(timer);
+      setElapsed(false);
+    };
   }, [active, delayMs]);
   return active && elapsed;
 }
@@ -170,7 +175,7 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
   const repositories = useMemo(() => buildPullRequestRepositoryOptions(snapshots), [snapshots]);
   const lastRepositoryKey = usePullRequestsLayoutStore((state) => state.lastRepositoryKey);
   const setLastRepositoryKey = usePullRequestsLayoutStore((state) => state.setLastRepositoryKey);
-  const selectRecentRepositoryKeys = useMemo(createRecentRepositoryKeysSelector, []);
+  const selectRecentRepositoryKeys = useMemo(() => createRecentRepositoryKeysSelector(), []);
   const recentRepositoryKeys = useStore(selectRecentRepositoryKeys);
   const requestedEnvironment = useRequestedEnvironment(search.env);
   const resolution = useMemo(
@@ -246,41 +251,34 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
     kind: "none",
     token: 0,
   });
-  const searchRef = useRef(search);
-  searchRef.current = search;
-  const modelRef = useRef(model);
-  modelRef.current = model;
-  const repositoryRef = useRef(repository);
-  repositoryRef.current = repository;
-  const onSearchChangeRef = useRef(onSearchChange);
-  onSearchChangeRef.current = onSearchChange;
-
-  const commit = useCallback<Parameters<typeof createPullRequestsNavigation>[0]["commit"]>(
-    (next, options) =>
-      onSearchChangeRef.current(withoutUndefined(next), {
+  // Stable readers of the latest render, so the actions keep one identity.
+  const getSearch = useEvent(() => search);
+  const getModel = useEvent(() => model);
+  const getRepositoryParams = useEvent(() =>
+    repository ? { env: repository.environmentId, project: repository.projectId } : {},
+  );
+  const commit = useEvent(
+    (next: PullRequestsSearch, options: Parameters<PullRequestsNavigationDeps["commit"]>[1]) =>
+      onSearchChange(withoutUndefined(next), {
         replace: !options.push,
         ...(options.viewTransitionTypes
           ? { viewTransitionTypes: options.viewTransitionTypes }
           : {}),
       }),
-    [],
   );
   const actions = useMemo(
     () =>
       createPullRequestsNavigation({
-        getSearch: () => searchRef.current,
-        getModel: () => modelRef.current,
-        getRepositoryParams: () => {
-          const current = repositoryRef.current;
-          return current ? { env: current.environmentId, project: current.projectId } : {};
-        },
+        getSearch,
+        getModel,
+        getRepositoryParams,
         commit,
         setSelectionMotion,
         closeDrawer: () => usePullRequestsLayoutStore.getState().setDrawerOpen(false),
         canRunPushTransition: () =>
           supportsViewTransitions() && readMotionDurationMs("--app-motion-duration-pane", 360) > 0,
       }),
-    [commit],
+    [commit, getModel, getRepositoryParams, getSearch],
   );
   const nav = useMemo<PullRequestsNavigation>(
     () => ({ search, tab, ...actions }),

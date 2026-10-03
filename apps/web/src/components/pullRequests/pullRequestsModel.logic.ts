@@ -7,6 +7,11 @@ import type {
   SourceControlProviderInfo,
 } from "@ryco/contracts";
 import {
+  getChangeRequestHostCapabilities,
+  type ChangeRequestHostCapabilities,
+  type ChangeRequestIdleRefresh,
+} from "@ryco/shared/sourceControl";
+import {
   deriveChangeRequestNextAction,
   indexReviewThreads,
   rankChangeRequests,
@@ -75,13 +80,26 @@ export interface PullRequestsModel {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
   readonly provider: SourceControlProviderInfo | null;
-  /** GitHub implements review, lifecycle, and stack actions; other hosts are read-mostly. */
-  readonly supportsReview: boolean;
+  /**
+   * What the host implements (`@ryco/shared/sourceControl`). Every control
+   * whose capability is false is hidden; reads it cannot serve are not made.
+   */
+  readonly capabilities: ChangeRequestHostCapabilities;
   readonly list: PullRequestsListModel;
   readonly selection: PullRequestSelectionModel | null;
 }
 
 const EMPTY_THREADS = indexReviewThreads([]);
+
+/**
+ * The host's capabilities; until the checkout's provider is known, nothing is
+ * offered (the `unknown` entry), so no control appears and then vanishes.
+ */
+export function derivePullRequestsCapabilities(
+  provider: Pick<SourceControlProviderInfo, "kind"> | null,
+): ChangeRequestHostCapabilities {
+  return getChangeRequestHostCapabilities(provider?.kind ?? "unknown");
+}
 
 export function mergeChangeRequestLists(
   ...lists: ReadonlyArray<ReadonlyArray<ChangeRequest> | null | undefined>
@@ -272,19 +290,26 @@ export function derivePullRequestSelection(input: {
 }
 
 /**
- * Refresh cadence for the selected change request's detail and activity.
- * Spec §6: poll only while checks are running on an open change request;
- * otherwise rely on lifecycle refreshes, mutations and invalidation.
+ * Refresh cadence for the selected change request's detail and activity: the
+ * active cadence while checks run on an open change request, the slower
+ * `watching` cadence while it is open otherwise (so new comments and reviews
+ * arrive without a window focus; `watching-slow` on hosts whose reads spawn
+ * many CLI processes, see `ChangeRequestIdleRefresh`), and none once it is
+ * closed or merged. The keyed-query lifecycle pauses every cadence while the
+ * app is in the background.
  */
 export function pullRequestSelectionRefreshPhase(input: {
   readonly detail: SourceControlChangeRequestDetail | null;
   readonly summary: ChangeRequest | null;
-}): "active" | "settled" {
+  /** The host's `idleRefresh` (default `standard`). */
+  readonly idleRefresh?: ChangeRequestIdleRefresh | undefined;
+}): "active" | "watching" | "watching-slow" | "settled" {
   const state = input.detail?.state ?? input.summary?.state;
   if (state !== "open") return "settled";
-  return derivePullRequestSelectionChecks(input.detail, input.summary).overall === "pending"
-    ? "active"
-    : "settled";
+  if (derivePullRequestSelectionChecks(input.detail, input.summary).overall === "pending") {
+    return "active";
+  }
+  return input.idleRefresh === "slow" ? "watching-slow" : "watching";
 }
 
 // ── Layout ──────────────────────────────────────────────────────────

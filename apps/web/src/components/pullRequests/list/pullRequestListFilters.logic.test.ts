@@ -1,9 +1,28 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  availablePullRequestOnlyOptions,
   pullRequestFilterChips,
   togglePullRequestLabelFilter,
 } from "./pullRequestListFilters.logic";
+
+describe("availablePullRequestOnlyOptions", () => {
+  const values = (input: Parameters<typeof availablePullRequestOnlyOptions>[0]) =>
+    availablePullRequestOnlyOptions(input).map((option) => option.value);
+
+  it("offers every filter on a host with involvement reads and check rollups", () => {
+    expect(values({ involvementSupported: true, checkRollup: true })).toEqual([
+      "review",
+      "mine",
+      "failing",
+    ]);
+  });
+
+  it("hides filters that would always come up empty on the host", () => {
+    expect(values({ involvementSupported: false, checkRollup: true })).toEqual(["failing"]);
+    expect(values({ involvementSupported: false, checkRollup: false })).toEqual([]);
+  });
+});
 
 describe("pullRequestFilterChips", () => {
   it("shows nothing while every filter is at its default", () => {

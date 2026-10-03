@@ -3,9 +3,13 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   AUTOMATIC_ACTIVE_REFRESH_MS,
   AUTOMATIC_DISCOVERY_REFRESH_MS,
+  AUTOMATIC_SLOW_WATCH_REFRESH_MS,
+  AUTOMATIC_WATCH_REFRESH_MS,
   POST_PUSH_DISCOVERY_WINDOW_MS,
   REDUCED_ACTIVE_REFRESH_MS,
   REDUCED_DISCOVERY_REFRESH_MS,
+  REDUCED_SLOW_WATCH_REFRESH_MS,
+  REDUCED_WATCH_REFRESH_MS,
   SOURCE_CONTROL_MAX_BACKOFF_MS,
   resolveSourceControlFailureDelay,
   resolveSourceControlRefreshDelay,
@@ -28,6 +32,34 @@ describe("source-control refresh policy", () => {
     expect(resolveSourceControlRefreshDelay({ mode: "reduced", phase: "active" })).toBe(
       REDUCED_ACTIVE_REFRESH_MS,
     );
+  });
+
+  it("watches idle open items at a slower cadence than active ones", () => {
+    expect(resolveSourceControlRefreshDelay({ mode: "automatic", phase: "watching" })).toBe(
+      AUTOMATIC_WATCH_REFRESH_MS,
+    );
+    expect(resolveSourceControlRefreshDelay({ mode: "reduced", phase: "watching" })).toBe(
+      REDUCED_WATCH_REFRESH_MS,
+    );
+    expect(resolveSourceControlRefreshDelay({ mode: "manual", phase: "watching" })).toBe(false);
+    expect(AUTOMATIC_WATCH_REFRESH_MS).toBe(60_000);
+    expect(REDUCED_WATCH_REFRESH_MS).toBe(120_000);
+    expect(AUTOMATIC_WATCH_REFRESH_MS).toBeGreaterThan(AUTOMATIC_ACTIVE_REFRESH_MS);
+    expect(REDUCED_WATCH_REFRESH_MS).toBeGreaterThan(REDUCED_ACTIVE_REFRESH_MS);
+  });
+
+  it("watches idle items on process-heavy hosts at a much slower cadence", () => {
+    expect(resolveSourceControlRefreshDelay({ mode: "automatic", phase: "watching-slow" })).toBe(
+      AUTOMATIC_SLOW_WATCH_REFRESH_MS,
+    );
+    expect(resolveSourceControlRefreshDelay({ mode: "reduced", phase: "watching-slow" })).toBe(
+      REDUCED_SLOW_WATCH_REFRESH_MS,
+    );
+    expect(resolveSourceControlRefreshDelay({ mode: "manual", phase: "watching-slow" })).toBe(
+      false,
+    );
+    expect(AUTOMATIC_SLOW_WATCH_REFRESH_MS).toBeGreaterThan(AUTOMATIC_WATCH_REFRESH_MS);
+    expect(REDUCED_SLOW_WATCH_REFRESH_MS).toBeGreaterThan(REDUCED_WATCH_REFRESH_MS);
   });
 
   it("starts no timer for manual or settled state", () => {

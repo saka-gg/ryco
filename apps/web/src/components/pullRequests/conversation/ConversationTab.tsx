@@ -39,7 +39,9 @@ function Conversation() {
   const hasHeader = selection.detail.data !== null || selection.summary !== null;
   const detailSettled = selection.detail.data !== null || selection.detail.error !== null;
   const activitySettled =
-    !model.supportsReview || selection.activity.data !== null || selection.activity.error !== null;
+    !model.capabilities.activity ||
+    selection.activity.data !== null ||
+    selection.activity.error !== null;
   const threadTarget = nav.tab === "conversation" ? nav.search.thread : undefined;
 
   useMastheadVisibility({ scrollRef, mastheadRef, readerKey, enabled: hasHeader });

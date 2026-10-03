@@ -40,14 +40,27 @@ export const CommitRow = memo(function CommitRow(props: {
   readonly commit: CommitListCommit;
   /** Files is currently scoped to this commit. */
   readonly scoped: boolean;
-  /** Pull request URL on the host; commit links hang off it. */
-  readonly pullRequestUrl: string | null;
-  readonly onScope: (oid: string) => void;
+  /** The commit on the host, when its URL scheme is known. */
+  readonly commitUrl: string | null;
+  /** The host's name, for "Open on …". */
+  readonly hostName: string;
+  /** Scope Files to the commit; null where the host has no single-commit diffs. */
+  readonly onScope: ((oid: string) => void) | null;
 }) {
-  const { commit } = props;
+  const { commit, commitUrl, onScope } = props;
   const copySha = useCopySha();
   const overall = commit.checks ?? "none";
-  const commitUrl = props.pullRequestUrl ? `${props.pullRequestUrl}/commits/${commit.oid}` : null;
+  const summary = (
+    <>
+      <CheckStateGlyph
+        overall={overall}
+        label={commit.checks ? CHECKS_OVERALL_LABEL[commit.checks] : "No checks reported"}
+      />
+      <span className="min-w-0 truncate text-[13px] text-foreground">
+        {commit.headline || "(no message)"}
+      </span>
+    </>
+  );
   return (
     <li data-commit-oid={commit.oid} className="border-b border-border/60">
       <div
@@ -56,21 +69,19 @@ export const CommitRow = memo(function CommitRow(props: {
           props.scoped ? "bg-accent/70" : "hover:bg-foreground/[0.025]",
         )}
       >
-        <button
-          type="button"
-          aria-current={props.scoped || undefined}
-          title={`Show the changes in ${commit.shortOid}`}
-          onClick={() => props.onScope(commit.oid)}
-          className="flex min-w-0 flex-1 items-center gap-2.5 self-stretch text-left outline-hidden before:absolute before:inset-0 before:rounded-md focus-visible:before:ring-2 focus-visible:before:ring-ring focus-visible:before:ring-inset"
-        >
-          <CheckStateGlyph
-            overall={overall}
-            label={commit.checks ? CHECKS_OVERALL_LABEL[commit.checks] : "No checks reported"}
-          />
-          <span className="min-w-0 truncate text-[13px] text-foreground">
-            {commit.headline || "(no message)"}
-          </span>
-        </button>
+        {onScope ? (
+          <button
+            type="button"
+            aria-current={props.scoped || undefined}
+            title={`Show the changes in ${commit.shortOid}`}
+            onClick={() => onScope(commit.oid)}
+            className="flex min-w-0 flex-1 items-center gap-2.5 self-stretch text-left outline-hidden before:absolute before:inset-0 before:rounded-md focus-visible:before:ring-2 focus-visible:before:ring-ring focus-visible:before:ring-inset"
+          >
+            {summary}
+          </button>
+        ) : (
+          <div className="flex min-w-0 flex-1 items-center gap-2.5 self-stretch">{summary}</div>
+        )}
         {commit.author ? (
           <span className="relative flex min-w-0 shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
             <ActorAvatar
@@ -104,10 +115,12 @@ export const CommitRow = memo(function CommitRow(props: {
             }
           />
           <MenuPopup align="end" className="min-w-48">
-            <MenuItem onClick={() => props.onScope(commit.oid)}>
-              <FileDiffIcon aria-hidden />
-              Show changes
-            </MenuItem>
+            {onScope ? (
+              <MenuItem onClick={() => onScope(commit.oid)}>
+                <FileDiffIcon aria-hidden />
+                Show changes
+              </MenuItem>
+            ) : null}
             <MenuItem onClick={() => copySha(commit.oid)}>
               <CopyIcon aria-hidden />
               Copy SHA
@@ -115,7 +128,7 @@ export const CommitRow = memo(function CommitRow(props: {
             {commitUrl ? (
               <MenuItem onClick={() => openExternalLink(commitUrl, "Couldn't open the commit")}>
                 <ExternalLinkIcon aria-hidden />
-                Open on GitHub
+                Open on {props.hostName}
               </MenuItem>
             ) : null}
           </MenuPopup>

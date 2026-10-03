@@ -37,7 +37,12 @@ const ROW_BASE_PADDING_PX = 8;
  * file being read in the diff (scroll-spy); clicking a file scrolls the diff
  * there. Viewed checkboxes sit at the row's end, where the eye finishes.
  */
-export const FileTreePane = memo(function FileTreePane(props: {
+export const FileTreePane = memo(function FileTreePane({
+  files,
+  viewed,
+  filterRef,
+  ...props
+}: {
   readonly files: PullRequestDiffFiles;
   readonly currentPath: string | null;
   readonly viewed: FilesViewedModel;
@@ -49,7 +54,6 @@ export const FileTreePane = memo(function FileTreePane(props: {
   readonly filterRef: RefObject<HTMLInputElement | null>;
   readonly className?: string | undefined;
 }) {
-  const { files, viewed } = props;
   const [query, setQuery] = useState("");
   const visiblePaths = useMemo(() => filterFilePaths(files.paths, query), [files.paths, query]);
   const rows = useMemo(
@@ -85,7 +89,7 @@ export const FileTreePane = memo(function FileTreePane(props: {
         <label className="flex h-8 items-center gap-2 rounded-md border border-border/60 px-2 transition-colors duration-(--app-motion-duration-chip) focus-within:border-ring/60">
           <SearchIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground/70" />
           <input
-            ref={props.filterRef}
+            ref={filterRef}
             type="text"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -102,7 +106,7 @@ export const FileTreePane = memo(function FileTreePane(props: {
               aria-label="Clear filter"
               onClick={() => {
                 setQuery("");
-                props.filterRef.current?.focus();
+                filterRef.current?.focus();
               }}
               className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
@@ -178,7 +182,8 @@ function TreeRows(props: {
   useLayoutEffect(() => {
     const list = listRef.current;
     const scroller = scrollerRef.current;
-    if (!list || !scroller || props.currentPath === null) {
+    // Rows re-lay out the list, so the plate is re-measured whenever they change.
+    if (!list || !scroller || props.currentPath === null || props.rows.length === 0) {
       setPlate(null);
       return;
     }

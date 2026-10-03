@@ -2,7 +2,9 @@ import type { ChangeRequest } from "@ryco/contracts";
 import { DateTime, Option } from "effect";
 import { describe, expect, it } from "vitest";
 
+import { resolveSourceControlRefreshDelay } from "../../rpc/sourceControlRefreshPolicy";
 import {
+  derivePullRequestsCapabilities,
   describePullRequestsListError,
   derivePullRequestSelectionThreads,
   derivePullRequestsLayoutMetrics,
@@ -109,21 +111,61 @@ describe("pullRequestSelectionRefreshPhase", () => {
     completedAt: Option.none(),
   });
 
-  it("polls only an open change request whose checks are running (spec §6)", () => {
+  it("polls an open change request fast while checks run and slower otherwise", () => {
     const running = row(1, { checkRollup: [check("IN_PROGRESS", null)] } as Partial<ChangeRequest>);
     const green = row(1, {
       checkRollup: [check("COMPLETED", "SUCCESS")],
     } as Partial<ChangeRequest>);
     expect(pullRequestSelectionRefreshPhase({ detail: null, summary: running })).toBe("active");
-    // Idle and open: settled (lifecycle, focus and mutations still refresh it).
-    expect(pullRequestSelectionRefreshPhase({ detail: null, summary: green })).toBe("settled");
-    expect(pullRequestSelectionRefreshPhase({ detail: null, summary: row(1) })).toBe("settled");
+    // Idle and open: still watched, so new comments arrive without a window focus.
+    expect(pullRequestSelectionRefreshPhase({ detail: null, summary: green })).toBe("watching");
+    expect(pullRequestSelectionRefreshPhase({ detail: null, summary: row(1) })).toBe("watching");
+    // Hosts whose every read spawns many CLI processes (az, glab) watch slower.
     expect(
-      pullRequestSelectionRefreshPhase({
-        detail: null,
-        summary: { ...running, state: "merged" },
-      }),
-    ).toBe("settled");
+      pullRequestSelectionRefreshPhase({ detail: null, summary: green, idleRefresh: "slow" }),
+    ).toBe("watching-slow");
+    expect(
+      pullRequestSelectionRefreshPhase({ detail: null, summary: running, idleRefresh: "slow" }),
+    ).toBe("active");
+  });
+
+  it("stops polling once the change request is closed or merged", () => {
+    const running = row(1, { checkRollup: [check("IN_PROGRESS", null)] } as Partial<ChangeRequest>);
+    for (const state of ["merged", "closed"] as const) {
+      expect(
+        pullRequestSelectionRefreshPhase({ detail: null, summary: { ...running, state } }),
+      ).toBe("settled");
+    }
+    expect(pullRequestSelectionRefreshPhase({ detail: null, summary: null })).toBe("settled");
+  });
+
+  it("maps the phases onto the house cadence (60s / 120s while watching, never when manual)", () => {
+    const delay = (
+      phase: ReturnType<typeof pullRequestSelectionRefreshPhase>,
+      mode: "automatic" | "reduced" | "manual",
+    ) => resolveSourceControlRefreshDelay({ mode, phase });
+    expect(delay("watching", "automatic")).toBe(60_000);
+    expect(delay("watching", "reduced")).toBe(120_000);
+    expect(delay("watching", "manual")).toBe(false);
+    expect(delay("watching-slow", "automatic")).toBe(300_000);
+    expect(delay("active", "automatic")).toBe(30_000);
+    expect(delay("settled", "automatic")).toBe(false);
+  });
+});
+
+describe("derivePullRequestsCapabilities", () => {
+  it("offers nothing until the checkout's host is known, then that host's matrix entry", () => {
+    const pending = derivePullRequestsCapabilities(null);
+    expect(pending.activity).toBe(false);
+    expect(pending.checkout).toBe(false);
+    expect(derivePullRequestsCapabilities({ kind: "github" }).activity).toBe(true);
+    const gitlab = derivePullRequestsCapabilities({ kind: "gitlab" });
+    expect(gitlab.activity).toBe(true);
+    expect(gitlab.reactions).toBe(false);
+    expect(gitlab.checkout).toBe(true);
+    const unknown = derivePullRequestsCapabilities({ kind: "unknown" });
+    expect(unknown.activity).toBe(false);
+    expect(unknown.checkout).toBe(false);
   });
 });
 

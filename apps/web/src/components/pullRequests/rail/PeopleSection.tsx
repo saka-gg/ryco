@@ -51,7 +51,9 @@ export function PeopleSection(props: { readonly layout: "rail" | "band" }) {
   const selection = usePullRequestSelection();
   const detail = selection.detail.data;
   const viewer = selection.activity.data?.viewer ?? null;
-  const canUpdate = model.supportsReview && viewer?.canUpdate === true;
+  // Each field edits through its own action kind; the host must apply it.
+  const viewerCanUpdate = viewer?.canUpdate === true;
+  const lifecycle = model.capabilities.lifecycle;
   const update = useUpdateChangeRequestMutation(selection.mutationTarget);
 
   const apply = (field: PeopleField, edit: ListEdit) => {
@@ -72,19 +74,19 @@ export function PeopleSection(props: { readonly layout: "rail" | "band" }) {
     <>
       <ReviewersField
         layout={props.layout}
-        canUpdate={canUpdate}
+        canUpdate={viewerCanUpdate && lifecycle.has("reviewers")}
         onApply={(edit) => apply("reviewers", edit)}
         viewerLogin={viewer?.login ?? null}
       />
       <AssigneesField
         layout={props.layout}
-        canUpdate={canUpdate}
+        canUpdate={viewerCanUpdate && lifecycle.has("assignees")}
         viewerLogin={viewer?.login ?? null}
         onApply={(edit) => apply("assignees", edit)}
       />
       <LabelsField
         layout={props.layout}
-        canUpdate={canUpdate}
+        canUpdate={viewerCanUpdate && lifecycle.has("labels")}
         onApply={(edit) => apply("labels", edit)}
       />
     </>

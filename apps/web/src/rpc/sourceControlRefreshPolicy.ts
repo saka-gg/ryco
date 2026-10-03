@@ -5,9 +5,30 @@ export const AUTOMATIC_DISCOVERY_REFRESH_MS = 10_000;
 export const REDUCED_DISCOVERY_REFRESH_MS = 30_000;
 export const AUTOMATIC_ACTIVE_REFRESH_MS = 30_000;
 export const REDUCED_ACTIVE_REFRESH_MS = 60_000;
+export const AUTOMATIC_WATCH_REFRESH_MS = 60_000;
+export const REDUCED_WATCH_REFRESH_MS = 120_000;
+export const AUTOMATIC_SLOW_WATCH_REFRESH_MS = 5 * 60_000;
+export const REDUCED_SLOW_WATCH_REFRESH_MS = 10 * 60_000;
 export const SOURCE_CONTROL_MAX_BACKOFF_MS = 5 * 60_000;
 
-export type SourceControlRefreshPhase = "discovery" | "active" | "settled";
+/**
+ * - `discovery`: right after a push, until the post-push window closes.
+ * - `active`: something is running (checks, workflow jobs).
+ * - `watching`: open and on screen but idle, so new comments and reviews
+ *   still arrive without a window focus (a slower cadence than `active`).
+ * - `watching-slow`: `watching` on a host where every read fans out into many
+ *   CLI processes (`az`, `glab`), at a much slower cadence.
+ * - `settled`: nothing to poll for; lifecycle refreshes and mutations only.
+ *
+ * No phase polls while the app is in the background: the keyed-query
+ * lifecycle pauses every timer until the window is foreground again.
+ */
+export type SourceControlRefreshPhase =
+  | "discovery"
+  | "active"
+  | "watching"
+  | "watching-slow"
+  | "settled";
 
 export function resolveSourceControlRefreshDelay(input: {
   readonly mode: SourceControlRefreshMode;
@@ -25,6 +46,14 @@ export function resolveSourceControlRefreshDelay(input: {
   }
   if (input.phase === "discovery") {
     return input.mode === "reduced" ? REDUCED_DISCOVERY_REFRESH_MS : AUTOMATIC_DISCOVERY_REFRESH_MS;
+  }
+  if (input.phase === "watching") {
+    return input.mode === "reduced" ? REDUCED_WATCH_REFRESH_MS : AUTOMATIC_WATCH_REFRESH_MS;
+  }
+  if (input.phase === "watching-slow") {
+    return input.mode === "reduced"
+      ? REDUCED_SLOW_WATCH_REFRESH_MS
+      : AUTOMATIC_SLOW_WATCH_REFRESH_MS;
   }
   return input.mode === "reduced" ? REDUCED_ACTIVE_REFRESH_MS : AUTOMATIC_ACTIVE_REFRESH_MS;
 }

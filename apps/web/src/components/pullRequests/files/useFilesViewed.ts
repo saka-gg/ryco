@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import { useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { usePullRequestFilesViewed } from "../../projectExplorer/usePullRequestFilesViewed";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
@@ -45,8 +45,12 @@ export function useFilesViewed(input: {
   }
   const data = viewed.data ?? (last?.key === key ? last.data : null);
 
+  // The model keeps one identity across mutation-state renders; its setter
+  // reaches the latest mutation through this ref.
   const setViewedRef = useRef(viewed.setViewed);
-  setViewedRef.current = viewed.setViewed;
+  useLayoutEffect(() => {
+    setViewedRef.current = viewed.setViewed;
+  });
 
   return useMemo<FilesViewedModel>(() => {
     const supported = data !== null && data.capability.storage !== "unsupported";

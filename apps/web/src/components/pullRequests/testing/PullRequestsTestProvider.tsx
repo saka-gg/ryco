@@ -47,8 +47,19 @@
  *
  * Test-only — never import this from app code.
  */
-import type { ChangeRequestActivity, SourceControlChangeRequestDetail } from "@ryco/contracts";
+import type {
+  ChangeRequest,
+  ChangeRequestActivity,
+  SourceControlChangeRequestDetail,
+  SourceControlProviderInfo,
+  SourceControlProviderKind,
+} from "@ryco/contracts";
 import { reviewDraftKey } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  getChangeRequestHostCapabilities,
+  resolveChangeRequestPresentationForKind,
+  type ChangeRequestHostCapabilities,
+} from "@ryco/shared/sourceControl";
 import { useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import { usePullRequestReviewDraftStore } from "../../../pullRequestReviewDraftStore";
@@ -113,8 +124,14 @@ export interface BuildTestPullRequestsModelInput {
   /** Selected change request (sugar for `search.pr`). */
   readonly selected?: number | undefined;
   readonly search?: Partial<PullRequestsSearch> | undefined;
-  /** GitHub (default) implements review; `false` models a read-mostly host (no activity). */
-  readonly supportsReview?: boolean | undefined;
+  /**
+   * The checkout's host (default "github"). The model gets that host's real
+   * capability matrix entry, so another host renders exactly what it would on
+   * the page: e.g. "gitlab" has no activity, involvement lists or mutations.
+   */
+  readonly host?: SourceControlProviderKind | undefined;
+  /** Override single capabilities on top of the host's entry (e.g. GitHub without reactions). */
+  readonly capabilities?: Partial<ChangeRequestHostCapabilities> | undefined;
   /** Patch the selected detail query (e.g. `{ data: null, isLoading: true }`). */
   readonly detailState?:
     | Partial<SourceControlQueryState<SourceControlChangeRequestDetail>>
@@ -163,34 +180,105 @@ function settledQuery<T>(
  * lists, filters, readiness ranking, then the selection's checks, next
  * action, thread index and draft key). Reads the live `pullRequestFixtureStore`.
  */
+/** The fixture checkout's provider on `host`. */
+export function testProviderFor(host: SourceControlProviderKind): SourceControlProviderInfo {
+  if (host === "github") return fixtureProvider;
+  const presentation = resolveChangeRequestPresentationForKind(host);
+  return { kind: host, name: presentation.providerName, baseUrl: `https://${host}.example` };
+}
+
+/** The host's capability matrix entry with the test's overrides applied. */
+export function testCapabilitiesFor(
+  host: SourceControlProviderKind,
+  overrides?: Partial<ChangeRequestHostCapabilities>,
+): ChangeRequestHostCapabilities {
+  return { ...getChangeRequestHostCapabilities(host), ...overrides };
+}
+
+const READINESS_FIELDS = [
+  "mergeability",
+  "mergeStateStatus",
+  "reviewDecision",
+  "reviewerStates",
+  "autoMerge",
+  "mergeCapabilities",
+  "deleteBranchOnMerge",
+] as const;
+
+/** What a `blockers` host's rows carry: conflicts and the votes it reports, no verdict. */
+const BLOCKER_FIELDS: ReadonlySet<string> = new Set(["mergeability", "reviewDecision"]);
+
+/**
+ * A fixture list row or detail as `capabilities`' host would report it:
+ * fields the host does not send there (check rollups, merge readiness,
+ * stacks) are dropped, so a non-GitHub host renders from the same sparse data
+ * the page would get. Rows and the detail differ (`listCheckRollup`,
+ * `listReadiness` vs `checkRollup`, `mergeReadiness`).
+ */
+export function shapeFixtureForHost<T extends ChangeRequest>(
+  entry: T,
+  capabilities: ChangeRequestHostCapabilities,
+  level: "row" | "detail",
+): T {
+  const shaped: Record<string, unknown> = { ...entry };
+  const checkRollup = level === "row" ? capabilities.listCheckRollup : capabilities.checkRollup;
+  if (!checkRollup) delete shaped.checkRollup;
+  for (const key of READINESS_FIELDS) {
+    const kept =
+      level === "detail"
+        ? capabilities.mergeReadiness
+        : capabilities.listReadiness === "verdict" ||
+          (capabilities.listReadiness === "blockers" && BLOCKER_FIELDS.has(key));
+    if (!kept) delete shaped[key];
+  }
+  if (!capabilities.stacks) {
+    for (const key of ["stack", "stackSummary", "stackMetadataIncomplete"]) delete shaped[key];
+  }
+  return shaped as T;
+}
+
 export function buildTestPullRequestsModel(
   input: BuildTestPullRequestsModelInput = {},
 ): PullRequestsModel {
   const search = initialSearch(input);
-  const supportsReview = input.supportsReview ?? true;
+  const host = input.host ?? "github";
+  const capabilities = testCapabilitiesFor(host, input.capabilities);
   const repositoryReady = (input.repositoryStatus?.kind ?? "ready") === "ready";
   const environmentId = FIXTURE_ENVIRONMENT_ID;
   const cwd = FIXTURE_CWD;
   const state = resolvePullRequestsStateFilter(search);
 
   // ── List and selection: the page's own pure derivations ──
-  const stateList = pullRequestFixtureStore.list({ state }).slice(0, PULL_REQUESTS_LIST_LIMIT);
-  const authoredList = supportsReview
+  const shapeAs =
+    (level: "row" | "detail") =>
+    <T extends ChangeRequest>(entry: T): T =>
+      host === "github" && input.capabilities === undefined
+        ? entry
+        : shapeFixtureForHost(entry, capabilities, level);
+  const shapeRow = shapeAs("row");
+  const shapeDetail = shapeAs("detail");
+  const stateList = pullRequestFixtureStore
+    .list({ state })
+    .slice(0, PULL_REQUESTS_LIST_LIMIT)
+    .map(shapeRow);
+  const authoredList = capabilities.involvementFilters
     ? pullRequestFixtureStore
         .list({ state, involvement: "authored" })
         .slice(0, PULL_REQUESTS_LIST_LIMIT)
+        .map(shapeRow)
     : null;
-  const reviewRequestedList = supportsReview
+  const reviewRequestedList = capabilities.involvementFilters
     ? pullRequestFixtureStore
         .list({ state, involvement: "review-requested" })
         .slice(0, PULL_REQUESTS_LIST_LIMIT)
+        .map(shapeRow)
     : null;
   const list: PullRequestsListModel = {
     ...derivePullRequestsList({
       stateList,
       authoredList,
       reviewRequestedList,
-      involvementSupported: supportsReview,
+      involvementSupported: capabilities.involvementFilters,
       search,
       foldedGroups: input.foldedGroups,
     }),
@@ -209,9 +297,14 @@ export function buildTestPullRequestsModel(
       : derivePullRequestSelection({
           number: selectedNumber,
           summary: list.byNumber.get(selectedNumber) ?? null,
-          detail: settledQuery(pullRequestFixtureStore.detail(selectedNumber), input.detailState),
+          detail: settledQuery(
+            ((detail) => (detail ? shapeDetail(detail) : null))(
+              pullRequestFixtureStore.detail(selectedNumber),
+            ),
+            input.detailState,
+          ),
           activity: settledQuery(
-            supportsReview ? pullRequestFixtureStore.activity(selectedNumber) : null,
+            capabilities.activity ? pullRequestFixtureStore.activity(selectedNumber) : null,
             input.activityState,
           ),
           environmentId,
@@ -221,10 +314,8 @@ export function buildTestPullRequestsModel(
   return {
     environmentId,
     cwd,
-    provider: supportsReview
-      ? fixtureProvider
-      : { ...fixtureProvider, kind: "gitlab", name: "GitLab" },
-    supportsReview,
+    provider: testProviderFor(host),
+    capabilities,
     list,
     selection,
   };
@@ -320,13 +411,14 @@ export interface PullRequestsTestProviderProps extends BuildTestPullRequestsMode
 export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
   const [search, setSearchState] = useState<PullRequestsSearch>(() => initialSearch(props));
   const version = usePullRequestFixtureVersion();
-  const { supportsReview, detailState, activityState, listState, repositoryStatus } = props;
+  const { host, capabilities, detailState, activityState, listState, repositoryStatus } = props;
   const foldedGroups = usePullRequestsLayoutStore((state) => state.foldedGroups);
   const model = useMemo(
     () =>
       buildTestPullRequestsModel({
         search,
-        supportsReview,
+        host,
+        capabilities,
         detailState,
         activityState,
         listState,
@@ -337,7 +429,8 @@ export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
     // oxlint-disable-next-line react-hooks/exhaustive-deps
     [
       search,
-      supportsReview,
+      host,
+      capabilities,
       detailState,
       activityState,
       listState,

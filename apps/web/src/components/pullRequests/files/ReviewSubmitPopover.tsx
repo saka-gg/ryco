@@ -5,6 +5,7 @@ import {
   type ReviewDraft,
   type ReviewDraftComment,
 } from "@ryco/client-runtime/state/pull-request-review";
+import { supportsChangeRequestReviewEvent } from "@ryco/shared/sourceControl";
 import { ArrowUpRightIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
@@ -12,10 +13,15 @@ import { cn } from "../../../lib/utils";
 import { usePullRequestReviewDraftStore } from "../../../pullRequestReviewDraftStore";
 import { useSubmitChangeRequestReviewMutation } from "../../../rpc/useSourceControl";
 import { Button } from "../../ui/button";
+import { rovingRadioGroup } from "../../ui/roving-radio-group";
 import { Spinner } from "../../ui/spinner";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { KeyHint } from "../primitives";
-import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
+import {
+  usePullRequestHostName,
+  usePullRequestSelection,
+  usePullRequestsPage,
+} from "../PullRequestsPageContext";
 import { SUBMIT_SHORTCUT_LABEL } from "../threads/ReplyComposer";
 import { commentSnippet } from "../threads/reviewThread.logic";
 import { lineCommentTargetLabel } from "./pullRequestFiles.logic";
@@ -55,13 +61,26 @@ export function ReviewSubmitPopover(props: {
 }) {
   const { nav, model } = usePullRequestsPage();
   const selection = usePullRequestSelection();
+  const hostName = usePullRequestHostName();
   const { draftKey, draft } = props;
   const viewer = selection.activity.data?.viewer ?? null;
-  const hostPending = selection.activity.data?.pendingReview ?? null;
+  // A review the viewer started on the host only counts where the host reports it.
+  const hostPending = model.capabilities.submitReview.pendingReview
+    ? (selection.activity.data?.pendingReview ?? null)
+    : null;
   const headSha = selection.headSha;
   const isAuthor = viewer?.isAuthor ?? false;
-  const event: ChangeRequestReviewEvent =
-    isAuthor && draft.event !== "comment" ? "comment" : (draft.event ?? "comment");
+  // Verdicts the host does not take are not offered at all.
+  const events = EVENTS.filter((option) =>
+    supportsChangeRequestReviewEvent(model.capabilities, option.id),
+  );
+  const fallbackEvent = events[0]?.id ?? "comment";
+  const chosen = draft.event ?? fallbackEvent;
+  const event: ChangeRequestReviewEvent = !events.some((option) => option.id === chosen)
+    ? fallbackEvent
+    : isAuthor && chosen !== "comment"
+      ? "comment"
+      : chosen;
 
   const setSummary = usePullRequestReviewDraftStore((state) => state.setSummary);
   const setEvent = usePullRequestReviewDraftStore((state) => state.setEvent);
@@ -135,6 +154,16 @@ export function ReviewSubmitPopover(props: {
     }
   };
 
+  // The author can only comment on their own pull request.
+  const verdictGroup = rovingRadioGroup<ChangeRequestReviewEvent>({
+    options: events.map((option) => ({
+      value: option.id,
+      disabled: (isAuthor && option.id !== "comment") || submit.isPending,
+    })),
+    value: event,
+    onChange: (next) => setEvent(draftKey, next),
+  });
+
   const jumpTo = (comment: ReviewDraftComment) => {
     props.onClose();
     nav.revealFile(
@@ -163,18 +192,14 @@ export function ReviewSubmitPopover(props: {
             role="radiogroup"
             aria-label="Verdict"
             className="flex gap-0.5 rounded-lg border border-border/70 p-0.5"
+            onKeyDown={verdictGroup.onKeyDown}
           >
-            {EVENTS.map((option) => {
-              const disabled = isAuthor && option.id !== "comment";
+            {events.map((option) => {
               const checked = event === option.id;
               return (
                 <button
                   key={option.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={checked}
-                  disabled={disabled || submit.isPending}
-                  onClick={() => setEvent(draftKey, option.id)}
+                  {...verdictGroup.radio(option.id)}
                   className={cn(
                     "h-7 flex-auto rounded-md px-2.5 text-xs whitespace-nowrap outline-hidden transition-colors duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-45",
                     checked
@@ -260,7 +285,7 @@ export function ReviewSubmitPopover(props: {
             <p className="mt-1.5 mb-1 text-[11px] text-muted-foreground">
               Also submits {hostPending.commentsCount}{" "}
               {hostPending.commentsCount === 1 ? "comment" : "comments"} from the review you started
-              on GitHub.
+              on {hostName}.
             </p>
           ) : null}
         </div>

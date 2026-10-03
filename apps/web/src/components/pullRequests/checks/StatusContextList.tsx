@@ -4,6 +4,7 @@ import { memo } from "react";
 import { openExternalLink } from "../../../lib/openExternalLink";
 import { CheckStateGlyph, RelativeTime } from "../primitives";
 import { CHECK_STATE_LABEL, checkStateOverall, type ChecksStatusEntry } from "./checksModel";
+import { RequiredTag } from "./checksUi";
 
 /**
  * Checks no Actions run accounts for — commit statuses (deployments, external
@@ -56,6 +57,7 @@ function StatusRow(props: { readonly status: ChecksStatusEntry }) {
         {check.label}
       </span>
       <span className="flex-1" />
+      {check.required === true ? <RequiredTag /> : null}
       {time !== null ? (
         <RelativeTime
           value={new Date(time).toISOString()}

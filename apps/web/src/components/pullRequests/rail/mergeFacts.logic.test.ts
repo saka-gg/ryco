@@ -3,6 +3,11 @@ import {
   deriveChangeRequestNextAction,
   summarizeChangeRequestChecks,
 } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  getChangeRequestHostCapabilities,
+  preferredUpdateBranchMethod,
+} from "@ryco/shared/sourceControl";
+import { Option } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,12 +17,14 @@ import {
   fixtureActivity,
   fixtureDetail,
 } from "../testing/pullRequestFixtures";
+import { fixtureRequiredRollup as markedRollup } from "../testing/requiredCheckFixtures";
 import {
   checkJobId,
   deriveMergeStatusLines,
   deriveMergeVerdict,
   deriveNextActionButton,
   deriveNextActionMenu,
+  hostSupportsCommand,
   isHeadMovedError,
   mergeMethodOptions,
   nextUnresolvedThread,
@@ -26,6 +33,8 @@ import {
   stackMergeCount,
   type MergeFactsInput,
 } from "./mergeFacts.logic";
+
+const GITHUB = getChangeRequestHostCapabilities("github");
 
 function factsFor(
   number: number,
@@ -108,6 +117,92 @@ describe("deriveMergeStatusLines", () => {
     // Changes requested jumps to the requester's unresolved thread.
     expect(lines[1]?.target).toEqual({ kind: "thread", threadId: FIXTURE_703_THREADS.draftWalk });
     expect(lines[2]?.target).toEqual({ kind: "thread", threadId: FIXTURE_703_THREADS.draftWalk });
+  });
+
+  it("adds no required note when the host does not mark required checks", () => {
+    const checks = deriveMergeStatusLines(factsFor(703)).find((line) => line.key === "checks");
+    expect(checks?.note).toBeUndefined();
+  });
+
+  it("names the required failure, not the optional one listed before it", () => {
+    const checkRollup = markedRollup(703, { required: ["Typecheck"], failing: ["Typecheck"] });
+    const facts = factsFor(703, { checkRollup });
+    const checks = deriveMergeStatusLines(facts).find((line) => line.key === "checks");
+    // "Test · web" fails too, but only Typecheck blocks; the meta still counts both.
+    expect(checks).toMatchObject({
+      tone: "danger",
+      text: "Typecheck",
+      note: "Required",
+      meta: "7/9",
+      target: { kind: "job" },
+    });
+    const target = checks?.target;
+    const jobId = target?.kind === "job" ? target.jobId : null;
+    expect(jobId).not.toBe(FIXTURE_703_FAILING_JOB.jobId);
+    // The button opens the same failing check the line names.
+    const button = buttonFor(703, { checkRollup });
+    expect(button?.command).toEqual({ type: "reveal-job", jobId });
+  });
+
+  it("reads failures as optional when no required check fails", () => {
+    // GitHub reports only optional failures as `unstable`: mergeable.
+    const checks = deriveMergeStatusLines(
+      factsFor(703, {
+        checkRollup: markedRollup(703, { required: ["Typecheck"] }),
+        mergeStateStatus: "unstable",
+      }),
+    ).find((line) => line.key === "checks");
+    expect(checks).toMatchObject({
+      tone: "warning",
+      text: FIXTURE_703_FAILING_JOB.name,
+      note: "Optional",
+      target: { kind: "job", jobId: FIXTURE_703_FAILING_JOB.jobId },
+    });
+  });
+
+  it("never calls checks optional while the host blocks the merge", () => {
+    // The rollup lists only checks that reported: a required status the host
+    // still expects (say `ci/jenkins`) is missing, and GitHub says BLOCKED.
+    const failing = deriveMergeStatusLines(
+      factsFor(703, {
+        checkRollup: markedRollup(703, { required: ["Typecheck"] }),
+        mergeStateStatus: "blocked",
+      }),
+    ).find((line) => line.key === "checks");
+    expect(failing).toMatchObject({ tone: "danger", text: FIXTURE_703_FAILING_JOB.name });
+    expect(failing?.note).toBeUndefined();
+    const running = deriveMergeStatusLines(
+      factsFor(702, {
+        checkRollup: markedRollup(702, { required: [] }),
+        mergeStateStatus: "blocked",
+      }),
+    ).find((line) => line.key === "checks");
+    expect(running?.note).toBeUndefined();
+  });
+
+  it("notes running checks the merge does not wait on", () => {
+    const optional = deriveMergeStatusLines(
+      factsFor(702, {
+        checkRollup: markedRollup(702, { required: [] }),
+        mergeStateStatus: "unstable",
+      }),
+    ).find((line) => line.key === "checks");
+    expect(optional).toMatchObject({
+      tone: "progress",
+      text: "4 checks running",
+      note: "Optional",
+    });
+
+    const running = (fixtureDetail(702).checkRollup ?? [])
+      .filter((item) => Option.isNone(item.conclusion))
+      .map((item) => item.name);
+    const required = deriveMergeStatusLines(
+      factsFor(702, {
+        checkRollup: markedRollup(702, { required: running.slice(0, 1) }),
+        mergeStateStatus: "unstable",
+      }),
+    ).find((line) => line.key === "checks");
+    expect(required?.note).toBeUndefined();
   });
 
   it("reports running checks as settled of total", () => {
@@ -214,7 +309,7 @@ describe("deriveNextActionMenu", () => {
         ...facts,
         button,
         method: "squash",
-        supportsMutations: true,
+        capabilities: GITHUB,
         agentsAvailable: true,
       }),
     };
@@ -250,6 +345,31 @@ describe("deriveNextActionMenu", () => {
     expect(menu.items.map((item) => item.label)).not.toContain("Update branch");
   });
 
+  it("updates a behind branch the way the host can (GitLab only rebases)", () => {
+    // GitLab: `need_rebase` reads "behind", and its only update is a rebase.
+    const gitlab = getChangeRequestHostCapabilities("gitlab");
+    const facts = factsFor(697);
+    const button = deriveNextActionButton({
+      ...facts,
+      method: "squash",
+      updateBranchMethod: preferredUpdateBranchMethod(gitlab),
+    });
+    expect(button).toMatchObject({
+      label: "Update with rebase",
+      command: { type: "update-branch", method: "rebase" },
+    });
+    expect(button && hostSupportsCommand(button.command, gitlab)).toBe(true);
+    const menu = deriveNextActionMenu({
+      ...facts,
+      button,
+      method: "squash",
+      capabilities: gitlab,
+      agentsAvailable: true,
+    });
+    // Neither update repeats: the button rebases, and GitLab cannot merge the base in.
+    expect(menu.items.some((item) => item.command.type === "update-branch")).toBe(false);
+  });
+
   it("hands conflicts to an agent from the menu", () => {
     expect(menuFor(694).menu.items[0]?.command).toEqual({ type: "resolve-with-agent" });
   });
@@ -262,10 +382,34 @@ describe("deriveNextActionMenu", () => {
         ...facts,
         button: null,
         method: "squash",
-        supportsMutations: false,
+        // A host that can check out but not mutate.
+        capabilities: { ...getChangeRequestHostCapabilities("unknown"), checkout: true },
         agentsAvailable: false,
-      }).items,
-    ).toEqual([]);
+      }),
+    ).toEqual({ methods: null, deleteBranchDefault: null, items: [] });
+  });
+
+  it("offers only the steps and merge methods the host implements", () => {
+    const facts = factsFor(701);
+    const capabilities = {
+      ...GITHUB,
+      lifecycle: new Set(["close"] as const),
+      merge: { methods: new Set(["squash"] as const), deleteBranch: false, expectedHeadSha: true },
+      stacks: false,
+    };
+    const button = deriveNextActionButton({ ...facts, method: "squash" });
+    const menu = deriveNextActionMenu({
+      ...facts,
+      button,
+      method: "squash",
+      capabilities,
+      agentsAvailable: true,
+    });
+    // No "Merge stack through…" (no stacks) and no draft toggle (not a lifecycle action here).
+    expect(menu.items.map((item) => item.label)).toEqual(["Close pull request"]);
+    expect(menu.methods?.map((option) => option.method)).toEqual(["squash"]);
+    // The host cannot delete the branch with the merge: no checkbox.
+    expect(menu.deleteBranchDefault).toBeNull();
   });
 });
 
@@ -276,7 +420,7 @@ describe("merging past a step the host does not require", () => {
       ...facts,
       button,
       method: "squash",
-      supportsMutations: true,
+      capabilities: GITHUB,
       agentsAvailable: true,
     });
   };
@@ -350,6 +494,43 @@ describe("merging past a step the host does not require", () => {
   });
 });
 
+describe("hostSupportsCommand", () => {
+  it("always allows navigation and gates every other step on its capability", () => {
+    // A host that can check out but not mutate.
+    const checkoutOnly = { ...getChangeRequestHostCapabilities("unknown"), checkout: true };
+    expect(hostSupportsCommand({ type: "open-files" }, checkoutOnly)).toBe(true);
+    expect(hostSupportsCommand({ type: "reveal-thread", threadId: "t" }, checkoutOnly)).toBe(true);
+    expect(hostSupportsCommand({ type: "checkout-worktree" }, checkoutOnly)).toBe(true);
+    expect(hostSupportsCommand({ type: "merge" }, checkoutOnly)).toBe(false);
+    expect(hostSupportsCommand({ type: "close" }, checkoutOnly)).toBe(false);
+    expect(hostSupportsCommand({ type: "enable-auto-merge" }, checkoutOnly)).toBe(false);
+    // GitLab updates branches only by rebasing.
+    const gitlab = getChangeRequestHostCapabilities("gitlab");
+    expect(hostSupportsCommand({ type: "merge" }, gitlab)).toBe(true);
+    expect(hostSupportsCommand({ type: "update-branch", method: "rebase" }, gitlab)).toBe(true);
+    expect(hostSupportsCommand({ type: "update-branch", method: "merge" }, gitlab)).toBe(false);
+    for (const command of [
+      { type: "merge" },
+      { type: "merge-stack" },
+      { type: "delete-branch" },
+      { type: "request-review" },
+      { type: "update-branch", method: "rebase" },
+    ] as const) {
+      expect(hostSupportsCommand(command, GITHUB)).toBe(true);
+    }
+  });
+});
+
+describe("deriveMergeStatusLines without check rollups", () => {
+  it("drops the checks line instead of claiming there are none", () => {
+    const facts = factsFor(703);
+    expect(deriveMergeStatusLines(facts).some((line) => line.key === "checks")).toBe(true);
+    expect(
+      deriveMergeStatusLines(facts, { checkRollup: false }).some((line) => line.key === "checks"),
+    ).toBe(false);
+  });
+});
+
 describe("merge method helpers", () => {
   it("falls back to the first allowed method", () => {
     const detail = fixtureDetail(701);
@@ -359,6 +540,15 @@ describe("merge method helpers", () => {
     expect(resolveMergeMethod(detail, "merge")).toBe("squash");
     expect(resolveMergeMethod(detail, "rebase")).toBe("rebase");
     expect(resolveMergeMethod(detail, null)).toBe("squash");
+  });
+
+  it("leaves out methods the host cannot merge with", () => {
+    const detail = fixtureDetail(701);
+    const hostMethods = new Set(["rebase"] as const);
+    expect(mergeMethodOptions(detail, hostMethods).map((option) => option.method)).toEqual([
+      "rebase",
+    ]);
+    expect(resolveMergeMethod(detail, "squash", hostMethods)).toBe("rebase");
   });
 
   it("reads job ids from Actions URLs only", () => {

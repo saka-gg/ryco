@@ -16,6 +16,7 @@ import {
 } from "react";
 
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
+import { useEvent } from "../../../hooks/useEvent";
 import { readMotionDurationMs } from "../../../lib/perf/motion";
 import { cn } from "../../../lib/utils";
 import { invalidateSourceControl } from "../../../rpc/useSourceControl";
@@ -107,7 +108,10 @@ function revealRow(scroller: HTMLElement, content: HTMLElement, row: HTMLElement
  * one unit. One plate glides to the selected row; filtering and reordering
  * FLIP rows into place and new rows settle in from just above.
  */
-export function PullRequestInbox(props: {
+export function PullRequestInbox({
+  ref,
+  ...props
+}: {
   readonly ref?: Ref<PullRequestInboxActions | null>;
   readonly variant: PullRequestListVariant;
   readonly search: PullRequestListSearch;
@@ -126,6 +130,7 @@ export function PullRequestInbox(props: {
   const toggleGroupFolded = usePullRequestsLayoutStore((state) => state.toggleGroupFolded);
   const detailStack = model.selection?.detail.data?.stack ?? null;
   const viewerLogin = list.viewerLogin;
+  const listReadiness = model.capabilities.listReadiness;
 
   const sections = useMemo<ReadonlyArray<InboxSection>>(() => {
     // Stack feet read every loaded layer, including ones a filter hides.
@@ -133,7 +138,11 @@ export function PullRequestInbox(props: {
     return list.groups.map((group) => {
       const readiness = new Map(
         group.entries.map(
-          (entry) => [entry.number, describePullRequestReadiness(entry, { viewerLogin })] as const,
+          (entry) =>
+            [
+              entry.number,
+              describePullRequestReadiness(entry, { viewerLogin, readiness: listReadiness }),
+            ] as const,
         ),
       );
       return {
@@ -143,24 +152,31 @@ export function PullRequestInbox(props: {
         reviewer: grouped && group.key === "needs-your-review",
         items: buildPullRequestListItems(group.entries, {
           isLandable: (entry) =>
-            (readiness.get(entry.number) ?? describePullRequestReadiness(entry)).landable,
+            (
+              readiness.get(entry.number) ??
+              describePullRequestReadiness(entry, { readiness: listReadiness })
+            ).landable,
           allRows,
           detailStack,
         }),
         readiness,
       };
     });
-  }, [detailStack, grouped, list.byNumber, list.groups, viewerLogin]);
+  }, [detailStack, grouped, list.byNumber, list.groups, listReadiness, viewerLogin]);
 
   const serverRows = search.server.results;
   const serverReadiness = useMemo(
     () =>
       new Map(
         serverRows.map(
-          (entry) => [entry.number, describePullRequestReadiness(entry, { viewerLogin })] as const,
+          (entry) =>
+            [
+              entry.number,
+              describePullRequestReadiness(entry, { viewerLogin, readiness: listReadiness }),
+            ] as const,
         ),
       ),
-    [serverRows, viewerLogin],
+    [listReadiness, serverRows, viewerLogin],
   );
 
   const isFolded = useCallback(
@@ -193,13 +209,12 @@ export function PullRequestInbox(props: {
     [sections, serverRows],
   );
   const hasRows = sections.length > 0 || serverRows.length > 0;
-  const motion = useInboxListMotion({
+  const { listRef: contentRef, gateRef: motionGateRef } = useInboxListMotion({
     // The first paint of a list (and every reload of it) stays still; only
     // later changes move.
     enabled: !list.isLoading && hasRows,
     orderSignature,
   });
-  const contentRef = motion.listRef;
   const scrollerRef = useRef<HTMLDivElement>(null);
   const plateRef = useRef<HTMLDivElement>(null);
   const plateBoxRef = useRef<{ readonly top: number; readonly height: number } | null>(null);
@@ -300,16 +315,16 @@ export function PullRequestInbox(props: {
     [contentRef, grouped],
   );
 
-  // Stable across URL changes, so memoized rows only re-render for their own props.
-  const navRef = useRef(nav);
-  navRef.current = nav;
+  // Stable across URL changes (nav's actions are), so memoized rows only
+  // re-render for their own props.
+  const { selectPullRequest } = nav;
   const select = useCallback(
-    (number: number) => navRef.current.selectPullRequest(number, { push: true, via: "list" }),
-    [],
+    (number: number) => selectPullRequest(number, { push: true, via: "list" }),
+    [selectPullRequest],
   );
 
   useImperativeHandle(
-    props.ref,
+    ref,
     () => ({
       focusRows: () => {
         const content = contentRef.current;
@@ -383,17 +398,14 @@ export function PullRequestInbox(props: {
   // The row menu's "Check out in worktree": the same hand-off as the bar's,
   // aimed at that row's pull request.
   const handoff = usePullRequestAgentHandoff();
-  const handoffRef = useRef(handoff);
-  handoffRef.current = handoff;
-  const checkoutWorktree = useCallback(
+  const checkoutWorktree = useEvent(
     (entry: ChangeRequest) =>
-      void handoffRef.current.openWorktreeThread({
+      void handoff.openWorktreeThread({
         number: entry.number,
         title: entry.title,
         headRefName: entry.headRefName,
         isCrossRepository: entry.isCrossRepository,
       }),
-    [],
   );
 
   const rowProps = {
@@ -403,6 +415,7 @@ export function PullRequestInbox(props: {
     onSelect: select,
     onCopyLink: copyLink,
     onCheckoutWorktree: repository !== null ? checkoutWorktree : undefined,
+    canCheckout: model.capabilities.checkout,
   } as const;
 
   const renderItems = (
@@ -437,7 +450,7 @@ export function PullRequestInbox(props: {
         <RepositoryStatusMessage status={repositoryStatus} />
       );
   } else if (list.isLoading) {
-    body = <InboxSkeleton grouped={model.supportsReview} />;
+    body = <InboxSkeleton grouped={model.capabilities.involvementFilters} />;
   } else if (list.error !== null && !hasRows) {
     body = (
       <ListMessage title="Couldn’t load pull requests" detail={list.error}>
@@ -503,7 +516,7 @@ export function PullRequestInbox(props: {
       aria-busy={list.isLoading || undefined}
     >
       {props.header}
-      <InboxMotionContext.Provider value={motion.gateRef}>
+      <InboxMotionContext.Provider value={motionGateRef}>
         <div
           ref={contentRef}
           role="presentation"

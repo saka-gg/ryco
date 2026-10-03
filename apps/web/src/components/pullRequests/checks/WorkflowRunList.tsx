@@ -35,6 +35,7 @@ import {
   DisclosureChevron,
   ROW_HOVER_REVEAL_CLASS,
   ROW_ICON_BUTTON_CLASS,
+  RequiredTag,
   landingFlashClass,
 } from "./checksUi";
 import { JobLogBlock } from "./JobLogBlock";
@@ -187,7 +188,7 @@ export const WorkflowSection = memo(function WorkflowSection(props: {
         <span className="flex-1" />
         {run ? (
           <RowMenu label={`${workflow.name} actions`}>
-            {props.rerunnable && tab.actionable ? (
+            {props.rerunnable && tab.canRerun ? (
               <MenuItem
                 onClick={() =>
                   void rerunFailed().then(
@@ -224,7 +225,7 @@ export const WorkflowSection = memo(function WorkflowSection(props: {
               workflow={workflow}
               job={job}
               requested={isRequested(job)}
-              canRerun={tab.actionable && runFinished && job.job !== null && !isRequested(job)}
+              canRerun={tab.canRerun && runFinished && job.job !== null && !isRequested(job)}
               onRerun={rerunJob}
             />
           ))
@@ -305,7 +306,7 @@ const JobRow = memo(function JobRow(props: {
     cwd: tab.cwd,
     runId: job.runId,
     jobId: actionsJob?.jobId ?? null,
-    enabled: completed && (anyStepOpen || failing),
+    enabled: tab.logsAvailable && completed && (anyStepOpen || failing),
   };
   const logQuery = useSourceControlWorkflowJobLog(logInput);
   const sections = useMemo(
@@ -394,10 +395,11 @@ const JobRow = memo(function JobRow(props: {
               </TooltipPopup>
             </Tooltip>
           ) : null}
+          {job.required ? <RequiredTag /> : null}
           <JobDuration job={job} state={durationState} />
-          {job.url || actionsJob ? (
+          {job.url || (actionsJob && tab.canRerun) ? (
             <RowMenu label={`${job.name} actions`}>
-              {tab.actionable && actionsJob ? (
+              {tab.canRerun && actionsJob ? (
                 <MenuItem disabled={!props.canRerun} onClick={() => props.onRerun(job)}>
                   <RotateCwIcon aria-hidden />
                   Re-run job
@@ -425,7 +427,7 @@ const JobRow = memo(function JobRow(props: {
                   <StepRow
                     key={step.number}
                     step={step}
-                    hasLog={completed}
+                    hasLog={completed && tab.logsAvailable}
                     open={isStepOpen(step)}
                     onToggle={(open) =>
                       setStepOverrides((current) => new Map(current).set(step.number, open))

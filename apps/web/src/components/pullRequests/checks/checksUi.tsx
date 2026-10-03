@@ -74,6 +74,14 @@ export function DisclosureChevron(props: {
 }
 
 /**
+ * Quiet text tag beside a job's duration: branch protection requires it.
+ * Plain words, no chip, like "Outdated" on a thread.
+ */
+export function RequiredTag() {
+  return <span className="shrink-0 text-[11px] text-muted-foreground">Required</span>;
+}
+
+/**
  * A number that rolls in from below when it changes (never on first paint).
  * The old value leaves at once, so the two never overlap.
  */

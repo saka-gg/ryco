@@ -23,6 +23,7 @@ import {
   pullRequestsTestNavLog,
   resetPullRequestsTestState,
 } from "../testing/PullRequestsTestProvider";
+import { READ_ONLY_HOST_CAPABILITIES } from "../testing/readOnlyHost";
 import { ListResizeHandle, PullRequestListPane } from "./PullRequestListPane";
 
 afterEach(() => resetPullRequestsTestState());
@@ -239,7 +240,12 @@ describe("PullRequestListPane", () => {
     vi.setSystemTime(FIXTURE_NOW_MS);
     await page.viewport(400, 600);
     const screen = await render(
-      <PullRequestsTestProvider supportsReview={false} width={320} height={600}>
+      <PullRequestsTestProvider
+        host="gitlab"
+        capabilities={READ_ONLY_HOST_CAPABILITIES}
+        width={320}
+        height={600}
+      >
         <PullRequestListPane variant="docked" />
       </PullRequestsTestProvider>,
     );
