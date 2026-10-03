@@ -49,6 +49,8 @@ function toChangeRequest(
     ...(summary.headRepositoryOwnerLogin !== undefined
       ? { headRepositoryOwnerLogin: summary.headRepositoryOwnerLogin }
       : {}),
+    ...(summary.isDraft !== undefined ? { isDraft: summary.isDraft } : {}),
+    ...(summary.createdAt !== undefined ? { createdAt: summary.createdAt } : {}),
   };
 }
 
@@ -106,11 +108,37 @@ function toChangeRequestDetail(
     ...(raw.reviewers.length > 0 ? { reviewers: raw.reviewers } : {}),
     ...(raw.participants.length > 0 ? { participants: raw.participants } : {}),
     ...(typeof raw.tasksCount === "number" ? { tasksCount: raw.tasksCount } : {}),
+    ...(raw.headSha !== undefined ? { headSha: raw.headSha } : {}),
+    ...(raw.commits !== undefined ? { commits: raw.commits } : {}),
+    ...(raw.reviewerStates !== undefined ? { reviewerStates: raw.reviewerStates } : {}),
+    ...(raw.reviewDecision !== undefined ? { reviewDecision: raw.reviewDecision } : {}),
+    ...(raw.mergeability !== undefined ? { mergeability: raw.mergeability } : {}),
+    ...(raw.mergeStateStatus !== undefined ? { mergeStateStatus: raw.mergeStateStatus } : {}),
+    ...(raw.mergeCapabilities !== undefined ? { mergeCapabilities: raw.mergeCapabilities } : {}),
+    ...(raw.checkRollup !== undefined ? { checkRollup: raw.checkRollup } : {}),
+    ...(raw.deleteBranchOnMerge !== undefined
+      ? { deleteBranchOnMerge: raw.deleteBranchOnMerge }
+      : {}),
+    ...(raw.mergedBy !== undefined ? { mergedBy: raw.mergedBy } : {}),
   };
 }
 
 export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* () {
   const bitbucket = yield* BitbucketApi.BitbucketApi;
+
+  /** The fresh, uncapped detail a mutation returns. */
+  const getDetail = (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+    readonly reference: string;
+  }) =>
+    bitbucket
+      .getPullRequestDetail({
+        cwd: input.cwd,
+        ...(input.context ? { context: input.context } : {}),
+        reference: input.reference,
+      })
+      .pipe(Effect.map((raw) => toChangeRequestDetail(raw, { fullContent: true })));
 
   const provider = SourceControlProvider.SourceControlProvider.of({
     kind: "bitbucket",
@@ -124,6 +152,8 @@ export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* ()
           ...(source ? { source } : {}),
           state: input.state,
           ...(input.limit !== undefined ? { limit: input.limit } : {}),
+          ...(input.involvement !== undefined ? { involvement: input.involvement } : {}),
+          ...(input.query !== undefined ? { query: input.query } : {}),
         })
         .pipe(
           Effect.map((items) => items.map(toChangeRequest)),
@@ -147,6 +177,7 @@ export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* ()
           ...(input.target ? { target: input.target } : {}),
           title: input.title,
           bodyFile: input.bodyFile,
+          ...(input.draft === true ? { draft: true } : {}),
         })
         .pipe(Effect.mapError((error) => providerError("createChangeRequest", error)));
     },
@@ -263,14 +294,18 @@ export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* ()
           ),
           Effect.mapError((error) => providerError("getChangeRequestDetail", error)),
         ),
-    addChangeRequestComment: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "bitbucket",
-          operation: "addChangeRequestComment",
-          detail: "Not implemented for bitbucket",
-        }),
-      ),
+    addChangeRequestComment: (input) =>
+      bitbucket
+        .addPullRequestComment({
+          cwd: input.cwd,
+          ...(input.context ? { context: input.context } : {}),
+          reference: input.reference,
+          body: input.body,
+        })
+        .pipe(
+          Effect.andThen(() => getDetail(input)),
+          Effect.mapError((error) => providerError("addChangeRequestComment", error)),
+        ),
     addChangeRequestCommentReaction: () =>
       Effect.fail(
         new SourceControlProviderError({
@@ -285,8 +320,55 @@ export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* ()
           cwd: input.cwd,
           ...(input.context ? { context: input.context } : {}),
           reference: input.reference,
+          ...(input.expectedHeadSha !== undefined
+            ? { expectedHeadSha: input.expectedHeadSha }
+            : {}),
+          ...(input.commitSha !== undefined ? { commitSha: input.commitSha } : {}),
         })
         .pipe(Effect.mapError((error) => providerError("getChangeRequestDiff", error))),
+    getChangeRequestActivity: (input) =>
+      bitbucket
+        .getPullRequestActivity(input)
+        .pipe(Effect.mapError((error) => providerError("getChangeRequestActivity", error))),
+    getChangeRequestFileContents: (input) =>
+      bitbucket
+        .getPullRequestFileContents(input)
+        .pipe(Effect.mapError((error) => providerError("getChangeRequestFileContents", error))),
+    submitChangeRequestReview: (input) =>
+      bitbucket
+        .submitPullRequestReview(input)
+        .pipe(Effect.mapError((error) => providerError("submitChangeRequestReview", error))),
+    replyToReviewThread: (input) =>
+      bitbucket.replyToPullRequestThread(input).pipe(
+        Effect.map((thread) => ({ thread })),
+        Effect.mapError((error) => providerError("replyToReviewThread", error)),
+      ),
+    setReviewThreadResolved: (input) =>
+      bitbucket
+        .setPullRequestThreadResolved(input)
+        .pipe(Effect.mapError((error) => providerError("setReviewThreadResolved", error))),
+    updateChangeRequestComment: (input) =>
+      bitbucket
+        .updatePullRequestComment({
+          cwd: input.cwd,
+          ...(input.context ? { context: input.context } : {}),
+          reference: input.reference,
+          commentId: input.commentId,
+          commentKind: input.commentKind,
+          action: input.action,
+          ...(input.action === "edit" ? { body: input.body } : {}),
+        })
+        .pipe(Effect.mapError((error) => providerError("updateChangeRequestComment", error))),
+    updateChangeRequest: (input) =>
+      bitbucket.updatePullRequest(input).pipe(
+        Effect.andThen(() => getDetail(input)),
+        Effect.map((detail) => ({ detail })),
+        Effect.mapError((error) => providerError("updateChangeRequest", error)),
+      ),
+    mergeChangeRequest: (input) =>
+      bitbucket
+        .mergePullRequest(input)
+        .pipe(Effect.mapError((error) => providerError("mergeChangeRequest", error))),
     createIssue: () =>
       Effect.fail(
         new SourceControlProviderError({
@@ -303,22 +385,19 @@ export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* ()
           detail: "Not implemented in Phase 1",
         }),
       ),
-    listAssignees: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "bitbucket",
-          operation: "listAssignees",
-          detail: "Not implemented in Phase 1",
-        }),
-      ),
-    getPullRequestState: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "bitbucket",
-          operation: "getPullRequestState",
-          detail: "Not implemented for bitbucket",
-        }),
-      ),
+    // Workspace members: the reviewer picker's candidates (Bitbucket has no assignees).
+    listAssignees: (input) =>
+      bitbucket
+        .listAssignees({ cwd: input.cwd, ...(input.context ? { context: input.context } : {}) })
+        .pipe(Effect.mapError((error) => providerError("listAssignees", error))),
+    getPullRequestState: (input) =>
+      bitbucket
+        .getPullRequestState({
+          cwd: input.cwd,
+          ...(input.context ? { context: input.context } : {}),
+          reference: String(input.number),
+        })
+        .pipe(Effect.mapError((error) => providerError("getPullRequestState", error))),
     getIssueState: () =>
       Effect.fail(
         new SourceControlProviderError({
@@ -328,7 +407,7 @@ export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* ()
         }),
       ),
   });
-  // No server-side involvement filter, list search, commit-scoped diff, or draft creation.
+  // Involvement kinds Bitbucket lacks (assigned, mentioned, involved) fail in the API.
   return SourceControlProvider.withUnsupportedChangeRequestOptionGuards(provider);
 });
 

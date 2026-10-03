@@ -1,6 +1,8 @@
 import { Config, Context, Effect, FileSystem, Layer, Option, Schema } from "effect";
 import {
   TrimmedNonEmptyString,
+  type ChangeRequestInvolvement,
+  type SourceControlAssigneeCandidate,
   type SourceControlProviderAuth,
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryVisibility,
@@ -9,8 +11,10 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstab
 import { sanitizeBranchFragment, WORKTREE_BRANCH_PREFIX } from "@ryco/shared/git";
 import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControl";
 
+import { BitbucketApiError, isBitbucketApiError } from "./bitbucketApiError.ts";
 import * as BitbucketIssues from "./bitbucketIssues.ts";
 import * as BitbucketPullRequests from "./bitbucketPullRequests.ts";
+import { makeBitbucketPullRequestPageApi } from "./bitbucketPullRequestPageApi.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import { manualBitbucketTokenSecretName } from "../atlassian/AtlassianConnectionService.ts";
 import { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";
@@ -31,19 +35,7 @@ const BitbucketApiEnvConfig = Config.all({
   apiToken: Config.string("RYCO_BITBUCKET_API_TOKEN").pipe(Config.option),
 });
 
-export class BitbucketApiError extends Schema.TaggedError<BitbucketApiError>()(
-  "BitbucketApiError",
-  {
-    operation: Schema.String,
-    detail: Schema.String,
-    status: Schema.optional(Schema.Number),
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
-  override get message(): string {
-    return `Bitbucket API failed in ${this.operation}: ${this.detail}`;
-  }
-}
+export { BitbucketApiError };
 
 const RawBitbucketRepositorySchema = Schema.Struct({
   full_name: TrimmedNonEmptyString,
@@ -137,6 +129,10 @@ export interface BitbucketApiShape {
     readonly source?: SourceControlProvider.SourceControlRefSelector;
     readonly state: "open" | "closed" | "merged" | "all";
     readonly limit?: number;
+    /** Authored / review-requested by the viewer (other kinds fail). */
+    readonly involvement?: ChangeRequestInvolvement;
+    /** Title search combined with the other filters. */
+    readonly query?: string;
   }) => Effect.Effect<
     ReadonlyArray<BitbucketPullRequests.NormalizedBitbucketPullRequestRecord>,
     BitbucketApiError
@@ -180,6 +176,7 @@ export interface BitbucketApiShape {
     readonly target?: SourceControlProvider.SourceControlRefSelector;
     readonly title: string;
     readonly bodyFile: string;
+    readonly draft?: boolean;
   }) => Effect.Effect<void, BitbucketApiError>;
   readonly getDefaultBranch: (input: {
     readonly cwd: string;
@@ -235,8 +232,39 @@ export interface BitbucketApiShape {
     readonly cwd: string;
     readonly context?: SourceControlProvider.SourceControlProviderContext;
     readonly reference: string;
+    /** Fail when the head is not (or no longer) this commit. */
+    readonly expectedHeadSha?: string | undefined;
+    /** One commit of the pull request against its first parent. */
+    readonly commitSha?: string | undefined;
   }) => Effect.Effect<string, BitbucketApiError>;
+  readonly getPullRequestState: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+    readonly reference: string;
+  }) => Effect.Effect<
+    { readonly state: "open" | "closed" | "merged"; readonly isDraft: boolean },
+    BitbucketApiError
+  >;
+  readonly listAssignees: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+  }) => Effect.Effect<ReadonlyArray<SourceControlAssigneeCandidate>, BitbucketApiError>;
+  readonly getPullRequestActivity: BitbucketPullRequestPageApi["getPullRequestActivity"];
+  readonly getPullRequestFileContents: BitbucketPullRequestPageApi["getPullRequestFileContents"];
+  readonly addPullRequestComment: (
+    input: Parameters<BitbucketPullRequestPageApi["addPullRequestComment"]>[0],
+  ) => Effect.Effect<void, BitbucketApiError>;
+  readonly updatePullRequestComment: BitbucketPullRequestPageApi["updatePullRequestComment"];
+  readonly replyToPullRequestThread: BitbucketPullRequestPageApi["replyToPullRequestThread"];
+  readonly setPullRequestThreadResolved: BitbucketPullRequestPageApi["setPullRequestThreadResolved"];
+  readonly submitPullRequestReview: BitbucketPullRequestPageApi["submitPullRequestReview"];
+  readonly updatePullRequest: (
+    input: Parameters<BitbucketPullRequestPageApi["updatePullRequest"]>[0],
+  ) => Effect.Effect<void, BitbucketApiError>;
+  readonly mergePullRequest: BitbucketPullRequestPageApi["mergePullRequest"];
 }
+
+type BitbucketPullRequestPageApi = ReturnType<typeof makeBitbucketPullRequestPageApi>;
 
 export class BitbucketApi extends Context.Service<BitbucketApi, BitbucketApiShape>()(
   "ryco/source-control/BitbucketApi",
@@ -245,14 +273,6 @@ export class BitbucketApi extends Context.Service<BitbucketApi, BitbucketApiShap
 function nonEmpty(value: string | undefined): Option.Option<string> {
   const trimmed = value?.trim();
   return trimmed === undefined || trimmed.length === 0 ? Option.none() : Option.some(trimmed);
-}
-
-function normalizeChangeRequestId(reference: string): string {
-  const trimmed = reference.trim().replace(/^#/, "");
-  const urlMatch = /(?:pull-requests|pullrequests|pull-request|pull|pr)\/(\d+)(?:\D.*)?$/i.exec(
-    trimmed,
-  );
-  return urlMatch?.[1] ?? trimmed;
 }
 
 function normalizeIssueId(reference: string): string {
@@ -629,10 +649,6 @@ function requestError(operation: string, cause: unknown): BitbucketApiError {
   });
 }
 
-function isBitbucketApiError(cause: unknown): cause is BitbucketApiError {
-  return Schema.is(BitbucketApiError)(cause);
-}
-
 function responseError(
   operation: string,
   response: HttpClientResponse.HttpClientResponse,
@@ -792,6 +808,35 @@ export const make = Effect.fn("makeBitbucketApi")(function* () {
         })(response),
       ),
     );
+
+  const executeResponse = (
+    operation: string,
+    request: HttpClientRequest.HttpClientRequest,
+  ): Effect.Effect<HttpClientResponse.HttpClientResponse, BitbucketApiError> =>
+    resolveCredential(operation).pipe(
+      Effect.flatMap((credential) => httpClient.execute(applyAuth(request, credential))),
+      Effect.mapError((cause) =>
+        isBitbucketApiError(cause) ? cause : requestError(operation, cause),
+      ),
+    );
+
+  const apiBase = (() => {
+    try {
+      return new URL(`${config.baseUrl.replace(/\/+$/u, "")}/`);
+    } catch {
+      return null;
+    }
+  })();
+  /** Credentials only follow links that stay on the configured API. */
+  const isApiUrl = (url: string): boolean => {
+    if (!apiBase) return false;
+    try {
+      const parsed = new URL(url);
+      return parsed.origin === apiBase.origin && parsed.pathname.startsWith(apiBase.pathname);
+    } catch {
+      return false;
+    }
+  };
 
   const resolveRepository = Effect.fn("BitbucketApi.resolveRepository")(function* (input: {
     readonly cwd: string;
@@ -970,7 +1015,7 @@ export const make = Effect.fn("makeBitbucketApi")(function* () {
       "getPullRequest",
       HttpClientRequest.get(
         apiUrl(
-          `/repositories/${encodeURIComponent(repository.workspace)}/${encodeURIComponent(repository.repoSlug)}/pullrequests/${encodeURIComponent(normalizeChangeRequestId(reference))}`,
+          `/repositories/${encodeURIComponent(repository.workspace)}/${encodeURIComponent(repository.repoSlug)}/pullrequests/${encodeURIComponent(BitbucketPullRequests.normalizeBitbucketChangeRequestId(reference))}`,
         ),
       ),
       BitbucketPullRequests.BitbucketPullRequestSchema,
@@ -1025,6 +1070,16 @@ export const make = Effect.fn("makeBitbucketApi")(function* () {
     });
   });
 
+  const page = makeBitbucketPullRequestPageApi({
+    apiUrl,
+    isApiUrl,
+    executeJson,
+    executeText,
+    executeResponse,
+    responseError,
+    resolveRepository,
+  });
+
   return BitbucketApi.of({
     probeAuth: resolveCredential("probeAuth").pipe(
       Effect.flatMap((credential) => {
@@ -1053,13 +1108,20 @@ export const make = Effect.fn("makeBitbucketApi")(function* () {
       ),
     ),
     listPullRequests: (input) =>
-      resolveRepository(input).pipe(
-        Effect.flatMap((repository) => {
+      Effect.all({
+        repository: resolveRepository(input),
+        involvementFilters: page.involvementFilters({
+          involvement: input.involvement,
+          query: input.query,
+        }),
+      }).pipe(
+        Effect.flatMap(({ repository, involvementFilters }) => {
           const states = toBitbucketStates(input.state);
           const sourceBranch = SourceControlProvider.sourceBranch(input).replaceAll('"', '\\"');
           const filters = [
             ...(sourceBranch.length > 0 ? [`source.branch.name = "${sourceBranch}"`] : []),
             bitbucketStateFilter(states),
+            ...involvementFilters,
           ];
           const query: Record<string, string | ReadonlyArray<string>> = {
             pagelen: String(Math.max(1, Math.min(input.limit ?? 20, 50))),
@@ -1145,6 +1207,7 @@ export const make = Effect.fn("makeBitbucketApi")(function* () {
               name: input.target?.refName ?? input.baseBranch,
             },
           },
+          ...(input.draft === true ? { draft: true } : {}),
         };
 
         yield* executeJson(
@@ -1369,7 +1432,7 @@ export const make = Effect.fn("makeBitbucketApi")(function* () {
         }),
       ),
     getPullRequestDetail: (input) => {
-      const referenceId = normalizeChangeRequestId(input.reference);
+      const referenceId = BitbucketPullRequests.normalizeBitbucketChangeRequestId(input.reference);
       return resolveRepository({
         cwd: input.cwd,
         ...(input.context ? { context: input.context } : {}),
@@ -1396,34 +1459,40 @@ export const make = Effect.fn("makeBitbucketApi")(function* () {
             ),
           );
           return Effect.all([pr, comments], { concurrency: 2 }).pipe(
-            Effect.map(([raw, normalizedComments]) =>
-              BitbucketPullRequests.normalizeBitbucketPullRequestDetailRecord(
-                raw,
-                normalizedComments,
+            Effect.flatMap(([raw, normalizedComments]) =>
+              page.getPullRequestPageDetail(repo, prPath, raw).pipe(
+                Effect.map((enrichment) => ({
+                  ...BitbucketPullRequests.normalizeBitbucketPullRequestDetailRecord(
+                    raw,
+                    normalizedComments,
+                  ),
+                  ...enrichment,
+                })),
               ),
             ),
           );
         }),
       );
     },
-    getPullRequestDiff: (input) => {
-      const referenceId = normalizeChangeRequestId(input.reference);
-      return resolveRepository({
-        cwd: input.cwd,
-        ...(input.context ? { context: input.context } : {}),
-      }).pipe(
-        Effect.flatMap((repo) =>
-          executeText(
-            "getPullRequestDiff",
-            HttpClientRequest.get(
-              apiUrl(
-                `/repositories/${encodeURIComponent(repo.workspace)}/${encodeURIComponent(repo.repoSlug)}/pullrequests/${encodeURIComponent(referenceId)}/diff`,
-              ),
-            ),
-          ),
-        ),
-      );
-    },
+    getPullRequestDiff: (input) => page.getPullRequestDiff(input),
+    getPullRequestState: (input) =>
+      getRawPullRequest(input).pipe(
+        Effect.map((raw) => {
+          const record = BitbucketPullRequests.normalizeBitbucketPullRequestRecord(raw);
+          return { state: record.state, isDraft: record.isDraft ?? false };
+        }),
+      ),
+    listAssignees: (input) =>
+      page.listWorkspaceMembers(input).pipe(Effect.map((members) => members.candidates)),
+    getPullRequestActivity: page.getPullRequestActivity,
+    getPullRequestFileContents: page.getPullRequestFileContents,
+    addPullRequestComment: page.addPullRequestComment,
+    updatePullRequestComment: page.updatePullRequestComment,
+    replyToPullRequestThread: page.replyToPullRequestThread,
+    setPullRequestThreadResolved: page.setPullRequestThreadResolved,
+    submitPullRequestReview: page.submitPullRequestReview,
+    updatePullRequest: page.updatePullRequest,
+    mergePullRequest: page.mergePullRequest,
   });
 });
 

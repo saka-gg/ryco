@@ -1,17 +1,11 @@
-import { assert, it, vi } from "@effect/vitest";
-import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ConfigProvider, DateTime, Effect, FileSystem, Layer, Option } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { assert, it } from "@effect/vitest";
+import { DateTime, Effect, FileSystem, Option } from "effect";
 import { AtlassianConnectionId } from "@ryco/contracts";
 
 import * as BitbucketApi from "./BitbucketApi.ts";
-import { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";
-import { AtlassianConnectionRepository } from "../persistence/Services/AtlassianConnections.ts";
+import { makeLayer } from "./bitbucketApiTestLayer.ts";
 import type { AtlassianConnectionRecord } from "../persistence/Services/AtlassianConnections.ts";
 import { manualBitbucketTokenSecretName } from "../atlassian/AtlassianConnectionService.ts";
-import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
-import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
-import type * as VcsDriver from "../vcs/VcsDriver.ts";
 
 const bitbucketPullRequest = {
   id: 42,
@@ -50,138 +44,6 @@ const repositoryJson = {
   },
   mainbranch: { name: "main" },
 };
-
-function makeLayer(input: {
-  readonly response: (request: HttpClientRequest.HttpClientRequest) => Response;
-  readonly env?: Readonly<Record<string, string>>;
-  readonly atlassianConnections?: ReadonlyArray<AtlassianConnectionRecord>;
-  readonly secrets?: ReadonlyMap<string, Uint8Array>;
-  readonly git?: Partial<GitVcsDriver.GitVcsDriverShape>;
-}) {
-  const execute = vi.fn((request: HttpClientRequest.HttpClientRequest) =>
-    Effect.succeed(HttpClientResponse.fromWeb(request, input.response(request))),
-  );
-  const gitMock = {
-    readConfigValue: vi.fn<GitVcsDriver.GitVcsDriverShape["readConfigValue"]>(() =>
-      Effect.succeed<string | null>("git@bitbucket.org:pingdotgg/ryco.git"),
-    ),
-    resolvePrimaryRemoteName: vi.fn<GitVcsDriver.GitVcsDriverShape["resolvePrimaryRemoteName"]>(
-      () => Effect.succeed("origin"),
-    ),
-    ensureRemote: vi.fn<GitVcsDriver.GitVcsDriverShape["ensureRemote"]>(() =>
-      Effect.succeed("octocat"),
-    ),
-    fetchRemoteBranch: vi.fn<GitVcsDriver.GitVcsDriverShape["fetchRemoteBranch"]>(
-      () => Effect.void,
-    ),
-    fetchRemoteTrackingBranch: vi.fn<GitVcsDriver.GitVcsDriverShape["fetchRemoteTrackingBranch"]>(
-      () => Effect.void,
-    ),
-    setBranchUpstream: vi.fn<GitVcsDriver.GitVcsDriverShape["setBranchUpstream"]>(
-      () => Effect.void,
-    ),
-    switchRef: vi.fn<GitVcsDriver.GitVcsDriverShape["switchRef"]>((request) =>
-      Effect.succeed({ refName: request.refName }),
-    ),
-    listLocalBranchNames: vi.fn<GitVcsDriver.GitVcsDriverShape["listLocalBranchNames"]>(() =>
-      Effect.succeed([]),
-    ),
-  };
-  const git = {
-    ...gitMock,
-    ...input.git,
-  } satisfies Partial<GitVcsDriver.GitVcsDriverShape>;
-
-  const driver = {
-    listRemotes: () =>
-      Effect.succeed({
-        remotes: [
-          {
-            name: "origin",
-            url: "git@bitbucket.org:pingdotgg/ryco.git",
-            pushUrl: Option.none(),
-            isPrimary: true,
-          },
-        ],
-        freshness: {
-          source: "live-local" as const,
-          observedAt: DateTime.makeUnsafe("1970-01-01T00:00:00.000Z"),
-          expiresAt: Option.none(),
-        },
-      }),
-  } satisfies Partial<VcsDriver.VcsDriverShape>;
-
-  const layer = BitbucketApi.layer.pipe(
-    Layer.provide(
-      Layer.mock(AtlassianConnectionRepository)({
-        list: (query = {}) =>
-          Effect.succeed(
-            (input.atlassianConnections ?? []).filter(
-              (connection) => query.status === undefined || connection.status === query.status,
-            ),
-          ),
-        getById: ({ connectionId }) =>
-          Effect.sync(() => {
-            const found = input.atlassianConnections?.find(
-              (connection) => connection.connectionId === connectionId,
-            );
-            return found ? Option.some(found) : Option.none();
-          }),
-        upsert: () => Effect.void,
-        disconnect: () => Effect.succeed(false),
-        deleteById: () => Effect.void,
-      }),
-    ),
-    Layer.provide(
-      Layer.mock(ServerSecretStore)({
-        get: (name) => Effect.succeed(input.secrets?.get(name) ?? null),
-        set: () => Effect.void,
-        getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
-        remove: () => Effect.void,
-      }),
-    ),
-    Layer.provide(
-      Layer.succeed(
-        HttpClient.HttpClient,
-        HttpClient.make((request) => execute(request)),
-      ),
-    ),
-    Layer.provide(
-      Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
-        resolve: () =>
-          Effect.succeed({
-            kind: "git",
-            repository: {
-              kind: "git",
-              rootPath: "/repo",
-              metadataPath: null,
-              freshness: {
-                source: "live-local" as const,
-                observedAt: DateTime.makeUnsafe("1970-01-01T00:00:00.000Z"),
-                expiresAt: Option.none(),
-              },
-            },
-            driver: driver as unknown as VcsDriver.VcsDriverShape,
-          }),
-      }),
-    ),
-    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)(git)),
-    Layer.provide(
-      ConfigProvider.layer(
-        ConfigProvider.fromEnv({
-          env: input.env ?? {
-            RYCO_BITBUCKET_API_BASE_URL: "https://api.test.local/2.0",
-            RYCO_BITBUCKET_EMAIL: "user@example.com",
-            RYCO_BITBUCKET_API_TOKEN: "token",
-          },
-        }),
-      ),
-    ),
-    Layer.provideMerge(NodeServices.layer),
-  );
-
-  return { execute, git: gitMock, layer };
-}
 
 function storedBitbucketConnection(input: {
   readonly connectionId: string;
@@ -1048,73 +910,85 @@ it.effect("searchPullRequests forwards BBQL to /pullrequests endpoint", () => {
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("getPullRequestDetail returns body and comments via two REST calls", () => {
-  const { execute, layer } = makeLayer({
-    response: (request) => {
-      if (request.url.includes("/comments")) {
+it.effect(
+  "getPullRequestDetail returns body and comments, tolerating failed enrichment reads",
+  () => {
+    const { execute, layer } = makeLayer({
+      response: (request) => {
+        if (/\/(commits|statuses|mergeability\/checks)$/u.test(request.url)) {
+          return Response.json({ type: "error", error: { message: "Forbidden" } }, { status: 403 });
+        }
+        if (request.url.includes("/comments")) {
+          return Response.json({
+            values: [
+              {
+                user: { username: "reviewer", display_name: "Reviewer" },
+                content: { raw: "looks good" },
+                created_on: "2026-03-14T10:00:00Z",
+              },
+            ],
+          });
+        }
         return Response.json({
-          values: [
+          id: 12,
+          title: "RYCO-123 Add feature",
+          state: "OPEN",
+          summary: { raw: "PR body text for OPS-9" },
+          author: { display_name: "Alice" },
+          reviewers: [{ display_name: "Reviewer" }],
+          participants: [
             {
-              user: { username: "reviewer", display_name: "Reviewer" },
-              content: { raw: "looks good" },
-              created_on: "2026-03-14T10:00:00Z",
+              user: { display_name: "Reviewer", nickname: "reviewer" },
+              role: "REVIEWER",
+              approved: true,
             },
           ],
-        });
-      }
-      return Response.json({
-        id: 12,
-        title: "RYCO-123 Add feature",
-        state: "OPEN",
-        summary: { raw: "PR body text for OPS-9" },
-        author: { display_name: "Alice" },
-        reviewers: [{ display_name: "Reviewer" }],
-        participants: [
-          {
-            user: { display_name: "Reviewer", nickname: "reviewer" },
-            role: "REVIEWER",
-            approved: true,
+          comment_count: 3,
+          task_count: 1,
+          links: {
+            html: { href: "https://bitbucket.org/pingdotgg/ryco/pull-requests/12" },
           },
-        ],
-        comment_count: 3,
-        task_count: 1,
-        links: {
-          html: { href: "https://bitbucket.org/pingdotgg/ryco/pull-requests/12" },
-        },
-        source: {
-          branch: { name: "feature/add" },
-          repository: { full_name: "pingdotgg/ryco" },
-        },
-        destination: {
-          branch: { name: "main" },
-          repository: { full_name: "pingdotgg/ryco" },
-        },
-      });
-    },
-  });
-
-  return Effect.gen(function* () {
-    const bitbucket = yield* BitbucketApi.BitbucketApi;
-    const detail = yield* bitbucket.getPullRequestDetail({ cwd: "/repo", reference: "12" });
-    assert.strictEqual(detail.number, 12);
-    assert.strictEqual(detail.body, "PR body text for OPS-9");
-    assert.strictEqual(detail.comments.length, 1);
-    assert.strictEqual(detail.comments[0]?.author, "reviewer");
-    assert.strictEqual(detail.author, "Alice");
-    assert.strictEqual(detail.commentsCount, 3);
-    assert.strictEqual(detail.tasksCount, 1);
-    assert.deepStrictEqual(detail.reviewers, ["Reviewer"]);
-    assert.deepStrictEqual(detail.linkedWorkItemKeys, ["RYCO-123", "OPS-9"]);
-    assert.deepStrictEqual(detail.participants[0], {
-      displayName: "Reviewer",
-      username: "reviewer",
-      role: "REVIEWER",
-      approved: true,
+          source: {
+            branch: { name: "feature/add" },
+            repository: { full_name: "pingdotgg/ryco" },
+          },
+          destination: {
+            branch: { name: "main" },
+            repository: { full_name: "pingdotgg/ryco" },
+          },
+        });
+      },
     });
-    // Two calls: PR + comments
-    assert.strictEqual(execute.mock.calls.length, 2);
-  }).pipe(Effect.provide(layer));
-});
+
+    return Effect.gen(function* () {
+      const bitbucket = yield* BitbucketApi.BitbucketApi;
+      const detail = yield* bitbucket.getPullRequestDetail({ cwd: "/repo", reference: "12" });
+      assert.strictEqual(detail.number, 12);
+      assert.strictEqual(detail.body, "PR body text for OPS-9");
+      assert.strictEqual(detail.comments.length, 1);
+      assert.strictEqual(detail.comments[0]?.author, "reviewer");
+      assert.strictEqual(detail.author, "Alice");
+      assert.strictEqual(detail.commentsCount, 3);
+      assert.strictEqual(detail.tasksCount, 1);
+      assert.deepStrictEqual(detail.reviewers, ["Reviewer"]);
+      assert.deepStrictEqual(detail.linkedWorkItemKeys, ["RYCO-123", "OPS-9"]);
+      assert.deepStrictEqual(detail.participants[0], {
+        displayName: "Reviewer",
+        username: "reviewer",
+        role: "REVIEWER",
+        approved: true,
+      });
+      // PR + comments, then the page enrichment (commits, statuses, mergeability).
+      assert.strictEqual(execute.mock.calls.length, 5);
+      assert.strictEqual(detail.commits, undefined);
+      assert.strictEqual(detail.checkRollup, undefined);
+      assert.strictEqual(detail.mergeability, "unknown");
+      assert.deepStrictEqual(detail.reviewerStates, [
+        { login: "Reviewer", kind: "user", state: "approved" },
+      ]);
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 it.effect("getPullRequestDiff returns the raw Bitbucket diff text", () => {
   const { execute, layer } = makeLayer({
