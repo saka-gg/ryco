@@ -88,7 +88,6 @@ import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
-  orderItemsByPreferredIds,
   shouldAutoAnimateSidebarProjectList,
   shouldAutoAnimateSidebarThreadLists,
   shouldClearThreadSelectionOnMouseDown,
@@ -111,18 +110,15 @@ import {
   type InboxSidebarEnvironment,
 } from "./inboxSidebar/inboxSidebarModel";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
+import { useLogicalProjectSnapshots } from "~/hooks/useLogicalProjectSnapshots";
 import { useServerKeybindings } from "../rpc/serverState";
-import { derivePhysicalProjectKey, getProjectOrderKey } from "../logicalProject";
+import { derivePhysicalProjectKey } from "../logicalProject";
 import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
 import type { SidebarThreadSummary } from "../types";
-import {
-  buildPhysicalToLogicalProjectKeyMap,
-  buildSidebarProjectSnapshots,
-  type SidebarProjectSnapshot,
-} from "../sidebarProjectGrouping";
+import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { buildSidebarProjectFolderTree } from "../sidebarProjectFolders";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import { useHostedWorkspaceState } from "../hostedHub/hostedConnectionCoordinator";
@@ -224,7 +220,6 @@ export default function Sidebar() {
   const sidebarMode = useUiStateStore((store) => store.sidebarMode);
   const setSidebarMode = useUiStateStore((store) => store.setSidebarMode);
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
-  const projectOrder = useUiStateStore((store) => store.projectOrder);
   const projectFoldersById = useUiStateStore((store) => store.projectFoldersById);
   const projectFolderOrder = useUiStateStore((store) => store.projectFolderOrder);
   const projectTreeOrder = useUiStateStore((store) => store.projectTreeOrder);
@@ -495,13 +490,7 @@ export default function Sidebar() {
     }
     return keys;
   }, [desktopWorkspace.snapshots, hostedWorkspace.workspace.threads]);
-  const orderedProjects = useMemo(() => {
-    return orderItemsByPreferredIds({
-      items: projects,
-      preferredIds: projectOrder,
-      getId: getProjectOrderKey,
-    });
-  }, [projectOrder, projects]);
+  const { orderedProjects, snapshots: sidebarProjects } = useLogicalProjectSnapshots();
 
   // Target for the sidebar-level "New thread" button: the project whose thread
   // was most recently opened or updated, falling back to sidebar order on a
@@ -565,25 +554,6 @@ export default function Sidebar() {
       ),
     [orderedProjects],
   );
-
-  const sidebarProjects = useMemo<SidebarProjectSnapshot[]>(() => {
-    return buildSidebarProjectSnapshots({
-      projects: orderedProjects,
-      settings: projectGroupingSettings,
-      primaryEnvironmentId,
-      resolveEnvironmentLabel: (environmentId) => {
-        const rt = savedEnvironmentRuntimeById[environmentId];
-        const saved = savedEnvironmentRegistry[environmentId];
-        return rt?.descriptor?.label ?? saved?.label ?? null;
-      },
-    });
-  }, [
-    orderedProjects,
-    projectGroupingSettings,
-    primaryEnvironmentId,
-    savedEnvironmentRegistry,
-    savedEnvironmentRuntimeById,
-  ]);
 
   const sidebarProjectByKey = useMemo(
     () => new Map(sidebarProjects.map((project) => [project.projectKey, project] as const)),

@@ -1,0 +1,193 @@
+/* Pull requests page — shell styles: reader settle, tab enter, stack-layer push. */
+
+/*
+ * PR settle (J/K, list click). The new reader enters from the direction of
+ * travel and never starts fully transparent, so no frame is blank; bar, body
+ * and rail move as one unit.
+ */
+@keyframes pr-reader-settle {
+  from {
+    transform: translateY(calc(var(--pr-motion-dir, 0) * 8px));
+    opacity: 0.4;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.pr-reader-settle {
+  animation: pr-reader-settle var(--app-motion-duration-pop, 200ms) var(--app-motion-ease) both;
+}
+
+/* Tab change: the incoming pane drifts in from the side it lives on. */
+@keyframes pr-tab-enter {
+  from {
+    transform: translateX(calc(var(--pr-motion-dir, 1) * 6px));
+    opacity: 0.4;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.pr-tab-enter {
+  animation: pr-tab-enter var(--app-motion-duration-pop, 200ms) var(--app-motion-ease) both;
+}
+
+/*
+ * Stack layer push (`[` `]`, stack rows). A same-document view transition
+ * snapshots the outgoing reader body, so old and new translate in lockstep by
+ * exactly the body's height — push, never a cross-fade. Moving up the stack
+ * enters from the top. Only the body below the 52px bar takes part: the bar
+ * stays put and rolls its title (RollingText); the rest of the page swaps
+ * without animation, and the group clips so nothing spills over the bar or
+ * the list. Files never pushes (it settles instead), so no diff is ghosted.
+ */
+.pr-reader-body {
+  view-transition-name: pr-reader-body;
+}
+
+html:active-view-transition-type(pr-push-up, pr-push-down)::view-transition-old(root),
+html:active-view-transition-type(pr-push-up, pr-push-down)::view-transition-new(root) {
+  animation: none;
+}
+
+html:active-view-transition-type(pr-push-up, pr-push-down)::view-transition-group(pr-reader-body) {
+  overflow: clip;
+  animation-duration: var(--app-motion-duration-pane, 360ms);
+  animation-timing-function: var(--app-motion-ease);
+}
+
+html:active-view-transition-type(pr-push-up, pr-push-down)::view-transition-old(pr-reader-body),
+html:active-view-transition-type(pr-push-up, pr-push-down)::view-transition-new(pr-reader-body) {
+  animation-duration: var(--app-motion-duration-pane, 360ms);
+  animation-timing-function: var(--app-motion-ease);
+  animation-fill-mode: both;
+  /* Snapshots keep their own size; no cross-fade blending between them. */
+  mix-blend-mode: normal;
+  height: 100%;
+  object-fit: none;
+  object-position: top;
+}
+
+@keyframes pr-push-in-from-top {
+  from {
+    transform: translateY(-100%);
+  }
+}
+@keyframes pr-push-out-to-bottom {
+  to {
+    transform: translateY(100%);
+  }
+}
+@keyframes pr-push-in-from-bottom {
+  from {
+    transform: translateY(100%);
+  }
+}
+@keyframes pr-push-out-to-top {
+  to {
+    transform: translateY(-100%);
+  }
+}
+
+html:active-view-transition-type(pr-push-up)::view-transition-new(pr-reader-body) {
+  animation-name: pr-push-in-from-top;
+}
+html:active-view-transition-type(pr-push-up)::view-transition-old(pr-reader-body) {
+  animation-name: pr-push-out-to-bottom;
+}
+html:active-view-transition-type(pr-push-down)::view-transition-new(pr-reader-body) {
+  animation-name: pr-push-in-from-bottom;
+}
+html:active-view-transition-type(pr-push-down)::view-transition-old(pr-reader-body) {
+  animation-name: pr-push-out-to-top;
+}
+
+/*
+ * Docked list hidden or shown (`\`, entering or leaving Files; spec motion
+ * #13). The layout has already snapped; the list slides (a ghost on the way
+ * out) while the reader column plays back from where it was. Transforms only.
+ */
+@keyframes pr-list-enter {
+  from {
+    transform: translateX(-100%);
+  }
+}
+@keyframes pr-list-exit {
+  to {
+    transform: translateX(-100%);
+  }
+}
+@keyframes pr-reader-shift-from-left {
+  from {
+    transform: translateX(calc(-1 * var(--pr-list-shift, 0px)));
+  }
+}
+@keyframes pr-reader-shift-from-right {
+  from {
+    transform: translateX(var(--pr-list-shift, 0px));
+  }
+}
+.pr-list-column[data-list-motion="enter"] {
+  animation: pr-list-enter var(--app-motion-duration-pane, 360ms) var(--app-motion-ease) both;
+}
+.pr-list-column[data-list-motion="exit"] {
+  animation: pr-list-exit var(--app-motion-duration-pane, 360ms) var(--app-motion-ease) forwards;
+}
+.pr-reader-column[data-list-motion="enter"] {
+  animation: pr-reader-shift-from-left var(--app-motion-duration-pane, 360ms) var(--app-motion-ease)
+    both;
+}
+.pr-reader-column[data-list-motion="exit"] {
+  animation: pr-reader-shift-from-right var(--app-motion-duration-pane, 360ms)
+    var(--app-motion-ease) both;
+}
+
+/* Bar title appears once the masthead scrolls away (or off Conversation). */
+.pr-bar-title {
+  transition:
+    opacity var(--app-motion-duration-pop, 200ms) var(--app-motion-ease),
+    transform var(--app-motion-duration-pop, 200ms) var(--app-motion-ease);
+}
+.pr-bar-title[data-visible="false"] {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+}
+/*
+ * Narrow readers (the 1180 and 920 reference widths) cannot fit four labelled
+ * tabs beside the title and the bar's facts. Inactive tabs keep only their
+ * glyph (name in the tooltip and accessible name); the active tab keeps its
+ * label, and the condensed title, stack chip and next action stay on screen.
+ */
+@container reader (max-width: 47.5rem) {
+  .pr-bar-tabs [role="tab"][aria-selected="false"] [data-slot="tab-label"],
+  .pr-bar-tabs [role="tab"][aria-selected="false"] [data-slot="tab-count"] {
+    display: none;
+  }
+  .pr-bar-tabs [role="tab"][aria-selected="false"] [data-slot="tab-icon"] {
+    display: inline-flex;
+  }
+}
+
+/* The rolling title truncates: its grid track and entries may shrink below the text. */
+.pr-bar-title-text {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 100%;
+}
+.pr-bar-title-text > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pr-reader-settle,
+  .pr-tab-enter,
+  .pr-list-column[data-list-motion],
+  .pr-reader-column[data-list-motion] {
+    animation: none;
+  }
+}

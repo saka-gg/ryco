@@ -1,0 +1,100 @@
+/* Pull requests page — files styles. Keyframes and selectors only; layout lives in Tailwind classes. */
+
+/*
+ * Grow-in for disclosures that mount open (line composer, reply field, a
+ * pending draft): grid rows 0fr → 1fr plus opacity, so height needs no
+ * measuring. `useFocusAfterReveal` focuses on this animation's end.
+ */
+@keyframes pr-grow-in {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+  to {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+}
+
+.pr-grow-in {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: pr-grow-in var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle) both;
+}
+
+/*
+ * Landing on a thread from a link, N/P or a pending-comment jump: one quiet
+ * ring-and-wash, then nothing. Reduced motion gets a static ring that the
+ * timer removes (the duration tokens are zero, so `flashElement` picks it).
+ */
+@keyframes pr-jump-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    background-color: transparent;
+  }
+  25% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 28%, transparent);
+    background-color: color-mix(in srgb, var(--primary) 4%, transparent);
+  }
+}
+
+.pr-jump-flash {
+  animation: pr-jump-flash 1.6s var(--app-motion-ease);
+}
+
+.pr-jump-ring {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 45%, transparent);
+}
+
+/* Viewed: the check draws in (stroke-dashoffset 1 → 0) and erases on uncheck. */
+.pr-viewed-check path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  transition: stroke-dashoffset var(--app-motion-duration-pop, 200ms)
+    var(--app-motion-spring-gentle);
+}
+
+[data-checked] > .pr-viewed-check path {
+  stroke-dashoffset: 0;
+}
+
+/*
+ * The tree's scroll-spy plate: one element that glides to the file being
+ * read. The first placement is instant (no slide in from the top on mount).
+ */
+.pr-tree-plate {
+  transition:
+    transform var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle),
+    height var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle),
+    opacity var(--app-motion-duration-chip, 120ms) var(--app-motion-ease);
+}
+
+.pr-tree-plate[data-placed="false"] {
+  transition: none;
+}
+
+/* Overlay tree (narrow readers): slides over the diff from the left edge. */
+.pr-tree-overlay {
+  transition:
+    transform var(--app-motion-duration-pane, 360ms) var(--app-motion-ease),
+    visibility 0s linear var(--app-motion-duration-pane, 360ms);
+}
+
+.pr-tree-overlay[data-open="true"] {
+  transition:
+    transform var(--app-motion-duration-pane, 360ms) var(--app-motion-ease),
+    visibility 0s;
+}
+
+/* Selection chip: settles under the selected lines like a popover. */
+@keyframes pr-chip-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px) scale(0.98);
+  }
+}
+
+.pr-chip-in {
+  animation: pr-chip-in var(--app-motion-duration-pop, 200ms) var(--app-motion-spring-snappy) both;
+}

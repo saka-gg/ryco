@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./components/pullRequests/pullRequests.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */

@@ -1,0 +1,153 @@
+/* Pull requests page — conversation styles. Keyframes and selectors only; layout lives in Tailwind classes. */
+
+/*
+ * Meta line under the title. Each item carries its own leading "·"; the row
+ * starts 1.25rem to the left and clips that strip, so the separator of an
+ * item that wraps to the start of a line falls outside and no line opens
+ * with a dot.
+ */
+.pr-meta {
+  margin-left: -1.25rem;
+  clip-path: inset(-4px -4px -4px 1.25rem);
+}
+.pr-meta > * {
+  position: relative;
+  margin-left: 1.25rem;
+}
+.pr-meta > *::before {
+  content: "·";
+  position: absolute;
+  left: -0.8rem;
+  color: color-mix(in srgb, var(--muted-foreground) 55%, transparent);
+  pointer-events: none;
+}
+
+/*
+ * Conversation prose (description, comments, review bodies): 14px/1.6 at
+ * most 68ch. Headings read as document structure, tables as hairline rows,
+ * task lists as checkboxes without bullets.
+ */
+.pr-prose.chat-markdown p,
+.pr-prose.chat-markdown ul,
+.pr-prose.chat-markdown ol,
+.pr-prose.chat-markdown blockquote,
+.pr-prose.chat-markdown pre,
+.pr-prose.chat-markdown table,
+.pr-prose.chat-markdown details {
+  margin: 0.75em 0;
+}
+.pr-prose.chat-markdown > :first-child {
+  margin-top: 0;
+}
+.pr-prose.chat-markdown > :last-child {
+  margin-bottom: 0;
+}
+.pr-prose.chat-markdown h1,
+.pr-prose.chat-markdown h2,
+.pr-prose.chat-markdown h3 {
+  margin: 1.5em 0 0.5em;
+  font-size: 1.07em;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+}
+.pr-prose.chat-markdown h4,
+.pr-prose.chat-markdown h5,
+.pr-prose.chat-markdown h6 {
+  margin: 1.25em 0 0.4em;
+  font-size: 1em;
+  font-weight: 600;
+}
+.pr-prose.chat-markdown :not(pre) > code {
+  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+  padding: 0.05rem 0.3rem;
+  font-size: 0.8125em;
+}
+.pr-prose.chat-markdown pre {
+  border-color: color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: var(--radius-lg);
+  background: transparent;
+}
+.pr-prose.chat-markdown table {
+  width: auto;
+  max-width: 100%;
+  font-size: 0.93em;
+  font-variant-numeric: tabular-nums;
+}
+.pr-prose.chat-markdown th,
+.pr-prose.chat-markdown td {
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  padding: 0.4rem 1.25rem 0.4rem 0;
+}
+.pr-prose.chat-markdown th {
+  font-size: 0.86em;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+.pr-prose.chat-markdown .contains-task-list {
+  padding-left: 0;
+  list-style: none;
+}
+.pr-prose.chat-markdown .contains-task-list .contains-task-list {
+  padding-left: 1.5rem;
+}
+.pr-prose.chat-markdown .task-list-item input[type="checkbox"] {
+  width: 0.875rem;
+  height: 0.875rem;
+  margin: 0 0.55rem 0 0;
+  vertical-align: -0.1em;
+  accent-color: var(--foreground);
+}
+.pr-prose.chat-markdown .task-list-item input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.pr-prose.chat-markdown details > summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  transition: color var(--app-motion-duration-chip, 120ms) var(--app-motion-ease);
+}
+.pr-prose.chat-markdown details > summary:hover {
+  color: var(--foreground);
+}
+.pr-prose.chat-markdown sub {
+  font-size: 0.86em;
+  color: var(--muted-foreground);
+}
+
+/*
+ * A review thread slot hosts the shared `ReviewThread`. While that component
+ * renders nothing (or before it lands), a one-line excerpt stands in.
+ */
+.pr-thread-host:empty {
+  display: none;
+}
+.pr-thread-host:not(:empty) + .pr-thread-fallback {
+  display: none;
+}
+
+/*
+ * Landing on a thread (URL `thread`, N/P): a soft ring that settles away.
+ * With reduced motion the ring holds still for the same moment instead.
+ */
+@keyframes pr-thread-flash {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ring) 0%, transparent);
+  }
+  18% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 38%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 0%, transparent);
+  }
+}
+.pr-thread-flash {
+  animation: pr-thread-flash 1.6s var(--app-motion-ease) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pr-thread-flash {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 45%, transparent);
+  }
+}

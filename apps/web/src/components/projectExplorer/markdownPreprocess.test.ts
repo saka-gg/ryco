@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { stripHtmlComments } from "./markdownPreprocess";
+import { stripHtmlComments, stripHtmlCommentsWithSourceMap } from "./markdownPreprocess";
 
 describe("stripHtmlComments", () => {
   it("returns unchanged text when no comments", () => {
@@ -32,5 +32,41 @@ describe("stripHtmlComments", () => {
   it("collapses leading/trailing blank lines created by the strip", () => {
     const input = "Hello\n<!-- gone -->\n\nWorld";
     expect(stripHtmlComments(input)).toBe("Hello\n\nWorld");
+  });
+});
+
+describe("stripHtmlCommentsWithSourceMap", () => {
+  const input = [
+    "<!-- template note -->",
+    "- [ ] first <!-- inline --> task",
+    "",
+    "<!--",
+    "- [ ] hidden",
+    "-->",
+    "",
+    "",
+    "```md",
+    "<!-- kept in code -->",
+    "```",
+    "Use `<!-- kept -->` and <!-- gone -->- [x] last",
+  ].join("\n");
+
+  it("strips exactly like stripHtmlComments", () => {
+    expect(stripHtmlCommentsWithSourceMap(input).text).toBe(stripHtmlComments(input));
+    expect(stripHtmlCommentsWithSourceMap("plain").text).toBe("plain");
+  });
+
+  it("maps every stripped character back to the same source character", () => {
+    const { text, toSourceOffset } = stripHtmlCommentsWithSourceMap(input);
+    let previous = -1;
+    for (let offset = 0; offset < text.length; offset += 1) {
+      const source = toSourceOffset(offset);
+      expect(input[source]).toBe(text[offset]);
+      expect(source).toBeGreaterThan(previous);
+      previous = source;
+    }
+    const last = text.lastIndexOf("[x]") + 1;
+    expect(input.slice(toSourceOffset(last) - 1, toSourceOffset(last) + 2)).toBe("[x]");
+    expect(input.slice(toSourceOffset(last) - 2)).toBe(" [x] last");
   });
 });
