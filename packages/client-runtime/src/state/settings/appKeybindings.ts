@@ -55,6 +55,8 @@ function actualOverrides(rules: readonly KeybindingRule[]): readonly KeybindingR
 /** Persist a complete editor snapshot, including commands the user deliberately unbound. */
 export function appKeybindingsFromRules(rules: readonly KeybindingRule[]): AppKeybindings {
   const decoded = Schema.decodeUnknownSync(KeybindingsConfig)(rules);
+  // Compilation drops invalid rules, so reject them before comparing against defaults.
+  validateAppKeybindings({ rules: decoded, disabledCommands: [] });
   const commands = new Set(decoded.map((rule) => rule.command));
   return validateAppKeybindings({
     rules: actualOverrides(decoded),

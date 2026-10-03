@@ -201,6 +201,15 @@ describe("app-owned keybindings", () => {
     expect(appKeybindingsFromRules(DEFAULT_KEYBINDINGS)).toEqual(DEFAULT_APP_KEYBINDINGS);
   });
 
+  it.each([
+    { key: "ctrl", command: "terminal.toggle" },
+    { key: "mod+x", command: "terminal.toggle", when: "terminalFocus &&" },
+  ] as const)("rejects invalid extra default-command rules before normalization: %j", (invalid) => {
+    expect(() => appKeybindingsFromRules([...DEFAULT_KEYBINDINGS, invalid])).toThrow(
+      "Invalid shortcut or when expression.",
+    );
+  });
+
   it("recovers corrupted data only after explicit reset; retry can reload repaired data", async () => {
     const { kv, values } = persistence();
     values.set(APP_KEYBINDINGS_STORAGE_KEY, "{broken");
