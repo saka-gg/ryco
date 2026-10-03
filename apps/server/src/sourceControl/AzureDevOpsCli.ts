@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Result, Schema, SchemaIssue } from "effect";
+import { Context, Effect, FileSystem, Layer, Result, Schema, SchemaIssue } from "effect";
 import {
   TrimmedNonEmptyString,
   type SourceControlRepositoryVisibility,
@@ -7,10 +7,6 @@ import {
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as AzureDevOpsPullRequests from "./azureDevOpsPullRequests.ts";
-import type {
-  NormalizedAzureDevOpsPullRequestDetail,
-  NormalizedAzureDevOpsThreadComment,
-} from "./azureDevOpsPullRequests.ts";
 import * as AzureDevOpsWorkItems from "./azureDevOpsWorkItems.ts";
 import type {
   NormalizedAzureDevOpsWorkItemDetail,
@@ -19,6 +15,13 @@ import type {
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const GIT_TIMEOUT_MS = 60_000;
+/** Background git must never prompt for credentials. */
+const GIT_ENV = Object.freeze({
+  LC_ALL: "C",
+  GIT_TERMINAL_PROMPT: "0",
+  SSH_ASKPASS_REQUIRE: "never",
+} satisfies NodeJS.ProcessEnv);
 
 export class AzureDevOpsCliError extends Schema.TaggedError<AzureDevOpsCliError>()(
   "AzureDevOpsCliError",
@@ -52,6 +55,10 @@ export interface AzureDevOpsCliShape {
     readonly source?: SourceControlProvider.SourceControlRefSelector;
     readonly state: "open" | "closed" | "merged" | "all";
     readonly limit?: number;
+    /** `--creator`: `me` resolves to the signed-in identity. */
+    readonly creator?: string;
+    /** `--reviewer`: `me` resolves to the signed-in identity. */
+    readonly reviewer?: string;
   }) => Effect.Effect<
     ReadonlyArray<AzureDevOpsPullRequests.NormalizedAzureDevOpsPullRequestRecord>,
     AzureDevOpsCliError
@@ -84,6 +91,7 @@ export interface AzureDevOpsCliShape {
     readonly target?: SourceControlProvider.SourceControlRefSelector;
     readonly title: string;
     readonly bodyFile: string;
+    readonly draft?: boolean;
   }) => Effect.Effect<void, AzureDevOpsCliError>;
 
   readonly getDefaultBranch: (input: {
@@ -122,10 +130,55 @@ export interface AzureDevOpsCliShape {
     AzureDevOpsCliError
   >;
 
-  readonly getPullRequestDetail: (input: {
+  /** The full `GitPullRequest` (`az repos pr show`): repository scope, reviewers, merge state. */
+  readonly getRawPullRequest: (input: {
     readonly cwd: string;
     readonly reference: string;
-  }) => Effect.Effect<NormalizedAzureDevOpsPullRequestDetail, AzureDevOpsCliError>;
+  }) => Effect.Effect<AzureDevOpsPullRequests.AzureDevOpsPullRequest, AzureDevOpsCliError>;
+
+  /**
+   * One REST call through `az devops invoke` (endpoints without an `az repos`
+   * command). A body is staged in a temp JSON file for `--in-file`, never
+   * passed on argv. Resolves to the raw JSON stdout.
+   */
+  readonly invoke: (input: AzureDevOpsInvokeInput) => Effect.Effect<string, AzureDevOpsCliError>;
+
+  /**
+   * Run a JSON-output `az` command whose argv references a temp file holding
+   * `contents` (for example `--description @file`), removed afterwards.
+   * Resolves to the trimmed stdout.
+   */
+  readonly executeWithFile: (input: {
+    readonly cwd: string;
+    readonly operation: string;
+    readonly contents: string;
+    readonly suffix: ".json" | ".md";
+    readonly args: (file: string) => ReadonlyArray<string>;
+  }) => Effect.Effect<string, AzureDevOpsCliError>;
+
+  /** Local `git` in the repository checkout (diffs and file contents have no REST hunk API). */
+  readonly runGit: (input: {
+    readonly cwd: string;
+    readonly operation: string;
+    readonly args: ReadonlyArray<string>;
+    readonly allowNonZeroExit?: boolean;
+    readonly maxOutputBytes?: number;
+    readonly timeoutMs?: number;
+  }) => Effect.Effect<VcsProcess.VcsProcessOutput, AzureDevOpsCliError>;
+}
+
+export interface AzureDevOpsInvokeInput {
+  readonly cwd: string;
+  readonly operation: string;
+  readonly area: string;
+  readonly resource: string;
+  readonly routeParameters: Readonly<Record<string, string | number>>;
+  readonly queryParameters?: Readonly<Record<string, string | number | boolean>>;
+  readonly httpMethod?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  readonly body?: unknown;
+  /** Defaults to `7.1`; `az devops invoke` cannot parse `-preview.N` suffixes (use `-preview`). */
+  readonly apiVersion?: string;
+  readonly timeoutMs?: number;
 }
 
 export class AzureDevOpsCli extends Context.Service<AzureDevOpsCli, AzureDevOpsCliShape>()(
@@ -277,8 +330,38 @@ function decodeAzureDevOpsJson<S extends Schema.Top>(
   );
 }
 
+/** argv for `az devops invoke` (JSON output flags are appended by the caller). */
+export function buildAzureDevOpsInvokeArgs(
+  input: AzureDevOpsInvokeInput,
+  bodyFile: string | null,
+): ReadonlyArray<string> {
+  const pairs = (values: Readonly<Record<string, string | number | boolean>>) =>
+    Object.entries(values).map(([key, value]) => `${key}=${String(value)}`);
+  const query = input.queryParameters ? pairs(input.queryParameters) : [];
+  return [
+    "devops",
+    "invoke",
+    "--detect",
+    "true",
+    "--area",
+    input.area,
+    "--resource",
+    input.resource,
+    ...(Object.keys(input.routeParameters).length > 0
+      ? ["--route-parameters", ...pairs(input.routeParameters)]
+      : []),
+    ...(query.length > 0 ? ["--query-parameters", ...query] : []),
+    "--http-method",
+    input.httpMethod ?? "GET",
+    "--api-version",
+    input.apiVersion ?? "7.1",
+    ...(bodyFile ? ["--in-file", bodyFile] : []),
+  ];
+}
+
 export const make = Effect.fn("makeAzureDevOpsCli")(function* () {
   const process = yield* VcsProcess.VcsProcess;
+  const fileSystem = yield* FileSystem.FileSystem;
 
   const execute: AzureDevOpsCliShape["execute"] = (input) =>
     process
@@ -298,6 +381,61 @@ export const make = Effect.fn("makeAzureDevOpsCli")(function* () {
       args: [...input.args, "--only-show-errors", "--output", "json"],
     });
 
+  const runJson = (input: {
+    readonly cwd: string;
+    readonly operation: string;
+    readonly args: ReadonlyArray<string>;
+    readonly timeoutMs?: number | undefined;
+  }) =>
+    executeJson({
+      cwd: input.cwd,
+      args: input.args,
+      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+    }).pipe(
+      Effect.map((result) => result.stdout.trim()),
+      Effect.mapError(
+        (error) =>
+          new AzureDevOpsCliError({
+            operation: input.operation,
+            detail: error.detail,
+            cause: error,
+          }),
+      ),
+    );
+
+  const executeWithFile: AzureDevOpsCliShape["executeWithFile"] = (input) =>
+    Effect.acquireUseRelease(
+      fileSystem.makeTempFile({ prefix: "ryco-az-body-", suffix: input.suffix }).pipe(
+        Effect.tap((file) => fileSystem.writeFileString(file, input.contents)),
+        Effect.mapError(
+          (cause) =>
+            new AzureDevOpsCliError({
+              operation: input.operation,
+              detail: "Failed to stage the request body in a temp file.",
+              cause,
+            }),
+        ),
+      ),
+      (file) => runJson({ cwd: input.cwd, operation: input.operation, args: input.args(file) }),
+      (file) => fileSystem.remove(file).pipe(Effect.ignore),
+    );
+
+  const invoke: AzureDevOpsCliShape["invoke"] = (input) =>
+    input.body === undefined
+      ? runJson({
+          cwd: input.cwd,
+          operation: input.operation,
+          args: buildAzureDevOpsInvokeArgs(input, null),
+          timeoutMs: input.timeoutMs,
+        })
+      : executeWithFile({
+          cwd: input.cwd,
+          operation: input.operation,
+          contents: JSON.stringify(input.body),
+          suffix: ".json",
+          args: (file) => buildAzureDevOpsInvokeArgs(input, file),
+        });
+
   return AzureDevOpsCli.of({
     execute,
     listPullRequests: (input) => {
@@ -311,6 +449,8 @@ export const make = Effect.fn("makeAzureDevOpsCli")(function* () {
           "--detect",
           "true",
           ...(sourceBranch.length > 0 ? ["--source-branch", sourceBranch] : []),
+          ...(input.creator ? ["--creator", input.creator] : []),
+          ...(input.reviewer ? ["--reviewer", input.reviewer] : []),
           "--status",
           toAzureStatus(input.state),
           "--top",
@@ -437,6 +577,7 @@ export const make = Effect.fn("makeAzureDevOpsCli")(function* () {
           input.title,
           "--description",
           `@${input.bodyFile}`,
+          ...(input.draft ? ["--draft", "true"] : []),
         ],
       }).pipe(Effect.asVoid),
     getDefaultBranch: (input) =>
@@ -595,58 +736,59 @@ export const make = Effect.fn("makeAzureDevOpsCli")(function* () {
         ),
       );
     },
-    getPullRequestDetail: (input) => {
-      const id = normalizeChangeRequestId(input.reference);
-      const showCmd = executeJson({
+    getRawPullRequest: (input) =>
+      executeJson({
         cwd: input.cwd,
-        args: ["repos", "pr", "show", "--detect", "true", "--id", id],
+        args: [
+          "repos",
+          "pr",
+          "show",
+          "--detect",
+          "true",
+          "--id",
+          normalizeChangeRequestId(input.reference),
+        ],
       }).pipe(
         Effect.map((result) => result.stdout.trim()),
         Effect.flatMap((raw) =>
-          Effect.sync(() => AzureDevOpsPullRequests.decodeAzureDevOpsPullRequestDetailJson(raw)),
+          Effect.sync(() => AzureDevOpsPullRequests.decodeAzureDevOpsRawPullRequestJson(raw)),
         ),
         Effect.flatMap((decoded) =>
           Result.isSuccess(decoded)
             ? Effect.succeed(decoded.success)
             : Effect.fail(
                 new AzureDevOpsCliError({
-                  operation: "getPullRequestDetail",
+                  operation: "getRawPullRequest",
                   detail: `Azure DevOps CLI returned invalid pull request JSON: ${AzureDevOpsPullRequests.formatAzureDevOpsJsonDecodeError(decoded.failure)}`,
                   cause: decoded.failure,
                 }),
               ),
         ),
-      );
-      // Fetch comment threads in parallel. The `list-comments` subcommand
-      // doesn't exist on every `azure-devops` extension version, so we fall
-      // back to an empty array on any error — but log the cause so a
-      // misconfigured CLI / auth-expired session is still distinguishable
-      // from a PR that genuinely has no threads.
-      const commentsCmd = executeJson({
-        cwd: input.cwd,
-        args: ["repos", "pr", "list-comments", "--detect", "true", "--id", id],
-      }).pipe(
-        Effect.map((result) => result.stdout.trim()),
-        Effect.flatMap((raw) =>
-          Effect.sync(() => AzureDevOpsPullRequests.decodeAzureDevOpsPullRequestThreadsJson(raw)),
+      ),
+    invoke,
+    executeWithFile,
+    runGit: (input) =>
+      process
+        .run({
+          operation: `AzureDevOpsCli.git.${input.operation}`,
+          command: "git",
+          args: input.args,
+          cwd: input.cwd,
+          timeoutMs: input.timeoutMs ?? GIT_TIMEOUT_MS,
+          ...(input.allowNonZeroExit ? { allowNonZeroExit: true } : {}),
+          ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
+          env: GIT_ENV,
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new AzureDevOpsCliError({
+                operation: input.operation,
+                detail: errorText(error) || "git failed.",
+                cause: error,
+              }),
+          ),
         ),
-        Effect.flatMap((decoded) =>
-          Result.isSuccess(decoded)
-            ? Effect.succeed(decoded.success)
-            : Effect.succeed([] as ReadonlyArray<NormalizedAzureDevOpsThreadComment>),
-        ),
-        Effect.catch((cause) =>
-          Effect.logWarning("AzureDevOpsCli.getPullRequestDetail: failed to load comment threads", {
-            pullRequestId: id,
-            detail: cause instanceof Error ? cause.message : String(cause),
-            cause,
-          }).pipe(Effect.as([] as ReadonlyArray<NormalizedAzureDevOpsThreadComment>)),
-        ),
-      );
-      return Effect.all([showCmd, commentsCmd], { concurrency: 2 }).pipe(
-        Effect.map(([detail, comments]) => Object.assign({}, detail, { comments })),
-      );
-    },
   });
 });
 

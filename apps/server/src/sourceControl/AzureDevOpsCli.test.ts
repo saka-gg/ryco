@@ -6,6 +6,10 @@ import { VcsProcessExitError } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
+import {
+  AZURE_PULL_REQUEST_22,
+  AZURE_PULL_REQUEST_LIST,
+} from "./azureDevOpsPullRequestPage.fixtures.ts";
 
 const processOutput = (stdout: string): VcsProcess.VcsProcessOutput => ({
   exitCode: ChildProcessSpawner.ExitCode(0),
@@ -315,83 +319,172 @@ describe("AzureDevOpsCli.layer", () => {
     }).pipe(Effect.provide(layer)),
   );
 
-  it.effect("getPullRequestDetail decodes description and merges comments", () =>
+  it.effect("invokes REST endpoints with route/query parameters and a temp-file body", () =>
     Effect.gen(function* () {
-      mockRun
-        .mockReturnValueOnce(
-          Effect.succeed(
-            processOutput(
-              JSON.stringify({
-                pullRequestId: 99,
-                title: "Add",
-                description: "PR body",
-                status: "active",
-                sourceRefName: "refs/heads/feature/add",
-                targetRefName: "refs/heads/main",
-                repository: {
-                  webUrl: "https://dev.azure.com/org/proj/_git/repo",
-                  name: "repo",
-                },
-              }),
-            ),
-          ),
-        )
-        .mockReturnValueOnce(
-          Effect.succeed(
-            processOutput(
-              JSON.stringify([
-                {
-                  comments: [
-                    {
-                      author: { displayName: "Reviewer", uniqueName: "rev@example.com" },
-                      content: "looks good",
-                      publishedDate: "2026-03-01T10:00:00Z",
-                    },
-                  ],
-                },
-              ]),
-            ),
-          ),
+      const fileSystem = yield* FileSystem.FileSystem;
+      let stagedBody: string | null = null;
+      let stagedFile: string | null = null;
+      mockRun.mockImplementationOnce((input) => {
+        const index = input.args.indexOf("--in-file");
+        stagedFile = input.args[index + 1] ?? null;
+        return fileSystem.readFileString(stagedFile!).pipe(
+          Effect.orDie,
+          Effect.tap((body) => Effect.sync(() => (stagedBody = body))),
+          Effect.as(processOutput('{"id":148}')),
         );
+      });
+
       const az = yield* AzureDevOpsCli.AzureDevOpsCli;
-      const detail = yield* az.getPullRequestDetail({ cwd: "/repo", reference: "99" });
-      expect(detail.body).toBe("PR body");
-      expect(detail.comments[0]?.author).toBe("rev@example.com");
+      const raw = yield* az.invoke({
+        cwd: "/repo",
+        operation: "createThread",
+        area: "git",
+        resource: "pullRequestThreads",
+        routeParameters: { project: "p", repositoryId: "r", pullRequestId: 22 },
+        queryParameters: { $iteration: 2 },
+        httpMethod: "POST",
+        body: {
+          comments: [{ parentCommentId: 0, content: "Body; $(not a shell)", commentType: 1 }],
+        },
+      });
+
+      assert.strictEqual(raw, '{"id":148}');
+      const args = mockRun.mock.calls[0]?.[0].args ?? [];
+      assert.deepStrictEqual(args.slice(0, args.indexOf("--in-file")), [
+        "devops",
+        "invoke",
+        "--detect",
+        "true",
+        "--area",
+        "git",
+        "--resource",
+        "pullRequestThreads",
+        "--route-parameters",
+        "project=p",
+        "repositoryId=r",
+        "pullRequestId=22",
+        "--query-parameters",
+        "$iteration=2",
+        "--http-method",
+        "POST",
+        "--api-version",
+        "7.1",
+      ]);
+      assert.deepStrictEqual(args.slice(-3), ["--only-show-errors", "--output", "json"]);
+      // The body travels in the file, never on argv, and the file is removed.
+      assert.ok(!args.some((arg) => arg.includes("not a shell")));
+      assert.deepStrictEqual(JSON.parse(stagedBody ?? "null"), {
+        comments: [{ parentCommentId: 0, content: "Body; $(not a shell)", commentType: 1 }],
+      });
+      assert.strictEqual(yield* fileSystem.exists(stagedFile!), false);
     }).pipe(Effect.provide(layer)),
   );
 
-  it.effect("getPullRequestDetail resolves with empty comments when list-comments fails", () =>
+  it.effect("omits empty route parameters and maps invoke failures", () =>
     Effect.gen(function* () {
-      mockRun
-        .mockReturnValueOnce(
-          Effect.succeed(
-            processOutput(
-              JSON.stringify({
-                pullRequestId: 55,
-                title: "Feature branch",
-                description: "Some body",
-                status: "active",
-                sourceRefName: "refs/heads/feature/x",
-                targetRefName: "refs/heads/main",
-              }),
-            ),
-          ),
-        )
-        .mockReturnValueOnce(
-          Effect.fail(
-            new VcsProcessExitError({
-              operation: "AzureDevOpsCli.execute",
-              command: "az repos pr list-comments",
-              cwd: "/repo",
-              exitCode: 1,
-              detail: "The 'list-comments' command is not available in this version.",
-            }),
-          ),
-        );
+      mockRun.mockReturnValueOnce(
+        Effect.fail(
+          new VcsProcessExitError({
+            operation: "AzureDevOpsCli.execute",
+            command: "az devops invoke",
+            cwd: "/repo",
+            exitCode: 1,
+            detail: "ERROR: --area is not present in current organization",
+          }),
+        ),
+      );
       const az = yield* AzureDevOpsCli.AzureDevOpsCli;
-      const detail = yield* az.getPullRequestDetail({ cwd: "/repo", reference: "55" });
-      expect(detail.body).toBe("Some body");
-      expect(detail.comments).toEqual([]);
+      const error = yield* az
+        .invoke({
+          cwd: "/repo",
+          operation: "getConnectionData",
+          area: "Location",
+          resource: "connectionData",
+          routeParameters: {},
+          apiVersion: "7.1-preview",
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.operation, "getConnectionData");
+      expect(error.detail).toContain("--area is not present");
+      const args = mockRun.mock.calls[0]?.[0].args ?? [];
+      assert.ok(!args.includes("--route-parameters"));
+      assert.ok(!args.includes("--in-file"));
+      assert.deepStrictEqual(
+        args.slice(args.indexOf("--api-version"), args.indexOf("--api-version") + 2),
+        ["--api-version", "7.1-preview"],
+      );
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("runs git without prompts and decodes the full pull request", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(Effect.succeed(processOutput("abc\n")));
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      yield* az.runGit({ cwd: "/repo", operation: "mergeBase", args: ["merge-base", "a", "b"] });
+      assert.deepStrictEqual(mockRun.mock.calls[0]?.[0], {
+        operation: "AzureDevOpsCli.git.mergeBase",
+        command: "git",
+        args: ["merge-base", "a", "b"],
+        cwd: "/repo",
+        timeoutMs: 60_000,
+        env: { LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", SSH_ASKPASS_REQUIRE: "never" },
+      });
+
+      mockRun.mockReturnValueOnce(
+        Effect.succeed(processOutput(JSON.stringify(AZURE_PULL_REQUEST_22))),
+      );
+      const pullRequest = yield* az.getRawPullRequest({ cwd: "/repo", reference: "#22" });
+      assert.strictEqual(pullRequest.repository?.id, "3411ebc1-d5aa-464f-9615-0b527bc66719");
+      assert.strictEqual(
+        pullRequest.lastMergeSourceCommit?.commitId,
+        "8c9396b5cf22f929767c7172e9dbbe777ddc6357",
+      );
+      assert.deepStrictEqual(mockRun.mock.calls[1]?.[0].args.slice(0, 7), [
+        "repos",
+        "pr",
+        "show",
+        "--detect",
+        "true",
+        "--id",
+        "22",
+      ]);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("passes involvement filters and draft creation to az repos pr", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(
+        Effect.succeed(processOutput(JSON.stringify(AZURE_PULL_REQUEST_LIST))),
+      );
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      const rows = yield* az.listPullRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "open",
+        creator: "me",
+        reviewer: "me",
+      });
+      assert.deepStrictEqual(
+        rows.map((row) => [row.number, row.mergeability]),
+        [
+          [22, "mergeable"],
+          [21, "mergeable"],
+          [1, "mergeable"],
+        ],
+      );
+      const listArgs = mockRun.mock.calls[0]?.[0].args ?? [];
+      expect(listArgs).toEqual(expect.arrayContaining(["--creator", "me", "--reviewer", "me"]));
+
+      mockRun.mockReturnValueOnce(Effect.succeed(processOutput("{}")));
+      yield* az.createPullRequest({
+        cwd: "/repo",
+        baseBranch: "main",
+        headSelector: "feature/provider",
+        title: "Provider PR",
+        bodyFile: "/tmp/body.md",
+        draft: true,
+      });
+      expect(mockRun.mock.calls[1]?.[0].args.slice(-2)).toEqual(["--draft", "true"]);
     }).pipe(Effect.provide(layer)),
   );
 

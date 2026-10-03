@@ -1,18 +1,54 @@
 import { Cause, DateTime, Exit, Option, Result, Schema } from "effect";
-import { PositiveInt, TrimmedNonEmptyString } from "@ryco/contracts";
+import {
+  PositiveInt,
+  TrimmedNonEmptyString,
+  type SourceControlChangeRequestMergeability,
+  type SourceControlChangeRequestReviewDecision,
+  type SourceControlLabel,
+} from "@ryco/contracts";
 import { decodeJsonResult, formatSchemaError } from "@ryco/shared/schemaJson";
 
-export interface NormalizedAzureDevOpsPullRequestRecord {
-  readonly number: number;
-  readonly title: string;
-  readonly url: string;
-  readonly baseRefName: string;
-  readonly headRefName: string;
-  readonly state: "open" | "closed" | "merged";
-  readonly updatedAt: Option.Option<DateTime.Utc>;
-}
+/**
+ * Azure DevOps `GitPullRequest` as `az repos pr show` / `az repos pr list`
+ * print it (REST 7.1 shape:
+ * https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-request?view=azure-devops-rest-7.1).
+ * Every field beyond the identity of the pull request is optional: list rows
+ * and older servers omit many of them.
+ */
 
-const AzureDevOpsPullRequestSchema = Schema.Struct({
+export const AzureDevOpsIdentityRefSchema = Schema.Struct({
+  id: Schema.optional(Schema.NullOr(Schema.String)),
+  displayName: Schema.optional(Schema.NullOr(Schema.String)),
+  uniqueName: Schema.optional(Schema.NullOr(Schema.String)),
+  imageUrl: Schema.optional(Schema.NullOr(Schema.String)),
+  isContainer: Schema.optional(Schema.NullOr(Schema.Boolean)),
+});
+export type AzureDevOpsIdentityRef = typeof AzureDevOpsIdentityRefSchema.Type;
+
+/** `IdentityRefWithVote`: 10 approved, 5 approved with suggestions, 0 none, -5 waiting for author, -10 rejected. */
+export const AzureDevOpsReviewerSchema = Schema.Struct({
+  ...AzureDevOpsIdentityRefSchema.fields,
+  vote: Schema.optional(Schema.NullOr(Schema.Number)),
+  isRequired: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  hasDeclined: Schema.optional(Schema.NullOr(Schema.Boolean)),
+});
+export type AzureDevOpsReviewer = typeof AzureDevOpsReviewerSchema.Type;
+
+const AzureDevOpsGitUserDateSchema = Schema.Struct({
+  name: Schema.optional(Schema.NullOr(Schema.String)),
+  email: Schema.optional(Schema.NullOr(Schema.String)),
+  date: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+export const AzureDevOpsCommitRefSchema = Schema.Struct({
+  commitId: TrimmedNonEmptyString,
+  comment: Schema.optional(Schema.NullOr(Schema.String)),
+  author: Schema.optional(Schema.NullOr(AzureDevOpsGitUserDateSchema)),
+  committer: Schema.optional(Schema.NullOr(AzureDevOpsGitUserDateSchema)),
+});
+export type AzureDevOpsCommitRef = typeof AzureDevOpsCommitRefSchema.Type;
+
+export const AzureDevOpsPullRequestSchema = Schema.Struct({
   pullRequestId: PositiveInt,
   title: TrimmedNonEmptyString,
   url: Schema.optional(Schema.String),
@@ -30,18 +66,86 @@ const AzureDevOpsPullRequestSchema = Schema.Struct({
       ),
     }),
   ),
+  description: Schema.optional(Schema.NullOr(Schema.String)),
+  isDraft: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  createdBy: Schema.optional(Schema.NullOr(AzureDevOpsIdentityRefSchema)),
+  closedBy: Schema.optional(Schema.NullOr(AzureDevOpsIdentityRefSchema)),
+  /** `PullRequestAsyncStatus`: notSet, queued, conflicts, succeeded, rejectedByPolicy, failure. */
+  mergeStatus: Schema.optional(Schema.NullOr(Schema.String)),
+  lastMergeSourceCommit: Schema.optional(Schema.NullOr(AzureDevOpsCommitRefSchema)),
+  lastMergeTargetCommit: Schema.optional(Schema.NullOr(AzureDevOpsCommitRefSchema)),
+  lastMergeCommit: Schema.optional(Schema.NullOr(AzureDevOpsCommitRefSchema)),
+  reviewers: Schema.optional(Schema.NullOr(Schema.Array(AzureDevOpsReviewerSchema))),
+  labels: Schema.optional(
+    Schema.NullOr(
+      Schema.Array(
+        Schema.Struct({
+          name: Schema.String,
+          active: Schema.optional(Schema.NullOr(Schema.Boolean)),
+        }),
+      ),
+    ),
+  ),
+  autoCompleteSetBy: Schema.optional(Schema.NullOr(AzureDevOpsIdentityRefSchema)),
+  completionOptions: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        mergeStrategy: Schema.optional(Schema.NullOr(Schema.String)),
+        squashMerge: Schema.optional(Schema.NullOr(Schema.Unknown)),
+        deleteSourceBranch: Schema.optional(Schema.NullOr(Schema.Unknown)),
+      }),
+    ),
+  ),
+  repository: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        id: Schema.optional(Schema.NullOr(Schema.String)),
+        name: Schema.optional(Schema.NullOr(Schema.String)),
+        webUrl: Schema.optional(Schema.NullOr(Schema.String)),
+        remoteUrl: Schema.optional(Schema.NullOr(Schema.String)),
+        project: Schema.optional(
+          Schema.NullOr(
+            Schema.Struct({
+              id: Schema.optional(Schema.NullOr(Schema.String)),
+              name: Schema.optional(Schema.NullOr(Schema.String)),
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
+  forkSource: Schema.optional(Schema.NullOr(Schema.Unknown)),
 });
+export type AzureDevOpsPullRequest = typeof AzureDevOpsPullRequestSchema.Type;
+
+export interface NormalizedAzureDevOpsPullRequestRecord {
+  readonly number: number;
+  readonly title: string;
+  readonly url: string;
+  readonly baseRefName: string;
+  readonly headRefName: string;
+  readonly state: "open" | "closed" | "merged";
+  readonly updatedAt: Option.Option<DateTime.Utc>;
+  readonly isDraft?: boolean;
+  readonly author?: string;
+  readonly headSha?: string;
+  readonly createdAt?: DateTime.Utc;
+  readonly labels?: ReadonlyArray<SourceControlLabel>;
+  readonly mergeability?: SourceControlChangeRequestMergeability;
+  readonly reviewDecision?: SourceControlChangeRequestReviewDecision | null;
+  readonly isCrossRepository?: boolean;
+}
 
 function trimOptionalString(value: string | null | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function normalizeRefName(refName: string): string {
+export function normalizeAzureDevOpsRefName(refName: string): string {
   return refName.trim().replace(/^refs\/heads\//, "");
 }
 
-function normalizeAzureDevOpsPullRequestState(status: string): "open" | "closed" | "merged" {
+export function normalizeAzureDevOpsPullRequestState(status: string): "open" | "closed" | "merged" {
   switch (status.trim().toLowerCase()) {
     case "completed":
       return "merged";
@@ -52,19 +156,92 @@ function normalizeAzureDevOpsPullRequestState(status: string): "open" | "closed"
   }
 }
 
-function normalizeAzureDevOpsPullRequestRecord(
-  raw: Schema.Schema.Type<typeof AzureDevOpsPullRequestSchema>,
+/** The login Ryco shows for an Azure identity: `uniqueName` (UPN / email), else the display name. */
+export function azureDevOpsIdentityLogin(
+  identity: AzureDevOpsIdentityRef | null | undefined,
+): string | null {
+  return (
+    trimOptionalString(identity?.uniqueName) ??
+    trimOptionalString(identity?.displayName) ??
+    trimOptionalString(identity?.id)
+  );
+}
+
+/** `mergeStatus` → mergeability: only `succeeded` and `conflicts` are facts. */
+export function azureDevOpsMergeability(
+  mergeStatus: string | null | undefined,
+): SourceControlChangeRequestMergeability {
+  switch (mergeStatus?.trim().toLowerCase()) {
+    case "succeeded":
+      return "mergeable";
+    case "conflicts":
+      return "conflicting";
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * The verdict the reviewer votes alone establish: a negative vote is a
+ * request for changes; required reviewers decide approval. Without required
+ * reviewers the votes do not say whether review is required (branch policies
+ * do), so there is no verdict.
+ */
+export function azureDevOpsReviewDecisionFromVotes(
+  reviewers: ReadonlyArray<AzureDevOpsReviewer>,
+): SourceControlChangeRequestReviewDecision | null {
+  if (reviewers.some((reviewer) => (reviewer.vote ?? 0) < 0)) return "changes_requested";
+  const required = reviewers.filter((reviewer) => reviewer.isRequired === true);
+  if (required.length === 0) return null;
+  return required.every((reviewer) => (reviewer.vote ?? 0) > 0) ? "approved" : "review_required";
+}
+
+export function azureDevOpsPullRequestWebUrl(raw: AzureDevOpsPullRequest): string {
+  const web = trimOptionalString(raw._links?.web?.href);
+  if (web) return web;
+  // The repository's web URL, else its HTTPS clone URL (same path, minus credentials).
+  const repositoryWebUrl =
+    trimOptionalString(raw.repository?.webUrl) ??
+    trimOptionalString(raw.repository?.remoteUrl)?.replace(/^(https?:\/\/)[^@/]+@/u, "$1") ??
+    null;
+  if (repositoryWebUrl && /^https?:\/\//u.test(repositoryWebUrl)) {
+    return `${repositoryWebUrl.replace(/\/+$/u, "")}/pullrequest/${raw.pullRequestId}`;
+  }
+  return trimOptionalString(raw.url) ?? "";
+}
+
+export function normalizeAzureDevOpsPullRequestRecord(
+  raw: AzureDevOpsPullRequest,
 ): NormalizedAzureDevOpsPullRequestRecord {
+  const author = azureDevOpsIdentityLogin(raw.createdBy);
+  const headSha = trimOptionalString(raw.lastMergeSourceCommit?.commitId);
+  const createdAt = raw.creationDate ? Option.getOrUndefined(raw.creationDate) : undefined;
+  const labels = (raw.labels ?? [])
+    .filter((label) => label.active !== false)
+    .map((label) => label.name.trim())
+    .filter((name) => name.length > 0)
+    .map((name) => ({ name }));
+  const state = normalizeAzureDevOpsPullRequestState(raw.status);
   return {
     number: raw.pullRequestId,
     title: raw.title,
-    url: trimOptionalString(raw._links?.web?.href) ?? trimOptionalString(raw.url) ?? "",
-    baseRefName: normalizeRefName(raw.targetRefName),
-    headRefName: normalizeRefName(raw.sourceRefName),
-    state: normalizeAzureDevOpsPullRequestState(raw.status),
+    url: azureDevOpsPullRequestWebUrl(raw),
+    baseRefName: normalizeAzureDevOpsRefName(raw.targetRefName),
+    headRefName: normalizeAzureDevOpsRefName(raw.sourceRefName),
+    state,
     updatedAt: (raw.closedDate ?? Option.none()).pipe(
       Option.orElse(() => raw.creationDate ?? Option.none()),
     ),
+    ...(typeof raw.isDraft === "boolean" ? { isDraft: raw.isDraft } : {}),
+    ...(author ? { author } : {}),
+    ...(headSha ? { headSha } : {}),
+    ...(createdAt ? { createdAt } : {}),
+    ...(labels.length > 0 ? { labels } : {}),
+    ...(raw.mergeStatus ? { mergeability: azureDevOpsMergeability(raw.mergeStatus) } : {}),
+    ...(raw.reviewers && state === "open"
+      ? { reviewDecision: azureDevOpsReviewDecisionFromVotes(raw.reviewers) }
+      : {}),
+    ...(raw.forkSource ? { isCrossRepository: true } : {}),
   };
 }
 
@@ -95,6 +272,13 @@ export function decodeAzureDevOpsPullRequestListJson(
   return Result.fail(result.failure);
 }
 
+/** The full `GitPullRequest` (`az repos pr show`), undigested. */
+export function decodeAzureDevOpsRawPullRequestJson(
+  raw: string,
+): Result.Result<AzureDevOpsPullRequest, Cause.Cause<Schema.SchemaError>> {
+  return decodeAzureDevOpsPullRequest(raw);
+}
+
 export function decodeAzureDevOpsPullRequestJson(
   raw: string,
 ): Result.Result<NormalizedAzureDevOpsPullRequestRecord, Cause.Cause<Schema.SchemaError>> {
@@ -103,84 +287,4 @@ export function decodeAzureDevOpsPullRequestJson(
     return Result.succeed(normalizeAzureDevOpsPullRequestRecord(result.success));
   }
   return Result.fail(result.failure);
-}
-
-export interface NormalizedAzureDevOpsThreadComment {
-  readonly author: string;
-  readonly body: string;
-  readonly createdAt: string;
-}
-
-export interface NormalizedAzureDevOpsPullRequestDetail extends NormalizedAzureDevOpsPullRequestRecord {
-  readonly body: string;
-  readonly comments: ReadonlyArray<NormalizedAzureDevOpsThreadComment>;
-}
-
-const AzureThreadCommentSchema = Schema.Struct({
-  author: Schema.optional(
-    Schema.NullOr(
-      Schema.Struct({
-        uniqueName: Schema.optional(Schema.String),
-        displayName: Schema.optional(Schema.String),
-      }),
-    ),
-  ),
-  content: Schema.optional(Schema.NullOr(Schema.String)),
-  publishedDate: Schema.optional(Schema.NullOr(Schema.String)),
-});
-
-const AzureThreadSchema = Schema.Struct({
-  comments: Schema.optional(Schema.Array(AzureThreadCommentSchema)),
-  isDeleted: Schema.optional(Schema.NullOr(Schema.Boolean)),
-});
-
-function flattenThreadComments(
-  threads: ReadonlyArray<Schema.Schema.Type<typeof AzureThreadSchema>>,
-): ReadonlyArray<NormalizedAzureDevOpsThreadComment> {
-  return threads
-    .filter((t) => !t.isDeleted)
-    .flatMap((t) => t.comments ?? [])
-    .filter((c) => (c.content?.trim() ?? "").length > 0)
-    .map((c) => ({
-      author: c.author?.uniqueName?.trim() ?? c.author?.displayName?.trim() ?? "unknown",
-      body: c.content ?? "",
-      createdAt: c.publishedDate ?? "",
-    }));
-}
-
-const AzureDevOpsPullRequestDetailSchema = Schema.Struct({
-  ...AzureDevOpsPullRequestSchema.fields,
-  description: Schema.optional(Schema.NullOr(Schema.String)),
-  threads: Schema.optional(Schema.Array(AzureThreadSchema)),
-});
-
-const decodeAzurePullRequestDetail = decodeJsonResult(AzureDevOpsPullRequestDetailSchema);
-
-export function decodeAzureDevOpsPullRequestDetailJson(
-  raw: string,
-): Result.Result<NormalizedAzureDevOpsPullRequestDetail, Cause.Cause<Schema.SchemaError>> {
-  const result = decodeAzurePullRequestDetail(raw);
-  if (!Result.isSuccess(result)) return Result.fail(result.failure);
-  const summary = normalizeAzureDevOpsPullRequestRecord(result.success);
-  return Result.succeed({
-    ...summary,
-    body: result.success.description ?? "",
-    comments: flattenThreadComments(result.success.threads ?? []),
-  });
-}
-
-const AzureDevOpsThreadListSchema = Schema.Array(AzureThreadSchema);
-
-const decodeThreadList = decodeJsonResult(AzureDevOpsThreadListSchema);
-
-export function decodeAzureDevOpsPullRequestThreadsJson(
-  raw: string,
-): Result.Result<
-  ReadonlyArray<NormalizedAzureDevOpsThreadComment>,
-  Cause.Cause<Schema.SchemaError>
-> {
-  if (raw.length === 0) return Result.succeed([]);
-  const result = decodeThreadList(raw);
-  if (!Result.isSuccess(result)) return Result.fail(result.failure);
-  return Result.succeed(flattenThreadComments(result.success));
 }
