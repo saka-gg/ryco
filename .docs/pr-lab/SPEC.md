@@ -348,8 +348,8 @@ The verdict reads as glyph · verdict · a muted "on you" or "on @x". Under it a
   - "Fix" on status lines
   - the conflicts menu
   - "Apply with agent" on suggestions
-- **Behaviour:** each one creates a thread on the PR's head worktree (♻`gitPreparePullRequestThread`) with the PR context attached, and shows a toast "Started · Open" instead of a modal.
-- **Results:** rows in `AgentsSection` (♻`InboxStatusGlyph`), which open the thread.
+- **Behaviour:** each one checks the PR's head out (its live worktree, the project checkout already on the head, or a new PR worktree via ♻`createWorktreeForProject`) and opens a composer there, prefilled with the prompt and the PR attached as context. Nothing is sent for the user: they read the prompt, pick the model and send. A new checkout shows a "Checking out #N…" toast while it runs; no modal.
+- **Results:** rows in `AgentsSection` (♻`InboxStatusGlyph`), which open the thread. A PR checked out into a new worktree gets its thread (and row) right away; a draft on an existing checkout gets one once it is sent.
 
 ## 7. Density audit
 

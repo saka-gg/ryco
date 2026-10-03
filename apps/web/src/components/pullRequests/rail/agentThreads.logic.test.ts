@@ -113,8 +113,13 @@ describe("linkedAgentThreads", () => {
 });
 
 describe("composeHandoffPrompt", () => {
-  it("returns the prompt alone when there is no material", () => {
-    expect(composeHandoffPrompt("Fix it.  ")).toBe("Fix it.");
+  it("returns the prompt alone when there is no material, open-ended with one space", () => {
+    expect(composeHandoffPrompt("Fix it.")).toBe("Fix it.");
+    expect(composeHandoffPrompt("About pull request #7 (Title): ")).toBe(
+      "About pull request #7 (Title): ",
+    );
+    expect(composeHandoffPrompt("Fix it.  \n")).toBe("Fix it. ");
+    expect(composeHandoffPrompt("  ")).toBe("");
   });
 
   it("fences material with a fence longer than any backtick run inside it", () => {

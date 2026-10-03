@@ -391,7 +391,7 @@ const JobRow = memo(function JobRow(props: {
                 }
               />
               <TooltipPopup side="top" sideOffset={4}>
-                Start an agent on the branch with this log
+                Open an agent thread on the branch with this log
               </TooltipPopup>
             </Tooltip>
           ) : null}

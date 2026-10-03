@@ -110,14 +110,16 @@ export function agentThreadActivityAt(thread: ThreadLike): string {
 // ── Hand-off prompt ──────────────────────────────────────────────────
 
 /**
- * The first message of a hand-off thread: the prompt as the user would write
- * it, then the quoted material (thread excerpt, log tail, selected lines) in a
- * fence long enough that backticks inside it cannot close it early.
+ * What a hand-off prefills into the composer: the prompt as the user would
+ * write it, then the quoted material (thread excerpt, log tail, selected
+ * lines) in a fence long enough that backticks inside it cannot close it
+ * early, ending on a fresh line. An open-ended prompt ("About #7: ") with no
+ * material keeps one trailing space, so typing continues the sentence.
  */
 export function composeHandoffPrompt(prompt: string, context?: string): string {
   const text = prompt.trimEnd();
   const material = context?.replace(/\s+$/u, "");
-  if (!material) return text;
+  if (!material) return text && text !== prompt ? `${text} ` : text;
   const longestRun = Math.max(2, ...[...material.matchAll(/`+/gu)].map((run) => run[0].length));
   const fence = "`".repeat(longestRun + 1);
   return `${text}${text ? "\n\n" : ""}${fence}\n${material}\n${fence}\n`;

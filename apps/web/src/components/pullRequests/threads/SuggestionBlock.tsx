@@ -55,7 +55,7 @@ export const SuggestionBlock = memo(function SuggestionBlock(props: {
             />
             <TooltipPopup side="top" sideOffset={4}>
               {props.onApply
-                ? "Start an agent on the pull request's branch to apply this"
+                ? "Open an agent thread on the pull request's branch to apply this"
                 : props.applyUnavailableReason}
             </TooltipPopup>
           </Tooltip>

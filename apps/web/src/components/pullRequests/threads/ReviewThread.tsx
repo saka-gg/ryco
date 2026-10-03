@@ -161,7 +161,8 @@ export const ReviewThread = memo(function ReviewThread({
     [
       `${location}${thread.isOutdated ? " (outdated)" : ""}`,
       thread.diffHunk ? `\`\`\`diff\n${thread.diffHunk}\n\`\`\`` : null,
-      ...thread.comments.map((comment) => `@${comment.author.login}: ${comment.body}`),
+      // No `@` before the login: the composer would draw `@login:` as a file mention.
+      ...thread.comments.map((comment) => `${comment.author.login}: ${comment.body}`),
     ]
       .filter((part): part is string => part !== null)
       .join("\n\n");
@@ -406,7 +407,7 @@ function AskAgentButton(props: {
       />
       <TooltipPopup side="top" sideOffset={4}>
         {props.available
-          ? "Start an agent on the branch to address this"
+          ? "Open an agent thread on the branch to address this"
           : (props.reason ?? "Agents are unavailable")}
       </TooltipPopup>
     </Tooltip>

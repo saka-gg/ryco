@@ -821,7 +821,7 @@ export function deriveNextActionMenu(
     readonly method: SourceControlChangeRequestMergeMethod;
     /** What the host implements; steps it cannot take are left out. */
     readonly capabilities: ChangeRequestHostCapabilities;
-    /** Agent hand-offs can start a thread. */
+    /** Agent hand-offs can open a thread. */
     readonly agentsAvailable: boolean;
   },
 ): NextActionMenuModel {

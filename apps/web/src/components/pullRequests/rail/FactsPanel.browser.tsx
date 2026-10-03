@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
-// No router by default (as before); the hand-off test installs one to follow "Open".
+// No router by default (as before); the hand-off tests install one to follow navigation.
 const routerMock = vi.hoisted(() => ({
   current: undefined as { navigate: (options: unknown) => Promise<void> } | undefined,
 }));
@@ -19,9 +19,11 @@ vi.mock("~/rpc/useSourceControl", async (importOriginal) => {
   return createSourceControlRpcMock(await importOriginal());
 });
 
-import type { EnvironmentApi } from "@ryco/contracts";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { WorktreeId, type EnvironmentApi } from "@ryco/contracts";
 
 import { toastManager } from "~/components/ui/toast";
+import { useComposerDraftStore, type DraftId } from "~/composerDraftStore";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -30,11 +32,13 @@ import { FactsPanel } from "~/components/pullRequests/rail/FactsPanel";
 import { NextActionButton } from "~/components/pullRequests/rail/NextActionButton";
 import { usePullRequestRailStore } from "~/components/pullRequests/rail/railStore";
 import { StackChip } from "~/components/pullRequests/rail/StackChip";
+import { selectEnvironmentState, useStore } from "~/store";
 import {
   FIXTURE_703_FAILING_JOB,
   FIXTURE_703_THREADS,
   FIXTURE_ENVIRONMENT_ID,
   FIXTURE_NOW_MS,
+  FIXTURE_PROJECT_ID,
   PullRequestsTestProvider,
   fixtureActivity,
   fixtureRepositoryOption,
@@ -50,6 +54,10 @@ const toasts: Array<{
   action?: unknown;
   onAction?: (() => void) | undefined;
 }> = [];
+
+// Hand-offs write composer drafts and read sidebar worktrees; each test starts from these.
+const initialComposerDraftState = useComposerDraftStore.getState();
+const initialAppState = useStore.getState();
 
 beforeEach(async () => {
   vi.setSystemTime(FIXTURE_NOW_MS);
@@ -72,6 +80,8 @@ afterEach(() => {
   resetPullRequestsTestState();
   __resetEnvironmentApiOverridesForTests();
   routerMock.current = undefined;
+  useComposerDraftStore.setState(initialComposerDraftState, true);
+  useStore.setState(initialAppState, true);
   // The merge method is a persisted habit; every test starts from the repository default.
   window.localStorage.removeItem("ryco:pull-requests-merge-method:v1");
   usePullRequestRailStore.setState({
@@ -276,10 +286,10 @@ describe("merging past a step the host does not require", () => {
 });
 
 describe("agent hand-offs", () => {
-  it("starts the thread in place and says so, without leaving the page", async () => {
+  /** A node whose project default is a model the provider no longer offers. */
+  function installHandoffApi() {
     const commands: Array<Record<string, unknown>> = [];
     const worktrees: Array<unknown> = [];
-    const modelSelection = { instanceId: "codex", model: "gpt-5-codex", options: [] };
     __setEnvironmentApiOverrideForTests(FIXTURE_ENVIRONMENT_ID, {
       git: {
         createWorktreeForProject: async (input: unknown) => {
@@ -298,35 +308,27 @@ describe("agent hand-offs", () => {
           environment: { capabilities: { projectPreferences: true } },
           settings: { defaultAgentTokenMode: "off" },
         }),
-        getProjectPreferences: async () => ({ initialModelSelection: { value: modelSelection } }),
+        getProjectPreferences: async () => ({
+          initialModelSelection: { value: { instanceId: "codex", model: "gpt-5.4", options: [] } },
+        }),
       },
     } as unknown as EnvironmentApi);
     const navigate = vi.fn(async (_options: unknown) => undefined);
     routerMock.current = { navigate };
+    return { commands, worktrees, navigate };
+  }
 
+  async function clickFixOnFailingCheck() {
     const screen = await renderRail(703);
     const checks = screen.getByRole("listitem").filter({ hasText: "Test · web" });
     await userEvent.hover(checks);
     await userEvent.click(checks.getByRole("button", { name: "Fix" }));
+  }
 
-    await vi.waitFor(() =>
-      expect(toasts).toContainEqual(
-        expect.objectContaining({ title: "Started", type: "success", action: "Open" }),
-      ),
-    );
-    expect(worktrees).toEqual([
-      { projectId: fixtureRepositoryOption.projectId, intent: { kind: "pr", number: 703 } },
-    ]);
-    expect(commands.find((command) => command.type === "thread.turn.start")).toMatchObject({
-      threadId: "thread-703-fix",
-      modelSelection,
-      message: { text: expect.stringContaining("failing on pull request #703") },
-      sourceControlContexts: [expect.objectContaining({ reference: "github#703" })],
-    });
-    // Still on the pull request: nothing navigated until "Open".
-    expect(pullRequestsTestNavLog.calls).toEqual([]);
-    expect(navigate).not.toHaveBeenCalled();
-    toasts.find((toast) => toast.title === "Started")?.onAction?.();
+  it("checks the pull request out and opens its thread with the composer prefilled, sending nothing", async () => {
+    const { commands, worktrees, navigate } = installHandoffApi();
+    await clickFixOnFailingCheck();
+
     await vi.waitFor(() =>
       expect(navigate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -335,6 +337,83 @@ describe("agent hand-offs", () => {
         }),
       ),
     );
+    expect(worktrees).toEqual([
+      { projectId: fixtureRepositoryOption.projectId, intent: { kind: "pr", number: 703 } },
+    ]);
+    expect(toasts).toContainEqual(
+      expect.objectContaining({ title: "Checking out #703…", type: "loading" }),
+    );
+    // The user reads the prompt, picks the model and sends: no turn, no "Started" toast.
+    expect(commands).toEqual([]);
+    expect(toasts.map((toast) => toast.title)).not.toContain("Started");
+    const composer = useComposerDraftStore
+      .getState()
+      .getComposerDraft(scopeThreadRef(FIXTURE_ENVIRONMENT_ID, "thread-703-fix" as never));
+    expect(composer?.prompt).toContain("failing on pull request #703");
+    expect(composer?.sourceControlContexts).toEqual([
+      expect.objectContaining({ reference: "github#703" }),
+    ]);
+  });
+
+  it("opens a draft on the pull request's existing worktree instead of checking it out again", async () => {
+    const worktreeId = WorktreeId.make("worktree-703-existing");
+    const base = selectEnvironmentState(useStore.getState(), FIXTURE_ENVIRONMENT_ID);
+    useStore.setState({
+      environmentStateById: {
+        ...useStore.getState().environmentStateById,
+        [FIXTURE_ENVIRONMENT_ID]: {
+          ...base,
+          worktreeIds: [worktreeId],
+          worktreeIdsByProjectId: { [FIXTURE_PROJECT_ID]: [worktreeId] },
+          worktreeById: {
+            [worktreeId]: {
+              id: worktreeId,
+              environmentId: FIXTURE_ENVIRONMENT_ID,
+              projectId: FIXTURE_PROJECT_ID,
+              branch: "pr-703",
+              worktreePath: "/worktrees/pr-703",
+              origin: "pr",
+              prNumber: 703,
+              issueNumber: null,
+              prTitle: null,
+              issueTitle: null,
+              prState: "open",
+              prIsDraft: false,
+              issueState: null,
+              workItemProvider: null,
+              workItemKey: null,
+              workItemTitle: null,
+              workItemState: null,
+              workItemStateName: null,
+              workItemUrl: null,
+              createdAt: new Date(FIXTURE_NOW_MS).toISOString(),
+              updatedAt: new Date(FIXTURE_NOW_MS).toISOString(),
+              archivedAt: null,
+              manualPosition: 0,
+            },
+          },
+        },
+      },
+    });
+    const { commands, worktrees, navigate } = installHandoffApi();
+    await clickFixOnFailingCheck();
+
+    await vi.waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ to: "/draft/$draftId" })),
+    );
+    const [route] = navigate.mock.calls[0] ?? [];
+    const { draftId } = (route as { params: { draftId: DraftId } }).params;
+    expect(worktrees).toEqual([]);
+    expect(commands).toEqual([]);
+    const drafts = useComposerDraftStore.getState();
+    expect(drafts.getDraftThread(draftId)).toMatchObject({
+      worktreePath: "/worktrees/pr-703",
+      branch: "pr-703",
+    });
+    expect(drafts.getComposerDraft(draftId)?.prompt).toContain("failing on pull request #703");
+    expect(drafts.getComposerDraft(draftId)?.sourceControlContexts).toEqual([
+      expect.objectContaining({ reference: "github#703" }),
+    ]);
   });
 });
 

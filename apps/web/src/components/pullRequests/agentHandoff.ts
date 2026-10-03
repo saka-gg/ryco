@@ -4,7 +4,6 @@ import {
   readEffectiveProjectPreferences,
 } from "@ryco/client-runtime/state/settings";
 import {
-  DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_RUNTIME_MODE,
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
@@ -16,18 +15,17 @@ import {
   type SourceControlChangeRequestDetail,
   type ThreadId,
 } from "@ryco/contracts";
-import { truncate } from "@ryco/shared/String";
 import { useRouter } from "@tanstack/react-router";
 import { DateTime } from "effect";
 import { useLayoutEffect, useMemo, useRef } from "react";
 
-import { useComposerDraftStore, type DraftThreadEnvMode } from "../../composerDraftStore";
+import { useComposerDraftStore, type ComposerThreadTarget } from "../../composerDraftStore";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { nodeIdForHostedEnvironment } from "../../hostedHub/hostedConnectionCoordinator";
 import { adoptRoutedHostedNode } from "../../hostedHub/nodeRoutes";
 import { getGitStatusSnapshot } from "../../lib/gitStatusState";
-import { newCommandId, newDraftId, newMessageId, newThreadId, randomUUID } from "../../lib/utils";
+import { newDraftId, newThreadId, randomUUID } from "../../lib/utils";
 import { fetchSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -35,7 +33,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { notifyWorktreeSubmoduleSetup } from "../worktrees/worktreeCreationNotifications";
 import { usePullRequestsPage } from "./PullRequestsPageContext";
 import type { PullRequestRepositoryOption } from "./pullRequestRepositories.logic";
-import { capHandoffContextDetail, dispatchHandoffThread } from "./rail/agentHandoffDispatch";
+import { capHandoffContextDetail } from "./rail/agentHandoffContext";
 import {
   composeHandoffPrompt,
   findPullRequestWorktree,
@@ -48,10 +46,13 @@ import {
  * Agent hand-offs from the pull requests page. Every entry point (✧ menu,
  * "Ask agent" on threads and selections, "Fix with agent" on checks and
  * status lines, conflicts, suggestions) goes through this one hook, so a
- * hand-off always lands the same way: a new thread on the change request's
- * head checkout with the pull request attached as context, its first turn
- * already sent, announced by a quiet "Started · Open" toast while the page
- * stays put. The thread then shows in the rail's Agents section.
+ * hand-off always lands the same way: the change request's head checked out
+ * (its live worktree, the project checkout already on the head, or a new
+ * pull request worktree) and a composer there, prefilled with the prompt and
+ * the pull request attached as context. Nothing is sent for the user: they
+ * read the prompt, pick the model and send, so a hand-off never runs on a
+ * model the composer would not offer. A sent thread shows in the rail's
+ * Agents section.
  */
 export type PullRequestAgentHandoffKind =
   | "ask"
@@ -80,6 +81,10 @@ export interface PullRequestAgentHandoff {
   readonly available: boolean;
   /** Why hand-offs are unavailable (shown in tooltips when `available` is false). */
   readonly unavailableReason?: string;
+  /**
+   * Check the change request out and open a composer there, prefilled with
+   * the request's prompt and the pull request as context (nothing is sent).
+   */
   start(request: PullRequestAgentHandoffRequest): Promise<void>;
   /**
    * Check the change request out (worktree) and open an empty thread there,
@@ -91,7 +96,6 @@ export interface PullRequestAgentHandoff {
 /** A pull request other than the selection to check out (the list's row menu). */
 export interface PullRequestWorktreeTarget {
   readonly number: number;
-  readonly title: string;
   readonly headRefName: string | null;
   readonly isCrossRepository?: boolean | undefined;
 }
@@ -103,7 +107,6 @@ interface HandoffTarget {
   readonly repository: PullRequestRepositoryOption;
   readonly projectRef: ScopedProjectRef;
   readonly link: PullRequestThreadLink;
-  readonly title: string;
   /** The page's (uncapped) detail, used when the capped context read fails. */
   readonly detail: SourceControlChangeRequestDetail | null;
 }
@@ -163,7 +166,11 @@ async function readChangeRequestContext(
   };
 }
 
-/** The project's default model and token mode, as a fresh thread would pick them. */
+/**
+ * The project's default model and token mode, seeded into a draft the way a
+ * new thread's draft is (`useHandleNewThread`). The composer still checks the
+ * model against the provider's live model list before it shows or sends it.
+ */
 async function readDraftDefaults(
   api: EnvironmentApi,
   projectRef: ScopedProjectRef,
@@ -190,36 +197,23 @@ async function readDraftDefaults(
   }
 }
 
-function draftLocationContext(location: HandoffWorkLocation, target: HandoffTarget) {
-  switch (location.kind) {
-    case "existing-worktree":
-      return {
-        envMode: "local" as DraftThreadEnvMode,
-        worktreePath: location.worktreePath,
-        branch: location.branch || null,
-        worktreeSource: null,
-      };
-    case "project-root":
-      return {
-        envMode: "local" as DraftThreadEnvMode,
-        worktreePath: null,
-        branch: location.branch,
-        worktreeSource: null,
-      };
-    case "new-worktree":
-      return {
-        envMode: "worktree" as DraftThreadEnvMode,
-        worktreePath: null,
-        branch: null,
-        // Recorded, not materialized: the worktree is created from the pull
-        // request on first send, through the same path the source picker uses.
-        worktreeSource: {
-          kind: "pr" as const,
-          number: target.link.number,
-          label: `#${target.link.number} ${target.title}`,
-        },
-      };
-  }
+/** A checkout that already exists: the draft runs there, nothing is created. */
+type ExistingCheckout = Exclude<HandoffWorkLocation, { readonly kind: "new-worktree" }>;
+
+function draftPlacement(location: ExistingCheckout) {
+  return location.kind === "existing-worktree"
+    ? { worktreePath: location.worktreePath, branch: location.branch || null }
+    : { worktreePath: null, branch: location.branch };
+}
+
+/** Writes the prompt and the pull request into a composer (a draft or a server thread). */
+function seedComposer(
+  target: ComposerThreadTarget,
+  input: { readonly prompt: string; readonly context: ComposerSourceControlContext | null },
+): void {
+  const store = useComposerDraftStore.getState();
+  if (input.prompt) store.setPrompt(target, input.prompt);
+  if (input.context) store.addSourceControlContext(target, input.context);
 }
 
 async function navigateToThread(
@@ -235,15 +229,14 @@ async function navigateToThread(
 }
 
 /**
- * Opens a separate draft (the project's own draft stays untouched) on the
- * pull request's checkout with the prompt and the pull request attached, then
- * routes to it. Only for nodes that cannot name a default model (no project
- * preferences): the composer resolves the model there and the user sends.
+ * Opens a separate draft (the project's own draft stays untouched) on a
+ * checkout that already exists, seeded the way a new thread's draft is, with
+ * the prompt and the pull request attached, then routes to it.
  */
 async function openHandoffDraft(input: {
   readonly target: HandoffTarget;
   readonly router: Router;
-  readonly location: HandoffWorkLocation;
+  readonly location: ExistingCheckout;
   readonly prompt: string;
   readonly context: ComposerSourceControlContext | null;
   readonly defaults: {
@@ -254,54 +247,80 @@ async function openHandoffDraft(input: {
   const { target, router, defaults } = input;
   const draftId = newDraftId();
   const store = useComposerDraftStore.getState();
-  const placement = draftLocationContext(input.location, target);
+  const placement = draftPlacement(input.location);
   store.createDetachedDraftSession(target.repository.repositoryKey, target.projectRef, draftId, {
     threadId: newThreadId(),
     branch: placement.branch,
     worktreePath: placement.worktreePath,
-    envMode: placement.envMode,
+    envMode: "local",
     runtimeMode: DEFAULT_RUNTIME_MODE,
     ...(defaults.tokenMode ? { tokenMode: defaults.tokenMode } : {}),
   });
-  store.setDraftThreadContext(draftId, { worktreeSource: placement.worktreeSource });
   store.applyStickyState(draftId);
   if (defaults.modelSelection) store.setModelSelection(draftId, defaults.modelSelection);
-  if (input.prompt) store.setPrompt(draftId, input.prompt);
-  if (input.context) store.addSourceControlContext(draftId, input.context);
+  seedComposer(draftId, { prompt: input.prompt, context: input.context });
   adoptHostedTarget(target.projectRef);
   await router.navigate({ to: "/draft/$draftId", params: { draftId } });
 }
 
-/** "Started · Open": the thread runs; the page stays where the reviewer is. */
-function announceStarted(input: {
-  readonly title: string;
-  /** Opens the thread; null where this surface cannot navigate. */
-  readonly open: (() => Promise<void>) | null;
-}): void {
-  const open = input.open;
-  const toastId = toastManager.add(
-    stackedThreadToast({
-      type: "success",
-      title: "Started",
-      description: input.title,
-      ...(open
-        ? {
-            actionProps: {
-              children: "Open",
-              onClick: () => {
-                toastManager.close(toastId);
-                void open();
-              },
-            },
-          }
-        : {}),
-    }),
-  );
+type CreateWorktreeForProject = NonNullable<EnvironmentApi["git"]["createWorktreeForProject"]>;
+
+/**
+ * Where every hand-off lands. On a checkout that already exists, a fresh
+ * draft there; otherwise the pull request is checked out into its own
+ * worktree first (which creates an empty thread on it) and that thread's
+ * composer is seeded. Seeding happens before the route mounts, so the
+ * composer opens with the caret after the prompt.
+ */
+async function openOnCheckout(input: {
+  readonly target: HandoffTarget;
+  readonly api: EnvironmentApi;
+  readonly router: Router;
+  readonly requireWorktreeCreation: () => CreateWorktreeForProject;
+  readonly prompt: string;
+  /** Read alongside the checkout; null leaves the composer without context. */
+  readonly context: Promise<ComposerSourceControlContext | null> | null;
+}): Promise<void> {
+  const { target, api, router } = input;
+  const location = resolveLocation(target);
+  if (location.kind !== "new-worktree") {
+    const [context, defaults] = await Promise.all([
+      input.context,
+      readDraftDefaults(api, target.projectRef),
+    ]);
+    await openHandoffDraft({ target, router, location, prompt: input.prompt, context, defaults });
+    return;
+  }
+  const createWorktree = input.requireWorktreeCreation();
+  const pending = toastManager.add({
+    type: "loading",
+    title: `Checking out #${target.link.number}…`,
+    timeout: 0,
+  });
+  try {
+    // Creates (or reuses) the pull request's worktree and an empty thread on it.
+    const [created, context] = await Promise.all([
+      createWorktree({
+        projectId: target.projectRef.projectId,
+        intent: { kind: "pr", number: target.link.number },
+      }),
+      input.context,
+    ]);
+    notifyWorktreeSubmoduleSetup(created.submoduleInitialization);
+    seedComposer(scopeThreadRef(target.projectRef.environmentId, created.sessionId), {
+      prompt: input.prompt,
+      context,
+    });
+    await navigateToThread(router, target.projectRef, created.sessionId);
+  } finally {
+    toastManager.close(pending);
+  }
 }
 
 export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
   const { repository, model } = usePullRequestsPage();
   const router = useRouter({ warn: false });
+  // A hand-off sends nothing itself, but the composer it opens can only send with dispatch.
   const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
   const worktreeCapability = useHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject);
   const selection = model.selection;
@@ -318,17 +337,9 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
         headRefName: detail?.headRefName ?? summary?.headRefName ?? null,
         isCrossRepository: detail?.isCrossRepository ?? summary?.isCrossRepository,
       },
-      title: detail?.title ?? summary?.title ?? `#${selection.number}`,
       detail,
     };
-  }, [
-    detail,
-    repository,
-    selection,
-    summary?.headRefName,
-    summary?.isCrossRepository,
-    summary?.title,
-  ]);
+  }, [detail, repository, selection, summary?.headRefName, summary?.isCrossRepository]);
 
   // Callers hold on to `start` across renders; read the latest target and router.
   const latest = useRef({ target, router, worktreeCapability });
@@ -390,12 +401,10 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
           headRefName: pullRequest.headRefName,
           isCrossRepository: pullRequest.isCrossRepository,
         },
-        title: pullRequest.title,
         detail: null,
       };
       return { target: rowTarget, api };
     };
-    // Only leaving the page needs the router; starting a thread does not.
     const requireRouter = () => {
       const currentRouter = latest.current.router;
       if (!currentRouter) throw new Error("Navigation is unavailable here.");
@@ -419,65 +428,15 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
       available: unavailableReason === undefined,
       ...(unavailableReason ? { unavailableReason } : {}),
       start: (request) =>
-        guard("Couldn’t start an agent thread", async () => {
+        guard("Couldn’t open an agent thread", async () => {
           const { target: current, api } = requireTarget();
-          const location = resolveLocation(current);
-          if (location.kind === "new-worktree") requireWorktreeCreation(api);
-          const prompt = composeHandoffPrompt(request.prompt, request.context);
-          const [context, defaults] = await Promise.all([
-            readChangeRequestContext(current),
-            readDraftDefaults(api, current.projectRef),
-          ]);
-          if (!defaults.modelSelection) {
-            // A node that names no default model leaves the pick to the composer.
-            await openHandoffDraft({
-              target: current,
-              router: requireRouter(),
-              location,
-              prompt,
-              context,
-              defaults,
-            });
-            return;
-          }
-          // A sent draft is titled by its prompt; the quoted material stays out.
-          const title = truncate(request.prompt) || `#${current.link.number}`;
-          const pending =
-            location.kind === "new-worktree"
-              ? toastManager.add({
-                  type: "loading",
-                  title: `Checking out #${current.link.number}…`,
-                  timeout: 0,
-                })
-              : null;
-          let threadId: ThreadId;
-          try {
-            ({ threadId } = await dispatchHandoffThread({
-              api,
-              projectId: current.projectRef.projectId,
-              projectCwd: current.repository.cwd,
-              pullRequestNumber: current.link.number,
-              location,
-              title,
-              prompt,
-              context,
-              modelSelection: defaults.modelSelection,
-              tokenMode: defaults.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-              newThreadId,
-              newMessageId,
-              newCommandId,
-              onWorktreeCreated: (created) =>
-                notifyWorktreeSubmoduleSetup(created.submoduleInitialization),
-            }));
-          } finally {
-            if (pending !== null) toastManager.close(pending);
-          }
-          const currentRouter = latest.current.router;
-          announceStarted({
-            title,
-            open: currentRouter
-              ? () => navigateToThread(currentRouter, current.projectRef, threadId)
-              : null,
+          await openOnCheckout({
+            target: current,
+            api,
+            router: requireRouter(),
+            requireWorktreeCreation: () => requireWorktreeCreation(api),
+            prompt: composeHandoffPrompt(request.prompt, request.context),
+            context: readChangeRequestContext(current),
           });
         }),
       openWorktreeThread: (pullRequest) =>
@@ -485,37 +444,14 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
           const { target: current, api } = pullRequest
             ? requireTargetFor(pullRequest)
             : requireTarget();
-          const currentRouter = requireRouter();
-          const location = resolveLocation(current);
-          if (location.kind !== "new-worktree") {
-            // Already checked out: a fresh, empty draft there is the whole job.
-            await openHandoffDraft({
-              target: current,
-              router: currentRouter,
-              location,
-              prompt: "",
-              context: null,
-              defaults: await readDraftDefaults(api, current.projectRef),
-            });
-            return;
-          }
-          const createWorktree = requireWorktreeCreation(api);
-          const pending = toastManager.add({
-            type: "loading",
-            title: `Checking out #${current.link.number}…`,
-            timeout: 0,
+          await openOnCheckout({
+            target: current,
+            api,
+            router: requireRouter(),
+            requireWorktreeCreation: () => requireWorktreeCreation(api),
+            prompt: "",
+            context: null,
           });
-          try {
-            // Creates (or reuses) the pull request's worktree and its first thread.
-            const created = await createWorktree({
-              projectId: current.projectRef.projectId,
-              intent: { kind: "pr", number: current.link.number },
-            });
-            notifyWorktreeSubmoduleSetup(created.submoduleInitialization);
-            await navigateToThread(currentRouter, current.projectRef, created.sessionId);
-          } finally {
-            toastManager.close(pending);
-          }
         }),
     };
   }, [dispatchAllowed, dispatchReason, hostName, repository, supported, target]);

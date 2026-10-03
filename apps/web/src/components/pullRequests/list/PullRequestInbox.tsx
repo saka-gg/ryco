@@ -402,7 +402,6 @@ export function PullRequestInbox({
     (entry: ChangeRequest) =>
       void handoff.openWorktreeThread({
         number: entry.number,
-        title: entry.title,
         headRefName: entry.headRefName,
         isCrossRepository: entry.isCrossRepository,
       }),
