@@ -21,6 +21,8 @@ export interface NormalizedForgejoIssueRecord {
 }
 
 export interface NormalizedForgejoComment {
+  /** Forgejo comment id; round-trips into comment edits, deletes, and reactions. */
+  readonly id?: string;
   readonly author: string;
   readonly body: string;
   readonly createdAt: string;
@@ -32,12 +34,15 @@ export interface NormalizedForgejoIssueDetail extends NormalizedForgejoIssueReco
 }
 
 export const ForgejoUserSchema = Schema.Struct({
+  id: Schema.optional(Schema.NullOr(Schema.Number)),
   login: Schema.optional(Schema.String),
   username: Schema.optional(Schema.String),
   full_name: Schema.optional(Schema.String),
+  avatar_url: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 export const ForgejoLabelSchema = Schema.Struct({
+  id: Schema.optional(Schema.NullOr(Schema.Number)),
   name: TrimmedNonEmptyString,
   color: Schema.optional(Schema.String),
   description: Schema.optional(Schema.NullOr(Schema.String)),
@@ -59,6 +64,7 @@ export const ForgejoIssueSchema = Schema.Struct({
 });
 
 export const ForgejoCommentSchema = Schema.Struct({
+  id: Schema.optional(Schema.NullOr(Schema.Number)),
   user: Schema.optional(Schema.NullOr(ForgejoUserSchema)),
   body: Schema.optional(Schema.String),
   created_at: Schema.optional(Schema.String),
@@ -122,6 +128,7 @@ export function normalizeForgejoComment(
   raw: Schema.Schema.Type<typeof ForgejoCommentSchema>,
 ): NormalizedForgejoComment {
   return {
+    ...(typeof raw.id === "number" ? { id: String(raw.id) } : {}),
     author: forgejoAuthorName(raw.user) ?? "unknown",
     body: raw.body ?? "",
     createdAt: raw.created_at ?? new Date(0).toISOString(),

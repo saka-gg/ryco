@@ -9,6 +9,7 @@ import {
 } from "@ryco/contracts";
 
 import * as ForgejoApi from "./ForgejoApi.ts";
+import { stripCommentMutationMarker } from "./gitHubCommentMutationMarker.ts";
 import * as ForgejoIssues from "./forgejoIssues.ts";
 import * as ForgejoPullRequests from "./forgejoPullRequests.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
@@ -29,6 +30,7 @@ function providerError(
 function toChangeRequest(
   summary: ForgejoPullRequests.NormalizedForgejoPullRequestRecord,
 ): ChangeRequest {
+  const readiness = summary.readiness;
   return {
     provider: "forgejo",
     number: summary.number,
@@ -43,6 +45,8 @@ function toChangeRequest(
       : {}),
     ...(summary.isDraft !== undefined ? { isDraft: summary.isDraft } : {}),
     ...(summary.author ? { author: summary.author } : {}),
+    ...(summary.assignees && summary.assignees.length > 0 ? { assignees: summary.assignees } : {}),
+    ...(summary.labels && summary.labels.length > 0 ? { labels: summary.labels } : {}),
     ...(typeof summary.commentsCount === "number" ? { commentsCount: summary.commentsCount } : {}),
     ...(summary.headRepositoryNameWithOwner !== null
       ? { headRepositoryNameWithOwner: summary.headRepositoryNameWithOwner }
@@ -50,6 +54,16 @@ function toChangeRequest(
     ...(summary.headRepositoryOwnerLogin !== null
       ? { headRepositoryOwnerLogin: summary.headRepositoryOwnerLogin }
       : {}),
+    ...(summary.headSha ? { headSha: summary.headSha } : {}),
+    ...(readiness?.mergeability ? { mergeability: readiness.mergeability } : {}),
+    ...(readiness?.checkRollup ? { checkRollup: readiness.checkRollup } : {}),
+    ...(summary.createdAt ? { createdAt: summary.createdAt } : {}),
+    ...(readiness && readiness.reviewDecision !== undefined
+      ? { reviewDecision: readiness.reviewDecision }
+      : {}),
+    ...(summary.additions !== undefined ? { additions: summary.additions } : {}),
+    ...(summary.deletions !== undefined ? { deletions: summary.deletions } : {}),
+    ...(summary.changedFiles !== undefined ? { changedFiles: summary.changedFiles } : {}),
   };
 }
 
@@ -93,13 +107,20 @@ function toChangeRequestDetail(
   raw: ForgejoPullRequests.NormalizedForgejoPullRequestDetail,
   options: { readonly fullContent: boolean },
 ): SourceControlChangeRequestDetail {
+  const comments = raw.comments.map((comment) => ({
+    ...comment,
+    body: stripCommentMutationMarker(comment.body),
+  }));
   const content = options.fullContent
-    ? { body: raw.body, comments: raw.comments, truncated: false }
-    : truncateSourceControlDetailContent({ body: raw.body, comments: raw.comments });
+    ? { body: raw.body, comments, truncated: false }
+    : truncateSourceControlDetailContent({ body: raw.body, comments });
+  const readiness = raw.readiness;
+  const reviewers = [...(raw.requestedReviewers ?? []), ...(raw.requestedTeams ?? [])];
   return {
     ...toChangeRequest(raw),
     body: content.body,
     comments: content.comments.map((comment) => ({
+      ...(comment.id ? { id: comment.id } : {}),
       author: comment.author,
       body: comment.body,
       createdAt: DateTime.fromDateUnsafe(new Date(comment.createdAt)),
@@ -110,24 +131,81 @@ function toChangeRequestDetail(
     deletions: raw.deletions,
     changedFiles: raw.changedFiles,
     ...(raw.files.length > 0 ? { files: raw.files } : {}),
+    ...(reviewers.length > 0 ? { reviewers } : {}),
+    ...(readiness?.reviewerStates ? { reviewerStates: readiness.reviewerStates } : {}),
+    ...(readiness?.mergeStateStatus ? { mergeStateStatus: readiness.mergeStateStatus } : {}),
+    ...(readiness?.mergeCapabilities ? { mergeCapabilities: readiness.mergeCapabilities } : {}),
+    ...(raw.closedAt ? { closedAt: raw.closedAt } : {}),
+    ...(raw.mergedAt ? { mergedAt: raw.mergedAt } : {}),
+    ...(raw.mergedBy ? { mergedBy: raw.mergedBy } : {}),
   };
+}
+
+function notImplemented(operation: string, detail = "Not implemented for forgejo") {
+  return Effect.fail(new SourceControlProviderError({ provider: "forgejo", operation, detail }));
 }
 
 export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
   const forgejo = yield* ForgejoApi.ForgejoApi;
 
+  const getChangeRequestDetail: SourceControlProvider.SourceControlProviderShape["getChangeRequestDetail"] =
+    (input) =>
+      forgejo
+        .getPullRequestDetail({
+          cwd: input.cwd,
+          ...(input.context ? { context: input.context } : {}),
+          reference: input.reference,
+        })
+        .pipe(
+          Effect.map((raw) =>
+            toChangeRequestDetail(raw, { fullContent: input.fullContent ?? false }),
+          ),
+          Effect.mapError((error) => providerError("getChangeRequestDetail", error)),
+        );
+
+  /** The fresh, uncapped detail a mutation returns. */
+  const freshDetail = (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+    readonly reference: string;
+  }) =>
+    getChangeRequestDetail({
+      cwd: input.cwd,
+      ...(input.context ? { context: input.context } : {}),
+      reference: input.reference,
+      fullContent: true,
+    });
+
   const provider = SourceControlProvider.SourceControlProvider.of({
     kind: "forgejo",
     listChangeRequests: (input) => {
+      const context = input.context ? { context: input.context } : {};
+      const limit = input.limit !== undefined ? { limit: input.limit } : {};
+      const query = input.query?.trim() ?? "";
+      if (input.involvement !== undefined) {
+        return forgejo
+          .listInvolvedPullRequests({
+            cwd: input.cwd,
+            ...context,
+            involvement: input.involvement,
+            state: input.state,
+            ...(query.length > 0 ? { query } : {}),
+            ...limit,
+          })
+          .pipe(
+            Effect.map((items) => items.map(toChangeRequest)),
+            Effect.mapError((error) => providerError("listChangeRequests", error)),
+          );
+      }
       const source = SourceControlProvider.sourceControlRefFromInput(input);
       return forgejo
         .listPullRequests({
           cwd: input.cwd,
-          ...(input.context ? { context: input.context } : {}),
+          ...context,
           headSelector: input.headSelector,
           ...(source ? { source } : {}),
           state: input.state,
-          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+          ...limit,
         })
         .pipe(
           Effect.map((items) => items.map(toChangeRequest)),
@@ -151,6 +229,7 @@ export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
           ...(input.target ? { target: input.target } : {}),
           title: input.title,
           bodyFile: input.bodyFile,
+          ...(input.draft === true ? { draft: true } : {}),
         })
         .pipe(Effect.mapError((error) => providerError("createChangeRequest", error)));
     },
@@ -201,22 +280,8 @@ export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
           Effect.map((raw) => toIssueDetail(raw, { fullContent: input.fullContent ?? false })),
           Effect.mapError((error) => providerError("getIssue", error)),
         ),
-    addIssueComment: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "addIssueComment",
-          detail: "Not implemented for forgejo",
-        }),
-      ),
-    addIssueCommentReaction: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "addIssueCommentReaction",
-          detail: "Not implemented for forgejo",
-        }),
-      ),
+    addIssueComment: () => notImplemented("addIssueComment"),
+    addIssueCommentReaction: () => notImplemented("addIssueCommentReaction"),
     searchIssues: (input) =>
       forgejo
         .searchIssues({
@@ -241,34 +306,16 @@ export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
           Effect.map((items) => items.map(toChangeRequest)),
           Effect.mapError((error) => providerError("searchChangeRequests", error)),
         ),
-    getChangeRequestDetail: (input) =>
-      forgejo
-        .getPullRequestDetail({
-          cwd: input.cwd,
-          ...(input.context ? { context: input.context } : {}),
-          reference: input.reference,
-        })
-        .pipe(
-          Effect.map((raw) =>
-            toChangeRequestDetail(raw, { fullContent: input.fullContent ?? false }),
-          ),
-          Effect.mapError((error) => providerError("getChangeRequestDetail", error)),
-        ),
-    addChangeRequestComment: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "addChangeRequestComment",
-          detail: "Not implemented for forgejo",
-        }),
+    getChangeRequestDetail,
+    addChangeRequestComment: (input) =>
+      forgejo.addPullRequestComment(input).pipe(
+        Effect.mapError((error) => providerError("addChangeRequestComment", error)),
+        Effect.andThen(() => freshDetail(input)),
       ),
-    addChangeRequestCommentReaction: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "addChangeRequestCommentReaction",
-          detail: "Not implemented for forgejo",
-        }),
+    addChangeRequestCommentReaction: (input) =>
+      forgejo.togglePullRequestCommentReaction(input).pipe(
+        Effect.mapError((error) => providerError("addChangeRequestCommentReaction", error)),
+        Effect.andThen(() => freshDetail(input)),
       ),
     getChangeRequestDiff: (input) =>
       forgejo
@@ -276,50 +323,66 @@ export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
           cwd: input.cwd,
           ...(input.context ? { context: input.context } : {}),
           reference: input.reference,
+          ...(input.expectedHeadSha !== undefined
+            ? { expectedHeadSha: input.expectedHeadSha }
+            : {}),
+          ...(input.commitSha !== undefined ? { commitSha: input.commitSha } : {}),
         })
         .pipe(Effect.mapError((error) => providerError("getChangeRequestDiff", error))),
-    createIssue: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "createIssue",
-          detail: "Not implemented in Phase 1",
-        }),
+    mergeChangeRequest: (input) =>
+      forgejo
+        .mergePullRequest(input)
+        .pipe(Effect.mapError((error) => providerError("mergeChangeRequest", error))),
+    getChangeRequestActivity: (input) =>
+      forgejo
+        .getPullRequestActivity(input)
+        .pipe(Effect.mapError((error) => providerError("getChangeRequestActivity", error))),
+    getChangeRequestFileContents: (input) =>
+      forgejo
+        .getPullRequestFileContents(input)
+        .pipe(Effect.mapError((error) => providerError("getChangeRequestFileContents", error))),
+    submitChangeRequestReview: (input) =>
+      forgejo
+        .submitPullRequestReview(input)
+        .pipe(Effect.mapError((error) => providerError("submitChangeRequestReview", error))),
+    replyToReviewThread: (input) =>
+      forgejo.replyToPullRequestReviewThread(input).pipe(
+        Effect.map((thread) => ({ thread })),
+        Effect.mapError((error) => providerError("replyToReviewThread", error)),
       ),
-    listLabels: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "listLabels",
-          detail: "Not implemented in Phase 1",
-        }),
+    // Forgejo's API cannot resolve conversations: no `setReviewThreadResolved`.
+    updateChangeRequestComment: (input) =>
+      forgejo
+        .updatePullRequestComment(input)
+        .pipe(Effect.mapError((error) => providerError("updateChangeRequestComment", error))),
+    updateChangeRequest: (input) =>
+      forgejo.updatePullRequest(input).pipe(
+        Effect.mapError((error) => providerError("updateChangeRequest", error)),
+        Effect.andThen(() => freshDetail(input)),
+        Effect.map((detail) => ({ detail })),
       ),
-    listAssignees: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "listAssignees",
-          detail: "Not implemented in Phase 1",
-        }),
-      ),
-    getPullRequestState: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "getPullRequestState",
-          detail: "Not implemented for forgejo",
-        }),
-      ),
-    getIssueState: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation: "getIssueState",
-          detail: "Not implemented for forgejo",
-        }),
-      ),
+    createIssue: () => notImplemented("createIssue", "Not implemented in Phase 1"),
+    listLabels: (input) =>
+      forgejo
+        .listLabels(input)
+        .pipe(Effect.mapError((error) => providerError("listLabels", error))),
+    listAssignees: (input) =>
+      forgejo
+        .listAssignees(input)
+        .pipe(Effect.mapError((error) => providerError("listAssignees", error))),
+    getPullRequestState: (input) =>
+      forgejo
+        .getPullRequest({
+          cwd: input.cwd,
+          ...(input.context ? { context: input.context } : {}),
+          reference: String(input.number),
+        })
+        .pipe(
+          Effect.map((summary) => ({ state: summary.state, isDraft: summary.isDraft ?? false })),
+          Effect.mapError((error) => providerError("getPullRequestState", error)),
+        ),
+    getIssueState: () => notImplemented("getIssueState"),
   });
-  // No server-side involvement filter, list search, commit-scoped diff, or draft creation.
   return SourceControlProvider.withUnsupportedChangeRequestOptionGuards(provider);
 });
 

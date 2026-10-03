@@ -1,12 +1,13 @@
-import { assert, it, vi } from "@effect/vitest";
+import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ConfigProvider, DateTime, Effect, FileSystem, Layer, Option } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { Effect, FileSystem, Option } from "effect";
 
 import * as ForgejoApi from "./ForgejoApi.ts";
-import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
-import type * as VcsDriver from "../vcs/VcsDriver.ts";
-import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import {
+  apiPath,
+  makeForgejoApiTestLayer as makeLayer,
+  requestJsonBody,
+} from "./forgejoApiTestLayer.ts";
 
 const forgejoRepository = {
   full_name: "pingdotgg/ryco",
@@ -44,113 +45,6 @@ const forgejoPullRequest = {
     repo: forgejoRepository,
   },
 };
-
-function requestJsonBody(request: HttpClientRequest.HttpClientRequest): unknown {
-  const rawBody = (request.body as { readonly body?: Uint8Array }).body;
-  assert.ok(rawBody);
-  return JSON.parse(new TextDecoder().decode(rawBody));
-}
-
-function makeLayer(input: {
-  readonly response: (request: HttpClientRequest.HttpClientRequest) => Response;
-  readonly env?: Record<string, string>;
-  readonly git?: Partial<GitVcsDriver.GitVcsDriverShape>;
-}) {
-  const execute = vi.fn((request: HttpClientRequest.HttpClientRequest) =>
-    Effect.succeed(HttpClientResponse.fromWeb(request, input.response(request))),
-  );
-  const gitMock = {
-    readConfigValue: vi.fn<GitVcsDriver.GitVcsDriverShape["readConfigValue"]>(() =>
-      Effect.succeed<string | null>("git@codeberg.test:pingdotgg/ryco.git"),
-    ),
-    resolvePrimaryRemoteName: vi.fn<GitVcsDriver.GitVcsDriverShape["resolvePrimaryRemoteName"]>(
-      () => Effect.succeed("origin"),
-    ),
-    ensureRemote: vi.fn<GitVcsDriver.GitVcsDriverShape["ensureRemote"]>(() =>
-      Effect.succeed("alice"),
-    ),
-    fetchRemoteBranch: vi.fn<GitVcsDriver.GitVcsDriverShape["fetchRemoteBranch"]>(
-      () => Effect.void,
-    ),
-    fetchRemoteTrackingBranch: vi.fn<GitVcsDriver.GitVcsDriverShape["fetchRemoteTrackingBranch"]>(
-      () => Effect.void,
-    ),
-    setBranchUpstream: vi.fn<GitVcsDriver.GitVcsDriverShape["setBranchUpstream"]>(
-      () => Effect.void,
-    ),
-    switchRef: vi.fn<GitVcsDriver.GitVcsDriverShape["switchRef"]>((request) =>
-      Effect.succeed({ refName: request.refName }),
-    ),
-    listLocalBranchNames: vi.fn<GitVcsDriver.GitVcsDriverShape["listLocalBranchNames"]>(() =>
-      Effect.succeed([]),
-    ),
-  };
-  const git = {
-    ...gitMock,
-    ...input.git,
-  } satisfies Partial<GitVcsDriver.GitVcsDriverShape>;
-
-  const driver = {
-    listRemotes: () =>
-      Effect.succeed({
-        remotes: [
-          {
-            name: "origin",
-            url: "git@codeberg.test:pingdotgg/ryco.git",
-            pushUrl: Option.none(),
-            isPrimary: true,
-          },
-        ],
-        freshness: {
-          source: "live-local" as const,
-          observedAt: DateTime.makeUnsafe("1970-01-01T00:00:00.000Z"),
-          expiresAt: Option.none(),
-        },
-      }),
-  } satisfies Partial<VcsDriver.VcsDriverShape>;
-
-  const layer = ForgejoApi.layer.pipe(
-    Layer.provide(
-      Layer.succeed(
-        HttpClient.HttpClient,
-        HttpClient.make((request) => execute(request)),
-      ),
-    ),
-    Layer.provide(
-      Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
-        resolve: () =>
-          Effect.succeed({
-            kind: "git",
-            repository: {
-              kind: "git",
-              rootPath: "/repo",
-              metadataPath: null,
-              freshness: {
-                source: "live-local" as const,
-                observedAt: DateTime.makeUnsafe("1970-01-01T00:00:00.000Z"),
-                expiresAt: Option.none(),
-              },
-            },
-            driver: driver as unknown as VcsDriver.VcsDriverShape,
-          }),
-      }),
-    ),
-    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)(git)),
-    Layer.provide(
-      ConfigProvider.layer(
-        ConfigProvider.fromEnv({
-          env: input.env ?? {
-            RYCO_FORGEJO_BASE_URL: "https://codeberg.test",
-            RYCO_FORGEJO_TOKEN: "token",
-          },
-        }),
-      ),
-    ),
-    Layer.provideMerge(NodeServices.layer),
-  );
-
-  return { execute, git: gitMock, layer };
-}
 
 it.effect("detects configured Forgejo hosts from remotes", () => {
   const { layer } = makeLayer({
@@ -447,7 +341,16 @@ it.effect("getPullRequestDetail returns body, comments, commits, and files", () 
     assert.strictEqual(detail.additions, 10);
     assert.strictEqual(detail.deletions, 2);
     assert.strictEqual(detail.changedFiles, 1);
-    assert.strictEqual(execute.mock.calls.length, 4);
+    // The detail reads, then the merge readiness reads (no head sha: no status read).
+    assert.deepStrictEqual(execute.mock.calls.map(([request]) => apiPath(request)).toSorted(), [
+      "/repos/pingdotgg/ryco",
+      "/repos/pingdotgg/ryco/branches/main",
+      "/repos/pingdotgg/ryco/issues/42/comments",
+      "/repos/pingdotgg/ryco/pulls/42",
+      "/repos/pingdotgg/ryco/pulls/42/commits",
+      "/repos/pingdotgg/ryco/pulls/42/files",
+      "/repos/pingdotgg/ryco/pulls/42/reviews",
+    ]);
   }).pipe(Effect.provide(layer));
 });
 
