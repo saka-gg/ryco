@@ -81,6 +81,10 @@ export function useOverviewWorkflowRuns(input: {
   );
 }
 
+/**
+ * The overview follows one active run; any other run's jobs still poll while
+ * they show unfinished work (see `useSourceControlWorkflowRunJobsBatch`).
+ */
 export function useOverviewWorkflowRunJobs(input: {
   environmentId: EnvironmentId | null;
   cwd: string | null;
@@ -88,5 +92,11 @@ export function useOverviewWorkflowRunJobs(input: {
   activeRunId: string | null;
   enabled: boolean;
 }): OverviewWorkflowRunJobsResult {
-  return useSourceControlWorkflowRunJobsBatch(input);
+  return useSourceControlWorkflowRunJobsBatch({
+    environmentId: input.environmentId,
+    cwd: input.cwd,
+    runIds: input.runIds,
+    incompleteRunIds: input.activeRunId === null ? [] : [input.activeRunId],
+    enabled: input.enabled,
+  });
 }

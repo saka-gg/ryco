@@ -9,7 +9,9 @@ import {
   SOURCE_CONTROL_MAX_BACKOFF_MS,
   resolveSourceControlFailureDelay,
   resolveSourceControlRefreshDelay,
+  resolveWorkflowRunJobsPhase,
   shouldRefreshSourceControlOnLifecycle,
+  workflowRunJobsContradictRun,
 } from "./sourceControlRefreshPolicy";
 
 describe("source-control refresh policy", () => {
@@ -104,5 +106,34 @@ describe("source-control refresh policy", () => {
         retryAfterMs: 45_000,
       }),
     ).toBe(45_000);
+  });
+});
+
+describe("workflow run jobs cadence", () => {
+  const running = [{ status: "completed" }, { status: "in_progress" }];
+  const finished = [{ status: "completed" }, { status: "COMPLETED" }];
+
+  it("follows every incomplete run and any run whose jobs still show work", () => {
+    expect(resolveWorkflowRunJobsPhase({ runIncomplete: true, jobs: null })).toBe("active");
+    expect(resolveWorkflowRunJobsPhase({ runIncomplete: true, jobs: finished })).toBe("active");
+    // The run finished but its cached jobs predate that: one more (final) read.
+    expect(resolveWorkflowRunJobsPhase({ runIncomplete: false, jobs: running })).toBe("active");
+  });
+
+  it("settles a finished run once its jobs agree", () => {
+    expect(resolveWorkflowRunJobsPhase({ runIncomplete: false, jobs: finished })).toBe("settled");
+    expect(resolveWorkflowRunJobsPhase({ runIncomplete: false, jobs: [] })).toBe("settled");
+    expect(resolveWorkflowRunJobsPhase({ runIncomplete: false, jobs: null })).toBe("settled");
+  });
+
+  it("flags cached jobs that contradict a run's new status", () => {
+    // Finished, jobs still running: take the final read now.
+    expect(workflowRunJobsContradictRun({ runIncomplete: false, jobs: running })).toBe(true);
+    // Re-run (or queued with no jobs yet), jobs all finished: start following it.
+    expect(workflowRunJobsContradictRun({ runIncomplete: true, jobs: finished })).toBe(true);
+    expect(workflowRunJobsContradictRun({ runIncomplete: true, jobs: [] })).toBe(true);
+    // Agreement needs no read.
+    expect(workflowRunJobsContradictRun({ runIncomplete: false, jobs: finished })).toBe(false);
+    expect(workflowRunJobsContradictRun({ runIncomplete: true, jobs: running })).toBe(false);
   });
 });

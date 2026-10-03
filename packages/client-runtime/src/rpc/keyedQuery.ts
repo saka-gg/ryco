@@ -49,6 +49,17 @@ export interface KeyedQueryControllerBase {
   pollTimer: ReturnType<typeof setTimeout> | null;
   pollSubscribers: Map<number, KeyedQueryPollSubscriber>;
   nextPollSubscriberId: number;
+  /**
+   * Bumped by every local write (`updateData`). A read that started before the
+   * latest local write carries older server state than the cache now holds, so
+   * it must neither publish over that write nor absorb later refresh requests.
+   * Optional so hand-built controllers keep compiling; absent means 0.
+   */
+  localWriteEpoch?: number;
+  /** `localWriteEpoch` observed when the current `inFlightPromise` started. */
+  inFlightLocalWriteEpoch?: number;
+  /** `Date.now()` of the latest local write; absent when there was none. */
+  lastLocalWriteAt?: number;
 }
 
 export interface KeyedQueryRegistryConfig<TState> {
@@ -73,6 +84,15 @@ export interface KeyedQueryRegistryConfig<TState> {
     controller: KeyedQueryControllerBase & Record<string, unknown>,
     outcome: "success" | "error",
   ) => void;
+  /**
+   * Called after a read's result is published to the controller's state, and
+   * only then: never for reads fenced by a cancel or superseded by a local
+   * write. Lets a registry share fresh data with related entries.
+   */
+  readonly onPublish?: (
+    controller: KeyedQueryControllerBase & Record<string, unknown>,
+    data: unknown,
+  ) => void;
   readonly shouldFetchOnWatch?: (
     controller: KeyedQueryControllerBase & Record<string, unknown>,
   ) => boolean;
@@ -88,8 +108,19 @@ export interface KeyedQueryRegistry<TState> {
   readonly defaultGcTime: number;
   registerController(controller: KeyedQueryControllerBase & Record<string, unknown>): void;
   setQueryState(compositeKey: string, next: TState): void;
+  /**
+   * Record a local write to the controller's data. Reads already in flight are
+   * superseded: they finish their bookkeeping but never publish, and the next
+   * run starts a fresh read instead of joining them.
+   */
+  markLocalWrite(controller: KeyedQueryControllerBase & Record<string, unknown>): void;
   getQueryState(compositeKey: string): TState;
   runController(controller: KeyedQueryControllerBase & Record<string, unknown>): Promise<void>;
+  /**
+   * The cadence the controller's subscribers ask for given its current data
+   * (the fastest one), before failure backoff and jitter; null when none polls.
+   */
+  pollInterval(controller: KeyedQueryControllerBase & Record<string, unknown>): number | null;
   schedulePoll(controller: KeyedQueryControllerBase & Record<string, unknown>): void;
   clearPollTimer(controller: KeyedQueryControllerBase & Record<string, unknown>): void;
   touch(controller: KeyedQueryControllerBase & Record<string, unknown>): void;
@@ -162,6 +193,11 @@ export function createKeyedQueryRegistry<TState>(
   );
 
   function setQueryState(compositeKey: string, next: TState): void {
+    // `Atom.family` caches atoms, so its factory (which records the key) only
+    // runs once per key. Re-record on every write so a key written again after
+    // an evict/reset/clear (e.g. by `updateData` without a watcher) is still
+    // reset by the next `clearEnvironment` / `resetForTests`.
+    knownStateKeys.add(compositeKey);
     appAtomRegistry.set(queryStateAtom(compositeKey), next);
   }
 
@@ -266,44 +302,60 @@ export function createKeyedQueryRegistry<TState>(
     return new Set(byEnvironment ?? byFamily ?? controllers.keys());
   }
 
+  function markLocalWrite(controller: KeyedQueryControllerBase & Record<string, unknown>): void {
+    controller.localWriteEpoch = (controller.localWriteEpoch ?? 0) + 1;
+    controller.lastLocalWriteAt = Date.now();
+  }
+
   async function runController(
     controller: KeyedQueryControllerBase & Record<string, unknown>,
   ): Promise<void> {
-    if (controller.inFlightPromise) return controller.inFlightPromise;
+    const localWriteEpoch = controller.localWriteEpoch ?? 0;
+    // Join an in-flight read only when no local write happened since it began;
+    // otherwise its result predates that write and a fresh read is needed. The
+    // token bump below fences the superseded read.
+    if (
+      controller.inFlightPromise &&
+      (controller.inFlightLocalWriteEpoch ?? 0) === localWriteEpoch
+    ) {
+      return controller.inFlightPromise;
+    }
     touchController(controller);
     const token = ++controller.fetchToken;
+    const isFenced = () =>
+      token !== controller.fetchToken || controllers.get(controller.compositeKey) !== controller;
+    const isSupersededByLocalWrite = () => (controller.localWriteEpoch ?? 0) !== localWriteEpoch;
     const promise = (async () => {
       config.onRunStart?.(controller);
       const current = getQueryState(controller.compositeKey);
       setQueryState(controller.compositeKey, config.buildFetchingState(current));
 
+      let published: { readonly data: unknown } | null = null;
       try {
         const data = await controller.run();
-        if (
-          token !== controller.fetchToken ||
-          controllers.get(controller.compositeKey) !== controller
-        ) {
-          return;
-        }
+        if (isFenced()) return;
         config.onRunEnd?.(controller, "success");
+        // The read is older than a local write: keep the write, and leave
+        // `lastFetchedAt` untouched so the entry still reads as stale.
+        if (isSupersededByLocalWrite()) return;
         controller.hasData = true;
         controller.lastFetchedAt = Date.now();
         setQueryState(controller.compositeKey, config.buildSuccessState(data));
+        published = { data };
       } catch (error) {
-        if (
-          token !== controller.fetchToken ||
-          controllers.get(controller.compositeKey) !== controller
-        ) {
-          return;
-        }
+        if (isFenced()) return;
         config.onRunEnd?.(controller, "error");
+        if (isSupersededByLocalWrite()) return;
         setQueryState(
           controller.compositeKey,
           config.buildErrorState(getQueryState(controller.compositeKey), toError(error)),
         );
       }
+      // Outside the try: a throwing hook must not turn a published read into an error.
+      if (published !== null) config.onPublish?.(controller, published.data);
     })();
     controller.inFlightPromise = promise;
+    controller.inFlightLocalWriteEpoch = localWriteEpoch;
     try {
       await promise;
     } finally {
@@ -333,6 +385,19 @@ export function createKeyedQueryRegistry<TState>(
     }
   }
 
+  function resolveControllerPollInterval(
+    controller: KeyedQueryControllerBase & Record<string, unknown>,
+  ): number | null {
+    const data = pollData(controller);
+    let interval: number | null = null;
+    for (const subscriber of controller.pollSubscribers.values()) {
+      const candidate = subscriber.resolveIntervalMs?.(data);
+      if (candidate === undefined || candidate === false || candidate <= 0) continue;
+      interval = interval === null ? candidate : Math.min(interval, candidate);
+    }
+    return interval;
+  }
+
   function scheduleControllerPoll(
     controller: KeyedQueryControllerBase & Record<string, unknown>,
   ): void {
@@ -344,14 +409,7 @@ export function createKeyedQueryRegistry<TState>(
     ) {
       return;
     }
-    const state = getQueryState(controller.compositeKey);
-    const data = config.selectPollData ? config.selectPollData(state) : state;
-    let interval: number | null = null;
-    for (const subscriber of controller.pollSubscribers.values()) {
-      const candidate = subscriber.resolveIntervalMs?.(data);
-      if (candidate === undefined || candidate === false || candidate <= 0) continue;
-      interval = interval === null ? candidate : Math.min(interval, candidate);
-    }
+    const interval = resolveControllerPollInterval(controller);
     if (interval === null) {
       return;
     }
@@ -504,8 +562,10 @@ export function createKeyedQueryRegistry<TState>(
     defaultGcTime,
     registerController,
     setQueryState,
+    markLocalWrite,
     getQueryState,
     runController,
+    pollInterval: resolveControllerPollInterval,
     schedulePoll: scheduleControllerPoll,
     clearPollTimer: clearControllerPollTimer,
     touch: touchController,
@@ -806,6 +866,10 @@ export function defineKeyedQueryByInput<
     } as TState);
     const controller = registry.controllers.get(compositeKey);
     if (controller) {
+      // Supersede reads already in flight: they started before this write, so
+      // publishing their result would silently revert it (e.g. an optimistic
+      // update overwritten by a poll that was racing the mutation).
+      registry.markLocalWrite(controller);
       controller.hasData = next !== null;
       registry.schedulePoll(controller);
     }

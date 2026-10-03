@@ -56,3 +56,43 @@ export function resolveSourceControlFailureDelay(input: {
     Math.max(1_000, input.baseDelayMs) * 2 ** exponent,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Workflow run jobs
+//
+// Each run's jobs poll on their own evidence: the runs list says the run is
+// not completed, or the cached jobs still show unfinished work. Every running
+// workflow is therefore followed (not just one "active" run), and a run that
+// finishes gets one final read because its cached jobs still show it running.
+// ---------------------------------------------------------------------------
+
+function isCompletedWorkflowStatus(status: string): boolean {
+  return status.trim().toLowerCase() === "completed";
+}
+
+function hasUnfinishedJobs(jobs: ReadonlyArray<{ readonly status: string }>): boolean {
+  return jobs.some((job) => !isCompletedWorkflowStatus(job.status));
+}
+
+export function resolveWorkflowRunJobsPhase(input: {
+  /** The runs list reports the run as not completed. */
+  readonly runIncomplete: boolean;
+  /** Cached jobs of the run; null before the first read. */
+  readonly jobs: ReadonlyArray<{ readonly status: string }> | null;
+}): Extract<SourceControlRefreshPhase, "active" | "settled"> {
+  return input.runIncomplete || (input.jobs !== null && hasUnfinishedJobs(input.jobs))
+    ? "active"
+    : "settled";
+}
+
+/**
+ * True when the cached jobs contradict the run's status after it changed: a
+ * finished run whose jobs still show work (take the final read now), or a
+ * (re)started run whose jobs all look finished (start following it now).
+ */
+export function workflowRunJobsContradictRun(input: {
+  readonly runIncomplete: boolean;
+  readonly jobs: ReadonlyArray<{ readonly status: string }>;
+}): boolean {
+  return input.runIncomplete !== hasUnfinishedJobs(input.jobs);
+}

@@ -2,17 +2,14 @@ import { useAtomValue } from "@effect/atom-react";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 import type {
   ChangeRequest,
+  ChangeRequestActivity,
+  ChangeRequestCreateInput,
+  ChangeRequestUpdateAction,
   EnvironmentId,
-  SourceControlAddCommentReactionInput,
-  SourceControlAddChangeRequestCommentInput,
-  SourceControlAddIssueCommentInput,
   SourceControlAssigneeCandidate,
   SourceControlChangeRequestDetail,
   SourceControlChangeRequestMergeMethod,
-  SourceControlCommentReaction,
-  SourceControlCommentReactionContent,
   SourceControlCreateIssueInput,
-  SourceControlIssueComment,
   SourceControlIssueDetail,
   SourceControlIssueSummary,
   SourceControlLabel,
@@ -26,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { useSettings } from "~/hooks/useSettings";
 import {
+  changeRequestActivityBinding,
   changeRequestDetailBinding,
   changeRequestDiffBinding,
   changeRequestListBinding,
@@ -35,14 +33,33 @@ import {
   issueLabelsBinding,
   issueListBinding,
   issueSearchBinding,
-  invalidateSourceControl,
+  addChangeRequestComment,
+  addIssueComment,
+  createChangeRequest,
+  invalidateSourceControlAfterWorkflowRerun,
+  invalidateSourceControlIssueLists,
   mergeSourceControlChangeRequest,
+  replyToReviewThread,
   repositorySearchBinding,
+  setReviewThreadResolved,
+  submitChangeRequestReview,
+  toggleChangeRequestCommentReaction,
+  toggleIssueCommentReaction,
+  updateChangeRequest,
+  updateChangeRequestComment,
   workflowJobLogBinding,
   workflowRunJobsBinding,
   workflowRunsBinding,
+  type AddCommentPayload,
+  type ChangeRequestMutationTarget,
+  type CommentReactionPayload,
   type QueryBinding,
+  type ReplyToReviewThreadPayload,
+  type SetReviewThreadResolvedPayload,
+  type SourceControlChangeRequestActivityInput,
   type SourceControlChangeRequestDetailInput,
+  type SubmitChangeRequestReviewPayload,
+  type UpdateChangeRequestCommentPayload,
   type SourceControlChangeRequestDiffInput,
   type SourceControlChangeRequestListInput,
   type SourceControlChangeRequestSearchInput,
@@ -58,54 +75,38 @@ import {
 } from "./sourceControlAtoms";
 import {
   resolveSourceControlRefreshDelay,
+  resolveWorkflowRunJobsPhase,
   shouldRefreshSourceControlOnLifecycle,
+  workflowRunJobsContradictRun,
 } from "./sourceControlRefreshPolicy";
 
 export {
   fetchSourceControlChangeRequestDetail,
   fetchSourceControlIssueDetail,
   invalidateSourceControl,
+  invalidateSourceControlWorkflowRuns,
+  loadChangeRequestFileContents,
+  retrySourceControlWorkflowJobLog,
+  writeChangeRequestDetail,
+  type ChangeRequestMutationTarget,
+  type ReplyToReviewThreadPayload,
+  type SetReviewThreadResolvedPayload,
+  type SourceControlChangeRequestActivityInput,
+  type SourceControlChangeRequestFileContentsInput,
   type SourceControlRepositorySearchInput,
   type SourceControlQueryState,
+  type SubmitChangeRequestReviewPayload,
+  type UpdateChangeRequestCommentPayload,
 } from "./sourceControlAtoms";
-
-type CommentReactionDetail = SourceControlIssueDetail | SourceControlChangeRequestDetail;
+export {
+  ChangeRequestFileContentsUnavailableError,
+  createChangeRequestDiffFilesLoader,
+  type ChangeRequestDiffFilesTarget,
+} from "./changeRequestDiffFiles";
 
 type SourceControlWorkflowRerunPayload =
   | { readonly target: "failed-jobs" }
   | { readonly target: "job"; readonly jobId: string };
-
-function toggleReactionList(
-  reactions: ReadonlyArray<SourceControlCommentReaction> | undefined,
-  content: SourceControlCommentReactionContent,
-): ReadonlyArray<SourceControlCommentReaction> | undefined {
-  const existing = reactions?.find((reaction) => reaction.content === content);
-  const others = reactions?.filter((reaction) => reaction.content !== content) ?? [];
-  if (!existing) {
-    return [...others, { content, count: 1, viewerHasReacted: true }];
-  }
-  const viewerHasReacted = existing.viewerHasReacted === true;
-  const nextCount = viewerHasReacted ? Math.max(0, existing.count - 1) : existing.count + 1;
-  if (nextCount <= 0) return others.length > 0 ? others : undefined;
-  return [...others, { ...existing, count: nextCount, viewerHasReacted: !viewerHasReacted }];
-}
-
-function toggleCommentReactionInDetail<TDetail extends CommentReactionDetail>(
-  detail: TDetail | null | undefined,
-  input: Pick<SourceControlAddCommentReactionInput, "commentId" | "content">,
-): TDetail | null | undefined {
-  if (!detail) return detail;
-  let changed = false;
-  const comments = detail.comments.map((comment): SourceControlIssueComment => {
-    if (comment.id !== input.commentId) return comment;
-    changed = true;
-    const reactions = toggleReactionList(comment.reactions, input.content);
-    if (reactions) return { ...comment, reactions };
-    const { reactions: _reactions, ...rest } = comment;
-    return rest;
-  });
-  return changed ? ({ ...detail, comments } as TDetail) : detail;
-}
 
 // ---------------------------------------------------------------------------
 // Reactive read hooks (atom-backed replacements for the former
@@ -116,6 +117,12 @@ function useWatchedQuery<TInput, TData>(
   binding: QueryBinding<TInput, TData>,
   input: TInput,
   resolveIntervalMs?: (data: TData | null) => number | false,
+  /**
+   * Re-subscribes when it changes, so a cadence that depends on caller state
+   * (not on the fetched data) takes effect immediately instead of after the
+   * next fetch.
+   */
+  cadenceKey?: string | number | boolean | null,
 ): SourceControlQueryState<TData> {
   const targetKey = binding.targetKey(input);
   const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
@@ -141,7 +148,7 @@ function useWatchedQuery<TInput, TData>(
           staleTimeMs: staleTime,
         }),
     });
-  }, [binding, refreshMode, targetKey]);
+  }, [binding, refreshMode, targetKey, cadenceKey]);
 
   return useAtomValue(binding.atomFor(input));
 }
@@ -208,6 +215,25 @@ export function useSourceControlChangeRequestDiff(
   return useWatchedQuery(changeRequestDiffBinding, input);
 }
 
+/**
+ * Timeline, review threads, and viewer capabilities for one change request.
+ * Polls at the "active" cadence while `active` (pass `detail.state === "open"`),
+ * otherwise only refreshes on demand, lifecycle recovery, or invalidation.
+ */
+export function useSourceControlChangeRequestActivity(
+  input: SourceControlChangeRequestActivityInput & { readonly active?: boolean },
+): SourceControlQueryState<ChangeRequestActivity> {
+  const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
+  const active = input.active ?? false;
+  return useWatchedQuery(
+    changeRequestActivityBinding,
+    input,
+    () =>
+      resolveSourceControlRefreshDelay({ mode: refreshMode, phase: active ? "active" : "settled" }),
+    active,
+  );
+}
+
 export function useSourceControlWorkflowRuns(
   input: SourceControlWorkflowRunsInput,
   resolveIntervalMs?: (data: SourceControlWorkflowRunListResult | null) => number | false,
@@ -239,11 +265,21 @@ export interface SourceControlWorkflowRunJobsBatchResult {
   readonly isLoading: boolean;
 }
 
+/**
+ * Jobs of several workflow runs. Each run's jobs poll at the active cadence
+ * while the runs list reports the run incomplete or its cached jobs still show
+ * unfinished work, so every running workflow is followed. The cadence is read
+ * per poll from a ref: status changes never re-subscribe (which would refetch
+ * every stale settled run). When a run's status flips and its cached jobs
+ * contradict it, that run alone is read once (the final read of a finished
+ * run, or the first read of a re-run).
+ */
 export function useSourceControlWorkflowRunJobsBatch(input: {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
   readonly runIds: ReadonlyArray<string>;
-  readonly activeRunId: string | null;
+  /** Runs the runs list reports as not completed (queued, waiting, in progress). */
+  readonly incompleteRunIds: ReadonlyArray<string>;
   readonly enabled: boolean;
 }): SourceControlWorkflowRunJobsBatchResult {
   const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
@@ -267,14 +303,24 @@ export function useSourceControlWorkflowRunJobsBatch(input: {
   const snapshotRef = useRef<
     ReadonlyArray<SourceControlQueryState<SourceControlWorkflowRunJobsResult>>
   >([]);
+  const incompleteSignature = input.incompleteRunIds.toSorted().join("\u0001");
+  const incompleteRunIds = useMemo(
+    () => new Set(incompleteSignature ? incompleteSignature.split("\u0001") : []),
+    [incompleteSignature],
+  );
+  const incompleteRunIdsRef = useRef(incompleteRunIds);
+  incompleteRunIdsRef.current = incompleteRunIds;
 
   useEffect(() => {
     const releases = queryInputsRef.current.map((queryInput) =>
       workflowRunJobsBinding.watch(queryInput, {
-        resolveIntervalMs: () =>
+        resolveIntervalMs: (data) =>
           resolveSourceControlRefreshDelay({
             mode: refreshMode,
-            phase: queryInput.runId === input.activeRunId ? "active" : "settled",
+            phase: resolveWorkflowRunJobsPhase({
+              runIncomplete: incompleteRunIdsRef.current.has(queryInput.runId ?? ""),
+              jobs: data?.jobs ?? null,
+            }),
           }),
         shouldRefreshOnLifecycle: ({ hasData, lastFetchedAt, staleTime }) =>
           shouldRefreshSourceControlOnLifecycle({
@@ -289,7 +335,25 @@ export function useSourceControlWorkflowRunJobsBatch(input: {
     return () => {
       for (const release of releases) release();
     };
-  }, [batchSignature, input.activeRunId, refreshMode]);
+  }, [batchSignature, refreshMode]);
+
+  // A run's status flipped: read it once if its cached jobs contradict the
+  // new status. Never-read runs are left to their watch.
+  const previousIncompleteRef = useRef<ReadonlySet<string> | null>(null);
+  useEffect(() => {
+    const previous = previousIncompleteRef.current;
+    previousIncompleteRef.current = incompleteRunIds;
+    if (previous === null) return;
+    for (const queryInput of queryInputsRef.current) {
+      const runId = queryInput.runId ?? "";
+      const runIncomplete = incompleteRunIds.has(runId);
+      if (previous.has(runId) === runIncomplete) continue;
+      const jobs = workflowRunJobsBinding.snapshotFor(queryInput).data?.jobs;
+      if (jobs && workflowRunJobsContradictRun({ runIncomplete, jobs })) {
+        workflowRunJobsBinding.refresh(queryInput);
+      }
+    }
+  }, [incompleteRunIds]);
 
   const subscribe = useCallback(
     (onStoreChange: () => void) => {
@@ -408,207 +472,53 @@ export function useCreateIssueMutation(input: { environmentId: EnvironmentId }) 
       requireEnvironmentConnection(environmentId).client.sourceControl.createIssue(payload),
     {
       onSuccess: (_result, payload) => {
-        invalidateSourceControl({ environmentId, cwd: payload.cwd });
+        invalidateSourceControlIssueLists({ environmentId, cwd: payload.cwd });
       },
     },
   );
 }
 
-export function useAddIssueCommentMutation(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  reference: string;
-}) {
-  const detailInput: SourceControlIssueDetailInput = {
-    environmentId: input.environmentId,
-    cwd: input.cwd,
-    reference: input.reference,
-    fullContent: true,
-  };
-  const mutation = useSourceControlMutation(
-    (payload: Pick<SourceControlAddIssueCommentInput, "body" | "clientMutationId">) => {
-      if (!input.environmentId || !input.cwd) {
-        throw new Error("Issue comments are unavailable.");
-      }
-      return requireEnvironmentConnection(input.environmentId).client.sourceControl.addIssueComment(
-        {
-          cwd: input.cwd,
-          reference: input.reference,
-          body: payload.body,
-          ...(payload.clientMutationId !== undefined
-            ? { clientMutationId: payload.clientMutationId }
-            : {}),
-        },
-      );
-    },
-    {
-      onSuccess: (result) => {
-        issueDetailBinding.updateData(detailInput, () => result.detail);
-        invalidateSourceControl({ environmentId: input.environmentId, cwd: input.cwd });
-      },
-    },
-  );
-  return mutation;
+interface CommentMutationInput {
+  readonly environmentId: EnvironmentId | null;
+  readonly cwd: string | null;
+  readonly reference: string;
 }
 
-export function useAddIssueCommentReactionMutation(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  reference: string;
-}) {
-  const detailInputRef = useRef<SourceControlIssueDetailInput>({
-    environmentId: input.environmentId,
-    cwd: input.cwd,
-    reference: input.reference,
-    fullContent: true,
-  });
-  detailInputRef.current = {
-    environmentId: input.environmentId,
-    cwd: input.cwd,
-    reference: input.reference,
-    fullContent: true,
-  };
-  const baseMutation = useSourceControlMutation(
-    (payload: Pick<SourceControlAddCommentReactionInput, "commentId" | "content">) => {
-      if (!input.environmentId || !input.cwd) {
-        throw new Error("Comment reactions are unavailable.");
-      }
-      return requireEnvironmentConnection(
-        input.environmentId,
-      ).client.sourceControl.addIssueCommentReaction({
-        cwd: input.cwd,
-        reference: input.reference,
-        commentId: payload.commentId,
-        content: payload.content,
-      });
-    },
-    {
-      onSuccess: (result) => {
-        issueDetailBinding.updateData(detailInputRef.current, () => result.detail);
-        invalidateSourceControl({ environmentId: input.environmentId, cwd: input.cwd });
-      },
-    },
-  );
-
-  const mutateAsync = useCallback(
-    async (
-      payload: Pick<SourceControlAddCommentReactionInput, "commentId" | "content">,
-    ): Promise<Awaited<ReturnType<typeof baseMutation.mutateAsync>>> => {
-      const detailInput = detailInputRef.current;
-      const previous = issueDetailBinding.snapshotFor(detailInput).data;
-      issueDetailBinding.updateData(
-        detailInput,
-        (current) => toggleCommentReactionInDetail(current, payload) ?? current,
-      );
-      try {
-        return await baseMutation.mutateAsync(payload);
-      } catch (error) {
-        issueDetailBinding.updateData(detailInput, () => previous);
-        throw error;
-      }
-    },
-    [baseMutation],
-  );
-
-  return { ...baseMutation, mutateAsync };
+/** Adds an issue comment; writes the returned detail and refreshes the issue lists. */
+export function useAddIssueCommentMutation(input: CommentMutationInput) {
+  return useSourceControlMutation((payload: AddCommentPayload) => addIssueComment(input, payload));
 }
 
-export function useAddChangeRequestCommentMutation(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  reference: string;
-}) {
-  const detailInput: SourceControlChangeRequestDetailInput = {
-    environmentId: input.environmentId,
-    cwd: input.cwd,
-    reference: input.reference,
-    fullContent: true,
-  };
-  return useSourceControlMutation(
-    (payload: Pick<SourceControlAddChangeRequestCommentInput, "body" | "clientMutationId">) => {
-      if (!input.environmentId || !input.cwd) {
-        throw new Error("Pull request comments are unavailable.");
-      }
-      return requireEnvironmentConnection(
-        input.environmentId,
-      ).client.sourceControl.addChangeRequestComment({
-        cwd: input.cwd,
-        reference: input.reference,
-        body: payload.body,
-        ...(payload.clientMutationId !== undefined
-          ? { clientMutationId: payload.clientMutationId }
-          : {}),
-      });
-    },
-    {
-      onSuccess: (result) => {
-        changeRequestDetailBinding.updateData(detailInput, () => result.detail);
-        invalidateSourceControl({ environmentId: input.environmentId, cwd: input.cwd });
-      },
-    },
+/** Toggles a reaction on an issue comment, optimistically, with exact rollback. */
+export function useAddIssueCommentReactionMutation(input: CommentMutationInput) {
+  return useSourceControlMutation((payload: CommentReactionPayload) =>
+    toggleIssueCommentReaction(input, payload),
   );
 }
 
-export function useAddChangeRequestCommentReactionMutation(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  reference: string;
-}) {
-  const detailInputRef = useRef<SourceControlChangeRequestDetailInput>({
-    environmentId: input.environmentId,
-    cwd: input.cwd,
-    reference: input.reference,
-    fullContent: true,
-  });
-  detailInputRef.current = {
-    environmentId: input.environmentId,
-    cwd: input.cwd,
-    reference: input.reference,
-    fullContent: true,
-  };
-  const baseMutation = useSourceControlMutation(
-    (payload: Pick<SourceControlAddCommentReactionInput, "commentId" | "content">) => {
-      if (!input.environmentId || !input.cwd) {
-        throw new Error("Comment reactions are unavailable.");
-      }
-      return requireEnvironmentConnection(
-        input.environmentId,
-      ).client.sourceControl.addChangeRequestCommentReaction({
-        cwd: input.cwd,
-        reference: input.reference,
-        commentId: payload.commentId,
-        content: payload.content,
-      });
-    },
-    {
-      onSuccess: (result) => {
-        changeRequestDetailBinding.updateData(detailInputRef.current, () => result.detail);
-        invalidateSourceControl({ environmentId: input.environmentId, cwd: input.cwd });
-      },
-    },
+/** Adds a conversation comment; writes the returned detail and refreshes the timeline only. */
+export function useAddChangeRequestCommentMutation(input: CommentMutationInput) {
+  return useSourceControlMutation((payload: AddCommentPayload) =>
+    addChangeRequestComment(input, payload),
   );
+}
 
-  const mutateAsync = useCallback(
-    async (
-      payload: Pick<SourceControlAddCommentReactionInput, "commentId" | "content">,
-    ): Promise<Awaited<ReturnType<typeof baseMutation.mutateAsync>>> => {
-      const detailInput = detailInputRef.current;
-      const previous = changeRequestDetailBinding.snapshotFor(detailInput).data;
-      changeRequestDetailBinding.updateData(
-        detailInput,
-        (current) => toggleCommentReactionInDetail(current, payload) ?? current,
-      );
-      try {
-        return await baseMutation.mutateAsync(payload);
-      } catch (error) {
-        changeRequestDetailBinding.updateData(detailInput, () => previous);
-        throw error;
-      }
-    },
-    [baseMutation],
+/**
+ * Toggles a reaction on a change-request comment, optimistically, with exact
+ * rollback; refreshes the timeline only (never the diff, checks, or lists).
+ */
+export function useAddChangeRequestCommentReactionMutation(input: CommentMutationInput) {
+  return useSourceControlMutation((payload: CommentReactionPayload) =>
+    toggleChangeRequestCommentReaction(input, payload),
   );
+}
 
-  return { ...baseMutation, mutateAsync };
+export interface MergeChangeRequestPayload {
+  readonly mergeMethod: SourceControlChangeRequestMergeMethod;
+  /** Delete the head branch after a successful (non-queued) merge. */
+  readonly deleteBranch?: boolean;
+  /** Refuse to merge when the head moved since the user looked. */
+  readonly expectedHeadSha?: string | null;
 }
 
 export function useMergeChangeRequestMutation(input: {
@@ -616,14 +526,61 @@ export function useMergeChangeRequestMutation(input: {
   cwd: string | null;
   reference: string;
 }) {
-  return useSourceControlMutation(
-    (payload: { readonly mergeMethod: SourceControlChangeRequestMergeMethod }) =>
-      mergeSourceControlChangeRequest({
-        environmentId: input.environmentId,
-        cwd: input.cwd,
-        reference: input.reference,
-        mergeMethod: payload.mergeMethod,
-      }),
+  return useSourceControlMutation((payload: MergeChangeRequestPayload) =>
+    mergeSourceControlChangeRequest({
+      environmentId: input.environmentId,
+      cwd: input.cwd,
+      reference: input.reference,
+      mergeMethod: payload.mergeMethod,
+      ...(payload.deleteBranch !== undefined ? { deleteBranch: payload.deleteBranch } : {}),
+      ...(payload.expectedHeadSha ? { expectedHeadSha: payload.expectedHeadSha } : {}),
+    }),
+  );
+}
+
+/** Submits a whole review (verdict + line comments); refreshes detail, timeline, and lists. */
+export function useSubmitChangeRequestReviewMutation(target: ChangeRequestMutationTarget) {
+  return useSourceControlMutation((payload: SubmitChangeRequestReviewPayload) =>
+    submitChangeRequestReview(target, payload),
+  );
+}
+
+/** Replies to a review thread; writes the returned thread, then refreshes the activity. */
+export function useReplyToReviewThreadMutation(target: ChangeRequestMutationTarget) {
+  return useSourceControlMutation((payload: ReplyToReviewThreadPayload) =>
+    replyToReviewThread(target, payload),
+  );
+}
+
+/** Optimistically resolves/unresolves a thread with exact per-thread rollback. */
+export function useSetReviewThreadResolvedMutation(target: ChangeRequestMutationTarget) {
+  return useSourceControlMutation((payload: SetReviewThreadResolvedPayload) =>
+    setReviewThreadResolved(target, payload),
+  );
+}
+
+/** Edits or deletes a conversation comment, review body, or review comment. */
+export function useUpdateChangeRequestCommentMutation(target: ChangeRequestMutationTarget) {
+  return useSourceControlMutation((payload: UpdateChangeRequestCommentPayload) =>
+    updateChangeRequestComment(target, payload),
+  );
+}
+
+/**
+ * Lifecycle actions (edit, draft/ready, close/reopen, reviewers, labels,
+ * assignees, update branch, auto-merge, delete branch). Predictable actions
+ * apply optimistically to both detail cache variants and roll back on failure.
+ */
+export function useUpdateChangeRequestMutation(target: ChangeRequestMutationTarget) {
+  return useSourceControlMutation((action: ChangeRequestUpdateAction) =>
+    updateChangeRequest(target, action),
+  );
+}
+
+export function useCreateChangeRequestMutation(input: { environmentId: EnvironmentId | null }) {
+  const { environmentId } = input;
+  return useSourceControlMutation((payload: ChangeRequestCreateInput) =>
+    createChangeRequest(environmentId, payload),
   );
 }
 
@@ -645,7 +602,10 @@ export function useRerunWorkflowMutation(input: {
     },
     {
       onSuccess: () => {
-        invalidateSourceControl({ environmentId: input.environmentId, cwd: input.cwd });
+        invalidateSourceControlAfterWorkflowRerun({
+          environmentId: input.environmentId,
+          cwd: input.cwd,
+        });
       },
     },
   );
