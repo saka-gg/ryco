@@ -1,0 +1,773 @@
+/* Per-direction surfaces. Every direction drops the liquid layer, the rim
+   rings, the sheen and the dialog viewport blur. They differ in how the
+   composer separates from the transcript, how dialogs arrive, and in motion
+   personality. */
+
+/* ═════════════════════════ shared: floating composer (A, B) ═════════════════════════ */
+
+.app:is([data-dir="a"], [data-dir="b"]) .composer-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0 28px 12px;
+  z-index: 5;
+}
+
+/* No glass: the transcript fades out just above the composer instead of
+   sliding underneath a frosted plate. Solid plate, zero backdrop work. */
+.app:is([data-dir="a"], [data-dir="b"]) .transcript {
+  --fade-top: calc(var(--composer-h, 140px) + 40px);
+  -webkit-mask-image: linear-gradient(
+    to top,
+    transparent 0,
+    transparent calc(var(--composer-h, 140px) - 6px),
+    #000 var(--fade-top)
+  );
+  mask-image: linear-gradient(
+    to top,
+    transparent 0,
+    transparent calc(var(--composer-h, 140px) - 6px),
+    #000 var(--fade-top)
+  );
+}
+
+/* ═════════════════════════ A · Hairline ═════════════════════════ */
+
+.app[data-dir="a"] .composer {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  transition:
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+html:not(.dark) .app[data-dir="a"] .composer {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+}
+
+.app[data-dir="a"] .composer:focus-within {
+  border-color: color-mix(in srgb, var(--foreground) 22%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--foreground) 6%, transparent);
+}
+
+.app[data-dir="a"] .composer[data-drag] {
+  border-color: color-mix(in srgb, var(--info-foreground) 55%, transparent);
+}
+
+/* A's running state: a hairline sweep along the composer's top edge. */
+.app[data-dir="a"] .composer::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: -1px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--foreground) 55%, transparent),
+    transparent
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  opacity: 0;
+  transition: opacity var(--t-med);
+}
+
+.app[data-dir="a"] .composer[data-running]::before {
+  opacity: 1;
+  animation: sweep calc(1400ms * max(var(--speed), 0.001)) var(--ease-in-out) infinite;
+}
+
+@keyframes sweep {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+
+.modal.a {
+  max-width: 452px;
+  background: var(--popover);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 24px 48px -18px rgb(0 0 0 / 0.2);
+}
+
+html.dark .modal.a {
+  box-shadow: 0 28px 64px -16px rgb(0 0 0 / 0.7);
+}
+
+.modal.a .dlg-h {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 16px 4px 20px;
+}
+
+.modal.a .dlg-h h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.modal.a .dlg-h p {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.modal.a .dlg-h > div {
+  flex: 1;
+}
+
+.modal.a .dlg-b {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 20px 18px;
+}
+
+.modal.a .name-row {
+  display: flex;
+  gap: 8px;
+}
+
+.icon-pick {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--input);
+  color: var(--foreground);
+  transition:
+    background-color var(--t-fast),
+    border-color var(--t-fast);
+}
+
+.icon-pick:hover,
+.icon-pick[data-open] {
+  background: var(--muted);
+}
+
+.icon-pick .i {
+  transition: transform var(--t-med) var(--spring-snappy);
+}
+
+.modal.a .toggle-row,
+.modal.b .toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.modal.a .toggle-row {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.toggle-row .tr-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.toggle-row .tr-text b {
+  font-weight: 500;
+  font-size: 13.5px;
+}
+
+.toggle-row .tr-text small {
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+}
+
+.modal.a .dlg-f,
+.modal.b .dlg-f {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 20px 18px;
+}
+
+.dlg-f .spacer {
+  flex: 1;
+}
+
+/* Small confirm (A, B). */
+.modal.confirm {
+  max-width: 360px;
+  padding: 18px 20px;
+}
+
+.modal.confirm h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.modal.confirm p {
+  margin: 6px 0 16px;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.modal.confirm .row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ═════════════════════════ B · Morph (tonal) ═════════════════════════ */
+
+.app[data-dir="b"] {
+  --tone-1: color-mix(in srgb, #000 4%, var(--background));
+  --tone-2: color-mix(in srgb, #000 6.5%, var(--background));
+  --tone-3: color-mix(in srgb, #000 9%, var(--background));
+  --composer-height-ease: var(--spring-soft);
+}
+
+html.dark .app[data-dir="b"] {
+  --tone-1: color-mix(in srgb, #fff 6%, var(--background));
+  --tone-2: color-mix(in srgb, #fff 8.5%, var(--background));
+  --tone-3: color-mix(in srgb, #fff 12%, var(--background));
+}
+
+.app[data-dir="b"] .composer {
+  background: var(--tone-1);
+  border-radius: 22px;
+  transition: background-color var(--t-med) var(--ease-out);
+}
+
+.app[data-dir="b"] .composer:focus-within {
+  background: var(--tone-2);
+}
+
+.app[data-dir="b"] .composer textarea {
+  padding: 16px 18px 6px;
+}
+
+.app[data-dir="b"] .ta-mirror {
+  padding: 16px 18px 6px;
+}
+
+.app[data-dir="b"] .toolbar {
+  padding: 6px 10px 10px;
+}
+
+.app[data-dir="b"] .tb:hover,
+.app[data-dir="b"] .tb[data-open] {
+  background: var(--tone-3);
+}
+
+.app[data-dir="b"] .tb.chip {
+  border-radius: 999px;
+  padding: 0 10px;
+}
+
+.app[data-dir="b"] .att-chip {
+  background: var(--tone-3);
+  border-radius: 10px;
+}
+
+/* B's stop control grows into a labelled pill with the elapsed time. */
+.app[data-dir="b"] .send {
+  height: 32px;
+  width: 32px;
+}
+
+.app[data-dir="b"] .send .stop-label {
+  display: block;
+  grid-area: 1 / 1;
+  padding-left: 20px;
+  font-size: 12.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+
+.app[data-dir="b"] .composer[data-running] .send {
+  width: 100px;
+  justify-items: start;
+  padding-left: 11px;
+}
+
+.app[data-dir="b"] .composer[data-running] .send .stop-label {
+  opacity: 1;
+  transition-delay: calc(80ms * var(--speed));
+}
+
+.app[data-dir="b"] .composer[data-running] .send .i-stop {
+  transform: none;
+}
+
+.app[data-dir="b"] .msg-user {
+  background: var(--tone-1);
+  border-radius: 18px;
+}
+
+/* Dialog: no border at all — tone + one soft shadow. */
+.modal.b {
+  max-width: 456px;
+  background: var(--popover);
+  border-radius: 20px;
+  box-shadow:
+    0 30px 60px -20px rgb(0 0 0 / 0.22),
+    0 0 0 1px rgb(0 0 0 / 0.03);
+}
+
+html.dark .modal.b {
+  background: color-mix(in srgb, #fff 7%, var(--background));
+  box-shadow: 0 30px 70px -18px rgb(0 0 0 / 0.75);
+}
+
+.morph-ghost.dialog-b {
+  background: var(--popover);
+  border-radius: 20px;
+  box-shadow: 0 30px 60px -20px rgb(0 0 0 / 0.22);
+}
+
+html.dark .morph-ghost.dialog-b {
+  background: color-mix(in srgb, #fff 7%, var(--background));
+  box-shadow: 0 30px 70px -18px rgb(0 0 0 / 0.75);
+}
+
+.modal.b .id-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 14px 6px 18px;
+}
+
+.modal.b .id-tile {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  background: var(--tone-2, var(--muted));
+  color: var(--foreground);
+  transition:
+    background-color var(--t-fast),
+    transform var(--t-press) var(--ease-out);
+}
+
+html.dark .modal.b .id-tile {
+  background: rgb(255 255 255 / 0.08);
+}
+
+html:not(.dark) .modal.b .id-tile {
+  background: rgb(0 0 0 / 0.05);
+}
+
+.modal.b .id-tile:active {
+  transform: scale(0.95);
+}
+
+html .modal.b .id-tile[data-open] {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--foreground) 22%, transparent);
+}
+
+.modal.b .id-tile .i {
+  width: 20px;
+  height: 20px;
+}
+
+.modal.b .id-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal.b .id-name input {
+  border: 0;
+  outline: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.modal.b .id-name input::placeholder {
+  color: var(--muted-foreground);
+  opacity: 0.6;
+}
+
+.modal.b .id-name small {
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+}
+
+.modal.b .icon-row-wrap > div {
+  padding: 0 18px;
+}
+
+.modal.b .icon-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  padding: 10px 0 2px;
+}
+
+.modal.b .icon-row .icon-opt {
+  height: 50px;
+}
+
+.modal.b .icon-row .glide {
+  border-radius: 10px;
+}
+
+.modal.b .icon-row .sel {
+  position: absolute;
+  z-index: 0;
+  border-radius: 10px;
+  background: var(--primary);
+  pointer-events: none;
+  transition:
+    transform var(--t-slow) var(--spring-soft),
+    width var(--t-slow) var(--spring-soft);
+}
+
+.modal.b .icon-row .icon-opt[aria-checked="true"] {
+  color: var(--primary-foreground);
+}
+
+.modal.b .icon-row .icon-opt[aria-checked="true"]::after {
+  display: none;
+}
+
+.modal.b .dlg-b {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 18px 18px;
+}
+
+.modal.b .input {
+  border-color: transparent;
+  background: rgb(0 0 0 / 0.045);
+}
+
+html.dark .modal.b .input {
+  background: rgb(255 255 255 / 0.06);
+}
+
+.modal.b .input:focus,
+.modal.b .input:focus-within {
+  border-color: transparent;
+  background: rgb(0 0 0 / 0.065);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--foreground) 14%, transparent);
+}
+
+html.dark .modal.b .input:focus,
+html.dark .modal.b .input:focus-within {
+  background: rgb(255 255 255 / 0.085);
+}
+
+.modal.b .input[data-invalid] {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--destructive) 55%, transparent);
+}
+
+.modal.b .btn {
+  border-radius: 999px;
+  height: 34px;
+  padding: 0 14px;
+}
+
+.modal.b .toggle-row {
+  padding: 2px 0 0;
+}
+
+/* ═════════════════════════ C · Dock ═════════════════════════ */
+
+.app[data-dir="c"] .transcript {
+  padding-bottom: 28px;
+}
+
+.app[data-dir="c"] .composer-dock {
+  position: relative;
+  flex: none;
+  padding: 0 28px;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+}
+
+/* Running: an indeterminate segment travels along the dock's top rule. */
+.app[data-dir="c"] .composer-dock::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--foreground), transparent) no-repeat;
+  background-size: 22% 100%;
+  opacity: 0;
+  transition: opacity var(--t-fast);
+}
+
+.app[data-dir="c"] .composer-dock[data-running]::before {
+  opacity: 0.8;
+  animation: sweep calc(1100ms * max(var(--speed), 0.001)) linear infinite;
+}
+
+.app[data-dir="c"] .composer {
+  max-width: 744px;
+}
+
+.app[data-dir="c"] .composer textarea,
+.app[data-dir="c"] .ta-mirror {
+  padding: 14px 0 4px;
+}
+
+.app[data-dir="c"] .composer textarea {
+  height: 52px;
+}
+
+.app[data-dir="c"] .attachments {
+  padding: 12px 0 0;
+}
+
+.app[data-dir="c"] .toolbar {
+  padding: 2px 0 10px;
+  margin: 0 -8px;
+}
+
+.app[data-dir="c"] .tb:hover,
+.app[data-dir="c"] .tb[data-open] {
+  background: var(--muted);
+}
+
+.app[data-dir="c"] .tb-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.app[data-dir="c"] .send {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+}
+
+.app[data-dir="c"] .keyhints {
+  display: flex;
+  gap: 10px;
+  margin-right: 8px;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  opacity: 0;
+  transform: translateX(4px);
+  transition:
+    opacity var(--t-fast) var(--ease-out),
+    transform var(--t-fast) var(--ease-out);
+}
+
+.app[data-dir="c"] .composer:focus-within .keyhints {
+  opacity: 1;
+  transform: none;
+}
+
+.app[data-dir="c"] .keyhints kbd {
+  color: var(--foreground);
+}
+
+.app[data-dir="c"] .below-composer {
+  display: none;
+}
+
+.app[data-dir="c"] .msg-user {
+  border-radius: 12px;
+}
+
+/* Command panel. */
+.modal.c {
+  max-width: 560px;
+  background: var(--popover);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 48px -18px rgb(0 0 0 / 0.22);
+  overflow: hidden;
+}
+
+html.dark .modal.c {
+  box-shadow: 0 28px 64px -16px rgb(0 0 0 / 0.7);
+}
+
+.modal.c .cp-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px 0 16px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.modal.c .cp-top .spacer {
+  flex: 1;
+}
+
+.modal.c .cp-top b {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.modal.c .cp-cmd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+}
+
+.modal.c .cp-cmd .prompt {
+  color: var(--muted-foreground);
+  font-size: 15px;
+}
+
+.modal.c .cp-cmd input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 15px;
+}
+
+.modal.c .cp-cmd input::placeholder {
+  font-family: var(--font-sans);
+  color: var(--muted-foreground);
+  opacity: 0.8;
+}
+
+.modal.c .cp-sugg {
+  position: relative;
+  padding: 6px;
+}
+
+.modal.c .cp-group {
+  padding: 4px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--muted-foreground);
+}
+
+.modal.c .cp-item {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  text-align: left;
+}
+
+.modal.c .cp-item .cmdtext {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.modal.c .cp-item .enter {
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--t-fast);
+}
+
+.modal.c .cp-item[data-hl] .enter {
+  opacity: 1;
+}
+
+.modal.c .cp-empty {
+  padding: 10px;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+}
+
+.modal.c .cp-fields {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.modal.c .cp-auto {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.modal.c .cp-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px 10px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.modal.c .cp-foot .spacer {
+  flex: 1;
+}
+
+.modal.c .cp-foot kbd {
+  color: var(--foreground);
+}
+
+.modal.c .btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+/* Hold-to-confirm delete. */
+.hold {
+  position: relative;
+  overflow: hidden;
+}
+
+.hold .fill {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--destructive) 22%, transparent);
+  transform-origin: left;
+  transform: scaleX(0);
+  pointer-events: none;
+}
+
+.hold .btn-face {
+  position: relative;
+}
+
+.modal.b .icon-row .sel {
+  top: 0;
+  left: 0;
+}

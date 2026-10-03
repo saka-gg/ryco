@@ -615,15 +615,9 @@ function buildSurfaceTransparencyCssVariables(surfaceTransparency: string): stri
     Math.max(DESKTOP_PANEL_PLATE_FLOOR[scheme], 100 - transparency * 95);
   const surfacePlate = (scheme: "light" | "dark") =>
     Math.max(DESKTOP_SURFACE_PLATE_FLOOR[scheme], 100 - transparency * 80);
-  // The composer's glass floor: capped below full opacity even at Solid (it
-  // is the surface content scrolls beneath), otherwise tracking the shared
-  // surface plate/blur as the Material step rises.
-  const composerPlate = (scheme: "light" | "dark") =>
-    Math.min(surfacePlate(scheme), scheme === "light" ? 93 : 92);
-  const composerBlur = Math.max(10, blur.surface);
   // The toast's glass floor: notifications float over arbitrary content, so
-  // like the composer they stay translucent and blurred even at Solid — at
-  // popover weight, because they are transient overlays rather than panes.
+  // they stay translucent and blurred even at Solid — at popover weight,
+  // because they are transient overlays rather than panes.
   // The Solid caps are chosen so muted body text keeps ~AA contrast over a
   // worst-case uniform backdrop; the blur carries the glass read.
   const toastPlate = (scheme: "light" | "dark") =>
@@ -633,9 +627,6 @@ function buildSurfaceTransparencyCssVariables(surfaceTransparency: string): stri
     ["--app-surface-opacity", formatPercent(surfacePlate("light"))],
     ["--app-surface-dark-opacity", formatPercent(surfacePlate("dark"))],
     ["--app-surface-filter", desktopGlassFilter(blur.surface)],
-    ["--app-composer-alpha", formatPercent(composerPlate("light"))],
-    ["--app-composer-dark-alpha", formatPercent(composerPlate("dark"))],
-    ["--app-composer-filter", desktopGlassFilter(composerBlur)],
     ["--app-toast-alpha", formatPercent(toastPlate("light"))],
     ["--app-toast-dark-alpha", formatPercent(toastPlate("dark"))],
     ["--app-toast-filter", desktopGlassFilter(toastBlur)],

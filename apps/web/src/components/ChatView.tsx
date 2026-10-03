@@ -4496,7 +4496,7 @@ export default function ChatView(props: ChatViewProps) {
   ]);
 
   // Direction A chrome layering: on the desktop tier the input bar overlays
-  // the transcript so messages scroll beneath the glass composer. The bar's
+  // the transcript so messages scroll beneath the composer. The bar's
   // rendered height travels as a CSS variable on the chat column — consumed
   // by the timeline's list footer (internal scroll clearance) and the
   // scroll-to-bottom pill. The phone tier and the new-thread hero keep the
@@ -4961,10 +4961,19 @@ export default function ChatView(props: ChatViewProps) {
             {composerOverlayActive ? (
               // Soft scroll-edge scrim across the whole floating bar
               // (composer + branch toolbar): keeps transcript lines readable
-              // as they travel beneath without reserving layout for it.
+              // as they travel beneath without reserving layout for it. It
+              // thins with the Transparency setting so a frosted composer
+              // shows the transcript beneath it (see `.app-composer-scrim`).
+              // The strip covers the branch toolbar row (42px + the bar's
+              // 0.25rem bottom padding) or, without it, the bottom padding.
               <div
                 aria-hidden
-                className="-top-10 -z-10 pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-background via-background/45 to-transparent"
+                className={cn(
+                  "app-composer-scrim -top-10 -z-10 pointer-events-none absolute inset-x-0 bottom-0",
+                  isGitRepo
+                    ? "[--app-composer-scrim-strip:calc(2.875rem+max(env(safe-area-inset-bottom),var(--app-keyboard-inset,0px)))]"
+                    : "[--app-composer-scrim-strip:calc(1rem+max(env(safe-area-inset-bottom),var(--app-keyboard-inset,0px)))]",
+                )}
               />
             ) : null}
             <div className={cn("relative isolate", composerOverlayActive && "pointer-events-auto")}>

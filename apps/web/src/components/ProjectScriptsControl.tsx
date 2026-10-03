@@ -10,7 +10,16 @@ import {
   SettingsIcon,
   WrenchIcon,
 } from "lucide-react";
-import React, { type FormEvent, type KeyboardEvent, useCallback, useMemo, useState } from "react";
+import React, {
+  type FormEvent,
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   keybindingValueForCommand,
@@ -22,7 +31,8 @@ import {
   primaryProjectScript,
 } from "~/projectScripts";
 import { shortcutLabelForCommand } from "~/keybindings";
-import { isMacPlatform } from "~/lib/utils";
+import { DISCLOSURE_INNER_CLASS, disclosureShellClassName } from "~/lib/disclosureMotion";
+import { cn, isMacPlatform } from "~/lib/utils";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -42,7 +52,6 @@ import {
   Dialog,
   DialogDescription,
   DialogFooter,
-  DialogHeader,
   DialogPanel,
   DialogPopup,
   DialogTitle,
@@ -50,7 +59,7 @@ import {
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "./ui/menu";
-import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
+import type { DialogMorph } from "./ui/dialogMorph";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 
@@ -62,6 +71,20 @@ const SCRIPT_ICONS: Array<{ id: ProjectScriptIcon; label: string }> = [
   { id: "build", label: "Build" },
   { id: "debug", label: "Debug" },
 ];
+
+/**
+ * Filled fields for the action dialog: tone instead of an outline, matching
+ * the borderless dialog surface they sit on.
+ */
+const FILLED_FIELD_CLASS_NAME =
+  "border-transparent bg-foreground/5 shadow-none before:hidden dark:bg-foreground/6 has-focus-visible:border-transparent has-focus-visible:bg-foreground/7 has-focus-visible:ring-2 has-focus-visible:ring-foreground/14";
+
+/** The action dialog's surface: no border, separated by one soft shadow. */
+const ACTION_DIALOG_SURFACE_CLASS_NAME =
+  "max-w-md border-0 shadow-[0_30px_60px_-20px_rgb(0_0_0/0.25)] before:hidden dark:shadow-[0_30px_70px_-18px_rgb(0_0_0/0.75)]";
+
+/** How long a picked icon stays visible in the open row before it folds away. */
+const ICON_ROW_SETTLE_MS = 320;
 
 function ScriptIcon({
   icon,
@@ -167,6 +190,45 @@ export default function ProjectScriptsControl({
   const [keybinding, setKeybinding] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const iconRowId = React.useId();
+
+  // Morph anchors. The dialog grows out of whatever opened it (the Add action
+  // button, or the scripts menu) and folds into where the saved action now
+  // lives: the run button when it became the primary script, otherwise the
+  // menu it was filed into.
+  const addButtonRef = useRef<HTMLButtonElement | null>(null);
+  const primaryButtonRef = useRef<HTMLButtonElement | null>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteButtonRef = useRef<HTMLButtonElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const iconRowRef = useRef<HTMLDivElement | null>(null);
+  const iconSelectionRef = useRef<HTMLSpanElement | null>(null);
+  const iconRowTimerRef = useRef<number | null>(null);
+  const morphOriginRef = useRef<HTMLElement | null>(null);
+  const savedScriptIdRef = useRef<string | null>(null);
+  const deleteConfirmedRef = useRef(false);
+
+  // Resolved lazily by the morph (on open and as the close starts), so these
+  // only read refs; their identity does not matter to the dialog.
+  const dialogMorph: DialogMorph = {
+    origin: () => morphOriginRef.current,
+    target: () => {
+      const savedId = savedScriptIdRef.current;
+      if (savedId !== null) {
+        const primary = primaryButtonRef.current;
+        if (primary?.dataset.scriptId === savedId) return primary;
+        return menuTriggerRef.current ?? addButtonRef.current;
+      }
+      const origin = morphOriginRef.current;
+      if (origin?.isConnected) return origin;
+      return menuTriggerRef.current ?? addButtonRef.current;
+    },
+  };
+  const deleteConfirmMorph: DialogMorph = {
+    origin: () => deleteButtonRef.current,
+    // Confirming closes the parent too, so there is no button to fold into.
+    target: () => (deleteConfirmedRef.current ? null : deleteButtonRef.current),
+  };
 
   const primaryScript = useMemo(() => {
     if (preferredScriptId) {
@@ -228,6 +290,7 @@ export default function ProjectScriptsControl({
       } else {
         await onAddScript(payload);
       }
+      savedScriptIdRef.current = scriptIdForValidation;
       setDialogOpen(false);
       setIconPickerOpen(false);
     } catch (error) {
@@ -235,7 +298,14 @@ export default function ProjectScriptsControl({
     }
   };
 
-  const openAddDialog = () => {
+  /** The menu popup is closing as the dialog opens, so the dialog grows out of it. */
+  const morphOriginFrom = (element: HTMLElement): HTMLElement =>
+    element.closest<HTMLElement>('[data-slot="menu-popup"]') ?? element;
+
+  const openAddDialog = (origin: HTMLElement) => {
+    morphOriginRef.current = morphOriginFrom(origin);
+    savedScriptIdRef.current = null;
+    deleteConfirmedRef.current = false;
     setEditingScriptId(null);
     setName("");
     setCommand("");
@@ -247,7 +317,10 @@ export default function ProjectScriptsControl({
     setDialogOpen(true);
   };
 
-  const openEditDialog = (script: ProjectScript) => {
+  const openEditDialog = (script: ProjectScript, origin: HTMLElement) => {
+    morphOriginRef.current = morphOriginFrom(origin);
+    savedScriptIdRef.current = null;
+    deleteConfirmedRef.current = false;
     setEditingScriptId(script.id);
     setName(script.name);
     setCommand(script.command);
@@ -261,16 +334,76 @@ export default function ProjectScriptsControl({
 
   const confirmDeleteScript = useCallback(() => {
     if (!editingScriptId) return;
+    deleteConfirmedRef.current = true;
     setDeleteConfirmOpen(false);
     setDialogOpen(false);
     void onDeleteScript(editingScriptId);
   }, [editingScriptId, onDeleteScript]);
+
+  // The selection pill sits under the checked icon and slides when it changes.
+  // The row mounts with the dialog, so the pill is placed (without a slide)
+  // each time the row opens, then slides between icons while it stays open.
+  const iconRowWasOpenRef = useRef(false);
+  useLayoutEffect(() => {
+    const opening = iconPickerOpen && !iconRowWasOpenRef.current;
+    iconRowWasOpenRef.current = iconPickerOpen;
+    if (!iconPickerOpen) return;
+    const pill = iconSelectionRef.current;
+    const checked = iconRowRef.current?.querySelector<HTMLElement>(
+      `[role="radio"][data-icon="${icon}"]`,
+    );
+    if (!pill || !checked) return;
+    if (opening) pill.style.transition = "none";
+    pill.style.width = `${checked.offsetWidth}px`;
+    pill.style.height = `${checked.offsetHeight}px`;
+    pill.style.translate = `${checked.offsetLeft}px ${checked.offsetTop}px`;
+    if (opening) {
+      void pill.offsetWidth;
+      pill.style.removeProperty("transition");
+    }
+  }, [icon, iconPickerOpen]);
+
+  useEffect(
+    () => () => {
+      if (iconRowTimerRef.current !== null) window.clearTimeout(iconRowTimerRef.current);
+    },
+    [],
+  );
+
+  const pickIcon = (next: ProjectScriptIcon) => {
+    setIcon(next);
+    if (iconRowTimerRef.current !== null) window.clearTimeout(iconRowTimerRef.current);
+    iconRowTimerRef.current = window.setTimeout(() => {
+      iconRowTimerRef.current = null;
+      setIconPickerOpen(false);
+    }, ICON_ROW_SETTLE_MS);
+  };
+
+  const onIconRowKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step =
+      event.key === "ArrowRight" || event.key === "ArrowDown"
+        ? 1
+        : event.key === "ArrowLeft" || event.key === "ArrowUp"
+          ? -1
+          : 0;
+    if (step === 0) return;
+    event.preventDefault();
+    const index = SCRIPT_ICONS.findIndex((entry) => entry.id === icon);
+    const next = SCRIPT_ICONS[(index + step + SCRIPT_ICONS.length) % SCRIPT_ICONS.length];
+    if (!next) return;
+    setIcon(next.id);
+    iconRowRef.current
+      ?.querySelector<HTMLElement>(`[role="radio"][data-icon="${next.id}"]`)
+      ?.focus();
+  };
 
   return (
     <>
       {primaryScript ? (
         <div aria-label="Project scripts" className={HEADER_CHROME_GROUP_CLASS_NAME} role="group">
           <Button
+            ref={primaryButtonRef}
+            data-script-id={primaryScript.id}
             size="xs"
             variant="ghost"
             className={HEADER_CHROME_BUTTON_CLASS_NAME}
@@ -286,6 +419,7 @@ export default function ProjectScriptsControl({
             <MenuTrigger
               render={
                 <Button
+                  ref={menuTriggerRef}
                   size="icon-xs"
                   variant="ghost"
                   className={HEADER_CHROME_ICON_BUTTON_CLASS_NAME}
@@ -330,7 +464,7 @@ export default function ProjectScriptsControl({
                         onClick={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
-                          openEditDialog(script);
+                          openEditDialog(script, event.currentTarget);
                         }}
                       >
                         <SettingsIcon className="size-3.5" />
@@ -339,7 +473,10 @@ export default function ProjectScriptsControl({
                   </MenuItem>
                 );
               })}
-              <MenuItem className={dropdownItemClassName} onClick={openAddDialog}>
+              <MenuItem
+                className={dropdownItemClassName}
+                onClick={(event) => openAddDialog(event.currentTarget)}
+              >
                 <PlusIcon className="size-4" />
                 Add action
               </MenuItem>
@@ -348,10 +485,11 @@ export default function ProjectScriptsControl({
         </div>
       ) : (
         <Button
+          ref={addButtonRef}
           size="xs"
           variant="ghost"
           className={HEADER_CHROME_BUTTON_CLASS_NAME}
-          onClick={openAddDialog}
+          onClick={(event) => openAddDialog(event.currentTarget)}
           title="Add action"
         >
           <PlusIcon className="size-3.5" />
@@ -380,70 +518,103 @@ export default function ProjectScriptsControl({
         }}
         open={dialogOpen}
       >
-        <DialogPopup>
-          <DialogHeader>
-            <DialogTitle>{isEditing ? "Edit Action" : "Add Action"}</DialogTitle>
-            <DialogDescription>
-              Actions are project-scoped commands you can run from the top bar or keybindings.
-            </DialogDescription>
-          </DialogHeader>
+        <DialogPopup
+          morph={dialogMorph}
+          initialFocus={nameInputRef}
+          className={ACTION_DIALOG_SURFACE_CLASS_NAME}
+        >
+          <div data-slot="dialog-header" className="flex items-center gap-3 pt-5 pb-3 ps-5 pe-12">
+            <button
+              type="button"
+              aria-label="Choose icon"
+              aria-expanded={iconPickerOpen}
+              aria-controls={iconRowId}
+              className="grid size-11 shrink-0 place-items-center rounded-xl bg-foreground/6 text-foreground outline-none transition-[background-color,box-shadow,scale] duration-(--app-motion-duration-chip) hover:bg-foreground/9 focus-visible:ring-2 focus-visible:ring-ring active:scale-95 aria-expanded:ring-2 aria-expanded:ring-foreground/18"
+              onClick={() => setIconPickerOpen((open) => !open)}
+            >
+              <span key={icon} className="app-icon-swap grid place-items-center">
+                <ScriptIcon icon={icon} className="size-5" />
+              </span>
+            </button>
+            <div className="min-w-0 flex-1">
+              <DialogTitle className="sr-only">
+                {isEditing ? "Edit action" : "Add action"}
+              </DialogTitle>
+              <input
+                ref={nameInputRef}
+                id="script-name"
+                form={addScriptFormId}
+                aria-label="Name"
+                autoComplete="off"
+                placeholder="Name this action"
+                className="w-full min-w-0 bg-transparent font-heading font-semibold text-lg leading-7 tracking-tight outline-none placeholder:text-muted-foreground/60"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+              <DialogDescription className="truncate text-xs">
+                Runs from the top bar or its shortcut, in this project only.
+              </DialogDescription>
+            </div>
+          </div>
+          <div id={iconRowId} className={disclosureShellClassName(iconPickerOpen)}>
+            <div className={DISCLOSURE_INNER_CLASS}>
+              <div
+                ref={iconRowRef}
+                role="radiogroup"
+                aria-label="Icon"
+                className="relative mx-5 mb-2 grid grid-cols-6 gap-1"
+                onKeyDown={onIconRowKeyDown}
+              >
+                <span
+                  ref={iconSelectionRef}
+                  aria-hidden
+                  className="pointer-events-none absolute top-0 left-0 rounded-xl bg-primary transition-[translate,width] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-snappy)"
+                />
+                {SCRIPT_ICONS.map((entry, index) => {
+                  const isSelected = entry.id === icon;
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      data-icon={entry.id}
+                      tabIndex={iconPickerOpen && isSelected ? 0 : -1}
+                      className={cn(
+                        "relative flex h-14 flex-col items-center justify-center gap-1 rounded-xl text-xs outline-none transition-[color,opacity,translate] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-gentle) focus-visible:ring-2 focus-visible:ring-ring",
+                        isSelected
+                          ? "text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground",
+                        iconPickerOpen ? "translate-y-0 opacity-100" : "-translate-y-1.5 opacity-0",
+                      )}
+                      style={{ transitionDelay: iconPickerOpen ? `${40 + index * 28}ms` : "0ms" }}
+                      onClick={() => pickIcon(entry.id)}
+                    >
+                      <ScriptIcon icon={entry.id} className="size-4" />
+                      <span>{entry.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
           <DialogPanel>
             <form id={addScriptFormId} className="space-y-4" onSubmit={submitAddScript}>
               <div className="space-y-1.5">
-                <Label htmlFor="script-name">Name</Label>
-                <div className="flex items-center gap-2">
-                  <Popover onOpenChange={setIconPickerOpen} open={iconPickerOpen}>
-                    <PopoverTrigger
-                      render={
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="size-9 shrink-0 hover:bg-popover active:bg-popover data-pressed:bg-popover data-pressed:shadow-xs/5 data-pressed:before:shadow-[0_1px_--theme(--color-black/4%)] dark:data-pressed:before:shadow-[0_-1px_--theme(--color-white/6%)]"
-                          aria-label="Choose icon"
-                        />
-                      }
-                    >
-                      <ScriptIcon icon={icon} className="size-4.5" />
-                    </PopoverTrigger>
-                    <PopoverPopup align="start">
-                      <div className="grid grid-cols-3 gap-2">
-                        {SCRIPT_ICONS.map((entry) => {
-                          const isSelected = entry.id === icon;
-                          return (
-                            <button
-                              key={entry.id}
-                              type="button"
-                              className={`relative flex flex-col items-center gap-2 rounded-md border px-2 py-2 text-xs ${
-                                isSelected
-                                  ? "border-primary/70 bg-primary/10"
-                                  : "border-border/70 hover:bg-accent/60"
-                              }`}
-                              onClick={() => {
-                                setIcon(entry.id);
-                                setIconPickerOpen(false);
-                              }}
-                            >
-                              <ScriptIcon icon={entry.id} className="size-4" />
-                              <span>{entry.label}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </PopoverPopup>
-                  </Popover>
-                  <Input
-                    id="script-name"
-                    autoFocus
-                    placeholder="Test"
-                    value={name}
-                    onChange={(event) => setName(event.target.value)}
-                  />
-                </div>
+                <Label htmlFor="script-command">Command</Label>
+                <Textarea
+                  id="script-command"
+                  className={FILLED_FIELD_CLASS_NAME}
+                  placeholder="bun test"
+                  value={command}
+                  onChange={(event) => setCommand(event.target.value)}
+                />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="script-keybinding">Keybinding</Label>
                 <Input
                   id="script-keybinding"
+                  className={FILLED_FIELD_CLASS_NAME}
                   placeholder="Press shortcut"
                   value={keybinding}
                   readOnly
@@ -453,17 +624,13 @@ export default function ProjectScriptsControl({
                   Press a shortcut. Use <code>Backspace</code> to clear.
                 </p>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="script-command">Command</Label>
-                <Textarea
-                  id="script-command"
-                  placeholder="bun test"
-                  value={command}
-                  onChange={(event) => setCommand(event.target.value)}
-                />
-              </div>
-              <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm">
-                <span>Run automatically on worktree creation</span>
+              <label className="flex items-center justify-between gap-3 text-sm">
+                <span className="flex flex-col">
+                  <span>Run on new worktrees</span>
+                  <span className="text-xs text-muted-foreground">
+                    Runs once, right after a worktree is created.
+                  </span>
+                </span>
                 <Switch
                   checked={runOnWorktreeCreate}
                   onCheckedChange={(checked) => setRunOnWorktreeCreate(Boolean(checked))}
@@ -472,9 +639,10 @@ export default function ProjectScriptsControl({
               {validationError && <p className="text-sm text-destructive">{validationError}</p>}
             </form>
           </DialogPanel>
-          <DialogFooter>
+          <DialogFooter variant="bare">
             {isEditing && (
               <Button
+                ref={deleteButtonRef}
                 type="button"
                 variant="destructive-outline"
                 className="mr-auto"
@@ -500,12 +668,15 @@ export default function ProjectScriptsControl({
       </Dialog>
 
       <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
-        <AlertDialogPopup>
+        <AlertDialogPopup
+          morph={deleteConfirmMorph}
+          className={cn(ACTION_DIALOG_SURFACE_CLASS_NAME, "max-w-sm")}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Delete action "{name}"?</AlertDialogTitle>
             <AlertDialogDescription>This action cannot be undone.</AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
+          <AlertDialogFooter variant="bare">
             <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
             <Button variant="destructive" onClick={confirmDeleteScript}>
               Delete action

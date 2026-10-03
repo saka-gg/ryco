@@ -5,6 +5,7 @@ import { XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
+import { DIALOG_MORPH_POPUP_CLASS_NAME, type DialogMorph, useDialogMorphRef } from "./dialogMorph";
 
 const DialogCreateHandle = DialogPrimitive.createHandle;
 
@@ -37,7 +38,10 @@ function DialogViewport({ className, ...props }: DialogPrimitive.Viewport.Props)
   return (
     <DialogPrimitive.Viewport
       className={cn(
-        "app-dialog-viewport-scrim pointer-events-auto fixed inset-0 z-50 grid grid-rows-[1fr_auto_3fr] justify-items-center p-4 backdrop-blur-[2px]",
+        // The scrim follows the dialog's open state, not its mount: it fades
+        // in as the dialog starts opening and out as soon as it starts
+        // closing, even while a morphing popup keeps the viewport mounted.
+        "app-dialog-viewport-scrim pointer-events-auto fixed inset-0 z-50 grid grid-rows-[1fr_auto_3fr] justify-items-center p-4 transition-[background-color] duration-(--app-motion-duration-pop) ease-(--app-motion-ease) data-ending-style:bg-transparent data-starting-style:bg-transparent",
         className,
       )}
       data-slot="dialog-viewport"
@@ -53,18 +57,23 @@ function DialogPopup({
   showCloseButton = true,
   bottomStickOnMobile = true,
   surface = "default",
+  morph,
+  ref,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
   bottomStickOnMobile?: boolean;
   surface?: "default" | "glass";
+  /** Grow out of (and fold back into) a control; see `dialogMorph.ts`. */
+  morph?: DialogMorph;
 }) {
+  const popupRef = useDialogMorphRef(morph, ref);
   return (
     <DialogPortal>
       <DialogBackdrop />
       <DialogViewport
         className={cn(
-          surface === "glass" && "bg-transparent backdrop-blur-none dark:bg-transparent",
+          surface === "glass" && "bg-transparent dark:bg-transparent",
           // Bottom-stuck phone-tier dialogs pad by the keyboard inset
           // published by the visual-viewport adapter so their action rows stay
           // above an open software keyboard; the variable is unset (0)
@@ -81,9 +90,11 @@ function DialogPopup({
               : "app-surface not-dark:bg-clip-padding shadow-lg/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(min(var(--radius-2xl),1.25rem)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
             bottomStickOnMobile &&
               "phone:max-w-none phone:rounded-none phone:border-x-0 phone:border-t phone:border-b-0 phone:opacity-[calc(1-min(var(--nested-dialogs),1))] phone:data-ending-style:translate-y-4 phone:data-starting-style:translate-y-4 phone:before:hidden phone:before:rounded-none",
+            morph && DIALOG_MORPH_POPUP_CLASS_NAME,
             className,
           )}
           data-slot="dialog-popup"
+          ref={popupRef}
           onKeyDown={(event) => {
             onKeyDown?.(event);
             event.stopPropagation();
