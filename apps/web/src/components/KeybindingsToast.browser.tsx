@@ -374,25 +374,6 @@ async function waitForWsConnection(): Promise<void> {
   );
 }
 
-async function waitForToast(title: string, count = 1): Promise<void> {
-  await vi.waitFor(
-    () => {
-      const matches = queryToastTitles().filter((t) => t === title);
-      expect(matches.length, `Expected ${count} "${title}" toast(s)`).toBeGreaterThanOrEqual(count);
-    },
-    { timeout: 4_000, interval: 16 },
-  );
-}
-
-async function waitForNoToast(title: string): Promise<void> {
-  await vi.waitFor(
-    () => {
-      expect(queryToastTitles().filter((t) => t === title)).toHaveLength(0);
-    },
-    { timeout: 10_000, interval: 50 },
-  );
-}
-
 async function waitForNoToasts(): Promise<void> {
   await vi.waitFor(
     () => {
@@ -578,60 +559,23 @@ describe("Keybindings update toast", () => {
     document.body.innerHTML = "";
   });
 
-  it("shows a toast for each consecutive keybinding update with no issues", async () => {
+  it("never announces remote legacy config changes as local app binding updates", async () => {
     const mounted = await mountApp();
-
     try {
-      sendServerConfigUpdatedPush([]);
-      await waitForToast("Keybindings updated", 1);
-
-      // Each server push represents a distinct file change, so it should produce its own toast.
-      sendServerConfigUpdatedPush([]);
-      await waitForToast("Keybindings updated", 2);
+      for (const issues of [
+        [],
+        [{ kind: "keybindings.malformed-config" as const, message: "bad json" }],
+      ]) {
+        const previousId = getServerConfigUpdatedNotification()?.id ?? 0;
+        sendServerConfigUpdatedPush(issues);
+        await vi.waitFor(() =>
+          expect(getServerConfigUpdatedNotification()?.id).toBeGreaterThan(previousId),
+        );
+        expect(queryToastTitles()).not.toContain("Keybindings updated");
+        expect(queryToastTitles()).not.toContain("Invalid keybindings configuration");
+      }
     } finally {
       await mounted.cleanup();
-    }
-  });
-
-  it("shows a warning toast when keybinding config has issues", async () => {
-    const mounted = await mountApp();
-
-    try {
-      sendServerConfigUpdatedPush([
-        { kind: "keybindings.malformed-config", message: "Expected JSON array" },
-      ]);
-      await waitForToast("Invalid keybindings configuration");
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("does not show a toast from the replayed cached value on subscribe", async () => {
-    const mounted = await mountApp();
-
-    try {
-      sendServerConfigUpdatedPush([]);
-      await waitForToast("Keybindings updated");
-      await waitForNoToast("Keybindings updated");
-
-      // Remount the app — onServerConfigUpdated replays the cached value
-      // synchronously on subscribe. This should NOT produce a toast.
-      await mounted.cleanup();
-      const remounted = await mountApp();
-
-      // Give it a moment to process the replayed value
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      const titles = queryToastTitles();
-      expect(
-        titles.filter((t) => t === "Keybindings updated").length,
-        "Replayed cached value should not produce a toast",
-      ).toBe(0);
-
-      await remounted.cleanup();
-    } catch (error) {
-      await mounted.cleanup().catch(() => {});
-      throw error;
     }
   });
 });

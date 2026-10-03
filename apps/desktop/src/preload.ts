@@ -176,6 +176,15 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       return () => ipcRenderer.removeListener("desktop:quit-shortcut-feedback", handler);
     },
   },
+  appKeybindings: {
+    read: () => ipcRenderer.invoke("desktop:app-keybindings-read"),
+    write: (document) => ipcRenderer.invoke("desktop:app-keybindings-write", document),
+    onChanged: (listener) => {
+      const handler = () => listener();
+      ipcRenderer.on("desktop:app-keybindings-changed", handler);
+      return () => ipcRenderer.removeListener("desktop:app-keybindings-changed", handler);
+    },
+  },
   getClientSettings: () => ipcRenderer.invoke(GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) => ipcRenderer.invoke(SET_CLIENT_SETTINGS_CHANNEL, settings),
   getSavedEnvironmentRegistry: () => ipcRenderer.invoke(GET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL),

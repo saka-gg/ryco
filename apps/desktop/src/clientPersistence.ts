@@ -3,6 +3,7 @@ import * as Path from "node:path";
 
 import {
   ClientSettingsSchema,
+  AppKeybindings,
   type ClientSettings,
   type PersistedSavedEnvironmentRecord,
 } from "@ryco/contracts";
@@ -237,4 +238,18 @@ export function removeSavedEnvironmentSecret(input: {
       return toPersistedSavedEnvironmentRecord(record);
     }),
   } satisfies SavedEnvironmentRegistryDocument);
+}
+
+/** Separate from general preferences so stale renderer snapshots cannot overwrite shortcuts. */
+export function readAppKeybindings(settingsPath: string): string | null {
+  try {
+    return FS.readFileSync(settingsPath, "utf8");
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw cause;
+  }
+}
+export function writeAppKeybindings(settingsPath: string, document: string): void {
+  const parsed = Schema.decodeUnknownSync(AppKeybindings)(JSON.parse(document));
+  writeJsonFile(settingsPath, parsed);
 }

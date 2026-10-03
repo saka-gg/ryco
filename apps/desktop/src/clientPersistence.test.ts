@@ -11,6 +11,8 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   readClientSettings,
+  readAppKeybindings,
+  writeAppKeybindings,
   readSavedEnvironmentRegistry,
   readSavedEnvironmentSecret,
   removeSavedEnvironmentSecret,
@@ -264,5 +266,30 @@ describe("clientPersistence", () => {
         secretStorage,
       }),
     ).toBe("bearer-token");
+  });
+});
+
+describe("installation-owned app keybindings", () => {
+  it("survives a relaunch and general preference writes without using node files", () => {
+    const file = makeTempPath("app-keybindings.json");
+    const preferences = {
+      rules: [{ key: "mod+x", command: "terminal.toggle" }],
+      disabledCommands: ["chat.new"],
+    };
+    expect(readAppKeybindings(file)).toBeNull();
+    writeAppKeybindings(file, JSON.stringify(preferences));
+    writeClientSettings(path.join(path.dirname(file), "client-settings.json"), clientSettings);
+    expect(JSON.parse(readAppKeybindings(file)!)).toEqual(preferences);
+    expect(fs.readdirSync(path.dirname(file)).sort()).toEqual([
+      "app-keybindings.json",
+      "client-settings.json",
+    ]);
+  });
+  it("retains the previous document when a new payload fails validation", () => {
+    const file = makeTempPath("app-keybindings.json");
+    const preferences = { rules: [], disabledCommands: [] };
+    writeAppKeybindings(file, JSON.stringify(preferences));
+    expect(() => writeAppKeybindings(file, "{broken")).toThrow();
+    expect(JSON.parse(readAppKeybindings(file)!)).toEqual(preferences);
   });
 });

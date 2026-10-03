@@ -1,3 +1,4 @@
+import { useAppKeybindings } from "../appKeybindings";
 import { applyInboxServerConfig } from "./inboxSidebar/inboxSidebarModel";
 import { useDeviceName } from "../deviceName";
 import { isLocalHubAlias } from "../deviceName.logic";
@@ -111,7 +112,6 @@ import {
   type InboxSidebarEnvironment,
 } from "./inboxSidebar/inboxSidebarModel";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
-import { useServerKeybindings } from "../rpc/serverState";
 import { derivePhysicalProjectKey, getProjectOrderKey } from "../logicalProject";
 import {
   useSavedEnvironmentRegistryStore,
@@ -186,7 +186,7 @@ function attachSidebarAutoAnimateNode(
 }
 
 function buildThreadJumpLabelMap(input: {
-  keybindings: ReturnType<typeof useServerKeybindings>;
+  keybindings: ReturnType<typeof useAppKeybindings>;
   platform: string;
   terminalOpen: boolean;
   threadJumpCommandByKey: ReadonlyMap<
@@ -276,7 +276,7 @@ export default function Sidebar() {
     ? scopedThreadKey(scopeThreadRef(routeDraftThread.environmentId, routeDraftThread.threadId))
     : null;
   const activeRouteThreadKey = routeThreadKey ?? routeDraftThreadKey;
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings();
   const openAddProjectCommandPalette = useCommandPaletteStore((store) => store.openAddProject);
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
     ReadonlySet<string>

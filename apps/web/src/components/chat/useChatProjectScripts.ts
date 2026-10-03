@@ -13,8 +13,8 @@ import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybinding
 import { newCommandId, randomUUID } from "~/lib/utils";
 import { commandForProjectScript, nextProjectScriptId } from "~/projectScripts";
 import { readEnvironmentApi } from "../../environmentApi";
-import { isElectron } from "../../env";
-import { readLocalApi } from "../../localApi";
+import { updateAppKeybinding } from "../../appKeybindings";
+import { scopedScriptCommand } from "@ryco/client-runtime/state/settings";
 import { useEvent } from "../../hooks/useEvent";
 import { DEFAULT_THREAD_TERMINAL_ID, type Project, type Thread } from "../../types";
 import { LastInvokedScriptByProjectSchema } from "../ChatView.logic";
@@ -99,6 +99,12 @@ export function useChatProjectScripts(
     async (script: ProjectScript, options?: RunProjectScriptOptions) => {
       const api = readEnvironmentApi(environmentId);
       if (!api || !activeThreadId || !activeProject || !activeThread) return;
+      if (
+        activeProject.environmentId !== environmentId ||
+        activeThread.environmentId !== environmentId ||
+        activeThread.projectId !== activeProject.id
+      )
+        return;
       if (options?.rememberAsLastInvoked !== false) {
         setLastInvokedScriptByProjectId((current) => {
           if (current[activeProject.id] === script.id) return current;
@@ -199,13 +205,11 @@ export function useChatProjectScripts(
         command: input.keybindingCommand,
       });
 
-      if (isElectron && keybindingRule) {
-        const localApi = readLocalApi();
-        if (!localApi) {
-          throw new Error("Local API unavailable.");
-        }
-        await localApi.server.upsertKeybinding(keybindingRule);
-      }
+      const command = scopedScriptCommand(
+        { environmentId, projectId: input.projectId },
+        input.keybindingCommand.slice("script.".length, -".run".length),
+      );
+      await updateAppKeybinding(command, keybindingRule ? { ...keybindingRule, command } : null);
     },
     [environmentId],
   );

@@ -1,3 +1,4 @@
+import { scopedScriptCommand } from "@ryco/client-runtime/state/settings";
 import { describe, expect, it } from "vite-plus/test";
 import type { KeybindingRule } from "@ryco/contracts";
 import { buildConflictIndex, detectConflictsAt } from "./keybindingConflicts";
@@ -84,4 +85,21 @@ describe("buildConflictIndex", () => {
     const draft = [r("mod+t", "chat.new"), r("mod+j", "terminal.toggle")];
     expect(buildConflictIndex(draft).size).toBe(0);
   });
+});
+
+it("does not report conflicts between scripts on different nodes or projects", () => {
+  const first = scopedScriptCommand({ environmentId: "node-a", projectId: "same-project" }, "test");
+  const second = scopedScriptCommand(
+    { environmentId: "node-b", projectId: "same-project" },
+    "test",
+  );
+  expect(
+    detectConflictsAt(
+      [
+        { key: "mod+x", command: first },
+        { key: "mod+x", command: second },
+      ],
+      0,
+    ),
+  ).toEqual([]);
 });

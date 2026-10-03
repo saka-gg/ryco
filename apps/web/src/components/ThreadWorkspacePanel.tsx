@@ -1,3 +1,4 @@
+import { useAppKeybindings } from "../appKeybindings";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 import { useSideChatStore } from "../sideChatStore";
 import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
@@ -67,7 +68,6 @@ import { buildTabs, type WorkspaceTab } from "../threadWorkspaceTabs";
 import { readEnvironmentApi } from "../environmentApi";
 import { shortcutLabelForCommand } from "../keybindings";
 import type { TerminalContextSelection } from "../lib/terminalContext";
-import { useServerKeybindings } from "../rpc/serverState";
 import { useStore } from "../store";
 import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
@@ -375,7 +375,7 @@ function WorkspaceTerminalPanel() {
   const storeNewTerminal = useTerminalStateStore((state) => state.newTerminal);
   const storeSetActiveTerminal = useTerminalStateStore((state) => state.setActiveTerminal);
   const storeCloseTerminal = useTerminalStateStore((state) => state.closeTerminal);
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings();
   const composerHandleRef = useComposerHandleContext();
   const [focusRequestId, setFocusRequestId] = useState(0);
   const worktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
@@ -629,7 +629,7 @@ function WorkspaceLauncher(props: {
   liveAgentCount: number;
   onOpenSideChat: () => void;
 }) {
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings();
   const filesTab: WorkspaceTab = { key: "files", label: "Files", mode: "files" };
   const reviewTab: WorkspaceTab = { key: "review", label: "Review", mode: "review" };
   const terminalTab: WorkspaceTab = { key: "terminal", label: "Terminal", mode: "terminal" };

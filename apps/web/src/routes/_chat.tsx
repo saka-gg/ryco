@@ -1,3 +1,4 @@
+import { useAppKeybindings } from "../appKeybindings";
 import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { useEffect } from "react";
@@ -22,7 +23,6 @@ import { selectThreadTerminalState, useTerminalStateStore } from "../terminalSta
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { resolveSidebarNewThreadEnvMode } from "~/components/Sidebar.logic";
 import { useSettings } from "~/hooks/useSettings";
-import { useServerKeybindings } from "~/rpc/serverState";
 import { toggleThreadPin } from "../threadPinning";
 
 function ChatRouteGlobalShortcuts() {
@@ -30,7 +30,7 @@ function ChatRouteGlobalShortcuts() {
   const selectedThreadKeysSize = useThreadSelectionStore((state) => state.selectedThreadKeys.size);
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
     useHandleNewThread();
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings();
   const terminalOpen = useTerminalStateStore((state) =>
     routeThreadRef
       ? selectThreadTerminalState(state.terminalStateByThreadKey, routeThreadRef).terminalOpen

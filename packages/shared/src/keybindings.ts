@@ -293,3 +293,15 @@ export function compileResolvedKeybindingsConfig(
 }
 
 export const DEFAULT_RESOLVED_KEYBINDINGS = compileResolvedKeybindingsConfig(DEFAULT_KEYBINDINGS);
+
+/** Command overrides and disabled commands share one merge policy on every platform. */
+export function mergeWithDefaultKeybindings(
+  custom: ResolvedKeybindingsConfig,
+  disabledCommands: ReadonlyArray<KeybindingRule["command"]> = [],
+): ResolvedKeybindingsConfig {
+  const overridden = new Set([...custom.map((rule) => rule.command), ...disabledCommands]);
+  return [
+    ...DEFAULT_RESOLVED_KEYBINDINGS.filter((rule) => !overridden.has(rule.command)),
+    ...custom,
+  ].slice(-MAX_KEYBINDINGS_COUNT);
+}

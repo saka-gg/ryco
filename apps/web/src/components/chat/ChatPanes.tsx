@@ -1,3 +1,4 @@
+import { useAppKeybindings } from "../../appKeybindings";
 import { navigateWithPreviewGuard } from "../../previewNavigation";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import {
@@ -42,7 +43,6 @@ import {
 import { shortcutLabelForCommand } from "../../keybindings";
 import { readMotionDurationMs } from "../../lib/perf/motion";
 import { cn } from "../../lib/utils";
-import { useServerKeybindings } from "../../rpc/serverState";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { selectThreadExistsByRef, selectSidebarThreadSummaryByRef, useStore } from "../../store";
 import { useDraftThreadExistsByRef } from "../../composerDraftSelectors";
@@ -293,7 +293,7 @@ export function ChatPanes({
   const split = root.kind === "split";
   const navigate = useNavigate();
   const router = useRouter();
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings();
   const container = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
   // A narrow/wide flip re-lays every pane at once; that is a mode switch, not

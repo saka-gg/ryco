@@ -1,3 +1,6 @@
+import { getAppKeybindings, replaceAppKeybindings, resetAppKeybindings } from "../appKeybindings";
+import { serializeShortcut } from "../lib/shortcutCapture";
+import { serializeWhenAst } from "../lib/keybindingWhenPresets";
 import { useChatPanesStore } from "../chatPanesStore";
 
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
@@ -1918,7 +1921,7 @@ async function waitForComposerStashBinding(key: string): Promise<void> {
   await vi.waitFor(
     () => {
       expect(
-        getServerConfig()?.keybindings.some(
+        getAppKeybindings().some(
           (binding) => binding.command === "composer.stash" && binding.shortcut.key === key,
         ),
       ).toBe(true);
@@ -2246,6 +2249,18 @@ async function mountChatView(options: {
 }): Promise<MountedChatView> {
   fixture = buildFixture(options.snapshot);
   options.configureFixture?.(fixture);
+  // Fixture shortcuts seed local app preferences explicitly; server data has no GUI authority.
+  if (fixture.serverConfig.keybindings.length > 0) {
+    await replaceAppKeybindings(
+      fixture.serverConfig.keybindings.map((rule) => ({
+        key: serializeShortcut(rule.shortcut),
+        command: rule.command,
+        when: serializeWhenAst(rule.whenAst),
+      })),
+    );
+  } else {
+    await resetAppKeybindings();
+  }
   customWsRpcResolver = options.resolveRpc ?? null;
   await setViewport(options.viewport);
   await waitForProductionStyles();

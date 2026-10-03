@@ -53,11 +53,13 @@ export const useSettingsDialogStore = create<SettingsDialogStore>((set) => ({
       open: true,
       section: section ?? (environmentId ? "general" : state.section),
       editingScope:
-        environmentId || (section && settingsSectionScope(section) === "node")
-          ? "node"
-          : section
-            ? "client"
-            : state.editingScope,
+        section === "keybindings"
+          ? "client"
+          : environmentId || (section && settingsSectionScope(section) === "node")
+            ? "node"
+            : section
+              ? "client"
+              : state.editingScope,
       targetEnvironmentId: environmentId ?? null,
     })),
   closeSettings: () => set({ open: false, targetEnvironmentId: null }),

@@ -49,6 +49,7 @@ import {
   compileResolvedKeybindingRule,
   compileResolvedKeybindingsConfig,
   parseKeybindingShortcut,
+  mergeWithDefaultKeybindings,
 } from "@ryco/shared/keybindings";
 
 export {
@@ -187,25 +188,6 @@ function invalidEntryIssue(index: number, detail: string): ServerConfigIssue {
     index,
     message: trimIssueMessage(detail),
   };
-}
-
-function mergeWithDefaultKeybindings(custom: ResolvedKeybindingsConfig): ResolvedKeybindingsConfig {
-  if (custom.length === 0) {
-    return [...DEFAULT_RESOLVED_KEYBINDINGS];
-  }
-
-  const overriddenCommands = new Set(custom.map((binding) => binding.command));
-  const retainedDefaults = DEFAULT_RESOLVED_KEYBINDINGS.filter(
-    (binding) => !overriddenCommands.has(binding.command),
-  );
-  const merged = [...retainedDefaults, ...custom];
-
-  if (merged.length <= MAX_KEYBINDINGS_COUNT) {
-    return merged;
-  }
-
-  // Keep the latest rules when the config exceeds max size; later rules have higher precedence.
-  return merged.slice(-MAX_KEYBINDINGS_COUNT);
 }
 
 /**
@@ -600,7 +582,6 @@ const makeKeybindings = Effect.gen(function* () {
     yield* Ref.set(startedRef, true);
     const startup = Effect.gen(function* () {
       yield* startWatcher;
-      yield* syncDefaultKeybindingsOnStartup;
       yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
       yield* loadConfigStateFromCacheOrDisk;
     });
