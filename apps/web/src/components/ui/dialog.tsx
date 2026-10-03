@@ -5,7 +5,12 @@ import { XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
-import { DIALOG_MORPH_POPUP_CLASS_NAME, type DialogMorph, useDialogMorphRef } from "./dialogMorph";
+import {
+  DIALOG_MORPH_POPUP_CLASS_NAME,
+  DIALOG_MORPH_PROFILE,
+  type SurfaceMorphProp,
+  useSurfaceMorphRef,
+} from "./surfaceMorph";
 
 const DialogCreateHandle = DialogPrimitive.createHandle;
 
@@ -64,10 +69,10 @@ function DialogPopup({
   showCloseButton?: boolean;
   bottomStickOnMobile?: boolean;
   surface?: "default" | "glass";
-  /** Grow out of (and fold back into) a control; see `dialogMorph.ts`. */
-  morph?: DialogMorph;
+  /** Grow out of (and fold back into) a control; see `surfaceMorph.ts`. */
+  morph?: SurfaceMorphProp;
 }) {
-  const popupRef = useDialogMorphRef(morph, ref);
+  const popupRef = useSurfaceMorphRef(morph, ref, { profile: DIALOG_MORPH_PROFILE });
   return (
     <DialogPortal>
       <DialogBackdrop />

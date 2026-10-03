@@ -831,7 +831,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   return (
     <TooltipProvider delay={0}>
       {hasTuning ? (
-        <div className="selection-glass-surface relative flex w-screen max-w-100 flex-col overflow-hidden rounded-lg border text-popover-foreground">
+        <div
+          data-morph-surface=""
+          className="selection-glass-surface relative flex w-screen max-w-100 flex-col overflow-hidden rounded-lg border text-popover-foreground"
+        >
           {pickerBody}
           <div className="border-t" data-slot="model-picker-tuning">
             <ModelPickerTuningBridgeContext.Provider value={tuningBridge}>
@@ -840,7 +843,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           </div>
         </div>
       ) : (
-        <div className="selection-glass-surface relative flex overflow-hidden rounded-lg border text-popover-foreground">
+        <div
+          data-morph-surface=""
+          className="selection-glass-surface relative flex overflow-hidden rounded-lg border text-popover-foreground"
+        >
           {pickerBody}
         </div>
       )}

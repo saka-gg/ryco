@@ -59,7 +59,7 @@ import {
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "./ui/menu";
-import type { DialogMorph } from "./ui/dialogMorph";
+import type { SurfaceMorph } from "./ui/surfaceMorph";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 
@@ -210,7 +210,7 @@ export default function ProjectScriptsControl({
 
   // Resolved lazily by the morph (on open and as the close starts), so these
   // only read refs; their identity does not matter to the dialog.
-  const dialogMorph: DialogMorph = {
+  const dialogMorph: SurfaceMorph = {
     origin: () => morphOriginRef.current,
     target: () => {
       const savedId = savedScriptIdRef.current;
@@ -224,7 +224,7 @@ export default function ProjectScriptsControl({
       return menuTriggerRef.current ?? addButtonRef.current;
     },
   };
-  const deleteConfirmMorph: DialogMorph = {
+  const deleteConfirmMorph: SurfaceMorph = {
     origin: () => deleteButtonRef.current,
     // Confirming closes the parent too, so there is no button to fold into.
     target: () => (deleteConfirmedRef.current ? null : deleteButtonRef.current),

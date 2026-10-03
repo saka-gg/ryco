@@ -4747,7 +4747,7 @@ export default function ChatView(props: ChatViewProps) {
       />
 
       {/* Provider status lives in the composer banner stack. Thread errors use
-          the global liquid-glass notification surface instead of obscuring the
+          the global notification surface instead of obscuring the
           transcript with a full-width inline strip. */}
       <ThreadErrorBanner
         error={activeThread.error}
@@ -4878,7 +4878,7 @@ export default function ChatView(props: ChatViewProps) {
                 <button
                   type="button"
                   onClick={() => scrollToEnd(true)}
-                  className="pointer-events-auto flex items-center gap-1.5 rounded-full border-0 bg-card/80 px-3 py-1 text-muted-foreground text-xs shadow-md/5 ring-1 ring-inset ring-foreground/6 backdrop-blur transition-[background-color,color,box-shadow] hover:bg-card hover:text-foreground hover:shadow-lg/8 hover:cursor-pointer"
+                  className="selection-glass-surface pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1 text-muted-foreground text-xs shadow-md/5 transition-[background-color,color,box-shadow] hover:bg-popover hover:text-foreground hover:shadow-lg/8 hover:cursor-pointer"
                 >
                   <ChevronDownIcon className="size-3.5" />
                   Scroll to bottom

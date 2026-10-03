@@ -3,7 +3,12 @@
 import { AlertDialog as AlertDialogPrimitive } from "@base-ui/react/alert-dialog";
 
 import { cn } from "~/lib/utils";
-import { DIALOG_MORPH_POPUP_CLASS_NAME, type DialogMorph, useDialogMorphRef } from "./dialogMorph";
+import {
+  DIALOG_MORPH_POPUP_CLASS_NAME,
+  DIALOG_MORPH_PROFILE,
+  type SurfaceMorphProp,
+  useSurfaceMorphRef,
+} from "./surfaceMorph";
 
 const AlertDialogCreateHandle = AlertDialogPrimitive.createHandle;
 
@@ -49,15 +54,19 @@ function AlertDialogPopup({
   className,
   onKeyDown,
   bottomStickOnMobile = true,
-  morph,
+  morph = "auto",
   ref,
   ...props
 }: AlertDialogPrimitive.Popup.Props & {
   bottomStickOnMobile?: boolean;
-  /** Grow out of (and fold back into) a control; see `dialogMorph.ts`. */
-  morph?: DialogMorph;
+  /**
+   * Grow out of (and fold back into) a control; see `surfaceMorph.ts`.
+   * Confirmations default to `"auto"`: they grow out of the button that asked
+   * for them (a Delete button, a menu item) without each caller wiring a ref.
+   */
+  morph?: SurfaceMorphProp;
 }) {
-  const popupRef = useDialogMorphRef(morph, ref);
+  const popupRef = useSurfaceMorphRef(morph, ref, { profile: DIALOG_MORPH_PROFILE });
   return (
     <AlertDialogPortal>
       <AlertDialogBackdrop />

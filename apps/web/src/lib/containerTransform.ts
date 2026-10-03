@@ -97,7 +97,7 @@ export interface SurfacePaint {
 
 /**
  * Snapshots a surface's paint. Take it before the surface hands its painting
- * to a ghost (see `dialogMorph.ts`), since it reads as transparent after.
+ * to a ghost (see `surfaceMorph.ts`), since it reads as transparent after.
  */
 export function readSurfacePaint(surface: Element): SurfacePaint {
   const paint = getComputedStyle(surface);
@@ -122,6 +122,8 @@ export function createSurfaceGhost(input: {
   readonly radius: number;
   readonly parent: Element;
   readonly before?: Node | null;
+  /** Needed when the ghost lives beside a z-indexed layer (a popover positioner). */
+  readonly zIndex?: string;
 }): HTMLElement {
   const paint = input.paint;
   const ghost = document.createElement("div");
@@ -133,6 +135,7 @@ export function createSurfaceGhost(input: {
   style.pointerEvents = "none";
   style.contain = "strict";
   style.boxSizing = "border-box";
+  if (input.zIndex) style.zIndex = input.zIndex;
   style.backgroundColor = paint.backgroundColor;
   style.boxShadow = paint.boxShadow;
   style.borderStyle = paint.borderStyle;

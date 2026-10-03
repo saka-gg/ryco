@@ -94,11 +94,11 @@ describe("ProjectScriptsControl action dialog", () => {
     expect(popup.dataset.slot).toBe("dialog-popup");
     // While the ghost carries the surface the popup paints only content, so
     // translucent plates never stack (and then snap clear at the hand-off).
-    expect(popup.hasAttribute("data-dialog-morphing")).toBe(true);
+    expect(popup.hasAttribute("data-surface-morphing")).toBe(true);
     expect(scrimAlpha(popup)).toBe(0);
 
     await vi.waitFor(() => expect(ghosts()).toHaveLength(0), { timeout: 2_000 });
-    expect(popup.hasAttribute("data-dialog-morphing")).toBe(false);
+    expect(popup.hasAttribute("data-surface-morphing")).toBe(false);
     expect(scrimAlpha(popup)).toBeGreaterThan(0.5);
     expect(Number(getComputedStyle(addButton).opacity)).toBe(0);
     await expect.element(page.getByRole("textbox", { name: "Name" })).toHaveFocus();

@@ -157,7 +157,7 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
     >
       <div
         ref={listRef}
-        className="relative overflow-hidden rounded-xl border border-border/80 bg-popover/96 shadow-lg/8 backdrop-blur-xs"
+        className="selection-glass-surface relative overflow-hidden rounded-xl border"
       >
         {/* The upward-anchored mention/command menu caps at 18rem (max-h-72)
             but clamps to the visible viewport height published by the

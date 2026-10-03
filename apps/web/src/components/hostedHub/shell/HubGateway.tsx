@@ -85,7 +85,7 @@ export function HubGateway({
           {/* The panel.
               `app-surface` rather than the flat `bg-card` plate this replaces:
               it is the same material the app's dialogs, popovers and sheets
-              already use, so the Hub inherits the shared dark-liquid-glass
+              already use, so the Hub inherits the shared surface
               language instead of forking it, tracks the user's Material step,
               and is already handled in all three enforcement blocks —
               prefers-reduced-transparency, forced-colors, and the

@@ -573,7 +573,12 @@ function buildGlassTierVariables(
  * scales UP as the plate thins — translucency and blur travel together, never
  * separately.
  */
-const DESKTOP_POPOVER_PLATE_FLOOR = { light: 66, dark: 60 } as const;
+/**
+ * Overlays (menus, pickers, toasts) stay only a little translucent: the plate
+ * never thins past this floor, whatever the Transparency step, so their text
+ * reads over any content. The step still sets the frost behind them.
+ */
+const DESKTOP_POPOVER_PLATE_FLOOR = { light: 88, dark: 86 } as const;
 const DESKTOP_PANEL_PLATE_FLOOR = { light: 76, dark: 70 } as const;
 const DESKTOP_SURFACE_PLATE_FLOOR = { light: 80, dark: 76 } as const;
 
@@ -639,12 +644,7 @@ function buildSurfaceTransparencyCssVariables(surfaceTransparency: string): stri
     ["--app-dialog-viewport-dark-alpha", formatPercent(Math.max(16, 28 - transparency * 36))],
     ["--app-sheet-backdrop-alpha", formatPercent(Math.max(18, 32 - transparency * 42))],
     ["--app-command-backdrop-opacity", formatPercent(Math.max(38, 60 - transparency * 60))],
-    ["--app-glass-light-start-alpha", formatPercent(transparency * 75)],
-    ["--app-glass-light-end-alpha", formatPercent(transparency * 32)],
-    ["--app-glass-foreground-alpha", formatPercent(transparency * 18)],
     ["--app-glass-light-popover-alpha", formatPercent(popoverPlate("light"))],
-    ["--app-glass-dark-start-alpha", formatPercent(transparency * 18)],
-    ["--app-glass-dark-end-alpha", formatPercent(transparency * 5)],
     ["--app-glass-dark-popover-alpha", formatPercent(popoverPlate("dark"))],
     ...GLASS_SURFACE_TIERS.flatMap((tier) =>
       buildGlassTierVariables(
