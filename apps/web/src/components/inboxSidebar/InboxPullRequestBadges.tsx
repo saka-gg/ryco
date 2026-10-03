@@ -3,17 +3,26 @@ import { ArrowUpRightIcon, GitForkIcon } from "lucide-react";
 import type { MouseEvent } from "react";
 
 import { openExternalLink } from "../../lib/openExternalLink";
+import { prefersExternalPullRequestLink } from "../../pullRequestsRoute";
 import { cn } from "../../lib/utils";
 import type { CheckRollupSummary } from "../projectExplorer/prCheckStatus";
 import { resolveStateBadgeVariant } from "../sourceControl/stateBadgeVariants";
 import type { InboxPullRequest } from "./inboxPullRequests";
 import { InboxHint } from "./InboxRowHint";
 
-function openPullRequest(event: MouseEvent, url: string) {
+function openPullRequest(
+  event: MouseEvent,
+  pr: InboxPullRequest,
+  onOpenInApp: ((pr: InboxPullRequest) => void) | undefined,
+) {
   // Chips live inside the row's open-thread button; the link wins.
   event.preventDefault();
   event.stopPropagation();
-  openExternalLink(url, "Unable to open pull request link");
+  if (onOpenInApp && !prefersExternalPullRequestLink(event)) {
+    onOpenInApp(pr);
+    return;
+  }
+  if (pr.url) openExternalLink(pr.url, "Unable to open pull request link");
 }
 
 function PullRequestHint(props: {
@@ -21,6 +30,7 @@ function PullRequestHint(props: {
   readonly label: string;
   readonly providerName: string;
   readonly checks: CheckRollupSummary | null;
+  readonly inApp: boolean;
 }) {
   return (
     <span className="flex max-w-64 flex-col gap-0.5 py-0.5">
@@ -34,7 +44,11 @@ function PullRequestHint(props: {
           {props.checks.active > 0 ? ` · ${props.checks.passed}/${props.checks.total}` : ""}
         </span>
       ) : null}
-      {props.pr.url ? (
+      {props.inApp ? (
+        <span className="text-[11px] text-muted-foreground/80">
+          Click to review{props.pr.url ? ` · ⌘-click opens ${props.providerName}` : ""}
+        </span>
+      ) : props.pr.url ? (
         <span className="flex items-center gap-0.5 text-[11px] text-muted-foreground/80">
           Open on {props.providerName}
           <ArrowUpRightIcon aria-hidden className="size-3" />
@@ -58,6 +72,11 @@ export function InboxPullRequestBadges(props: {
   readonly currentNumber?: number | null;
   /** Checks of the thread's own change request, named in its hint. */
   readonly currentChecks?: CheckRollupSummary | null;
+  /**
+   * Opens the change request on the pull requests page. When set, a plain
+   * click stays in the app and ⌘/Ctrl-click opens the host.
+   */
+  readonly onOpenInApp?: ((pr: InboxPullRequest) => void) | undefined;
 }) {
   if (props.requests.length === 0) return null;
   const inline = props.variant === "inline";
@@ -98,15 +117,19 @@ export function InboxPullRequestBadges(props: {
                   label={label}
                   pr={pr}
                   providerName={providerName}
+                  inApp={props.onOpenInApp !== undefined}
                 />
               }
               className={cn(
                 "inline-flex shrink-0 items-center gap-0.5 rounded-sm text-[11px] font-medium tabular-nums",
                 variant.textClassName,
-                url && "cursor-pointer underline-offset-2 hover:underline",
+                (url || props.onOpenInApp) && "cursor-pointer underline-offset-2 hover:underline",
               )}
-              {...(url
-                ? { role: "link", onClick: (event: MouseEvent) => openPullRequest(event, url) }
+              {...(url || props.onOpenInApp
+                ? {
+                    role: "link",
+                    onClick: (event: MouseEvent) => openPullRequest(event, pr, props.onOpenInApp),
+                  }
                 : {})}
             >
               <Icon aria-hidden className="size-[11px]" />
@@ -121,7 +144,7 @@ export function InboxPullRequestBadges(props: {
             aria-label={label}
             className={cn(badgeClassName, "transition-[filter] hover:brightness-125")}
             href={url}
-            onClick={(event) => openPullRequest(event, url)}
+            onClick={(event) => openPullRequest(event, pr, props.onOpenInApp)}
           >
             <Icon aria-hidden className="size-3" />
             <span>#{pr.number}</span>

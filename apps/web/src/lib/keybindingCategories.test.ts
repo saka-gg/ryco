@@ -31,6 +31,13 @@ describe("keybindingCategories", () => {
     });
   });
 
+  it("maps the pull requests page command to its own category", () => {
+    expect(getCommandMeta("pullRequests.open")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.pullRequests,
+      title: "Open pull requests",
+    });
+  });
+
   it("maps stash to the Composer category with a friendly title", () => {
     expect(getCommandMeta("composer.stash").category).toBe(KEYBINDING_CATEGORIES.composer);
     expect(getCommandMeta("composer.stash").title).toBe("Stash prompt or open stash");

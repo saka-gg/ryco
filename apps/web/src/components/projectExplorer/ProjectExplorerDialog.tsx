@@ -4,7 +4,10 @@ import type {
   WorkItemStateFilter,
   WorkItemSummary,
 } from "@ryco/contracts";
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePresentationTier } from "~/hooks/usePresentationTier";
+import { buildPullRequestLocation } from "~/pullRequestsRoute";
 import {
   hasNoShortcutModifiers,
   isDifferentDialogShortcutTarget,
@@ -121,9 +124,33 @@ export function ProjectExplorerDialog(props: ProjectExplorerDialogProps) {
     setSelection({ kind: "issue", number: issue.number });
   }, []);
 
-  const handleSelectChangeRequest = useCallback((cr: ChangeRequest) => {
-    setSelection({ kind: "pr", number: cr.number });
-  }, []);
+  const navigate = useNavigate();
+  const phoneTier = usePresentationTier() === "phone";
+  const { onOpenChange } = props;
+  // Desktop reviews change requests on the dedicated page; the frozen phone
+  // tier keeps the in-dialog detail.
+  const openChangeRequest = useCallback(
+    (number: number) => {
+      if (!phoneTier && selectedMember) {
+        onOpenChange(false);
+        void navigate(
+          buildPullRequestLocation({
+            environmentId: selectedMember.environmentId,
+            projectId: selectedMember.id,
+            number,
+          }),
+        );
+        return;
+      }
+      setSelection({ kind: "pr", number });
+    },
+    [navigate, onOpenChange, phoneTier, selectedMember],
+  );
+
+  const handleSelectChangeRequest = useCallback(
+    (cr: ChangeRequest) => openChangeRequest(cr.number),
+    [openChangeRequest],
+  );
 
   const handleSelectWorkItem = useCallback((item: WorkItemSummary) => {
     setSelection({ kind: "workItem", key: item.key });
@@ -134,10 +161,13 @@ export function ProjectExplorerDialog(props: ProjectExplorerDialogProps) {
     setSelection({ kind: "issue", number: issueNumber });
   }, []);
 
-  const handleSelectLinkedChangeRequest = useCallback((changeRequestNumber: number) => {
-    setActiveTab("prs");
-    setSelection({ kind: "pr", number: changeRequestNumber });
-  }, []);
+  const handleSelectLinkedChangeRequest = useCallback(
+    (changeRequestNumber: number) => {
+      setActiveTab("prs");
+      openChangeRequest(changeRequestNumber);
+    },
+    [openChangeRequest],
+  );
 
   const handleSelectLinkedWorkItem = useCallback((workItemKey: string) => {
     setActiveTab("workItems");

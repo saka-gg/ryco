@@ -10,7 +10,8 @@ import {
   ShieldAlertIcon,
   Undo2Icon,
 } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import { endPaneDrag, startPaneDrag } from "../../chatPanesStore";
 import { readEnvironmentApi } from "../../environmentApi";
@@ -18,6 +19,7 @@ import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useSettings } from "../../hooks/useSettings";
 import { useGitStatus } from "../../lib/gitStatusState";
 import { openExternalLink } from "../../lib/openExternalLink";
+import { buildPullRequestLocation } from "../../pullRequestsRoute";
 import { cn, newCommandId } from "../../lib/utils";
 import { resolveSourceControlRefreshDelay } from "../../rpc/sourceControlRefreshPolicy";
 import { useSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
@@ -137,6 +139,21 @@ export function InboxThreadRow(props: {
 }) {
   const { row } = props;
   const isPhone = usePresentationTier() === "phone";
+  const navigate = useNavigate();
+  const rowProject = row.project;
+  const openPullRequestInApp = useCallback(
+    (pr: { readonly number: number }) => {
+      if (!rowProject) return;
+      void navigate(
+        buildPullRequestLocation({
+          environmentId: rowProject.environmentId,
+          projectId: rowProject.id,
+          number: pr.number,
+        }),
+      );
+    },
+    [navigate, rowProject],
+  );
   const threadRef = useMemo(
     () => scopeThreadRef(row.environmentId, row.threadId),
     [row.environmentId, row.threadId],
@@ -302,6 +319,11 @@ export function InboxThreadRow(props: {
       snoozePresets={snoozePresets}
       threadActions={props.threadActions}
       onOpenPullRequest={(url) => openExternalLink(url, "Unable to open pull request link")}
+      onReviewPullRequest={
+        ownPullRequest && rowProject && !isPhone
+          ? () => openPullRequestInApp(ownPullRequest)
+          : undefined
+      }
       onSettle={() => void handleSettlement()}
       onSnooze={(snoozedUntil) => void handleSnooze(snoozedUntil)}
     />
@@ -412,6 +434,7 @@ export function InboxThreadRow(props: {
             />
             <InboxPullRequestBadges
               {...pullRequests}
+              onOpenInApp={rowProject && !isPhone ? openPullRequestInApp : undefined}
               currentChecks={changeStats?.checks ?? null}
               currentNumber={currentPr?.number ?? null}
               providerName={sourceControlName}

@@ -190,6 +190,8 @@ export interface ChatOverviewPanelProps {
   onOpenFiles: () => void;
   onOpenReview: () => void;
   onOpenSubagent: (subagent: ThreadSubagentView) => void;
+  /** Opens a change request on the pull requests page (desktop). */
+  onOpenPullRequestInApp?: ((number: number) => void) | undefined;
 }
 
 export function usePostPushWorkflowWatch() {
@@ -807,6 +809,11 @@ export function ChatOverviewPanel(
       onOpenFiles={onOpenFiles}
       onOpenReview={onOpenReview}
       onOpenSubagent={onOpenSubagent}
+      onOpenPullRequestInApp={
+        props.onOpenPullRequestInApp && overviewPullRequest?.number != null
+          ? () => props.onOpenPullRequestInApp?.(overviewPullRequest.number as number)
+          : undefined
+      }
     />
   );
 }

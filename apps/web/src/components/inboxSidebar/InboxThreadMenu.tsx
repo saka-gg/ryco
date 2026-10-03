@@ -8,6 +8,7 @@ import {
   Columns2Icon,
   CopyIcon,
   ExternalLinkIcon,
+  GitPullRequestIcon,
   FolderIcon,
   GitForkIcon,
   HashIcon,
@@ -80,6 +81,8 @@ export function InboxThreadMenuItems(props: {
   readonly onSettle: () => void;
   readonly onSnooze: (snoozedUntil: string | null) => void;
   readonly onOpenPullRequest: (url: string) => void;
+  /** Opens the change request on the pull requests page. */
+  readonly onReviewPullRequest?: (() => void) | undefined;
 }) {
   const { row } = props;
   const actions = props.threadActions?.listThreadMenuActions(row.key) ?? [];
@@ -112,15 +115,25 @@ export function InboxThreadMenuItems(props: {
     ["organize", inGroup("organize")],
     [
       "pull-request",
-      pullRequestUrl
-        ? [
-            <MenuItem key="open-pr" onClick={() => props.onOpenPullRequest(pullRequestUrl)}>
-              <ExternalLinkIcon aria-hidden />
-              {`Open ${props.changeRequestShortName} #${props.pullRequest!.number}`}
-              <MenuShortcut className="tracking-normal">{props.providerName}</MenuShortcut>
-            </MenuItem>,
-          ]
-        : [],
+      [
+        ...(props.pullRequest && props.onReviewPullRequest
+          ? [
+              <MenuItem key="review-pr" onClick={props.onReviewPullRequest}>
+                <GitPullRequestIcon aria-hidden />
+                {`Review ${props.changeRequestShortName} #${props.pullRequest.number}`}
+              </MenuItem>,
+            ]
+          : []),
+        ...(pullRequestUrl
+          ? [
+              <MenuItem key="open-pr" onClick={() => props.onOpenPullRequest(pullRequestUrl)}>
+                <ExternalLinkIcon aria-hidden />
+                {`Open ${props.changeRequestShortName} #${props.pullRequest!.number}`}
+                <MenuShortcut className="tracking-normal">{props.providerName}</MenuShortcut>
+              </MenuItem>,
+            ]
+          : []),
+      ],
     ],
     [
       "lifecycle",

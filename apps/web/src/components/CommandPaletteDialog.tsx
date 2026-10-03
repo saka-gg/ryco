@@ -34,6 +34,7 @@ import {
   ArrowLeftIcon,
   ArrowUpIcon,
   BarChart3Icon,
+  GitPullRequestIcon,
   CircleAlertIcon,
   Columns2Icon,
   CornerLeftUpIcon,
@@ -69,6 +70,7 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useLogicalProjectSnapshots } from "../hooks/useLogicalProjectSnapshots";
 import { useSettings } from "../hooks/useSettings";
 import { readLocalApi } from "../localApi";
 import {
@@ -128,6 +130,10 @@ import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteResults } from "./CommandPaletteResults";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
+import {
+  buildPullRequestRepositoryOptions,
+  pullRequestRepositoryQualifier,
+} from "./pullRequests/pullRequestRepositories.logic";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
 import { useServerKeybindings } from "../rpc/serverState";
 import {
@@ -144,6 +150,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { getPresentationTier } from "../lib/presentationTier";
+import { buildPullRequestsPageLocation } from "../pullRequestsRoute";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { resolveThreadPinCommandPresentation, toggleThreadPin } from "../threadPinning";
@@ -402,6 +409,7 @@ function OpenCommandPaletteDialog() {
   const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
   const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
   const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics);
+  const pullRequestsCapability = useHostedRpcCapability(WS_METHODS.sourceControlListChangeRequests);
   const navigate = useNavigate();
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const openIntent = useCommandPaletteStore((store) => store.openIntent);
@@ -786,6 +794,44 @@ function OpenCommandPaletteDialog() {
       }),
     [openProjectFromSearch, projects],
   );
+
+  // One entry per checkout the pull requests page can read, labelled like
+  // the page's repository switcher (environment only when checkouts share a name).
+  const { snapshots: logicalProjects } = useLogicalProjectSnapshots();
+  const pullRequestRepositoryItems = useMemo<CommandPaletteActionItem[]>(() => {
+    const options = buildPullRequestRepositoryOptions(logicalProjects);
+    const projectByKey = new Map(
+      projects.map((project) => [`${project.environmentId}\0${project.id}`, project] as const),
+    );
+    return options.map((option) => {
+      const environment = pullRequestRepositoryQualifier(option, options);
+      const project = projectByKey.get(`${option.environmentId}\0${option.projectId}`);
+      return {
+        kind: "action",
+        value: `pull-requests-in:${option.environmentId}:${option.projectId}`,
+        searchTerms: [option.name, option.cwd, ...(environment ? [environment] : [])],
+        title: environment ? `${option.name} · ${environment}` : option.name,
+        description: option.cwd,
+        icon: (
+          <ProjectFavicon
+            environmentId={option.environmentId}
+            cwd={option.cwd}
+            projectId={option.projectId}
+            customAvatarContentHash={project?.customAvatarContentHash ?? null}
+            className={ITEM_ICON_CLASS}
+          />
+        ),
+        run: async () => {
+          await navigate(
+            buildPullRequestsPageLocation({
+              environmentId: option.environmentId,
+              projectId: option.projectId,
+            }),
+          );
+        },
+      };
+    });
+  }, [logicalProjects, navigate, projects]);
 
   const projectThreadItems = useMemo(
     () =>
@@ -1344,6 +1390,35 @@ function OpenCommandPaletteDialog() {
         await navigate({ to: "/statistics" });
       },
     });
+    actionItems.push({
+      kind: "action",
+      value: "action:pull-requests",
+      searchTerms: ["pull requests", "prs", "review", "merge", "stack", "checks", "code review"],
+      title: "Open pull requests",
+      ...(pullRequestsCapability.reason ? { description: pullRequestsCapability.reason } : {}),
+      disabled: !pullRequestsCapability.allowed,
+      icon: <GitPullRequestIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "pullRequests.open",
+      run: async () => {
+        setOpen(false);
+        await navigate(buildPullRequestsPageLocation());
+      },
+    });
+    if (pullRequestRepositoryItems.length > 1) {
+      actionItems.push({
+        kind: "submenu",
+        value: "action:pull-requests-in",
+        searchTerms: ["pull requests", "prs", "review", "repository", "repo", "project"],
+        title: "Open pull requests in...",
+        icon: <GitPullRequestIcon className={ITEM_ICON_CLASS} />,
+        addonIcon: <GitPullRequestIcon className={ADDON_ICON_CLASS} />,
+        groups: [
+          { value: "repositories", label: "Repositories", items: pullRequestRepositoryItems },
+        ],
+        ...(pullRequestsCapability.reason ? { description: pullRequestsCapability.reason } : {}),
+        disabled: !pullRequestsCapability.allowed,
+      });
+    }
   }
 
   actionItems.push({

@@ -11,6 +11,7 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { resetGitStatusStateForTests, watchGitStatus } from "../../lib/gitStatusState";
+import { buildPullRequestLocation } from "../../pullRequestsRoute";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 
@@ -18,6 +19,11 @@ const harness = vi.hoisted(() => ({
   detail: null as SourceControlChangeRequestDetail | null,
   query: vi.fn(),
   openExternal: vi.fn((_url: string, _failureTitle: string) => undefined),
+  navigate: vi.fn((_options: unknown) => Promise.resolve()),
+}));
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useNavigate: () => harness.navigate,
 }));
 vi.mock("../../lib/openExternalLink", () => ({
   openExternalLink: (url: string, failureTitle: string) => harness.openExternal(url, failureTitle),
@@ -45,6 +51,7 @@ afterEach(() => {
   harness.detail = null;
   harness.query.mockClear();
   harness.openExternal.mockClear();
+  harness.navigate.mockClear();
 });
 
 it.each([null, "/repo/worktrees/feature"])(
@@ -164,16 +171,24 @@ it.each([null, "/repo/worktrees/feature"])(
           popup.textContent?.includes("Live PR"),
         );
         expect(hint?.textContent).toContain("PR #42 · Open");
-        expect(hint?.textContent).toContain("Open on");
+        expect(hint?.textContent).toContain("Click to review");
+        expect(hint?.textContent).toContain("⌘-click opens");
       });
       await new Promise((resolve) => setTimeout(resolve, 450));
       expect(document.querySelector('[data-testid="inbox-preview"]')).toBeNull();
-      // Clicking it opens the pull request instead of the thread.
+      // Clicking it opens the pull request on the pull requests page instead
+      // of the thread; ⌘-click opens it on the host.
       await page.getByLabelText("PR #42 · Open", { exact: true }).click();
+      expect(harness.navigate).toHaveBeenCalledWith(
+        buildPullRequestLocation({ environmentId, projectId, number: 42 }),
+      );
+      expect(harness.openExternal).not.toHaveBeenCalled();
+      await page.getByLabelText("PR #42 · Open", { exact: true }).click({ modifiers: ["Meta"] });
       expect(harness.openExternal).toHaveBeenCalledWith(
         "https://github.com/acme/ryco/pull/42",
         "Unable to open pull request link",
       );
+      expect(harness.navigate).toHaveBeenCalledTimes(1);
       expect(props.onOpenThread).not.toHaveBeenCalled();
       harness.detail = {
         provider: "github",
@@ -270,7 +285,7 @@ it.each([null, "/repo/worktrees/feature"])(
       expect(document.querySelector('[data-testid="inbox-preview"]')).not.toBeNull();
       expect(
         [...document.querySelectorAll('[data-slot="tooltip-popup"]')].some((popup) =>
-          popup.textContent?.includes("Open on"),
+          popup.textContent?.includes("Click to review"),
         ),
       ).toBe(false);
       // Inside the card it stays open and its links work.

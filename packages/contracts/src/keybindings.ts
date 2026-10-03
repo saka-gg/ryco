@@ -70,6 +70,8 @@ const STATIC_KEYBINDING_COMMANDS = [
   "pane.close",
   "pane.focusNext",
   "pane.focusPrevious",
+  // Opens the pull requests page; no default key (users bind it themselves).
+  "pullRequests.open",
   ...MODEL_PICKER_KEYBINDING_COMMANDS,
   ...THREAD_KEYBINDING_COMMANDS,
 ] as const;
