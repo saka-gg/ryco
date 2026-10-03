@@ -62,14 +62,19 @@ function DialogPopup({
   showCloseButton = true,
   bottomStickOnMobile = true,
   surface = "default",
-  morph,
+  morph = "auto",
   ref,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
   bottomStickOnMobile?: boolean;
   surface?: "default" | "glass";
-  /** Grow out of (and fold back into) a control; see `surfaceMorph.ts`. */
+  /**
+   * Grow out of (and fold back into) a control; see `surfaceMorph.ts`.
+   * Defaults to `"auto"`: a dialog grows out of whatever opened it (a button,
+   * a menu item, a list row) and simply fades when nothing just did (a prompt
+   * raised by the app). Pass anchors to land somewhere specific, or `false`.
+   */
   morph?: SurfaceMorphProp;
 }) {
   const popupRef = useSurfaceMorphRef(morph, ref, { profile: DIALOG_MORPH_PROFILE });

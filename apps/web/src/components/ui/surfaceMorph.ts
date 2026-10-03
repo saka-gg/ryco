@@ -30,22 +30,35 @@ import { useEvent } from "~/hooks/useEvent";
 import { isReducedMotionEffective } from "~/themes/appearancePreferences";
 
 export interface SurfaceMorph {
-  /** The control the popup grows out of. Read on mount. */
-  readonly origin: () => HTMLElement | null;
   /**
-   * Where the popup folds into as it closes; defaults to `origin`. Read once
-   * the content has faded, so a result that renders in that window — a
-   * just-saved item — can be the landing spot. `null` dissolves in place.
+   * The control the popup grows out of. Read on mount. Omitted, it is the
+   * control the user activated just before the popup opened (see
+   * `recentActivation`); with none, the popup simply fades in.
    */
-  readonly target?: () => HTMLElement | null;
+  readonly origin?: () => HTMLElement | null;
+  /**
+   * Where the popup folds into as it closes. Read once the content has faded,
+   * so a result that renders in that window — a just-saved item — can be the
+   * landing spot. Receives the resolved origin so callers can fall back to
+   * it; `null` dissolves in place. Omitted, the popup folds back into its
+   * origin, or — when the origin was a menu item whose menu has since closed
+   * — into that menu's trigger.
+   */
+  readonly target?: (origin: HTMLElement | null) => HTMLElement | null;
 }
 
 /**
- * A primitive's `morph` prop: explicit anchors, or `"auto"` to grow out of
- * the control the user activated just before the popup opened (and fold back
- * into it). With no recent activation, `"auto"` falls back to a plain fade.
+ * A primitive's `morph` prop: anchors (either may be omitted), `"auto"` (no
+ * anchors: grow out of whatever was just activated, fold back into it), or
+ * `false` to keep the primitive's plain fade.
  */
-export type SurfaceMorphProp = SurfaceMorph | "auto";
+export type SurfaceMorphProp = SurfaceMorph | "auto" | false;
+
+/** The anchors `attachSurfaceMorph` works with, resolved by the hook. */
+export interface ResolvedSurfaceMorph {
+  readonly origin: () => HTMLElement | null;
+  readonly target?: () => HTMLElement | null;
+}
 
 export interface MorphProfile {
   readonly grow: MotionCurve;
@@ -135,23 +148,71 @@ function isMorphSuppressed(): boolean {
 /* ───────── Auto origin: the control the user just activated ───────── */
 
 const AUTO_ORIGIN_WINDOW_MS = 1200;
+/**
+ * A right-click usually opens a context menu — native in the desktop app,
+ * where picking an item fires no DOM event at all — so the row it targeted
+ * stays the origin for as long as a person plausibly spends in that menu.
+ */
+const CONTEXT_MENU_ORIGIN_WINDOW_MS = 15_000;
 const ACTIVATABLE =
   'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], summary';
-let lastActivation: { element: HTMLElement; at: number } | null = null;
+interface Activation {
+  readonly element: HTMLElement;
+  /** The trigger of the menu `element` sits in: menus close as dialogs open. */
+  readonly menuTrigger: HTMLElement | null;
+  readonly at: number;
+  readonly windowMs: number;
+}
+let lastActivation: Activation | null = null;
 let activationTrackingInstalled = false;
+
+/**
+ * The button that opened the menu `control` belongs to. base-ui wires the
+ * trigger's `aria-controls` to the menu popup's id; read it while the menu is
+ * still open, because both go away as it closes.
+ */
+function menuTriggerFor(control: HTMLElement): HTMLElement | null {
+  const menu = control.closest<HTMLElement>('[role="menu"]');
+  if (!menu?.id) return null;
+  return document.querySelector<HTMLElement>(`[aria-controls="${CSS.escape(menu.id)}"]`);
+}
 
 function recordActivation(event: Event): void {
   const target = event.target;
   if (!(target instanceof Element)) return;
   const control = target.closest<HTMLElement>(ACTIVATABLE);
-  if (control) lastActivation = { element: control, at: performance.now() };
+  if (!control) return;
+  if (event.type === "contextmenu") {
+    lastActivation = {
+      element: control,
+      menuTrigger: null,
+      at: performance.now(),
+      windowMs: CONTEXT_MENU_ORIGIN_WINDOW_MS,
+    };
+    return;
+  }
+  // An item in a DOM context menu has no trigger button; the row that was
+  // right-clicked to open that menu is where its dialog should fold back.
+  const previous = lastActivation;
+  const menuTrigger =
+    menuTriggerFor(control) ??
+    (control.closest('[role="menu"]') && previous?.windowMs === CONTEXT_MENU_ORIGIN_WINDOW_MS
+      ? previous.element
+      : null);
+  lastActivation = {
+    element: control,
+    menuTrigger,
+    at: performance.now(),
+    windowMs: AUTO_ORIGIN_WINDOW_MS,
+  };
 }
 
-/** Idempotent; installed by the first primitive rendered with `morph="auto"`. */
+/** Idempotent; installed by the first primitive that may need an automatic origin. */
 export function installActivationTracking(): void {
   if (activationTrackingInstalled || typeof document === "undefined") return;
   activationTrackingInstalled = true;
   document.addEventListener("pointerdown", recordActivation, true);
+  document.addEventListener("contextmenu", recordActivation, true);
   document.addEventListener(
     "keydown",
     (event) => {
@@ -162,10 +223,10 @@ export function installActivationTracking(): void {
 }
 
 /** The control activated within the last moment, if it is still on screen. */
-export function recentlyActivatedControl(): HTMLElement | null {
+export function recentActivation(): Activation | null {
   if (!lastActivation) return null;
-  if (performance.now() - lastActivation.at > AUTO_ORIGIN_WINDOW_MS) return null;
-  return isMorphable(lastActivation.element) ? lastActivation.element : null;
+  if (performance.now() - lastActivation.at > lastActivation.windowMs) return null;
+  return isMorphable(lastActivation.element) ? lastActivation : null;
 }
 
 /* ───────── The morph ───────── */
@@ -190,7 +251,7 @@ export interface AttachSurfaceMorphOptions {
 /** Runs the grow now and arms the fold for when base-ui starts the close. */
 export function attachSurfaceMorph(
   popup: HTMLElement,
-  morph: SurfaceMorph,
+  morph: ResolvedSurfaceMorph,
   options: AttachSurfaceMorphOptions,
 ): () => void {
   const host: { parent: Element | null; before: Node | null; zIndex?: string } =
@@ -413,16 +474,25 @@ export function useSurfaceMorphRef(
     readonly resolveHost?: (popup: HTMLElement) => Omit<AttachSurfaceMorphOptions, "profile">;
   },
 ): (node: HTMLDivElement | null) => () => void {
-  const enabled = morph !== undefined;
-  const auto = morph === "auto";
+  const spec: SurfaceMorph | null =
+    morph === undefined || morph === false ? null : morph === "auto" ? {} : morph;
+  const enabled = spec !== null;
+  const tracksActivation = spec !== null && spec.origin === undefined;
   useEffect(() => {
-    if (auto) installActivationTracking();
-  }, [auto]);
-  const resolveOrigin = useEvent(() =>
-    morph === "auto" ? recentlyActivatedControl() : (morph?.origin() ?? null),
-  );
-  const resolveTarget = useEvent(() =>
-    morph === undefined || morph === "auto" ? null : (morph.target ?? morph.origin)(),
+    if (tracksActivation) installActivationTracking();
+  }, [tracksActivation]);
+  // Read once per mount: the activation record moves on with the next click,
+  // and the fold must return to the control this popup grew from.
+  const resolveAnchors = useEvent(() => {
+    if (spec?.origin) return { origin: spec.origin(), menuTrigger: null };
+    const activation = recentActivation();
+    return { origin: activation?.element ?? null, menuTrigger: activation?.menuTrigger ?? null };
+  });
+  const resolveTarget = useEvent(
+    (origin: HTMLElement | null, menuTrigger: HTMLElement | null): HTMLElement | null => {
+      if (spec?.target) return spec.target(origin);
+      return origin?.isConnected ? origin : menuTrigger;
+    },
   );
   const resolveHost = useEvent((popup: HTMLElement) => config.resolveHost?.(popup) ?? {});
   const profile = config.profile;
@@ -431,12 +501,10 @@ export function useSurfaceMorphRef(
       assignRef(forwardedRef, node);
       let detach = () => {};
       if (node && enabled) {
-        // `"auto"` folds back into the control it grew from: capture it now,
-        // since the activation record moves on with the next click.
-        const origin = resolveOrigin();
+        const { origin, menuTrigger } = resolveAnchors();
         detach = attachSurfaceMorph(
           node,
-          auto ? { origin: () => origin } : { origin: () => origin, target: resolveTarget },
+          { origin: () => origin, target: () => resolveTarget(origin, menuTrigger) },
           { profile, ...resolveHost(node) },
         );
       }
@@ -445,6 +513,6 @@ export function useSurfaceMorphRef(
         assignRef(forwardedRef, null);
       };
     },
-    [auto, enabled, forwardedRef, profile, resolveHost, resolveOrigin, resolveTarget],
+    [enabled, forwardedRef, profile, resolveAnchors, resolveHost, resolveTarget],
   );
 }
