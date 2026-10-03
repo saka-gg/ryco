@@ -30,7 +30,7 @@ const setText = (el: Element, text: string) => {
 
 const COLUMNS = ["Idle", "In progress", "Review", "Done"];
 const CARDS = [
-  { branch: "feat/relay-backoff", provider: "claude", note: "+63 −2" },
+  { branch: "feat/relay-backoff", provider: "claude", note: "+131 −2" },
   { branch: "fix/worktree-flake", provider: "copilot", note: "1 test" },
   { branch: "docs/changelog-0.1.29", provider: "opencode", note: "draft" },
   { branch: "perf/diff-search", provider: "cursor", note: "+38 −22" },
@@ -43,41 +43,52 @@ const CARD_GAP = 8;
 const COL_HEAD = 34;
 
 function WorktreeBoard() {
+  /* below ~620px the board scrolls sideways instead of squeezing branch names
+     to a letter; columns carry their gutter as padding so a card's 25% width
+     lines up with its column exactly */
   return (
-    <div data-board className="relative h-[300px] w-full">
-      <div className="absolute inset-0 grid grid-cols-4 gap-2.5">
-        {COLUMNS.map((c) => (
-          <div key={c} className="rounded-xl bg-white/[0.025] ring-1 ring-inset ring-white/[0.05]">
-            <p className="flex h-[34px] items-center px-3 text-[12px] font-medium text-ink/55">
-              {c}
-            </p>
-          </div>
-        ))}
-      </div>
-      {CARDS.map((card, i) => {
-        const p = providerById(card.provider);
-        const col = START_COL[i];
-        const slot = START_COL.slice(0, i).filter((c) => c === col).length;
-        return (
-          <div
-            key={card.branch}
-            data-card
-            className="absolute left-0 top-0 px-1.5"
-            style={{
-              width: "25%",
-              transform: `translate(${col * 100}%, ${COL_HEAD + slot * (CARD_H + CARD_GAP)}px)`,
-            }}
-          >
-            <div className="flex h-[56px] flex-col justify-center gap-1 rounded-lg border border-white/[0.08] bg-app-card px-2.5 shadow-[0_8px_20px_-12px_rgba(0,0,0,0.8)]">
-              <span className="flex items-center gap-1.5">
-                <BrandIcon name={p.brand} className="size-3 shrink-0" style={{ color: p.accent }} />
-                <span className="truncate font-mono text-[11px] text-ink/85">{card.branch}</span>
-              </span>
-              <span className="text-[10.5px] text-ink/45">{card.note}</span>
+    <div className="-mx-5 overflow-x-auto px-5 [scrollbar-width:none] sm:mx-0 sm:px-0 [&::-webkit-scrollbar]:hidden">
+      <div data-board className="relative h-[300px] w-full min-w-[620px]">
+        <div className="absolute inset-0 grid grid-cols-4">
+          {COLUMNS.map((c) => (
+            <div key={c} className="px-[5px]">
+              <div className="h-full rounded-xl bg-white/[0.025] ring-1 ring-inset ring-white/[0.05]">
+                <p className="flex h-[34px] items-center whitespace-nowrap px-3 text-[12px] font-medium text-ink/55">
+                  {c}
+                </p>
+              </div>
             </div>
-          </div>
-        );
-      })}
+          ))}
+        </div>
+        {CARDS.map((card, i) => {
+          const p = providerById(card.provider);
+          const col = START_COL[i];
+          const slot = START_COL.slice(0, i).filter((c) => c === col).length;
+          return (
+            <div
+              key={card.branch}
+              data-card
+              className="absolute left-0 top-0 px-[11px]"
+              style={{
+                width: "25%",
+                transform: `translate(${col * 100}%, ${COL_HEAD + slot * (CARD_H + CARD_GAP)}px)`,
+              }}
+            >
+              <div className="flex h-[56px] flex-col justify-center gap-1 rounded-lg border border-white/[0.08] bg-app-card px-2.5 shadow-[0_8px_20px_-12px_rgba(0,0,0,0.8)]">
+                <span className="flex items-center gap-1.5">
+                  <BrandIcon
+                    name={p.brand}
+                    className="size-3 shrink-0"
+                    style={{ color: p.accent }}
+                  />
+                  <span className="truncate font-mono text-[11px] text-ink/85">{card.branch}</span>
+                </span>
+                <span className="text-[10.5px] text-ink/45">{card.note}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -137,15 +148,17 @@ function setupBoard(cell: HTMLElement) {
 
 /* ------------------------------ command (⌘K) ------------------------------ */
 
+/* Real palette entries (CommandPaletteDialog.tsx) with their default
+   bindings (packages/shared/src/keybindings.ts). */
 const COMMANDS = [
   { label: "New thread", keys: "⌘N" },
-  { label: "Toggle terminal", keys: "⌘J" },
-  { label: "Toggle diff", keys: "⌘D" },
-  { label: "Open files", keys: "⌘P" },
-  { label: "Switch model", keys: "⇧⌘M" },
-  { label: "Jump to thread 3", keys: "⌘3" },
+  { label: "Open thread in split view…", keys: "⌘\\" },
+  { label: "Show Inbox sidebar", keys: "⇧⌘I" },
+  { label: "Show Projects sidebar", keys: "⇧⌘P" },
+  { label: "Pin thread", keys: "⌥⌘P" },
+  { label: "Open settings", keys: "" },
 ];
-const QUERIES = ["term", "model", "diff", "thread 3"];
+const QUERIES = ["split", "inbox", "pin", "settings"];
 const ROW_H = 34;
 
 function Palette() {
@@ -154,7 +167,7 @@ function Palette() {
       <div className="flex h-11 items-center gap-2.5 border-b border-white/[0.07] px-3.5 text-[13.5px]">
         <Search className="size-4 text-ink/40" />
         <span data-q className="text-ink">
-          term
+          split
         </span>
         <span className="ry-caret -ml-1.5 text-ink/70" />
       </div>
@@ -171,9 +184,9 @@ function Palette() {
             className="relative flex items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-ink/85"
             style={{ height: ROW_H }}
           >
-            <Command className="size-3.5 text-ink/35" />
-            {c.label}
-            <span className="ml-auto font-mono text-[11px] text-ink/40">{c.keys}</span>
+            <Command className="size-3.5 shrink-0 text-ink/35" />
+            <span className="min-w-0 flex-1 truncate">{c.label}</span>
+            <span className="shrink-0 font-mono text-[11px] text-ink/40">{c.keys}</span>
           </div>
         ))}
       </div>
@@ -329,11 +342,13 @@ function setupIssues(cell: HTMLElement) {
 
 /* --------------------------------- themes --------------------------------- */
 
+/* Only values the real editor can produce: a custom accent colour plus one of
+   its radius steps (RADIUS_OPTIONS in apps/web/src/themes/appearancePreferences.ts). */
 const PRESETS = [
-  { name: "Ember", accent: "#ff5c28", radius: 14, font: "DM Sans" },
-  { name: "Indigo", accent: "#6466f1", radius: 6, font: "Geist Mono" },
-  { name: "Teal", accent: "#2cc5b0", radius: 20, font: "DM Sans" },
-  { name: "Rose", accent: "#ec6aa0", radius: 10, font: "Archivo" },
+  { accent: "#ff5c28", radius: 14, step: "Soft" },
+  { accent: "#6466f1", radius: 6, step: "Tight" },
+  { accent: "#2cc5b0", radius: 18, step: "Round" },
+  { accent: "#ec6aa0", radius: 10, step: "Default" },
 ];
 
 function ThemeEditor() {
@@ -366,11 +381,11 @@ function ThemeEditor() {
         ))}
       </div>
       <div className="flex flex-1 flex-col p-3">
-        <p data-font className="text-[13px] text-ink/85" style={{ fontFamily: first.font }}>
+        <p data-font className="text-[13px] text-ink/85">
           The quick agent ships the fix.
         </p>
-        <p className="mt-1 text-[11px] text-ink/45">
-          <span data-preset>{first.name}</span>, radius <span data-radius>{first.radius}</span>
+        <p className="mt-1 font-mono text-[11px] text-ink/45">
+          <span data-preset>{first.accent}</span>, <span data-radius>{first.step}</span> radius
         </p>
         <div
           className="mt-auto flex h-9 items-center justify-between border border-white/10 bg-app-card pl-3 pr-1.5 text-[11.5px] text-ink/45"
@@ -403,26 +418,33 @@ function setupThemes(cell: HTMLElement) {
     );
     tl.call(
       () => {
-        font.style.fontFamily = p.font;
-        preset.textContent = p.name;
-        radius.textContent = String(p.radius);
+        preset.textContent = p.accent;
+        radius.textContent = p.step;
       },
       [],
       "<+0.2",
     );
-    tl.fromTo(font, { autoAlpha: 0.2, y: 4 }, { autoAlpha: 1, y: 0, duration: 0.4 }, "<");
+    /* immediateRender: false, so the sample only dips at a preset change
+       rather than sitting at the "from" opacity until its turn comes */
+    tl.fromTo(
+      font,
+      { autoAlpha: 0.2, y: 4 },
+      { autoAlpha: 1, y: 0, duration: 0.4, immediateRender: false },
+      "<",
+    );
   });
   return whileVisible(cell, tl);
 }
 
 /* --------------------------------- traces --------------------------------- */
 
+/* Span names the server really emits (apps/server/src); timings illustrative. */
 const SPANS = [
-  { name: "provider.turn", at: 0, w: 100, ms: "4.2s" },
-  { name: "tool.read", at: 4, w: 7, ms: "38ms" },
-  { name: "tool.edit", at: 14, w: 12, ms: "120ms" },
-  { name: "tool.exec", at: 30, w: 46, ms: "612ms" },
-  { name: "persist", at: 80, w: 6, ms: "9ms" },
+  { name: "provider.sendTurn", at: 0, w: 100, ms: "4.2s" },
+  { name: "git.createWorktree", at: 3, w: 9, ms: "120ms" },
+  { name: "terminal.startSession", at: 16, w: 5, ms: "38ms" },
+  { name: "terminal.write", at: 26, w: 44, ms: "612ms" },
+  { name: "terminal.persistHistory", at: 78, w: 6, ms: "9ms" },
 ];
 
 function Traces() {
@@ -451,7 +473,7 @@ function Traces() {
       {SPANS.map((s) => (
         <div
           key={s.name}
-          className="grid grid-cols-[92px_minmax(0,1fr)] items-center gap-2.5 text-[11px]"
+          className="grid grid-cols-[minmax(0,148px)_minmax(0,1fr)] items-center gap-2.5 text-[11px]"
         >
           <span className="truncate font-mono text-ink/55">{s.name}</span>
           <span className="relative h-[14px]">
@@ -570,7 +592,7 @@ export function Toolkit() {
             demo="palette"
             className="md:col-span-2"
             title="Everything on ⌘K"
-            body="Commands, threads and models a few keys away. Every binding is yours to change."
+            body="Threads, sidebars, split view and settings a few keys away. Every binding is yours to change."
           >
             <Palette />
           </Cell>

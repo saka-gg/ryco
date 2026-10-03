@@ -14,10 +14,9 @@ import { SplitText } from "gsap/SplitText";
 import { DrawSVGPlugin } from "gsap/DrawSVGPlugin";
 import { CustomEase } from "gsap/CustomEase";
 import { ScrambleTextPlugin } from "gsap/ScrambleTextPlugin";
-import { Flip } from "gsap/Flip";
 import Lenis from "lenis";
 
-gsap.registerPlugin(ScrollTrigger, SplitText, DrawSVGPlugin, CustomEase, ScrambleTextPlugin, Flip);
+gsap.registerPlugin(ScrollTrigger, SplitText, DrawSVGPlugin, CustomEase, ScrambleTextPlugin);
 
 /* The Ryco app's own house curve (--app-motion-ease), so the site and the
    product move with the same hand. */
@@ -45,16 +44,18 @@ const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayout
 /**
  * Run GSAP setup inside a context scoped to the returned ref. Everything the
  * callback creates (tweens, ScrollTriggers, SplitTexts) is reverted on unmount.
- * Skipped entirely under reduced motion.
+ * Skipped under reduced motion, and torn down or rebuilt live if the OS
+ * preference flips mid-visit, so the layout and the motion always agree.
  */
 export function useGsap<T extends HTMLElement = HTMLDivElement>(
   setup: (scope: T) => void | (() => void),
   deps: ReadonlyArray<unknown> = [],
 ) {
   const scope = useRef<T>(null);
+  const reduced = useReducedMotion();
   useIsoLayoutEffect(() => {
     const el = scope.current;
-    if (!el || prefersReducedMotion()) return;
+    if (!el || reduced) return;
     let cleanup: void | (() => void);
     const ctx = gsap.context(() => {
       cleanup = setup(el);
@@ -64,7 +65,7 @@ export function useGsap<T extends HTMLElement = HTMLDivElement>(
       ctx.revert();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [...deps, reduced]);
   return scope;
 }
 
@@ -73,10 +74,11 @@ export function useGsap<T extends HTMLElement = HTMLDivElement>(
 let lenis: Lenis | null = null;
 export const getLenis = () => lenis;
 
-/** Mount once at the page root. Native scroll under reduced motion. */
+/** Mount once at the page root. Native scroll under reduced motion (live). */
 export function useSmoothScroll() {
+  const reduced = useReducedMotion();
   useEffect(() => {
-    if (prefersReducedMotion()) return;
+    if (reduced) return;
     const instance = new Lenis({
       lerp: 0.1,
       wheelMultiplier: 1,
@@ -94,7 +96,7 @@ export function useSmoothScroll() {
       instance.destroy();
       lenis = null;
     };
-  }, []);
+  }, [reduced]);
 }
 
 /**
@@ -120,12 +122,36 @@ export function usePauseOffscreenLoops() {
   }, []);
 }
 
-/** Scroll to an in-page anchor through Lenis when it's running. */
+/**
+ * Re-measure every ScrollTrigger once the web fonts have settled. Trigger
+ * positions computed with fallback metrics drift by tens of pixels once
+ * Archivo and DM Sans arrive (headings re-wrap), so reveals, the nav spy and
+ * the footer wordmark would otherwise fire at the wrong scroll offsets.
+ */
+export function useRefreshAfterFonts() {
+  useEffect(() => {
+    let live = true;
+    void document.fonts?.ready.then(() => {
+      if (live) ScrollTrigger.refresh();
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+}
+
+/**
+ * Scroll to an in-page anchor through Lenis when it's running, and move
+ * keyboard focus there too: these are skip links, so the next Tab must
+ * continue inside the target section rather than back in the nav.
+ */
 export function scrollToId(id: string) {
   const el = document.getElementById(id);
   if (!el) return;
   if (lenis) lenis.scrollTo(el, { offset: -72 });
   else el.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "-1");
+  el.focus({ preventScroll: true });
 }
 
-export { gsap, ScrollTrigger, SplitText, Flip };
+export { gsap, ScrollTrigger, SplitText };

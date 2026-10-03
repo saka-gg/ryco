@@ -57,7 +57,9 @@ export function Faq() {
               <li key={item.q} data-faq-item className="border-t border-white/12 last:border-b">
                 <button
                   type="button"
+                  id={`faq-q-${i}`}
                   aria-expanded={isOpen}
+                  aria-controls={`faq-a-${i}`}
                   onClick={() => setOpen(isOpen ? null : i)}
                   className={cn("flex w-full items-center gap-6 py-6 text-left", focusRing)}
                 >
@@ -87,7 +89,13 @@ export function Faq() {
                     />
                   </span>
                 </button>
+                {/* inert while collapsed: hidden from screen readers and tab
+                    order, not merely clipped to zero height */}
                 <div
+                  id={`faq-a-${i}`}
+                  role="region"
+                  aria-labelledby={`faq-q-${i}`}
+                  inert={!isOpen}
                   className="grid transition-[grid-template-rows] duration-500 ease-ryco"
                   style={{ gridTemplateRows: isOpen ? "1fr" : "0fr" }}
                 >

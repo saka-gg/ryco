@@ -10,7 +10,7 @@ import { SITE } from "@/data/content";
 import { cn } from "@/lib/cn";
 import { gsap, scrollToId, useGsap } from "@/lib/motion";
 import { Button } from "./ui/Button";
-import { revealText } from "./ui/reveal";
+import { revealText, revealUp } from "./ui/reveal";
 import { useDownload } from "./useDownload";
 import { focusRing, SECTION_X } from "./theme";
 
@@ -25,16 +25,14 @@ export function Finale() {
       widen: true,
       stagger: 0.06,
     });
-    gsap.from(root.querySelectorAll("[data-finale-cta]"), {
-      autoAlpha: 0,
-      y: 24,
-      stagger: 0.08,
-      scrollTrigger: {
-        trigger: root.querySelector("[data-finale-title]"),
+    revealUp(
+      root.querySelectorAll("[data-finale-cta]"),
+      root.querySelector("[data-finale-title]")!,
+      {
+        y: 24,
         start: "top 70%",
-        once: true,
       },
-    });
+    );
     gsap.from(root.querySelectorAll<SVGPathElement>("[data-wordmark] path"), {
       /* resolved once at creation (one getBBox per glyph); yPercent on SVG
          would re-measure the box on every scrubbed frame */
@@ -44,7 +42,9 @@ export function Finale() {
       scrollTrigger: {
         trigger: root.querySelector("[data-wordmark]"),
         start: "top bottom",
-        end: "bottom 101%",
+        /* "max": always completes at the very bottom, however the page's
+           height shifts after fonts and images settle */
+        end: "max",
         scrub: 1,
       },
     });
@@ -70,12 +70,7 @@ export function Finale() {
         </h2>
         <div className="mt-12 flex flex-wrap items-center justify-center gap-3">
           <span data-finale-cta>
-            <Button
-              href={dl.href}
-              external={!dl.isDirect}
-              icon={<Download />}
-              ariaLabel={dl.osLabel ? `Download Ryco for ${dl.osLabel}` : "Download Ryco"}
-            >
+            <Button href={dl.href} external={!dl.isDirect} icon={<Download />}>
               {dl.osLabel ? `Download for ${dl.osLabel}` : "Download Ryco"}
             </Button>
           </span>
@@ -99,7 +94,7 @@ export function Finale() {
             <p className="mt-5 text-[15px] leading-relaxed text-ink/55">{SITE.longDescription}</p>
           </div>
           <nav aria-label="Product" className="flex flex-col gap-3">
-            <span className="mb-1 text-[13px] font-medium text-ink/40">Product</span>
+            <span className="mb-1 text-[13px] font-medium text-ink/55">Product</span>
             <a href="#agents" onClick={go("agents")} className={linkCls}>
               Agents
             </a>
@@ -114,7 +109,7 @@ export function Finale() {
             </Link>
           </nav>
           <nav aria-label="Community" className="flex flex-col gap-3">
-            <span className="mb-1 text-[13px] font-medium text-ink/40">Community</span>
+            <span className="mb-1 text-[13px] font-medium text-ink/55">Community</span>
             <a
               href={SITE.repo}
               target="_blank"
@@ -138,7 +133,7 @@ export function Finale() {
         <div
           className={cn(
             SECTION_X,
-            "mt-16 flex flex-col gap-3 text-[13px] text-ink/45 sm:flex-row sm:items-center sm:justify-between",
+            "mt-16 flex flex-col gap-3 text-[13px] text-ink/55 sm:flex-row sm:items-center sm:justify-between",
           )}
         >
           <p>

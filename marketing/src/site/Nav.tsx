@@ -48,23 +48,30 @@ export function Nav() {
     /* hide on scroll down, reveal on scroll up; progress hairline. The bar
        only tweens when its state flips, never once per scroll frame. */
     let hidden = false;
+    const setHidden = (hide: boolean) => {
+      if (hide === hidden || !bar.current) return;
+      hidden = hide;
+      gsap.to(bar.current, {
+        yPercent: hide ? -150 : 0,
+        duration: 0.5,
+        ease: "ryco",
+        overwrite: "auto",
+      });
+    };
     const st = ScrollTrigger.create({
       start: 0,
       end: "max",
       onUpdate: (self) => {
         if (progress.current) progress.current.style.transform = `scaleX(${self.progress})`;
         if (reduce || !bar.current) return;
-        const hide = self.direction === 1 && self.scroll() > 240;
-        if (hide === hidden) return;
-        hidden = hide;
-        gsap.to(bar.current, {
-          yPercent: hide ? -150 : 0,
-          duration: 0.5,
-          ease: "ryco",
-          overwrite: "auto",
-        });
+        /* never tuck away while keyboard focus is inside the bar */
+        if (bar.current.contains(document.activeElement)) return setHidden(false);
+        setHidden(self.direction === 1 && self.scroll() > 240);
       },
     });
+    const onFocusIn = () => setHidden(false);
+    const barEl = bar.current;
+    barEl?.addEventListener("focusin", onFocusIn);
     /* scroll-spy */
     const spies = NAV_LINKS.filter((l) => document.getElementById(l.id)).map((l) =>
       ScrollTrigger.create({
@@ -77,6 +84,7 @@ export function Nav() {
       }),
     );
     return () => {
+      barEl?.removeEventListener("focusin", onFocusIn);
       ctx.revert();
       st.kill();
       spies.forEach((s) => s.kill());
@@ -108,7 +116,7 @@ export function Nav() {
 
           <nav
             aria-label="Primary"
-            className="mx-auto hidden items-center gap-0.5 text-[14px] md:flex"
+            className="mx-auto hidden items-center gap-0.5 text-[14px] lg:flex"
           >
             {NAV_LINKS.map((l) => (
               <a
@@ -142,7 +150,7 @@ export function Nav() {
             </Link>
           </nav>
 
-          <div className="ml-auto flex items-center gap-1 md:ml-0">
+          <div className="ml-auto flex items-center gap-1 lg:ml-0">
             <a
               href={SITE.repo}
               target="_blank"
@@ -171,7 +179,7 @@ export function Nav() {
               aria-label={open ? "Close menu" : "Open menu"}
               aria-expanded={open}
               className={cn(
-                "grid size-9 place-items-center rounded-full text-ink/75 transition hover:bg-white/[0.06] md:hidden",
+                "grid size-9 place-items-center rounded-full text-ink/75 transition hover:bg-white/[0.06] lg:hidden",
                 focusRing,
               )}
             >
@@ -183,28 +191,34 @@ export function Nav() {
         <div
           inert={!open}
           className={cn(
-            "grid transition-[grid-template-rows,opacity] duration-500 ease-ryco md:hidden",
+            "grid transition-[grid-template-rows,opacity] duration-500 ease-ryco lg:hidden",
             open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
           )}
         >
-          <nav aria-label="Mobile" className="flex flex-col overflow-hidden px-2 pb-2">
-            {NAV_LINKS.map((l) => (
-              <a
-                key={l.id}
-                href={`#${l.id}`}
-                onClick={go(l.id)}
+          <div className="min-h-0 overflow-hidden">
+            {/* scrolls on short screens (landscape phones) instead of clipping */}
+            <nav
+              aria-label="Mobile"
+              className="flex max-h-[calc(100svh-5rem)] flex-col overflow-y-auto overscroll-contain px-2 pb-2"
+            >
+              {NAV_LINKS.map((l) => (
+                <a
+                  key={l.id}
+                  href={`#${l.id}`}
+                  onClick={go(l.id)}
+                  className="rounded-xl px-3 py-3 font-display text-[22px] font-semibold tracking-[-0.02em] text-ink/85 hover:bg-white/[0.05]"
+                >
+                  {l.label}
+                </a>
+              ))}
+              <Link
+                to="/changelog"
                 className="rounded-xl px-3 py-3 font-display text-[22px] font-semibold tracking-[-0.02em] text-ink/85 hover:bg-white/[0.05]"
               >
-                {l.label}
-              </a>
-            ))}
-            <Link
-              to="/changelog"
-              className="rounded-xl px-3 py-3 font-display text-[22px] font-semibold tracking-[-0.02em] text-ink/85 hover:bg-white/[0.05]"
-            >
-              Changelog
-            </Link>
-          </nav>
+                Changelog
+              </Link>
+            </nav>
+          </div>
         </div>
 
         <span aria-hidden className="absolute inset-x-5 bottom-0 h-px overflow-hidden">

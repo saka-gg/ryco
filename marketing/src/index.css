@@ -58,11 +58,23 @@ html.lenis body {
   overflow: clip;
 }
 
+/* clip on html too: on touch browsers an overflowing descendant (the pinned
+   gallery track is wider than the screen) otherwise widens the layout
+   viewport, inflating innerWidth/innerHeight for every scroll measurement */
+html {
+  overflow-x: clip;
+}
+
 body {
   background: var(--color-canvas);
   color: var(--color-ink);
   font-family: var(--font-sans);
   overflow-x: clip;
+}
+
+/* scroll targets focused by in-page links (scrollToId) need no ring */
+[tabindex="-1"]:focus {
+  outline: none;
 }
 
 ::selection {
@@ -137,9 +149,11 @@ body {
 .ry-spin {
   animation: ry-spin 0.9s linear infinite;
 }
+/* transform, not the individual rotate property: Chrome only composites
+   transform animations on SVG, so this stays off the main thread */
 @keyframes ry-spin {
   to {
-    rotate: 360deg;
+    transform: rotate(360deg);
   }
 }
 
@@ -166,21 +180,28 @@ body {
   }
 }
 
+/* Pulse rings are HTML boxes animating transform + opacity (composited);
+   scaling an SVG shape instead forced layout and paint every frame. */
 .ry-pulse {
   animation: ry-pulse 2.4s var(--ease-ryco) infinite;
-  transform-box: fill-box;
-  transform-origin: center;
 }
 @keyframes ry-pulse {
   0% {
     opacity: 0.55;
-    scale: 1;
+    transform: scale(1);
   }
   70%,
   100% {
     opacity: 0;
-    scale: 2.6;
+    transform: scale(1.45);
   }
+}
+
+/* The Stage's spinners and carets are paused until the film shows them
+   (film.ts flips animation-play-state as it reveals and hides each one), so
+   hidden loops never cost a frame. */
+[data-s="stage"] :is(.ry-spin, .ry-caret, .ry-block-caret) {
+  animation-play-state: paused;
 }
 
 /* Off-screen loop containers (usePauseOffscreenLoops) freeze in place. */

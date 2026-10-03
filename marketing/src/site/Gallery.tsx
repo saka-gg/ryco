@@ -9,7 +9,7 @@ import { screenshotImageProps } from "@/lib/screenshotAssets";
 import { cn } from "@/lib/cn";
 import { gsap, ScrollTrigger, useGsap } from "@/lib/motion";
 import { revealText } from "./ui/reveal";
-import { SECTION_X } from "./theme";
+import { focusRing, SECTION_X } from "./theme";
 
 export function Gallery() {
   const scope = useGsap<HTMLElement>((root) => {
@@ -20,7 +20,9 @@ export function Gallery() {
     mm.add("(min-width: 1024px)", () => {
       const pin = root.querySelector<HTMLElement>("[data-gallery-pin]")!;
       const track = root.querySelector<HTMLElement>("[data-gallery-track]")!;
-      const distance = () => track.scrollWidth - window.innerWidth;
+      /* clientWidth, not innerWidth: on touch browsers innerWidth can report
+         the layout viewport inflated by this very track */
+      const distance = () => track.scrollWidth - document.documentElement.clientWidth;
 
       const pan = gsap.to(track, {
         x: () => -distance(),
@@ -32,6 +34,8 @@ export function Gallery() {
           pin: true,
           scrub: 0.8,
           invalidateOnRefresh: true,
+          /* sort by document position after a breakpoint rebuild (see film) */
+          refreshPriority: 0,
         },
       });
 
@@ -102,14 +106,21 @@ export function Gallery() {
 
       <div
         data-gallery-pin
-        className="lg:flex lg:h-[100svh] lg:items-center"
+        /* the pinned pan only exists with motion; reduced motion keeps the
+           native scroll-snap strip at every width */
+        className="motion-safe:lg:flex motion-safe:lg:h-[100svh] motion-safe:lg:items-center"
         style={{ perspective: "1800px" }}
       >
         <div
           data-gallery-track
+          tabIndex={0}
+          role="region"
+          aria-label="Product screenshots"
           className={cn(
-            "mt-12 flex snap-x snap-mandatory gap-5 overflow-x-auto px-4 pb-6 sm:px-8 lg:mt-0 lg:w-max lg:snap-none lg:gap-10 lg:overflow-visible lg:px-[8vw] lg:pb-0",
-            "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+            "mt-12 flex snap-x snap-mandatory gap-5 overflow-x-auto px-4 pb-6 sm:px-8 lg:gap-10",
+            "motion-safe:lg:mt-0 motion-safe:lg:w-max motion-safe:lg:snap-none motion-safe:lg:overflow-visible motion-safe:lg:px-[8vw] motion-safe:lg:pb-0",
+            "motion-safe:[scrollbar-width:none] motion-safe:[&::-webkit-scrollbar]:hidden",
+            focusRing,
           )}
         >
           {SHOTS.map((shot) => (

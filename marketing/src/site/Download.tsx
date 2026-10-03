@@ -20,6 +20,7 @@ const LINES: Tok[][] = [
   [],
   [{ t: "# or reach this machine from anywhere", tone: "muted" }],
   [{ t: "$ ", tone: "accent" }, { t: CLOUD.serve }],
+  [{ t: "$ ", tone: "accent" }, { t: CLOUD.link }],
 ];
 const lineLen = (i: number) => LINES[i].reduce((n, tok) => n + tok.t.length, 0);
 
@@ -65,9 +66,9 @@ function TypingTerminal() {
         <span className="size-2.5 rounded-full bg-white/15" />
         <span className="size-2.5 rounded-full bg-white/15" />
         <span className="size-2.5 rounded-full bg-white/15" />
-        <span className="ml-2 text-[11.5px] text-ink/40">zsh</span>
+        <span className="ml-2 text-[11.5px] text-ink/55">zsh</span>
       </div>
-      <div ref={ref} aria-hidden className="min-h-[148px] px-5 py-4 leading-[1.75]">
+      <div ref={ref} aria-hidden className="min-h-[180px] px-5 py-4 leading-[1.75]">
         {LINES.map((line, i) => {
           if (i > pos.line) return null;
           let budget = i === pos.line ? pos.char : Infinity;
@@ -84,7 +85,7 @@ function TypingTerminal() {
                       tok.tone === "accent"
                         ? "text-accent"
                         : tok.tone === "muted"
-                          ? "text-ink/35"
+                          ? "text-ink/55"
                           : "text-ink/85"
                     }
                   >
@@ -190,7 +191,7 @@ export function Download() {
                           </span>
                         )}
                       </span>
-                      <span className="mt-1 block font-mono text-[12.5px] text-ink/45">
+                      <span className="mt-1 block font-mono text-[12.5px] text-ink/55">
                         {pl.format} · {pl.arch}
                       </span>
                       <span className="mt-1 block text-[14px] text-ink/55">{pl.install}</span>

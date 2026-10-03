@@ -9,7 +9,7 @@ import { SITE } from "@/data/content";
 import { cn } from "@/lib/cn";
 import { getLenis, gsap, ScrollTrigger, SplitText, useGsap, useReducedMotion } from "@/lib/motion";
 import { NARROW_CROP, Stage } from "./stage/Stage";
-import { NARROW_QUERY, useMediaQuery } from "@/lib/useMediaQuery";
+import { NARROW_QUERY, SHORT_QUERY, useMediaQuery } from "@/lib/useMediaQuery";
 import { buildFilm, CHAPTER_AT, CHAPTERS } from "./stage/film";
 import { Button } from "./ui/Button";
 import { CopyCommand } from "./ui/CopyCommand";
@@ -26,6 +26,10 @@ const WDTH_PEAK = 122;
 export function ProductFilm() {
   const reduced = useReducedMotion();
   const narrow = useMediaQuery(NARROW_QUERY);
+  /* Landscape phones are too short to pin a film beside its chapter rail;
+     they get the same settled composition as reduced motion. */
+  const short = useMediaQuery(SHORT_QUERY);
+  const still = reduced || short;
   const dl = useDownload();
   const [chapter, setChapter] = useState(0);
   const bars = useRef<Array<HTMLSpanElement | null>>([]);
@@ -58,7 +62,8 @@ export function ProductFilm() {
         { scale: 0, duration: 0.7, stagger: 0.12, ease: "back.out(3)" },
         0.75,
       )
-      .from("[data-hero-fade]", { autoAlpha: 0, y: 22, duration: 1, stagger: 0.08 }, 0.55)
+      /* opacity, not autoAlpha: the CTAs stay focusable while they wait */
+      .from("[data-hero-fade]", { opacity: 0, y: 22, duration: 1, stagger: 0.08 }, 0.55)
       .from(lift, { y: 140, autoAlpha: 0, duration: 1.6, ease: "ryco" }, 0.45);
 
     /* Hold the entrance (letters wait hidden under their masks) until the web
@@ -131,54 +136,63 @@ export function ProductFilm() {
 
     /* --------------------------------- film -------------------------------- */
     const mm = gsap.matchMedia();
-    mm.add({ narrow: "(max-width: 767px)", wide: "(min-width: 768px)" }, (ctx) => {
-      const narrow = !!ctx.conditions?.narrow;
+    mm.add(
+      {
+        narrow: "(max-width: 767px) and (min-height: 521px)",
+        wide: "(min-width: 768px) and (min-height: 521px)",
+      },
+      (ctx) => {
+        const narrow = !!ctx.conditions?.narrow;
 
-      /* The window lies back, then flattens as it reaches the top. */
-      gsap.fromTo(
-        stage,
-        { rotateX: narrow ? 14 : 26, scale: narrow ? 0.94 : 0.86, transformOrigin: "50% 0%" },
-        {
-          rotateX: 0,
-          scale: 1,
-          ease: "none",
-          scrollTrigger: { trigger: pin, start: "top bottom", end: "top top", scrub: true },
-        },
-      );
+        /* The window lies back, then flattens as it reaches the top. */
+        gsap.fromTo(
+          stage,
+          { rotateX: narrow ? 14 : 26, scale: narrow ? 0.94 : 0.86, transformOrigin: "50% 0%" },
+          {
+            rotateX: 0,
+            scale: 1,
+            ease: "none",
+            scrollTrigger: { trigger: pin, start: "top bottom", end: "top top", scrub: true },
+          },
+        );
 
-      const film = buildFilm(stage, { narrow });
-      const total = film.duration();
-      let current = -1;
-      filmTrigger.current = ScrollTrigger.create({
-        trigger: pin,
-        start: "top top",
-        end: () => `+=${window.innerHeight * (narrow ? 4.4 : 5.4)}`,
-        pin: true,
-        scrub: 0.75,
-        animation: film,
-        invalidateOnRefresh: true,
-        onUpdate: (self) => {
-          const t = self.progress * total;
-          let idx = 0;
-          STARTS.forEach((s, i) => {
-            if (t >= s - 0.01) idx = i;
-          });
-          /* React only hears about chapter changes, not every frame */
-          if (idx !== current) {
-            current = idx;
-            setChapter(idx);
-          }
-          bars.current.forEach((bar, i) => {
-            if (!bar) return;
-            const k = gsap.utils.clamp(0, 1, (t - STARTS[i]) / (ENDS[i] - STARTS[i]));
-            bar.style.transform = `scaleX(${k})`;
-          });
-        },
-      });
-      return () => {
-        filmTrigger.current = null;
-      };
-    });
+        const film = buildFilm(stage, { narrow });
+        const total = film.duration();
+        let current = -1;
+        filmTrigger.current = ScrollTrigger.create({
+          trigger: pin,
+          start: "top top",
+          end: () => `+=${window.innerHeight * (narrow ? 4.4 : 5.4)}`,
+          pin: true,
+          scrub: 0.75,
+          animation: film,
+          /* any refreshPriority turns on ScrollTrigger's sort by document
+           position, so a pin rebuilt at a breakpoint (appended last) is
+           still measured before the triggers below it */
+          refreshPriority: 0,
+          onUpdate: (self) => {
+            const t = self.progress * total;
+            let idx = 0;
+            STARTS.forEach((s, i) => {
+              if (t >= s - 0.01) idx = i;
+            });
+            /* React only hears about chapter changes, not every frame */
+            if (idx !== current) {
+              current = idx;
+              setChapter(idx);
+            }
+            bars.current.forEach((bar, i) => {
+              if (!bar) return;
+              const k = gsap.utils.clamp(0, 1, (t - STARTS[i]) / (ENDS[i] - STARTS[i]));
+              bar.style.transform = `scaleX(${k})`;
+            });
+          },
+        });
+        return () => {
+          filmTrigger.current = null;
+        };
+      },
+    );
 
     return () => {
       started = true;
@@ -191,7 +205,7 @@ export function ProductFilm() {
   });
 
   /* The window is as large as the pinned frame allows next to the chapter rail. */
-  const stageMax = reduced
+  const stageMax = still
     ? 1180
     : narrow
       ? `min(calc(100vw - 32px), calc((100svh - 250px) * ${NARROW_CROP.w / 800}))`
@@ -214,7 +228,9 @@ export function ProductFilm() {
         <div data-hero-copy>
           <h1
             data-hero-title
-            className="font-display text-[clamp(3.1rem,10.2vw,10.4rem)] font-[760] leading-[0.9] tracking-[-0.045em] text-ink"
+            /* phones size by width so "One workspace." (about 7.4em) always
+               fits inside the gutters; larger screens keep the poster scale */
+            className="font-display text-[clamp(2.25rem,calc((100vw-2rem)/7.6),4.5rem)] font-[760] leading-[0.9] tracking-[-0.045em] text-ink sm:text-[clamp(3.1rem,10.2vw,10.4rem)]"
           >
             <span className="block whitespace-nowrap">
               Every agent
@@ -238,12 +254,7 @@ export function ProductFilm() {
               {SITE.oneLiner}
             </p>
             <div data-hero-fade className="flex flex-wrap items-center gap-3">
-              <Button
-                href={dl.href}
-                external={!dl.isDirect}
-                icon={<Download />}
-                ariaLabel={dl.osLabel ? `Download Ryco for ${dl.osLabel}` : "Download Ryco"}
-              >
+              <Button href={dl.href} external={!dl.isDirect} icon={<Download />}>
                 {dl.osLabel ? `Download for ${dl.osLabel}` : "Download Ryco"}
               </Button>
               <CopyCommand command={SITE.npx} />
@@ -267,62 +278,73 @@ export function ProductFilm() {
           data-film-pin
           className={cn(
             "flex flex-col items-center px-4",
-            reduced ? "gap-10 pb-10" : "h-[100svh] justify-center gap-6 sm:gap-7",
+            still ? "gap-10 pb-10" : "h-[100svh] justify-center gap-6 sm:gap-7",
           )}
           style={{ perspective: "1600px" }}
         >
           <div data-stage-lift className="w-full" style={{ maxWidth: stageMax }}>
             <Stage
-              crop={narrow ? NARROW_CROP : undefined}
+              /* the settled frame is a whole window, so it is never cropped */
+              crop={narrow && !still ? NARROW_CROP : undefined}
               className="shadow-[0_60px_140px_-40px_rgba(0,0,0,0.95)]"
             />
           </div>
 
-          {/* chapter rail */}
-          <div className="w-full" style={{ maxWidth: stageMax }}>
-            {/* wide: all five; narrow: the active one */}
-            <ol className="hidden grid-cols-5 gap-6 md:grid">
-              {CHAPTERS.map((c, i) => (
-                <li key={c.id}>
-                  <button
-                    type="button"
-                    onClick={() => jump(i)}
-                    disabled={reduced}
-                    className={cn(
-                      "group/ch block w-full text-left transition-opacity duration-500",
-                      reduced || i === chapter ? "opacity-100" : "opacity-40 hover:opacity-75",
-                      focusRing,
-                    )}
-                  >
-                    <span className="block h-px overflow-hidden bg-white/15">
-                      <span
-                        ref={(el) => {
-                          bars.current[i] = el;
-                        }}
-                        className="block h-full origin-left bg-accent will-change-transform"
-                        style={{ transform: reduced ? "scaleX(1)" : "scaleX(0)" }}
-                      />
-                    </span>
-                    <span className="mt-3 block font-display text-[15px] font-semibold tracking-[-0.01em] text-ink">
-                      {c.title}
-                    </span>
-                    <span className="mt-1 block text-[13px] leading-snug text-ink/55">
-                      {c.line}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ol>
-            {reduced ? (
-              <ol className="grid gap-4 md:hidden">
+          {/* chapter rail: never narrower than reads well, even when a short
+              viewport shrinks the window above it */}
+          <div
+            className="w-full"
+            style={{
+              maxWidth: still ? 1180 : `max(${stageMax}, min(900px, calc(100vw - 32px)))`,
+            }}
+          >
+            {/* static: a plain list; wide: five chapter buttons; narrow: the active one */}
+            {still ? (
+              <ol className="grid gap-4 md:grid-cols-5 md:gap-6">
                 {CHAPTERS.map((c) => (
                   <li key={c.id}>
-                    <p className="font-display text-[17px] font-semibold text-ink">{c.title}</p>
-                    <p className="text-[14px] text-ink/60">{c.line}</p>
+                    <span aria-hidden className="block h-px bg-accent" />
+                    <p className="mt-3 font-display text-[15px] font-semibold tracking-[-0.01em] text-ink">
+                      {c.title}
+                    </p>
+                    <p className="mt-1 text-[13px] leading-snug text-ink/60">{c.line}</p>
                   </li>
                 ))}
               </ol>
             ) : (
+              <ol className="hidden grid-cols-5 gap-6 md:grid">
+                {CHAPTERS.map((c, i) => (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      onClick={() => jump(i)}
+                      className={cn(
+                        "group/ch block w-full text-left transition-opacity duration-500",
+                        i === chapter ? "opacity-100" : "opacity-40 hover:opacity-75",
+                        focusRing,
+                      )}
+                    >
+                      <span className="block h-px overflow-hidden bg-white/15">
+                        <span
+                          ref={(el) => {
+                            bars.current[i] = el;
+                          }}
+                          className="block h-full origin-left bg-accent will-change-transform"
+                          style={{ transform: "scaleX(0)" }}
+                        />
+                      </span>
+                      <span className="mt-3 block font-display text-[15px] font-semibold tracking-[-0.01em] text-ink">
+                        {c.title}
+                      </span>
+                      <span className="mt-1 block text-[13px] leading-snug text-ink/55">
+                        {c.line}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            )}
+            {!still && (
               <div className="md:hidden" aria-live="polite">
                 <div className="flex gap-1.5">
                   {CHAPTERS.map((c, i) => (
@@ -343,7 +365,8 @@ export function ProductFilm() {
                   {CHAPTERS[chapter].title}
                   <span className="text-accent">.</span>
                 </p>
-                <p className="mt-1 text-[15px] leading-snug text-ink/60">
+                {/* two lines reserved, so the pinned window never hops */}
+                <p className="mt-1 min-h-[2.75em] text-[15px] leading-snug text-ink/60">
                   {CHAPTERS[chapter].line}
                 </p>
               </div>

@@ -189,8 +189,8 @@ export const SHOTS: Shot[] = [
 export const CLOUD = {
   points: [
     {
-      title: "Sign in with a passkey",
-      body: "No passwords. One account for every machine you enroll.",
+      title: "One account, passkey first",
+      body: "Sign in with a passkey, or a password plus a second factor. Every machine you enroll joins it.",
     },
     {
       title: "No ports to open",
@@ -198,14 +198,18 @@ export const CLOUD = {
     },
     {
       title: "Your work stays home",
-      body: "Projects, terminals and conversations live on your machines. Cloud relays an encrypted connection to them.",
+      body: "Projects, terminals and conversations live on your machines. Cloud relays the connection and stores none of it.",
     },
     {
       title: "One workspace, every machine",
       body: "Threads from your laptop and your build box show up side by side, each tagged with where it runs.",
     },
   ],
+  /** Headless machines: start the relay connector, then link the node to an
+   *  account (`hub login` needs a password + second factor; otherwise
+   *  `hub enroll` prints a device code to approve in Cloud). */
   serve: "npx ryco-cli serve --hub",
+  link: "npx ryco-cli hub login",
 } as const;
 
 export const FAQ = [
@@ -215,11 +219,11 @@ export const FAQ = [
   },
   {
     q: "What does Ryco Cloud cost?",
-    a: "Nothing for now. Sign in at app.ryco.space with a passkey and connect a machine. If that ever changes, it will be announced well ahead of time.",
+    a: "Nothing, for now. Sign in at app.ryco.space and connect a machine.",
   },
   {
     q: "Does my code go through Ryco Cloud?",
-    a: "Your projects, files, terminals and conversations stay on the machines that own them. Cloud relays an end-to-end encrypted connection to those machines; it is not a copy of your work.",
+    a: "Cloud stores none of it: projects, files, terminals and conversations stay on the machines that own them. When you open a thread remotely, Cloud relays that traffic to the machine. Browser sessions are encrypted to your machine when it supports it, and you can start it with --hub-e2ee-policy require-e2ee to refuse anything else.",
   },
   {
     q: "Which agents are supported?",

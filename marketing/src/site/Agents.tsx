@@ -169,7 +169,7 @@ export function Agents() {
               data-agent-row={p.id}
               onPointerEnter={() => hover(p.id)}
               style={{ "--brand": p.accent } as React.CSSProperties}
-              className="group/row relative grid grid-cols-[44px_minmax(0,1fr)] items-center gap-x-4 gap-y-3 border-t border-white/10 py-6 last:border-b sm:grid-cols-[64px_minmax(0,1fr)_minmax(0,320px)] sm:gap-x-8 sm:py-8"
+              className="group/row relative grid grid-cols-[44px_minmax(0,1fr)] items-center gap-x-4 gap-y-3 border-t border-white/10 py-6 last:border-b sm:py-8 md:grid-cols-[64px_minmax(0,1fr)_minmax(0,320px)] md:gap-x-8"
             >
               <span
                 data-agent-flood
@@ -196,7 +196,7 @@ export function Agents() {
                   </span>
                 )}
               </span>
-              <span data-agent-meta className="relative col-span-2 sm:col-span-1">
+              <span data-agent-meta className="relative col-span-2 md:col-span-1">
                 <span className="block font-mono text-[12.5px] text-ink/50">
                   {p.vendor} · {p.via}
                 </span>

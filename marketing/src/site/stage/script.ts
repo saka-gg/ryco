@@ -1,8 +1,9 @@
 /**
  * The screenplay for the coded product replica. One coherent run: the user asks
  * Claude for relay reconnect backoff, the tool rows, diff and test output all
- * agree with each other (+63 −2, 42 tests), and five sibling threads run on the
- * other providers. Model names follow apps/server/src/provider/model-manifest.json.
+ * agree with each other (3 files, +131 −2 = 11 + 52 + 68; 9 tests in
+ * backoff.test.ts, 42 in total), and five sibling threads run on the other
+ * providers. Model names follow apps/server/src/provider/model-manifest.json.
  */
 
 export const PROMPT =
@@ -21,11 +22,15 @@ export const TOOL_ROWS: ToolRow[] = [
   { verb: "Searched", target: "“reconnect”", meta: { text: "14 results" } },
   { verb: "Edited", target: "relay/client.ts", meta: { add: 11, del: 2 } },
   { verb: "Created", target: "relay/backoff.ts", meta: { add: 52 } },
+  { verb: "Created", target: "relay/backoff.test.ts", meta: { add: 68 } },
   { verb: "Ran", target: "bun run test relay", meta: { text: "42 passed" } },
 ];
 
+/** Totals for the change summary, the header counter and the worktree card. */
+export const CHANGES = { files: 3, add: 131, del: 2 } as const;
+
 export const ANSWER =
-  "Reconnects now back off exponentially with jitter, capped at 30s, and the attempt counter resets after a stable minute. I added backoff.ts with 9 tests for the cap, the jitter bounds and the reset.";
+  "Reconnects now back off exponentially with jitter, capped at 30s, and the attempt counter resets after a stable minute. I added backoff.ts plus 9 tests for the cap, the jitter bounds and the reset.";
 
 export interface SideThread {
   id: string;
@@ -34,7 +39,8 @@ export interface SideThread {
   age: string;
 }
 
-/** Sidebar threads, also the six panes of the parallel scene (same order). */
+/** Sidebar threads (all six run at once); the first four also fill the
+ *  parallel scene's split view, which the app caps at a 2x2 grid. */
 export const THREADS: SideThread[] = [
   { id: "t1", provider: "claude", title: "Relay reconnect backoff", age: "now" },
   { id: "t2", provider: "codex", title: "Theme editor on tokens", age: "2m" },
@@ -51,11 +57,13 @@ export interface Pane {
   text: string;
 }
 
+/** One per provider. The film shows the first four (split view holds four);
+ *  the Agents roster previews all six. */
 export const PANES: Pane[] = [
   {
     thread: "t1",
     model: "Opus 5.5",
-    rows: TOOL_ROWS.slice(2, 5),
+    rows: [TOOL_ROWS[2], TOOL_ROWS[3], TOOL_ROWS[5]],
     text: "Reconnects back off with jitter, capped at 30s. 42 tests pass.",
   },
   {
@@ -143,3 +151,6 @@ export const TERMINAL: Array<{ text: string; tone?: "ok" | "dim" | "cmd" | "bold
 ];
 
 export const TERMINAL_CMD = "bun run test relay";
+
+/** Split view holds up to four threads (docs/thread-split-panes.md). */
+export const SPLIT_PANES = PANES.slice(0, 4);

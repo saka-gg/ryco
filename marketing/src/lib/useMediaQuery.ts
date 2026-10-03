@@ -14,3 +14,5 @@ export function useMediaQuery(query: string): boolean {
 }
 
 export const NARROW_QUERY = "(max-width: 767px)";
+/** Too short to pin the product film (landscape phones). */
+export const SHORT_QUERY = "(max-height: 520px)";

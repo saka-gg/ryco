@@ -15,6 +15,7 @@ import {
   Laptop,
   Layers,
   Lock,
+  Network,
   Router,
   Server,
 } from "lucide-react";
@@ -23,7 +24,7 @@ import { RycoMark } from "@/assets/RycoLogo";
 import { CLOUD, providerById, SITE } from "@/data/content";
 import { cn } from "@/lib/cn";
 import { gsap, prefersReducedMotion, useGsap } from "@/lib/motion";
-import { NARROW_QUERY, useMediaQuery } from "@/lib/useMediaQuery";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 import { Spinner } from "./stage/Stage";
 import { Button } from "./ui/Button";
 import { CopyCommand } from "./ui/CopyCommand";
@@ -221,7 +222,13 @@ function Diagram({ L }: { L: Layout }) {
         ))}
 
         <Machine side="mac" box={L.mac} icon={<Laptop />} name="MacBook Pro" sub="Desktop app" />
-        <Machine side="box" box={L.box} icon={<Server />} name="build-box" sub="ryco serve --hub" />
+        <Machine
+          side="box"
+          box={L.box}
+          icon={<Server />}
+          name="build-box"
+          sub={L === TALL ? "serve --hub" : "ryco serve --hub"}
+        />
 
         {/* the hub */}
         <div
@@ -229,35 +236,16 @@ function Diagram({ L }: { L: Layout }) {
           className="absolute grid place-items-center"
           style={{ left: L.hub.x, top: L.hub.y, width: L.hub.w, height: L.hub.h }}
         >
-          <svg
-            className="pointer-events-none absolute -inset-10 overflow-visible"
-            viewBox="0 0 320 208"
+          {/* pulse rings: HTML boxes, so transform + opacity stay composited */}
+          <span
             aria-hidden
-          >
-            <rect
-              x="40"
-              y="40"
-              width="240"
-              height="128"
-              rx="28"
-              stroke="#ff5c28"
-              strokeOpacity="0.5"
-              className="ry-pulse"
-              fill="none"
-            />
-            <rect
-              x="40"
-              y="40"
-              width="240"
-              height="128"
-              rx="28"
-              stroke="#ff5c28"
-              strokeOpacity="0.5"
-              className="ry-pulse"
-              style={{ animationDelay: "1.2s" }}
-              fill="none"
-            />
-          </svg>
+            className="ry-pulse pointer-events-none absolute inset-0 rounded-[28px] border border-accent/50"
+          />
+          <span
+            aria-hidden
+            className="ry-pulse pointer-events-none absolute inset-0 rounded-[28px] border border-accent/50"
+            style={{ animationDelay: "1.2s" }}
+          />
           <div className="relative flex h-full w-full flex-col items-center justify-center rounded-[28px] border border-accent/40 bg-[#160c08] shadow-[0_0_0_6px_rgba(255,92,40,0.06),0_30px_80px_-30px_rgba(255,92,40,0.45)]">
             <RycoMark className="h-7 text-accent" />
             <span className="mt-3 text-[15px] font-semibold text-ink">Ryco Cloud</span>
@@ -312,7 +300,8 @@ function Diagram({ L }: { L: Layout }) {
             </div>
           </div>
           <div className="flex h-10 shrink-0 items-center gap-2 border-t border-white/[0.06] px-3.5 text-[11.5px] text-ink/50">
-            <Lock className="size-3.5 text-accent" /> Encrypted between this tab and your machines
+            <Network className="size-3.5 text-accent" /> Relayed live from your machines, stored
+            nowhere
           </div>
         </div>
       </div>
@@ -321,7 +310,8 @@ function Diagram({ L }: { L: Layout }) {
 }
 
 export function Cloud() {
-  const narrow = useMediaQuery(NARROW_QUERY);
+  /* the wide canvas would shrink below readable sizes under 1024px */
+  const narrow = useMediaQuery("(max-width: 1023px)");
   const L = narrow ? TALL : WIDE;
 
   const scope = useGsap<HTMLElement>(
@@ -424,10 +414,14 @@ export function Cloud() {
         <p data-cloud-sub className="mt-6 max-w-[50ch] text-[17px] leading-relaxed text-ink/60">
           Connect the machines you already run Ryco on, then pick up any thread from a browser at{" "}
           <span className="font-mono text-[15px] text-ink/85">{SITE.cloudHost}</span>. Your code
-          never moves.
+          stays on your machines.
         </p>
 
-        <div data-diagram data-loops className="mx-auto mt-16 max-w-[1200px] sm:mt-20">
+        <div
+          data-diagram
+          data-loops
+          className={cn("mx-auto mt-16 sm:mt-20", narrow ? "max-w-[460px]" : "max-w-[1200px]")}
+        >
           <Diagram L={L} />
         </div>
 
@@ -449,17 +443,27 @@ export function Cloud() {
           })}
         </ul>
 
-        <div className="mt-14 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div data-cloud-cta className="flex flex-wrap items-center gap-3">
+        <div className="mt-14 grid gap-10 lg:grid-cols-[auto_minmax(0,1fr)] lg:items-start lg:gap-16">
+          <div data-cloud-cta>
             <Button href={SITE.cloud} external icon={<ArrowUpRight />}>
               Open Ryco Cloud
             </Button>
-            <CopyCommand command={CLOUD.serve} />
           </div>
-          <p data-cloud-cta className={cn("max-w-[44ch] text-[14.5px] leading-snug text-ink/50")}>
-            In the desktop app, click Connect Ryco account. On a server or a headless box, the
-            command above enrolls it.
-          </p>
+          <div data-cloud-cta className="text-[14.5px] leading-snug text-ink/60">
+            <p>
+              In the desktop app, click <span className="text-ink/85">Connect Ryco account</span>.
+              On a server or a headless box, start Ryco with the relay on, then link the machine to
+              your account:
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2.5">
+              <CopyCommand command={CLOUD.serve} />
+              <CopyCommand command={CLOUD.link} />
+            </div>
+            <p className="mt-3 text-[13.5px] text-ink/55">
+              No password on your account? Run <span className="font-mono">hub enroll</span> instead
+              and approve the code in Cloud.
+            </p>
+          </div>
         </div>
       </div>
     </section>

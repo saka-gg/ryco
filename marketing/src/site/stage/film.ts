@@ -3,9 +3,15 @@
  * Stage to an empty thread and plays a full Ryco run across five chapters.
  *
  * Built only with `.to()` tweens on top of an explicit initial `set`, so the
- * whole thing is reversible frame-for-frame when you scroll back up. Text is
- * "typed" by tweening a counter and writing slices into the existing React
- * text node (nodeValue), which keeps React's DOM ownership intact.
+ * whole thing is reversible frame-for-frame when you scroll back up.
+ *
+ * Text is "typed" by tweening a getter/setter that writes slices into the
+ * existing React text node (nodeValue, so React keeps DOM ownership). It must
+ * not be an onUpdate callback: ScrollTrigger renders with events suppressed on
+ * refresh, resize and back-navigation, and onUpdate-only text would go blank.
+ *
+ * The Stage's spinners and carets sit paused in CSS; the film sets each one
+ * running only while it is visible (see loopOn / loopOff).
  */
 import { gsap } from "@/lib/motion";
 import {
@@ -18,7 +24,7 @@ import {
   STAGE_W,
   TERMINAL_H,
 } from "./Stage";
-import { ANSWER, PANES, PROMPT, TERMINAL_CMD } from "./script";
+import { ANSWER, PROMPT, SPLIT_PANES, TERMINAL_CMD } from "./script";
 
 export const CHAPTERS = [
   { id: "ask", title: "Ask", line: "Write the task once. Pick any agent, any model." },
@@ -26,7 +32,7 @@ export const CHAPTERS = [
   {
     id: "parallel",
     title: "Parallel",
-    line: "Six providers, six threads, all running side by side.",
+    line: "Every agent at once, four threads side by side in split view.",
   },
   { id: "review", title: "Review", line: "Per-turn diffs. Click a line to land in your editor." },
   { id: "run", title: "Run", line: "Real terminals in a drawer, right beside the thread." },
@@ -131,19 +137,32 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   /* -------------------------------- helpers -------------------------------- */
   const tl = gsap.timeline({ defaults: { ease: "ryco", duration: 0.5 } });
 
-  const type = (el: HTMLElement, text: string, at: number, duration: number) => {
-    const proxy = { n: 0 };
-    tl.to(
-      proxy,
-      {
-        n: text.length,
-        duration,
-        ease: "none",
-        onUpdate: () => setText(el, text.slice(0, Math.round(proxy.n))),
-      },
-      at,
-    );
+  /* A getter/setter GSAP renders on every render, events suppressed or not. */
+  const typers = new Map<HTMLElement, { n: (v?: number) => number | void }>();
+  const typer = (el: HTMLElement, text: string) => {
+    let typer = typers.get(el);
+    if (!typer) {
+      let n = 0;
+      typer = {
+        n: (v?: number) => {
+          if (v === undefined) return n;
+          n = v;
+          setText(el, text.slice(0, Math.round(v)));
+        },
+      };
+      typers.set(el, typer);
+    }
+    return typer;
   };
+  const type = (el: HTMLElement, text: string, at: number, duration: number) =>
+    tl.to(typer(el, text), { n: text.length, duration, ease: "none" }, at);
+
+  /* Show/hide a looping spinner or caret, running its CSS loop only while it
+     can be seen. Scrubbing back restores the recorded (paused) state. */
+  const loopOn = (el: Element | null, at: number, duration = 0.05) =>
+    el && tl.to(el, { opacity: 1, animationPlayState: "running", duration }, at);
+  const loopOff = (el: Element | null, at: number, duration = 0.05) =>
+    el && tl.to(el, { opacity: 0, animationPlayState: "paused", duration }, at);
 
   /* Camera: scale `s` around a focus point, centred in the visible crop.
      At s >= 1 it is clamped so the window always fills the frame; below 1 it
@@ -189,7 +208,7 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   const composerFocus = { x: SIDEBAR_W + bodyW / 2, y: STAGE_H - 70 };
   camTo(z(1.14, 1), composerFocus, A, 0.9);
   tl.to(q("placeholder"), { opacity: 0, duration: 0.1 }, A + 0.15);
-  tl.to(q("typed-caret"), { opacity: 1, duration: 0.05 }, A + 0.15);
+  loopOn(q("typed-caret"), A + 0.15);
   type(q("typed"), PROMPT, A + 0.2, 1.25);
 
   const send = q("send");
@@ -197,20 +216,10 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   showCursor(A + 1.25, { x: sendAt.x + 110, y: sendAt.y + 70 });
   moveCursor(sendAt, A + 1.3, 0.35);
   click(send, A + 1.7);
-  tl.to(q("typed-caret"), { opacity: 0, duration: 0.05 }, A + 1.72);
+  loopOff(q("typed-caret"), A + 1.72);
   tl.to(q("typed"), { opacity: 0, duration: 0.18 }, A + 1.74);
-  {
-    const proxy = { n: PROMPT.length };
-    tl.to(
-      proxy,
-      {
-        n: 0,
-        duration: 0.01,
-        onUpdate: () => setText(q("typed"), PROMPT.slice(0, Math.round(proxy.n))),
-      },
-      A + 1.95,
-    );
-  }
+  /* the sent prompt clears from the composer */
+  tl.to(typer(q("typed"), PROMPT), { n: 0, duration: 0.01, ease: "none" }, A + 1.95);
   tl.to(q("typed"), { opacity: 1, duration: 0.01 }, A + 1.97);
   tl.to(q("placeholder"), { opacity: 1, duration: 0.2 }, A + 1.98);
   tl.to(q("empty"), { opacity: 0, y: -14, duration: 0.3 }, A + 1.72);
@@ -227,20 +236,21 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   const threadFocus = { x: SIDEBAR_W + bodyW / 2, y: HEADER_H + 250 };
   camTo(z(1.07, 1.1), threadFocus, W, 1.2);
   tl.to(assistant, { autoAlpha: 1, duration: 0.3 }, W);
-  tl.to(sideRows[0].querySelector(".side-spin"), { opacity: 1, duration: 0.2 }, W);
+  loopOn(sideRows[0].querySelector(".side-spin"), W, 0.2);
   mainTools.forEach((row, i) => {
-    const at = W + 0.2 + i * 0.36;
+    const at = W + 0.2 + i * 0.3;
     tl.to(row, { autoAlpha: 1, x: 0, duration: 0.3 }, at);
-    tl.to(row.querySelector(".tool-spin"), { opacity: 0, duration: 0.1 }, at + 0.26);
-    tl.to(q("tool-done", row), { opacity: 1, duration: 0.15 }, at + 0.28);
+    tl.set(row.querySelector(".tool-spin"), { animationPlayState: "running" }, at);
+    loopOff(row.querySelector(".tool-spin"), at + 0.24, 0.1);
+    tl.to(q("tool-done", row), { opacity: 1, duration: 0.15 }, at + 0.26);
     if (i === 2) tl.to(q("diff-count"), { autoAlpha: 1, width: "auto", duration: 0.35 }, at + 0.3);
   });
   tl.to(q("worked"), { autoAlpha: 1, duration: 0.25 }, W + 2.1);
-  tl.to(q("answer-caret"), { opacity: 1, duration: 0.05 }, W + 2.15);
+  loopOn(q("answer-caret"), W + 2.15);
   type(q("answer"), ANSWER, W + 2.2, 0.95);
-  tl.to(q("answer-caret"), { opacity: 0, duration: 0.05 }, W + 3.15);
+  loopOff(q("answer-caret"), W + 3.15);
   tl.to(q("changes"), { autoAlpha: 1, y: 0, duration: 0.4 }, W + 3.1);
-  tl.to(sideRows[0].querySelector(".side-spin"), { opacity: 0, duration: 0.15 }, W + 3.15);
+  loopOff(sideRows[0].querySelector(".side-spin"), W + 3.15, 0.15);
   tl.to(qa("side-age")[0], { opacity: 1, duration: 0.2 }, W + 3.2);
   camTo(1, null, W + 2.9, 0.7);
 
@@ -271,21 +281,22 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
       { opacity: 0, duration: 0.12 },
       P + 0.3 + i * 0.08,
     );
-    tl.to(row.querySelector(".side-spin"), { opacity: 1, duration: 0.12 }, P + 0.32 + i * 0.08);
+    loopOn(row.querySelector(".side-spin"), P + 0.32 + i * 0.08, 0.12);
   });
   panes.forEach((pane, i) => {
     const rows = qa("tool", pane);
     rows.forEach((row, r) => {
       const at = P + 0.7 + i * 0.12 + r * 0.32;
       tl.to(row, { autoAlpha: 1, duration: 0.2 }, at);
-      tl.to(row.querySelector(".tool-spin"), { opacity: 0, duration: 0.1 }, at + 0.25);
+      tl.set(row.querySelector(".tool-spin"), { animationPlayState: "running" }, at);
+      loopOff(row.querySelector(".tool-spin"), at + 0.25, 0.1);
       tl.to(q("tool-done", row), { opacity: 1, duration: 0.1 }, at + 0.27);
     });
     const textAt = P + 0.95 + i * 0.12 + rows.length * 0.3;
-    const caret = pane.querySelector(".pane-caret")!;
-    tl.to(caret, { opacity: 1, duration: 0.05 }, textAt);
-    type(q("pane-text", pane), PANES[i].text, textAt, 0.9 + (i % 3) * 0.18);
-    tl.to(caret, { opacity: 0, duration: 0.05 }, textAt + 1.3);
+    const caret = pane.querySelector(".pane-caret");
+    loopOn(caret, textAt);
+    type(q("pane-text", pane), SPLIT_PANES[i].text, textAt, 0.9 + (i % 2) * 0.22);
+    loopOff(caret, textAt + 1.3);
   });
 
   /* --------------------------------- review -------------------------------- */
@@ -301,11 +312,7 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   tl.to(thread, { autoAlpha: 1, scale: 1, duration: 0.45 }, R + 0.3);
   tl.to(composer, { autoAlpha: 1, y: 0, duration: 0.4 }, R + 0.35);
   [1, 3].forEach((i, k) => {
-    tl.to(
-      sideRows[i].querySelector(".side-spin"),
-      { opacity: 0, duration: 0.12 },
-      R + 0.5 + k * 0.3,
-    );
+    loopOff(sideRows[i].querySelector(".side-spin"), R + 0.5 + k * 0.3, 0.12);
     tl.to(
       sideRows[i].querySelector('[data-s="side-age"]'),
       { opacity: 1, duration: 0.12 },
@@ -329,7 +336,9 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   tl.to(q("diff-hit-glow"), { opacity: 1, duration: 0.15 }, R + 2.4);
   tl.to(q("toast"), { autoAlpha: 1, y: 0, duration: 0.4 }, R + 2.5);
   hideCursor(R + 2.75);
-  camTo(1, null, R + 2.6, 0.7);
+  /* phones pan to the payoff toast (bottom-left of the thread) and hold it */
+  const toastFocus = { x: SIDEBAR_W + 180, y: STAGE_H / 2 };
+  camTo(1, opts.narrow ? toastFocus : null, R + 2.6, 0.7);
 
   /* ----------------------------------- run --------------------------------- */
   const U = CHAPTER_AT.run;
@@ -337,6 +346,8 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   tl.to(q("diff-hit-glow"), { opacity: 0, duration: 0.2 }, U);
   const termBtn = q("btn-term");
   const termAt = centre(termBtn);
+  /* phones pan to the header's terminal button before the click */
+  if (opts.narrow) camTo(1, { x: termAt.x - 60, y: STAGE_H / 2 }, U, 0.5);
   showCursor(U + 0.05, { x: termAt.x - 160, y: termAt.y + 140 });
   moveCursor(termAt, U + 0.1, 0.45);
   click(termBtn, U + 0.6);
@@ -350,11 +361,12 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   tl.to(chat, { x: 0, y: -TERMINAL_H, duration: 0.7, ease: "ryco.inOut" }, U + 0.65);
   tl.to(terminal, { y: 0, duration: 0.7, ease: "ryco.inOut" }, U + 0.65);
   camTo(z(1.08, 1.12), { x: SIDEBAR_W + 300, y: STAGE_H - TERMINAL_H / 2 - 10 }, U + 1.0, 0.9);
-  tl.to(q("term-caret"), { opacity: 1, duration: 0.05 }, U + 1.35);
+  loopOn(q("term-caret"), U + 1.35);
   type(q("term-cmd"), TERMINAL_CMD, U + 1.4, 0.5);
-  tl.to(q("term-caret"), { opacity: 0, duration: 0.05 }, U + 1.95);
+  loopOff(q("term-caret"), U + 1.95);
   tl.to(termLines, { autoAlpha: 1, duration: 0.12, stagger: 0.11 }, U + 2.0);
-  camTo(1, null, U + 2.75, 0.6);
+  /* end framed on the terminal's left edge, so phones see "42 passed" */
+  camTo(1, opts.narrow ? { x: SIDEBAR_W + 310, y: STAGE_H / 2 } : null, U + 2.75, 0.6);
   tl.to({}, { duration: 0.01 }, CHAPTER_AT.end);
 
   return tl;

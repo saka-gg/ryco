@@ -6,7 +6,9 @@
  */
 import { useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
-import { gsap, prefersReducedMotion } from "@/lib/motion";
+/* gsap core only, not @/lib/motion: the changelog page uses this button and
+   must not pull in the plugins, Lenis and their ticker */
+import { gsap } from "gsap";
 import { focusRing } from "../theme";
 
 type Variant = "primary" | "ghost" | "light";
@@ -36,7 +38,8 @@ export function Button({
 
   useEffect(() => {
     const el = ref.current;
-    if (!el || !magnetic || prefersReducedMotion()) return;
+    if (!el || !magnetic) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     if (window.matchMedia("(pointer: coarse)").matches) return;
     const xTo = gsap.quickTo(el, "x", { duration: 0.5, ease: "power3" });
     const yTo = gsap.quickTo(el, "y", { duration: 0.5, ease: "power3" });
@@ -54,6 +57,9 @@ export function Button({
     return () => {
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerleave", leave);
+      /* kill the reusable quickTo tweens, or they keep the detached page alive */
+      xTo.tween.kill();
+      yTo.tween.kill();
       gsap.set(el, { clearProps: "x,y" });
     };
   }, [magnetic]);

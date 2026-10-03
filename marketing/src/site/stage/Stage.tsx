@@ -14,6 +14,7 @@ import {
   ArrowUp,
   Check,
   ChevronDown,
+  ChevronRight,
   Columns2,
   ExternalLink,
   FileDiff,
@@ -38,10 +39,11 @@ import {
   ANSWER,
   BACKOFF_FILE,
   BRANCH,
+  CHANGES,
   DIFF,
   DIFF_CLICK_ROW,
-  PANES,
   PROMPT,
+  SPLIT_PANES,
   TERMINAL,
   TERMINAL_CMD,
   THREADS,
@@ -364,8 +366,8 @@ function Thread() {
             className="mt-4 flex items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5 text-[12.5px]"
           >
             <FileDiff className="size-4 text-app-muted" />
-            <span className="text-app-fg/90">2 files changed</span>
-            <Delta add={63} del={2} className="text-[12px]" />
+            <span className="text-app-fg/90">{CHANGES.files} files changed</span>
+            <Delta add={CHANGES.add} del={CHANGES.del} className="text-[12px]" />
             <span
               data-s="review-btn"
               className="ml-auto rounded-md border border-white/10 px-2.5 py-1 text-[12px] text-app-fg"
@@ -385,10 +387,10 @@ function ParallelGrid() {
   return (
     <div
       data-s="grid"
-      className="invisible absolute inset-0 grid grid-cols-3 grid-rows-2 opacity-0"
+      className="invisible absolute inset-0 grid grid-cols-2 grid-rows-2 opacity-0"
       style={{ gap: GRID_GAP, padding: GRID_GAP }}
     >
-      {PANES.map((pane) => {
+      {SPLIT_PANES.map((pane) => {
         const t = THREADS.find((x) => x.id === pane.thread)!;
         const p = providerById(t.provider);
         return (
@@ -517,6 +519,13 @@ function ReviewPanel() {
             ))}
           </div>
         </div>
+
+        <div className="mt-2 flex h-9 items-center gap-2 rounded-xl border border-white/[0.07] bg-app px-3 text-[12px]">
+          <ChevronRight className="size-3.5 text-app-muted" />
+          <FilePlus2 className="size-3.5 text-[#5fcf86]" />
+          <span className="font-mono text-[11.5px] text-app-fg">relay/backoff.test.ts</span>
+          <Delta add={68} className="ml-auto text-[11.5px]" />
+        </div>
       </div>
     </aside>
   );
@@ -638,7 +647,7 @@ const Window = memo(function Window() {
             >
               <FileDiff className="size-[15px]" />
               <span data-s="diff-count" className="inline-block overflow-hidden whitespace-nowrap">
-                <Delta add={63} del={2} />
+                <Delta add={CHANGES.add} del={CHANGES.del} />
               </span>
             </span>
             <IconButton data-s="btn-term">
@@ -716,8 +725,10 @@ export const Stage = memo(function Stage({
       role="img"
       aria-label="The Ryco desktop app: a Claude thread adding relay reconnect backoff, with the review panel showing the diff."
     >
+      {/* the role=img wrapper speaks for the replica via its aria-label */}
       <div
         ref={fit}
+        aria-hidden
         className="absolute left-0 top-0 origin-top-left"
         style={{ width: STAGE_W, height: STAGE_H }}
       >
