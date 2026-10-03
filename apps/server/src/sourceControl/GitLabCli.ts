@@ -10,9 +10,21 @@ import {
   type DateTime,
 } from "effect";
 
-import { TrimmedNonEmptyString, type SourceControlRepositoryVisibility } from "@ryco/contracts";
+import {
+  TrimmedNonEmptyString,
+  type SourceControlChangeRequestMergeability,
+  type SourceControlChangeRequestMergeStateStatus,
+  type SourceControlLabel,
+  type SourceControlRepositoryVisibility,
+} from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import {
+  buildGlabApiInvocation,
+  describeGitLabApiFailure,
+  parseGitLabApiFailure,
+  type GitLabApiRequest,
+} from "./gitLabApi.ts";
 import * as GitLabIssues from "./gitLabIssues.ts";
 import type { NormalizedGitLabIssueDetail, NormalizedGitLabIssueRecord } from "./gitLabIssues.ts";
 import * as GitLabMergeRequests from "./gitLabMergeRequests.ts";
@@ -24,6 +36,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 export class GitLabCliError extends Schema.TaggedError<GitLabCliError>()("GitLabCliError", {
   operation: Schema.String,
   detail: Schema.String,
+  /** HTTP status of a failed `glab api` call, when the request reached GitLab. */
+  status: Schema.optional(Schema.Number),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
@@ -42,6 +56,21 @@ export interface GitLabMergeRequestSummary {
   readonly isCrossRepository?: boolean;
   readonly headRepositoryNameWithOwner?: string | null;
   readonly headRepositoryOwnerLogin?: string | null;
+  readonly isDraft?: boolean;
+  readonly author?: string;
+  readonly assignees?: ReadonlyArray<string>;
+  readonly labels?: ReadonlyArray<SourceControlLabel>;
+  readonly commentsCount?: number;
+  readonly headSha?: string;
+  readonly mergeability?: SourceControlChangeRequestMergeability;
+  readonly mergeStateStatus?: SourceControlChangeRequestMergeStateStatus;
+  readonly reviewDecision?: "review_required" | "changes_requested";
+  readonly createdAt?: DateTime.Utc;
+}
+
+export interface GitLabApiOutput {
+  readonly stdout: string;
+  readonly stdoutTruncated: boolean;
 }
 
 export interface GitLabRepositoryCloneUrls {
@@ -56,6 +85,22 @@ export interface GitLabCliShape {
     readonly args: ReadonlyArray<string>;
     readonly timeoutMs?: number;
   }) => Effect.Effect<VcsProcess.VcsProcessOutput, GitLabCliError>;
+
+  /**
+   * One REST v4 call through `glab api`. JSON bodies go over stdin; a
+   * non-2xx response fails with the HTTP status on the error.
+   */
+  readonly api: (input: {
+    readonly cwd: string;
+    readonly operation: string;
+    readonly request: GitLabApiRequest;
+    readonly timeoutMs?: number;
+    readonly maxOutputBytes?: number;
+    /** Keep the first `maxOutputBytes` instead of failing on larger output. */
+    readonly truncateOutputAtMaxBytes?: boolean;
+    /** Keep the last `maxOutputBytes` instead (logs); `stdoutTruncated` reports the cut. */
+    readonly keepOutputTail?: boolean;
+  }) => Effect.Effect<GitLabApiOutput, GitLabCliError>;
 
   readonly listMergeRequests: (input: {
     readonly cwd: string;
@@ -89,6 +134,8 @@ export interface GitLabCliShape {
     readonly target?: SourceControlProvider.SourceControlRefSelector;
     readonly title: string;
     readonly bodyFile: string;
+    /** GitLab marks drafts by title (`Draft: …`); the create API has no draft field. */
+    readonly draft?: boolean;
   }) => Effect.Effect<void, GitLabCliError>;
 
   readonly getDefaultBranch: (input: {
@@ -333,8 +380,48 @@ export const make = Effect.fn("makeGitLabCli")(function* () {
       })
       .pipe(Effect.mapError((error) => normalizeGitLabCliError("execute", error)));
 
+  const api: GitLabCliShape["api"] = (input) => {
+    const invocation = buildGlabApiInvocation(input.request);
+    return process
+      .run({
+        operation: "GitLabCli.api",
+        command: "glab",
+        args: invocation.args,
+        cwd: input.cwd,
+        ...(invocation.stdin !== undefined ? { stdin: invocation.stdin } : {}),
+        timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        allowNonZeroExit: true,
+        ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
+        ...(input.truncateOutputAtMaxBytes !== undefined
+          ? { truncateOutputAtMaxBytes: input.truncateOutputAtMaxBytes }
+          : {}),
+        ...(input.keepOutputTail !== undefined ? { keepOutputTail: input.keepOutputTail } : {}),
+        env: { LC_ALL: "C" },
+      })
+      .pipe(
+        Effect.mapError((error) => normalizeGitLabCliError("execute", error)),
+        Effect.flatMap((output) => {
+          if (output.exitCode === 0) {
+            return Effect.succeed({
+              stdout: output.stdout,
+              stdoutTruncated: output.stdoutTruncated,
+            });
+          }
+          const failure = parseGitLabApiFailure(output);
+          return Effect.fail(
+            new GitLabCliError({
+              operation: input.operation,
+              detail: describeGitLabApiFailure(failure),
+              ...(failure.status !== null ? { status: failure.status } : {}),
+            }),
+          );
+        }),
+      );
+  };
+
   return GitLabCli.of({
     execute,
+    api,
     listMergeRequests: (input) => {
       const sourceBranch = sourceRefName(input);
       return runAndDecode({
@@ -453,7 +540,7 @@ export const make = Effect.fn("makeGitLabCli")(function* () {
           `target_branch=${input.target?.refName ?? input.baseBranch}`,
           ...(sourceProject ? ["--raw-field", `source_project_id=${sourceProject}`] : []),
           "--raw-field",
-          `title=${input.title}`,
+          `title=${input.draft === true ? GitLabMergeRequests.gitLabDraftTitle(input.title, true) : input.title}`,
           "--field",
           `description=@${input.bodyFile}`,
         ],

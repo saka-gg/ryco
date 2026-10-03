@@ -475,4 +475,86 @@ layer("GitLabCli.layer", (it) => {
       );
     }),
   );
+  it.effect("opens draft merge requests with GitLab's title prefix", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(Effect.succeed(processOutput("{}")));
+      const glab = yield* GitLabCli.GitLabCli;
+      yield* glab.createMergeRequest({
+        cwd: "/repo",
+        baseBranch: "main",
+        headSelector: "feature/provider",
+        title: "Provider MR",
+        bodyFile: "/tmp/ryco-mr-body.md",
+        draft: true,
+      });
+      expect(mockedRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: expect.arrayContaining(["title=Draft: Provider MR"]),
+        }),
+      );
+    }),
+  );
+
+  it.effect("api sends JSON bodies over stdin and returns stdout", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(Effect.succeed(processOutput('{"id":301}')));
+      const glab = yield* GitLabCli.GitLabCli;
+      const output = yield* glab.api({
+        cwd: "/repo",
+        operation: "addChangeRequestComment",
+        request: {
+          method: "POST",
+          endpoint: "projects/:fullpath/merge_requests/7/notes",
+          body: { body: "Looks good\n--force" },
+        },
+      });
+      expect(output).toEqual({ stdout: '{"id":301}', stdoutTruncated: false });
+      expect(mockedRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: "glab",
+          cwd: "/repo",
+          args: [
+            "api",
+            "--method",
+            "POST",
+            "projects/:fullpath/merge_requests/7/notes",
+            "--header",
+            "Content-Type: application/json",
+            "--input",
+            "-",
+          ],
+          stdin: JSON.stringify({ body: "Looks good\n--force" }),
+          allowNonZeroExit: true,
+        }),
+      );
+    }),
+  );
+
+  it.effect("api fails with GitLab's HTTP status and message", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(
+        Effect.succeed({
+          exitCode: ChildProcessSpawner.ExitCode(1),
+          stdout: '{"message":"SHA does not match HEAD of source branch: e82eb4a0"}',
+          stderr: "glab: SHA does not match HEAD of source branch: e82eb4a0 (HTTP 409)\n",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        }),
+      );
+      const glab = yield* GitLabCli.GitLabCli;
+      const error = yield* glab
+        .api({
+          cwd: "/repo",
+          operation: "mergeChangeRequest",
+          request: { method: "PUT", endpoint: "projects/:fullpath/merge_requests/7/merge" },
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.status, 409);
+      assert.strictEqual(error.operation, "mergeChangeRequest");
+      assert.strictEqual(
+        error.detail,
+        "GitLab API request failed (HTTP 409): SHA does not match HEAD of source branch: e82eb4a0",
+      );
+    }),
+  );
 });
