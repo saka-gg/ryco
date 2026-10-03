@@ -1,3 +1,4 @@
+import { useAppKeybindings } from "../appKeybindings";
 import { notifyWorktreeSubmoduleSetup } from "./worktrees/worktreeCreationNotifications";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
@@ -278,11 +279,7 @@ import {
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
-import {
-  useServerAvailableEditors,
-  useServerConfig,
-  useServerKeybindings,
-} from "~/rpc/serverState";
+import { useServerAvailableEditors, useServerConfig } from "~/rpc/serverState";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
@@ -2057,7 +2054,7 @@ export default function ChatView(props: ChatViewProps) {
     handlePostPush: handlePostPushGitAction,
     clearWatch: clearPostPushWatch,
   } = usePostPushWorkflowWatch();
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings(activeProjectRef);
   const availableEditors = useServerAvailableEditors();
   // Prefer an instance-id match so a custom Codex instance (e.g.
   // `codex_personal`) surfaces its own status/message in the banner rather

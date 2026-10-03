@@ -1,3 +1,4 @@
+import { keybindingCommandScopesOverlap } from "@ryco/client-runtime/state/settings";
 import type { KeybindingRule } from "@ryco/contracts";
 
 export interface ConflictEntry {
@@ -43,6 +44,7 @@ export function detectConflictsAt(
   draft.forEach((other, index) => {
     if (index === targetIndex) return;
     if (other.command === target.command) return;
+    if (!keybindingCommandScopesOverlap(other.command, target.command)) return;
     if (other.key !== target.key) return;
     if (!whenContextsOverlap(other.when, target.when)) return;
     conflicts.push({

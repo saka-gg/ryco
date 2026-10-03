@@ -1,3 +1,5 @@
+import { EnvironmentId } from "@ryco/contracts";
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { describe, expect, it } from "vite-plus/test";
 
 import { E2EE_WEB_SAS_MORE } from "../hostedHub/HostedE2eeVerification.logic";
@@ -18,6 +20,24 @@ import {
 } from "./settingsSections.logic";
 
 describe("settings destinations", () => {
+  it("offers app keybindings offline and for every hosted role, never on headless nodes", () => {
+    useSettingsDialogStore
+      .getState()
+      .openSettings("keybindings", EnvironmentId.make("offline-node"));
+    expect(useSettingsDialogStore.getState().editingScope).toBe("client");
+    useSettingsDialogStore.getState().closeSettings();
+    expect(settingsSectionScope("keybindings")).toBe("browser");
+    expect(settingsSectionInDestination("keybindings", "client", false)).toBe(true);
+    expect(settingsSectionInDestination("keybindings", "node", true)).toBe(false);
+    for (const role of ["viewer", "operator", "owner", null] as const) {
+      expect(settingsSectionReachable("keybindings", { hosted: true, role })).toBe(true);
+    }
+    expect(
+      SETTINGS_SEARCH_INDEX.filter((entry) => entry.section === "keybindings").every(
+        (entry) => entry.owner === "client",
+      ),
+    ).toBe(true);
+  });
   it("keeps local appearance and desktop permissions out of remote node settings", () => {
     expect(settingsSectionInDestination("appearance", "client", false)).toBe(true);
     expect(settingsSectionInDestination("appearance", "node", true)).toBe(false);
@@ -120,7 +140,7 @@ describe("hosted settings capabilities", () => {
   it("keeps local connection setup hidden and restricts node mutations to owners", () => {
     expect(hostedSettingsSectionAllowed("connections", "owner")).toBe(false);
     expect(hostedSettingsSectionAllowed("providers", "viewer")).toBe(false);
-    expect(hostedSettingsSectionAllowed("keybindings", "operator")).toBe(false);
+    expect(hostedSettingsSectionAllowed("keybindings", "operator")).toBe(true);
     expect(hostedSettingsSectionAllowed("statistics", "owner")).toBe(true);
     expect(hostedSettingsSectionAllowed("providers", "owner")).toBe(true);
     expect(hostedSettingsSectionAllowed("security", "viewer")).toBe(false);

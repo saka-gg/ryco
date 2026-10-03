@@ -156,7 +156,7 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
     id: "keybindings",
     label: "Keybindings",
     icon: KeyboardIcon,
-    description: "Keyboard shortcuts and the file they are stored in.",
+    description: "Keyboard shortcuts saved in this app or browser profile.",
   },
   {
     id: "source-control",

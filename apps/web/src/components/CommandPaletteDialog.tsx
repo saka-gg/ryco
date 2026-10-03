@@ -1,5 +1,7 @@
 "use client";
 
+import { useAppKeybindings } from "../appKeybindings";
+
 import { usePresentationTier } from "../hooks/usePresentationTier";
 import { useThreadExportAction } from "../hooks/useThreadExportAction";
 
@@ -135,7 +137,6 @@ import {
   pullRequestRepositoryQualifier,
 } from "./pullRequests/pullRequestRepositories.logic";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
-import { useServerKeybindings } from "../rpc/serverState";
 import {
   Command,
   CommandDialogPopup,
@@ -426,7 +427,7 @@ function OpenCommandPaletteDialog() {
     useHandleNewThread();
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings();
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
   const isRootView = currentView === null;
