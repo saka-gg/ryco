@@ -112,7 +112,7 @@ function toChangeRequestDetail(
 export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* () {
   const bitbucket = yield* BitbucketApi.BitbucketApi;
 
-  return SourceControlProvider.SourceControlProvider.of({
+  const provider = SourceControlProvider.SourceControlProvider.of({
     kind: "bitbucket",
     listChangeRequests: (input) => {
       const source = SourceControlProvider.sourceControlRefFromInput(input);
@@ -328,6 +328,8 @@ export const make = Effect.fn("makeBitbucketSourceControlProvider")(function* ()
         }),
       ),
   });
+  // No server-side involvement filter, list search, commit-scoped diff, or draft creation.
+  return SourceControlProvider.withUnsupportedChangeRequestOptionGuards(provider);
 });
 
 export const layer = Layer.effect(SourceControlProvider.SourceControlProvider, make());

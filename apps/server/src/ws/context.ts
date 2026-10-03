@@ -3,7 +3,7 @@ import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { StorageService } from "../storage/StorageService.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
-import { Cause, Effect, Metric, Option, Schema, Stream } from "effect";
+import { Cause, Effect, FileSystem, Metric, Option, Schema, Stream } from "effect";
 import {
   AuthSessionId,
   USAGE_CONTRACT_VERSION,
@@ -192,6 +192,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const projectAvatarStore = yield* Effect.serviceOption(ProjectAvatarStore);
     const workspaceEntries = yield* WorkspaceEntries;
     const workspaceFileSystem = yield* WorkspaceFileSystem;
+    const fileSystem = yield* FileSystem.FileSystem;
     const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
     const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
     const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
@@ -885,6 +886,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectAvatarStore,
       workspaceEntries,
       workspaceFileSystem,
+      fileSystem,
       workspaceAccessPolicy,
       sourceControlDiscovery,
       sourceControlRepositories,

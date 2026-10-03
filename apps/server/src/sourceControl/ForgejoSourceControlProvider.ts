@@ -116,7 +116,7 @@ function toChangeRequestDetail(
 export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
   const forgejo = yield* ForgejoApi.ForgejoApi;
 
-  return SourceControlProvider.SourceControlProvider.of({
+  const provider = SourceControlProvider.SourceControlProvider.of({
     kind: "forgejo",
     listChangeRequests: (input) => {
       const source = SourceControlProvider.sourceControlRefFromInput(input);
@@ -319,6 +319,8 @@ export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
         }),
       ),
   });
+  // No server-side involvement filter, list search, commit-scoped diff, or draft creation.
+  return SourceControlProvider.withUnsupportedChangeRequestOptionGuards(provider);
 });
 
 export const layer = Layer.effect(SourceControlProvider.SourceControlProvider, make());

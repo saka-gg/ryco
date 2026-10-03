@@ -556,6 +556,16 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
     service: {
       getPullRequestFilesViewed: () => Effect.die("unused"),
       setPullRequestFileViewed: () => Effect.die("unused"),
+      deleteBranch: () => Effect.die("unused"),
+      getPullRequestTarget: () => Effect.die("unused"),
+      getPullRequestActivity: () => Effect.die("unused"),
+      getPullRequestReviewThread: () => Effect.die("unused"),
+      replyToPullRequestReviewThread: () => Effect.die("unused"),
+      setPullRequestReviewThreadResolved: () => Effect.die("unused"),
+      updatePullRequestComment: () => Effect.die("unused"),
+      submitPullRequestReview: () => Effect.die("unused"),
+      updatePullRequest: () => Effect.die("unused"),
+      getPullRequestFileContents: () => Effect.die("unused"),
       execute,
       listOpenPullRequests: (input) =>
         execute({

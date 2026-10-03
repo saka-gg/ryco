@@ -389,3 +389,101 @@ describe("parseLinkedIssueNumbers", () => {
     expect(parseLinkedIssueNumbers("")).toEqual([]);
   });
 });
+
+describe("pull request page enrichment", () => {
+  const base = {
+    number: 7,
+    title: "Seven",
+    url: "https://github.com/acme/repo/pull/7",
+    baseRefName: "main",
+    headRefName: "feature/x",
+    state: "MERGED",
+    mergedAt: "2026-10-02T12:00:00Z",
+  };
+
+  it("decodes list metadata and treats an empty review decision as none", () => {
+    const result = decodeGitHubPullRequestListJson(
+      JSON.stringify([
+        {
+          ...base,
+          createdAt: "2026-10-01T10:00:00Z",
+          reviewDecision: "",
+          additions: 5,
+          deletions: -1,
+          changedFiles: 3,
+        },
+      ]),
+    );
+    expect(Result.isSuccess(result)).toBe(true);
+    if (!Result.isSuccess(result)) return;
+    expect(result.success[0]?.reviewDecision).toBeNull();
+    expect(result.success[0]?.additions).toBe(5);
+    expect(result.success[0]?.deletions).toBeUndefined();
+    // List rows waiting on the viewer's review show the file count.
+    expect(result.success[0]?.changedFiles).toBe(3);
+    expect(result.success[0]?.createdAt?.toString()).toContain("2026-10-01T10:00:00");
+  });
+
+  it("builds reviewer states, merge state, auto-merge, and merge facts", () => {
+    const result = decodeGitHubPullRequestDetailJson(
+      JSON.stringify({
+        ...base,
+        body: "",
+        closedAt: "2026-10-02T12:00:00Z",
+        mergedBy: { login: "carol" },
+        mergeStateStatus: "BEHIND",
+        autoMergeRequest: {
+          mergeMethod: "SQUASH",
+          enabledAt: "2026-10-02T11:00:00Z",
+          enabledBy: { login: "alice" },
+        },
+        latestReviews: [
+          { author: { login: "bob" }, state: "APPROVED", submittedAt: "2026-10-02T09:00:00Z" },
+          { author: { login: "coderabbitai[bot]" }, state: "COMMENTED", submittedAt: null },
+          {
+            author: { login: "dave" },
+            state: "CHANGES_REQUESTED",
+            submittedAt: "2026-10-02T08:00:00Z",
+          },
+          { author: { login: "erin" }, state: "PENDING" },
+        ],
+        reviewRequests: [
+          { __typename: "User", login: "dave" },
+          { __typename: "Team", name: "Core", slug: "acme/core" },
+          { __typename: "Bot", login: "copilot-pull-request-reviewer" },
+        ],
+      }),
+    );
+    expect(Result.isSuccess(result)).toBe(true);
+    if (!Result.isSuccess(result)) return;
+    const detail = result.success;
+    expect(
+      detail.reviewerStates.map((reviewer) => [reviewer.login, reviewer.kind, reviewer.state]),
+    ).toEqual([
+      ["bob", "user", "approved"],
+      ["coderabbitai[bot]", "bot", "commented"],
+      // Re-requested after changes were requested: outstanding again, keeps the review time.
+      ["dave", "user", "requested"],
+      ["acme/core", "team", "requested"],
+      ["copilot-pull-request-reviewer", "bot", "requested"],
+    ]);
+    expect(detail.reviewerStates[2]?.submittedAt?.toString()).toContain("2026-10-02T08:00:00");
+    expect(detail.mergeStateStatus).toBe("behind");
+    expect(detail.autoMerge?.mergeMethod).toBe("squash");
+    expect(detail.autoMerge?.enabledBy).toBe("alice");
+    expect(detail.mergedBy).toBe("carol");
+    expect(detail.mergedAt?.toString()).toContain("2026-10-02T12:00:00");
+    expect(detail.closedAt).toBeDefined();
+    // Comments keep their agent-context semantics: none here, nothing synthesized from reviews.
+    expect(detail.comments).toEqual([]);
+  });
+
+  it("distinguishes no auto-merge from an unreported one", () => {
+    const disabled = decodeGitHubPullRequestDetailJson(
+      JSON.stringify({ ...base, autoMergeRequest: null }),
+    );
+    const unreported = decodeGitHubPullRequestDetailJson(JSON.stringify(base));
+    expect(Result.isSuccess(disabled) && disabled.success.autoMerge).toBeNull();
+    expect(Result.isSuccess(unreported) && "autoMerge" in unreported.success).toBe(false);
+  });
+});

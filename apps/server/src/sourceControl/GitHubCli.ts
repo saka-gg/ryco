@@ -1,7 +1,24 @@
-import { Context, Effect, Layer, Result, Schema, SchemaIssue } from "effect";
+import { Context, DateTime, Effect, Layer, Option, Result, Schema, SchemaIssue } from "effect";
 
 import {
+  CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES,
+  PositiveInt,
   TrimmedNonEmptyString,
+  type ChangeRequestActivity,
+  type ChangeRequestDraftReviewComment,
+  type ChangeRequestFileContents,
+  type ChangeRequestFileContentsInput,
+  type ChangeRequestReviewEvent,
+  type ChangeRequestReviewThread,
+  type ChangeRequestSetThreadResolvedResult,
+  type ChangeRequestSubmitReviewResult,
+  type ChangeRequestUpdateAction,
+  type ChangeRequestUpdateCommentInput,
+  type ChangeRequestUpdateCommentResult,
+  type SourceControlChangeRequestAutoMerge,
+  type SourceControlChangeRequestMergeStateStatus,
+  type SourceControlChangeRequestReviewDecision,
+  type SourceControlChangeRequestReviewer,
   type SourceControlGetChangeRequestFilesViewedInput,
   type SourceControlChangeRequestFilesViewed,
   type SourceControlSetChangeRequestFileViewedInput,
@@ -16,12 +33,19 @@ import {
   type VcsError,
 } from "@ryco/contracts";
 import { formatSchemaError } from "@ryco/shared/schemaJson";
+import { parseGitHubRepositoryIdentityFromUrl } from "@ryco/shared/sourceControl";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubIssues from "./gitHubIssues.ts";
 import type { NormalizedGitHubIssueDetail, NormalizedGitHubIssueRecord } from "./gitHubIssues.ts";
 import * as GitHubActions from "./gitHubActions.ts";
 import { buildGitHubIssueCreateArgv, parseGitHubIssueCreateOutput } from "./gitHubIssueCreate.ts";
+import {
+  appendCommentMutationMarker,
+  hasCommentMutationMarker,
+} from "./gitHubCommentMutationMarker.ts";
+import * as GitHubPullRequestActivity from "./gitHubPullRequestActivity.ts";
+import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubPullRequestStacks from "./gitHubPullRequestStacks.ts";
 import {
@@ -33,6 +57,9 @@ import {
 } from "./gitHubReactions.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+/** Ceiling for a single-commit diff; larger diffs fail clearly instead of truncating mid-hunk. */
+const COMMIT_DIFF_MAX_BYTES = 8 * 1024 * 1024;
+const FILE_CONTENTS_TIMEOUT_MS = 60_000;
 const GITHUB_API_VERSION = "2026-03-10";
 const ASYNC_MERGE_POLL_LIMIT = 300;
 const STATUS_CHECK_ROLLUP_JSON_FIELD = "statusCheckRollup";
@@ -62,6 +89,7 @@ const GITHUB_PULL_REQUEST_METADATA_JSON_FIELDS = [
 
 export const GITHUB_PULL_REQUEST_SUMMARY_JSON_FIELDS = [
   ...GITHUB_PULL_REQUEST_CORE_JSON_FIELDS,
+  "updatedAt",
   ...GITHUB_PULL_REQUEST_METADATA_JSON_FIELDS,
   STATUS_CHECK_ROLLUP_JSON_FIELD,
 ] as const;
@@ -69,12 +97,25 @@ export const GITHUB_PULL_REQUEST_SUMMARY_JSON_FIELDS = [
 export const GITHUB_PULL_REQUEST_LIST_JSON_FIELDS = [
   ...GITHUB_PULL_REQUEST_CORE_JSON_FIELDS,
   "updatedAt",
+  "createdAt",
+  "reviewDecision",
+  "additions",
+  "deletions",
+  "changedFiles",
   ...GITHUB_PULL_REQUEST_METADATA_JSON_FIELDS,
   STATUS_CHECK_ROLLUP_JSON_FIELD,
 ] as const;
 
 export const GITHUB_PULL_REQUEST_DETAIL_JSON_FIELDS = [
   ...GITHUB_PULL_REQUEST_CORE_JSON_FIELDS,
+  "updatedAt",
+  "createdAt",
+  "closedAt",
+  "mergedBy",
+  "reviewDecision",
+  "latestReviews",
+  "mergeStateStatus",
+  "autoMergeRequest",
   ...GITHUB_PULL_REQUEST_METADATA_JSON_FIELDS,
   STATUS_CHECK_ROLLUP_JSON_FIELD,
   "body",
@@ -133,6 +174,33 @@ export interface GitHubPullRequestSummary {
   readonly headSha?: string;
   readonly mergeability?: SourceControlChangeRequestMergeability;
   readonly checkRollup?: ReadonlyArray<GitHubPullRequests.NormalizedGitHubCheckRollupItem>;
+  readonly updatedAt?: Option.Option<DateTime.Utc>;
+  readonly createdAt?: DateTime.Utc;
+  readonly reviewDecision?: SourceControlChangeRequestReviewDecision | null;
+  readonly additions?: number;
+  readonly deletions?: number;
+  readonly changedFiles?: number;
+}
+
+/** Resolved identity of a pull request, used to address API calls precisely. */
+export interface GitHubPullRequestTarget {
+  /** GraphQL node id. */
+  readonly id: string;
+  readonly number: number;
+  readonly url: string;
+  readonly host: string;
+  readonly owner: string;
+  readonly name: string;
+  readonly nameWithOwner: string;
+  /** `host/owner/name`, the `--repo` form `gh` accepts for any host. */
+  readonly repo: string;
+  readonly state: "open" | "closed" | "merged";
+  readonly headRefOid: string;
+  readonly headRefName: string;
+  readonly baseRefName: string;
+  /** Base tip GitHub last diffed against (frozen at merge time for merged pull requests). */
+  readonly baseRefOid: string | null;
+  readonly isCrossRepository: boolean;
 }
 
 export interface GitHubPullRequestCommit {
@@ -174,6 +242,12 @@ export interface GitHubPullRequestDetail extends GitHubPullRequestSummary {
   readonly deletions: number;
   readonly changedFiles: number;
   readonly files: ReadonlyArray<GitHubPullRequestFile>;
+  readonly reviewerStates?: ReadonlyArray<SourceControlChangeRequestReviewer>;
+  readonly mergeStateStatus?: SourceControlChangeRequestMergeStateStatus;
+  readonly autoMerge?: SourceControlChangeRequestAutoMerge | null;
+  readonly closedAt?: DateTime.Utc;
+  readonly mergedAt?: DateTime.Utc;
+  readonly mergedBy?: string;
 }
 
 export interface GitHubRepositoryCloneUrls {
@@ -194,6 +268,7 @@ export interface GitHubCliShape {
     readonly stdin?: string;
     readonly allowNonZeroExit?: boolean;
     readonly timeoutMs?: number;
+    readonly maxOutputBytes?: number;
   }) => Effect.Effect<VcsProcess.VcsProcessOutput, GitHubCliError>;
 
   readonly getPullRequestStack: (input: {
@@ -214,7 +289,7 @@ export interface GitHubCliShape {
     readonly cwd: string;
     readonly repository: string;
     readonly host: string;
-  }) => Effect.Effect<SourceControlChangeRequestMergeCapabilities, GitHubCliError>;
+  }) => Effect.Effect<GitHubRepositoryMergeCapabilities, GitHubCliError>;
 
   readonly mergePullRequestAsync: (input: {
     readonly cwd: string;
@@ -223,7 +298,74 @@ export interface GitHubCliShape {
     readonly number: number;
     readonly mergeMethod: SourceControlChangeRequestMergeMethod;
     readonly stackMembership: "stacked" | "standalone";
+    /** GitHub refuses the merge when the head no longer matches. */
+    readonly expectedHeadSha?: string | undefined;
   }) => Effect.Effect<{ readonly outcome: "merged" | "enqueued" }, GitHubCliError>;
+
+  /** Delete a same-repository head branch (`DELETE git/refs/heads/<branch>`); a missing ref is success. */
+  readonly deleteBranch: (input: {
+    readonly cwd: string;
+    readonly repository: string;
+    readonly host: string;
+    readonly branch: string;
+  }) => Effect.Effect<void, GitHubCliError>;
+
+  readonly getPullRequestTarget: (input: {
+    readonly cwd: string;
+    readonly reference: string;
+  }) => Effect.Effect<GitHubPullRequestTarget, GitHubCliError>;
+
+  readonly getPullRequestActivity: (input: {
+    readonly cwd: string;
+    readonly reference: string;
+  }) => Effect.Effect<ChangeRequestActivity, GitHubCliError>;
+
+  readonly getPullRequestReviewThread: (input: {
+    readonly cwd: string;
+    readonly reference: string;
+    readonly threadId: string;
+  }) => Effect.Effect<ChangeRequestReviewThread, GitHubCliError>;
+
+  /** Reply, skipping the post when a reply with the same `clientMutationId` already exists. */
+  readonly replyToPullRequestReviewThread: (input: {
+    readonly cwd: string;
+    readonly reference: string;
+    readonly threadId: string;
+    readonly body: string;
+    readonly clientMutationId?: string | undefined;
+  }) => Effect.Effect<ChangeRequestReviewThread, GitHubCliError>;
+
+  readonly setPullRequestReviewThreadResolved: (input: {
+    readonly cwd: string;
+    readonly reference: string;
+    readonly threadId: string;
+    readonly resolved: boolean;
+  }) => Effect.Effect<ChangeRequestSetThreadResolvedResult, GitHubCliError>;
+
+  readonly updatePullRequestComment: (
+    input: ChangeRequestUpdateCommentInput,
+  ) => Effect.Effect<ChangeRequestUpdateCommentResult, GitHubCliError>;
+
+  readonly submitPullRequestReview: (input: {
+    readonly cwd: string;
+    readonly reference: string;
+    readonly event: ChangeRequestReviewEvent;
+    readonly body?: string | undefined;
+    readonly comments: ReadonlyArray<ChangeRequestDraftReviewComment>;
+    readonly expectedHeadSha: string;
+  }) => Effect.Effect<ChangeRequestSubmitReviewResult, GitHubCliError>;
+
+  /** Apply one lifecycle action. `bodyFile` carries a new description for `edit`. */
+  readonly updatePullRequest: (input: {
+    readonly cwd: string;
+    readonly reference: string;
+    readonly action: ChangeRequestUpdateAction;
+    readonly bodyFile?: string | undefined;
+  }) => Effect.Effect<void, GitHubCliError>;
+
+  readonly getPullRequestFileContents: (
+    input: ChangeRequestFileContentsInput,
+  ) => Effect.Effect<ChangeRequestFileContents, GitHubCliError>;
 
   readonly listOpenPullRequests: (input: {
     readonly cwd: string;
@@ -253,6 +395,7 @@ export interface GitHubCliShape {
     readonly headSelector: string;
     readonly title: string;
     readonly bodyFile: string;
+    readonly draft?: boolean | undefined;
   }) => Effect.Effect<void, GitHubCliError>;
 
   readonly getDefaultBranch: (input: {
@@ -303,6 +446,8 @@ export interface GitHubCliShape {
     readonly cwd: string;
     readonly reference: string;
     readonly expectedHeadSha?: string | undefined;
+    /** Scope the diff to one commit of the pull request. */
+    readonly commitSha?: string | undefined;
   }) => Effect.Effect<string, GitHubCliError>;
 
   readonly createIssue: (input: {
@@ -387,6 +532,11 @@ export interface GitHubCliShape {
   }) => Effect.Effect<void, GitHubCliError>;
 }
 
+export type GitHubRepositoryMergeCapabilities = SourceControlChangeRequestMergeCapabilities & {
+  /** Repository setting `delete_branch_on_merge`, when GitHub reported it. */
+  readonly deleteBranchOnMerge?: boolean;
+};
+
 export class GitHubCli extends Context.Service<GitHubCli, GitHubCliShape>()(
   "ryco/source-control/GitHubCli",
 ) {}
@@ -415,19 +565,89 @@ export function isStatusCheckRollupAccessError(error: GitHubCliError): boolean {
   );
 }
 
-function normalizeGitHubCliError(
-  operation: "execute" | "stdout",
+/**
+ * Which GitHub surface a `gh` invocation targets. Actions calls keep their
+ * Actions-specific guidance; everything else (pull requests, reviews,
+ * comments, mutations) gets messages that describe the actual failure.
+ */
+export type GitHubCliErrorDomain = "actions" | "general";
+
+export function gitHubCliErrorDomain(args: ReadonlyArray<string>): GitHubCliErrorDomain {
+  const command = args[0];
+  if (command === "run" || command === "workflow") return "actions";
+  return args.some((arg) => /(?:^|\/)actions\//u.test(arg)) ? "actions" : "general";
+}
+
+/**
+ * GitHub's own wording from `gh` stderr (`gh: Not Found (HTTP 404)`,
+ * `GraphQL: … (path)`) or an API error body, without process noise.
+ */
+export function gitHubErrorMessage(error: VcsError | unknown): string | null {
+  const source =
+    typeof error === "object" &&
+    error !== null &&
+    "detail" in error &&
+    typeof error.detail === "string"
+      ? error.detail
+      : errorText(error);
+  const lines = source
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  for (const line of lines) {
+    const match = /^(?:gh:|GraphQL:|error:)\s*(.+)$/iu.exec(line);
+    if (match?.[1]) return match[1].trim();
+  }
+  return lines[0] ?? null;
+}
+
+/** Messages from a GitHub REST or GraphQL error body (`{message, errors:[…]}`). */
+export function gitHubApiErrorBodyMessage(raw: string): string | null {
+  const text = raw.trim();
+  if (!text.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(text) as {
+      readonly message?: unknown;
+      readonly errors?: unknown;
+    };
+    const details = Array.isArray(parsed.errors)
+      ? parsed.errors.flatMap((entry: unknown) => {
+          if (typeof entry === "string") return [entry];
+          if (typeof entry !== "object" || entry === null) return [];
+          const record = entry as Record<string, unknown>;
+          if (typeof record.message === "string" && record.message.trim()) {
+            return [record.message.trim()];
+          }
+          const parts = [record.code, record.field].filter(
+            (part): part is string => typeof part === "string" && part.length > 0,
+          );
+          return parts.length > 0 ? [parts.join(" ")] : [];
+        })
+      : [];
+    const message = typeof parsed.message === "string" ? parsed.message.trim() : "";
+    const combined = [message, details.join("; ")].filter((part) => part.length > 0);
+    return combined.length > 0 ? combined.join(": ") : null;
+  } catch {
+    return null;
+  }
+}
+
+function withGitHubMessage(prefix: string, message: string | null, suffix = ""): string {
+  return message ? `${prefix}: ${message}.${suffix}` : `${prefix}.${suffix}`;
+}
+
+export function normalizeGitHubCliError(
+  operation: string,
   error: VcsError | unknown,
+  domain: GitHubCliErrorDomain = "general",
 ): GitHubCliError {
   const text = errorText(error);
   const lower = text.toLowerCase();
+  const message = gitHubErrorMessage(error)?.replace(/\.$/u, "") ?? null;
+  const fail = (detail: string) => new GitHubCliError({ operation, detail, cause: error });
 
   if (lower.includes("command not found: gh") || lower.includes("enoent")) {
-    return new GitHubCliError({
-      operation,
-      detail: "GitHub CLI (`gh`) is required but not available on PATH.",
-      cause: error,
-    });
+    return fail("GitHub CLI (`gh`) is required but not available on PATH.");
   }
 
   if (
@@ -436,11 +656,7 @@ function normalizeGitHubCliError(
     lower.includes("gh auth login") ||
     lower.includes("no oauth token")
   ) {
-    return new GitHubCliError({
-      operation,
-      detail: "GitHub CLI is not authenticated. Run `gh auth login` and retry.",
-      cause: error,
-    });
+    return fail("GitHub CLI is not authenticated. Run `gh auth login` and retry.");
   }
 
   if (
@@ -448,14 +664,40 @@ function normalizeGitHubCliError(
     lower.includes("secondary rate limit") ||
     lower.includes("rate limit")
   ) {
-    return new GitHubCliError({
-      operation,
-      detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
-      cause: error,
-    });
+    return fail("GitHub API rate limit exceeded. Wait for the reset window and retry.");
   }
 
-  if (
+  if (domain === "general") {
+    if (
+      /head branch was modified|head (?:sha|oid|commit)[^.\n]*(?:does not match|didn't match|is not|has changed|changed)|expected head (?:oid|sha)|is not the head of|head ref (?:has )?changed|sha does not match/iu.test(
+        text,
+      )
+    ) {
+      return fail(
+        "The pull request's head changed since it was loaded. Refresh and review the new commits, then try again.",
+      );
+    }
+
+    if (
+      lower.includes("resource not accessible") ||
+      lower.includes("must have admin rights") ||
+      lower.includes("must have push access") ||
+      lower.includes("must have write access") ||
+      lower.includes("does not have permission") ||
+      lower.includes("permission denied") ||
+      lower.includes("not authorized") ||
+      lower.includes("forbidden") ||
+      lower.includes("http 403")
+    ) {
+      return fail(
+        withGitHubMessage(
+          "GitHub denied permission for this action",
+          message,
+          " Check that your account has the required access to this repository.",
+        ),
+      );
+    }
+  } else if (
     lower.includes("resource not accessible by integration") ||
     lower.includes("must have actions read permission") ||
     lower.includes("must have actions write permission") ||
@@ -463,25 +705,19 @@ function normalizeGitHubCliError(
     lower.includes("forbidden") ||
     lower.includes("http 403")
   ) {
-    return new GitHubCliError({
-      operation,
-      detail:
-        "GitHub Actions is not accessible for this repository. Check token permissions, required Actions access, and repository Actions settings.",
-      cause: error,
-    });
+    return fail(
+      "GitHub Actions is not accessible for this repository. Check token permissions, required Actions access, and repository Actions settings.",
+    );
   }
 
   if (
-    lower.includes("http 410") ||
-    lower.includes("gone") ||
-    lower.includes("expired") ||
-    lower.includes("logs are no longer available")
+    domain === "actions" &&
+    (lower.includes("http 410") ||
+      lower.includes("gone") ||
+      lower.includes("expired") ||
+      lower.includes("logs are no longer available"))
   ) {
-    return new GitHubCliError({
-      operation,
-      detail: "GitHub Actions logs are no longer available for this run.",
-      cause: error,
-    });
+    return fail("GitHub Actions logs are no longer available for this run.");
   }
 
   if (
@@ -490,30 +726,43 @@ function normalizeGitHubCliError(
     lower.includes("no pull requests found for branch") ||
     lower.includes("pull request not found")
   ) {
-    return new GitHubCliError({
-      operation,
-      detail: "Pull request not found. Check the PR number or URL and try again.",
-      cause: error,
-    });
+    return fail("Pull request not found. Check the PR number or URL and try again.");
+  }
+
+  if (domain === "actions") {
+    if (
+      lower.includes("not found") ||
+      lower.includes("http 404") ||
+      lower.includes("no workflow runs found")
+    ) {
+      return fail("GitHub Actions run or repository was not found.");
+    }
+    return fail(text);
   }
 
   if (
-    lower.includes("not found") ||
     lower.includes("http 404") ||
-    lower.includes("no workflow runs found")
+    lower.includes("not found") ||
+    lower.includes("could not resolve to a node")
   ) {
-    return new GitHubCliError({
-      operation,
-      detail: "GitHub Actions run or repository was not found.",
-      cause: error,
-    });
+    return fail(
+      withGitHubMessage(
+        "GitHub could not find what this action refers to",
+        message,
+        " It may have been deleted, or your account may not have access.",
+      ),
+    );
   }
 
-  return new GitHubCliError({
-    operation,
-    detail: text,
-    cause: error,
-  });
+  if (
+    lower.includes("http 422") ||
+    lower.includes("validation failed") ||
+    lower.includes("unprocessable")
+  ) {
+    return fail(withGitHubMessage("GitHub rejected the request", message ?? text));
+  }
+
+  return fail(text);
 }
 
 const RawGitHubRepositoryCloneUrlsSchema = Schema.Struct({
@@ -692,6 +941,14 @@ function nonEmptyProcessDetail(output: VcsProcess.VcsProcessOutput): string {
 const COMMENT_REACTION_GROUPS_QUERY =
   "query($ids:[ID!]!){nodes(ids:$ids){id ... on Reactable{reactionGroups{content viewerHasReacted reactors{totalCount} users{totalCount}}}}}";
 
+/** Keep `updatedAt` only when GitHub reported it, so absent timestamps stay absent. */
+function withPresentUpdatedAt<T extends { readonly updatedAt: Option.Option<DateTime.Utc> }>(
+  record: T,
+): Omit<T, "updatedAt"> & { readonly updatedAt?: Option.Option<DateTime.Utc> } {
+  const { updatedAt, ...rest } = record;
+  return Option.isSome(updatedAt) ? { ...rest, updatedAt } : rest;
+}
+
 function mergeCommentReactionGroups<
   T extends { readonly id?: string; readonly reactions?: ReadonlyArray<NormalizedGitHubReaction> },
 >(
@@ -711,6 +968,76 @@ function mergeCommentReactionGroups<
   });
 }
 
+function gitHubApiFailure(
+  operation: string,
+  args: ReadonlyArray<string>,
+  output: VcsProcess.VcsProcessOutput,
+): GitHubCliError {
+  const bodyMessage = gitHubApiErrorBodyMessage(output.stdout);
+  const stderr = output.stderr.trim();
+  const detail =
+    [bodyMessage ? `gh: ${bodyMessage}` : null, stderr || null]
+      .filter((part): part is string => part !== null)
+      .join("\n") || `GitHub CLI exited with code ${output.exitCode}.`;
+  return normalizeGitHubCliError(operation, { detail }, gitHubCliErrorDomain(args));
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  const text = raw.trim();
+  if (!text.startsWith("{")) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasGraphQlErrors(raw: string): boolean {
+  const errors = parseJsonObject(raw)?.errors;
+  return Array.isArray(errors) && errors.length > 0;
+}
+
+function hasGraphQlData(raw: string): boolean {
+  const data = parseJsonObject(raw)?.data;
+  return typeof data === "object" && data !== null;
+}
+
+function isHttpNotFound(output: VcsProcess.VcsProcessOutput): boolean {
+  return output.exitCode !== 0 && /\bHTTP\s+404\b/iu.test(`${output.stderr}\n${output.stdout}`);
+}
+
+const RawPullRequestTargetSchema = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  number: PositiveInt,
+  url: TrimmedNonEmptyString,
+  state: Schema.String,
+  headRefOid: TrimmedNonEmptyString,
+  headRefName: TrimmedNonEmptyString,
+  baseRefName: TrimmedNonEmptyString,
+  baseRefOid: Schema.optional(Schema.NullOr(Schema.String)),
+  isCrossRepository: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  mergedAt: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+export const GITHUB_PULL_REQUEST_TARGET_JSON_FIELDS =
+  "id,number,url,state,headRefOid,headRefName,baseRefName,baseRefOid,isCrossRepository,mergedAt";
+
+interface GitHubFileRevisionContents {
+  readonly contents: string | null;
+  readonly truncated: boolean;
+}
+
+function staleHeadError(operation: string): GitHubCliError {
+  return new GitHubCliError({
+    operation,
+    detail:
+      "The pull request's head changed since it was loaded. Refresh and review the new commits, then try again.",
+  });
+}
+
 export const make = Effect.fn("makeGitHubCli")(function* () {
   const process = yield* VcsProcess.VcsProcess;
 
@@ -726,8 +1053,82 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           ? { allowNonZeroExit: input.allowNonZeroExit }
           : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
       })
-      .pipe(Effect.mapError((error) => normalizeGitHubCliError("execute", error)));
+      .pipe(
+        Effect.mapError((error) =>
+          normalizeGitHubCliError("execute", error, gitHubCliErrorDomain(input.args)),
+        ),
+      );
+
+  /**
+   * Run a `gh api` call and turn a non-zero exit into a normalized error that
+   * carries GitHub's message from the response body (REST `{message, errors}`
+   * or GraphQL `{errors}`), which `gh` otherwise only prints to stdout.
+   */
+  const api = (input: {
+    readonly cwd: string;
+    readonly operation: string;
+    readonly args: ReadonlyArray<string>;
+    readonly stdin?: string;
+    readonly timeoutMs?: number;
+    readonly maxOutputBytes?: number;
+  }) =>
+    execute({
+      cwd: input.cwd,
+      args: input.args,
+      ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
+      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
+      allowNonZeroExit: true,
+    }).pipe(
+      Effect.flatMap((output) =>
+        output.exitCode === 0
+          ? Effect.succeed(output)
+          : Effect.fail(gitHubApiFailure(input.operation, input.args, output)),
+      ),
+    );
+
+  /**
+   * One GraphQL document over stdin (`--input -`): variables can carry text
+   * people wrote, and argv is visible in process listings and error messages.
+   */
+  const graphqlDocument = (input: {
+    readonly cwd: string;
+    readonly host: string;
+    readonly operation: string;
+    readonly query: string;
+    readonly variables: GitHubPullRequestMutations.GitHubGraphQlVariables;
+    /**
+     * Hand a partial response (`data` alongside `errors`, which makes `gh`
+     * exit non-zero) to the caller's decoder, which decides which errors are
+     * fatal. Only for reads whose decoders inspect `errors` themselves.
+     */
+    readonly acceptPartialData?: boolean;
+  }) => {
+    const args = ["api", "graphql", "--hostname", input.host, "--input", "-"];
+    return execute({
+      cwd: input.cwd,
+      args,
+      stdin: GitHubPullRequestMutations.encodeGitHubGraphQlRequest({
+        query: input.query,
+        variables: input.variables,
+      }),
+      allowNonZeroExit: true,
+    }).pipe(
+      Effect.flatMap((output) => {
+        if (output.exitCode === 0) {
+          // A GraphQL error must never pass as success, even if gh exits cleanly.
+          return hasGraphQlErrors(output.stdout) && input.acceptPartialData !== true
+            ? Effect.fail(gitHubApiFailure(input.operation, args, output))
+            : Effect.succeed(output.stdout);
+        }
+        return input.acceptPartialData === true && hasGraphQlData(output.stdout)
+          ? Effect.succeed(output.stdout)
+          : Effect.fail(gitHubApiFailure(input.operation, args, output));
+      }),
+    );
+  };
 
   const viewedIdentitySchema = Schema.Struct({
     id: TrimmedNonEmptyString,
@@ -767,13 +1168,24 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
         ),
       ),
     );
-  const graphql = (cwd: string, url: string, query: string, variables: ReadonlyArray<string>) =>
+  /**
+   * GraphQL read with `-f` variables, for values this module composed itself
+   * (node ids, paths, cursors). Anything a person wrote goes through
+   * `graphqlDocument` over stdin instead.
+   */
+  const graphql = (
+    cwd: string,
+    url: string,
+    query: string,
+    variables: ReadonlyArray<string>,
+    operation = "viewedFiles",
+  ) =>
     Effect.gen(function* () {
       const hostname = yield* Effect.try({
         try: () => new URL(url).hostname,
         catch: (cause) =>
           new GitHubCliError({
-            operation: "viewedFiles",
+            operation,
             detail: "Invalid pull request URL",
             cause,
           }),
@@ -805,6 +1217,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           identity.url,
           "query($id:ID!,$cursor:String){node(id:$id){... on PullRequest{headRefOid files(first:100,after:$cursor){nodes{path viewerViewedState} pageInfo{hasNextPage endCursor}}}}}",
           [`id=${identity.id}`, ...(cursor ? [`cursor=${cursor}`] : [])],
+          "getPullRequestFilesViewed",
         );
         const response: typeof viewedPageSchema.Type = yield* decodeGitHubJson(
           raw,
@@ -879,6 +1292,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
         identity.url,
         `mutation($id:ID!,$path:String!){${mutation}(input:{pullRequestId:$id,path:$path}){pullRequest{id headRefOid}}}`,
         [`id=${identity.id}`, `path=${input.path}`],
+        "setPullRequestFileViewed",
       );
       const result = yield* decodeGitHubJson(
         raw,
@@ -905,6 +1319,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
             identity.url,
             "mutation($id:ID!,$path:String!){unmarkFileAsViewed(input:{pullRequestId:$id,path:$path}){pullRequest{id}}}",
             [`id=${identity.id}`, `path=${input.path}`],
+            "setPullRequestFileViewed",
           );
         return yield* Effect.fail(
           new GitHubCliError({
@@ -1152,7 +1567,11 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           "--input",
           "-",
         ],
-        stdin: JSON.stringify({ merge_method: input.mergeMethod, merge_action: "default" }),
+        stdin: JSON.stringify({
+          merge_method: input.mergeMethod,
+          merge_action: "default",
+          ...(input.expectedHeadSha ? { sha: input.expectedHeadSha } : {}),
+        }),
         allowNonZeroExit: true,
       });
 
@@ -1174,6 +1593,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
             "--repo",
             `${input.host}/${input.repository}`,
             `--${input.mergeMethod}`,
+            ...(input.expectedHeadSha ? ["--match-head-commit", input.expectedHeadSha] : []),
           ],
         });
         return {
@@ -1185,6 +1605,9 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
 
       const decodeOutput = (output: VcsProcess.VcsProcessOutput) => {
         const raw = output.stdout.trim();
+        if (output.exitCode !== 0 && gitHubApiErrorBodyMessage(raw) !== null) {
+          return Effect.fail(gitHubApiFailure("mergePullRequestAsync", [endpoint], output));
+        }
         if (!raw) {
           return Effect.fail(
             new GitHubCliError({
@@ -1257,12 +1680,726 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       );
     });
 
+  const getPullRequestTarget: GitHubCliShape["getPullRequestTarget"] = (input) =>
+    execute({
+      cwd: input.cwd,
+      args: ["pr", "view", input.reference, "--json", GITHUB_PULL_REQUEST_TARGET_JSON_FIELDS],
+    }).pipe(
+      Effect.flatMap((result) =>
+        decodeGitHubJson(
+          result.stdout.trim(),
+          RawPullRequestTargetSchema,
+          "getPullRequestTarget",
+          "GitHub CLI returned an invalid pull request identity",
+        ),
+      ),
+      Effect.flatMap((raw) => {
+        const identity = parseGitHubRepositoryIdentityFromUrl(raw.url);
+        if (!identity) {
+          return Effect.fail(
+            new GitHubCliError({
+              operation: "getPullRequestTarget",
+              detail: "Could not determine the pull request's GitHub repository from its URL.",
+            }),
+          );
+        }
+        const state = raw.state.trim().toUpperCase();
+        return Effect.succeed({
+          id: raw.id,
+          number: raw.number,
+          url: raw.url,
+          host: identity.host,
+          owner: identity.owner,
+          name: identity.repository,
+          nameWithOwner: identity.nameWithOwner,
+          repo: `${identity.host}/${identity.nameWithOwner}`,
+          state:
+            state === "MERGED" || raw.mergedAt?.trim()
+              ? ("merged" as const)
+              : state === "CLOSED"
+                ? ("closed" as const)
+                : ("open" as const),
+          headRefOid: raw.headRefOid,
+          headRefName: raw.headRefName,
+          baseRefName: raw.baseRefName,
+          baseRefOid: raw.baseRefOid?.trim() || null,
+          isCrossRepository: raw.isCrossRepository === true,
+        } satisfies GitHubPullRequestTarget);
+      }),
+    );
+
+  const decodeOrFail = <A>(operation: string, result: Result.Result<A, string>) =>
+    githubResultOrError(result, operation);
+
+  /**
+   * Refuse to mutate a node (thread, comment, review) unless it belongs to the
+   * pull request the caller named; node ids are global, so a stale or forged
+   * id could otherwise act on another pull request.
+   */
+  const requireNodeInPullRequest = (input: {
+    readonly cwd: string;
+    readonly target: GitHubPullRequestTarget;
+    readonly nodeId: string;
+    readonly operation: string;
+    readonly expectedTypes: ReadonlyArray<string>;
+    readonly label: string;
+  }) =>
+    graphqlDocument({
+      cwd: input.cwd,
+      host: input.target.host,
+      operation: input.operation,
+      query: GitHubPullRequestActivity.GITHUB_NODE_SCOPE_QUERY,
+      variables: { id: input.nodeId },
+    }).pipe(
+      Effect.flatMap((raw) =>
+        decodeOrFail(input.operation, GitHubPullRequestActivity.decodeGitHubNodeScopeJson(raw)),
+      ),
+      Effect.flatMap((node) => {
+        if (!node || !input.expectedTypes.includes(node.typename)) {
+          return Effect.fail(
+            new GitHubCliError({
+              operation: input.operation,
+              detail: `The ${input.label} was not found on GitHub. It may have been deleted.`,
+            }),
+          );
+        }
+        return ensureScope(input.operation, input.target, node.scope, input.label);
+      }),
+    );
+
+  const ensureScope = (
+    operation: string,
+    target: GitHubPullRequestTarget,
+    scope: GitHubPullRequestActivity.GitHubPullRequestScope | null,
+    label: string,
+  ): Effect.Effect<void, GitHubCliError> =>
+    scope &&
+    scope.number === target.number &&
+    (scope.repository === null ||
+      scope.repository.toLowerCase() === target.nameWithOwner.toLowerCase())
+      ? Effect.void
+      : Effect.fail(
+          new GitHubCliError({
+            operation,
+            detail: `The ${label} does not belong to pull request #${target.number}.`,
+          }),
+        );
+
+  const getPullRequestActivity: GitHubCliShape["getPullRequestActivity"] = (input) =>
+    getPullRequestTarget(input).pipe(
+      Effect.flatMap((target) =>
+        GitHubPullRequestActivity.fetchGitHubChangeRequestActivity({
+          owner: target.owner,
+          name: target.name,
+          number: target.number,
+          runQuery: (query, variables) =>
+            graphqlDocument({
+              cwd: input.cwd,
+              host: target.host,
+              operation: "getPullRequestActivity",
+              query,
+              variables,
+              acceptPartialData: true,
+            }),
+          fail: (detail) => new GitHubCliError({ operation: "getPullRequestActivity", detail }),
+        }),
+      ),
+    );
+
+  const readReviewThread = (input: {
+    readonly cwd: string;
+    readonly target: GitHubPullRequestTarget;
+    readonly threadId: string;
+    readonly operation: string;
+  }) =>
+    graphqlDocument({
+      cwd: input.cwd,
+      host: input.target.host,
+      operation: input.operation,
+      query: GitHubPullRequestActivity.GITHUB_REVIEW_THREAD_NODE_QUERY,
+      variables: { id: input.threadId },
+    }).pipe(
+      Effect.flatMap((raw) =>
+        decodeOrFail(
+          input.operation,
+          GitHubPullRequestActivity.decodeGitHubReviewThreadNodeJson(raw),
+        ),
+      ),
+      Effect.tap((result) =>
+        ensureScope(input.operation, input.target, result.scope, "review thread"),
+      ),
+      Effect.map((result) => result.thread),
+    );
+
+  const getPullRequestReviewThread: GitHubCliShape["getPullRequestReviewThread"] = (input) =>
+    getPullRequestTarget(input).pipe(
+      Effect.flatMap((target) =>
+        readReviewThread({
+          cwd: input.cwd,
+          target,
+          threadId: input.threadId,
+          operation: "getPullRequestReviewThread",
+        }),
+      ),
+      Effect.map((entry) => entry.thread),
+    );
+
+  const replyToPullRequestReviewThread: GitHubCliShape["replyToPullRequestReviewThread"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const operation = "replyToPullRequestReviewThread";
+      const target = yield* getPullRequestTarget(input);
+      const existing = yield* readReviewThread({
+        cwd: input.cwd,
+        target,
+        threadId: input.threadId,
+        operation,
+      });
+      if (
+        hasCommentMutationMarker(
+          existing.rawCommentBodies.map((body) => ({ body })),
+          input.clientMutationId,
+        )
+      ) {
+        return existing.thread;
+      }
+      if (!existing.thread.viewerCanReply) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: "GitHub does not allow you to reply to this review thread.",
+        });
+      }
+      yield* graphqlDocument({
+        cwd: input.cwd,
+        host: target.host,
+        operation,
+        query: GitHubPullRequestMutations.GITHUB_REVIEW_THREAD_REPLY_MUTATION,
+        variables: {
+          threadId: input.threadId,
+          body: appendCommentMutationMarker(input.body, input.clientMutationId),
+        },
+      });
+      const updated = yield* readReviewThread({
+        cwd: input.cwd,
+        target,
+        threadId: input.threadId,
+        operation,
+      });
+      return updated.thread;
+    });
+
+  const setPullRequestReviewThreadResolved: GitHubCliShape["setPullRequestReviewThreadResolved"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const operation = "setPullRequestReviewThreadResolved";
+      const target = yield* getPullRequestTarget(input);
+      yield* requireNodeInPullRequest({
+        cwd: input.cwd,
+        target,
+        nodeId: input.threadId,
+        operation,
+        expectedTypes: ["PullRequestReviewThread"],
+        label: "review thread",
+      });
+      const raw = yield* graphqlDocument({
+        cwd: input.cwd,
+        host: target.host,
+        operation,
+        query: input.resolved
+          ? GitHubPullRequestMutations.GITHUB_RESOLVE_REVIEW_THREAD_MUTATION
+          : GitHubPullRequestMutations.GITHUB_UNRESOLVE_REVIEW_THREAD_MUTATION,
+        variables: { threadId: input.threadId },
+      });
+      return yield* decodeOrFail(
+        operation,
+        GitHubPullRequestActivity.decodeGitHubResolveThreadJson(raw),
+      );
+    });
+
+  const updatePullRequestComment: GitHubCliShape["updatePullRequestComment"] = (input) =>
+    Effect.gen(function* () {
+      const operation = "updatePullRequestComment";
+      const document = GitHubPullRequestMutations.gitHubCommentMutationDocument(
+        input.commentKind,
+        input.action,
+      );
+      if (!document) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: "GitHub reviews cannot be deleted once submitted; edit the summary instead.",
+        });
+      }
+      const target = yield* getPullRequestTarget(input);
+      yield* requireNodeInPullRequest({
+        cwd: input.cwd,
+        target,
+        nodeId: input.commentId,
+        operation,
+        expectedTypes: [GitHubPullRequestMutations.GITHUB_COMMENT_NODE_TYPES[input.commentKind]],
+        label: input.commentKind === "review" ? "review" : "comment",
+      });
+      yield* graphqlDocument({
+        cwd: input.cwd,
+        host: target.host,
+        operation,
+        query: document,
+        variables:
+          input.action === "edit"
+            ? { id: input.commentId, body: input.body }
+            : { id: input.commentId },
+      });
+      return { commentId: input.commentId, deleted: input.action === "delete" };
+    });
+
+  const submitPullRequestReview: GitHubCliShape["submitPullRequestReview"] = (input) =>
+    Effect.gen(function* () {
+      const operation = "submitPullRequestReview";
+      // Everything but emptiness is checked before any request: an empty
+      // comment review is fine when it submits the viewer's pending review,
+      // which only the review context below can tell.
+      const submission = yield* decodeOrFail(
+        operation,
+        GitHubPullRequestMutations.buildGitHubReviewSubmissionBody(input, {
+          submitsPendingReview: true,
+        }),
+      );
+      const target = yield* getPullRequestTarget(input);
+      if (target.headRefOid !== input.expectedHeadSha) return yield* staleHeadError(operation);
+      const context = yield* graphqlDocument({
+        cwd: input.cwd,
+        host: target.host,
+        operation,
+        query: GitHubPullRequestMutations.GITHUB_REVIEW_CONTEXT_QUERY,
+        variables: { owner: target.owner, name: target.name, number: target.number },
+      }).pipe(
+        Effect.flatMap((raw) =>
+          decodeOrFail(operation, GitHubPullRequestMutations.decodeGitHubReviewContextJson(raw)),
+        ),
+      );
+      if (context.headRefOid !== input.expectedHeadSha) return yield* staleHeadError(operation);
+
+      /** Add every draft to a pending review, then submit it with the verdict. */
+      const fillAndSubmitPendingReview = (reviewId: string) =>
+        Effect.gen(function* () {
+          for (const comment of submission.comments) {
+            yield* graphqlDocument({
+              cwd: input.cwd,
+              host: target.host,
+              operation,
+              query: GitHubPullRequestMutations.GITHUB_ADD_PENDING_REVIEW_THREAD_MUTATION,
+              variables: {
+                input: GitHubPullRequestMutations.buildGitHubPendingReviewThreadInput(
+                  reviewId,
+                  comment,
+                ),
+              },
+            });
+          }
+          const raw = yield* graphqlDocument({
+            cwd: input.cwd,
+            host: target.host,
+            operation,
+            query: GitHubPullRequestMutations.GITHUB_SUBMIT_PENDING_REVIEW_MUTATION,
+            variables: {
+              reviewId,
+              event: submission.event,
+              body: submission.body ?? null,
+            },
+          });
+          return yield* decodeOrFail(
+            operation,
+            GitHubPullRequestMutations.decodeGitHubSubmitPendingReviewJson(raw),
+          );
+        });
+
+      const pendingReviewId = context.pendingReviewId;
+      if (pendingReviewId) {
+        // A pending review keeps the commit it was started on: threads added to
+        // it anchor there and its verdict applies there. Absorbing drafts
+        // written against a newer head would misplace them and approve (or
+        // reject) code the reviewer never saw, so refuse instead.
+        if (context.pendingReviewCommitOid !== input.expectedHeadSha) {
+          return yield* new GitHubCliError({
+            operation,
+            detail:
+              "You have a pending review on GitHub that was started on an older commit of this pull request. Submit or discard it on GitHub, then try again.",
+          });
+        }
+        // GitHub allows one pending review per reviewer, so a review started on
+        // the web absorbs these drafts and is submitted with them.
+        return yield* fillAndSubmitPendingReview(pendingReviewId);
+      }
+      // Without a pending review, an empty comment review has nothing to submit.
+      yield* decodeOrFail(
+        operation,
+        GitHubPullRequestMutations.buildGitHubReviewSubmissionBody(input),
+      );
+
+      if (submission.comments.some((comment) => comment.subject_type === "file")) {
+        // REST review comments cannot be file-level (no `subject_type` on the
+        // create-review endpoint), so stage a pending review pinned to the
+        // expected head, add the drafts through GraphQL, and submit it. If any
+        // step fails, the half-built review is discarded so a retry starts clean.
+        const reviewId = yield* graphqlDocument({
+          cwd: input.cwd,
+          host: target.host,
+          operation,
+          query: GitHubPullRequestMutations.GITHUB_START_PENDING_REVIEW_MUTATION,
+          variables: { pullRequestId: context.pullRequestId, commitOID: input.expectedHeadSha },
+        }).pipe(
+          Effect.flatMap((raw) =>
+            decodeOrFail(
+              operation,
+              GitHubPullRequestMutations.decodeGitHubStartPendingReviewJson(raw),
+            ),
+          ),
+        );
+        return yield* fillAndSubmitPendingReview(reviewId).pipe(
+          Effect.tapError(() =>
+            graphqlDocument({
+              cwd: input.cwd,
+              host: target.host,
+              operation,
+              query: GitHubPullRequestMutations.GITHUB_DELETE_PENDING_REVIEW_MUTATION,
+              variables: { reviewId },
+            }).pipe(Effect.ignore),
+          ),
+        );
+      }
+
+      const output = yield* api({
+        cwd: input.cwd,
+        operation,
+        args: [
+          "api",
+          "--hostname",
+          target.host,
+          "--method",
+          "POST",
+          `repos/${target.nameWithOwner}/pulls/${target.number}/reviews`,
+          "--input",
+          "-",
+        ],
+        stdin: JSON.stringify(submission),
+      });
+      return yield* decodeOrFail(
+        operation,
+        GitHubPullRequestMutations.decodeGitHubReviewSubmissionJson(output.stdout.trim()),
+      );
+    });
+
+  const deleteBranch: GitHubCliShape["deleteBranch"] = (input) =>
+    execute({
+      cwd: input.cwd,
+      args: [
+        "api",
+        "--hostname",
+        input.host,
+        "--method",
+        "DELETE",
+        `repos/${input.repository}/git/refs/heads/${GitHubPullRequestMutations.encodeGitHubPathSegments(input.branch)}`,
+      ],
+      allowNonZeroExit: true,
+    }).pipe(
+      Effect.flatMap((output) => {
+        if (output.exitCode === 0) return Effect.void;
+        // Already gone (GitHub's auto-delete, or a previous attempt) is the goal state.
+        if (
+          isHttpNotFound(output) ||
+          /reference does not exist/iu.test(`${output.stdout}\n${output.stderr}`)
+        ) {
+          return Effect.void;
+        }
+        return Effect.fail(
+          gitHubApiFailure("deleteBranch", ["api", `repos/${input.repository}/git/refs`], output),
+        );
+      }),
+    );
+
+  const updatePullRequest: GitHubCliShape["updatePullRequest"] = (input) =>
+    Effect.gen(function* () {
+      const operation = "updatePullRequest";
+      const target = yield* getPullRequestTarget(input);
+      const action = input.action;
+      const args = yield* decodeOrFail(
+        operation,
+        GitHubPullRequestMutations.buildGitHubPullRequestLifecycleArgs({
+          number: target.number,
+          repo: target.repo,
+          action,
+          bodyFile: input.bodyFile,
+        }),
+      );
+      if (args) {
+        yield* execute({ cwd: input.cwd, args });
+        return;
+      }
+      switch (action.kind) {
+        case "update-branch": {
+          if (target.headRefOid !== action.expectedHeadSha) {
+            return yield* staleHeadError(operation);
+          }
+          yield* graphqlDocument({
+            cwd: input.cwd,
+            host: target.host,
+            operation,
+            query: GitHubPullRequestMutations.GITHUB_UPDATE_PULL_REQUEST_BRANCH_MUTATION,
+            variables: {
+              pullRequestId: target.id,
+              expectedHeadOid: action.expectedHeadSha,
+              updateMethod: action.method === "rebase" ? "REBASE" : "MERGE",
+            },
+          });
+          return;
+        }
+        case "auto-merge": {
+          if (
+            action.enabled &&
+            action.expectedHeadSha !== undefined &&
+            target.headRefOid !== action.expectedHeadSha
+          ) {
+            return yield* staleHeadError(operation);
+          }
+          const request = GitHubPullRequestMutations.buildGitHubAutoMergeRequest({
+            pullRequestId: target.id,
+            action,
+          });
+          yield* graphqlDocument({
+            cwd: input.cwd,
+            host: target.host,
+            operation,
+            query: request.query,
+            variables: request.variables,
+          });
+          return;
+        }
+        case "delete-branch": {
+          if (target.state === "open") {
+            return yield* new GitHubCliError({
+              operation,
+              detail: "Close or merge the pull request before deleting its branch.",
+            });
+          }
+          if (target.isCrossRepository) {
+            return yield* new GitHubCliError({
+              operation,
+              detail:
+                "The head branch lives in a fork; Ryco only deletes branches in the pull request's own repository.",
+            });
+          }
+          yield* deleteBranch({
+            cwd: input.cwd,
+            host: target.host,
+            repository: target.nameWithOwner,
+            branch: target.headRefName,
+          });
+          return;
+        }
+        default:
+          return yield* new GitHubCliError({
+            operation,
+            detail: `Unsupported pull request action: ${action.kind}.`,
+          });
+      }
+    });
+
+  const fetchFileAtRevision = (input: {
+    readonly cwd: string;
+    readonly target: GitHubPullRequestTarget;
+    readonly path: string;
+    readonly revision: string;
+  }): Effect.Effect<GitHubFileRevisionContents, GitHubCliError> =>
+    execute({
+      cwd: input.cwd,
+      args: [
+        "api",
+        "--hostname",
+        input.target.host,
+        "-H",
+        "Accept: application/vnd.github.raw",
+        `repos/${input.target.nameWithOwner}/contents/${GitHubPullRequestMutations.encodeGitHubPathSegments(input.path)}?ref=${encodeURIComponent(input.revision)}`,
+      ],
+      allowNonZeroExit: true,
+      timeoutMs: FILE_CONTENTS_TIMEOUT_MS,
+      maxOutputBytes: CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES,
+    }).pipe(
+      Effect.flatMap((output): Effect.Effect<GitHubFileRevisionContents, GitHubCliError> => {
+        if (output.exitCode !== 0) {
+          // Absent on this side: the file was added or deleted by the change.
+          if (isHttpNotFound(output)) {
+            return Effect.succeed({ contents: null, truncated: false });
+          }
+          return Effect.fail(
+            gitHubApiFailure(
+              "getPullRequestFileContents",
+              ["api", `repos/${input.target.nameWithOwner}/contents`],
+              output,
+            ),
+          );
+        }
+        // Binary files cannot be expanded as text.
+        if (output.stdout.includes("\u0000")) {
+          return Effect.succeed({ contents: null, truncated: false });
+        }
+        return Effect.succeed({ contents: output.stdout, truncated: output.stdoutTruncated });
+      }),
+    );
+
+  const getPullRequestFileContents: GitHubCliShape["getPullRequestFileContents"] = (input) =>
+    Effect.gen(function* () {
+      const operation = "getPullRequestFileContents";
+      for (const path of [input.path, input.previousPath]) {
+        if (path !== undefined && !GitHubPullRequestMutations.isGitHubRepositoryFilePath(path)) {
+          return yield* new GitHubCliError({
+            operation,
+            detail: `Invalid repository file path: ${path}`,
+          });
+        }
+      }
+      const target = yield* getPullRequestTarget(input);
+      // Diff against merge-base(base, head) exactly like GitHub's PR diff. The
+      // recorded base tip (not the branch name) keeps merged pull requests
+      // correct: once merged, the base branch contains the head.
+      const baseRevision = target.baseRefOid
+        ? encodeURIComponent(target.baseRefOid)
+        : GitHubPullRequestMutations.encodeGitHubPathSegments(target.baseRefName);
+      const baseSha = input.baseSha
+        ? input.baseSha
+        : yield* api({
+            cwd: input.cwd,
+            operation,
+            args: [
+              "api",
+              "--hostname",
+              target.host,
+              `repos/${target.nameWithOwner}/compare/${baseRevision}...${encodeURIComponent(input.headSha)}?per_page=1`,
+              "--jq",
+              ".merge_base_commit.sha",
+            ],
+          }).pipe(
+            Effect.flatMap((output) => {
+              const sha = output.stdout.trim();
+              return /^[0-9a-f]{7,64}$/iu.test(sha)
+                ? Effect.succeed(sha)
+                : Effect.fail(
+                    new GitHubCliError({
+                      operation,
+                      detail: "GitHub did not report a merge base for this pull request.",
+                    }),
+                  );
+            }),
+          );
+      const [oldSide, newSide] = yield* Effect.all(
+        [
+          fetchFileAtRevision({
+            cwd: input.cwd,
+            target,
+            path: input.previousPath ?? input.path,
+            revision: baseSha,
+          }),
+          fetchFileAtRevision({
+            cwd: input.cwd,
+            target,
+            path: input.path,
+            revision: input.headSha,
+          }),
+        ],
+        { concurrency: 2 },
+      );
+      return {
+        path: input.path,
+        oldContents: oldSide.contents,
+        newContents: newSide.contents,
+        truncated: oldSide.truncated || newSide.truncated,
+      } satisfies ChangeRequestFileContents;
+    });
+
+  /**
+   * A single commit's diff, but only for commits that belong to the pull
+   * request (GitHub's PR commit list, capped by GitHub at 250), so a commit
+   * from elsewhere in the repository cannot be shown as part of this change.
+   */
+  const getPullRequestCommitDiff = (input: {
+    readonly cwd: string;
+    readonly reference: string;
+    readonly commitSha: string;
+  }) =>
+    Effect.gen(function* () {
+      const operation = "getPullRequestDiff";
+      const target = yield* getPullRequestTarget(input);
+      const commits = yield* api({
+        cwd: input.cwd,
+        operation,
+        args: [
+          "api",
+          "--hostname",
+          target.host,
+          "--paginate",
+          `repos/${target.nameWithOwner}/pulls/${target.number}/commits?per_page=100`,
+          "--jq",
+          ".[].sha",
+        ],
+        timeoutMs: 45_000,
+      }).pipe(
+        Effect.map((output) =>
+          output.stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0),
+        ),
+      );
+      const wanted = input.commitSha.toLowerCase();
+      const matches = commits.filter((sha) =>
+        wanted.length >= 7 ? sha.toLowerCase().startsWith(wanted) : sha.toLowerCase() === wanted,
+      );
+      const commitSha = matches.length === 1 ? matches[0] : undefined;
+      if (!commitSha) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: `Commit ${input.commitSha} is not part of pull request #${target.number}.`,
+        });
+      }
+      const output = yield* api({
+        cwd: input.cwd,
+        operation,
+        args: [
+          "api",
+          "--hostname",
+          target.host,
+          "-H",
+          "Accept: application/vnd.github.diff",
+          `repos/${target.nameWithOwner}/commits/${commitSha}`,
+        ],
+        timeoutMs: 60_000,
+        maxOutputBytes: COMMIT_DIFF_MAX_BYTES,
+      });
+      if (output.stdoutTruncated) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: "This commit's diff is too large to display.",
+        });
+      }
+      return output.stdout;
+    });
+
   return GitHubCli.of({
     execute,
     getPullRequestStack,
     getPullRequestStackSummaries,
     getRepositoryMergeCapabilities,
     mergePullRequestAsync,
+    deleteBranch,
+    getPullRequestTarget,
+    getPullRequestActivity,
+    getPullRequestReviewThread,
+    replyToPullRequestReviewThread,
+    setPullRequestReviewThreadResolved,
+    updatePullRequestComment,
+    submitPullRequestReview,
+    updatePullRequest,
+    getPullRequestFileContents,
     listOpenPullRequests: (input) =>
       executePrJson({
         cwd: input.cwd,
@@ -1294,9 +2431,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
                     );
                   }
 
-                  return Effect.succeed(
-                    decoded.success.map(({ updatedAt: _updatedAt, ...summary }) => summary),
-                  );
+                  return Effect.succeed(decoded.success.map(withPresentUpdatedAt));
                 }),
               ),
         ),
@@ -1321,9 +2456,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
                 );
               }
 
-              return Effect.succeed(
-                (({ updatedAt: _updatedAt, ...summary }) => summary)(decoded.success),
-              );
+              return Effect.succeed(withPresentUpdatedAt(decoded.success));
             }),
           ),
         ),
@@ -1367,6 +2500,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           input.title,
           "--body-file",
           input.bodyFile,
+          ...(input.draft ? ["--draft"] : []),
         ],
       }).pipe(Effect.asVoid),
     getDefaultBranch: (input) =>
@@ -1506,9 +2640,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
                       }),
                     );
                   }
-                  return Effect.succeed(
-                    decoded.success.map(({ updatedAt: _updatedAt, ...summary }) => summary),
-                  );
+                  return Effect.succeed(decoded.success.map(withPresentUpdatedAt));
                 }),
               ),
         ),
@@ -1532,8 +2664,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
                   }),
                 );
               }
-              const { updatedAt: _updatedAt, ...rest } = decoded.success;
-              return hydrateCommentReactionGroups(input.cwd, rest);
+              return hydrateCommentReactionGroups(input.cwd, withPresentUpdatedAt(decoded.success));
             }),
           ),
         ),
@@ -1556,9 +2687,15 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
             ),
           );
         if (input.expectedHeadSha) yield* verifyHead();
-        const result = yield* execute({ cwd: input.cwd, args: ["pr", "diff", input.reference] });
+        const diff = input.commitSha?.trim()
+          ? yield* getPullRequestCommitDiff({
+              cwd: input.cwd,
+              reference: input.reference,
+              commitSha: input.commitSha.trim(),
+            })
+          : (yield* execute({ cwd: input.cwd, args: ["pr", "diff", input.reference] })).stdout;
         if (input.expectedHeadSha) yield* verifyHead();
-        return result.stdout;
+        return diff;
       }),
     createIssue: (input) =>
       execute({

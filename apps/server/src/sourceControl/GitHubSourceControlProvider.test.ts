@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as fs from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -1555,5 +1556,196 @@ it.effect("listAssignees maps GitHubCliError to SourceControlProviderError", () 
 
     assert.strictEqual(result.operation, "listAssignees");
     assert.strictEqual(result.provider, "github");
+  }),
+);
+
+it.effect("lists involvement-scoped pull requests through gh search qualifiers", () =>
+  Effect.gen(function* () {
+    const calls: Array<ReadonlyArray<string>> = [];
+    const provider = yield* makeProvider({
+      execute: (input) => {
+        calls.push(input.args);
+        return Effect.succeed(
+          processResult(
+            JSON.stringify([
+              {
+                number: 9,
+                title: "Mine",
+                url: "https://github.com/owner/repo/pull/9",
+                baseRefName: "main",
+                headRefName: "feature/9",
+                state: "OPEN",
+                createdAt: "2026-10-01T10:00:00Z",
+                updatedAt: "2026-10-02T10:00:00Z",
+                reviewDecision: "CHANGES_REQUESTED",
+                additions: 12,
+                deletions: 3,
+              },
+            ]),
+          ),
+        );
+      },
+    });
+    const items = yield* provider.listChangeRequests({
+      cwd: "/repo",
+      headSelector: "",
+      state: "merged",
+      involvement: "review-requested",
+      query: "flaky",
+      limit: 25,
+      includeStackSummary: false,
+    });
+    assert.deepStrictEqual(calls[0], [
+      "pr",
+      "list",
+      "--search",
+      "flaky review-requested:@me",
+      "--state",
+      "merged",
+      "--limit",
+      "25",
+      "--json",
+      prListJsonFields,
+    ]);
+    assert.equal(items[0]?.reviewDecision, "changes_requested");
+    assert.equal(items[0]?.additions, 12);
+    assert.equal(items[0]?.deletions, 3);
+    assert.equal(items[0]?.createdAt?.toString().includes("2026-10-01T10:00:00"), true);
+    assert.equal(Option.isSome(items[0]!.updatedAt), true);
+  }),
+);
+
+it.effect("enriches detail with reviewer states, merge state, and branch auto-delete", () =>
+  Effect.gen(function* () {
+    const provider = yield* makeProvider({
+      getPullRequestDetail: () =>
+        Effect.succeed({
+          ...githubPullRequestDetail,
+          reviewerStates: [
+            { login: "acme/core", kind: "team" as const, state: "requested" as const },
+          ],
+          mergeStateStatus: "behind" as const,
+          autoMerge: null,
+          mergedBy: "carol",
+        }),
+      getRepositoryMergeCapabilities: () =>
+        Effect.succeed({ merge: true, squash: false, rebase: true, deleteBranchOnMerge: true }),
+    });
+    const detail = yield* provider.getChangeRequestDetail({ cwd: "/repo", reference: "42" });
+    assert.deepStrictEqual(detail.reviewerStates, [
+      { login: "acme/core", kind: "team", state: "requested" },
+    ]);
+    assert.equal(detail.mergeStateStatus, "behind");
+    assert.equal(detail.autoMerge, null);
+    assert.equal(detail.mergedBy, "carol");
+    assert.equal(detail.deleteBranchOnMerge, true);
+    // The repository flag is reported separately, not leaked into the capability struct.
+    assert.deepStrictEqual(detail.mergeCapabilities, { merge: true, squash: false, rebase: true });
+  }),
+);
+
+it.effect("merges with the expected head and deletes the same-repo head branch", () =>
+  Effect.gen(function* () {
+    const deleted: Array<string> = [];
+    let asyncInput: Parameters<GitHubCli.GitHubCliShape["mergePullRequestAsync"]>[0] | null = null;
+    const provider = yield* makeProvider({
+      getPullRequest: () => Effect.succeed({ ...githubPullRequestDetail, headSha: "abc" }),
+      getRepositoryMergeCapabilities: () =>
+        Effect.succeed({ merge: true, squash: true, rebase: true }),
+      mergePullRequestAsync: (input) => {
+        asyncInput = input;
+        return Effect.succeed({ outcome: "merged" as const });
+      },
+      deleteBranch: (input) => {
+        deleted.push(`${input.repository}:${input.branch}`);
+        return Effect.void;
+      },
+    });
+    const merge = provider.mergeChangeRequest;
+    assert.ok(merge);
+
+    const stale = yield* merge({
+      cwd: "/repo",
+      reference: "42",
+      mergeMethod: "merge",
+      expectedHeadSha: "old",
+    }).pipe(Effect.flip);
+    assert.include(stale.detail, "head changed");
+    assert.equal(asyncInput, null);
+
+    yield* merge({
+      cwd: "/repo",
+      reference: "42",
+      mergeMethod: "merge",
+      expectedHeadSha: "abc",
+      deleteBranch: true,
+    });
+    assert.equal(asyncInput!.expectedHeadSha, "abc");
+    assert.deepStrictEqual(deleted, ["owner/repo:feature/42"]);
+  }),
+);
+
+it.effect("deletes every landed layer's branch after a stacked merge", () =>
+  Effect.gen(function* () {
+    const deleted: Array<string> = [];
+    const provider = yield* makeProvider({
+      getPullRequest: () => Effect.succeed({ ...githubPullRequestDetail, headSha: "abc" }),
+      // #42 sits on #41 (open), with #43 above it.
+      getPullRequestStack: () => Effect.succeed(stack),
+      getRepositoryMergeCapabilities: () =>
+        Effect.succeed({ merge: true, squash: true, rebase: true }),
+      mergePullRequestAsync: () => Effect.succeed({ outcome: "merged" as const }),
+      deleteBranch: (input) => {
+        deleted.push(`${input.repository}:${input.branch}`);
+        return Effect.void;
+      },
+    });
+    const merge = provider.mergeChangeRequest;
+    assert.ok(merge);
+    yield* merge({ cwd: "/repo", reference: "42", mergeMethod: "squash", deleteBranch: true });
+    // Merging #42 landed #41 with it; #43 is still open on top.
+    assert.deepStrictEqual(deleted, ["owner/repo:feature/42", "owner/repo:feature/41"]);
+  }),
+);
+
+it("names a fork's landed lower layers but never the fork head itself", () => {
+  assert.deepStrictEqual(
+    GitHubSourceControlProvider.landedHeadBranches({
+      pullRequest: { number: 42, headRefName: "main", isCrossRepository: true },
+      stack,
+    }),
+    ["feature/41"],
+  );
+  assert.deepStrictEqual(
+    GitHubSourceControlProvider.landedHeadBranches({
+      pullRequest: { number: 42, headRefName: "feature/42" },
+      stack: null,
+    }),
+    ["feature/42"],
+  );
+});
+
+it.effect("returns a fresh uncapped detail after a lifecycle update", () =>
+  Effect.gen(function* () {
+    let bodyFileContents: string | null = null;
+    const provider = yield* makeProvider({
+      updatePullRequest: (input) =>
+        Effect.sync(() => {
+          assert.equal(input.action.kind, "edit");
+          bodyFileContents = input.bodyFile ? fs.readFileSync(input.bodyFile, "utf8") : null;
+        }),
+      getPullRequestDetail: () =>
+        Effect.succeed({ ...githubPullRequestDetail, body: "x".repeat(20_000) }),
+    });
+    const updateChangeRequest = provider.updateChangeRequest;
+    assert.ok(updateChangeRequest);
+    const result = yield* updateChangeRequest({
+      cwd: "/repo",
+      reference: "42",
+      action: { kind: "edit", body: "New description" },
+    });
+    assert.equal(bodyFileContents, "New description");
+    assert.equal(result.detail.body.length, 20_000);
+    assert.equal(result.detail.truncated, false);
   }),
 );

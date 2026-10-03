@@ -1,6 +1,7 @@
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { DateTime, Effect, Layer, Option, Ref } from "effect";
+import { DateTime, Effect, Layer, Option, Ref, Schema } from "effect";
+import { SourceControlProviderError } from "@ryco/contracts";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../config.ts";
@@ -12,6 +13,7 @@ import * as BitbucketApi from "./BitbucketApi.ts";
 import * as ForgejoApi from "./ForgejoApi.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 import * as GitLabCli from "./GitLabCli.ts";
+import * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
@@ -407,3 +409,217 @@ it.effect(
       );
     }),
 );
+
+describe("change request page forwarding", () => {
+  const context = {
+    provider: {
+      kind: "github" as const,
+      name: "GitHub",
+      baseUrl: "https://github.com",
+    },
+    remoteName: "origin",
+    remoteUrl: "git@github.com:acme/repo.git",
+  } satisfies SourceControlProvider.SourceControlProviderContext;
+
+  const optionalOperations = [
+    "mergeChangeRequest",
+    "getChangeRequestActivity",
+    "getChangeRequestFileContents",
+    "submitChangeRequestReview",
+    "replyToReviewThread",
+    "setReviewThreadResolved",
+    "updateChangeRequestComment",
+    "updateChangeRequest",
+  ] as const satisfies ReadonlyArray<SourceControlProvider.OptionalChangeRequestOperation>;
+
+  /** A provider whose optional methods echo their name and received input. */
+  function recordingProvider(
+    calls: Array<{ readonly operation: string; readonly input: unknown }>,
+    options: { readonly withOptional: boolean },
+  ): SourceControlProvider.SourceControlProviderShape {
+    const record =
+      (operation: string) =>
+      (input: unknown): Effect.Effect<never, never> => {
+        calls.push({ operation, input });
+        return Effect.succeed({ operation } as never);
+      };
+    const optional = options.withOptional
+      ? Object.fromEntries(optionalOperations.map((operation) => [operation, record(operation)]))
+      : {};
+    return {
+      kind: "github",
+      ...optional,
+    } as unknown as SourceControlProvider.SourceControlProviderShape;
+  }
+
+  const inputFor = (operation: (typeof optionalOperations)[number]) =>
+    ({ cwd: "/repo", reference: "7", operation }) as never;
+
+  const invoke = (
+    provider: SourceControlProvider.SourceControlProviderShape,
+    operation: (typeof optionalOperations)[number],
+  ) => {
+    const method = provider[operation] as
+      | ((input: never) => Effect.Effect<object, SourceControlProviderError>)
+      | undefined;
+    assert.ok(method, `${operation} must be forwarded`);
+    return method(inputFor(operation));
+  };
+
+  it.effect("forwards merge and every page method through the lazy provider", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly operation: string; readonly input: unknown }> = [];
+      const lazy = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "github",
+        Effect.succeed(recordingProvider(calls, { withOptional: true })),
+      );
+      for (const operation of optionalOperations) {
+        const result = yield* invoke(lazy, operation);
+        assert.deepStrictEqual(result, { operation });
+      }
+      assert.deepStrictEqual(
+        calls.map((call) => call.operation),
+        [...optionalOperations],
+      );
+    }),
+  );
+
+  it.effect("fails clearly when the loaded provider lacks a page method", () =>
+    Effect.gen(function* () {
+      const lazy = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "gitlab",
+        Effect.succeed(recordingProvider([], { withOptional: false })),
+      );
+      for (const operation of optionalOperations) {
+        const error = yield* invoke(lazy, operation).pipe(Effect.flip);
+        assert.ok(Schema.is(SourceControlProviderError)(error));
+        assert.strictEqual(error.operation, operation);
+        assert.strictEqual(error.provider, "gitlab");
+        assert.include(error.detail, "does not support");
+      }
+    }),
+  );
+
+  it.effect("binds the detected remote context into every forwarded page method", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly operation: string; readonly input: unknown }> = [];
+      const bound = SourceControlProviderRegistry.bindProviderContext(
+        recordingProvider(calls, { withOptional: true }),
+        context,
+      );
+      for (const operation of optionalOperations) {
+        yield* invoke(bound, operation);
+      }
+      assert.strictEqual(calls.length, optionalOperations.length);
+      for (const call of calls) {
+        assert.deepStrictEqual((call.input as { readonly context?: unknown }).context, context);
+      }
+
+      const unbound = SourceControlProviderRegistry.bindProviderContext(
+        recordingProvider([], { withOptional: false }),
+        context,
+      );
+      for (const operation of optionalOperations) {
+        assert.strictEqual(unbound[operation], undefined);
+      }
+    }),
+  );
+
+  it.effect("merges a GitHub pull request through registry.resolve", () =>
+    Effect.gen(function* () {
+      const merged = yield* Ref.make(false);
+      const registry = yield* makeRegistry({
+        remotes: [{ name: "origin", url: "git@github.com:acme/repo.git" }],
+        githubCli: {
+          getPullRequest: () =>
+            Effect.succeed({
+              number: 7,
+              title: "Seven",
+              url: "https://github.com/acme/repo/pull/7",
+              baseRefName: "main",
+              headRefName: "feature/x",
+              state: "open" as const,
+              headSha: "abc",
+            }),
+          getRepositoryMergeCapabilities: () =>
+            Effect.succeed({ merge: true, squash: true, rebase: false }),
+          mergePullRequestAsync: (input) =>
+            Effect.sync(() => {
+              assert.strictEqual(input.repository, "acme/repo");
+              assert.strictEqual(input.expectedHeadSha, "abc");
+            }).pipe(
+              Effect.andThen(Ref.set(merged, true)),
+              Effect.as({ outcome: "merged" as const }),
+            ),
+        },
+      });
+      const provider = yield* registry.resolve({ cwd: "/repo" });
+      const mergeChangeRequest = provider.mergeChangeRequest;
+      assert.ok(mergeChangeRequest);
+      const result = yield* mergeChangeRequest({
+        cwd: "/repo",
+        reference: "7",
+        mergeMethod: "squash",
+        expectedHeadSha: "abc",
+      });
+      assert.deepStrictEqual(result, { outcome: "merged" });
+      assert.strictEqual(yield* Ref.get(merged), true);
+    }),
+  );
+});
+
+describe("unsupported change request options", () => {
+  const base = {
+    kind: "gitlab",
+    listChangeRequests: () => Effect.succeed([]),
+    getChangeRequestDiff: () => Effect.succeed("diff"),
+    createChangeRequest: () => Effect.void,
+  } as unknown as SourceControlProvider.SourceControlProviderShape;
+  const guarded = SourceControlProvider.withUnsupportedChangeRequestOptionGuards(base);
+
+  it.effect("fails instead of silently returning unfiltered or whole data", () =>
+    Effect.gen(function* () {
+      const involvement = yield* guarded
+        .listChangeRequests({
+          cwd: "/repo",
+          headSelector: "",
+          state: "open",
+          involvement: "authored",
+        })
+        .pipe(Effect.flip);
+      assert.include(involvement.detail, "involvement");
+      const query = yield* guarded
+        .listChangeRequests({ cwd: "/repo", headSelector: "", state: "open", query: "bug" })
+        .pipe(Effect.flip);
+      assert.include(query.detail, "Searching");
+      const commit = yield* guarded
+        .getChangeRequestDiff({ cwd: "/repo", reference: "7", commitSha: "abc" })
+        .pipe(Effect.flip);
+      assert.include(commit.detail, "Single-commit");
+      const draft = yield* guarded
+        .createChangeRequest({
+          cwd: "/repo",
+          baseRefName: "main",
+          headSelector: "x",
+          title: "t",
+          bodyFile: "/tmp/b",
+          draft: true,
+        })
+        .pipe(Effect.flip);
+      assert.include(draft.detail, "draft");
+    }),
+  );
+
+  it.effect("passes plain requests through untouched", () =>
+    Effect.gen(function* () {
+      assert.deepStrictEqual(
+        yield* guarded.listChangeRequests({ cwd: "/repo", headSelector: "", state: "open" }),
+        [],
+      );
+      assert.strictEqual(
+        yield* guarded.getChangeRequestDiff({ cwd: "/repo", reference: "7" }),
+        "diff",
+      );
+    }),
+  );
+});
