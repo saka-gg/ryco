@@ -573,7 +573,12 @@ function buildGlassTierVariables(
  * scales UP as the plate thins — translucency and blur travel together, never
  * separately.
  */
-const DESKTOP_POPOVER_PLATE_FLOOR = { light: 66, dark: 60 } as const;
+/**
+ * Overlays (menus, pickers, toasts) stay only a little translucent: the plate
+ * never thins past this floor, whatever the Transparency step, so their text
+ * reads over any content. The step still sets the frost behind them.
+ */
+const DESKTOP_POPOVER_PLATE_FLOOR = { light: 88, dark: 86 } as const;
 const DESKTOP_PANEL_PLATE_FLOOR = { light: 76, dark: 70 } as const;
 const DESKTOP_SURFACE_PLATE_FLOOR = { light: 80, dark: 76 } as const;
 
@@ -615,15 +620,9 @@ function buildSurfaceTransparencyCssVariables(surfaceTransparency: string): stri
     Math.max(DESKTOP_PANEL_PLATE_FLOOR[scheme], 100 - transparency * 95);
   const surfacePlate = (scheme: "light" | "dark") =>
     Math.max(DESKTOP_SURFACE_PLATE_FLOOR[scheme], 100 - transparency * 80);
-  // The composer's glass floor: capped below full opacity even at Solid (it
-  // is the surface content scrolls beneath), otherwise tracking the shared
-  // surface plate/blur as the Material step rises.
-  const composerPlate = (scheme: "light" | "dark") =>
-    Math.min(surfacePlate(scheme), scheme === "light" ? 93 : 92);
-  const composerBlur = Math.max(10, blur.surface);
   // The toast's glass floor: notifications float over arbitrary content, so
-  // like the composer they stay translucent and blurred even at Solid — at
-  // popover weight, because they are transient overlays rather than panes.
+  // they stay translucent and blurred even at Solid — at popover weight,
+  // because they are transient overlays rather than panes.
   // The Solid caps are chosen so muted body text keeps ~AA contrast over a
   // worst-case uniform backdrop; the blur carries the glass read.
   const toastPlate = (scheme: "light" | "dark") =>
@@ -633,9 +632,6 @@ function buildSurfaceTransparencyCssVariables(surfaceTransparency: string): stri
     ["--app-surface-opacity", formatPercent(surfacePlate("light"))],
     ["--app-surface-dark-opacity", formatPercent(surfacePlate("dark"))],
     ["--app-surface-filter", desktopGlassFilter(blur.surface)],
-    ["--app-composer-alpha", formatPercent(composerPlate("light"))],
-    ["--app-composer-dark-alpha", formatPercent(composerPlate("dark"))],
-    ["--app-composer-filter", desktopGlassFilter(composerBlur)],
     ["--app-toast-alpha", formatPercent(toastPlate("light"))],
     ["--app-toast-dark-alpha", formatPercent(toastPlate("dark"))],
     ["--app-toast-filter", desktopGlassFilter(toastBlur)],
@@ -648,12 +644,7 @@ function buildSurfaceTransparencyCssVariables(surfaceTransparency: string): stri
     ["--app-dialog-viewport-dark-alpha", formatPercent(Math.max(16, 28 - transparency * 36))],
     ["--app-sheet-backdrop-alpha", formatPercent(Math.max(18, 32 - transparency * 42))],
     ["--app-command-backdrop-opacity", formatPercent(Math.max(38, 60 - transparency * 60))],
-    ["--app-glass-light-start-alpha", formatPercent(transparency * 75)],
-    ["--app-glass-light-end-alpha", formatPercent(transparency * 32)],
-    ["--app-glass-foreground-alpha", formatPercent(transparency * 18)],
     ["--app-glass-light-popover-alpha", formatPercent(popoverPlate("light"))],
-    ["--app-glass-dark-start-alpha", formatPercent(transparency * 18)],
-    ["--app-glass-dark-end-alpha", formatPercent(transparency * 5)],
     ["--app-glass-dark-popover-alpha", formatPercent(popoverPlate("dark"))],
     ...GLASS_SURFACE_TIERS.flatMap((tier) =>
       buildGlassTierVariables(

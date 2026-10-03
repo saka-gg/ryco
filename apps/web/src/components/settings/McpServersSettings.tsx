@@ -12,7 +12,7 @@ import {
   Trash2Icon,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type EnvironmentApi,
   McpServerName,
@@ -224,9 +224,12 @@ function McpServerDialog({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const editing = server !== null;
+  // The dialog folds into the card of the server it just saved.
+  const savedServerNameRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    savedServerNameRef.current = null;
     setForm(server ? formFromMcpServer(server) : createEmptyMcpServerForm());
     setValidationError(null);
   }, [open, server]);
@@ -244,6 +247,7 @@ function McpServerDialog({
     setSaving(true);
     try {
       await onSubmit(form);
+      savedServerNameRef.current = form.name.trim();
       onOpenChange(false);
     } catch (cause) {
       showErrorToast("Failed to save MCP server", cause);
@@ -254,7 +258,20 @@ function McpServerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogPopup className="max-w-2xl" bottomStickOnMobile={false}>
+      <DialogPopup
+        className="max-w-2xl"
+        bottomStickOnMobile={false}
+        morph={{
+          target: (origin) => {
+            const saved = savedServerNameRef.current;
+            if (!saved) return origin;
+            return (
+              document.querySelector<HTMLElement>(`[data-mcp-server="${CSS.escape(saved)}"]`) ??
+              origin
+            );
+          },
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{editing ? "Edit MCP server" : "Add MCP server"}</DialogTitle>
           <DialogDescription>
@@ -698,7 +715,10 @@ function McpServerCard({
   const meta = [server.config.transport.toUpperCase(), inventoryLabel, authLabel].filter(Boolean);
 
   return (
-    <div className={cn("min-w-0 border-t border-border/60 first:border-t-0")}>
+    <div
+      data-mcp-server={server.name}
+      className={cn("min-w-0 border-t border-border/60 first:border-t-0")}
+    >
       <div
         className={cn(
           "flex min-w-0 flex-col gap-3 py-3.5 sm:flex-row sm:items-center",

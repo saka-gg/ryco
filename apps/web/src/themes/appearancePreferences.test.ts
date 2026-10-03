@@ -246,7 +246,7 @@ describe("appearance preferences", () => {
       ":root, :root.dark { --primary: #0ea5e9; --ring: #0ea5e9; --primary-foreground: #ffffff; }",
     );
     expect(css).toContain("--app-surface-opacity: 82.4%;");
-    expect(css).toContain("--app-glass-light-popover-alpha: 71.4%;");
+    expect(css).toContain("--app-glass-light-popover-alpha: 88%;");
     expect(css).toContain("--app-dialog-viewport-light-alpha: 37%;");
   });
 
@@ -259,7 +259,6 @@ describe("appearance preferences", () => {
     expect(css).toContain("--app-surface-opacity: 100%;");
     expect(css).not.toContain(`--primary: ${PRIMARY_COLOR_OPTIONS[0].value};`);
     expect(css).toContain("--app-muted-surface-opacity: 100%;");
-    expect(css).toContain("--app-glass-light-start-alpha: 0%;");
     expect(css).toContain("--app-glass-light-popover-alpha: 100%;");
     expect(css).toContain("--app-glass-dark-popover-alpha: 100%;");
   });
@@ -454,9 +453,6 @@ describe("desktop appearance regression", () => {
       "--app-surface-opacity: 100%;",
       "--app-surface-dark-opacity: 100%;",
       "--app-surface-filter: none;",
-      "--app-composer-alpha: 93%;",
-      "--app-composer-dark-alpha: 92%;",
-      "--app-composer-filter: blur(10px) saturate(158%);",
       "--app-glass-popover-filter: none;",
       "--app-glass-panel-filter: none;",
       "--app-glass-panel-light-alpha: 100%;",
@@ -466,21 +462,13 @@ describe("desktop appearance regression", () => {
       "--app-dialog-viewport-dark-alpha: 28%;",
       "--app-sheet-backdrop-alpha: 32%;",
       "--app-command-backdrop-opacity: 60%;",
-      "--app-glass-light-start-alpha: 0%;",
-      "--app-glass-light-end-alpha: 0%;",
-      "--app-glass-foreground-alpha: 0%;",
       "--app-glass-light-popover-alpha: 100%;",
-      "--app-glass-dark-start-alpha: 0%;",
-      "--app-glass-dark-end-alpha: 0%;",
       "--app-glass-dark-popover-alpha: 100%;",
     ],
     light: [
       "--app-surface-opacity: 93.6%;",
       "--app-surface-dark-opacity: 93.6%;",
       "--app-surface-filter: blur(8px) saturate(158%);",
-      "--app-composer-alpha: 93%;",
-      "--app-composer-dark-alpha: 92%;",
-      "--app-composer-filter: blur(10px) saturate(158%);",
       "--app-glass-popover-filter: blur(14px) saturate(158%);",
       "--app-glass-panel-filter: blur(10px) saturate(158%);",
       "--app-glass-panel-light-alpha: 92.4%;",
@@ -490,21 +478,13 @@ describe("desktop appearance regression", () => {
       "--app-dialog-viewport-dark-alpha: 25.12%;",
       "--app-sheet-backdrop-alpha: 28.64%;",
       "--app-command-backdrop-opacity: 55.2%;",
-      "--app-glass-light-start-alpha: 6%;",
-      "--app-glass-light-end-alpha: 2.56%;",
-      "--app-glass-foreground-alpha: 1.44%;",
       "--app-glass-light-popover-alpha: 89.6%;",
-      "--app-glass-dark-start-alpha: 1.44%;",
-      "--app-glass-dark-end-alpha: 0.4%;",
       "--app-glass-dark-popover-alpha: 89.6%;",
     ],
     medium: [
       "--app-surface-opacity: 87.2%;",
       "--app-surface-dark-opacity: 87.2%;",
       "--app-surface-filter: blur(12px) saturate(158%);",
-      "--app-composer-alpha: 87.2%;",
-      "--app-composer-dark-alpha: 87.2%;",
-      "--app-composer-filter: blur(12px) saturate(158%);",
       "--app-glass-popover-filter: blur(18px) saturate(158%);",
       "--app-glass-panel-filter: blur(14px) saturate(158%);",
       "--app-glass-panel-light-alpha: 84.8%;",
@@ -514,21 +494,13 @@ describe("desktop appearance regression", () => {
       "--app-dialog-viewport-dark-alpha: 22.24%;",
       "--app-sheet-backdrop-alpha: 25.28%;",
       "--app-command-backdrop-opacity: 50.4%;",
-      "--app-glass-light-start-alpha: 12%;",
-      "--app-glass-light-end-alpha: 5.12%;",
-      "--app-glass-foreground-alpha: 2.88%;",
-      "--app-glass-light-popover-alpha: 79.2%;",
-      "--app-glass-dark-start-alpha: 2.88%;",
-      "--app-glass-dark-end-alpha: 0.8%;",
-      "--app-glass-dark-popover-alpha: 79.2%;",
+      "--app-glass-light-popover-alpha: 88%;",
+      "--app-glass-dark-popover-alpha: 86%;",
     ],
     high: [
       "--app-surface-opacity: 82.4%;",
       "--app-surface-dark-opacity: 82.4%;",
       "--app-surface-filter: blur(14px) saturate(158%);",
-      "--app-composer-alpha: 82.4%;",
-      "--app-composer-dark-alpha: 82.4%;",
-      "--app-composer-filter: blur(14px) saturate(158%);",
       "--app-glass-popover-filter: blur(22px) saturate(158%);",
       "--app-glass-panel-filter: blur(18px) saturate(158%);",
       "--app-glass-panel-light-alpha: 79.1%;",
@@ -538,21 +510,13 @@ describe("desktop appearance regression", () => {
       "--app-dialog-viewport-dark-alpha: 20.08%;",
       "--app-sheet-backdrop-alpha: 22.76%;",
       "--app-command-backdrop-opacity: 46.8%;",
-      "--app-glass-light-start-alpha: 16.5%;",
-      "--app-glass-light-end-alpha: 7.04%;",
-      "--app-glass-foreground-alpha: 3.96%;",
-      "--app-glass-light-popover-alpha: 71.4%;",
-      "--app-glass-dark-start-alpha: 3.96%;",
-      "--app-glass-dark-end-alpha: 1.1%;",
-      "--app-glass-dark-popover-alpha: 71.4%;",
+      "--app-glass-light-popover-alpha: 88%;",
+      "--app-glass-dark-popover-alpha: 86%;",
     ],
     glass: [
       "--app-surface-opacity: 80%;",
       "--app-surface-dark-opacity: 77.6%;",
       "--app-surface-filter: blur(16px) saturate(158%);",
-      "--app-composer-alpha: 80%;",
-      "--app-composer-dark-alpha: 77.6%;",
-      "--app-composer-filter: blur(16px) saturate(158%);",
       "--app-glass-popover-filter: blur(26px) saturate(158%);",
       "--app-glass-panel-filter: blur(22px) saturate(158%);",
       "--app-glass-panel-light-alpha: 76%;",
@@ -562,13 +526,8 @@ describe("desktop appearance regression", () => {
       "--app-dialog-viewport-dark-alpha: 17.92%;",
       "--app-sheet-backdrop-alpha: 20.24%;",
       "--app-command-backdrop-opacity: 43.2%;",
-      "--app-glass-light-start-alpha: 21%;",
-      "--app-glass-light-end-alpha: 8.96%;",
-      "--app-glass-foreground-alpha: 5.04%;",
-      "--app-glass-light-popover-alpha: 66%;",
-      "--app-glass-dark-start-alpha: 5.04%;",
-      "--app-glass-dark-end-alpha: 1.4%;",
-      "--app-glass-dark-popover-alpha: 63.6%;",
+      "--app-glass-light-popover-alpha: 88%;",
+      "--app-glass-dark-popover-alpha: 86%;",
     ],
   };
 
@@ -648,18 +607,18 @@ describe("desktop appearance regression", () => {
         "--app-toast-filter: blur(20px) saturate(158%);",
       ],
       medium: [
-        "--app-toast-alpha: 79.2%;",
-        "--app-toast-dark-alpha: 79.2%;",
+        "--app-toast-alpha: 88%;",
+        "--app-toast-dark-alpha: 86%;",
         "--app-toast-filter: blur(20px) saturate(158%);",
       ],
       high: [
-        "--app-toast-alpha: 71.4%;",
-        "--app-toast-dark-alpha: 71.4%;",
+        "--app-toast-alpha: 88%;",
+        "--app-toast-dark-alpha: 86%;",
         "--app-toast-filter: blur(22px) saturate(158%);",
       ],
       glass: [
-        "--app-toast-alpha: 66%;",
-        "--app-toast-dark-alpha: 63.6%;",
+        "--app-toast-alpha: 88%;",
+        "--app-toast-dark-alpha: 86%;",
         "--app-toast-filter: blur(26px) saturate(158%);",
       ],
     };

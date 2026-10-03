@@ -36,7 +36,7 @@ describe("thread error notification", () => {
     document.body.innerHTML = "";
   });
 
-  it("uses the persistent liquid-glass error notification and dismisses thread state", async () => {
+  it("uses the persistent error notification and dismisses thread state", async () => {
     const onDismiss = vi.fn();
     const mounted = await render(<NotificationHarness onDismiss={onDismiss} />);
 
@@ -47,7 +47,7 @@ describe("thread error notification", () => {
       const root = document.querySelector<HTMLElement>('[data-slot="toast-root"]')!;
       expect(root.dataset.type).toBe("error");
       expect(root.classList.contains("app-toast-surface")).toBe(true);
-      expect(root.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(2);
+      expect(root.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(0);
       expect(root.textContent).toContain("Thread references an unknown provider instance.");
       expect(document.querySelector('[data-slot="alert"]')).toBeNull();
 

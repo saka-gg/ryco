@@ -2,7 +2,7 @@
 
 import { CheckIcon } from "lucide-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProviderInstanceId,
   ProviderDriverKind,
@@ -113,6 +113,11 @@ export function AddProviderInstanceDialog({
 }: AddProviderInstanceDialogProps) {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
+  // The dialog folds into the row of the instance it just added.
+  const createdInstanceIdRef = useRef<ProviderInstanceId | null>(null);
+  useEffect(() => {
+    if (open) createdInstanceIdRef.current = null;
+  }, [open]);
 
   const [wizardStep, setWizardStep] = useState(0);
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
@@ -207,6 +212,7 @@ export function AddProviderInstanceDialog({
     };
     try {
       updateSettings({ providerInstances: nextMap });
+      createdInstanceIdRef.current = brandedId;
       onCreated?.(brandedId);
       toastManager.add({
         type: "success",
@@ -238,7 +244,20 @@ export function AddProviderInstanceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogPopup className="max-w-xl overflow-hidden">
+      <DialogPopup
+        className="max-w-xl overflow-hidden"
+        morph={{
+          target: (origin) => {
+            const created = createdInstanceIdRef.current;
+            if (!created) return origin;
+            return (
+              document.querySelector<HTMLElement>(
+                `[data-provider-instance-id="${CSS.escape(created)}"]`,
+              ) ?? origin
+            );
+          },
+        }}
+      >
         <div className="flex min-h-0 flex-col overflow-hidden border-foreground/10 bg-background shadow-2xl">
           <DialogHeader className="border-b border-border/70 bg-background">
             <DialogTitle>Add provider instance</DialogTitle>

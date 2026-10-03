@@ -62,16 +62,6 @@ syncDocumentVisualViewportInsets();
 // reduced motion — without ever writing a stored value.
 syncAppearancePreferenceEnvironment();
 
-// Liquid-glass refraction on floating glass popups (menus, model picker,
-// command palette). Chromium only; no-ops under reduced transparency,
-// forced colors, coarse pointers, and the Solid material step.
-void import("./lib/liquidGlass")
-  .then(({ installLiquidGlassEnhancer }) => installLiquidGlassEnhancer())
-  .catch(() => {
-    // Decorative enhancement — a failed chunk load (offline, replaced asset
-    // after a deploy) must stay silent.
-  });
-
 // The Hub is its own product, not a view of the desktop client, so it does not
 // wear the desktop app's name or release-channel suffix. Per-page titles are
 // set by the Hub routes themselves; this is the boot title and the fallback.

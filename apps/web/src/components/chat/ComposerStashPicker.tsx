@@ -127,7 +127,7 @@ export const ComposerStashPicker = memo(function ComposerStashPicker(props: {
       className="absolute right-0 bottom-[calc(100%+0.75rem)] z-30 w-[min(28rem,calc(100vw-2rem))]"
     >
       <Command autoHighlight={false} mode="none">
-        <div className="app-surface relative overflow-hidden rounded-xl border border-border/80 bg-popover/96 shadow-lg/8 backdrop-blur-xs">
+        <div className="selection-glass-surface relative overflow-hidden rounded-xl border">
           <CommandList ref={listRef} className="max-h-72">
             <CommandGroup>
               <CommandGroupLabel className="flex items-center gap-1.5 px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/55">
