@@ -298,3 +298,180 @@ describe("keyed query polling", () => {
     registry.dispose();
   });
 });
+
+describe("keyed query local writes", () => {
+  function deferredRuns() {
+    const resolvers: Array<(value: string) => void> = [];
+    const run = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    return { run, resolvers };
+  }
+
+  it("keeps a local write when a read that started before it resolves late", async () => {
+    const registry = makeRegistry();
+    const { run, resolvers } = deferredRuns();
+    const binding = makeBinding(registry, run);
+    const input = { key: "optimistic" };
+    const compositeKey = binding.targetKey(input) as string;
+    const release = binding.watch(input);
+    const staleRead = registry.controllers.get(compositeKey)?.inFlightPromise;
+
+    binding.updateData(input, () => "optimistic");
+    resolvers[0]?.("server-before-write");
+    await staleRead;
+
+    expect(binding.snapshotFor(input).data).toBe("optimistic");
+    expect(registry.controllers.get(compositeKey)?.inFlightPromise).toBeNull();
+    release();
+    registry.dispose();
+  });
+
+  it("starts a fresh read for a refresh after a local write instead of joining the stale one", async () => {
+    const registry = makeRegistry();
+    const { run, resolvers } = deferredRuns();
+    const binding = makeBinding(registry, run);
+    const input = { key: "refresh-after-write" };
+    const compositeKey = binding.targetKey(input) as string;
+    const release = binding.watch(input);
+    const staleRead = registry.controllers.get(compositeKey)?.inFlightPromise;
+
+    binding.updateData(input, () => "optimistic");
+    const fresh = binding.refreshAsync(input);
+    expect(run).toHaveBeenCalledTimes(2);
+
+    resolvers[1]?.("server-after-write");
+    await fresh;
+    resolvers[0]?.("server-before-write");
+    await staleRead;
+
+    expect(binding.snapshotFor(input).data).toBe("server-after-write");
+    release();
+    registry.dispose();
+  });
+
+  it("still dedupes concurrent reads when no local write intervened", async () => {
+    const registry = makeRegistry();
+    const { run, resolvers } = deferredRuns();
+    const binding = makeBinding(registry, run);
+    const input = { key: "dedupe" };
+    const release = binding.watch(input);
+
+    const first = binding.refreshAsync(input);
+    const second = binding.refreshAsync(input);
+    expect(run).toHaveBeenCalledTimes(1);
+    resolvers[0]?.("value");
+    await Promise.all([first, second]);
+
+    expect(binding.snapshotFor(input).data).toBe("value");
+    release();
+    registry.dispose();
+  });
+
+  it("reports the superseded read's outcome so run bookkeeping stays balanced", async () => {
+    const outcomes: Array<string> = [];
+    let running = 0;
+    const registry = createKeyedQueryRegistry<State>({
+      labelPrefix: "keyed-query-bookkeeping-test",
+      initialState,
+      gcTime: 20,
+      buildFetchingState: (current) => ({ ...current, fetching: true, error: null }),
+      buildSuccessState: (data) => ({ data: data as string, fetching: false, error: null }),
+      buildErrorState: (current, error) => ({ ...current, fetching: false, error }),
+      onRunStart: () => {
+        running += 1;
+      },
+      onRunEnd: (_controller, outcome) => {
+        running -= 1;
+        outcomes.push(outcome);
+      },
+    });
+    const { run, resolvers } = deferredRuns();
+    const binding = makeBinding(registry, run);
+    const input = { key: "bookkeeping" };
+    const compositeKey = binding.targetKey(input) as string;
+    const release = binding.watch(input);
+    const staleRead = registry.controllers.get(compositeKey)?.inFlightPromise;
+
+    binding.updateData(input, () => "optimistic");
+    resolvers[0]?.("server-before-write");
+    await staleRead;
+
+    expect(outcomes).toEqual(["success"]);
+    expect(running).toBe(0);
+    expect(binding.snapshotFor(input).data).toBe("optimistic");
+    release();
+    registry.dispose();
+  });
+});
+
+describe("keyed query publish hook", () => {
+  it("reports published reads only, never superseded or fenced ones", async () => {
+    const published: Array<{ key: string; data: unknown }> = [];
+    const registry = createKeyedQueryRegistry<State>({
+      labelPrefix: "keyed-query-publish-test",
+      initialState,
+      gcTime: 20,
+      buildFetchingState: (current) => ({ ...current, fetching: true, error: null }),
+      buildSuccessState: (data) => ({ data: data as string, fetching: false, error: null }),
+      buildErrorState: (current, error) => ({ ...current, fetching: false, error }),
+      onPublish: (controller, data) => {
+        published.push({ key: controller.compositeKey, data });
+      },
+    });
+    const resolvers: Array<(value: string) => void> = [];
+    const binding = makeBinding(
+      registry,
+      () =>
+        new Promise<string>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const input = { key: "publish" };
+    const compositeKey = binding.targetKey(input) as string;
+    const release = binding.watch(input);
+
+    // Superseded by a local write: not published, not reported.
+    const superseded = registry.controllers.get(compositeKey)?.inFlightPromise;
+    binding.updateData(input, () => "local");
+    resolvers[0]?.("before-write");
+    await superseded;
+    expect(published).toEqual([]);
+
+    // Fenced by a cancel: not reported either.
+    binding.refresh(input);
+    const controller = registry.controllers.get(compositeKey)!;
+    const fenced = controller.inFlightPromise;
+    registry.cancel(controller);
+    resolvers[1]?.("fenced");
+    await fenced;
+    expect(published).toEqual([]);
+
+    const fresh = binding.refreshAsync(input);
+    resolvers[2]?.("fresh");
+    await fresh;
+    expect(published).toEqual([{ key: compositeKey, data: "fresh" }]);
+    release();
+    registry.dispose();
+  });
+});
+
+describe("keyed query state tracking", () => {
+  it("resets a key written again after a previous reset", () => {
+    const registry = makeRegistry();
+    const binding = makeBinding(registry, () => Promise.resolve("unused"));
+    const input = { key: "rewritten" };
+
+    binding.updateData(input, () => "first");
+    registry.resetForTests();
+    expect(binding.snapshotFor(input).data).toBeNull();
+
+    binding.updateData(input, () => "second");
+    registry.resetForTests();
+    expect(binding.snapshotFor(input).data).toBeNull();
+    registry.dispose();
+  });
+});

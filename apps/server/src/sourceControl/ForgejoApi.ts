@@ -1,9 +1,25 @@
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { Config, Context, Effect, FileSystem, Layer, Option, Result, Schema } from "effect";
+import { Config, Context, Effect, FileSystem, Layer, Option, Result, Schema, Stream } from "effect";
 import {
   TrimmedNonEmptyString,
+  type ChangeRequestActivity,
+  type ChangeRequestFileContents,
+  type ChangeRequestFileContentsInput,
+  type ChangeRequestInvolvement,
+  type ChangeRequestReplyToThreadInput,
+  type ChangeRequestReviewThread,
+  type ChangeRequestSubmitReviewInput,
+  type ChangeRequestSubmitReviewResult,
+  type ChangeRequestUpdateAction,
+  type ChangeRequestUpdateCommentInput,
+  type ChangeRequestUpdateCommentResult,
+  type SourceControlAddCommentReactionInput,
+  type SourceControlAssigneeCandidate,
+  type SourceControlLabel,
+  type SourceControlMergeChangeRequestInput,
+  type SourceControlMergeChangeRequestResult,
   type SourceControlProviderAuth,
   type SourceControlProviderInfo,
   type SourceControlRepositoryCloneUrls,
@@ -14,8 +30,16 @@ import { sanitizeBranchFragment, WORKTREE_BRANCH_PREFIX } from "@ryco/shared/git
 import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControl";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
 
+import { ForgejoApiError, forgejoErrorMessage, isForgejoApiError } from "./forgejoApiError.ts";
 import * as ForgejoIssues from "./forgejoIssues.ts";
+import { forgejoWorkInProgressTitle } from "./forgejoPullRequestMutations.ts";
 import * as ForgejoPullRequests from "./forgejoPullRequests.ts";
+import {
+  forgejoPullRequestIndex,
+  makeForgejoPullRequestPageApi,
+  type ForgejoPageHttp,
+  type ForgejoRequestSpec,
+} from "./ForgejoPullRequestPageApi.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -30,16 +54,7 @@ const ForgejoApiEnvConfig = Config.all({
   cliKeysFile: Config.string("RYCO_FORGEJO_CLI_KEYS_FILE").pipe(Config.option),
 });
 
-export class ForgejoApiError extends Schema.TaggedError<ForgejoApiError>()("ForgejoApiError", {
-  operation: Schema.String,
-  detail: Schema.String,
-  status: Schema.optional(Schema.Number),
-  cause: Schema.optional(Schema.Defect()),
-}) {
-  override get message(): string {
-    return `Forgejo API failed in ${this.operation}: ${this.detail}`;
-  }
-}
+export { ForgejoApiError };
 
 const ForgejoCurrentUserSchema = Schema.Struct({
   login: Schema.optional(TrimmedNonEmptyString),
@@ -70,7 +85,7 @@ interface ForgejoConfiguredInstanceInput {
   readonly token?: string;
 }
 
-interface ForgejoInstanceConfig {
+export interface ForgejoInstanceConfig {
   readonly baseUrl: string;
   readonly apiBaseUrl: string;
   readonly host: string;
@@ -121,6 +136,8 @@ export interface ForgejoApiShape {
     readonly target?: SourceControlProvider.SourceControlRefSelector;
     readonly title: string;
     readonly bodyFile: string;
+    /** Open as a draft (Forgejo: a `WIP:` title prefix). */
+    readonly draft?: boolean | undefined;
   }) => Effect.Effect<void, ForgejoApiError>;
   readonly getDefaultBranch: (input: {
     readonly cwd: string;
@@ -167,7 +184,80 @@ export interface ForgejoApiShape {
     readonly cwd: string;
     readonly context?: SourceControlProvider.SourceControlProviderContext;
     readonly reference: string;
+    /** Refuse when the head moved while the diff loaded. */
+    readonly expectedHeadSha?: string | undefined;
+    /** One commit of the pull request instead of the whole change. */
+    readonly commitSha?: string | undefined;
   }) => Effect.Effect<string, ForgejoApiError>;
+  /** Page lists: pull requests involving the authenticated user, with readiness. */
+  readonly listInvolvedPullRequests: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+    readonly involvement: ChangeRequestInvolvement;
+    readonly state: "open" | "closed" | "merged" | "all";
+    readonly query?: string | undefined;
+    readonly limit?: number | undefined;
+  }) => Effect.Effect<
+    ReadonlyArray<ForgejoPullRequests.NormalizedForgejoPullRequestRecord>,
+    ForgejoApiError
+  >;
+  readonly getPullRequestActivity: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+    readonly reference: string;
+  }) => Effect.Effect<ChangeRequestActivity, ForgejoApiError>;
+  readonly getPullRequestFileContents: (
+    input: ChangeRequestFileContentsInput & {
+      readonly context?: SourceControlProvider.SourceControlProviderContext;
+    },
+  ) => Effect.Effect<ChangeRequestFileContents, ForgejoApiError>;
+  readonly addPullRequestComment: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+    readonly reference: string;
+    readonly body: string;
+    readonly clientMutationId?: string | undefined;
+  }) => Effect.Effect<void, ForgejoApiError>;
+  /** Add the viewer's reaction, or remove it when present. */
+  readonly togglePullRequestCommentReaction: (
+    input: SourceControlAddCommentReactionInput & {
+      readonly context?: SourceControlProvider.SourceControlProviderContext;
+    },
+  ) => Effect.Effect<void, ForgejoApiError>;
+  readonly updatePullRequestComment: (
+    input: ChangeRequestUpdateCommentInput & {
+      readonly context?: SourceControlProvider.SourceControlProviderContext;
+    },
+  ) => Effect.Effect<ChangeRequestUpdateCommentResult, ForgejoApiError>;
+  readonly submitPullRequestReview: (
+    input: ChangeRequestSubmitReviewInput & {
+      readonly context?: SourceControlProvider.SourceControlProviderContext;
+    },
+  ) => Effect.Effect<ChangeRequestSubmitReviewResult, ForgejoApiError>;
+  readonly replyToPullRequestReviewThread: (
+    input: ChangeRequestReplyToThreadInput & {
+      readonly context?: SourceControlProvider.SourceControlProviderContext;
+    },
+  ) => Effect.Effect<ChangeRequestReviewThread, ForgejoApiError>;
+  readonly updatePullRequest: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+    readonly reference: string;
+    readonly action: ChangeRequestUpdateAction;
+  }) => Effect.Effect<void, ForgejoApiError>;
+  readonly mergePullRequest: (
+    input: SourceControlMergeChangeRequestInput & {
+      readonly context?: SourceControlProvider.SourceControlProviderContext;
+    },
+  ) => Effect.Effect<SourceControlMergeChangeRequestResult, ForgejoApiError>;
+  readonly listLabels: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+  }) => Effect.Effect<ReadonlyArray<SourceControlLabel>, ForgejoApiError>;
+  readonly listAssignees: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
+  }) => Effect.Effect<ReadonlyArray<SourceControlAssigneeCandidate>, ForgejoApiError>;
 }
 
 export class ForgejoApi extends Context.Service<ForgejoApi, ForgejoApiShape>()(
@@ -443,11 +533,7 @@ function providerInfoForInstance(instance: ForgejoInstanceConfig): SourceControl
   };
 }
 
-function normalizeChangeRequestId(reference: string): string {
-  const trimmed = reference.trim().replace(/^#/, "");
-  const urlMatch = /(?:pulls?|pull-requests?|pullrequests?|pr)\/(\d+)(?:\D.*)?$/iu.exec(trimmed);
-  return urlMatch?.[1] ?? trimmed;
-}
+const normalizeChangeRequestId = forgejoPullRequestIndex;
 
 function normalizeIssueId(reference: string): string {
   const trimmed = reference.trim().replace(/^#/, "");
@@ -529,10 +615,6 @@ function requestError(operation: string, cause: unknown): ForgejoApiError {
   });
 }
 
-function isForgejoApiError(cause: unknown): cause is ForgejoApiError {
-  return Schema.is(ForgejoApiError)(cause);
-}
-
 function responseError(
   operation: string,
   response: HttpClientResponse.HttpClientResponse,
@@ -545,8 +627,8 @@ function responseError(
           operation,
           status: response.status,
           detail:
-            body.trim().length > 0
-              ? `Forgejo returned HTTP ${response.status}: ${body.trim()}`
+            forgejoErrorMessage(body).length > 0
+              ? `Forgejo returned HTTP ${response.status}: ${forgejoErrorMessage(body)}`
               : `Forgejo returned HTTP ${response.status}.`,
         }),
       ),
@@ -632,6 +714,145 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
         })(response),
       ),
     );
+
+  // ── Pull request page transport ────────────────────────────────────
+
+  const pageRequest = (
+    repository: ForgejoRepositoryLocator,
+    spec: ForgejoRequestSpec,
+  ): HttpClientRequest.HttpClientRequest => {
+    const url = apiUrl(
+      repository.instance,
+      spec.absolute ? spec.path : `${repositoryPath(repository)}${spec.path}`,
+    );
+    const request = HttpClientRequest.make(spec.method ?? "GET")(
+      url,
+      spec.urlParams ? { urlParams: spec.urlParams } : undefined,
+    );
+    return spec.body === undefined
+      ? request
+      : request.pipe(HttpClientRequest.bodyJsonUnsafe(spec.body));
+  };
+
+  const executePage = <A>(
+    operation: string,
+    repository: ForgejoRepositoryLocator,
+    spec: ForgejoRequestSpec,
+    onSuccess: (
+      response: HttpClientResponse.HttpClientResponse,
+    ) => Effect.Effect<A, ForgejoApiError>,
+  ): Effect.Effect<A, ForgejoApiError> =>
+    httpClient
+      .execute(
+        withAuth(
+          repository.instance,
+          pageRequest(repository, spec).pipe(HttpClientRequest.acceptJson),
+        ),
+      )
+      .pipe(
+        Effect.mapError((cause) => requestError(operation, cause)),
+        Effect.flatMap((response) =>
+          HttpClientResponse.matchStatus({
+            "2xx": onSuccess,
+            orElse: (failed) => responseError(operation, failed),
+          })(response),
+        ),
+      );
+
+  /** The response body up to `maxBytes`; stops reading (and drops the connection) past it. */
+  const readBoundedBody = (
+    operation: string,
+    response: HttpClientResponse.HttpClientResponse,
+    maxBytes: number,
+  ) =>
+    Effect.gen(function* () {
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      let truncated = false;
+      yield* response.stream.pipe(
+        Stream.runForEachWhile((chunk) =>
+          Effect.sync(() => {
+            const remaining = maxBytes - size;
+            if (chunk.byteLength > remaining) {
+              chunks.push(chunk.subarray(0, Math.max(0, remaining)));
+              size = maxBytes;
+              truncated = true;
+              return false;
+            }
+            chunks.push(chunk);
+            size += chunk.byteLength;
+            return true;
+          }),
+        ),
+        Effect.mapError((cause) => requestError(operation, cause)),
+      );
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { bytes, truncated };
+    });
+
+  /** Logins are stable for a token, so each instance's is read once. */
+  const viewerLogins = new Map<string, string>();
+  const viewerLogin = (instance: ForgejoInstanceConfig) => {
+    if (Option.isNone(tokenForInstance(instance))) return Effect.succeed<string | null>(null);
+    const cached = viewerLogins.get(instance.baseUrl);
+    if (cached) return Effect.succeed<string | null>(cached);
+    return currentUser(instance).pipe(
+      Effect.map((user) => {
+        const login = (user.login ?? user.username ?? "").trim();
+        if (login.length === 0) return null;
+        viewerLogins.set(instance.baseUrl, login);
+        return login;
+      }),
+    );
+  };
+
+  const pageHttp: ForgejoPageHttp<ForgejoRepositoryLocator> = {
+    json: (operation, repository, spec, schema) =>
+      executeJson(operation, repository.instance, pageRequest(repository, spec), schema),
+    jsonOrEmpty: (operation, repository, spec, schema) =>
+      executePage(operation, repository, spec, (response) =>
+        response.text.pipe(Effect.mapError((cause) => requestError(operation, cause))),
+      ).pipe(
+        Effect.flatMap((text) =>
+          text.trim().length === 0
+            ? Effect.succeed(null)
+            : Effect.try({
+                try: () => JSON.parse(text) as unknown,
+                catch: (cause) =>
+                  new ForgejoApiError({
+                    operation,
+                    detail: "Forgejo returned invalid JSON for the requested resource.",
+                    cause,
+                  }),
+              }).pipe(
+                Effect.flatMap((json) => Schema.decodeUnknownEffect(schema)(json)),
+                Effect.mapError((cause) =>
+                  isForgejoApiError(cause)
+                    ? cause
+                    : new ForgejoApiError({
+                        operation,
+                        detail: "Forgejo returned invalid JSON for the requested resource.",
+                        cause,
+                      }),
+                ),
+              ),
+        ),
+      ),
+    text: (operation, repository, spec) =>
+      executeText(operation, repository.instance, pageRequest(repository, spec)),
+    send: (operation, repository, spec) =>
+      executePage(operation, repository, spec, () => Effect.void),
+    bytes: (operation, repository, spec, maxBytes) =>
+      executePage(operation, repository, spec, (response) =>
+        readBoundedBody(operation, response, maxBytes),
+      ),
+    viewerLogin: (repository) => viewerLogin(repository.instance),
+  };
 
   const detectProviderFromRemoteUrl: ForgejoApiShape["detectProviderFromRemoteUrl"] = (
     remoteUrl,
@@ -794,6 +1015,15 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
       ForgejoCurrentUserSchema,
     );
 
+  const page = makeForgejoPullRequestPageApi({
+    http: pageHttp,
+    resolveRepository: (request) =>
+      resolveRepository({
+        cwd: request.cwd,
+        ...(request.context ? { context: request.context } : {}),
+      }),
+  });
+
   return ForgejoApi.of({
     probeAuth: Effect.gen(function* () {
       const authedInstance = instances.find((instance) =>
@@ -833,8 +1063,12 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
       );
     }),
     detectProviderFromRemoteUrl,
-    listPullRequests: (input) =>
-      resolveRepository(input).pipe(
+    listPullRequests: (input) => {
+      // An empty head selector is the pull requests page's list: every head,
+      // with merge readiness on open rows.
+      const expectedHead = SourceControlProvider.sourceBranch(input);
+      const pageList = expectedHead.length === 0;
+      return resolveRepository(input).pipe(
         Effect.flatMap((repository) =>
           executeJson(
             "listPullRequests",
@@ -852,16 +1086,19 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
             ForgejoPullRequests.ForgejoPullRequestListSchema,
           ).pipe(
             Effect.map((list) => list.map(ForgejoPullRequests.normalizeForgejoPullRequestRecord)),
-            Effect.map((list) => {
-              const expectedHead = SourceControlProvider.sourceBranch(input);
-              return list.filter((pr) => {
-                if (pr.headRefName !== expectedHead) return false;
+            Effect.map((list) =>
+              list.filter((pr) => {
+                if (!pageList && pr.headRefName !== expectedHead) return false;
                 return input.state === "merged" ? pr.state === "merged" : true;
-              });
-            }),
+              }),
+            ),
+            Effect.flatMap((list) =>
+              pageList ? page.withRowReadiness(input, list) : Effect.succeed(list),
+            ),
           ),
         ),
-      ),
+      );
+    },
     getPullRequest: (input) =>
       getRawPullRequest(input).pipe(
         Effect.map(ForgejoPullRequests.normalizeForgejoPullRequestRecord),
@@ -917,14 +1154,16 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
         const headBranch = SourceControlProvider.sourceBranch(input);
         const head = owner ? `${owner}:${headBranch}` : headBranch;
 
-        yield* executeJson(
+        const created = yield* executeJson(
           "createPullRequest",
           repository.instance,
           HttpClientRequest.post(
             apiUrl(repository.instance, `${repositoryPath(repository)}/pulls`),
           ).pipe(
             HttpClientRequest.bodyJsonUnsafe({
-              title: input.title,
+              // Forgejo drafts are work-in-progress title prefixes.
+              title:
+                input.draft === true ? forgejoWorkInProgressTitle(input.title, true) : input.title,
               body,
               head,
               base: input.target?.refName ?? input.baseBranch,
@@ -932,6 +1171,7 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
           ),
           ForgejoPullRequests.ForgejoPullRequestSchema,
         );
+        if (input.draft === true) yield* page.verifyCreatedDraft("createPullRequest", created);
       }),
     getDefaultBranch: (input) =>
       getRepository(input).pipe(
@@ -1126,40 +1366,9 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
         ),
       ),
     searchPullRequests: (input) =>
-      resolveRepository({
-        cwd: input.cwd,
-        ...(input.context ? { context: input.context } : {}),
-      }).pipe(
-        Effect.flatMap((repo) =>
-          executeJson(
-            "searchPullRequests",
-            repo.instance,
-            HttpClientRequest.get(apiUrl(repo.instance, `${repositoryPath(repo)}/pulls`), {
-              urlParams: {
-                state: "all",
-                sort: "recentupdate",
-                limit: String(clampLimit(input.limit)),
-              },
-            }),
-            ForgejoPullRequests.ForgejoPullRequestListSchema,
-          ).pipe(
-            Effect.map((list) => list.map(ForgejoPullRequests.normalizeForgejoPullRequestRecord)),
-            Effect.map((list) => {
-              const query = input.query.trim().toLowerCase();
-              return query.length === 0
-                ? list
-                : list.filter(
-                    (pullRequest) =>
-                      pullRequest.title.toLowerCase().includes(query) ||
-                      String(pullRequest.number) === query,
-                  );
-            }),
-            Effect.catch((err) =>
-              isForgejoApiError(err) && err.status === 404 ? Effect.succeed([]) : Effect.fail(err),
-            ),
-          ),
-        ),
-      ),
+      page
+        .searchPullRequests({ ...input, limit: clampLimit(input.limit) })
+        .pipe(Effect.catch((err) => (err.status === 404 ? Effect.succeed([]) : Effect.fail(err)))),
     getPullRequestDetail: (input) => {
       const referenceId = normalizeChangeRequestId(input.reference);
       return resolveRepository({
@@ -1225,30 +1434,27 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
               files,
             },
             { concurrency: "unbounded" },
-          ).pipe(Effect.map(ForgejoPullRequests.normalizeForgejoPullRequestDetail));
+          ).pipe(
+            Effect.map(ForgejoPullRequests.normalizeForgejoPullRequestDetail),
+            Effect.flatMap((detail) => page.withDetailReadiness(input, detail)),
+          );
         }),
       );
     },
-    getPullRequestDiff: (input) => {
-      const referenceId = normalizeChangeRequestId(input.reference);
-      return resolveRepository({
-        cwd: input.cwd,
-        ...(input.context ? { context: input.context } : {}),
-      }).pipe(
-        Effect.flatMap((repo) =>
-          executeText(
-            "getPullRequestDiff",
-            repo.instance,
-            HttpClientRequest.get(
-              apiUrl(
-                repo.instance,
-                `${repositoryPath(repo)}/pulls/${encodeURIComponent(referenceId)}.diff`,
-              ),
-            ),
-          ),
-        ),
-      );
-    },
+    getPullRequestDiff: (input) => page.getPullRequestDiff(input),
+    listInvolvedPullRequests: (input) =>
+      page.listInvolvedPullRequests({ ...input, limit: clampLimit(input.limit) }),
+    getPullRequestActivity: (input) => page.getPullRequestActivity(input),
+    getPullRequestFileContents: (input) => page.getPullRequestFileContents(input),
+    addPullRequestComment: (input) => page.addPullRequestComment(input),
+    togglePullRequestCommentReaction: (input) => page.togglePullRequestCommentReaction(input),
+    updatePullRequestComment: (input) => page.updatePullRequestComment(input),
+    submitPullRequestReview: (input) => page.submitPullRequestReview(input),
+    replyToPullRequestReviewThread: (input) => page.replyToPullRequestReviewThread(input),
+    updatePullRequest: (input) => page.updatePullRequest(input),
+    mergePullRequest: (input) => page.mergePullRequest(input),
+    listLabels: (input) => page.listLabels(input),
+    listAssignees: (input) => page.listAssignees(input),
   });
 });
 

@@ -1,0 +1,148 @@
+/* Pull requests page — list styles. Keyframes and selectors only; layout lives in Tailwind classes. */
+
+/* The pane's own background, so sticky group headers cover rows exactly (the drawer sits on the popover). */
+.pr-list-pane {
+  --pr-list-bg: var(--background);
+}
+.pr-list-pane[data-pr-list-pane="drawer"] {
+  --pr-list-bg: var(--popover);
+}
+
+/*
+ * Drawer (motion #12): the panel slides its full width in from the left
+ * instead of the sheet's default nudge-and-fade; the scrim keeps its fade.
+ */
+[data-slot="sheet-popup"]:has(> [data-pr-list-pane="drawer"]) {
+  transition-duration: var(--app-motion-duration-pane, 360ms);
+  transition-timing-function: var(--app-motion-ease);
+}
+[data-slot="sheet-popup"]:has(> [data-pr-list-pane="drawer"])[data-starting-style],
+[data-slot="sheet-popup"]:has(> [data-pr-list-pane="drawer"])[data-ending-style] {
+  opacity: 1;
+  translate: -100% 0;
+}
+
+/*
+ * Selection plate (motion #1): one plate behind the rows glides to the
+ * selected row (translateY + height). It follows a stack-layer push at the
+ * push's pace, rides along with its row when the list reorders (the rows'
+ * FLIP runs 1.6× the stack duration), and appears in place when it was hidden.
+ */
+.pr-list-plate {
+  position: absolute;
+  top: 0;
+  z-index: 0;
+  height: 0;
+  border-radius: var(--radius-lg);
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle),
+    height var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle),
+    opacity var(--app-motion-duration-chip, 120ms) var(--app-motion-ease);
+}
+.pr-list-plate[data-visible="true"] {
+  opacity: 1;
+}
+.pr-list-plate[data-motion="reorder"] {
+  transition-duration:
+    calc(var(--app-motion-duration-stack, 260ms) * 1.6),
+    calc(var(--app-motion-duration-stack, 260ms) * 1.6), var(--app-motion-duration-chip, 120ms);
+}
+.pr-list-plate[data-motion="push"] {
+  transition-duration:
+    var(--app-motion-duration-pane, 360ms), var(--app-motion-duration-pane, 360ms),
+    var(--app-motion-duration-chip, 120ms);
+  transition-timing-function: var(--app-motion-ease);
+}
+
+/* Filter button dot: present only while a filter is off its default. */
+.pr-filter-dot {
+  transition:
+    opacity var(--app-motion-duration-chip, 120ms) var(--app-motion-ease),
+    scale var(--app-motion-duration-pop, 200ms) var(--app-motion-spring-snappy);
+}
+.pr-filter-dot[data-active="false"] {
+  opacity: 0;
+  scale: 0.4;
+}
+
+/*
+ * Stack spine. Each row draws its own segments through the glyph column
+ * (above the state glyph, between the two glyphs, below the checks glyph),
+ * so rows virtualize and FLIP independently; the foot ends the spine in a
+ * ring at the base branch. Geometry follows the row: 7px padding, an 18px
+ * line holding the 14px state glyph, 2px gap, a 16px line holding the 12px
+ * checks glyph.
+ */
+.pr-stack-spine,
+.pr-stack-foot-node {
+  position: absolute;
+  inset-block: 0;
+  left: 0.375rem;
+  z-index: 0;
+  width: 1.375rem;
+  pointer-events: none;
+}
+.pr-stack-segment {
+  position: absolute;
+  left: 50%;
+  width: 1.5px;
+  border-radius: 1px;
+  translate: -50% 0;
+  background: color-mix(in srgb, var(--foreground) 15%, transparent);
+  transition: background-color var(--app-motion-duration-pane, 360ms) var(--app-motion-ease);
+}
+.pr-stack-segment[data-tone="landable"] {
+  background: color-mix(in srgb, var(--success) 50%, transparent);
+}
+.pr-stack-segment[data-tone="merged"] {
+  background: color-mix(in srgb, var(--color-violet-500) 60%, transparent);
+}
+.pr-stack-spine > [data-segment="up"] {
+  top: 0;
+  height: 8px;
+}
+.pr-stack-spine > [data-segment="mid"] {
+  top: 24px;
+  height: 4px;
+}
+.pr-stack-spine > [data-segment="down"] {
+  top: 42px;
+  bottom: 0;
+}
+.pr-stack-foot-node > [data-segment="up"] {
+  top: 0;
+  height: 7px;
+}
+.pr-stack-ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  translate: -50% -50%;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--muted-foreground) 70%, transparent);
+}
+.pr-stack-foot-node[data-tone="landable"] > .pr-stack-ring {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--success) 80%, transparent);
+}
+.pr-stack-foot-node[data-tone="merged"] > .pr-stack-ring {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--color-violet-500) 80%, transparent);
+}
+
+/* Resize handle: the list's hairline brightens under the pointer, while dragging, and on focus. */
+.pr-list-resize-line {
+  transition: background-color var(--app-motion-duration-chip, 120ms) var(--app-motion-ease);
+}
+.pr-list-resize:hover > .pr-list-resize-line {
+  transition-delay: 120ms;
+  background: color-mix(in srgb, var(--foreground) 22%, transparent);
+}
+.pr-list-resize[data-dragging="true"] > .pr-list-resize-line,
+.pr-list-resize:focus-visible > .pr-list-resize-line {
+  transition-delay: 0ms;
+  background: var(--ring);
+}

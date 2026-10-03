@@ -5,9 +5,30 @@ export const AUTOMATIC_DISCOVERY_REFRESH_MS = 10_000;
 export const REDUCED_DISCOVERY_REFRESH_MS = 30_000;
 export const AUTOMATIC_ACTIVE_REFRESH_MS = 30_000;
 export const REDUCED_ACTIVE_REFRESH_MS = 60_000;
+export const AUTOMATIC_WATCH_REFRESH_MS = 60_000;
+export const REDUCED_WATCH_REFRESH_MS = 120_000;
+export const AUTOMATIC_SLOW_WATCH_REFRESH_MS = 5 * 60_000;
+export const REDUCED_SLOW_WATCH_REFRESH_MS = 10 * 60_000;
 export const SOURCE_CONTROL_MAX_BACKOFF_MS = 5 * 60_000;
 
-export type SourceControlRefreshPhase = "discovery" | "active" | "settled";
+/**
+ * - `discovery`: right after a push, until the post-push window closes.
+ * - `active`: something is running (checks, workflow jobs).
+ * - `watching`: open and on screen but idle, so new comments and reviews
+ *   still arrive without a window focus (a slower cadence than `active`).
+ * - `watching-slow`: `watching` on a host where every read fans out into many
+ *   CLI processes (`az`, `glab`), at a much slower cadence.
+ * - `settled`: nothing to poll for; lifecycle refreshes and mutations only.
+ *
+ * No phase polls while the app is in the background: the keyed-query
+ * lifecycle pauses every timer until the window is foreground again.
+ */
+export type SourceControlRefreshPhase =
+  | "discovery"
+  | "active"
+  | "watching"
+  | "watching-slow"
+  | "settled";
 
 export function resolveSourceControlRefreshDelay(input: {
   readonly mode: SourceControlRefreshMode;
@@ -25,6 +46,14 @@ export function resolveSourceControlRefreshDelay(input: {
   }
   if (input.phase === "discovery") {
     return input.mode === "reduced" ? REDUCED_DISCOVERY_REFRESH_MS : AUTOMATIC_DISCOVERY_REFRESH_MS;
+  }
+  if (input.phase === "watching") {
+    return input.mode === "reduced" ? REDUCED_WATCH_REFRESH_MS : AUTOMATIC_WATCH_REFRESH_MS;
+  }
+  if (input.phase === "watching-slow") {
+    return input.mode === "reduced"
+      ? REDUCED_SLOW_WATCH_REFRESH_MS
+      : AUTOMATIC_SLOW_WATCH_REFRESH_MS;
   }
   return input.mode === "reduced" ? REDUCED_ACTIVE_REFRESH_MS : AUTOMATIC_ACTIVE_REFRESH_MS;
 }
@@ -55,4 +84,44 @@ export function resolveSourceControlFailureDelay(input: {
     SOURCE_CONTROL_MAX_BACKOFF_MS,
     Math.max(1_000, input.baseDelayMs) * 2 ** exponent,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Workflow run jobs
+//
+// Each run's jobs poll on their own evidence: the runs list says the run is
+// not completed, or the cached jobs still show unfinished work. Every running
+// workflow is therefore followed (not just one "active" run), and a run that
+// finishes gets one final read because its cached jobs still show it running.
+// ---------------------------------------------------------------------------
+
+function isCompletedWorkflowStatus(status: string): boolean {
+  return status.trim().toLowerCase() === "completed";
+}
+
+function hasUnfinishedJobs(jobs: ReadonlyArray<{ readonly status: string }>): boolean {
+  return jobs.some((job) => !isCompletedWorkflowStatus(job.status));
+}
+
+export function resolveWorkflowRunJobsPhase(input: {
+  /** The runs list reports the run as not completed. */
+  readonly runIncomplete: boolean;
+  /** Cached jobs of the run; null before the first read. */
+  readonly jobs: ReadonlyArray<{ readonly status: string }> | null;
+}): Extract<SourceControlRefreshPhase, "active" | "settled"> {
+  return input.runIncomplete || (input.jobs !== null && hasUnfinishedJobs(input.jobs))
+    ? "active"
+    : "settled";
+}
+
+/**
+ * True when the cached jobs contradict the run's status after it changed: a
+ * finished run whose jobs still show work (take the final read now), or a
+ * (re)started run whose jobs all look finished (start following it now).
+ */
+export function workflowRunJobsContradictRun(input: {
+  readonly runIncomplete: boolean;
+  readonly jobs: ReadonlyArray<{ readonly status: string }>;
+}): boolean {
+  return input.runIncomplete !== hasUnfinishedJobs(input.jobs);
 }

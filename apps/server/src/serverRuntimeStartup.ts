@@ -6,12 +6,9 @@ import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
 import {
   CommandId,
   EventId,
-  DEFAULT_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
-  type ModelSelection,
   type OrchestrationReadModel,
   ProjectId,
-  ProviderInstanceId,
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
@@ -36,6 +33,7 @@ import {
 } from "effect";
 
 import { ServerConfig } from "./config.ts";
+import { resolveProjectPreferences } from "./project/projectPreferences.ts";
 import { Keybindings } from "./keybindings.ts";
 import { Open } from "./open.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
@@ -360,11 +358,6 @@ export const launchStartupHeartbeat = recordStartupHeartbeat.pipe(
   Effect.asVoid,
 );
 
-export const getAutoBootstrapDefaultModelSelection = (): ModelSelection => ({
-  instanceId: ProviderInstanceId.make("codex"),
-  model: DEFAULT_MODEL,
-});
-
 export const resolveWelcomeBase = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const segments = serverConfig.cwd.split(/[/\\]/).filter(Boolean);
@@ -392,7 +385,6 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
         serverConfig.cwd,
       );
       let nextProjectId: ProjectId;
-      const initialThreadModelSelection = getAutoBootstrapDefaultModelSelection();
 
       if (Option.isNone(existingProject)) {
         const createdAt = new Date().toISOString();
@@ -413,7 +405,12 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
       const existingThreadId =
         yield* projectionReadModelQuery.getFirstActiveThreadIdByProjectId(nextProjectId);
       if (Option.isNone(existingThreadId)) {
-        const { defaultAgentTokenMode } = yield* serverSettings.getSettings;
+        const settings = yield* serverSettings.getSettings;
+        // The same model any new thread in this project would start with.
+        const initialThreadModelSelection = resolveProjectPreferences({
+          settings,
+          ...(Option.isSome(existingProject) ? { project: existingProject.value } : {}),
+        }).initialModelSelection.value;
         const createdAt = new Date().toISOString();
         const createdThreadId = ThreadId.make(crypto.randomUUID());
         yield* orchestrationEngine.dispatch({
@@ -425,7 +422,7 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
           modelSelection: initialThreadModelSelection,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "full-access",
-          tokenMode: defaultAgentTokenMode,
+          tokenMode: settings.defaultAgentTokenMode,
           branch: null,
           worktreePath: null,
           createdAt,

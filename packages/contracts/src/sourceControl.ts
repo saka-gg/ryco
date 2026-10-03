@@ -92,6 +92,12 @@ export const SourceControlCheckRollupItem = Schema.Struct({
   url: Schema.Option(TrimmedNonEmptyString),
   startedAt: Schema.Option(Schema.DateTimeUtc),
   completedAt: Schema.Option(Schema.DateTimeUtc),
+  /**
+   * The base branch's protection requires this check to pass before merging.
+   * Absent when the host did not say (list rows, hosts without the concept,
+   * or a failed lookup), which is not the same as `false`.
+   */
+  isRequired: Schema.optional(Schema.Boolean),
 });
 export type SourceControlCheckRollupItem = typeof SourceControlCheckRollupItem.Type;
 
@@ -101,6 +107,63 @@ export const SourceControlLabel = Schema.Struct({
   description: Schema.optional(TrimmedNonEmptyString),
 });
 export type SourceControlLabel = typeof SourceControlLabel.Type;
+
+/** Aggregate review verdict as reported by the host (GitHub `reviewDecision`). */
+export const SourceControlChangeRequestReviewDecision = Schema.Literals([
+  "approved",
+  "changes_requested",
+  "review_required",
+]);
+export type SourceControlChangeRequestReviewDecision =
+  typeof SourceControlChangeRequestReviewDecision.Type;
+
+/**
+ * Why a change request can or cannot merge right now (GitHub `mergeStateStatus`,
+ * lower-cased). `behind` means the head needs the base merged in; `blocked`
+ * means required reviews or checks are missing; `dirty` means conflicts.
+ */
+export const SourceControlChangeRequestMergeStateStatus = Schema.Literals([
+  "behind",
+  "blocked",
+  "clean",
+  "dirty",
+  "draft",
+  "has_hooks",
+  "unknown",
+  "unstable",
+]);
+export type SourceControlChangeRequestMergeStateStatus =
+  typeof SourceControlChangeRequestMergeStateStatus.Type;
+
+/** One reviewer's latest standing on a change request. `requested` = asked, not yet reviewed. */
+export const SourceControlChangeRequestReviewerState = Schema.Literals([
+  "approved",
+  "changes_requested",
+  "commented",
+  "dismissed",
+  "requested",
+]);
+export type SourceControlChangeRequestReviewerState =
+  typeof SourceControlChangeRequestReviewerState.Type;
+
+export const SourceControlChangeRequestReviewer = Schema.Struct({
+  /** User login, or `org/team-slug` for team review requests. */
+  login: TrimmedNonEmptyString,
+  kind: Schema.Literals(["user", "team", "bot"]),
+  state: SourceControlChangeRequestReviewerState,
+  avatarUrl: Schema.optional(Schema.String),
+  submittedAt: Schema.optional(Schema.DateTimeUtc),
+  /** True when the request came from CODEOWNERS. */
+  isCodeOwner: Schema.optional(Schema.Boolean),
+});
+export type SourceControlChangeRequestReviewer = typeof SourceControlChangeRequestReviewer.Type;
+
+export const SourceControlChangeRequestAutoMerge = Schema.Struct({
+  mergeMethod: SourceControlChangeRequestMergeMethod,
+  enabledBy: Schema.optional(TrimmedNonEmptyString),
+  enabledAt: Schema.optional(Schema.DateTimeUtc),
+});
+export type SourceControlChangeRequestAutoMerge = typeof SourceControlChangeRequestAutoMerge.Type;
 
 export const ChangeRequest = Schema.Struct({
   provider: SourceControlProviderKind,
@@ -121,8 +184,20 @@ export const ChangeRequest = Schema.Struct({
   headRepositoryOwnerLogin: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   headSha: Schema.optional(TrimmedNonEmptyString),
   mergeability: Schema.optional(SourceControlChangeRequestMergeability),
+  /**
+   * Why it can or cannot merge right now. Always on the detail where the host
+   * reports readiness; on list rows only where the list payload carries it
+   * (GitLab's `detailed_merge_status`).
+   */
+  mergeStateStatus: Schema.optional(SourceControlChangeRequestMergeStateStatus),
   checkRollup: Schema.optional(Schema.Array(SourceControlCheckRollupItem)),
   stackSummary: Schema.optional(SourceControlChangeRequestStackSummary),
+  createdAt: Schema.optional(Schema.DateTimeUtc),
+  reviewDecision: Schema.optional(Schema.NullOr(SourceControlChangeRequestReviewDecision)),
+  additions: Schema.optional(NonNegativeInt),
+  deletions: Schema.optional(NonNegativeInt),
+  /** Files touched (list rows waiting on the viewer's review show it). */
+  changedFiles: Schema.optional(NonNegativeInt),
 });
 export type ChangeRequest = typeof ChangeRequest.Type;
 
@@ -314,6 +389,14 @@ export const SourceControlChangeRequestDetail = Schema.Struct({
   stack: Schema.optional(SourceControlChangeRequestStack),
   stackMetadataIncomplete: Schema.optional(Schema.Boolean),
   mergeCapabilities: Schema.optional(SourceControlChangeRequestMergeCapabilities),
+  /** Per-reviewer latest state, including pending (requested) reviewers. */
+  reviewerStates: Schema.optional(Schema.Array(SourceControlChangeRequestReviewer)),
+  autoMerge: Schema.optional(Schema.NullOr(SourceControlChangeRequestAutoMerge)),
+  closedAt: Schema.optional(Schema.DateTimeUtc),
+  mergedAt: Schema.optional(Schema.DateTimeUtc),
+  mergedBy: Schema.optional(TrimmedNonEmptyString),
+  /** True when the host deletes the head branch automatically after merge. */
+  deleteBranchOnMerge: Schema.optional(Schema.Boolean),
 });
 export type SourceControlChangeRequestDetail = typeof SourceControlChangeRequestDetail.Type;
 
@@ -321,6 +404,10 @@ export const SourceControlMergeChangeRequestInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   reference: TrimmedNonEmptyString,
   mergeMethod: SourceControlChangeRequestMergeMethod,
+  /** Delete the head branch after a successful (non-queued) merge. */
+  deleteBranch: Schema.optional(Schema.Boolean),
+  /** Refuse to merge when the head moved since the user looked. */
+  expectedHeadSha: Schema.optional(TrimmedNonEmptyString),
 });
 export type SourceControlMergeChangeRequestInput = typeof SourceControlMergeChangeRequestInput.Type;
 
@@ -347,6 +434,12 @@ export const SourceControlWorkflowRun = Schema.Struct({
   branch: Schema.Option(TrimmedNonEmptyString),
   event: Schema.optional(TrimmedNonEmptyString),
   commit: SourceControlWorkflowRunCommit,
+  /**
+   * The change request head this run verifies when `commit` is not the head
+   * itself but a merge of it into the target (GitLab merged-results and
+   * merge-train pipelines). Absent when the run is on the head commit.
+   */
+  sourceHeadOid: Schema.optional(TrimmedNonEmptyString),
   actor: Schema.Option(TrimmedNonEmptyString),
   status: TrimmedNonEmptyString,
   conclusion: Schema.Option(TrimmedNonEmptyString),

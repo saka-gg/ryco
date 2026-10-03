@@ -131,6 +131,7 @@ import { useDelayedUnmount } from "../hooks/useDelayedUnmount";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { usePresentationTier } from "../hooks/usePresentationTier";
+import { buildPullRequestLocation } from "../pullRequestsRoute";
 import {
   APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
   COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS,
@@ -951,6 +952,20 @@ export default function ChatView(props: ChatViewProps) {
     : null;
   const activeProject = useStore(
     useMemo(() => createProjectSelectorByRef(activeProjectRef), [activeProjectRef]),
+  );
+  const openPullRequestInApp = useMemo(
+    () =>
+      activeProject && presentationTier !== "phone"
+        ? (number: number) =>
+            void routerNavigate(
+              buildPullRequestLocation({
+                environmentId: activeProject.environmentId,
+                projectId: activeProject.id,
+                number,
+              }),
+            )
+        : undefined,
+    [activeProject, presentationTier, routerNavigate],
   );
 
   const activeWorktreeSummary = useStore(
@@ -4864,6 +4879,7 @@ export default function ChatView(props: ChatViewProps) {
                   onOpenFiles={onOpenFilesPanel}
                   onOpenReview={onOpenReviewPanel}
                   onOpenSubagent={onOpenSubagentPanel}
+                  onOpenPullRequestInApp={openPullRequestInApp}
                   onPostPushDiscoveryComplete={clearPostPushWatch}
                 />
               </FloatingOverviewMotionFrame>
@@ -5258,6 +5274,7 @@ export default function ChatView(props: ChatViewProps) {
               onOpenFiles={onOpenFilesPanel}
               onOpenReview={onOpenReviewPanel}
               onOpenSubagent={onOpenSubagentPanel}
+              onOpenPullRequestInApp={openPullRequestInApp}
               onPostPushDiscoveryComplete={clearPostPushWatch}
             />
           </OverviewSidebarMotionFrame>
@@ -5345,6 +5362,7 @@ export default function ChatView(props: ChatViewProps) {
               onOpenFiles={onOpenFilesPanel}
               onOpenReview={onOpenReviewPanel}
               onOpenSubagent={onOpenSubagentPanel}
+              onOpenPullRequestInApp={openPullRequestInApp}
               onPostPushDiscoveryComplete={clearPostPushWatch}
             />
           </PhoneSurfaceScaffold>
@@ -5375,6 +5393,7 @@ export default function ChatView(props: ChatViewProps) {
             onOpenFiles={onOpenFilesPanel}
             onOpenReview={onOpenReviewPanel}
             onOpenSubagent={onOpenSubagentPanel}
+            onOpenPullRequestInApp={openPullRequestInApp}
             onPostPushDiscoveryComplete={clearPostPushWatch}
           />
         </RightPanelSheet>

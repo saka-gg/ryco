@@ -1,0 +1,131 @@
+/* Pull requests page — rail styles. Keyframes and selectors only; layout lives in Tailwind classes. */
+
+/*
+ * Status marks (merge verdict, status lines, stack layers). A mark that
+ * remounts after the first paint pops in, and a check then draws its stroke.
+ * Every duration is a motion token, so reduced motion leaves marks at rest.
+ */
+.pr-fact-check {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+
+@keyframes pr-fact-glyph-in {
+  from {
+    opacity: 0;
+    transform: scale(0.3) rotate(-90deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pr-fact-check-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.pr-fact-glyph[data-pop] {
+  animation: pr-fact-glyph-in var(--app-motion-duration-pop, 200ms) var(--app-motion-spring-gentle)
+    both;
+}
+
+.pr-fact-glyph[data-pop] .pr-fact-check {
+  animation: pr-fact-check-draw var(--app-motion-duration-stack, 260ms)
+    var(--app-motion-spring-gentle) both;
+  animation-delay: var(--app-motion-duration-chip, 120ms);
+}
+
+/*
+ * Hover ghosts. A row's quiet word (a layer's state, a check count) and its
+ * ghost action ("Merge through", "Fix", "Update") share one slot. On hover or
+ * keyboard focus the word leaves first and the ghost arrives a chip later
+ * (the reverse on leave), so no frame shows both. Without hover to reveal
+ * it (touch), the ghost sits beside the word instead, both at rest.
+ *
+ * Markup: `.pr-swap` row > `.pr-swap-slot` > `.pr-swap-out` word + `.pr-swap-in` ghost.
+ */
+.pr-swap-slot {
+  display: grid;
+  grid-template-areas: "slot";
+  align-items: center;
+}
+
+.pr-swap-slot > * {
+  grid-area: slot;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pr-swap-out,
+  .pr-swap-in {
+    transition: opacity var(--app-motion-duration-chip, 120ms) var(--app-motion-ease, ease);
+  }
+
+  .pr-swap-out {
+    transition-delay: var(--app-motion-duration-chip, 120ms);
+  }
+
+  .pr-swap-in {
+    opacity: 0;
+  }
+
+  .pr-swap:is(:hover, :has(:focus-visible)) .pr-swap-out {
+    opacity: 0;
+    transition-delay: 0ms;
+  }
+
+  .pr-swap:is(:hover, :has(:focus-visible)) .pr-swap-in {
+    opacity: 1;
+    transition-delay: var(--app-motion-duration-chip, 120ms);
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .pr-swap-slot {
+    grid-template-areas: none;
+    grid-auto-flow: column;
+    column-gap: 0.375rem;
+  }
+
+  .pr-swap-slot > * {
+    grid-area: auto;
+  }
+}
+
+/*
+ * A merge lands: layer marks turn violet from the base up, one after another.
+ * The stagger is a quarter of the pane duration (90ms), so it collapses to
+ * nothing with the tokens under reduced motion.
+ */
+@keyframes pr-stack-layer-land {
+  0% {
+    transform: scale(0.3) rotate(-90deg);
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.pr-stack-mark[data-landed] {
+  animation: pr-stack-layer-land var(--app-motion-duration-pane, 360ms)
+    var(--app-motion-spring-snappy) both;
+  animation-delay: calc(var(--i, 0) * var(--app-motion-duration-pane, 360ms) / 4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pr-fact-glyph[data-pop],
+  .pr-fact-glyph[data-pop] .pr-fact-check,
+  .pr-stack-mark[data-landed] {
+    animation: none;
+  }
+}

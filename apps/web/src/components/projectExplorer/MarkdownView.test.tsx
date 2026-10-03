@@ -42,6 +42,60 @@ describe("MarkdownView", () => {
     expect(markup).toContain("checked=");
   });
 
+  it("keeps task checkboxes disabled unless onToggleTask is passed", () => {
+    const markup = renderToStaticMarkup(<MarkdownView text={"- [ ] todo"} />);
+    expect(markup).toContain("disabled");
+    expect(markup).not.toContain("data-task-offset");
+  });
+
+  it("reports each interactive task by its source offset, as the parser saw it", () => {
+    const text = [
+      "<!-- template: tick what applies -->",
+      "<details>",
+      "<summary>Checklist</summary>",
+      "- [ ] docs (HTML block, renders as text)",
+      "</details>",
+      "",
+      "```md",
+      "- [ ] in code",
+      "```",
+      "",
+      "    - [ ] indented code",
+      "",
+      "- [ ] tests <!-- note -->",
+      "  - [x] nested **bold**",
+      "> 1. [X] quoted",
+      "",
+      '<ul><li class="task-list-item"><input type="checkbox"> raw html</li></ul>',
+    ].join("\n");
+    const markup = renderToStaticMarkup(<MarkdownView text={text} onToggleTask={() => {}} />);
+    const offsets = [...markup.matchAll(/data-task-offset="(\d+)"/gu)].map((match) =>
+      Number(match[1]),
+    );
+    // Exactly the three parser-made tasks; each offset is its state character in `text`.
+    expect(offsets.map((offset) => text.slice(offset - 3, offset + 2))).toEqual([
+      "- [ ]",
+      "- [x]",
+      ". [X]",
+    ]);
+    expect(offsets[0]).toBe(text.indexOf("- [ ] tests") + 3);
+    // The raw-HTML box stays a disabled, unreported checkbox.
+    expect(
+      markup.match(/<input[^>]*>/gu)?.filter((input) => input.includes("disabled")),
+    ).toHaveLength(1);
+  });
+
+  it("names each interactive checkbox after its own task text", () => {
+    const markup = renderToStaticMarkup(
+      <MarkdownView
+        text={"- [ ] Ship the **rail**\n  - [x] Nested child"}
+        onToggleTask={() => {}}
+      />,
+    );
+    const labels = [...markup.matchAll(/aria-label="([^"]*)"/gu)].map((match) => match[1]);
+    expect(labels).toEqual(["Ship the rail", "Nested child"]);
+  });
+
   it("strips dangerous HTML even when raw HTML is enabled", () => {
     const markup = renderToStaticMarkup(
       <MarkdownView

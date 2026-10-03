@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createPullRequestReviewController, type PullRequestReviewData } from "./index.ts";
+import { createPullRequestReviewController, type PullRequestReviewData } from "./viewedFiles.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

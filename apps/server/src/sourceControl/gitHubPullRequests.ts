@@ -1,8 +1,12 @@
 import { Cause, DateTime, Exit, Option, Result, Schema } from "effect";
 import {
   PositiveInt,
+  SourceControlChangeRequestReviewer,
   TrimmedNonEmptyString,
+  type SourceControlChangeRequestAutoMerge,
   type SourceControlChangeRequestMergeability,
+  type SourceControlChangeRequestMergeStateStatus,
+  type SourceControlChangeRequestReviewDecision,
 } from "@ryco/contracts";
 import { decodeJsonResult, formatSchemaError } from "@ryco/shared/schemaJson";
 import {
@@ -26,6 +30,8 @@ export interface NormalizedGitHubCheckRollupItem {
   readonly url: Option.Option<string>;
   readonly startedAt: Option.Option<DateTime.Utc>;
   readonly completedAt: Option.Option<DateTime.Utc>;
+  /** Set by the detail's required-checks lookup (`gitHubRequiredChecks.ts`), never by `gh pr`. */
+  readonly isRequired?: boolean;
 }
 
 export interface NormalizedGitHubPullRequestRecord {
@@ -47,6 +53,11 @@ export interface NormalizedGitHubPullRequestRecord {
   readonly headSha?: string;
   readonly mergeability?: SourceControlChangeRequestMergeability;
   readonly checkRollup?: ReadonlyArray<NormalizedGitHubCheckRollupItem>;
+  readonly createdAt?: DateTime.Utc;
+  readonly reviewDecision?: SourceControlChangeRequestReviewDecision | null;
+  readonly additions?: number;
+  readonly deletions?: number;
+  readonly changedFiles?: number;
 }
 
 function normalizeLabels(
@@ -81,6 +92,37 @@ const GitHubPullRequestSchema = Schema.Struct({
   state: Schema.optional(Schema.NullOr(Schema.String)),
   mergedAt: Schema.optional(Schema.NullOr(Schema.String)),
   updatedAt: Schema.optional(Schema.OptionFromNullOr(Schema.DateTimeUtcFromString)),
+  createdAt: Schema.optional(Schema.NullOr(Schema.String)),
+  closedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  reviewDecision: Schema.optional(Schema.NullOr(Schema.String)),
+  mergeStateStatus: Schema.optional(Schema.NullOr(Schema.String)),
+  mergedBy: Schema.optional(
+    Schema.NullOr(Schema.Struct({ login: Schema.optional(Schema.NullOr(Schema.String)) })),
+  ),
+  autoMergeRequest: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        mergeMethod: Schema.optional(Schema.NullOr(Schema.String)),
+        enabledAt: Schema.optional(Schema.NullOr(Schema.String)),
+        enabledBy: Schema.optional(
+          Schema.NullOr(Schema.Struct({ login: Schema.optional(Schema.NullOr(Schema.String)) })),
+        ),
+      }),
+    ),
+  ),
+  latestReviews: Schema.optional(
+    Schema.NullOr(
+      Schema.Array(
+        Schema.Struct({
+          author: Schema.optional(
+            Schema.NullOr(Schema.Struct({ login: Schema.optional(Schema.NullOr(Schema.String)) })),
+          ),
+          state: Schema.optional(Schema.NullOr(Schema.String)),
+          submittedAt: Schema.optional(Schema.NullOr(Schema.String)),
+        }),
+      ),
+    ),
+  ),
   isCrossRepository: Schema.optional(Schema.Boolean),
   isDraft: Schema.optional(Schema.Boolean),
   author: Schema.optional(Schema.NullOr(Schema.Struct({ login: Schema.String }))),
@@ -146,8 +188,10 @@ const GitHubPullRequestSchema = Schema.Struct({
   reviewRequests: Schema.optional(
     Schema.Array(
       Schema.Struct({
+        __typename: Schema.optional(Schema.NullOr(Schema.String)),
         login: Schema.optional(Schema.NullOr(Schema.String)),
         name: Schema.optional(Schema.NullOr(Schema.String)),
+        slug: Schema.optional(Schema.NullOr(Schema.String)),
       }),
     ),
   ),
@@ -274,6 +318,25 @@ function normalizeCheckRollupItem(
   };
 }
 
+function normalizeReviewDecision(
+  value: string | null | undefined,
+): SourceControlChangeRequestReviewDecision | null {
+  switch (value?.trim().toUpperCase()) {
+    case "APPROVED":
+      return "approved";
+    case "CHANGES_REQUESTED":
+      return "changes_requested";
+    case "REVIEW_REQUIRED":
+      return "review_required";
+    default:
+      return null;
+  }
+}
+
+function nonNegativeInt(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 function normalizeGitHubPullRequestRecord(
   raw: Schema.Schema.Type<typeof GitHubPullRequestSchema>,
 ): NormalizedGitHubPullRequestRecord {
@@ -291,6 +354,10 @@ function normalizeGitHubPullRequestRecord(
         : null;
   const headSha = trimOptionalString(raw.headRefOid);
   const mergeability = normalizeMergeability(raw.mergeable);
+  const createdAt = Option.getOrNull(optionFromIsoDateTime(raw.createdAt));
+  const additions = nonNegativeInt(raw.additions);
+  const deletions = nonNegativeInt(raw.deletions);
+  const changedFiles = nonNegativeInt(raw.changedFiles);
 
   return {
     number: raw.number,
@@ -312,6 +379,13 @@ function normalizeGitHubPullRequestRecord(
     ...(headRepositoryOwnerLogin ? { headRepositoryOwnerLogin } : {}),
     ...(headSha ? { headSha } : {}),
     ...(mergeability ? { mergeability } : {}),
+    ...(createdAt ? { createdAt } : {}),
+    ...(raw.reviewDecision !== undefined
+      ? { reviewDecision: normalizeReviewDecision(raw.reviewDecision) }
+      : {}),
+    ...(additions !== null ? { additions } : {}),
+    ...(deletions !== null ? { deletions } : {}),
+    ...(changedFiles !== null ? { changedFiles } : {}),
     ...(raw.statusCheckRollup
       ? {
           checkRollup: raw.statusCheckRollup.map((item, index) =>
@@ -398,6 +472,12 @@ export interface NormalizedGitHubPullRequestDetail extends NormalizedGitHubPullR
   readonly deletions: number;
   readonly changedFiles: number;
   readonly files: ReadonlyArray<NormalizedGitHubPullRequestFile>;
+  readonly reviewerStates: ReadonlyArray<SourceControlChangeRequestReviewer>;
+  readonly mergeStateStatus?: SourceControlChangeRequestMergeStateStatus;
+  readonly autoMerge?: SourceControlChangeRequestAutoMerge | null;
+  readonly closedAt?: DateTime.Utc;
+  readonly mergedAt?: DateTime.Utc;
+  readonly mergedBy?: string;
 }
 
 function normalizePullRequestComment(raw: {
@@ -497,7 +577,7 @@ function normalizeCommits(
   });
 }
 
-function normalizeReviewState(
+export function normalizeGitHubReviewState(
   state: string | null | undefined,
 ): NormalizedGitHubReviewState | null {
   switch (state?.trim().toUpperCase()) {
@@ -531,7 +611,7 @@ function reviewToComment(raw: {
   if (body.length === 0) return null;
   const submittedAt = trimNonEmpty(raw.submittedAt);
   if (submittedAt === null) return null;
-  const reviewState = normalizeReviewState(raw.state);
+  const reviewState = normalizeGitHubReviewState(raw.state);
   const reactions = normalizeReactionGroups(raw.reactionGroups);
   return {
     ...(raw.id ? { id: raw.id } : {}),
@@ -561,6 +641,107 @@ function normalizeFiles(
   }));
 }
 
+const MERGE_STATE_STATUSES: ReadonlySet<string> =
+  new Set<SourceControlChangeRequestMergeStateStatus>([
+    "behind",
+    "blocked",
+    "clean",
+    "dirty",
+    "draft",
+    "has_hooks",
+    "unknown",
+    "unstable",
+  ]);
+
+function normalizeMergeStateStatus(
+  value: string | null | undefined,
+): SourceControlChangeRequestMergeStateStatus | null {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  return MERGE_STATE_STATUSES.has(normalized)
+    ? (normalized as SourceControlChangeRequestMergeStateStatus)
+    : null;
+}
+
+function normalizeMergeMethod(
+  value: string | null | undefined,
+): "merge" | "squash" | "rebase" | null {
+  switch (value?.trim().toUpperCase()) {
+    case "MERGE":
+      return "merge";
+    case "SQUASH":
+      return "squash";
+    case "REBASE":
+      return "rebase";
+    default:
+      return null;
+  }
+}
+
+type RawGitHubPullRequest = Schema.Schema.Type<typeof GitHubPullRequestSchema>;
+
+function normalizeAutoMerge(
+  raw: RawGitHubPullRequest["autoMergeRequest"],
+): SourceControlChangeRequestAutoMerge | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const mergeMethod = normalizeMergeMethod(raw.mergeMethod);
+  if (!mergeMethod) return null;
+  const enabledBy = trimNonEmpty(raw.enabledBy?.login);
+  const enabledAt = Option.getOrNull(optionFromIsoDateTime(raw.enabledAt));
+  return {
+    mergeMethod,
+    ...(enabledBy ? { enabledBy } : {}),
+    ...(enabledAt ? { enabledAt } : {}),
+  };
+}
+
+const isReviewer = Schema.is(SourceControlChangeRequestReviewer);
+
+function isBotLogin(login: string): boolean {
+  return /\[bot\]$/iu.test(login);
+}
+
+/**
+ * Per-reviewer standing: each reviewer's latest submitted review, overlaid with
+ * outstanding review requests (a re-requested reviewer reads as `requested`
+ * but keeps the time of their last review). Team requests use `org/slug`.
+ */
+export function buildGitHubReviewerStates(input: {
+  readonly latestReviews: RawGitHubPullRequest["latestReviews"];
+  readonly reviewRequests: RawGitHubPullRequest["reviewRequests"];
+}): ReadonlyArray<SourceControlChangeRequestReviewer> {
+  const reviewers = new Map<string, SourceControlChangeRequestReviewer>();
+  for (const review of input.latestReviews ?? []) {
+    const login = trimNonEmpty(review.author?.login);
+    const state = normalizeGitHubReviewState(review.state);
+    if (!login || !state || state === "pending") continue;
+    const submittedAt = Option.getOrNull(optionFromIsoDateTime(review.submittedAt));
+    reviewers.set(login.toLowerCase(), {
+      login,
+      kind: isBotLogin(login) ? "bot" : "user",
+      state,
+      ...(submittedAt ? { submittedAt } : {}),
+    });
+  }
+  for (const request of input.reviewRequests ?? []) {
+    const typename = request.__typename?.trim();
+    const isTeam = typename === "Team";
+    const login = isTeam
+      ? (trimNonEmpty(request.slug) ?? trimNonEmpty(request.name))
+      : trimNonEmpty(request.login);
+    if (!login) continue;
+    const key = login.toLowerCase();
+    const previous = reviewers.get(key);
+    reviewers.set(key, {
+      login,
+      kind: isTeam ? "team" : typename === "Bot" || isBotLogin(login) ? "bot" : "user",
+      state: "requested",
+      ...(previous?.submittedAt ? { submittedAt: previous.submittedAt } : {}),
+    });
+  }
+  return [...reviewers.values()].filter(isReviewer);
+}
+
 export function decodeGitHubPullRequestDetailJson(
   raw: string,
 ): Result.Result<NormalizedGitHubPullRequestDetail, Cause.Cause<Schema.SchemaError>> {
@@ -580,6 +761,11 @@ export function decodeGitHubPullRequestDetailJson(
     a.createdAt.localeCompare(b.createdAt),
   );
   const files = normalizeFiles(result.success.files);
+  const mergeStateStatus = normalizeMergeStateStatus(result.success.mergeStateStatus);
+  const autoMerge = normalizeAutoMerge(result.success.autoMergeRequest);
+  const closedAt = Option.getOrNull(optionFromIsoDateTime(result.success.closedAt));
+  const mergedAt = Option.getOrNull(optionFromIsoDateTime(result.success.mergedAt));
+  const mergedBy = trimNonEmpty(result.success.mergedBy?.login);
   const detail: NormalizedGitHubPullRequestDetail = {
     ...summary,
     body,
@@ -592,6 +778,15 @@ export function decodeGitHubPullRequestDetailJson(
     changedFiles:
       typeof result.success.changedFiles === "number" ? result.success.changedFiles : files.length,
     files,
+    reviewerStates: buildGitHubReviewerStates({
+      latestReviews: result.success.latestReviews,
+      reviewRequests: result.success.reviewRequests,
+    }),
+    ...(mergeStateStatus ? { mergeStateStatus } : {}),
+    ...(autoMerge !== undefined ? { autoMerge } : {}),
+    ...(closedAt ? { closedAt } : {}),
+    ...(mergedAt ? { mergedAt } : {}),
+    ...(mergedBy ? { mergedBy } : {}),
   };
   return Result.succeed(detail);
 }

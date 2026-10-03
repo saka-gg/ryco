@@ -1,0 +1,34 @@
+/* Pull requests page — checks styles. Keyframes and selectors only; layout lives in Tailwind classes. */
+
+/*
+ * Summary counts (Checks) roll in from below when they change; the old value
+ * is already gone, so the two never overlap. Token-driven, so reduced motion
+ * makes it an instant swap.
+ */
+@keyframes pr-checks-count-in {
+  from {
+    transform: translateY(0.55em);
+    opacity: 0.4;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.pr-checks-count-in {
+  animation: pr-checks-count-in var(--app-motion-duration-pop, 200ms) var(--app-motion-ease) both;
+}
+
+/*
+ * Landing on a job or commit from a link: one pass of the house jump flash.
+ * With motion reduced the row holds a static ring for the same time instead
+ * (the class is removed by the tab after 1.6s).
+ */
+.pr-checks-flash {
+  animation: overview-jump-flash 1.6s var(--app-motion-ease);
+}
+
+.pr-checks-flash-static {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ring) 70%, transparent);
+}

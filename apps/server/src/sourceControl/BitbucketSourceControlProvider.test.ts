@@ -3,7 +3,9 @@ import { DateTime, Effect, Layer, Option } from "effect";
 import { SOURCE_CONTROL_DETAIL_BODY_MAX_BYTES } from "@ryco/contracts";
 
 import * as BitbucketApi from "./BitbucketApi.ts";
+import type * as BitbucketPullRequests from "./bitbucketPullRequests.ts";
 import * as BitbucketSourceControlProvider from "./BitbucketSourceControlProvider.ts";
+import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 
 function makeProvider(bitbucket: Partial<BitbucketApi.BitbucketApiShape>) {
   return BitbucketSourceControlProvider.make().pipe(
@@ -285,12 +287,201 @@ describe("BitbucketSourceControlProvider stubs (Phase 1 of issue creation)", () 
       assert.include(result.detail, "Not implemented");
     }),
   );
+});
 
-  it.effect("listAssignees fails with 'Not implemented'", () =>
+describe("BitbucketSourceControlProvider pull requests page", () => {
+  const detail: BitbucketPullRequests.NormalizedBitbucketPullRequestDetail = {
+    number: 5695,
+    title: "Use onClick",
+    url: "https://bitbucket.org/atlassian/atlaskit-mk-2/pull-requests/5695",
+    baseRefName: "master",
+    headRefName: "feature",
+    state: "open",
+    updatedAt: Option.none(),
+    isDraft: false,
+    body: "Body",
+    comments: [],
+    reviewers: ["Jessica Yeh"],
+    participants: [],
+    linkedWorkItemKeys: [],
+    headSha: "728c8bad1813e6a1f2b9a7a3c4d5e6f708192a3b",
+    commits: [
+      {
+        oid: "728c8bad1813e6a1f2b9a7a3c4d5e6f708192a3b",
+        shortOid: "728c8ba",
+        messageHeadline: "Use onClick",
+      },
+    ],
+    reviewerStates: [{ login: "Jessica Yeh", kind: "user", state: "approved" }],
+    reviewDecision: "approved",
+    mergeability: "mergeable",
+    mergeStateStatus: "clean",
+    mergeCapabilities: { merge: true, squash: false, rebase: false },
+    checkRollup: [],
+    deleteBranchOnMerge: true,
+  };
+
+  it.effect("maps the detail's readiness and head into the contract", () =>
     Effect.gen(function* () {
-      const provider = yield* makeProvider({});
-      const result = yield* provider.listAssignees({ cwd: "/repo" }).pipe(Effect.flip);
-      assert.include(result.detail, "Not implemented");
+      const provider = yield* makeProvider({ getPullRequestDetail: () => Effect.succeed(detail) });
+      const result = yield* provider.getChangeRequestDetail({ cwd: "/repo", reference: "5695" });
+      assert.strictEqual(result.headSha, detail.headSha);
+      assert.strictEqual(result.isDraft, false);
+      assert.deepStrictEqual(result.commits, detail.commits);
+      assert.deepStrictEqual(result.reviewerStates, detail.reviewerStates);
+      assert.strictEqual(result.reviewDecision, "approved");
+      assert.strictEqual(result.mergeability, "mergeable");
+      assert.strictEqual(result.mergeStateStatus, "clean");
+      assert.deepStrictEqual(result.mergeCapabilities, detail.mergeCapabilities);
+      assert.strictEqual(result.deleteBranchOnMerge, true);
+    }),
+  );
+
+  it.effect("forwards involvement, query, commit scope, head guard and drafts", () =>
+    Effect.gen(function* () {
+      const seen: Array<unknown> = [];
+      const provider = yield* makeProvider({
+        listPullRequests: (input) => {
+          seen.push(input);
+          return Effect.succeed([]);
+        },
+        getPullRequestDiff: (input) => {
+          seen.push(input);
+          return Effect.succeed("diff");
+        },
+        createPullRequest: (input) => {
+          seen.push(input.draft);
+          return Effect.void;
+        },
+      });
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "open",
+        involvement: "authored",
+        query: "fix",
+      });
+      yield* provider.getChangeRequestDiff({
+        cwd: "/repo",
+        reference: "5695",
+        commitSha: "abc1234",
+        expectedHeadSha: "def5678",
+      });
+      yield* provider.createChangeRequest({
+        cwd: "/repo",
+        baseRefName: "master",
+        headSelector: "feature",
+        title: "Draft",
+        bodyFile: "/tmp/body.md",
+        draft: true,
+      });
+      assert.deepStrictEqual(seen, [
+        { cwd: "/repo", headSelector: "", state: "open", involvement: "authored", query: "fix" },
+        { cwd: "/repo", reference: "5695", expectedHeadSha: "def5678", commitSha: "abc1234" },
+        true,
+      ]);
+    }),
+  );
+
+  it.effect("returns the fresh, uncapped detail after comments and lifecycle actions", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const provider = yield* makeProvider({
+        addPullRequestComment: (input) => {
+          calls.push(`comment:${input.body}`);
+          return Effect.void;
+        },
+        updatePullRequest: (input) => {
+          calls.push(`update:${input.action.kind}`);
+          return Effect.void;
+        },
+        getPullRequestDetail: () => {
+          calls.push("detail");
+          return Effect.succeed({
+            ...detail,
+            body: "x".repeat(SOURCE_CONTROL_DETAIL_BODY_MAX_BYTES + 1),
+          });
+        },
+      });
+      const commented = yield* provider.addChangeRequestComment({
+        cwd: "/repo",
+        reference: "5695",
+        body: "Hi",
+      });
+      const updated = yield* provider.updateChangeRequest!({
+        cwd: "/repo",
+        reference: "5695",
+        action: { kind: "set-draft", draft: true },
+      });
+      assert.deepStrictEqual(calls, ["comment:Hi", "detail", "update:set-draft", "detail"]);
+      assert.strictEqual(commented.truncated, false);
+      assert.strictEqual(updated.detail.body.length, SOURCE_CONTROL_DETAIL_BODY_MAX_BYTES + 1);
+    }),
+  );
+
+  it.effect("maps API failures to provider errors naming the operation", () =>
+    Effect.gen(function* () {
+      const provider = yield* makeProvider({
+        getPullRequestActivity: () =>
+          Effect.fail(
+            new BitbucketApi.BitbucketApiError({
+              operation: "getPullRequestActivity",
+              detail: "Bitbucket returned HTTP 403.",
+              status: 403,
+            }),
+          ),
+      });
+      const error = yield* provider.getChangeRequestActivity!({
+        cwd: "/repo",
+        reference: "5695",
+      }).pipe(Effect.flip);
+      assert.strictEqual(error.provider, "bitbucket");
+      assert.strictEqual(error.operation, "getChangeRequestActivity");
+      assert.strictEqual(error.detail, "Bitbucket returned HTTP 403.");
+    }),
+  );
+
+  it.effect("is forwarded by the lazy registry provider", () =>
+    Effect.gen(function* () {
+      const provider = yield* makeProvider({
+        getPullRequestActivity: (input) =>
+          Effect.succeed({
+            provider: "bitbucket" as const,
+            number: Number(input.reference),
+            headSha: null,
+            viewer: null,
+            timeline: [],
+            timelineTruncated: false,
+            reviewThreads: [],
+            reviewThreadsTruncated: false,
+            pendingReview: null,
+          }),
+        mergePullRequest: () => Effect.succeed({ outcome: "merged" as const }),
+      });
+      const lazy = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "bitbucket",
+        Effect.succeed(provider),
+      );
+      for (const method of [
+        "getChangeRequestActivity",
+        "getChangeRequestFileContents",
+        "submitChangeRequestReview",
+        "replyToReviewThread",
+        "setReviewThreadResolved",
+        "updateChangeRequestComment",
+        "updateChangeRequest",
+        "mergeChangeRequest",
+      ] as const) {
+        assert.strictEqual(typeof provider[method], "function", method);
+      }
+      const activity = yield* lazy.getChangeRequestActivity!({ cwd: "/repo", reference: "7" });
+      assert.strictEqual(activity.number, 7);
+      const merged = yield* lazy.mergeChangeRequest!({
+        cwd: "/repo",
+        reference: "7",
+        mergeMethod: "merge",
+      });
+      assert.deepStrictEqual(merged, { outcome: "merged" });
     }),
   );
 });

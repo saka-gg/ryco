@@ -23,11 +23,17 @@ export function resolveProjectPreferences(input: {
   const { settings, project } = input;
   const overrides = project ? settings.projectPreferences[project.id] : undefined;
   const initial = overrides?.initialModelSelection;
+  // A model saved on the project before project defaults moved into settings
+  // ranks below the node's default: it was usually that day's built-in model,
+  // copied in when the project was created, and providers retire models. It
+  // only stands in for Ryco's built-in model, and an explicit project reset
+  // (`initialModelSelection: null`) masks it.
   const legacy =
-    overrides && Object.hasOwn(overrides, "initialModelSelection")
+    (overrides && Object.hasOwn(overrides, "initialModelSelection")) ||
+    settings.initialModelSelection
       ? null
       : project?.defaultModelSelection;
-  const model = initial ?? legacy ?? settings.initialModelSelection;
+  const model = initial ?? settings.initialModelSelection ?? legacy;
   const root = project ? settings.projectWorktreeRoots[project.id] : undefined;
   return {
     overrides: overrides ?? {},
@@ -35,10 +41,10 @@ export function resolveProjectPreferences(input: {
       value: model ?? { instanceId: ProviderInstanceId.make("codex"), model: DEFAULT_MODEL },
       source: initial
         ? "project"
-        : legacy
-          ? "legacy-project"
-          : settings.initialModelSelection
-            ? "node"
+        : settings.initialModelSelection
+          ? "node"
+          : legacy
+            ? "legacy-project"
             : "builtin",
     },
     defaultThreadEnvMode: {

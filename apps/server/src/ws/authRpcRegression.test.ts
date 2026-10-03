@@ -286,7 +286,8 @@ it.effect("rejects client sessions from source-control change-request listing", 
 
 it.effect("returns a provider error when pull request merge is unsupported", () =>
   Effect.gen(function* () {
-    const provider = { kind: "gitlab" } as SourceControlProviderShape;
+    // A host the capability matrix gives no merge support.
+    const provider = { kind: "unknown" } as SourceControlProviderShape;
     const ctx = {
       ...makeAccessGuards("owner"),
       sourceControlRegistry: { resolve: () => Effect.succeed(provider) },
@@ -303,8 +304,10 @@ it.effect("returns a provider error when pull request merge is unsupported", () 
 
     expect(Schema.is(SourceControlProviderError)(error)).toBe(true);
     if (Schema.is(SourceControlProviderError)(error)) {
-      expect(error.provider).toBe("gitlab");
-      expect(error.detail).toContain("does not support pull request merges");
+      expect(error.provider).toBe("unknown");
+      expect(error.detail).toBe(
+        "This source control provider does not support merging change requests.",
+      );
     }
   }),
 );

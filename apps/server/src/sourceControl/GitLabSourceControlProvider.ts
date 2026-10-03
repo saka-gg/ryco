@@ -10,6 +10,7 @@ import {
 
 import * as GitLabCli from "./GitLabCli.ts";
 import * as GitLabIssues from "./gitLabIssues.ts";
+import * as GitLabMergeRequestPage from "./gitLabMergeRequestPage.ts";
 import * as GitLabMergeRequests from "./gitLabMergeRequests.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 export { gitlabDiscovery as discovery } from "./SourceControlProviderDiscoveryCatalog.ts";
@@ -45,6 +46,16 @@ function toChangeRequest(summary: GitLabCli.GitLabMergeRequestSummary): ChangeRe
     ...(summary.headRepositoryOwnerLogin !== undefined
       ? { headRepositoryOwnerLogin: summary.headRepositoryOwnerLogin }
       : {}),
+    ...(summary.isDraft !== undefined ? { isDraft: summary.isDraft } : {}),
+    ...(summary.author ? { author: summary.author } : {}),
+    ...(summary.assignees && summary.assignees.length > 0 ? { assignees: summary.assignees } : {}),
+    ...(summary.labels && summary.labels.length > 0 ? { labels: summary.labels } : {}),
+    ...(summary.commentsCount !== undefined ? { commentsCount: summary.commentsCount } : {}),
+    ...(summary.headSha ? { headSha: summary.headSha } : {}),
+    ...(summary.mergeability ? { mergeability: summary.mergeability } : {}),
+    ...(summary.mergeStateStatus ? { mergeStateStatus: summary.mergeStateStatus } : {}),
+    ...(summary.reviewDecision ? { reviewDecision: summary.reviewDecision } : {}),
+    ...(summary.createdAt ? { createdAt: summary.createdAt } : {}),
   };
 }
 
@@ -102,22 +113,70 @@ function toChangeRequestDetail(
 export const make = Effect.fn("makeGitLabSourceControlProvider")(function* () {
   const gitlab = yield* GitLabCli.GitLabCli;
 
-  return SourceControlProvider.SourceControlProvider.of({
+  /** The page runner for one checkout: `glab api` resolves `:fullpath` from `cwd`. */
+  const callIn =
+    (cwd: string): GitLabMergeRequestPage.GitLabCall =>
+    (operation, request, options) =>
+      gitlab.api({ cwd, operation, request, ...options });
+
+  const run = <A>(
+    operation: string,
+    effect: Effect.Effect<A, GitLabCli.GitLabCliError>,
+  ): Effect.Effect<A, SourceControlProviderError> =>
+    effect.pipe(Effect.mapError((error) => providerError(operation, error)));
+
+  const getChangeRequestDetail: SourceControlProvider.SourceControlProviderShape["getChangeRequestDetail"] =
+    (input) =>
+      Effect.gen(function* () {
+        const raw = yield* gitlab.getMergeRequestDetail({
+          cwd: input.cwd,
+          reference: input.reference,
+        });
+        const detail = toChangeRequestDetail(raw, { fullContent: input.fullContent ?? false });
+        if (!raw.facts) return detail;
+        const readiness = yield* GitLabMergeRequestPage.fetchGitLabDetailReadiness(
+          callIn(input.cwd),
+          raw.facts,
+          String(raw.number),
+        );
+        return { ...detail, ...readiness };
+      }).pipe(Effect.mapError((error) => providerError("getChangeRequestDetail", error)));
+
+  const freshDetail = (input: { readonly cwd: string; readonly reference: string }) =>
+    getChangeRequestDetail({ cwd: input.cwd, reference: input.reference, fullContent: true });
+
+  const provider = SourceControlProvider.SourceControlProvider.of({
     kind: "gitlab",
     listChangeRequests: (input) => {
       const source = SourceControlProvider.sourceControlRefFromInput(input);
-      return gitlab
-        .listMergeRequests({
-          cwd: input.cwd,
-          headSelector: input.headSelector,
-          ...(source ? { source } : {}),
-          state: input.state,
-          ...(input.limit !== undefined ? { limit: input.limit } : {}),
-        })
-        .pipe(
-          Effect.map((items) => items.map(toChangeRequest)),
-          Effect.mapError((error) => providerError("listChangeRequests", error)),
-        );
+      const query = input.query?.trim() ?? "";
+      const call = callIn(input.cwd);
+      const records =
+        input.involvement !== undefined || query.length > 0
+          ? GitLabMergeRequestPage.listGitLabMergeRequestsFiltered(call, {
+              state: input.state,
+              involvement: input.involvement,
+              query,
+              sourceBranch: SourceControlProvider.sourceBranch(input) || undefined,
+              limit: input.limit,
+            })
+          : gitlab.listMergeRequests({
+              cwd: input.cwd,
+              headSelector: input.headSelector,
+              ...(source ? { source } : {}),
+              state: input.state,
+              ...(input.limit !== undefined ? { limit: input.limit } : {}),
+            });
+      return records.pipe(
+        Effect.map((items) => items.map(toChangeRequest)),
+        // The page's lists (no branch) show each row's pipeline.
+        Effect.flatMap((rows) =>
+          input.headSelector.trim().length === 0 && input.includeStackSummary !== false
+            ? GitLabMergeRequestPage.enrichGitLabListRowsWithPipelines(call, rows)
+            : Effect.succeed(rows),
+        ),
+        Effect.mapError((error) => providerError("listChangeRequests", error)),
+      );
     },
     getChangeRequest: (input) =>
       gitlab.getMergeRequest(input).pipe(
@@ -135,6 +194,7 @@ export const make = Effect.fn("makeGitLabSourceControlProvider")(function* () {
           ...(input.target ? { target: input.target } : {}),
           title: input.title,
           bodyFile: input.bodyFile,
+          ...(input.draft === true ? { draft: true } : {}),
         })
         .pipe(Effect.mapError((error) => providerError("createChangeRequest", error)));
     },
@@ -208,30 +268,70 @@ export const make = Effect.fn("makeGitLabSourceControlProvider")(function* () {
           Effect.map((items) => items.map(toChangeRequest)),
           Effect.mapError((error) => providerError("searchChangeRequests", error)),
         ),
-    getChangeRequestDetail: (input) =>
-      gitlab.getMergeRequestDetail({ cwd: input.cwd, reference: input.reference }).pipe(
-        Effect.map((raw) =>
-          toChangeRequestDetail(raw, { fullContent: input.fullContent ?? false }),
-        ),
-        Effect.mapError((error) => providerError("getChangeRequestDetail", error)),
-      ),
-    addChangeRequestComment: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "gitlab",
-          operation: "addChangeRequestComment",
-          detail: "Not implemented for gitlab",
-        }),
-      ),
+    getChangeRequestDetail,
+    addChangeRequestComment: (input) =>
+      run(
+        "addChangeRequestComment",
+        GitLabMergeRequestPage.addGitLabComment(callIn(input.cwd), input),
+      ).pipe(Effect.andThen(() => freshDetail(input))),
+    // Reading award emoji takes one request per note over REST, so the page
+    // could not show existing reactions; `reactions` stays off.
     addChangeRequestCommentReaction: () =>
       Effect.fail(
         new SourceControlProviderError({
           provider: "gitlab",
           operation: "addChangeRequestCommentReaction",
-          detail: "Not implemented for gitlab",
+          detail: "GitLab does not support comment reactions.",
         }),
       ),
-    getChangeRequestDiff: (_input) => Effect.succeed(""),
+    getChangeRequestDiff: (input) =>
+      run(
+        "getChangeRequestDiff",
+        GitLabMergeRequestPage.fetchGitLabChangeRequestDiff(callIn(input.cwd), input),
+      ),
+    mergeChangeRequest: (input) =>
+      run(
+        "mergeChangeRequest",
+        GitLabMergeRequestPage.mergeGitLabMergeRequest(callIn(input.cwd), input),
+      ),
+    getChangeRequestActivity: (input) =>
+      run(
+        "getChangeRequestActivity",
+        GitLabMergeRequestPage.fetchGitLabChangeRequestActivity(callIn(input.cwd), input.reference),
+      ),
+    getChangeRequestFileContents: ({ context: _context, ...input }) =>
+      run(
+        "getChangeRequestFileContents",
+        GitLabMergeRequestPage.fetchGitLabFileContents(callIn(input.cwd), input),
+      ),
+    submitChangeRequestReview: ({ context: _context, ...input }) =>
+      run(
+        "submitChangeRequestReview",
+        GitLabMergeRequestPage.submitGitLabReview(callIn(input.cwd), input),
+      ),
+    replyToReviewThread: (input) =>
+      run(
+        "replyToReviewThread",
+        GitLabMergeRequestPage.replyToGitLabThread(callIn(input.cwd), input),
+      ).pipe(Effect.map((thread) => ({ thread }))),
+    setReviewThreadResolved: (input) =>
+      run(
+        "setReviewThreadResolved",
+        GitLabMergeRequestPage.setGitLabThreadResolved(callIn(input.cwd), input),
+      ),
+    updateChangeRequestComment: ({ context: _context, ...input }) =>
+      run(
+        "updateChangeRequestComment",
+        GitLabMergeRequestPage.updateGitLabComment(callIn(input.cwd), input),
+      ),
+    updateChangeRequest: (input) =>
+      run(
+        "updateChangeRequest",
+        GitLabMergeRequestPage.updateGitLabMergeRequest(callIn(input.cwd), input),
+      ).pipe(
+        Effect.andThen(() => freshDetail(input)),
+        Effect.map((detail) => ({ detail })),
+      ),
     createIssue: () =>
       Effect.fail(
         new SourceControlProviderError({
@@ -240,29 +340,17 @@ export const make = Effect.fn("makeGitLabSourceControlProvider")(function* () {
           detail: "Not implemented in Phase 1",
         }),
       ),
-    listLabels: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "gitlab",
-          operation: "listLabels",
-          detail: "Not implemented in Phase 1",
-        }),
-      ),
-    listAssignees: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "gitlab",
-          operation: "listAssignees",
-          detail: "Not implemented in Phase 1",
-        }),
-      ),
-    getPullRequestState: () =>
-      Effect.fail(
-        new SourceControlProviderError({
-          provider: "gitlab",
-          operation: "getPullRequestState",
-          detail: "Not implemented for gitlab",
-        }),
+    listLabels: (input) =>
+      run("listLabels", GitLabMergeRequestPage.listGitLabLabels(callIn(input.cwd))),
+    listAssignees: (input) =>
+      run("listAssignees", GitLabMergeRequestPage.listGitLabAssignees(callIn(input.cwd))),
+    getPullRequestState: (input) =>
+      gitlab.getMergeRequest({ cwd: input.cwd, reference: String(input.number) }).pipe(
+        Effect.map((summary) => ({
+          state: summary.state ?? "open",
+          isDraft: summary.isDraft ?? false,
+        })),
+        Effect.mapError((error) => providerError("getPullRequestState", error)),
       ),
     getIssueState: () =>
       Effect.fail(
@@ -272,7 +360,24 @@ export const make = Effect.fn("makeGitLabSourceControlProvider")(function* () {
           detail: "Not implemented for gitlab",
         }),
       ),
+    listWorkflowRuns: (input) =>
+      run(
+        "listWorkflowRuns",
+        GitLabMergeRequestPage.listGitLabWorkflowRuns(callIn(input.cwd), input),
+      ),
+    getWorkflowRunJobs: (input) =>
+      run(
+        "getWorkflowRunJobs",
+        GitLabMergeRequestPage.listGitLabPipelineJobs(callIn(input.cwd), input.runId),
+      ),
+    getWorkflowJobLog: (input) =>
+      run("getWorkflowJobLog", GitLabMergeRequestPage.getGitLabJobLog(callIn(input.cwd), input)),
+    rerunWorkflow: ({ context: _context, ...input }) =>
+      run("rerunWorkflow", GitLabMergeRequestPage.rerunGitLabPipeline(callIn(input.cwd), input)),
   });
+  // Guards involvement ("mentioned"/"involved" fail in the provider), list
+  // search, commit diffs and drafts against the capability matrix.
+  return SourceControlProvider.withUnsupportedChangeRequestOptionGuards(provider);
 });
 
 export const layer = Layer.effect(SourceControlProvider.SourceControlProvider, make());

@@ -74,6 +74,38 @@ describe("authoritative project preferences", () => {
     ).toBe("builtin");
     expect(legacy.defaultModelSelection).toEqual(model);
   });
+  it("ranks a node default above a legacy project model, and a project override above both", () => {
+    const legacyModel = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    const legacy = { ...project, defaultModelSelection: legacyModel };
+    let settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      initialModelSelection: model,
+    });
+    expect(resolveProjectPreferences({ settings, project: legacy }).initialModelSelection).toEqual({
+      value: model,
+      source: "node",
+    });
+    const override = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-x" };
+    settings = applyServerSettingsPatch(settings, {
+      projectPreferences: { p: { initialModelSelection: override } },
+    });
+    expect(
+      resolveProjectPreferences({ settings, project: legacy }).initialModelSelection,
+    ).toMatchObject({ value: override, source: "project" });
+    // An explicit project reset inherits the node default, never the legacy model.
+    settings = applyServerSettingsPatch(settings, {
+      projectPreferences: { p: { initialModelSelection: null } },
+    });
+    expect(resolveProjectPreferences({ settings, project: legacy }).initialModelSelection).toEqual({
+      value: model,
+      source: "node",
+    });
+    // Without a node default the legacy model still stands in for the built-in one.
+    settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {});
+    expect(resolveProjectPreferences({ settings, project: legacy }).initialModelSelection).toEqual({
+      value: legacyModel,
+      source: "legacy-project",
+    });
+  });
   it("keeps empty prefixes and false setup as explicit overrides", () => {
     let settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       projectPreferences: {

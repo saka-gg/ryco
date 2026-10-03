@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ryco · Pull Requests Lab</title>
+    <link rel="icon" href="data:," />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="dir-a.css" />
+    <link rel="stylesheet" href="dir-b.css" />
+    <link rel="stylesheet" href="dir-c.css" />
+  </head>
+  <body>
+    <!--
+      Window frame: [ app sidebar | page ]. Directions mount into #page
+      (a fresh <div class="dir-root dir-x"> per mount). #page is an
+      inline-size container named "page": use @container page (…) for
+      narrow-window layouts. Hash state: see README.md.
+    -->
+    <div class="lab-stage">
+      <div class="win" id="win">
+        <aside class="asb" id="asb" aria-label="Ryco sidebar">
+          <div class="asb-head">
+            <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+            <button class="asb-ib" type="button" data-tip="Statistics" data-tip-side="bottom">
+              <i data-icon="stats"></i>
+            </button>
+            <button
+              class="asb-ib"
+              type="button"
+              data-tip="Switch to Projects"
+              data-tip-side="bottom"
+            >
+              <i data-icon="inbox"></i>
+            </button>
+            <button class="asb-ib" type="button" data-tip="Settings" data-tip-side="bottom">
+              <i data-icon="settings"></i>
+            </button>
+            <button
+              class="asb-ib"
+              type="button"
+              id="asb-collapse"
+              data-tip="Hide sidebar"
+              data-kbd="⌥B"
+              data-tip-side="bottom"
+            >
+              <i data-icon="sidebar"></i>
+            </button>
+          </div>
+          <nav class="asb-nav">
+            <button class="asb-act primary" type="button">
+              <i data-icon="pen"></i><span>New thread</span><span class="hint">⌘N</span>
+            </button>
+            <button class="asb-act" type="button">
+              <i data-icon="search"></i><span>Search</span><kbd>⌘K</kbd>
+            </button>
+            <button class="asb-act" type="button" id="asb-prs" aria-current="page">
+              <i data-icon="pr-open"></i><span>Pull requests</span
+              ><span class="cnt" id="asb-pr-count" data-tip="Waiting on your review"></span>
+            </button>
+          </nav>
+          <div class="asb-list" id="asb-list"></div>
+        </aside>
+        <main class="page" id="page"></main>
+      </div>
+    </div>
+    <div class="labsw" id="labsw" role="toolbar" aria-label="Lab controls"></div>
+
+    <script src="data.js"></script>
+    <script src="core.js"></script>
+    <script src="dir-a.js"></script>
+    <script src="dir-b.js"></script>
+    <script src="dir-c.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

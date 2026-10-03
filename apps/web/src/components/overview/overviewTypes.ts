@@ -105,6 +105,8 @@ export interface OverviewLayoutProps {
   overviewItems?: ReadonlyArray<OverviewPanelItem> | undefined;
   pullRequest?: OverviewPullRequestState | null | undefined;
   onRefreshPullRequest?: (() => void) | undefined;
+  /** Opens the pull request on the pull requests page; ⌘/Ctrl-click keeps the host link. */
+  onOpenPullRequestInApp?: (() => void) | undefined;
   isRefreshingPullRequest?: boolean | undefined;
   subagents?: ReadonlyArray<ThreadSubagentView> | undefined;
   sourceControlActions?: ReactNode | undefined;

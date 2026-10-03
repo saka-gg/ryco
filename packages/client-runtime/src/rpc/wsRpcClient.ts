@@ -153,6 +153,30 @@ export interface WsRpcClient {
     readonly getWorkflowRunJobs: RpcUnaryMethod<typeof WS_METHODS.sourceControlGetWorkflowRunJobs>;
     readonly getWorkflowJobLog: RpcUnaryMethod<typeof WS_METHODS.sourceControlGetWorkflowJobLog>;
     readonly rerunWorkflow: RpcUnaryMethod<typeof WS_METHODS.sourceControlRerunWorkflow>;
+    readonly getChangeRequestActivity: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlGetChangeRequestActivity
+    >;
+    readonly getChangeRequestFileContents: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlGetChangeRequestFileContents
+    >;
+    readonly submitChangeRequestReview: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlSubmitChangeRequestReview
+    >;
+    readonly replyToReviewThread: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlReplyToReviewThread
+    >;
+    readonly setReviewThreadResolved: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlSetReviewThreadResolved
+    >;
+    readonly updateChangeRequestComment: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlUpdateChangeRequestComment
+    >;
+    readonly updateChangeRequest: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlUpdateChangeRequest
+    >;
+    readonly createChangeRequest: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlCreateChangeRequest
+    >;
   };
   readonly textGeneration: {
     readonly askSideQuestion: RpcUnaryMethod<typeof WS_METHODS.textGenerationAskSideQuestion>;
@@ -539,6 +563,32 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.sourceControlGetWorkflowJobLog](input)),
       rerunWorkflow: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlRerunWorkflow](input)),
+      getChangeRequestActivity: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlGetChangeRequestActivity](input),
+        ),
+      getChangeRequestFileContents: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlGetChangeRequestFileContents](input),
+        ),
+      submitChangeRequestReview: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlSubmitChangeRequestReview](input),
+        ),
+      replyToReviewThread: (input) =>
+        transport.request((client) => client[WS_METHODS.sourceControlReplyToReviewThread](input)),
+      setReviewThreadResolved: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlSetReviewThreadResolved](input),
+        ),
+      updateChangeRequestComment: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlUpdateChangeRequestComment](input),
+        ),
+      updateChangeRequest: (input) =>
+        transport.request((client) => client[WS_METHODS.sourceControlUpdateChangeRequest](input)),
+      createChangeRequest: (input) =>
+        transport.request((client) => client[WS_METHODS.sourceControlCreateChangeRequest](input)),
     },
     textGeneration: {
       askSideQuestion: (input) =>

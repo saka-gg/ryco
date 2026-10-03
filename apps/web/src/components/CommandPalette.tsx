@@ -1,14 +1,18 @@
 "use client";
 
-import { useAppKeybindings } from "../appKeybindings";
+import { WS_METHODS } from "@ryco/contracts";
+import { useNavigate, useParams } from "@tanstack/react-router";
 
-import { useParams } from "@tanstack/react-router";
+import { useAppKeybindings } from "../appKeybindings";
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { ComposerHandleContext } from "../composerHandleContext";
+import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../keybindings";
+import { getPresentationTier } from "../lib/presentationTier";
 import { isTerminalFocused } from "../lib/terminalFocus";
+import { buildPullRequestsPageLocation } from "../pullRequestsRoute";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
@@ -52,6 +56,13 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     select: (params) => resolveThreadRouteTarget(params),
   });
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
+  const navigate = useNavigate();
+  // `pullRequests.open` (no default key) opens the page wherever the user is.
+  const pullRequestsAllowed = useHostedRpcCapability(
+    WS_METHODS.sourceControlListChangeRequests,
+  ).allowed;
+  const pullRequestsAllowedRef = useRef(pullRequestsAllowed);
+  pullRequestsAllowedRef.current = pullRequestsAllowed;
   const terminalOpen = useTerminalStateStore((state) =>
     routeThreadRef
       ? selectThreadTerminalState(state.terminalStateByThreadKey, routeThreadRef).terminalOpen
@@ -69,6 +80,14 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           terminalOpen,
         },
       });
+      if (command === "pullRequests.open") {
+        if (!pullRequestsAllowedRef.current || getPresentationTier() === "phone") return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        void navigate(buildPullRequestsPageLocation());
+        return;
+      }
       if (command !== "commandPalette.toggle") {
         return;
       }
@@ -78,7 +97,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [keybindings, terminalOpen, toggleOpen]);
+  }, [keybindings, navigate, setOpen, terminalOpen, toggleOpen]);
 
   useEffect(() => {
     return () => {

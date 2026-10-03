@@ -3,7 +3,7 @@ import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { StorageService } from "../storage/StorageService.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
-import { Cause, Effect, Metric, Option, Schema, Stream } from "effect";
+import { Cause, Effect, FileSystem, Metric, Option, Schema, Stream } from "effect";
 import {
   AuthSessionId,
   USAGE_CONTRACT_VERSION,
@@ -75,7 +75,10 @@ import { ProjectionWorktreeRepository } from "../persistence/Services/Projection
 import { refreshWorktreeSourceControlState } from "../sourceControl/refreshWorktreeSourceControlState.ts";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
-import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
+import {
+  requireChangeRequestCapability,
+  type SourceControlProviderShape,
+} from "../sourceControl/SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { BootstrapCredentialService } from "../auth/Services/BootstrapCredentialService.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
@@ -192,6 +195,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const projectAvatarStore = yield* Effect.serviceOption(ProjectAvatarStore);
     const workspaceEntries = yield* WorkspaceEntries;
     const workspaceFileSystem = yield* WorkspaceFileSystem;
+    const fileSystem = yield* FileSystem.FileSystem;
     const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
     const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
     const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
@@ -833,6 +837,10 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       ) => Effect.Effect<A, SourceControlProviderError> | undefined;
     }) =>
       sourceControlRegistry.resolve({ cwd: input.cwd }).pipe(
+        // Hosts the capability matrix lists without CI fail before the provider loads.
+        Effect.tap((provider) =>
+          requireChangeRequestCapability(provider.kind, { operation: input.operation }),
+        ),
         Effect.flatMap((provider) => {
           const effect = input.invoke(provider);
           if (effect) return effect;
@@ -885,6 +893,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectAvatarStore,
       workspaceEntries,
       workspaceFileSystem,
+      fileSystem,
       workspaceAccessPolicy,
       sourceControlDiscovery,
       sourceControlRepositories,

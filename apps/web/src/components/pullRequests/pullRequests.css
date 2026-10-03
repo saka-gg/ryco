@@ -1,0 +1,11 @@
+/*
+ * Pull requests page styles, one file per area so areas evolve independently.
+ * Motion reads the --app-motion-* tokens only, so reduced motion (which zeroes
+ * them) needs no extra rules unless a keyframe would otherwise flash.
+ */
+@import "./styles/shell.css";
+@import "./styles/list.css";
+@import "./styles/conversation.css";
+@import "./styles/rail.css";
+@import "./styles/files.css";
+@import "./styles/checks.css";

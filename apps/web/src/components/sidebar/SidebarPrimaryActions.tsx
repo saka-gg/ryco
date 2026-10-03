@@ -1,5 +1,10 @@
-import { SearchIcon, SquarePenIcon } from "lucide-react";
+import { WS_METHODS } from "@ryco/contracts";
+import { Link, useLocation } from "@tanstack/react-router";
+import { GitPullRequestIcon, SearchIcon, SquarePenIcon } from "lucide-react";
 import { memo } from "react";
+
+import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { cn } from "../../lib/utils";
 
 import { CommandDialogTrigger } from "../ui/command";
 import { Kbd } from "../ui/kbd";
@@ -23,6 +28,7 @@ export interface SidebarPrimaryActionsProps {
  * "Work in …" row retarget from there. "Search" opens the command palette, the
  * one place for everything else — adding a project, jumping to a thread,
  * starting a thread elsewhere — so neither mode can strand you without it.
+ * "Pull requests" opens the review page for every connected repository.
  */
 export const SidebarPrimaryActions = memo(function SidebarPrimaryActions({
   newThreadShortcutLabel,
@@ -30,6 +36,9 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions({
   onNewThread,
   searchShortcutLabel,
 }: SidebarPrimaryActionsProps) {
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const pullRequestsCapability = useHostedRpcCapability(WS_METHODS.sourceControlListChangeRequests);
+  const pullRequestsActive = pathname === "/pull-requests";
   return (
     <div className="space-y-px px-2 pb-1">
       <Tooltip>
@@ -68,6 +77,22 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions({
           </Kbd>
         ) : null}
       </CommandDialogTrigger>
+      {pullRequestsCapability.allowed ? (
+        <Link
+          to="/pull-requests"
+          aria-current={pullRequestsActive ? "page" : undefined}
+          data-testid="sidebar-pull-requests-link"
+          className={cn(
+            SIDEBAR_PRIMARY_ACTION_CLASS_NAME,
+            pullRequestsActive
+              ? "bg-sidebar-accent text-sidebar-accent-foreground"
+              : "text-muted-foreground/70 hover:text-foreground",
+          )}
+        >
+          <GitPullRequestIcon className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">Pull requests</span>
+        </Link>
+      ) : null}
     </div>
   );
 });

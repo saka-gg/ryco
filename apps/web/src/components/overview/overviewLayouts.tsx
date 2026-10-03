@@ -205,7 +205,10 @@ export function StatusBoardLayout(props: OverviewLayoutProps) {
             props.pullRequest.url
               ? {
                   href: props.pullRequest.url,
-                  ariaLabel: `Open pull request #${props.pullRequest.number} in a new tab`,
+                  ariaLabel: props.onOpenPullRequestInApp
+                    ? `Review pull request #${props.pullRequest.number} (⌘-click opens it in a new tab)`
+                    : `Open pull request #${props.pullRequest.number} in a new tab`,
+                  onOpenInApp: props.onOpenPullRequestInApp,
                 }
               : undefined
           }

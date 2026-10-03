@@ -33,10 +33,13 @@ their existing keys. `worktreeRoot` / `projectWorktreeRoots` retain their existi
 path validation and persistence. No repository configuration is read for these
 general preferences.
 
-The server resolver first uses a project model override, then the existing
-project `defaultModelSelection`, then the node's initial model, then Ryco's
-built-in model. A persisted `initialModelSelection: null` in a project's map
-explicitly selects inheritance and masks a legacy project preset. The legacy
+The server resolver first uses a project model override, then the node's
+initial model, then the existing project `defaultModelSelection`, then Ryco's
+built-in model. A legacy project preset therefore only stands in for the
+built-in model: most were the built-in model of the day, copied in when the
+project was created, so a node default replaces them everywhere. A persisted
+`initialModelSelection: null` in a project's map explicitly selects inheritance
+and masks a legacy project preset. The legacy
 preset remains stored and readable by older nodes. Other null project patch
 fields remove that field. A null map entry removes that project's new overrides.
 Model replacements replace options as a whole, avoiding stale effort or fast-mode
@@ -63,7 +66,8 @@ Thread-location, branch-prefix, and setup sources are **node** whenever no proje
 override exists, including default-valued node preferences. This describes the
 inheritance layer without claiming whether a default-valued node preference was
 explicitly persisted. Model/root **builtin** sources describe their built-in
-fallbacks, and **legacy-project** identifies existing project model presets.
+fallbacks, and **legacy-project** identifies an existing project model preset in
+effect because the node has no initial model.
 
 ## Integration boundary
 

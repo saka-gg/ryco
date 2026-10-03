@@ -155,6 +155,7 @@ const RawRepositoryMergeCapabilitiesSchema = Schema.Struct({
   allow_merge_commit: Schema.Boolean,
   allow_squash_merge: Schema.Boolean,
   allow_rebase_merge: Schema.Boolean,
+  delete_branch_on_merge: Schema.optional(Schema.NullOr(Schema.Boolean)),
 });
 
 const decodeStackPage = decodeJsonResult(RawPullRequestStackResponseSchema);
@@ -385,14 +386,19 @@ export function decodeGitHubAsyncMergeResultJson(
 
 export function decodeGitHubRepositoryMergeCapabilitiesJson(
   raw: string,
-): Result.Result<SourceControlChangeRequestMergeCapabilities, string> {
+): Result.Result<
+  SourceControlChangeRequestMergeCapabilities & { readonly deleteBranchOnMerge?: boolean },
+  string
+> {
   const decoded = decodeMergeCapabilities(raw);
   if (!Result.isSuccess(decoded)) {
     return Result.fail(`Invalid GitHub repository response: ${formatSchemaError(decoded.failure)}`);
   }
+  const deleteBranchOnMerge = decoded.success.delete_branch_on_merge;
   return Result.succeed({
     merge: decoded.success.allow_merge_commit,
     squash: decoded.success.allow_squash_merge,
     rebase: decoded.success.allow_rebase_merge,
+    ...(typeof deleteBranchOnMerge === "boolean" ? { deleteBranchOnMerge } : {}),
   });
 }

@@ -1,32 +1,51 @@
 import { Context, Effect } from "effect";
-import type {
-  SourceControlGetChangeRequestFilesViewedInput,
-  SourceControlChangeRequestFilesViewed,
-  SourceControlSetChangeRequestFileViewedInput,
-  SourceControlSetChangeRequestFileViewedResult,
-  ChangeRequest,
-  ChangeRequestState,
-  IssueState,
-  PullRequestState,
-  SourceControlAssigneeCandidate,
-  SourceControlAddCommentReactionInput,
-  SourceControlChangeRequestDetail,
-  SourceControlMergeChangeRequestInput,
-  SourceControlMergeChangeRequestResult,
-  SourceControlWorkflowJobLogResult,
-  SourceControlWorkflowRerunInput,
-  SourceControlWorkflowRerunResult,
-  SourceControlWorkflowRunJobsResult,
-  SourceControlWorkflowRunListResult,
-  SourceControlIssueDetail,
-  SourceControlIssueSummary,
-  SourceControlLabel,
+import {
   SourceControlProviderError,
-  SourceControlProviderInfo,
-  SourceControlProviderKind,
-  SourceControlRepositoryCloneUrls,
-  SourceControlRepositoryVisibility,
+  type ChangeRequestActivity,
+  type ChangeRequestActivityInput,
+  type ChangeRequestFileContents,
+  type ChangeRequestFileContentsInput,
+  type ChangeRequestInvolvement,
+  type ChangeRequestReplyToThreadInput,
+  type ChangeRequestReplyToThreadResult,
+  type ChangeRequestSetThreadResolvedInput,
+  type ChangeRequestSetThreadResolvedResult,
+  type ChangeRequestSubmitReviewInput,
+  type ChangeRequestSubmitReviewResult,
+  type ChangeRequestUpdateCommentInput,
+  type ChangeRequestUpdateCommentResult,
+  type ChangeRequestUpdateInput,
+  type ChangeRequestUpdateResult,
+  type SourceControlGetChangeRequestFilesViewedInput,
+  type SourceControlChangeRequestFilesViewed,
+  type SourceControlSetChangeRequestFileViewedInput,
+  type SourceControlSetChangeRequestFileViewedResult,
+  type ChangeRequest,
+  type ChangeRequestState,
+  type IssueState,
+  type PullRequestState,
+  type SourceControlAssigneeCandidate,
+  type SourceControlAddCommentReactionInput,
+  type SourceControlChangeRequestDetail,
+  type SourceControlMergeChangeRequestInput,
+  type SourceControlMergeChangeRequestResult,
+  type SourceControlWorkflowJobLogResult,
+  type SourceControlWorkflowRerunInput,
+  type SourceControlWorkflowRerunResult,
+  type SourceControlWorkflowRunJobsResult,
+  type SourceControlWorkflowRunListResult,
+  type SourceControlIssueDetail,
+  type SourceControlIssueSummary,
+  type SourceControlLabel,
+  type SourceControlProviderInfo,
+  type SourceControlProviderKind,
+  type SourceControlRepositoryCloneUrls,
+  type SourceControlRepositoryVisibility,
 } from "@ryco/contracts";
+import {
+  describeUnsupportedChangeRequestRequest,
+  type ChangeRequestHostRequest,
+} from "@ryco/shared/sourceControl";
 
 export interface SourceControlProviderContext {
   readonly provider: SourceControlProviderInfo;
@@ -73,6 +92,60 @@ export function sourceControlRefFromInput(input: {
   return input.source ?? parseSourceControlOwnerRef(input.headSelector);
 }
 
+/**
+ * Fail fast when the host capability matrix (`getChangeRequestHostCapabilities`)
+ * says `kind` cannot serve `request`, before any provider is loaded or called.
+ * Silently ignoring an option would return unfiltered lists, whole-PR diffs,
+ * or non-draft change requests, which is worse than a clear error.
+ */
+export function requireChangeRequestCapability(
+  kind: SourceControlProviderKind,
+  request: ChangeRequestHostRequest,
+): Effect.Effect<void, SourceControlProviderError> {
+  const detail = describeUnsupportedChangeRequestRequest(kind, request);
+  return detail === null
+    ? Effect.void
+    : Effect.fail(
+        new SourceControlProviderError({ provider: kind, operation: request.operation, detail }),
+      );
+}
+
+/** Optional change request operations a provider may not implement. */
+export type OptionalChangeRequestOperation =
+  | "mergeChangeRequest"
+  | "getChangeRequestActivity"
+  | "getChangeRequestFileContents"
+  | "submitChangeRequestReview"
+  | "replyToReviewThread"
+  | "setReviewThreadResolved"
+  | "updateChangeRequestComment"
+  | "updateChangeRequest";
+
+const OPTIONAL_CHANGE_REQUEST_OPERATION_LABELS: Record<OptionalChangeRequestOperation, string> = {
+  mergeChangeRequest: "pull request merges",
+  getChangeRequestActivity: "the review timeline",
+  getChangeRequestFileContents: "expanding diff context",
+  submitChangeRequestReview: "submitting reviews",
+  replyToReviewThread: "replying to review threads",
+  setReviewThreadResolved: "resolving review threads",
+  updateChangeRequestComment: "editing comments",
+  updateChangeRequest: "updating change requests",
+};
+
+/** The provider has no method for `operation` (the matrix may still list it as unsupported). */
+export function unsupportedChangeRequestOperation(
+  kind: SourceControlProviderKind,
+  operation: OptionalChangeRequestOperation,
+): Effect.Effect<never, SourceControlProviderError> {
+  return Effect.fail(
+    new SourceControlProviderError({
+      provider: kind,
+      operation,
+      detail: `This source control provider does not support ${OPTIONAL_CHANGE_REQUEST_OPERATION_LABELS[operation]}.`,
+    }),
+  );
+}
+
 export interface SourceControlProviderShape {
   readonly kind: SourceControlProviderKind;
   readonly listChangeRequests: (input: {
@@ -84,6 +157,13 @@ export interface SourceControlProviderShape {
     readonly limit?: number;
     /** Skip optional stack enrichment when only branch/status fields are consumed. */
     readonly includeStackSummary?: boolean;
+    /**
+     * Narrow to change requests involving the authenticated viewer. Providers
+     * that cannot filter server-side must fail rather than return everything.
+     */
+    readonly involvement?: ChangeRequestInvolvement;
+    /** Free-text search combined with `involvement` and `state`; same failure rule. */
+    readonly query?: string;
   }) => Effect.Effect<ReadonlyArray<ChangeRequest>, SourceControlProviderError>;
   readonly getChangeRequest: (input: {
     readonly cwd: string;
@@ -99,6 +179,8 @@ export interface SourceControlProviderShape {
     readonly headSelector: string;
     readonly title: string;
     readonly bodyFile: string;
+    /** Open as a draft; providers that cannot must fail instead of opening it ready. */
+    readonly draft?: boolean;
   }) => Effect.Effect<void, SourceControlProviderError>;
   readonly getRepositoryCloneUrls: (input: {
     readonly cwd: string;
@@ -195,6 +277,8 @@ export interface SourceControlProviderShape {
   ) => Effect.Effect<SourceControlSetChangeRequestFileViewedResult, SourceControlProviderError>;
   readonly getChangeRequestDiff: (input: {
     readonly expectedHeadSha?: string | undefined;
+    /** Scope to one commit of the change request; providers that cannot must fail. */
+    readonly commitSha?: string | undefined;
     readonly cwd: string;
     readonly context?: SourceControlProviderContext;
     readonly reference: string;
@@ -204,6 +288,31 @@ export interface SourceControlProviderShape {
       readonly context?: SourceControlProviderContext;
     },
   ) => Effect.Effect<SourceControlMergeChangeRequestResult, SourceControlProviderError>;
+  /** Review conversation, timeline, and viewer capabilities for the pull request page. */
+  readonly getChangeRequestActivity?: (
+    input: ChangeRequestActivityInput & { readonly context?: SourceControlProviderContext },
+  ) => Effect.Effect<ChangeRequestActivity, SourceControlProviderError>;
+  readonly getChangeRequestFileContents?: (
+    input: ChangeRequestFileContentsInput & { readonly context?: SourceControlProviderContext },
+  ) => Effect.Effect<ChangeRequestFileContents, SourceControlProviderError>;
+  readonly submitChangeRequestReview?: (
+    input: ChangeRequestSubmitReviewInput & { readonly context?: SourceControlProviderContext },
+  ) => Effect.Effect<ChangeRequestSubmitReviewResult, SourceControlProviderError>;
+  readonly replyToReviewThread?: (
+    input: ChangeRequestReplyToThreadInput & { readonly context?: SourceControlProviderContext },
+  ) => Effect.Effect<ChangeRequestReplyToThreadResult, SourceControlProviderError>;
+  readonly setReviewThreadResolved?: (
+    input: ChangeRequestSetThreadResolvedInput & {
+      readonly context?: SourceControlProviderContext;
+    },
+  ) => Effect.Effect<ChangeRequestSetThreadResolvedResult, SourceControlProviderError>;
+  readonly updateChangeRequestComment?: (
+    input: ChangeRequestUpdateCommentInput & { readonly context?: SourceControlProviderContext },
+  ) => Effect.Effect<ChangeRequestUpdateCommentResult, SourceControlProviderError>;
+  /** Apply one lifecycle action and return the fresh, uncapped detail. */
+  readonly updateChangeRequest?: (
+    input: ChangeRequestUpdateInput & { readonly context?: SourceControlProviderContext },
+  ) => Effect.Effect<ChangeRequestUpdateResult, SourceControlProviderError>;
   readonly createIssue: (input: {
     readonly cwd: string;
     readonly context?: SourceControlProviderContext;
@@ -256,6 +365,37 @@ export interface SourceControlProviderShape {
   readonly rerunWorkflow?: (
     input: SourceControlWorkflowRerunInput & { readonly context?: SourceControlProviderContext },
   ) => Effect.Effect<SourceControlWorkflowRerunResult, SourceControlProviderError>;
+}
+
+/**
+ * Guard the options of a provider's required list/diff/create methods with the
+ * capability matrix, so every caller (not only the ws handlers) asking for an
+ * involvement filter, list search, single-commit diff, or draft the host does
+ * not support gets a clear error instead of silently broader results. Flip the
+ * host's flag in `@ryco/shared/sourceControl` when the provider implements it.
+ */
+export function withUnsupportedChangeRequestOptionGuards(
+  provider: SourceControlProviderShape,
+): SourceControlProviderShape {
+  return {
+    ...provider,
+    listChangeRequests: (input) =>
+      requireChangeRequestCapability(provider.kind, {
+        operation: "listChangeRequests",
+        involvement: input.involvement,
+        query: input.query,
+      }).pipe(Effect.andThen(() => provider.listChangeRequests(input))),
+    getChangeRequestDiff: (input) =>
+      requireChangeRequestCapability(provider.kind, {
+        operation: "getChangeRequestDiff",
+        commitSha: input.commitSha,
+      }).pipe(Effect.andThen(() => provider.getChangeRequestDiff(input))),
+    createChangeRequest: (input) =>
+      requireChangeRequestCapability(provider.kind, {
+        operation: "createChangeRequest",
+        draft: input.draft,
+      }).pipe(Effect.andThen(() => provider.createChangeRequest(input))),
+  };
 }
 
 export class SourceControlProvider extends Context.Service<

@@ -29,12 +29,15 @@ describe("web bundle splitting boundaries", () => {
 
   it("keeps heavy route bodies out of the eager route registration graph", async () => {
     const statisticsRoute = await readSource("../routes/statistics.tsx");
+    const pullRequestsRoute = await readSource("../routes/pull-requests.tsx");
     const settingsRoute = await readSource("../routes/settings.tsx");
     const diagnosticsRoute = await readSource("../routes/_settings.diagnostics.tsx");
     const nativeAuthorizationRoute = await readSource("../routes/native.authorize.$handoffId.tsx");
 
     expect(statisticsRoute).toContain('import("../components/statistics/StatisticsPage")');
     expect(statisticsRoute).not.toContain("import { StatisticsPage }");
+    expect(pullRequestsRoute).toContain('import("../components/pullRequests/PullRequestsPage")');
+    expect(pullRequestsRoute).not.toContain("import { PullRequestsPage }");
     expect(settingsRoute).toContain('import("../components/settings/SettingsPage")');
     expect(settingsRoute).not.toContain("import { SettingsPage }");
     expect(diagnosticsRoute).toContain('import("../components/settings/DiagnosticsSettings")');

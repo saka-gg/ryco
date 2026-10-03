@@ -317,6 +317,24 @@ import {
   SourceControlWorkflowRunListInput,
   SourceControlWorkflowRunListResult,
 } from "./sourceControl.ts";
+import {
+  ChangeRequestActivity,
+  ChangeRequestActivityInput,
+  ChangeRequestCreateInput,
+  ChangeRequestFileContents,
+  ChangeRequestFileContentsInput,
+  ChangeRequestInvolvement,
+  ChangeRequestReplyToThreadInput,
+  ChangeRequestReplyToThreadResult,
+  ChangeRequestSetThreadResolvedInput,
+  ChangeRequestSetThreadResolvedResult,
+  ChangeRequestSubmitReviewInput,
+  ChangeRequestSubmitReviewResult,
+  ChangeRequestUpdateCommentInput,
+  ChangeRequestUpdateCommentResult,
+  ChangeRequestUpdateInput,
+  ChangeRequestUpdateResult,
+} from "./changeRequestReview.ts";
 import { VcsError } from "./vcs.ts";
 import {
   WorkItemAddCommentInput,
@@ -485,6 +503,14 @@ export const WS_METHODS = {
   sourceControlGetWorkflowRunJobs: "sourceControl.getWorkflowRunJobs",
   sourceControlGetWorkflowJobLog: "sourceControl.getWorkflowJobLog",
   sourceControlRerunWorkflow: "sourceControl.rerunWorkflow",
+  sourceControlGetChangeRequestActivity: "sourceControl.getChangeRequestActivity",
+  sourceControlGetChangeRequestFileContents: "sourceControl.getChangeRequestFileContents",
+  sourceControlSubmitChangeRequestReview: "sourceControl.submitChangeRequestReview",
+  sourceControlReplyToReviewThread: "sourceControl.replyToReviewThread",
+  sourceControlSetReviewThreadResolved: "sourceControl.setReviewThreadResolved",
+  sourceControlUpdateChangeRequestComment: "sourceControl.updateChangeRequestComment",
+  sourceControlUpdateChangeRequest: "sourceControl.updateChangeRequest",
+  sourceControlCreateChangeRequest: "sourceControl.createChangeRequest",
 
   // Text generation methods
   textGenerationGenerateIssueContent: "textGeneration.generateIssueContent",
@@ -1049,6 +1075,8 @@ export const WsSourceControlListChangeRequestsRpc = Rpc.make(
       state: Schema.Literals(["open", "closed", "merged", "all"]),
       limit: Schema.optional(Schema.Number),
       query: Schema.optional(Schema.String),
+      /** Narrow to change requests involving the authenticated viewer. */
+      involvement: Schema.optional(ChangeRequestInvolvement),
     }),
     success: Schema.Array(ChangeRequest),
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
@@ -1105,6 +1133,8 @@ export const WsSourceControlGetChangeRequestDiffRpc = Rpc.make(
       cwd: Schema.String,
       reference: Schema.String,
       expectedHeadSha: Schema.optional(TrimmedNonEmptyString),
+      /** Scope the diff to a single commit of the change request. */
+      commitSha: Schema.optional(TrimmedNonEmptyString),
     }),
     success: Schema.String,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
@@ -1206,6 +1236,78 @@ export const WsSourceControlRerunWorkflowRpc = Rpc.make(WS_METHODS.sourceControl
   success: SourceControlWorkflowRerunResult,
   error: Schema.Union([SourceControlProviderError, AuthRpcError]),
 });
+
+export const WsSourceControlGetChangeRequestActivityRpc = Rpc.make(
+  WS_METHODS.sourceControlGetChangeRequestActivity,
+  {
+    payload: ChangeRequestActivityInput,
+    success: ChangeRequestActivity,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlGetChangeRequestFileContentsRpc = Rpc.make(
+  WS_METHODS.sourceControlGetChangeRequestFileContents,
+  {
+    payload: ChangeRequestFileContentsInput,
+    success: ChangeRequestFileContents,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlSubmitChangeRequestReviewRpc = Rpc.make(
+  WS_METHODS.sourceControlSubmitChangeRequestReview,
+  {
+    payload: ChangeRequestSubmitReviewInput,
+    success: ChangeRequestSubmitReviewResult,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlReplyToReviewThreadRpc = Rpc.make(
+  WS_METHODS.sourceControlReplyToReviewThread,
+  {
+    payload: ChangeRequestReplyToThreadInput,
+    success: ChangeRequestReplyToThreadResult,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlSetReviewThreadResolvedRpc = Rpc.make(
+  WS_METHODS.sourceControlSetReviewThreadResolved,
+  {
+    payload: ChangeRequestSetThreadResolvedInput,
+    success: ChangeRequestSetThreadResolvedResult,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlUpdateChangeRequestCommentRpc = Rpc.make(
+  WS_METHODS.sourceControlUpdateChangeRequestComment,
+  {
+    payload: ChangeRequestUpdateCommentInput,
+    success: ChangeRequestUpdateCommentResult,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlUpdateChangeRequestRpc = Rpc.make(
+  WS_METHODS.sourceControlUpdateChangeRequest,
+  {
+    payload: ChangeRequestUpdateInput,
+    success: ChangeRequestUpdateResult,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlCreateChangeRequestRpc = Rpc.make(
+  WS_METHODS.sourceControlCreateChangeRequest,
+  {
+    payload: ChangeRequestCreateInput,
+    success: ChangeRequest,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
 
 export const WsTextGenerationAskSideQuestionRpc = Rpc.make(
   WS_METHODS.textGenerationAskSideQuestion,
@@ -2093,6 +2195,14 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlGetWorkflowRunJobsRpc
   | typeof WsSourceControlGetWorkflowJobLogRpc
   | typeof WsSourceControlRerunWorkflowRpc
+  | typeof WsSourceControlGetChangeRequestActivityRpc
+  | typeof WsSourceControlGetChangeRequestFileContentsRpc
+  | typeof WsSourceControlSubmitChangeRequestReviewRpc
+  | typeof WsSourceControlReplyToReviewThreadRpc
+  | typeof WsSourceControlSetReviewThreadResolvedRpc
+  | typeof WsSourceControlUpdateChangeRequestCommentRpc
+  | typeof WsSourceControlUpdateChangeRequestRpc
+  | typeof WsSourceControlCreateChangeRequestRpc
   | typeof WsTextGenerationAskSideQuestionRpc
   | typeof WsTextGenerationCancelSideQuestionRpc
   | typeof WsTextGenerationGenerateIssueContentRpc
@@ -2272,6 +2382,14 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlGetWorkflowRunJobsRpc,
   WsSourceControlGetWorkflowJobLogRpc,
   WsSourceControlRerunWorkflowRpc,
+  WsSourceControlGetChangeRequestActivityRpc,
+  WsSourceControlGetChangeRequestFileContentsRpc,
+  WsSourceControlSubmitChangeRequestReviewRpc,
+  WsSourceControlReplyToReviewThreadRpc,
+  WsSourceControlSetReviewThreadResolvedRpc,
+  WsSourceControlUpdateChangeRequestCommentRpc,
+  WsSourceControlUpdateChangeRequestRpc,
+  WsSourceControlCreateChangeRequestRpc,
   WsTextGenerationAskSideQuestionRpc,
   WsTextGenerationCancelSideQuestionRpc,
   WsTextGenerationGenerateIssueContentRpc,

@@ -138,7 +138,41 @@ function providerLoadError(kind: SourceControlProviderKind, cause: unknown) {
   });
 }
 
-const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(function* (
+type ProviderMethod<I, A> = (input: I) => Effect.Effect<A, SourceControlProviderError>;
+
+/** Forward an optional method through a lazily loaded provider, failing clearly when absent. */
+function lazyOptionalMethod<I, A>(
+  provider: Effect.Effect<
+    SourceControlProvider.SourceControlProviderShape,
+    SourceControlProviderError
+  >,
+  select: (
+    loaded: SourceControlProvider.SourceControlProviderShape,
+  ) => ProviderMethod<I, A> | undefined,
+  missing: () => Effect.Effect<A, SourceControlProviderError>,
+): ProviderMethod<I, A> {
+  return (input) =>
+    provider.pipe(
+      Effect.flatMap((loaded) => {
+        const method = select(loaded);
+        return method ? method(input) : missing();
+      }),
+    );
+}
+
+/** Bind the detected remote context into a method's input unless the caller supplied one. */
+function withProviderContext<
+  I extends { readonly context?: SourceControlProvider.SourceControlProviderContext },
+  A,
+>(
+  method: ProviderMethod<I, A>,
+  context: SourceControlProvider.SourceControlProviderContext,
+): ProviderMethod<I, A> {
+  return (input) => method({ ...input, context: input.context ?? context });
+}
+
+/** Exported for registry forwarding tests. */
+export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(function* (
   kind: SourceControlProviderKind,
   load: Effect.Effect<SourceControlProvider.SourceControlProviderShape, SourceControlProviderError>,
   options: LazyProviderOptions = {},
@@ -231,6 +265,54 @@ const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(function* (
       ),
     getChangeRequestDiff: (input) =>
       provider.pipe(Effect.flatMap((loaded) => loaded.getChangeRequestDiff(input))),
+    mergeChangeRequest: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.mergeChangeRequest,
+      () => SourceControlProvider.unsupportedChangeRequestOperation(kind, "mergeChangeRequest"),
+    ),
+    getChangeRequestActivity: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.getChangeRequestActivity,
+      () =>
+        SourceControlProvider.unsupportedChangeRequestOperation(kind, "getChangeRequestActivity"),
+    ),
+    getChangeRequestFileContents: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.getChangeRequestFileContents,
+      () =>
+        SourceControlProvider.unsupportedChangeRequestOperation(
+          kind,
+          "getChangeRequestFileContents",
+        ),
+    ),
+    submitChangeRequestReview: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.submitChangeRequestReview,
+      () =>
+        SourceControlProvider.unsupportedChangeRequestOperation(kind, "submitChangeRequestReview"),
+    ),
+    replyToReviewThread: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.replyToReviewThread,
+      () => SourceControlProvider.unsupportedChangeRequestOperation(kind, "replyToReviewThread"),
+    ),
+    setReviewThreadResolved: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.setReviewThreadResolved,
+      () =>
+        SourceControlProvider.unsupportedChangeRequestOperation(kind, "setReviewThreadResolved"),
+    ),
+    updateChangeRequestComment: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.updateChangeRequestComment,
+      () =>
+        SourceControlProvider.unsupportedChangeRequestOperation(kind, "updateChangeRequestComment"),
+    ),
+    updateChangeRequest: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.updateChangeRequest,
+      () => SourceControlProvider.unsupportedChangeRequestOperation(kind, "updateChangeRequest"),
+    ),
     createIssue: (input) => provider.pipe(Effect.flatMap((loaded) => loaded.createIssue(input))),
     listLabels: (input) => provider.pipe(Effect.flatMap((loaded) => loaded.listLabels(input))),
     listAssignees: (input) =>
@@ -298,7 +380,8 @@ function selectProviderContext(
   );
 }
 
-function bindProviderContext(
+/** Exported for registry forwarding tests. */
+export function bindProviderContext(
   provider: SourceControlProvider.SourceControlProviderShape,
   context: SourceControlProvider.SourceControlProviderContext | null,
 ): SourceControlProvider.SourceControlProviderShape {
@@ -434,6 +517,47 @@ function bindProviderContext(
         ...input,
         context: input.context ?? context,
       }),
+    ...(provider.mergeChangeRequest
+      ? { mergeChangeRequest: withProviderContext(provider.mergeChangeRequest, context) }
+      : {}),
+    ...(provider.getChangeRequestActivity
+      ? {
+          getChangeRequestActivity: withProviderContext(provider.getChangeRequestActivity, context),
+        }
+      : {}),
+    ...(provider.getChangeRequestFileContents
+      ? {
+          getChangeRequestFileContents: withProviderContext(
+            provider.getChangeRequestFileContents,
+            context,
+          ),
+        }
+      : {}),
+    ...(provider.submitChangeRequestReview
+      ? {
+          submitChangeRequestReview: withProviderContext(
+            provider.submitChangeRequestReview,
+            context,
+          ),
+        }
+      : {}),
+    ...(provider.replyToReviewThread
+      ? { replyToReviewThread: withProviderContext(provider.replyToReviewThread, context) }
+      : {}),
+    ...(provider.setReviewThreadResolved
+      ? { setReviewThreadResolved: withProviderContext(provider.setReviewThreadResolved, context) }
+      : {}),
+    ...(provider.updateChangeRequestComment
+      ? {
+          updateChangeRequestComment: withProviderContext(
+            provider.updateChangeRequestComment,
+            context,
+          ),
+        }
+      : {}),
+    ...(provider.updateChangeRequest
+      ? { updateChangeRequest: withProviderContext(provider.updateChangeRequest, context) }
+      : {}),
     createIssue: (input) =>
       provider.createIssue({
         ...input,
