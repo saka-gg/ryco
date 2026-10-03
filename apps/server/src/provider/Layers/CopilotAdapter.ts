@@ -268,6 +268,8 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
                   input.modelSelection.options,
                   "reasoningEffort",
                 ) as "low" | "medium" | "high" | "xhigh",
+                // Reasoning models: stream a readable summary into the transcript.
+                reasoningSummary: "detailed" as const,
               }
             : {}),
         }

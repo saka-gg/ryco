@@ -5,6 +5,7 @@ import {
   getPrCheckStatusFromRollup,
   getPrCheckStatusFromWorkflowRuns,
   primaryFailedCheckUrl,
+  summarizeCheckRollup,
 } from "./prCheckStatus";
 
 function rollup(
@@ -137,5 +138,42 @@ describe("PR check status view model", () => {
 
     expect(view.kind).toBe("passed");
     expect(view.headSha).toBe("abc123def456");
+  });
+});
+
+describe("summarizeCheckRollup", () => {
+  it("returns one state per check with counts and the aggregate verdict", () => {
+    const summary = summarizeCheckRollup({
+      checkRollup: [
+        rollup({
+          name: "lint",
+          conclusion: Option.some("SUCCESS"),
+          status: Option.some("COMPLETED"),
+        }),
+        rollup({
+          name: "test",
+          conclusion: Option.some("FAILURE"),
+          status: Option.some("COMPLETED"),
+        }),
+        rollup({ name: "build", status: Option.some("IN_PROGRESS") }),
+        rollup({ name: "build", status: Option.some("QUEUED") }),
+      ],
+      headSha: "abc123",
+    });
+    expect(summary).toMatchObject({ passed: 1, failed: 1, active: 2, total: 4 });
+    expect(summary?.view.kind).toBe("failed");
+    expect(summary?.items.map((item) => item.kind)).toEqual([
+      "passed",
+      "failed",
+      "running",
+      "pending",
+    ]);
+    // Same-named checks (matrix jobs) still get distinct ids.
+    expect(new Set(summary?.items.map((item) => item.id)).size).toBe(4);
+  });
+
+  it("has nothing to summarize without reported checks", () => {
+    expect(summarizeCheckRollup({ checkRollup: [], headSha: "abc123" })).toBeNull();
+    expect(summarizeCheckRollup({ checkRollup: undefined, headSha: "abc123" })).toBeNull();
   });
 });

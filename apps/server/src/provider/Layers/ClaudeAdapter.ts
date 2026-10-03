@@ -158,12 +158,17 @@ interface ClaudeResumeState {
 
 interface ClaudeTurnState {
   readonly turnId: TurnId;
+  /** Only user-initiated turns have a prompt UUID; synthetic turns preserve legacy completion. */
+  readonly promptUuid?: string;
   readonly startedAt: string;
   readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
   nextSyntheticAssistantBlockIndex: number;
+  /** Open thinking blocks by stream index; each one is a reasoning item. */
+  readonly reasoningBlocks: Map<number, { readonly itemId: string }>;
+  reasoningBlockCount: number;
 }
 
 interface AssistantTextBlockState {
@@ -267,6 +272,8 @@ interface ClaudeSessionContext {
    * sides of the linkage have arrived.
    */
   readonly subagentModelByToolUseId: Map<string, string>;
+  /** Snapshot-only tool calls need the same parent attribution as streamed calls. */
+  readonly subagentParentByToolUseId: Map<string, string>;
   /**
    * Last emitted workflow-member fingerprint per member slot. A coordinator
    * task_progress repeats the FULL member array every tick; without a
@@ -345,38 +352,16 @@ export interface ClaudeAdapterLiveOptions {
 
 const CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP = 256;
 
-function rememberClaudeSubagentLaunchInput(
-  context: ClaudeSessionContext,
+function rememberClaudeSubagentAttribution<A>(
+  cache: Map<string, A>,
   toolUseId: string,
-  input: Record<string, unknown>,
+  value: A,
 ): void {
-  if (
-    !context.subagentLaunchInputByToolUseId.has(toolUseId) &&
-    context.subagentLaunchInputByToolUseId.size >= CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP
-  ) {
-    const oldestToolUseId = context.subagentLaunchInputByToolUseId.keys().next().value;
-    if (oldestToolUseId !== undefined) {
-      context.subagentLaunchInputByToolUseId.delete(oldestToolUseId);
-    }
+  if (!cache.has(toolUseId) && cache.size >= CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP) {
+    const oldestToolUseId = cache.keys().next().value;
+    if (oldestToolUseId !== undefined) cache.delete(oldestToolUseId);
   }
-  context.subagentLaunchInputByToolUseId.set(toolUseId, input);
-}
-
-function rememberClaudeSubagentModel(
-  context: ClaudeSessionContext,
-  toolUseId: string,
-  model: string,
-): void {
-  if (
-    !context.subagentModelByToolUseId.has(toolUseId) &&
-    context.subagentModelByToolUseId.size >= CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP
-  ) {
-    const oldestToolUseId = context.subagentModelByToolUseId.keys().next().value;
-    if (oldestToolUseId !== undefined) {
-      context.subagentModelByToolUseId.delete(oldestToolUseId);
-    }
-  }
-  context.subagentModelByToolUseId.set(toolUseId, model);
+  cache.set(toolUseId, value);
 }
 
 function claudeSubagentLaunchModel(input: Record<string, unknown> | undefined): string | undefined {
@@ -2497,17 +2482,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           return;
         }
         const streamKind = streamKindFromDeltaType(event.delta.type);
+        // Thinking deltas belong to their own reasoning item, never to a text
+        // block that happens to share the stream index.
+        const reasoningBlock =
+          event.delta.type === "thinking_delta"
+            ? context.turnState.reasoningBlocks.get(event.index)
+            : undefined;
         const assistantBlockEntry =
           event.delta.type === "text_delta"
             ? yield* ensureAssistantTextBlock(context, event.index)
-            : context.turnState.assistantTextBlocks.get(event.index)
-              ? {
-                  blockIndex: event.index,
-                  block: context.turnState.assistantTextBlocks.get(
-                    event.index,
-                  ) as AssistantTextBlockState,
-                }
-              : undefined;
+            : undefined;
         if (assistantBlockEntry?.block && event.delta.type === "text_delta") {
           assistantBlockEntry.block.emittedTextDelta = true;
         }
@@ -2523,7 +2507,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ? {
                 itemId: asRuntimeItemId(assistantBlockEntry.block.itemId),
               }
-            : {}),
+            : reasoningBlock
+              ? { itemId: asRuntimeItemId(reasoningBlock.itemId) }
+              : {}),
           payload: {
             streamKind,
             delta: deltaText,
@@ -2560,7 +2546,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : undefined;
         context.inFlightTools.set(event.index, nextTool);
         if (nextTool.itemType === "collab_agent_tool_call" && parsedInput) {
-          rememberClaudeSubagentLaunchInput(context, nextTool.itemId, parsedInput);
+          rememberClaudeSubagentAttribution(
+            context.subagentLaunchInputByToolUseId,
+            nextTool.itemId,
+            parsedInput,
+          );
         }
 
         if (
@@ -2647,6 +2637,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       }
+      if (block.type === "thinking" && context.turnState) {
+        const turnState = context.turnState;
+        turnState.reasoningBlockCount += 1;
+        const itemId = `${turnState.turnId}:thinking:${turnState.reasoningBlockCount}`;
+        turnState.reasoningBlocks.set(index, { itemId });
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEventForContext(context, {
+          type: "item.started",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          turnId: asCanonicalTurnId(turnState.turnId),
+          itemId: asRuntimeItemId(itemId),
+          payload: { itemType: "reasoning", status: "inProgress", title: "Reasoning" },
+          providerRefs: nativeProviderRefs(context),
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/stream_event/content_block_start",
+            payload: message,
+          },
+        });
+        return;
+      }
       if (
         block.type !== "tool_use" &&
         block.type !== "server_tool_use" &&
@@ -2688,7 +2702,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       context.inFlightTools.set(index, tool);
       if (itemType === "collab_agent_tool_call") {
-        rememberClaudeSubagentLaunchInput(context, itemId, toolInput);
+        rememberClaudeSubagentAttribution(
+          context.subagentLaunchInputByToolUseId,
+          itemId,
+          toolInput,
+        );
       }
 
       const stamp = yield* makeEventStamp();
@@ -2726,6 +2744,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (event.type === "content_block_stop") {
       const { index } = event;
+      const reasoningBlock = context.turnState?.reasoningBlocks.get(index);
+      if (reasoningBlock && context.turnState) {
+        context.turnState.reasoningBlocks.delete(index);
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEventForContext(context, {
+          type: "item.completed",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          turnId: asCanonicalTurnId(context.turnState.turnId),
+          itemId: asRuntimeItemId(reasoningBlock.itemId),
+          payload: { itemType: "reasoning", status: "completed", title: "Reasoning" },
+          providerRefs: nativeProviderRefs(context),
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/stream_event/content_block_stop",
+            payload: message,
+          },
+        });
+        return;
+      }
       const assistantBlock = context.turnState?.assistantTextBlocks.get(index);
       if (assistantBlock) {
         assistantBlock.streamClosed = true;
@@ -2914,10 +2954,54 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const owningTaskId = agentIdForParentToolUse(context.taskAgents, assistantParentToolUseId);
       const snapshotModel = trimmedClaudeString(message.message.model);
       const owningAgent = owningTaskId ? context.taskAgents.get(owningTaskId) : undefined;
-      if (owningAgent && snapshotModel) {
+      if (owningAgent && snapshotModel && owningAgent.model !== snapshotModel) {
         owningAgent.model = snapshotModel;
-      } else if (snapshotModel) {
-        rememberClaudeSubagentModel(context, assistantParentToolUseId, snapshotModel);
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEventForContext(context, {
+          ...stamp,
+          type: "task.updated",
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+          providerRefs: nativeProviderRefs(context),
+          payload: {
+            taskId: RuntimeTaskId.make(owningAgent.taskId),
+            ...taskLinkageFor(context.taskAgents, owningAgent.taskId),
+          },
+        });
+        const existingSubagent = context.subagentByTaskId.get(owningAgent.taskId);
+        if (existingSubagent) {
+          const subagent = { ...existingSubagent, model: snapshotModel };
+          context.subagentByTaskId.set(owningAgent.taskId, subagent);
+          yield* emitClaudeSubagentUpdated(context, { subagent, raw: message });
+        }
+      } else if (!owningAgent && snapshotModel) {
+        rememberClaudeSubagentAttribution(
+          context.subagentModelByToolUseId,
+          assistantParentToolUseId,
+          snapshotModel,
+        );
+      }
+      // The SDK may deliver subagent tool calls only in full snapshots.
+      for (const block of message.message.content) {
+        if (block.type !== "tool_use") continue;
+        rememberClaudeSubagentAttribution(
+          context.subagentParentByToolUseId,
+          block.id,
+          assistantParentToolUseId,
+        );
+        if (
+          classifyToolItemType(block.name) === "collab_agent_tool_call" &&
+          block.input !== null &&
+          typeof block.input === "object" &&
+          !Array.isArray(block.input)
+        ) {
+          rememberClaudeSubagentAttribution(
+            context.subagentLaunchInputByToolUseId,
+            block.id,
+            block.input as Record<string, unknown>,
+          );
+        }
       }
       context.lastAssistantUuid = message.uuid;
       yield* updateResumeCursor(context);
@@ -2975,6 +3059,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         assistantTextBlockOrder: [],
         capturedProposedPlanKeys: new Set(),
         nextSyntheticAssistantBlockIndex: -1,
+        reasoningBlocks: new Map(),
+        reasoningBlockCount: 0,
       };
       context.session = {
         ...context.session,
@@ -3047,6 +3133,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     if (message.type !== "result") {
       return;
+    }
+
+    const promptUuid = context.turnState?.promptUuid;
+    // Resuming can produce a result for a background notification before the
+    // queued user prompt runs. Prefer explicit correlation; older CLIs omit it.
+    if (promptUuid !== undefined) {
+      const promptUuids = message.user_message_uuids?.length
+        ? message.user_message_uuids
+        : message.user_message_uuid
+          ? [message.user_message_uuid]
+          : undefined;
+      if (
+        promptUuids
+          ? !promptUuids.includes(promptUuid)
+          : message.origin !== undefined && message.origin.kind !== "human"
+      ) {
+        yield* Effect.logInfo("claude.turn.result-for-other-prompt", {
+          threadId: context.session.threadId,
+          turnId: context.turnState?.turnId,
+          origin: message.origin?.kind,
+        });
+        return;
+      }
     }
 
     const status = turnStatusFromResult(message);
@@ -3415,7 +3524,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               (tool) => tool.itemId === message.tool_use_id,
             )
           : undefined;
-        const owningAgentId = launchingTool?.agentId;
+        const parentToolUseId = message.tool_use_id
+          ? context.subagentParentByToolUseId.get(message.tool_use_id)
+          : undefined;
+        const owningAgentId =
+          launchingTool?.agentId ?? agentIdForParentToolUse(context.taskAgents, parentToolUseId);
+        if (message.tool_use_id) context.subagentParentByToolUseId.delete(message.tool_use_id);
         // Model/effort: the Agent tool's input carries explicit overrides.
         // The subagent's own assistant snapshot is authoritative for its API
         // model and may arrive before or after task_started. Never fill a
@@ -4416,7 +4530,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
       const claudeBinaryPath = claudeSettings.binaryPath;
-      const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
+      // Claude Code forces thinking display to "omitted" in SDK sessions unless
+      // the display is set explicitly on the command line. Ryco renders the
+      // thinking in the transcript, so ask for summaries — unless the user's
+      // own launch args already choose a display.
+      const extraArgs = {
+        "thinking-display": "summarized",
+        ...parseCliArgs(claudeSettings.launchArgs).flags,
+      };
       const modelSelection =
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
       const caps = getClaudeModelCapabilities(modelSelection?.model);
@@ -4635,6 +4756,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         taskAgents: new Map(),
         subagentLaunchInputByToolUseId: new Map(),
         subagentModelByToolUseId: new Map(),
+        subagentParentByToolUseId: new Map(),
         workflowMemberFingerprints: new Map(),
         workflowPhasesByTaskId: new Map(),
         liveTaskIds: new Set(),
@@ -4783,15 +4905,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    const turnId = TurnId.make(yield* Effect.sync(() => crypto.randomUUID()));
+    const promptUuid = yield* Effect.sync(() => crypto.randomUUID());
+    const turnId = TurnId.make(promptUuid);
     const turnState: ClaudeTurnState = {
       turnId,
+      promptUuid,
       startedAt: yield* nowIso,
       items: [],
       assistantTextBlocks: new Map(),
       assistantTextBlockOrder: [],
       capturedProposedPlanKeys: new Set(),
       nextSyntheticAssistantBlockIndex: -1,
+      reasoningBlocks: new Map(),
+      reasoningBlockCount: 0,
     };
 
     const updatedAt = yield* nowIso;
@@ -4838,7 +4964,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     yield* Queue.offer(context.promptQueue, {
       type: "message",
-      message,
+      message: { ...message, uuid: promptUuid },
     }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
 
     if (context.agentControl) {

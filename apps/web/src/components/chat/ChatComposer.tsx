@@ -1,4 +1,5 @@
 import { ClaudeCacheDetails } from "./ClaudeCacheReview";
+import { isHostedHubMode } from "../../env";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
 import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
@@ -103,7 +104,10 @@ import {
   getComposerProviderState,
   renderProviderTraitsChips,
   renderProviderTraitsMenuContent,
+  renderProviderModelTuning,
+  getProviderModelTuningSummary,
 } from "./composerProviderState";
+import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
 import { PhoneThreadDock, type PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
@@ -130,7 +134,6 @@ import { useUiStateStore } from "../../uiStateStore";
 import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
 import { isTerminalFocused } from "../../lib/terminalFocus";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { ComposerLiquidGlass } from "./ComposerLiquidGlass";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashPicker } from "./ComposerStashPicker";
 import { PendingContextHandoffChip } from "./PendingContextHandoffChip";
@@ -380,6 +383,7 @@ export interface ChatComposerProps {
     instanceId: ProviderInstanceId,
     model: string,
     options?: ReadonlyArray<ProviderOptionSelection>,
+    meta?: ModelPickMeta,
   ) => void;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
@@ -970,9 +974,11 @@ export const ChatComposer = memo(
     // tap at all. The collapsed surface needs an explicit expand path in that
     // state (see the surface onClick below).
     const isComposerEditorDisabled =
-      isConnecting ||
       isComposerApprovalState ||
-      (environmentUnavailable !== null && activePendingProgress === null);
+      // Hosted text editing is local while cached conversations reconnect.
+      // The independent primary-action and dispatch gates still require fresh authority.
+      (!isHostedHubMode() &&
+        (isConnecting || (environmentUnavailable !== null && activePendingProgress === null)));
 
     const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
     const showPlanSidebarToggle = false;
@@ -1031,7 +1037,7 @@ export const ChatComposer = memo(
     const traitsDisabled = !traitsMutationCapability.allowed;
     const traitsDisabledReason = traitsMutationCapability.reason;
 
-    const providerTraitsMenuContent = renderProviderTraitsMenuContent({
+    const providerTraitsInput = {
       hideAgent: enforceBuildMode,
       provider: selectedProvider,
       instanceId: selectedInstanceId,
@@ -1044,20 +1050,20 @@ export const ChatComposer = memo(
       onPromptChange: setPromptFromTraits,
       disabled: traitsDisabled,
       disabledReason: traitsDisabledReason,
+    };
+    const providerTraitsMenuContent = renderProviderTraitsMenuContent(providerTraitsInput);
+    const providerExtraTraitsMenuContent = renderProviderTraitsMenuContent({
+      ...providerTraitsInput,
+      omitTuning: true,
     });
-    const providerTraitsChips = renderProviderTraitsChips({
-      hideAgent: enforceBuildMode,
+    const providerTraitsChips = renderProviderTraitsChips(providerTraitsInput);
+    const providerModelTuning = renderProviderModelTuning(providerTraitsInput);
+    const providerModelTuningSummary = getProviderModelTuningSummary({
       provider: selectedProvider,
-      instanceId: selectedInstanceId,
-      ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
-      ...(routeKind === "draft" && draftId ? { draftId } : {}),
       model: selectedModel,
       models: selectedProviderModels,
       modelOptions: composerModelOptions?.[selectedInstanceId],
       prompt,
-      onPromptChange: setPromptFromTraits,
-      disabled: traitsDisabled,
-      disabledReason: traitsDisabledReason,
     });
     const pendingPrimaryAction = useMemo(
       () =>
@@ -2486,15 +2492,16 @@ export const ChatComposer = memo(
             onKeyDownCapture={() => setIsReadingChat(false)}
             data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
             className={cn(
-              // The fill never changes on hover or focus. This is a persistent
-              // surface the pointer crosses on its way to the transcript and
-              // clicks into constantly, so re-tinting it read as a flicker
-              // rather than an affordance. Focus still lifts the shadow — the
-              // one state worth signalling — and a drag-over still tints,
-              // because that one has to read as a drop target.
-              "rounded-[max(0px,calc(var(--radius-3xl)-2px))] border-0 bg-[color-mix(in_srgb,var(--card)_var(--app-composer-alpha),transparent)] dark:bg-[color-mix(in_srgb,var(--card)_var(--app-composer-dark-alpha),transparent)] [-webkit-backdrop-filter:var(--app-composer-filter)] [backdrop-filter:var(--app-composer-filter)] shadow-[0_6px_18px_rgba(0,0,0,0.06),0_1px_3px_rgba(0,0,0,0.05)] outline-none transition-[background-color,box-shadow] duration-200 has-focus-visible:shadow-[0_8px_24px_rgba(0,0,0,0.09),0_1px_4px_rgba(0,0,0,0.07)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_10px_28px_rgba(0,0,0,0.4),0_1px_3px_rgba(0,0,0,0.35)] dark:has-focus-visible:shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_12px_32px_rgba(0,0,0,0.5),0_1px_4px_rgba(0,0,0,0.4)]",
+              // A tonal plate with the dialogs' material: the same alpha and
+              // frost, set by the Transparency preference (opaque at Solid). No
+              // border, no rim, no shadow. The fill never changes on hover —
+              // the pointer crosses this surface constantly and a hover tint
+              // read as flicker — but focus steps it one tone up, and a
+              // drag-over still tints, because that one has to read as a drop
+              // target.
+              "app-composer-surface rounded-[max(0px,calc(var(--radius-3xl)-2px))] border-0 outline-none transition-[background-color,box-shadow] duration-(--app-motion-duration-pop) ease-(--app-motion-ease)",
               isDragOverComposer
-                ? "bg-accent/30 shadow-lg/12 ring-1 ring-inset ring-primary/45 [--lg-plate-alpha:72%] [--lg-plate-color:color-mix(in_srgb,var(--accent)_38%,var(--card))]"
+                ? "bg-[color-mix(in_srgb,var(--accent)_38%,var(--app-composer-surface))] ring-1 ring-inset ring-primary/45"
                 : null,
               environmentUnavailable ? "opacity-75" : null,
               composerProviderState.composerSurfaceClassName,
@@ -2552,7 +2559,6 @@ export const ChatComposer = memo(
               setIsComposerFocused(true);
             }}
           >
-            <ComposerLiquidGlass hostRef={composerSurfaceRef} />
             {!isComposerCollapsedMobile &&
               (activePendingApproval ? (
                 <div className="rounded-t-[max(0px,calc(var(--radius-3xl)-3px))] border-b border-border/65 bg-muted/20">
@@ -2770,7 +2776,10 @@ export const ChatComposer = memo(
                 planSidebarLabel={planSidebarLabel}
                 planSidebarOpen={planSidebarOpen}
                 providerTraitsMenuContent={providerTraitsMenuContent}
+                providerExtraTraitsMenuContent={providerExtraTraitsMenuContent}
                 providerTraitsChips={providerTraitsChips}
+                providerModelTuning={providerModelTuning}
+                providerModelTuningSummary={providerModelTuningSummary}
                 onInteractionModeChange={handleInteractionModeChange}
                 onTogglePlanSidebar={togglePlanSidebar}
                 onRuntimeModeChange={handleRuntimeModeChange}

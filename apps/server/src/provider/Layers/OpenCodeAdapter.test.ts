@@ -1441,6 +1441,79 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect(
+    "releases completed text without replaying late snapshots, deltas, or removed messages",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("completed-text-replay");
+        const textPart = {
+          id: "text-part",
+          sessionID: taskRoot,
+          messageID: "message",
+          type: "text",
+          text: "Hello world",
+          time: { start: 1, end: 2 },
+        };
+        const messageEvent = {
+          type: "message.updated",
+          properties: {
+            sessionID: taskRoot,
+            info: {
+              id: "message",
+              role: "assistant",
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+          },
+        };
+        runtimeMock.state.subscribedEvents = [
+          // A completed part can arrive before its message role is known.
+          nativePartEvent(textPart),
+          messageEvent,
+          nativePartEvent(textPart),
+          {
+            type: "message.part.delta",
+            properties: {
+              sessionID: taskRoot,
+              messageID: "message",
+              partID: "text-part",
+              field: "text",
+              delta: "world",
+            },
+          },
+          messageEvent,
+          { type: "message.removed", properties: { sessionID: taskRoot, messageID: "message" } },
+          nativePartEvent({ ...textPart, id: "late-unseen-part", text: "Do not resurrect" }),
+          messageEvent,
+          taskSentinel(),
+        ];
+        const fiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.takeUntil((event) => event.itemId === "sentinel"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("test-completed-text-replay"),
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const events = Array.from(yield* Fiber.join(fiber).pipe(Effect.timeout("1 second")));
+        const deltas = events.filter((event) => event.type === "content.delta");
+        assert.deepEqual(
+          deltas.map((event) => event.payload.delta),
+          ["Hello world"],
+        );
+        const completed = events.filter(
+          (event) => event.type === "item.completed" && event.itemId === "text-part",
+        );
+        assert.equal(completed.length, 1);
+        if (completed[0]?.type === "item.completed")
+          assert.equal(completed[0].payload.detail, "Hello world");
+      }),
+  );
+
   it.effect("deduplicates overlapping assistant text deltas after part updates", () =>
     Effect.sync(() => {
       const firstUpdate = mergeOpenCodeAssistantText(undefined, "Hello");

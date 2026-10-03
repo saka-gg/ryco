@@ -11,6 +11,8 @@ import { DraftId } from "../../composerDraftStore";
 import {
   getComposerProviderState,
   renderProviderTraitsChips,
+  renderProviderModelTuning,
+  getProviderModelTuningSummary,
   renderProviderTraitsMenuContent,
 } from "./composerProviderState";
 
@@ -268,6 +270,7 @@ describe("provider traits render guards", () => {
   it("passes instance id through traits render helpers", () => {
     const models = modelWith([
       selectDescriptor("effort", [{ id: "high", label: "High", isDefault: true }]),
+      selectDescriptor("agent", [{ id: "build", label: "Build", isDefault: true }]),
     ]);
     const args = {
       provider: PROVIDER,
@@ -281,14 +284,45 @@ describe("provider traits render guards", () => {
     };
     const chips = renderProviderTraitsChips(args);
     const menu = renderProviderTraitsMenuContent(args);
+    const tuning = renderProviderModelTuning(args);
 
-    expect(isValidElement(chips)).toBe(true);
-    expect(isValidElement(menu)).toBe(true);
-    expect((chips as ReactElement<{ instanceId?: ProviderInstanceId }>).props.instanceId).toBe(
-      INSTANCE_ID,
-    );
-    expect((menu as ReactElement<{ instanceId?: ProviderInstanceId }>).props.instanceId).toBe(
-      INSTANCE_ID,
-    );
+    for (const element of [chips, menu, tuning]) {
+      expect(isValidElement(element)).toBe(true);
+      expect((element as ReactElement<{ instanceId?: ProviderInstanceId }>).props.instanceId).toBe(
+        INSTANCE_ID,
+      );
+    }
+  });
+
+  it("routes dial-owned options to the model tuning dial instead of chips", () => {
+    const args = {
+      provider: PROVIDER,
+      draftId: DraftId.make("draft-tuning-only"),
+      model: MODEL,
+      models: modelWith([
+        selectDescriptor("effort", [{ id: "high", label: "High", isDefault: true }]),
+        selectDescriptor("contextWindow", [{ id: "1m", label: "1M", isDefault: true }]),
+      ]),
+      modelOptions: undefined,
+      prompt: "",
+      onPromptChange: () => {},
+    };
+    expect(renderProviderTraitsChips(args)).toBeNull();
+    expect(renderProviderTraitsMenuContent({ ...args, omitTuning: true })).toBeNull();
+    expect(isValidElement(renderProviderTraitsMenuContent(args))).toBe(true);
+    expect(isValidElement(renderProviderModelTuning(args))).toBe(true);
+    expect(
+      getProviderModelTuningSummary({
+        provider: PROVIDER,
+        model: MODEL,
+        models: args.models,
+        modelOptions: undefined,
+        prompt: "",
+      }),
+    ).toEqual({
+      level: { id: "high", label: "High", index: 0 },
+      fastMode: false,
+      contextWindowLabel: "1M",
+    });
   });
 });

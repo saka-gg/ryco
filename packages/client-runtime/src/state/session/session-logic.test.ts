@@ -701,6 +701,96 @@ describe("deriveWorkLogEntries", () => {
     expect(entries[0]?.lastActivityAt).toBe("2026-02-23T00:00:03.000Z");
   });
 
+  it("marks approval lifecycle rows so narrative views can leave them out", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "approval-1",
+          kind: "approval.requested",
+          summary: "Command approval requested",
+          tone: "approval",
+          payload: { requestId: "req-1", requestKind: "command", detail: "bun lint" },
+        }),
+        makeActivity({
+          id: "tool-1",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          kind: "tool.completed",
+          summary: "Ran command",
+          payload: { itemType: "command_execution", command: "bun lint" },
+        }),
+      ],
+      undefined,
+    );
+    expect(entries.find((entry) => entry.id === "approval-1")?.approvalLifecycle).toBe(true);
+    expect(entries.find((entry) => entry.id === "tool-1")?.approvalLifecycle).toBeUndefined();
+  });
+
+  it("projects a reasoning block as a thinking entry with its text and timing", () => {
+    const live = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "reasoning:thread-1:turn-1:item:rs-1",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          kind: "reasoning",
+          summary: "Tracing reconnects",
+          tone: "info",
+          turnId: "turn-1",
+          payload: {
+            itemType: "reasoning",
+            providerItemId: "rs-1",
+            text: "…the timer never resets",
+            headline: "Tracing reconnects",
+            streaming: true,
+            startedAt: "2026-02-23T00:00:01.000Z",
+            updatedAt: "2026-02-23T00:00:04.000Z",
+          },
+        }),
+      ],
+      undefined,
+    );
+    expect(live).toEqual([
+      expect.objectContaining({
+        id: "reasoning:thread-1:turn-1:item:rs-1",
+        tone: "thinking",
+        itemType: "reasoning",
+        label: "Tracing reconnects",
+        detail: "Tracing reconnects",
+        output: "…the timer never resets",
+        startedAt: "2026-02-23T00:00:01.000Z",
+        lastActivityAt: "2026-02-23T00:00:04.000Z",
+      }),
+    ]);
+    expect(live[0]?.completed).toBeUndefined();
+
+    const settled = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "reasoning:thread-1:turn-1:block:1",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          kind: "reasoning",
+          summary: "Reasoning",
+          tone: "info",
+          payload: {
+            itemType: "reasoning",
+            text: "Full thought.",
+            streaming: false,
+            startedAt: "2026-02-23T00:00:01.000Z",
+            updatedAt: "2026-02-23T00:00:06.000Z",
+            completedAt: "2026-02-23T00:00:06.000Z",
+          },
+        }),
+      ],
+      undefined,
+    );
+    expect(settled[0]).toMatchObject({
+      label: "Reasoning",
+      output: "Full thought.",
+      completed: true,
+      lastActivityAt: "2026-02-23T00:00:06.000Z",
+    });
+    expect(settled[0]?.detail).toBeUndefined();
+  });
+
   it("omits task.started but shows task.progress and task.completed", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -1121,7 +1211,7 @@ describe("deriveWorkLogEntries", () => {
     const entries = deriveWorkLogEntries(activities, undefined);
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
-      id: "grep-complete",
+      id: "grep-update",
       toolTitle: "grep",
       detail: "19 files",
       itemType: "web_search",
@@ -1170,7 +1260,7 @@ describe("deriveWorkLogEntries", () => {
     const entries = deriveWorkLogEntries(activities, undefined);
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
-      id: "read-complete",
+      id: "read-update",
       toolTitle: "Read File",
       detail: 'import * as Effect from "effect/Effect"',
       itemType: "dynamic_tool_call",
@@ -1246,7 +1336,7 @@ describe("deriveWorkLogEntries", () => {
     const entries = deriveWorkLogEntries(activities, undefined);
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
-      id: "legacy-read-complete",
+      id: "legacy-read-update",
       toolTitle: "Read File",
       itemType: "dynamic_tool_call",
     });
@@ -1298,9 +1388,12 @@ describe("deriveWorkLogEntries", () => {
     const entries = deriveWorkLogEntries(activities, undefined);
 
     expect(entries).toHaveLength(1);
+    // The row keeps its first event's identity and position; the completion
+    // supplies the settled label and state.
     expect(entries[0]).toMatchObject({
-      id: "tool-complete",
-      createdAt: "2026-02-23T00:00:03.000Z",
+      id: "tool-update-1",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      completed: true,
       label: "Tool call completed",
       detail: 'Read: {"file_path":"/tmp/app.ts"}',
       command: "sed -n 1,40p /tmp/app.ts",
@@ -1359,7 +1452,7 @@ describe("deriveWorkLogEntries", () => {
 
     const entries = deriveWorkLogEntries(activities, undefined);
 
-    expect(entries.map((entry) => entry.id)).toEqual(["tool-1-complete", "tool-2-complete"]);
+    expect(entries.map((entry) => entry.id)).toEqual(["tool-1-update", "tool-2-update"]);
   });
 
   it("collapses same-timestamp lifecycle rows even when completed sorts before updated by id", () => {
@@ -1402,7 +1495,7 @@ describe("deriveWorkLogEntries", () => {
     const entries = deriveWorkLogEntries(activities, undefined);
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.id).toBe("a-complete-same-timestamp");
+    expect(entries[0]).toMatchObject({ id: "z-update-earlier", completed: true });
   });
 
   it("populates output from Codex aggregatedOutput for commandExecution items", () => {

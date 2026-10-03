@@ -69,7 +69,7 @@ Ryco never changes Keychain access rules to suppress an operating-system prompt.
 
 Native mobile authentication requires a hardware-backed device key. If the device cannot provide
 one, setup explains the limitation and offers retry without falling back to a software key.
-Node-level security details live under **Settings → Connections → Node security · Advanced**;
+Node-level security details live under **Settings → Security** (the device group of the settings page);
 the existing owner and connection-readiness checks still apply.
 
 Sign-in uses the existing Hub passkey options and verification endpoints. The client converts the
@@ -202,7 +202,8 @@ then flushed as encrypted records on an encrypted lock, flushed **in the clear**
 or discarded unflushed when the channel fails closed. The legacy branch is the one that hands the
 buffer to the Hub in readable form, and it is reached whenever a channel falls back — against an
 un-upgraded node, or against any node whose capability advertisement did not arrive. The UI stays on
-read-only blocked surfaces until each stage completes. Possession of a node URL grants nothing.
+read-only until each stage completes. A remembered browser can show its saved conversation text and
+allow local draft editing during that interval. Possession of a node URL grants nothing.
 
 A reload starts a fresh application session, and the tab's downgrade check starts empty again with
 it. That check is set on the first capability statement the session validates for a node and is held
@@ -212,8 +213,10 @@ serves the code implementing it. This is a different mechanism from the mobile a
 guarantees, and the two MUST NOT be described in the same terms. Only the node's own admission
 policy refuses plaintext for browsers.
 
-Absent, revoked, unauthorized, removed, offline, or incompatible routed nodes and malformed
-segments fail closed to the node directory with a bounded explanation. A signed-out or expired
+Absent, revoked, unauthorized, removed, or incompatible routed nodes and malformed segments fail
+closed to the node directory with a bounded explanation. An offline node or temporarily stale
+directory can keep an already known cached thread visible without acquiring mutation authority.
+A signed-out or expired
 session shows the normal passkey surface; the routed node resumes only after re-authentication and
 revalidation. Back and Forward navigate between the directory and selected-node views: returning
 to the directory releases exactly that route's scope. A non-retained connection may remain warm as
@@ -415,11 +418,11 @@ line and the pointer at the rest of it:
 
 <!-- shipped-text:web-sas-more -->
 
-> Settings → Connections → Node security explains what else this tab cannot check.
+> Settings → Security explains what else this tab cannot check.
 
 <!-- /shipped-text:web-sas-more -->
 
-In Settings → Connections → Node security, the same code is drawn with the longer account. It names both of the reasons
+In Settings → Security, the same code is drawn with the longer account. It names both of the reasons
 the browser tier is denied the active-Hub column, and keeps them apart: one needs a substituted
 bundle and one needs nothing at all.
 
@@ -452,7 +455,7 @@ analytics, and it must not be captured into qualification evidence, screenshots,
 a channel locked encrypted but produced no code, the surface says so rather than rendering nothing —
 an absent comparison value is reported, not silently dropped.
 
-The code renders in the desktop-width node menu and again in Settings → Connections → Node security, which is where the
+The code renders in the desktop-width node menu and again in Settings → Security, which is where the
 menu's pointer leads. That section is owner-only in hosted mode, so the menu asks whether this
 reader can open it before it points there: a viewer, an operator, or an owner whose role snapshot
 has gone stale is shown the longer account in the menu itself, with the `ryco e2ee sessions`
@@ -524,8 +527,12 @@ Installed Ryco uses standalone display mode. A new service worker waits while an
 active. Ryco shows **Update ready** and activates it only after the user confirms; finding an update
 does not reload active work automatically.
 
-Navigation remains network-first. If the network is unavailable, the worker returns a static
-offline document containing no account, node, project, or conversation data. Returning online does
+Navigation opens a versioned, build-generated static boot document from the shell cache, with a
+network fallback if that document is absent. The document contains no account, node, project, or
+conversation data. With **Account → Overview → Remember this browser** enabled, the page restores
+bounded encrypted text snapshots from its own IndexedDB store before session checking finishes.
+This setting is off by default; anyone with access to a remembered browser profile can read its
+saved copy offline. Returning online does
 not make stale browser state authoritative: hosted mutations remain disabled until Ryco validates
 the current session, refreshes the authorized node directory and role, establishes a fresh relay
 generation, and accepts the current node snapshot or replay point.
@@ -539,14 +546,21 @@ installation adds no surface that states anything stronger.
 
 ## Security and browser persistence
 
-Hosted mode keeps authentication material, node-owned state, and every value the payload encryption
+Hosted mode keeps authentication material and every value the relay payload encryption
 layer produces out of localStorage, sessionStorage, IndexedDB, service-worker caches, URL/history
 state, configuration exports, and browser logs. The encryption values are the browser's ephemeral
 agreement key material, its handshake and session-key state, its in-memory downgrade check, and the
 session verification code: all of them live in process memory, the browser has no storage class any
 of them may enter, and each is erased when the channel — or, for the downgrade check, the
 application session — that produced it ends. Draft, terminal, general UI, script-selection,
-and other generic local-storage hooks use in-memory storage. A separate, schema-validated inbox
+and other generic local-storage hooks use in-memory storage. The explicitly enabled remembered-browser
+feature stores bounded conversation text, workspace metadata, text drafts, and scroll positions in
+encrypted IndexedDB using a separate non-exportable local AES-GCM key. Relay keys and credentials
+are never reused for this storage. Disabling the feature or observing sign-out, expiry, account
+change, or loss of node eligibility deletes the corresponding records and keys. Restoring records
+does not establish a session or role; fresh snapshots reconcile the saved display. See
+[cache bounds and behavior](unified-workspace.md#cache-and-failure-behavior).
+A separate, schema-validated inbox
 preference record stores only three finite user choices: the auto-settle interval, whether AI Focus
 is enabled, and its refresh interval. It contains no node identifiers, rankings, model/provider
 preferences, content, or authentication material. These browser-local choices survive reloads.
@@ -565,7 +579,9 @@ Do not add passwords, cookies, Authorization headers, CSRF values, WebAuthn chal
 invitation secrets, tickets, native device grants, Hub keysets, node proofs, encryption key material,
 handshake or session-key state,
 session verification codes, provider data, source code, conversations, terminal output, files,
-attachments, or relay payloads to errors, diagnostics, metrics, exports, or persistence.
+attachments, or relay payloads to errors, diagnostics, metrics, or exports. The remembered-browser
+text projection above is the only conversation-persistence exception; it never stores relay frames,
+authentication or relay encryption material, terminal output, files, or attachment bodies.
 
 ## Accessibility and layout
 

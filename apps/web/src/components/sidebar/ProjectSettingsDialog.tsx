@@ -938,10 +938,9 @@ export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
       }}
     >
       <DialogPopup
-        className="project-glass-surface h-[min(70vh,620px)] max-w-[760px] overflow-hidden p-0 duration-[320ms] ease-[cubic-bezier(0.16,1,0.3,1)] data-ending-style:translate-y-4 data-starting-style:translate-y-4"
+        className="h-[min(70vh,620px)] max-w-[760px] overflow-hidden p-0 duration-[320ms] ease-[cubic-bezier(0.16,1,0.3,1)] data-ending-style:translate-y-4 data-starting-style:translate-y-4"
         bottomStickOnMobile={false}
         showCloseButton={true}
-        surface="glass"
       >
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-5">
           <div className="min-w-0">

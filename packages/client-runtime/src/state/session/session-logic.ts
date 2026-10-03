@@ -82,7 +82,8 @@ export interface WorkLogEntry {
   completed?: boolean;
   tone: "thinking" | "tool" | "info" | "error";
   toolTitle?: string;
-  itemType?: ToolLifecycleItemType;
+  /** Tool lifecycle kind, or "reasoning" for a projected thinking block. */
+  itemType?: ToolLifecycleItemType | "reasoning";
   requestKind?: PendingApproval["requestKind"];
   turnId?: TurnId | null;
   /** Full untruncated output text for the expanded panel. */
@@ -101,6 +102,12 @@ export interface WorkLogEntry {
   taskId?: string;
   /** Agent role (subagent_type) for labeled timeline rows. */
   agentRole?: string;
+  /**
+   * Approval lifecycle row (request, response, resolution). The pending
+   * approval card owns this interaction; transcripts that narrate the agent's
+   * own steps (chapters) leave these out.
+   */
+  approvalLifecycle?: true;
   /**
    * Present on agent-spawn CTA rows: one per workflow run or per-turn batch
    * of direct spawns. The row renders as a call-to-action ("Kicked off N
@@ -950,6 +957,46 @@ function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): bool
   return typeof payload?.detail === "string" && payload.detail.startsWith("ExitPlanMode:");
 }
 
+/** Activity kind the server uses for one upserted reasoning block. */
+const REASONING_ACTIVITY_KIND = "reasoning";
+
+/**
+ * A reasoning block (Claude thinking, Codex summary, ACP thought): `output`
+ * carries its text (a short tail while it streams, the full text once it
+ * closes) and `detail` the provider's headline when it has one.
+ */
+function toReasoningWorkLogEntry(
+  activity: OrchestrationThreadActivity,
+  payload: Record<string, unknown> | null,
+): DerivedWorkLogEntry {
+  const headline = asTrimmedString(payload?.headline);
+  const completedAt = asTrimmedString(payload?.completedAt);
+  const entry: DerivedWorkLogEntry = {
+    id: activity.id,
+    createdAt: activity.createdAt,
+    label: headline ?? "Reasoning",
+    tone: "thinking",
+    activityKind: activity.kind,
+    itemType: "reasoning",
+    startedAt: asTrimmedString(payload?.startedAt) ?? activity.createdAt,
+    lastActivityAt: completedAt ?? asTrimmedString(payload?.updatedAt) ?? activity.createdAt,
+  };
+  const text = typeof payload?.text === "string" ? payload.text.trim() : "";
+  if (text.length > 0) {
+    entry.output = text;
+  }
+  if (headline) {
+    entry.detail = headline;
+  }
+  if (payload?.streaming === false || completedAt) {
+    entry.completed = true;
+  }
+  if (activity.turnId !== null) {
+    entry.turnId = activity.turnId;
+  }
+  return entry;
+}
+
 function toDerivedWorkLogEntry(
   activity: OrchestrationThreadActivity,
   startedAtByToolCallId: ReadonlyMap<string, string>,
@@ -958,6 +1005,9 @@ function toDerivedWorkLogEntry(
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
       : null;
+  if (activity.kind === REASONING_ACTIVITY_KIND) {
+    return toReasoningWorkLogEntry(activity, payload);
+  }
   const commandPreview = extractToolCommand(payload);
   const changedFiles = extractChangedFiles(payload);
   const changedFileStats = extractChangedFileStats(payload);
@@ -1046,6 +1096,9 @@ function toDerivedWorkLogEntry(
   }
   if (activity.kind === "tool.completed" || activity.kind === "task.completed") {
     entry.completed = true;
+  }
+  if (activity.kind.startsWith("approval.")) {
+    entry.approvalLifecycle = true;
   }
   if (isTaskActivity && typeof payload?.taskId === "string" && payload.taskId.length > 0) {
     entry.taskId = payload.taskId;
@@ -1159,7 +1212,16 @@ function collapseDerivedWorkLogEntries(
     }
     const previous = collapsed.at(-1);
     if (previous && shouldCollapseToolLifecycleEntries(previous, entry)) {
-      collapsed[collapsed.length - 1] = mergeDerivedWorkLogEntries(previous, entry);
+      // One tool call is one row from its first lifecycle event on: it keeps
+      // that event's id and position while updates stream in and when it
+      // settles. Adopting each update's id re-keyed the row on every event
+      // (a remount, lost expansion state, a ghost row in the live chapter)
+      // and its completion time could move it past steps started meanwhile.
+      collapsed[collapsed.length - 1] = {
+        ...mergeDerivedWorkLogEntries(previous, entry),
+        id: previous.id,
+        createdAt: previous.createdAt,
+      };
       continue;
     }
     collapsed.push(entry);

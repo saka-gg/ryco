@@ -107,15 +107,6 @@ const toastCornerOrbClass = cn(
   "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
 );
 
-function ToastLiquidGlassRings() {
-  return (
-    <>
-      <span aria-hidden="true" className="liquid-glass-ring" />
-      <span aria-hidden="true" className="liquid-glass-ring liquid-glass-ring--overlay" />
-    </>
-  );
-}
-
 function handleToastDismissClick(
   manager: typeof toastManager | typeof anchoredToastManager,
   toastId: ToastId,
@@ -655,7 +646,6 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
               }
               toast={toast}
             >
-              <ToastLiquidGlassRings />
               <ThreadToastVisibleAutoDismiss
                 dismissAfterVisibleMs={toast.data?.dismissAfterVisibleMs}
                 toastId={toast.id}
@@ -670,7 +660,6 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
                   }
                   type="button"
                 >
-                  <ToastLiquidGlassRings />
                   <XIcon className="size-3" strokeWidth={2.25} />
                 </button>
               </div>
@@ -749,7 +738,6 @@ function AnchoredToasts() {
                   data-slot="toast-popup"
                   toast={toast}
                 >
-                  <ToastLiquidGlassRings />
                   {tooltipStyle ? (
                     <Toast.Content className="pointer-events-auto px-2 py-1">
                       <Toast.Title data-slot="toast-title" />
@@ -770,7 +758,6 @@ function AnchoredToasts() {
                           }
                           type="button"
                         >
-                          <ToastLiquidGlassRings />
                           <XIcon className="size-3" strokeWidth={2.25} />
                         </button>
                       </div>

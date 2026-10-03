@@ -133,7 +133,9 @@ export const PLATFORMS: Platform[] = [
   },
 ];
 
-/** Real product captures in /public/shots, dark mode, identities blurred. */
+/** Real product captures in /public/shots, dark mode, identities blurred.
+ *  `src` is the source PNG key; pages render the responsive WebP variants
+ *  through screenshotImageProps(). */
 export interface Shot {
   src: string;
   title: string;
@@ -145,14 +147,14 @@ export interface Shot {
 
 export const SHOTS: Shot[] = [
   {
-    src: "/shots/model-picker.webp",
+    src: "/shots/model-picker.png",
     title: "Model picker",
     caption: "Every model from every provider in one picker, with ⌘1 to ⌘9 jumps.",
     alt: "Ryco model picker listing Claude models with keyboard shortcuts and a provider rail.",
     aspect: 1594 / 850,
   },
   {
-    src: "/shots/diff.webp",
+    src: "/shots/diff.png",
     title: "Review",
     caption: "Per-turn diffs. Click any line to open your editor right there.",
     alt: "Ryco review panel showing per-turn diffs of TypeScript files.",
@@ -160,7 +162,7 @@ export const SHOTS: Shot[] = [
   },
 
   {
-    src: "/shots/overview.webp",
+    src: "/shots/overview.png",
     title: "Project overview",
     caption: "Issues, pull requests, Actions and Jira for the repo at a glance.",
     alt: "Ryco project overview with open issues, pull requests, Actions and Jira status.",
@@ -168,14 +170,14 @@ export const SHOTS: Shot[] = [
   },
 
   {
-    src: "/shots/providers.webp",
+    src: "/shots/providers.png",
     title: "Providers",
     caption: "Live auth, version and subscription status per provider.",
     alt: "Ryco provider settings listing authenticated Codex, Claude, Copilot, Cursor and OpenCode.",
     aspect: 1946 / 1088,
   },
   {
-    src: "/shots/themes.webp",
+    src: "/shots/themes.png",
     title: "Appearance",
     caption: "Fonts, size, radius and a custom accent, tuned live.",
     alt: "Ryco appearance settings with font pickers, size, radius and accent colour.",

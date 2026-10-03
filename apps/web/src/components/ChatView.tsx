@@ -1,25 +1,11 @@
-import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
+import { useAppKeybindings } from "../appKeybindings";
 import { notifyWorktreeSubmoduleSetup } from "./worktrees/worktreeCreationNotifications";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
-import { BatchLaunchControls } from "./chat/BatchLaunchControls";
-import { BatchResultSummary } from "./chat/BatchResultSummary";
-import { batchLaunchStore } from "../batchLaunchStore";
-import { prepareBatchAttachments } from "../hooks/prepareBatchAttachments";
-import {
-  batchSelectionKey,
-  createBatchLaunch,
-  prepareBatchDestination,
-  normalizeBatchSelection,
-  captureBatchLaunchReadiness,
-  getComposerProviderState,
-  type BatchLaunchPorts,
-} from "@ryco/client-runtime/state/composer";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { ComputerBetaPreview } from "./chat/ComputerBetaPreview";
 import type { ProviderOptionSelection } from "@ryco/contracts";
-import type { ComposerSourceControlContext } from "@ryco/contracts";
 import {
   rejectRetiredProjectMemory,
   hasRetiredProjectMemory,
@@ -191,6 +177,7 @@ import {
   type DevicePromptAttachmentResolution,
 } from "../lib/devicePromptContext";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import type { ModelPickMeta } from "./chat/modelPickerTuningBridge";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -286,17 +273,12 @@ import {
   selectionAllowedAtSendBoundary,
   threadHasStarted,
   revokeUserMessagePreviewUrls,
-  refreshStaleSourceControlContexts,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
-import {
-  useServerAvailableEditors,
-  useServerConfig,
-  useServerKeybindings,
-} from "~/rpc/serverState";
+import { useServerAvailableEditors, useServerConfig } from "~/rpc/serverState";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
@@ -527,22 +509,6 @@ export default function ChatView(props: ChatViewProps) {
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
   const composerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;
-  const batchOwnerKey = draftId ? String(draftId) : routeThreadKey;
-  const [batchSelections, setBatchSelections] = useState<readonly ModelSelection[]>([]);
-  const batchState = batchLaunchStore.useStore();
-  const batch = batchState.batches.find(
-    (item) =>
-      item.environmentId === environmentId &&
-      (item.ownerKey === batchOwnerKey ||
-        item.destinations.some((target) => target.threadId === threadId)),
-  );
-  const batchRunnerRef = useRef<{ id: string; ports: BatchLaunchPorts } | null>(null);
-  const batchMutationAllowedRef = useRef(dispatchCapability.allowed);
-  batchMutationAllowedRef.current = dispatchCapability.allowed;
-  useEffect(() => {
-    setBatchSelections([]);
-    batchRunnerRef.current = null;
-  }, [batchOwnerKey]);
   const serverThread = useStore(
     useMemo(
       () => createThreadSelectorByRef(routeKind === "server" ? routeThreadRef : null),
@@ -2073,7 +2039,7 @@ export default function ChatView(props: ChatViewProps) {
     handlePostPush: handlePostPushGitAction,
     clearWatch: clearPostPushWatch,
   } = usePostPushWorkflowWatch();
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings(activeProjectRef);
   const availableEditors = useServerAvailableEditors();
   // Prefer an instance-id match so a custom Codex instance (e.g.
   // `codex_personal`) surfaces its own status/message in the banner rather
@@ -3382,144 +3348,6 @@ export default function ChatView(props: ChatViewProps) {
       const effectiveSettingsSnapshot: SendTurnSettings = enforceBuildMode
         ? { ...settingsSnapshot, interactionMode: DEFAULT_INTERACTION_MODE }
         : settingsSnapshot;
-      if (
-        isLocalDraftThread &&
-        (batchSelections.length >= 2 || batch?.ownerKey === batchOwnerKey)
-      ) {
-        if (batch?.ownerKey === batchOwnerKey) {
-          toastManager.add({
-            type: "info",
-            title: "This comparison has already been submitted",
-            description: "Open its results or retry only safe failures. Your draft is retained.",
-          });
-          return false;
-        }
-        if (
-          presentationTier === "phone" ||
-          activeThread.worktreePath ||
-          draftThread?.worktreeSource ||
-          effectiveSettingsSnapshot.computerUse
-        )
-          throw new Error(
-            "Batch launch requires a new Git branch workspace without a linked source or Computer Use.",
-          );
-        const baseBranch = activeThreadBranch ?? gitStatusQuery.data?.refName ?? null;
-        const created = createBatchLaunch({
-          id: randomUUID(),
-          ownerKey: batchOwnerKey,
-          environmentId,
-          projectId: activeProject.id,
-          selections: batchSelections,
-          providers: providerStatuses,
-          prompt: composerSnapshot.prompt,
-          isGitRepo: gitStatusQuery.data?.isRepo === true,
-          baseBranch,
-          createdAt: new Date().toISOString(),
-        });
-        const captureMutationReadiness = () => {
-          const assertGeneration = captureBatchLaunchReadiness(environmentId, () =>
-            readEnvironmentConnection(environmentId),
-          );
-          return () => {
-            assertGeneration();
-            if (!batchMutationAllowedRef.current)
-              throw new Error("Mutation readiness changed; your draft is retained.");
-          };
-        };
-        const assertMutationReady = captureMutationReadiness();
-        assertMutationReady();
-        const freshContexts = await refreshStaleSourceControlContexts(
-          composerSnapshot.sourceControlContexts,
-          {
-            fetcher: async (context) => {
-              if (!gitCwd) throw new Error("Project context is unavailable.");
-              const detail =
-                context.kind === "issue"
-                  ? await queryClient.fetchQuery(
-                      issueDetailQueryOptions({
-                        environmentId,
-                        cwd: gitCwd,
-                        reference: String(context.detail.number),
-                      }),
-                    )
-                  : await queryClient.fetchQuery(
-                      changeRequestDetailQueryOptions({
-                        environmentId,
-                        cwd: gitCwd,
-                        reference: String(context.detail.number),
-                      }),
-                    );
-              return {
-                ...context,
-                detail,
-                fetchedAt: DateTime.fromDateUnsafe(new Date()),
-                staleAfter: DateTime.fromDateUnsafe(new Date(Date.now() + 5 * 60 * 1000)),
-              } as ComposerSourceControlContext;
-            },
-          },
-        );
-        const retained = await batchLaunchStore.add(created);
-        if (retained.id !== created.id) return false;
-        const ports: BatchLaunchPorts = {
-          assertMutationReady,
-          captureMutationReadiness,
-          prepare: async (destination, signal, currentGuard) => {
-            currentGuard();
-            const currentApi = readEnvironmentApi(environmentId);
-            if (!currentApi?.server?.getConfig)
-              throw new Error("The selected node is unavailable.");
-            const currentProviders = (await currentApi.server.getConfig()).providers;
-            currentGuard();
-            const { selection, entry } = normalizeBatchSelection(
-              destination.modelSelection,
-              currentProviders,
-              composerSnapshot.prompt,
-            );
-            const providerState = getComposerProviderState({
-              provider: entry.driverKind,
-              model: selection.model,
-              models: entry.models,
-              prompt: composerSnapshot.prompt,
-              modelOptions: selection.options,
-            });
-            const prompt = buildOutgoingMessageText({
-              composer: {
-                ...composerSnapshot,
-                selectedProvider: entry.driverKind,
-                selectedModel: selection.model,
-                selectedProviderModels: entry.models,
-                selectedPromptEffort: providerState.promptEffort,
-                selectedModelSelection: selection,
-              },
-              formatOutgoingPrompt,
-            });
-            const attachments = await prepareBatchAttachments({
-              environmentId,
-              threadId: destination.threadId,
-              attachments: composerSnapshot.images,
-              signal,
-            });
-            return prepareBatchDestination({
-              readProjectPreferences: readEffectiveProjectPreferences,
-              api: currentApi,
-              batch: retained,
-              destination,
-              providers: currentProviders,
-              prompt,
-              projectCwd: activeProject.cwd,
-              baseBranch: baseBranch!,
-              fetchOrigin: draftThread?.fetchOrigin ?? true,
-              ...effectiveSettingsSnapshot,
-              sourceControlContexts: freshContexts,
-              attachments,
-              assertMutationReady: currentGuard,
-            });
-          },
-        };
-        batchRunnerRef.current = { id: retained.id, ports };
-        await batchLaunchStore.run(retained.id, ports);
-        return false; // Batch retains its source draft; it is never promoted into a candidate.
-      }
       const threadIdForSend = activeThread.id;
       const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
       const { shouldMaterializeLegacyBranchWorktree, baseBranchForWorktree, shouldCreateWorktree } =
@@ -4454,8 +4282,14 @@ export default function ChatView(props: ChatViewProps) {
       instanceId: ProviderInstanceId,
       model: string,
       options?: ReadonlyArray<ProviderOptionSelection>,
+      meta?: ModelPickMeta,
     ) => {
       if (!activeThread) return;
+      // A pointer pick with the tuning dial docked keeps the picker open;
+      // pulling focus back to the composer would dismiss it.
+      const refocusComposer = () => {
+        if (!meta?.keepOpen) scheduleComposerFocus();
+      };
       // Look up the configured instance so model normalization and custom
       // model lookup stay scoped to that exact instance. Unknown instance ids
       // are rejected by returning early; the server remains authoritative too.
@@ -4467,12 +4301,12 @@ export default function ChatView(props: ChatViewProps) {
         entry.status !== "ready" ||
         entry.availability === "unavailable"
       ) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       const resolvedDriverKind = entry?.driver ?? null;
       if (providerSelectionPolicy.mode === "continuation-only" && lockedProvider === null) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       if (
@@ -4480,7 +4314,7 @@ export default function ChatView(props: ChatViewProps) {
         resolvedDriverKind !== null &&
         resolvedDriverKind !== lockedProvider
       ) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       if (lockedProvider !== null && activeThread.session?.providerInstanceId) {
@@ -4492,7 +4326,7 @@ export default function ChatView(props: ChatViewProps) {
           entry?.continuation?.groupKey &&
           currentEntry.continuation.groupKey !== entry.continuation.groupKey
         ) {
-          scheduleComposerFocus();
+          refocusComposer();
           return;
         }
       }
@@ -4503,7 +4337,7 @@ export default function ChatView(props: ChatViewProps) {
         model,
       );
       if (!resolvedModel) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       const nextModelSelection: ModelSelection = {
@@ -4519,7 +4353,7 @@ export default function ChatView(props: ChatViewProps) {
           targetSelection: nextModelSelection,
         })
       ) {
-        scheduleComposerFocus();
+        refocusComposer();
         return;
       }
       setComposerDraftModelSelection(
@@ -4536,7 +4370,7 @@ export default function ChatView(props: ChatViewProps) {
       if (normalizedInteractionMode !== interactionMode) {
         handleInteractionModeChange(normalizedInteractionMode);
       }
-      scheduleComposerFocus();
+      refocusComposer();
     },
     [
       activeThread,
@@ -4659,7 +4493,7 @@ export default function ChatView(props: ChatViewProps) {
   ]);
 
   // Direction A chrome layering: on the desktop tier the input bar overlays
-  // the transcript so messages scroll beneath the glass composer. The bar's
+  // the transcript so messages scroll beneath the composer. The bar's
   // rendered height travels as a CSS variable on the chat column — consumed
   // by the timeline's list footer (internal scroll clearance) and the
   // scroll-to-bottom pill. The phone tier and the new-thread hero keep the
@@ -4910,7 +4744,7 @@ export default function ChatView(props: ChatViewProps) {
       />
 
       {/* Provider status lives in the composer banner stack. Thread errors use
-          the global liquid-glass notification surface instead of obscuring the
+          the global notification surface instead of obscuring the
           transcript with a full-width inline strip. */}
       <ThreadErrorBanner
         error={activeThread.error}
@@ -4981,6 +4815,7 @@ export default function ChatView(props: ChatViewProps) {
                 {...(presentationTier !== "phone"
                   ? { onInspectContextHandoff: openContextHandoffInspection }
                   : {})}
+                providerDriverKind={selectedProvider}
               />
             ) : (
               <div aria-hidden className="flex min-h-0 flex-1" />
@@ -5040,7 +4875,7 @@ export default function ChatView(props: ChatViewProps) {
                 <button
                   type="button"
                   onClick={() => scrollToEnd(true)}
-                  className="pointer-events-auto flex items-center gap-1.5 rounded-full border-0 bg-card/80 px-3 py-1 text-muted-foreground text-xs shadow-md/5 ring-1 ring-inset ring-foreground/6 backdrop-blur transition-[background-color,color,box-shadow] hover:bg-card hover:text-foreground hover:shadow-lg/8 hover:cursor-pointer"
+                  className="selection-glass-surface pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1 text-muted-foreground text-xs shadow-md/5 transition-[background-color,color,box-shadow] hover:bg-popover hover:text-foreground hover:shadow-lg/8 hover:cursor-pointer"
                 >
                   <ChevronDownIcon className="size-3.5" />
                   Scroll to bottom
@@ -5123,10 +4958,19 @@ export default function ChatView(props: ChatViewProps) {
             {composerOverlayActive ? (
               // Soft scroll-edge scrim across the whole floating bar
               // (composer + branch toolbar): keeps transcript lines readable
-              // as they travel beneath without reserving layout for it.
+              // as they travel beneath without reserving layout for it. It
+              // thins with the Transparency setting so a frosted composer
+              // shows the transcript beneath it (see `.app-composer-scrim`).
+              // The strip covers the branch toolbar row (42px + the bar's
+              // 0.25rem bottom padding) or, without it, the bottom padding.
               <div
                 aria-hidden
-                className="-top-10 -z-10 pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-background via-background/45 to-transparent"
+                className={cn(
+                  "app-composer-scrim -top-10 -z-10 pointer-events-none absolute inset-x-0 bottom-0",
+                  isGitRepo
+                    ? "[--app-composer-scrim-strip:calc(2.875rem+max(env(safe-area-inset-bottom),var(--app-keyboard-inset,0px)))]"
+                    : "[--app-composer-scrim-strip:calc(1rem+max(env(safe-area-inset-bottom),var(--app-keyboard-inset,0px)))]",
+                )}
               />
             ) : null}
             <div className={cn("relative isolate", composerOverlayActive && "pointer-events-auto")}>
@@ -5173,104 +5017,6 @@ export default function ChatView(props: ChatViewProps) {
                   ))
                 : null}
               <ComposerBannerStack className="relative z-0" items={composerBannerStackItems} />
-              {presentationTier !== "phone" && batch ? (
-                <BatchResultSummary
-                  batch={batch}
-                  error={batchState.storageError}
-                  retryDisabled={
-                    !!batchState.storageError ||
-                    !dispatchCapability.allowed ||
-                    isConnecting ||
-                    activeEnvironmentUnavailable
-                  }
-                  onNew={
-                    isLocalDraftThread && batch.ownerKey === batchOwnerKey
-                      ? () => {
-                          const contentChanged = captureComposerContentGuard();
-                          const sourceTarget = editorSendTargetRef.current;
-                          void batchLaunchStore
-                            .releaseSource(batch.id)
-                            .then((released) => {
-                              if (!released)
-                                throw new Error("Finish or cancel comparison targets first.");
-                              if (
-                                contentChanged() ||
-                                editorSendTargetRef.current.environmentId !==
-                                  sourceTarget.environmentId ||
-                                editorSendTargetRef.current.threadId !== sourceTarget.threadId
-                              )
-                                return;
-                              promptRef.current = "";
-                              clearComposerDraftContent(composerDraftTarget);
-                              readComposer()?.resetCursorState();
-                              setBatchSelections([]);
-                            })
-                            .catch((error) =>
-                              toastManager.add({
-                                type: "error",
-                                title: "Comparison draft could not be released",
-                                description:
-                                  error instanceof Error
-                                    ? error.message
-                                    : "Draft storage unavailable",
-                              }),
-                            );
-                        }
-                      : undefined
-                  }
-                  onRetry={
-                    batchRunnerRef.current?.id === batch.id
-                      ? () => {
-                          const runner = batchRunnerRef.current;
-                          if (runner)
-                            void batchLaunchStore.run(runner.id, runner.ports).catch((error) =>
-                              toastManager.add({
-                                type: "error",
-                                title: error instanceof Error ? error.message : "Retry unavailable",
-                              }),
-                            );
-                        }
-                      : undefined
-                  }
-                />
-              ) : null}
-              {presentationTier !== "phone" && isLocalDraftThread && !batch ? (
-                <BatchLaunchControls
-                  selections={batchSelections}
-                  disabled={
-                    !dispatchCapability.allowed ||
-                    isSendBusy ||
-                    !batchState.hydrated ||
-                    !!batchState.storageError ||
-                    serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true ||
-                    gitStatusQuery.data?.isRepo !== true ||
-                    !!draftThread?.worktreeSource
-                  }
-                  reason={
-                    batchState.storageError ??
-                    (serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true
-                      ? "Update this node to enable isolated batch launches."
-                      : gitStatusQuery.data?.isRepo !== true
-                        ? "Batch launch requires a Git project."
-                        : null)
-                  }
-                  onAdd={() => {
-                    const context = readComposer()?.getSendContext();
-                    if (!context) return;
-                    const target = context.selectedModelSelection;
-                    setBatchSelections((previous) =>
-                      previous.some((item) => batchSelectionKey(item) === batchSelectionKey(target))
-                        ? previous
-                        : [...previous, target],
-                    );
-                  }}
-                  onRemove={(key) =>
-                    setBatchSelections((previous) =>
-                      previous.filter((item) => batchSelectionKey(item) !== key),
-                    )
-                  }
-                />
-              ) : null}
               {/* Agent Control approvals stay off the frozen phone tier;
                   apps/mobile owns the native surface. */}
               {presentationTier !== "phone" ? (

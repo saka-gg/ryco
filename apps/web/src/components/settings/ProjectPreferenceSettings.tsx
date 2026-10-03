@@ -1,7 +1,6 @@
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { WS_METHODS } from "@ryco/contracts";
 import { useEffect, useRef, useState } from "react";
-import { useShallow } from "zustand/react/shallow";
 import { Schema } from "effect";
 import {
   DEFAULT_UNIFIED_SETTINGS,
@@ -17,7 +16,6 @@ import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/sett
 import { createModelSelection } from "@ryco/shared/model";
 import { useServerConfig, applySettingsUpdated } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
-import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { ensureEnvironmentApi } from "../../environmentApi";
 import { ensureLocalApi } from "../../localApi";
@@ -30,15 +28,21 @@ import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { DraftInput } from "../ui/draft-input";
 import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { SettingsRow } from "./settingsLayout";
+import { SettingResetButton, SettingsBlock, SettingsNotice, SettingsRow } from "./settingsLayout";
+import { SETTINGS_CONTROL_WIDTH } from "./settingsLayout";
+import { SettingsSelect } from "./SettingsSelect";
 
-export function ProjectPreferenceSettings() {
+export function ProjectPreferenceSettings({
+  projectId,
+  projects,
+}: {
+  readonly projectId: string;
+  readonly projects: ReadonlyArray<{ readonly id: string; readonly title: string }>;
+}) {
   const config = useServerConfig();
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
   const capability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
   const disabled =
     !capability.allowed ||
@@ -53,29 +57,27 @@ export function ProjectPreferenceSettings() {
       <SettingsRow
         title="Project defaults"
         owner="node"
-        description="Update this node to configure inherited project defaults."
-        control={null}
+        description="Update this device's Ryco server to configure inherited project defaults."
       />
     );
   return (
     <ProjectPreferenceEditor
       key={environmentId}
+      projectId={projectId}
       disabled={disabled}
-      projects={projects
-        .filter((project) => project.environmentId === environmentId)
-        .map((project) => ({ id: project.id, title: project.name }))}
+      projects={projects}
     />
   );
 }
 
 function ProjectPreferenceEditor(props: {
+  readonly projectId: string;
   readonly disabled: boolean;
   readonly projects: ReadonlyArray<{ readonly id: string; readonly title: string }>;
 }) {
   const config = useServerConfig();
   const target = useSettingsTarget();
-  const [selectedProject, setSelectedProject] = useState("");
-  const projectId = selectedProject;
+  const projectId = props.projectId;
   const projectMissing = Boolean(
     projectId && !props.projects.some((project) => project.id === projectId),
   );
@@ -158,23 +160,28 @@ function ProjectPreferenceEditor(props: {
   }
   function source(field: keyof ProjectPreferencesPatch) {
     const result = effective?.[field];
-    if (!result) return "Loading effective value…";
+    if (!result) return "Loading…";
     return result.source === "project" || result.source === "legacy-project"
       ? "Overridden for this project"
       : projectId
-        ? `Inherited from ${result.source === "builtin" ? "Ryco defaults" : "node defaults"}`
+        ? `Inherited from ${result.source === "builtin" ? "Ryco defaults" : "device defaults"}`
         : result.source === "builtin"
           ? "Ryco default"
-          : "Node default";
+          : "Device default";
   }
-  function reset(field: keyof ProjectPreferencesPatch) {
+  function reset(field: keyof ProjectPreferencesPatch, label: string) {
     const overridden =
       effective?.[field]?.source === "project" || effective?.[field]?.source === "legacy-project";
-    if (projectId && !overridden) return null;
+    const changedOnNode =
+      field === "initialModelSelection"
+        ? effective?.initialModelSelection.source === "node"
+        : effective !== null && effective[field].value !== DEFAULT_UNIFIED_SETTINGS[field];
+    if (projectId ? !overridden : !changedOnNode) return null;
     return (
-      <Button
-        variant="outline"
-        size="sm"
+      <SettingResetButton
+        label={label}
+        tooltip={projectId ? "Use device default" : "Reset to default"}
+        ariaLabel={projectId ? `Use device default for ${label}` : undefined}
         disabled={blocked}
         onClick={() => {
           const value = projectId
@@ -184,9 +191,7 @@ function ProjectPreferenceEditor(props: {
               : DEFAULT_UNIFIED_SETTINGS[field];
           void save({ [field]: value });
         }}
-      >
-        {projectId ? "Use node default" : "Reset"}
-      </Button>
+      />
     );
   }
   const model = effective?.initialModelSelection.value;
@@ -197,49 +202,11 @@ function ProjectPreferenceEditor(props: {
   return (
     <>
       <SettingsRow
-        title="Project default scope"
-        owner="node"
-        scope={target?.nodeLabel ?? "This node"}
-        description="Defaults apply to new threads and worktrees. Each project can inherit or override individual fields. Existing threads keep their choices."
-        control={
-          <Select
-            value={projectId ? `project:${projectId}` : "node"}
-            disabled={props.disabled || saving}
-            onValueChange={(value, details) => {
-              // The Select can suggest its first option when a project disappears.
-              // Only an intentional user selection may change the editing scope.
-              if (details.reason === "none") {
-                details.cancel();
-                return;
-              }
-              // A removed option can produce null; it must not redirect edits to node defaults.
-              if (value === "node") setSelectedProject("");
-              else if (typeof value === "string" && value.startsWith("project:"))
-                setSelectedProject(value.slice(8));
-            }}
-          >
-            <SelectTrigger aria-label="Project default scope">
-              <SelectValue>
-                {props.projects.find((project) => project.id === projectId)?.title ??
-                  (projectId ? "Project removed" : "Node defaults")}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              <SelectItem value="node">Node defaults</SelectItem>
-              {props.projects.map((project) => (
-                <SelectItem key={project.id} value={`project:${project.id}`}>
-                  {project.title}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-        }
-      />
-      <SettingsRow
         title="Initial model and effort"
         owner="node"
-        description={source("initialModelSelection")}
-        resetAction={reset("initialModelSelection")}
+        description="The model and reasoning effort new threads start with."
+        status={source("initialModelSelection")}
+        resetAction={reset("initialModelSelection", "initial model")}
         control={
           model && config ? (
             <div className="flex flex-wrap justify-end gap-2">
@@ -299,38 +266,35 @@ function ProjectPreferenceEditor(props: {
       <SettingsRow
         title="New threads"
         owner="node"
-        description={source("defaultThreadEnvMode")}
-        resetAction={reset("defaultThreadEnvMode")}
+        description="Whether new threads work in the project folder or a fresh worktree."
+        status={source("defaultThreadEnvMode")}
+        resetAction={reset("defaultThreadEnvMode", "new threads")}
         control={
-          <Select
+          <SettingsSelect<"local" | "worktree">
+            ariaLabel="Default thread mode"
+            width="sm"
             value={effective?.defaultThreadEnvMode.value ?? "local"}
             disabled={blocked}
-            onValueChange={(value) => {
-              if (value === "local" || value === "worktree")
-                void save({ defaultThreadEnvMode: value });
-            }}
-          >
-            <SelectTrigger aria-label="Default thread mode">
-              <SelectValue>
-                {effective?.defaultThreadEnvMode.value === "worktree" ? "New worktree" : "Local"}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              <SelectItem value="local">Local</SelectItem>
-              <SelectItem value="worktree">New worktree</SelectItem>
-            </SelectPopup>
-          </Select>
+            onValueChange={(value) => void save({ defaultThreadEnvMode: value })}
+            options={[
+              { value: "local", label: "Local" },
+              { value: "worktree", label: "New worktree" },
+            ]}
+          />
         }
       />
       <SettingsRow
         title="Worktree branch prefix"
         owner="node"
-        description={`${source("worktreeBranchPrefix")}. Empty means no prefix; existing branches keep their names.`}
-        resetAction={reset("worktreeBranchPrefix")}
+        description="A Git namespace for generated branches. Empty means no prefix; existing branches keep their names."
+        status={source("worktreeBranchPrefix")}
+        resetAction={reset("worktreeBranchPrefix", "worktree branch prefix")}
         control={
           <DraftInput
+            className={SETTINGS_CONTROL_WIDTH.md}
             value={effective?.worktreeBranchPrefix.value ?? ""}
             disabled={blocked}
+            placeholder="No prefix"
             aria-label="Worktree branch prefix"
             spellCheck={false}
             autoCapitalize="none"
@@ -350,39 +314,41 @@ function ProjectPreferenceEditor(props: {
       <SettingsRow
         title="Worktree setup"
         owner="node"
-        description={`${source("runSetupScript")}. Run the project's existing setup script after creating a worktree.`}
-        resetAction={reset("runSetupScript")}
+        description="Run the project's setup script after creating a worktree."
+        status={source("runSetupScript")}
+        resetAction={reset("runSetupScript", "worktree setup")}
         control={
-          <Select
+          <SettingsSelect<"run" | "skip">
+            ariaLabel="Worktree setup"
+            width="sm"
             value={effective?.runSetupScript.value === false ? "skip" : "run"}
             disabled={blocked}
             onValueChange={(value) => void save({ runSetupScript: value === "run" })}
-          >
-            <SelectTrigger aria-label="Worktree setup">
-              <SelectValue>
-                {effective?.runSetupScript.value === false ? "Skip setup" : "Run setup"}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              <SelectItem value="run">Run setup</SelectItem>
-              <SelectItem value="skip">Skip setup</SelectItem>
-            </SelectPopup>
-          </Select>
+            options={[
+              { value: "run", label: "Run setup" },
+              { value: "skip", label: "Skip setup" },
+            ]}
+          />
         }
       />
-      {saving && (
-        <p role="status" className="text-xs text-muted-foreground">
+      {error ? (
+        <SettingsBlock>
+          <SettingsNotice
+            tone="error"
+            action={
+              <Button variant="outline" size="xs" onClick={() => setReload((value) => value + 1)}>
+                Reload
+              </Button>
+            }
+          >
+            {error}
+          </SettingsNotice>
+        </SettingsBlock>
+      ) : saving ? (
+        <SettingsBlock role="status" className="py-2.5 text-xs text-muted-foreground">
           Saving…
-        </p>
-      )}
-      {error && (
-        <div role="alert" className="text-sm text-destructive">
-          {error}{" "}
-          <Button variant="outline" size="sm" onClick={() => setReload((value) => value + 1)}>
-            Reload
-          </Button>
-        </div>
-      )}
+        </SettingsBlock>
+      ) : null}
     </>
   );
 }

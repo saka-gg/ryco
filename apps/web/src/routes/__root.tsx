@@ -124,7 +124,8 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
     const { ensureWebHostedRuntimeConfigured, hostedHubController } =
       await import("../hostedHub/state");
     ensureWebHostedRuntimeConfigured();
-    await hostedHubController.bootstrap();
+    const { bootstrapWithHostedReadCache } = await import("../hostedHub/readCache");
+    await bootstrapWithHostedReadCache(() => hostedHubController.bootstrap());
     markStartupPhase("root-before-load-ready");
     return { authGateState: { status: "hosted-hub" } };
   }

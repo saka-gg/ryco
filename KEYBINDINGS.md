@@ -1,11 +1,48 @@
 # Keybindings
 
-Ryco reads keybindings from:
+Open **App preferences → Keybindings** to edit keyboard shortcuts. Bindings are saved in
+the current desktop installation or browser profile and apply across connected nodes.
+Connecting, switching or reconnecting nodes, and server configuration pushes, do not change them.
+Viewers and operators can edit these local preferences even while a node is disconnected.
+Headless nodes have no GUI keybindings settings section or mutation authority.
 
-- `~/.ryco/userdata/keybindings.json`
-- dev mode: `$RYCO_HOME/dev/keybindings.json`
+Desktop stores a separate `app-keybindings.json` document beside its client preferences,
+independent of backend state directories and renderer origins. Browser storage uses
+`ryco:app-keybindings:v1` in the current origin/profile. Desktop windows and browser tabs
+reload the shared local document when another window saves. Concurrent saves follow
+last successful save precedence. Separate browser origins/profiles and separate desktop
+installations have separate bindings.
 
-The file must be a JSON array of rules:
+Shortcuts remain inactive until the local document loads successfully or defaults are
+explicitly restored. Returning after a window has no shortcut subscribers reloads the document
+to pick up changes made by other windows during that gap.
+
+Only command overrides and deliberately disabled commands are persisted, allowing future
+defaults to evolve. **Restore defaults** removes both. Failed writes retain the last
+successfully saved bindings. Corrupt or unreadable documents are retained and surfaced:
+**Retry loading** retries the read; **Replace local bindings with defaults** explicitly
+replaces the local document. Ordinary edits cannot overwrite an unreadable document.
+
+## Import existing node bindings
+
+There is no automatic adoption of a node's bindings. Existing files remain available at
+`~/.ryco/userdata/keybindings.json` (or `$RYCO_HOME/dev/keybindings.json` in dev mode).
+Copy the desired node's file to your client and select it under **Import legacy bindings**.
+Review the listed rules and click **Import reviewed bindings**. Cancel makes no changes.
+The import keeps local command overrides and explicit disables; it fills untouched commands.
+It neither modifies the node's file nor grants the node future control of local shortcuts.
+
+Legacy `script.{id}.run` rules require an explicit project/node choice. Every imported script
+must exist in the selected project; otherwise the whole import is rejected without changes.
+Split multi-project legacy files or assign shortcuts from each project's Actions editor.
+New script shortcuts include environment and project identity internally, so identical
+script and project IDs on different nodes cannot collide. Only the active project's script
+bindings participate in shortcut resolution; execution uses that project's node API.
+
+Legacy RPC mutation methods remain in the wire protocol for compatibility but reject writes
+with a message directing older clients to App preferences.
+
+A legacy file is a JSON array of rules:
 
 ```json
 [
@@ -14,7 +51,7 @@ The file must be a JSON array of rules:
 ]
 ```
 
-See the full schema for more details: [`packages/contracts/src/keybindings.ts`](packages/contracts/src/keybindings.ts)
+See [`packages/contracts/src/keybindings.ts`](packages/contracts/src/keybindings.ts) for schemas.
 
 ## Defaults
 
@@ -58,7 +95,7 @@ See the full schema for more details: [`packages/contracts/src/keybindings.ts`](
 ]
 ```
 
-For most up to date defaults, see [`DEFAULT_KEYBINDINGS` in `apps/server/src/keybindings.ts`](apps/server/src/keybindings.ts)
+For most up to date defaults, see [`DEFAULT_KEYBINDINGS` in `packages/shared/src/keybindings.ts`](packages/shared/src/keybindings.ts)
 
 ## Configuration
 
@@ -70,7 +107,7 @@ Each entry supports:
 - `command` (required): action ID
 - `when` (optional): boolean expression controlling when the shortcut is active
 
-Invalid rules are ignored. Invalid config files are ignored. Warnings are logged by the server.
+Invalid imports are rejected without changing local preferences. The same shared compiler validates shortcut and context expressions on every client.
 
 ### Available Commands
 
@@ -91,7 +128,7 @@ Invalid rules are ignored. Invalid config files are ignored. Warnings are logged
 - `modelPicker.jump.1` through `modelPicker.jump.9`: pick a visible model by position while the model picker is open
 - `thread.previous` / `thread.next`: navigate between threads
 - `thread.jump.1` through `thread.jump.9`: jump to a visible thread by position
-- `script.{id}.run`: run a project script by id (for example `script.test.run`)
+- `projectScript.{environment}/{project}/{id}.run`: a locally assigned script shortcut. The app constructs these scoped IDs; legacy `script.{id}.run` rules are supported only through explicit import.
 
 ### Key Syntax
 

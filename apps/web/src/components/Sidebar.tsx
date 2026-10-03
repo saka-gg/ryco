@@ -1,3 +1,4 @@
+import { useAppKeybindings } from "../appKeybindings";
 import { applyInboxServerConfig } from "./inboxSidebar/inboxSidebarModel";
 import { useDeviceName } from "../deviceName";
 import { isLocalHubAlias } from "../deviceName.logic";
@@ -103,7 +104,7 @@ import { SidebarProjectsContent, PROJECT_ROOT_DROP_ID } from "./sidebar/SidebarP
 import { SidebarProjectItem } from "./sidebar/SidebarProjectItem";
 import { SidebarProjectDialogProvider } from "./sidebar/SidebarProjectDialogOwner";
 import { SidebarChromeHeader, SidebarChromeFooter } from "./sidebar/SidebarChrome";
-import { SidebarNewThreadButton } from "./sidebar/SidebarNewThreadButton";
+import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
 import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
 import {
@@ -111,7 +112,6 @@ import {
   type InboxSidebarEnvironment,
 } from "./inboxSidebar/inboxSidebarModel";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
-import { useServerKeybindings } from "../rpc/serverState";
 import { derivePhysicalProjectKey, getProjectOrderKey } from "../logicalProject";
 import {
   useSavedEnvironmentRegistryStore,
@@ -186,7 +186,7 @@ function attachSidebarAutoAnimateNode(
 }
 
 function buildThreadJumpLabelMap(input: {
-  keybindings: ReturnType<typeof useServerKeybindings>;
+  keybindings: ReturnType<typeof useAppKeybindings>;
   platform: string;
   terminalOpen: boolean;
   threadJumpCommandByKey: ReadonlyMap<
@@ -276,7 +276,7 @@ export default function Sidebar() {
     ? scopedThreadKey(scopeThreadRef(routeDraftThread.environmentId, routeDraftThread.threadId))
     : null;
   const activeRouteThreadKey = routeThreadKey ?? routeDraftThreadKey;
-  const keybindings = useServerKeybindings();
+  const keybindings = useAppKeybindings();
   const openAddProjectCommandPalette = useCommandPaletteStore((store) => store.openAddProject);
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
     ReadonlySet<string>
@@ -1326,10 +1326,11 @@ export default function Sidebar() {
         onModeChange={handleSidebarModeChange}
       />
 
-      <SidebarNewThreadButton
-        shortcutLabel={newThreadShortcutLabel}
-        disabled={newThreadTargetProject === null}
-        onClick={startNewThreadFromSidebar}
+      <SidebarPrimaryActions
+        newThreadShortcutLabel={newThreadShortcutLabel}
+        newThreadDisabled={newThreadTargetProject === null}
+        onNewThread={startNewThreadFromSidebar}
+        searchShortcutLabel={commandPaletteShortcutLabel}
       />
 
       <SidebarProjectDialogProvider
@@ -1360,7 +1361,6 @@ export default function Sidebar() {
             handleProjectDragEnd={handleProjectDragEnd}
             handleProjectDragCancel={handleProjectDragCancel}
             projectTreeRows={projectTreeRows}
-            commandPaletteShortcutLabel={commandPaletteShortcutLabel}
             attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
             projectsLength={projects.length}
             renderProjectRow={(project, dragHandleProps, onNewFolderWithProject) => (
@@ -1402,6 +1402,7 @@ export default function Sidebar() {
             environments={inboxEnvironments}
             localQueuedThreadKeys={localQueuedThreadKeys}
             pinnedThreadKeys={pinnedThreadKeys}
+            primaryEnvironmentId={primaryEnvironmentId}
             onOpenThread={navigateToThread}
             projects={projects}
             projectGroups={sidebarProjects}

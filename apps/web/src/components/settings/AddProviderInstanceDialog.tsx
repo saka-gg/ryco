@@ -2,7 +2,7 @@
 
 import { CheckIcon } from "lucide-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProviderInstanceId,
   ProviderDriverKind,
@@ -10,6 +10,7 @@ import {
 } from "@ryco/contracts";
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { ColorSwatchPicker } from "./ColorSwatchPicker";
 import { cn } from "../../lib/utils";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Button } from "../ui/button";
@@ -112,6 +113,11 @@ export function AddProviderInstanceDialog({
 }: AddProviderInstanceDialogProps) {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
+  // The dialog folds into the row of the instance it just added.
+  const createdInstanceIdRef = useRef<ProviderInstanceId | null>(null);
+  useEffect(() => {
+    if (open) createdInstanceIdRef.current = null;
+  }, [open]);
 
   const [wizardStep, setWizardStep] = useState(0);
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
@@ -206,6 +212,7 @@ export function AddProviderInstanceDialog({
     };
     try {
       updateSettings({ providerInstances: nextMap });
+      createdInstanceIdRef.current = brandedId;
       onCreated?.(brandedId);
       toastManager.add({
         type: "success",
@@ -237,7 +244,20 @@ export function AddProviderInstanceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogPopup className="max-w-xl overflow-hidden">
+      <DialogPopup
+        className="max-w-xl overflow-hidden"
+        morph={{
+          target: (origin) => {
+            const created = createdInstanceIdRef.current;
+            if (!created) return origin;
+            return (
+              document.querySelector<HTMLElement>(
+                `[data-provider-instance-id="${CSS.escape(created)}"]`,
+              ) ?? origin
+            );
+          },
+        }}
+      >
         <div className="flex min-h-0 flex-col overflow-hidden border-foreground/10 bg-background shadow-2xl">
           <DialogHeader className="border-b border-border/70 bg-background">
             <DialogTitle>Add provider instance</DialogTitle>
@@ -395,46 +415,13 @@ export function AddProviderInstanceDialog({
 
               <div className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
                 <span className="text-xs font-medium text-foreground">Accent color</span>
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <input
-                    type="color"
-                    value={normalizeProviderAccentColor(accentColor) ?? PROVIDER_ACCENT_SWATCHES[0]}
-                    onChange={(event) => setAccentColor(event.target.value)}
-                    aria-label="Provider instance accent color"
-                    className="h-8 w-10 cursor-pointer rounded-xl border border-input bg-background p-0.5"
-                  />
-                  <div className="flex flex-wrap gap-1.5">
-                    {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
-                      const selected = accentColor.toLowerCase() === swatch;
-                      return (
-                        <button
-                          key={swatch}
-                          type="button"
-                          className={cn(
-                            "size-6 cursor-pointer rounded-full border transition",
-                            selected
-                              ? "scale-110 border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
-                              : "border-black/10 hover:scale-105 dark:border-white/20",
-                          )}
-                          style={{ backgroundColor: swatch }}
-                          onClick={() => setAccentColor(swatch)}
-                          aria-label={`Use ${swatch} accent`}
-                        />
-                      );
-                    })}
-                  </div>
-                  {accentColor ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-xs text-muted-foreground"
-                      onClick={() => setAccentColor("")}
-                    >
-                      Clear
-                    </Button>
-                  ) : null}
-                </div>
+                <ColorSwatchPicker
+                  ariaLabel="Provider instance accent color"
+                  value={normalizeProviderAccentColor(accentColor) ?? null}
+                  swatches={PROVIDER_ACCENT_SWATCHES}
+                  defaultOption={{ label: "No accent" }}
+                  onChange={(next) => setAccentColor(next ?? "")}
+                />
                 <span className="text-[11px] text-muted-foreground">
                   Optional marker shown in the picker.
                 </span>

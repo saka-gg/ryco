@@ -1,3 +1,4 @@
+import { rejectRemoteKeybindingWrite } from "@ryco/client-runtime/state/settings";
 import type { ContextMenuItem, LocalApi } from "@ryco/contracts";
 
 import { resetGitStatusStateForTests } from "./lib/gitStatusState";
@@ -182,8 +183,7 @@ function createBrowserLocalApi(
         ),
       updateProvider: (input) =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.updateProvider(input)),
-      upsertKeybinding: (input) =>
-        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.upsertKeybinding(input)),
+      upsertKeybinding: rejectRemoteKeybindingWrite,
       getSettings: () =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getSettings()),
       updateSettings: (patch) =>
@@ -214,8 +214,7 @@ function createBrowserLocalApi(
         ),
     },
     keybindings: {
-      replaceCustom: (input) =>
-        withRpcClient(readRpcClient, (rpcClient) => rpcClient.keybindings.replaceCustom(input)),
+      replaceCustom: rejectRemoteKeybindingWrite,
     },
     ...((options?.includeMcp ?? rpcClientOrResolver !== undefined)
       ? {

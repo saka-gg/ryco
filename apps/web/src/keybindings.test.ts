@@ -6,6 +6,7 @@ import {
   type KeybindingWhenNode,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
+import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import {
   formatShortcutLabel,
   hasNoShortcutModifiers,
@@ -757,6 +758,38 @@ describe("resolveShortcutCommand", () => {
         },
       ),
       "thread.next",
+    );
+  });
+
+  it("resolves the default split-view shortcuts from physical keys", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, context = {}) =>
+      resolveShortcutCommand(event(overrides), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context,
+      });
+    assert.strictEqual(resolve({ key: "\\", code: "Backslash", metaKey: true }), "pane.split");
+    // Shift turns the key into "|"; the physical code still names the binding.
+    assert.strictEqual(
+      resolve({ key: "|", code: "Backslash", metaKey: true, shiftKey: true }),
+      "pane.close",
+    );
+    // Option rewrites bracket keys on macOS ("‘", "“").
+    assert.strictEqual(
+      resolve({ key: "‘", code: "BracketRight", metaKey: true, altKey: true }),
+      "pane.focusNext",
+    );
+    assert.strictEqual(
+      resolve({ key: "“", code: "BracketLeft", metaKey: true, altKey: true }),
+      "pane.focusPrevious",
+    );
+    // Terminal input keeps the split and close keys.
+    assert.strictEqual(
+      resolve({ key: "\\", code: "Backslash", metaKey: true }, { terminalFocus: true }),
+      null,
+    );
+    assert.strictEqual(
+      shortcutLabelForCommand(DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
+      "⇧⌘\\",
     );
   });
 });

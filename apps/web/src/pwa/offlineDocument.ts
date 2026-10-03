@@ -6,7 +6,15 @@ function escapeHtmlAttribute(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
-export function renderHostedPwaOfflineDocument(input: { readonly startUrl: string }): string {
+export function renderHostedPwaOfflineDocument(input: {
+  readonly startUrl: string;
+  readonly scripts?: ReadonlyArray<string>;
+  readonly styles?: ReadonlyArray<string>;
+}): string {
+  if (input.scripts?.length) {
+    // Build-generated entry points only. No live document, account, or API response is cached.
+    return `<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#0b0b0c"><title>Ryco</title><style>html,body,#root{height:100%;width:100%;margin:0}body{background:#fff;color:#262626}@media(prefers-color-scheme:dark){body{background:#0b0b0c;color:#f5f5f5}}</style>${(input.styles ?? []).map((url) => `<link rel="stylesheet" href="${escapeHtmlAttribute(url)}">`).join("")}${input.scripts.map((url) => `<script type="module" crossorigin src="${escapeHtmlAttribute(url)}"></script>`).join("")}</head><body><div id="root"></div></body></html>`;
+  }
   const startUrl = escapeHtmlAttribute(input.startUrl);
   return `<!doctype html>
 <html lang="en">

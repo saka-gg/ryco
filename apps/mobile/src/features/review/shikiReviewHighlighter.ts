@@ -1,4 +1,4 @@
-import { createHighlighterCore, type HighlighterCore } from "@shikijs/core";
+import { createHighlighterCore, type GrammarState, type HighlighterCore } from "@shikijs/core";
 import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 import bashLanguage from "@shikijs/langs/bash";
 import javascriptLanguage from "@shikijs/langs/javascript";
@@ -71,6 +71,20 @@ const REVIEW_HIGHLIGHTER_DISABLE_RESULT_CACHE = resolveReviewHighlighterBooleanF
 const REVIEW_HIGHLIGHT_RESULT_CACHE_LIMIT = 8;
 const REVIEW_HIGHLIGHT_CHUNK_LINE_THRESHOLD = 8;
 const REVIEW_HIGHLIGHT_CHUNK_SIZE = 200;
+const REVIEW_HIGHLIGHT_CACHE_BYTES = 4 * 1024 * 1024;
+const REVIEW_HIGHLIGHT_SLICE_MS = 4;
+const highlightCacheBytes = new Map<string, number>();
+let resolvedHighlightBytes = 0;
+
+function nextHighlightChunkSize(previous: number, elapsed: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      REVIEW_HIGHLIGHT_CHUNK_SIZE,
+      Math.floor((previous * REVIEW_HIGHLIGHT_SLICE_MS) / Math.max(1, elapsed)),
+    ),
+  );
+}
 const REVIEW_TOKENIZE_MAX_LINE_LENGTH = 1_000;
 const highlightCache = new Map<string, Promise<ReviewHighlightedFile>>();
 const resolvedHighlightCache = new Map<string, ReviewHighlightedFile>();
@@ -659,6 +673,29 @@ function applyWordAltDiffHighlightsToSelectedLines(input: {
   return nextTokenMap;
 }
 
+/** Preserve multiline grammar across scheduling boundaries without replaying
+ * previously highlighted text. Oversized lines deliberately bypass tokenizing;
+ * reset after that unknown context instead of carrying a potentially closed
+ * comment/string into the rest of the file.
+ */
+function createChunkTokenizer(highlighter: HighlighterCore, language: string, theme: string) {
+  let grammarState: GrammarState | undefined;
+  return {
+    tokenize: (lines: ReadonlyArray<string>) => {
+      const tokens = highlighter.codeToTokensBase(lines.join("\n"), {
+        lang: language,
+        theme,
+        ...(grammarState ? { grammarState } : {}),
+      });
+      grammarState = highlighter.getLastGrammarState(tokens);
+      return normalizeHighlightedLines(tokens);
+    },
+    reset: () => {
+      grammarState = undefined;
+    },
+  };
+}
+
 async function highlightLines(
   code: string,
   language: string,
@@ -669,20 +706,20 @@ async function highlightLines(
   }
 
   const highlighter = await getHighlighter();
+  const tokenizer = createChunkTokenizer(highlighter, language, theme);
   const sourceLines = code.split("\n");
   const highlightedLines: Array<ReadonlyArray<ReviewHighlightedToken>> = [];
   const shortLineBatch: string[] = [];
+  let chunkSize = 16;
 
   const flushShortLineBatch = async (): Promise<void> => {
     if (shortLineBatch.length === 0) {
       return;
     }
 
-    const tokenLines = highlighter.codeToTokensBase(shortLineBatch.join("\n"), {
-      lang: language,
-      theme,
-    });
-    highlightedLines.push(...normalizeHighlightedLines(tokenLines));
+    const started = performance.now();
+    highlightedLines.push(...tokenizer.tokenize(shortLineBatch));
+    chunkSize = nextHighlightChunkSize(shortLineBatch.length, performance.now() - started);
     shortLineBatch.length = 0;
   };
 
@@ -692,11 +729,12 @@ async function highlightLines(
     if (line.length > REVIEW_TOKENIZE_MAX_LINE_LENGTH) {
       await flushShortLineBatch();
       highlightedLines.push([{ content: line, color: null, fontStyle: null }]);
+      tokenizer.reset();
     } else {
       shortLineBatch.push(line);
     }
 
-    if (shortLineBatch.length >= REVIEW_HIGHLIGHT_CHUNK_SIZE) {
+    if (shortLineBatch.length >= chunkSize) {
       await flushShortLineBatch();
     }
 
@@ -747,46 +785,47 @@ async function highlightPatchLinesInChunks(input: {
   }
 
   const highlighter = await getHighlighter();
+  const tokenizer = createChunkTokenizer(highlighter, input.language, input.theme);
   const highlightedLines: Array<ReadonlyArray<ReviewHighlightedToken>> = [];
 
-  for (
-    let startIndex = 0;
-    startIndex < input.lines.length;
-    startIndex += REVIEW_HIGHLIGHT_CHUNK_SIZE
-  ) {
-    const lineChunk = input.lines.slice(startIndex, startIndex + REVIEW_HIGHLIGHT_CHUNK_SIZE);
+  let chunkSize = 16;
+  for (let startIndex = 0; startIndex < input.lines.length;) {
+    const started = performance.now();
+    const lineChunk = input.lines.slice(startIndex, startIndex + chunkSize);
     const chunkTokens: Array<ReadonlyArray<ReviewHighlightedToken>> = [];
     const tokenizableLines: string[] = [];
     const tokenizableIndexes: number[] = [];
 
-    lineChunk.forEach((line, index) => {
-      const strippedLine = stripTrailingNewline(line);
-      if (strippedLine.length > REVIEW_TOKENIZE_MAX_LINE_LENGTH) {
-        chunkTokens[index] = [{ content: strippedLine, color: null, fontStyle: null }];
-        return;
-      }
-
-      tokenizableIndexes.push(index);
-      tokenizableLines.push(strippedLine);
-    });
-
-    if (tokenizableLines.length > 0) {
-      const tokenLines = highlighter.codeToTokensBase(tokenizableLines.join("\n"), {
-        lang: input.language,
-        theme: input.theme,
-      });
-      const normalizedTokenLines = normalizeHighlightedLines(tokenLines);
-
+    const flushTokenizableLines = () => {
+      if (tokenizableLines.length === 0) return;
+      const normalizedTokenLines = tokenizer.tokenize(tokenizableLines);
       tokenizableIndexes.forEach((chunkIndex, tokenIndex) => {
         chunkTokens[chunkIndex] = normalizedTokenLines[tokenIndex] ?? [];
       });
-    }
+      tokenizableLines.length = 0;
+      tokenizableIndexes.length = 0;
+    };
+
+    lineChunk.forEach((line, index) => {
+      const strippedLine = stripTrailingNewline(line);
+      if (strippedLine.length > REVIEW_TOKENIZE_MAX_LINE_LENGTH) {
+        flushTokenizableLines();
+        chunkTokens[index] = [{ content: strippedLine, color: null, fontStyle: null }];
+        tokenizer.reset();
+        return;
+      }
+      tokenizableIndexes.push(index);
+      tokenizableLines.push(strippedLine);
+    });
+    flushTokenizableLines();
 
     const completedChunk = lineChunk.map((_, index) => chunkTokens[index] ?? []);
     highlightedLines.push(...completedChunk);
     input.onChunk(startIndex, completedChunk);
 
-    if (startIndex + REVIEW_HIGHLIGHT_CHUNK_SIZE < input.lines.length) {
+    startIndex += lineChunk.length;
+    chunkSize = nextHighlightChunkSize(lineChunk.length, performance.now() - started);
+    if (startIndex < input.lines.length) {
       await waitForNextFrame();
     }
   }
@@ -798,25 +837,43 @@ function getHighlightCacheKey(file: ReviewRenderableFile, theme: ReviewDiffTheme
   return `${SHIKI_THEME_NAME_BY_SCHEME[theme]}:${file.cacheKey}`;
 }
 
+function removeResolvedHighlight(cacheKey: string): void {
+  resolvedHighlightBytes -= highlightCacheBytes.get(cacheKey) ?? 0;
+  highlightCacheBytes.delete(cacheKey);
+  resolvedHighlightCache.delete(cacheKey);
+}
+
 function storeResolvedHighlightedFile(cacheKey: string, highlighted: ReviewHighlightedFile): void {
-  if (resolvedHighlightCache.has(cacheKey)) {
-    resolvedHighlightCache.delete(cacheKey);
-  }
-
-  resolvedHighlightCache.set(cacheKey, highlighted);
-
-  while (resolvedHighlightCache.size > REVIEW_HIGHLIGHT_RESULT_CACHE_LIMIT) {
-    const oldestKey = resolvedHighlightCache.keys().next().value;
-    if (oldestKey === undefined) {
-      break;
+  // Account for UTF-16 strings, token objects, and line arrays. Large results
+  // remain usable by their caller but must not displace the entire cache.
+  let bytes = cacheKey.length * 2;
+  for (const lines of [highlighted.additionLines, highlighted.deletionLines]) {
+    for (const line of lines) {
+      bytes += 32;
+      for (const token of line)
+        bytes += 64 + token.content.length * 2 + (token.color?.length ?? 0) * 2;
     }
-    resolvedHighlightCache.delete(oldestKey);
+  }
+  removeResolvedHighlight(cacheKey);
+  if (bytes > REVIEW_HIGHLIGHT_CACHE_BYTES) return;
+  resolvedHighlightCache.set(cacheKey, highlighted);
+  highlightCacheBytes.set(cacheKey, bytes);
+  resolvedHighlightBytes += bytes;
+  while (
+    resolvedHighlightCache.size > REVIEW_HIGHLIGHT_RESULT_CACHE_LIMIT ||
+    resolvedHighlightBytes > REVIEW_HIGHLIGHT_CACHE_BYTES
+  ) {
+    const oldestKey = resolvedHighlightCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    removeResolvedHighlight(oldestKey);
   }
 }
 
 export function clearReviewHighlightFileCache(): void {
   highlightCache.clear();
   resolvedHighlightCache.clear();
+  highlightCacheBytes.clear();
+  resolvedHighlightBytes = 0;
 }
 
 export function getCachedHighlightedReviewFile(

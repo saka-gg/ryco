@@ -11,6 +11,11 @@ const harness = vi.hoisted(() => ({
   allowed: true,
 }));
 import { SessionImportPanel } from "./SessionImportPanel";
+
+async function chooseOption(label: string, option: string) {
+  await page.getByLabelText(label, { exact: true }).click();
+  await page.getByRole("option", { name: option, exact: true }).click();
+}
 import { ProviderInstanceId, ProviderDriverKind } from "@ryco/contracts";
 function FixturePanel() {
   return (
@@ -119,12 +124,14 @@ describe("local history import", () => {
     await page.getByRole("button", { name: "Find conversations" }).click();
     await page.getByLabelText("Select First fixture").click();
     await page.getByLabelText("Select Second fixture").click();
-    await page.getByLabelText("Import target project").selectOptions("target");
-    await expect.element(page.getByLabelText("Continuation model")).toHaveValue("fixture-model");
-    await page.getByRole("button", { name: "Import selected / retry failed" }).click();
+    await chooseOption("Import target project", "Replacement project");
+    await expect
+      .element(page.getByLabelText("Continuation model"))
+      .toHaveTextContent("Fixture model");
+    await page.getByRole("button", { name: "Import selected" }).click();
     await expect.element(page.getByText("Fixture provider unavailable")).toBeVisible();
     await expect.element(page.getByLabelText("Select First fixture")).toBeDisabled();
-    await page.getByRole("button", { name: "Import selected / retry failed" }).click();
+    await page.getByRole("button", { name: "Import selected" }).click();
     await expect.poll(() => harness.run.mock.calls.length).toBe(3);
     expect(harness.run.mock.calls[2]![0]).toMatchObject({
       key: "b".repeat(64),
@@ -167,14 +174,24 @@ describe("local history import", () => {
   });
   it("normalizes models when source or provider changes", async () => {
     render(<FixturePanel />);
-    await expect.element(page.getByLabelText("Continuation model")).toHaveValue("fixture-model");
-    await page.getByLabelText("Import provider instance").selectOptions("codex-other");
-    await expect.element(page.getByLabelText("Continuation model")).toHaveValue("other-model");
-    await page.getByLabelText("Import source", { exact: true }).selectOptions("claudeAgent");
-    await expect.element(page.getByLabelText("Import provider instance")).toHaveValue("claude");
-    await expect.element(page.getByLabelText("Continuation model")).toHaveValue("claude-model");
-    await page.getByLabelText("Import source", { exact: true }).selectOptions("codex");
-    await expect.element(page.getByLabelText("Continuation model")).toHaveValue("fixture-model");
+    await expect
+      .element(page.getByLabelText("Continuation model"))
+      .toHaveTextContent("Fixture model");
+    await chooseOption("Import provider instance", "Other Codex");
+    await expect
+      .element(page.getByLabelText("Continuation model"))
+      .toHaveTextContent("Other model");
+    await chooseOption("Import source", "Claude Code");
+    await expect
+      .element(page.getByLabelText("Import provider instance"))
+      .toHaveTextContent("Claude fixture");
+    await expect
+      .element(page.getByLabelText("Continuation model"))
+      .toHaveTextContent("Claude fixture model");
+    await chooseOption("Import source", "Codex");
+    await expect
+      .element(page.getByLabelText("Continuation model"))
+      .toHaveTextContent("Fixture model");
   });
   it("keeps discovery disabled until hosted mutation readiness is current", async () => {
     harness.allowed = false;
@@ -265,16 +282,18 @@ it("filters continuation instances by the explicitly chosen store and clears old
   harness.discover.mockResolvedValue({ items: [uncertain], notices: [], nextOffset: null });
   render(<FixturePanel />);
   await page.getByRole("button", { name: "Find conversations" }).click();
-  await expect.element(page.getByLabelText("Import provider instance")).toHaveValue("codex");
-  await page.getByLabelText("Import source store").selectOptions("d".repeat(64));
+  await expect
+    .element(page.getByLabelText("Import provider instance"))
+    .toHaveTextContent("Fixture Codex");
+  await chooseOption("Import source store", "Custom store");
   await expect.element(page.getByText("Recovery fixture")).not.toBeInTheDocument();
-  await expect.element(page.getByLabelText("Import provider instance")).toHaveValue("codex-other");
+  await expect
+    .element(page.getByLabelText("Import provider instance"))
+    .toHaveTextContent("Other Codex");
   await page.getByRole("button", { name: "Find conversations" }).click();
   expect(harness.discover.mock.calls[1]![0].storeKey).toBe("d".repeat(64));
-  await page.getByLabelText("Import source store").selectOptions("e".repeat(64));
-  await expect
-    .element(page.getByRole("button", { name: "Import selected / retry failed" }))
-    .toBeDisabled();
+  await chooseOption("Import source store", "Disabled store (no enabled continuation instance)");
+  await expect.element(page.getByRole("button", { name: "Import selected" })).toBeDisabled();
 });
 
 it("invalidates a late inspection when owner readiness is lost", async () => {

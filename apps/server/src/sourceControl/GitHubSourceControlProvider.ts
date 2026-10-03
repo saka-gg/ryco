@@ -427,6 +427,10 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
 
   const listChangeRequests: SourceControlProvider.SourceControlProviderShape["listChangeRequests"] =
     (input) => {
+      const enrich = (items: ReadonlyArray<ChangeRequest>) =>
+        input.includeStackSummary === false
+          ? Effect.succeed(items)
+          : enrichChangeRequestsWithStacks({ cwd: input.cwd, items });
       const headSelector = input.headSelector.trim();
       if (input.state === "open" && headSelector.length > 0) {
         return github
@@ -437,7 +441,7 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
           })
           .pipe(
             Effect.map((items) => items.map((item) => toChangeRequest(item))),
-            Effect.flatMap((items) => enrichChangeRequestsWithStacks({ cwd: input.cwd, items })),
+            Effect.flatMap(enrich),
             Effect.mapError((error) => providerError("listChangeRequests", error)),
           );
       }
@@ -492,7 +496,7 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
             ),
           );
         }),
-        Effect.flatMap((items) => enrichChangeRequestsWithStacks({ cwd: input.cwd, items })),
+        Effect.flatMap(enrich),
         Effect.mapError((error) =>
           Schema.is(SourceControlProviderError)(error)
             ? error

@@ -2,7 +2,6 @@ import { useAtomSubscribe, useAtomValue } from "@effect/atom-react";
 import type { Atom } from "effect/unstable/reactivity";
 import {
   selectAvailableEditors,
-  selectKeybindings,
   selectKeybindingsConfigPath,
   selectObservability,
   selectProviders,
@@ -54,10 +53,6 @@ export function useServerSettings(): ServerSettings {
 
 export function useServerProviders(): ReadonlyArray<ServerProvider> {
   return selectProviders(useServerConfig());
-}
-
-export function useServerKeybindings(): ServerConfig["keybindings"] {
-  return selectKeybindings(useServerConfig());
 }
 
 export function useServerAvailableEditors(): ReadonlyArray<EditorId> {

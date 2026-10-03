@@ -1,18 +1,22 @@
 # Settings ownership
 
-The shared web and desktop settings dialog has two destinations:
+Web and desktop settings are a page at `/settings` that replaces the main content, like
+Statistics. Its navigation lists both destinations at once, each under its own heading, so
+the destination is stated once instead of on every row:
 
 - **This browser / This app** stores appearance, composer preferences, confirmations,
-  notifications, and other interaction preferences in the current client. Desktop
+  notifications, keybindings, and other interaction preferences in the current client. Desktop
   permissions, updates, and saved connections also belong here. Changing a theme
   in the Hub never changes a desktop or phone theme.
 - **Node: name** configures the selected server: providers, MCP, source control
-  integrations, model selections, project defaults, keybindings, and diagnostics.
+  integrations, model selections, project defaults, and diagnostics.
   Only sections permitted by the current node role are offered. Node security is
-  under Connections → Advanced.
+  its own Security section. The device name and icon live in its General section.
 
 Hub account and device enrollment remain on the Hub account pages. Browser
 appearance on those pages is still local to that browser.
+
+Keybindings use a separate local document and are editable independently of node readiness or role. Legacy node files require explicit, reviewed import; server pushes never update local bindings. See [Keybindings](../KEYBINDINGS.md).
 
 Mixed panels are filtered by persistence ownership. Search results and reset
 actions use the same destination; a node reset cannot reset the client's theme.
@@ -33,7 +37,9 @@ presentation remains frozen.
 ## Project inheritance
 
 Node General settings expose initial model/effort, thread location, generated
-branch prefix and setup behavior with independent project overrides. Each field
+branch prefix, setup behavior, worktree root and worktree submodules with
+independent project overrides. One picker in the Project defaults heading chooses
+between the node defaults and a project's overrides for all of them. Each field
 shows its effective source and can reset to the node default. The server owns
 resolution and atomic patching; native New Task consumes the same contract and
 shared runtime. See [project defaults and inheritance](project-preferences.md)

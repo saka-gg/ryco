@@ -58,6 +58,7 @@ const TERMINAL_DELETE_TO_LINE_START = "\u0015";
 const EVENT_CODE_KEY_ALIASES: Readonly<Record<string, readonly string[]>> = {
   BracketLeft: ["["],
   BracketRight: ["]"],
+  Backslash: ["\\"],
   Digit0: ["0"],
   Digit1: ["1"],
   Digit2: ["2"],
@@ -213,11 +214,17 @@ function isVisibleDialogElement(element: Element): boolean {
   return element.getClientRects().length > 0;
 }
 
+// Toast roots carry role="dialog" but never hold the keyboard: a toast on
+// screen must not switch off every app shortcut. Focus inside one still does.
+const NON_MODAL_DIALOG_SELECTOR = '[data-slot="toast-root"]';
+
 export function hasOpenDialogShortcutTarget(): boolean {
   if (typeof document === "undefined") return false;
   const activeDialog = dialogShortcutElementForTarget(document.activeElement);
   if (activeDialog && isVisibleDialogElement(activeDialog)) return true;
-  return Array.from(document.querySelectorAll(DIALOG_TARGET_SELECTOR)).some(isVisibleDialogElement);
+  return Array.from(document.querySelectorAll(DIALOG_TARGET_SELECTOR)).some(
+    (element) => !element.matches(NON_MODAL_DIALOG_SELECTOR) && isVisibleDialogElement(element),
+  );
 }
 
 export function isEditableShortcutTarget(target: EventTarget | null | undefined): boolean {
@@ -245,6 +252,34 @@ export function shouldIgnoreGlobalNavigationShortcut(
   if (isBareModifierKeyEvent(event)) return true;
   if (isEditableShortcutTarget(event.target)) return true;
   return isDialogShortcutTarget(event.target) || hasOpenDialogShortcutTarget();
+}
+
+/**
+ * Split-view chords never edit text, so unlike navigation shortcuts they also
+ * run while typing (the composer is where focus usually is). Dialogs and IME
+ * composition still own the keyboard.
+ */
+export function shouldIgnoreSplitViewShortcut(
+  event: ShortcutEventLike & {
+    isComposing?: boolean;
+    target?: EventTarget | null;
+  },
+): boolean {
+  if (event.type !== undefined && event.type !== "keydown") return true;
+  if (event.isComposing) return true;
+  if (isBareModifierKeyEvent(event)) return true;
+  return isDialogShortcutTarget(event.target) || hasOpenDialogShortcutTarget();
+}
+
+export function isSplitViewCommand(
+  command: KeybindingCommand | null,
+): command is "pane.split" | "pane.close" | "pane.focusNext" | "pane.focusPrevious" {
+  return (
+    command === "pane.split" ||
+    command === "pane.close" ||
+    command === "pane.focusNext" ||
+    command === "pane.focusPrevious"
+  );
 }
 
 function resolvePlatform(options: ShortcutMatchOptions | undefined): string {

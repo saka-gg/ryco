@@ -1,31 +1,31 @@
 import { useState } from "react";
 import type { ServerSettingsPatch } from "@ryco/contracts";
-import { useShallow } from "zustand/react/shallow";
 
 import { useServerConfig, applySettingsUpdated } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
-import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { ensureLocalApi } from "../../localApi";
 import { DraftInput } from "../ui/draft-input";
-import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { SettingsRow } from "./settingsLayout";
+import { SETTINGS_CONTROL_WIDTH, SettingResetButton, SettingsRow } from "./settingsLayout";
 
 /** A node-scoped preference. Paths are interpreted and validated by the selected server. */
-export function WorktreeRootSettings() {
+export function WorktreeRootSettings({
+  projectId,
+  projects,
+}: {
+  readonly projectId: string;
+  readonly projects: ReadonlyArray<{ readonly id: string; readonly title: string }>;
+}) {
   const config = useServerConfig();
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
   // Remount the editor on node changes so in-flight errors and drafts never cross environments.
   return (
     <WorktreeRootEditor
       key={environmentId ?? "disconnected"}
-      projects={projects
-        .filter((project) => project.environmentId === environmentId)
-        .map((project) => ({ id: project.id, title: project.name }))}
+      projectId={projectId}
+      projects={projects}
       disabled={
         scope === "client" ||
         !config ||
@@ -39,20 +39,23 @@ export function WorktreeRootSettings() {
 }
 
 export function WorktreeRootEditor({
+  projectId: requestedProjectId,
   projects,
   disabled,
 }: {
+  readonly projectId: string;
   readonly projects: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly disabled: boolean;
 }) {
   const config = useServerConfig();
   const target = useSettingsTarget();
-  const [selectedProject, setSelectedProject] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const projectId = projects.some((project) => project.id === selectedProject)
-    ? selectedProject
-    : "";
+  // A removed project must never redirect its edit to the device default.
+  const projectMissing =
+    requestedProjectId !== "" && !projects.some((project) => project.id === requestedProjectId);
+  const projectId = projectMissing ? "" : requestedProjectId;
+  const blocked = disabled || saving || projectMissing;
   const settings = config?.settings;
   const override =
     projectId && settings && Object.hasOwn(settings.projectWorktreeRoots, projectId)
@@ -63,7 +66,7 @@ export function WorktreeRootEditor({
   const effective = override || settings?.worktreeRoot || "Ryco-managed directory";
 
   async function save(root: string) {
-    if (disabled || saving) return;
+    if (blocked) return;
     setSaving(true);
     setError(null);
     const patch: ServerSettingsPatch = projectId
@@ -84,74 +87,49 @@ export function WorktreeRootEditor({
       title="Worktree root"
       owner="node"
       scope={target?.nodeLabel ?? "This node"}
-      description="Choose where new worktrees are created on this node. Existing checkouts keep their paths."
-      control={
-        <div className="flex w-full flex-col gap-2 sm:w-72">
-          <Select
-            value={projectId || "environment"}
-            disabled={disabled || saving}
-            onValueChange={(value) => {
-              setSelectedProject(value === "environment" ? "" : (value ?? ""));
-              setError(null);
-            }}
-          >
-            <SelectTrigger className="w-full" aria-label="Worktree root scope">
-              <SelectValue>
-                {projects.find((project) => project.id === projectId)?.title ??
-                  "Environment default"}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup align="end" alignItemWithTrigger={false}>
-              <SelectItem value="environment">Environment default</SelectItem>
-              {projects.map((project) => (
-                <SelectItem key={project.id} value={project.id}>
-                  {project.title}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-          <DraftInput
-            key={projectId}
-            value={value}
-            disabled={disabled || saving}
-            onCommit={(root) => {
-              void save(root);
-            }}
-            placeholder={projectId ? "Inherit environment default" : "Ryco-managed directory"}
-            aria-label="Worktree root directory"
-            spellCheck={false}
-            autoCapitalize="none"
+      description={`Where new worktrees are created. Use an absolute path or ~/; leave empty to ${projectId ? "inherit" : "use the default"}. Existing checkouts keep their paths.`}
+      resetAction={
+        value ? (
+          <SettingResetButton
+            label="worktree root"
+            tooltip={projectId ? "Use device default" : "Reset to default"}
+            ariaLabel={projectId ? "Use device default for worktree root" : undefined}
+            disabled={blocked}
+            onClick={() => void save("")}
           />
-          <p className="break-all text-xs text-muted-foreground">
+        ) : null
+      }
+      status={
+        <>
+          <span className="block break-all">
             {inherited ? "Inherited: " : "Effective: "}
             {effective}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Use an absolute path or ~/. Leave empty to {projectId ? "inherit" : "reset"}.
-          </p>
-          {value && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={disabled || saving}
-              onClick={() => {
-                void save("");
-              }}
-            >
-              {projectId ? "Use environment default" : "Reset worktree root"}
-            </Button>
-          )}
-          {saving && (
-            <p role="status" className="text-xs text-muted-foreground">
-              Saving…
-            </p>
-          )}
-          {error && (
-            <p role="alert" className="text-xs text-destructive">
+          </span>
+          {error ? (
+            <span role="alert" className="mt-1 block text-destructive-foreground">
               {error}
-            </p>
-          )}
-        </div>
+            </span>
+          ) : saving ? (
+            <span role="status" className="mt-1 block">
+              Saving…
+            </span>
+          ) : null}
+        </>
+      }
+      control={
+        <DraftInput
+          key={projectId}
+          className={SETTINGS_CONTROL_WIDTH.lg}
+          value={value}
+          disabled={blocked}
+          onCommit={(root) => {
+            void save(root);
+          }}
+          placeholder={projectId ? "Inherit device default" : "Ryco-managed directory"}
+          aria-label="Worktree root directory"
+          spellCheck={false}
+          autoCapitalize="none"
+        />
       }
     />
   );

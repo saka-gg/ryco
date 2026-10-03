@@ -6,7 +6,6 @@ import {
   FolderPlusIcon,
   MoreHorizontalIcon,
   PlusIcon,
-  SearchIcon,
   Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -68,11 +67,8 @@ import {
   SidebarGroup,
   SidebarMenu,
   SidebarMenuButton,
-  SidebarMenuItem,
   SidebarMenuSub,
 } from "../ui/sidebar";
-import { Kbd } from "../ui/kbd";
-import { CommandDialogTrigger } from "../ui/command";
 import {
   SIDEBAR_ROW_ACTION_COARSE_ANCHORED_CLASS_NAME,
   SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME,
@@ -349,7 +345,6 @@ export interface SidebarProjectsContentProps {
   handleProjectDragEnd: (event: DragEndEvent) => void;
   handleProjectDragCancel: (event: DragCancelEvent) => void;
   projectTreeRows: readonly SidebarProjectTreeRow[];
-  commandPaletteShortcutLabel: string | null;
   attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
   renderProjectRow: (
@@ -380,7 +375,6 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleProjectDragEnd,
     handleProjectDragCancel,
     projectTreeRows,
-    commandPaletteShortcutLabel,
     attachProjectListAutoAnimateRef,
     projectsLength,
     renderProjectRow,
@@ -475,29 +469,6 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
   return (
     <>
       <SidebarContent className="gap-0">
-        <SidebarGroup className="px-2 pt-2 pb-1">
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <CommandDialogTrigger
-                render={
-                  <SidebarMenuButton
-                    size="sm"
-                    className="gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground focus-visible:ring-0"
-                    data-testid="command-palette-trigger"
-                  />
-                }
-              >
-                <SearchIcon className="size-3.5" />
-                <span className="flex-1 truncate text-left text-xs">Search</span>
-                {commandPaletteShortcutLabel ? (
-                  <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px] pointer-coarse:hidden">
-                    {commandPaletteShortcutLabel}
-                  </Kbd>
-                ) : null}
-              </CommandDialogTrigger>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarGroup>
         {showArm64IntelBuildWarning && arm64IntelBuildWarningDescription ? (
           <SidebarGroup className="px-2 pt-2 pb-0">
             <Alert variant="warning" className="rounded-2xl border-warning/40 bg-warning/8">
@@ -675,7 +646,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
           }
         }}
       >
-        <DialogPopup className="project-glass-surface max-w-md" surface="glass">
+        <DialogPopup className="max-w-md">
           <DialogHeader>
             <DialogTitle>
               {folderDialog?.mode === "rename" ? "Rename folder" : "New project folder"}

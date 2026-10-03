@@ -77,9 +77,10 @@ MOTION=off node scripts/shoot.mjs   # settled (reduced-motion) captures into scr
 ## Real product screenshots
 
 `public/shots/` holds real captures of the running app (dark mode, account
-identities blurred). The gallery serves the `.webp` versions; the `.png` files
-are the source captures. To regenerate them, boot the server with this repo as a
-project and drive it with `scripts/app-shots.mjs`:
+identities blurred). The `.png` files are the sources; `bun run assets:optimize`
+regenerates the responsive lossless WebP variants and `src/lib/screenshotAssets.json`,
+and pages render them through `screenshotImageProps()`. To recapture, boot the server
+with this repo as a project and drive it with `scripts/app-shots.mjs`:
 
 ```bash
 # from the repo root

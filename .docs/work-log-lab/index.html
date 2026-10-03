@@ -1,0 +1,4768 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ryco · Work Log Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* ============================================================
+         Tokens — mirrored from apps/web/src/index.css (Graphite dark,
+         neutral light). Kind tints are new: muted, one per tool kind.
+         ============================================================ */
+      :root {
+        color-scheme: light;
+        --font-sans:
+          "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        --font-mono: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+        --ease: cubic-bezier(0.16, 1, 0.3, 1);
+        --gentle: cubic-bezier(0.22, 1, 0.36, 1);
+        --snappy: cubic-bezier(0.3, 1.36, 0.44, 1);
+
+        --page: #ececef;
+        --background: #ffffff;
+        --foreground: #262626;
+        --prose: rgba(38, 38, 38, 0.86);
+        --card: #ffffff;
+        --popover: #ffffff;
+        --bubble: rgba(0, 0, 0, 0.05);
+        --muted: rgba(0, 0, 0, 0.045);
+        --muted-fg: #6b6b70;
+        --faint-fg: #a0a0a6;
+        --ghost-fg: #c4c4c8;
+        --accent: rgba(0, 0, 0, 0.05);
+        --border: rgba(0, 0, 0, 0.09);
+        --hair: rgba(0, 0, 0, 0.08);
+        --ring: #52525b;
+        --track: rgba(0, 0, 0, 0.055);
+        --code-bg: rgba(0, 0, 0, 0.035);
+        --shine: #0a0a0a;
+        --ok: #2f9e62;
+        --add: #1a9a55;
+        --del: #d4483b;
+        --pop-shadow: 0 18px 54px rgba(15, 23, 42, 0.14), 0 2px 10px rgba(15, 23, 42, 0.06);
+        --composer-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+
+        --k-think: #8b7ef0;
+        --k-read: #b4b7bf;
+        --k-search: #8ea3c7;
+        --k-edit: #4fb487;
+        --k-run: #6e6e76;
+        --k-web: #6aaac4;
+        --k-agent: #d0a26f;
+        --k-fail: #e27373;
+      }
+      .dark {
+        color-scheme: dark;
+        --page: #050506;
+        --background: #0b0b0c;
+        --foreground: #ececed;
+        --prose: rgba(236, 236, 237, 0.84);
+        --card: #141415;
+        --popover: #18181a;
+        --bubble: rgba(255, 255, 255, 0.07);
+        --muted: rgba(255, 255, 255, 0.06);
+        --muted-fg: #a3a3a8;
+        --faint-fg: #6c6c73;
+        --ghost-fg: #48484e;
+        --accent: rgba(255, 255, 255, 0.06);
+        --border: rgba(255, 255, 255, 0.09);
+        --hair: rgba(255, 255, 255, 0.075);
+        --ring: #a1a1a6;
+        --track: rgba(255, 255, 255, 0.06);
+        --code-bg: rgba(255, 255, 255, 0.05);
+        --shine: #ffffff;
+        --ok: #5fcf8e;
+        --add: #5fd38d;
+        --del: #f0846c;
+        --pop-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 22px 64px rgba(0, 0, 0, 0.6),
+          0 2px 12px rgba(0, 0, 0, 0.35);
+        --composer-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+
+        --k-think: #a99cf5;
+        --k-read: #6f747f;
+        --k-search: #8aa0c6;
+        --k-edit: #5cc497;
+        --k-run: #cfcfd4;
+        --k-web: #7fb6cc;
+        --k-agent: #d6a56d;
+        --k-fail: #f07070;
+      }
+      [data-motion="off"] *,
+      [data-motion="off"] *::before,
+      [data-motion="off"] *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+
+      /* ============================================================
+         Base / lab chrome
+         ============================================================ */
+      * {
+        box-sizing: border-box;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family: var(--font-sans);
+        background: var(--page);
+        color: var(--foreground);
+        -webkit-font-smoothing: antialiased;
+        font-size: 14px;
+        line-height: 1.45;
+        min-height: 100vh;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+      }
+      .ic {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
+      .tnum {
+        font-variant-numeric: tabular-nums;
+      }
+      .mono {
+        font-family: var(--font-mono);
+      }
+      kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 16px;
+        height: 16px;
+        padding: 0 4px;
+        border-radius: 4px;
+        font-family: var(--font-sans);
+        font-size: 10px;
+        font-weight: 500;
+        color: var(--muted-fg);
+        background: var(--muted);
+        box-shadow: inset 0 0 0 1px var(--border);
+      }
+
+      .lab {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 28px 28px 64px;
+      }
+      .lab-bar {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        flex-wrap: wrap;
+      }
+      .lab-title {
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+        margin: 0;
+      }
+      .lab-sub {
+        margin: 4px 0 0;
+        color: var(--muted-fg);
+        font-size: 13.5px;
+        max-width: 600px;
+      }
+      .lab-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .lab-icon-btn {
+        height: 30px;
+        padding: 0 10px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 8px;
+        border: 0;
+        background: transparent;
+        color: var(--muted-fg);
+        box-shadow: inset 0 0 0 1px var(--border);
+        cursor: pointer;
+        font-size: 12.5px;
+        white-space: nowrap;
+      }
+      .lab-icon-btn:hover {
+        color: var(--foreground);
+        background: var(--muted);
+      }
+      .lab-icon-btn .ic {
+        width: 14px;
+        height: 14px;
+      }
+      .lab-tabs .seg-opt {
+        height: 26px;
+        padding: 0 12px;
+        font-size: 12.5px;
+      }
+      .lab-tabs .seg-opt b {
+        font-weight: 600;
+        margin-right: 5px;
+        color: var(--faint-fg);
+      }
+      .lab-tabs .seg-opt[aria-checked="true"] b {
+        color: var(--muted-fg);
+      }
+
+      .toolbar {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin: 18px 0 14px;
+      }
+      .scenarios {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        font-size: 12.5px;
+        color: var(--muted-fg);
+      }
+      .scenarios > span {
+        margin-right: 4px;
+      }
+      .scenario {
+        height: 26px;
+        padding: 0 10px;
+        border-radius: 999px;
+        border: 0;
+        cursor: pointer;
+        background: transparent;
+        color: var(--muted-fg);
+        box-shadow: inset 0 0 0 1px var(--border);
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .scenario:hover {
+        color: var(--foreground);
+        background: var(--muted);
+      }
+      .scenario[aria-pressed="true"] {
+        color: var(--foreground);
+        background: var(--accent);
+        box-shadow: inset 0 0 0 1px var(--ring);
+      }
+      .scenario small {
+        color: var(--faint-fg);
+        font-size: 11px;
+      }
+
+      .transport {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .tp-btn {
+        width: 30px;
+        height: 30px;
+        flex: none;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted-fg);
+        box-shadow: inset 0 0 0 1px var(--border);
+        cursor: pointer;
+      }
+      .tp-btn:hover {
+        color: var(--foreground);
+        background: var(--muted);
+      }
+      .tp-btn.primary {
+        background: var(--foreground);
+        color: var(--background);
+        box-shadow: none;
+      }
+      .tp-btn .ic {
+        width: 14px;
+        height: 14px;
+      }
+      .tp-time {
+        font-size: 12px;
+        color: var(--muted-fg);
+        min-width: 92px;
+        text-align: right;
+      }
+      .scrub {
+        position: relative;
+        flex: 1 1 auto;
+        height: 30px;
+        cursor: pointer;
+        touch-action: none;
+      }
+      .scrub-track {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 13px;
+        height: 4px;
+        border-radius: 4px;
+        background: var(--track);
+      }
+      .scrub-fill {
+        position: absolute;
+        left: 0;
+        top: 13px;
+        height: 4px;
+        border-radius: 4px;
+        background: var(--muted-fg);
+        width: 0;
+      }
+      .scrub-tick {
+        position: absolute;
+        top: 9px;
+        width: 1px;
+        height: 12px;
+        background: var(--faint-fg);
+        opacity: 0.6;
+      }
+      .scrub-tick.final {
+        background: var(--ok);
+        opacity: 0.8;
+      }
+      .scrub-thumb {
+        position: absolute;
+        top: 8px;
+        width: 14px;
+        height: 14px;
+        margin-left: -7px;
+        border-radius: 50%;
+        background: var(--foreground);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+        transition: transform 0.15s;
+      }
+      .scrub:hover .scrub-thumb {
+        transform: scale(1.15);
+      }
+
+      .seg {
+        position: relative;
+        display: inline-flex;
+        align-items: stretch;
+        padding: 2px;
+        border-radius: 8px;
+        background: var(--track);
+        isolation: isolate;
+      }
+      .seg-opt {
+        position: relative;
+        z-index: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        height: 24px;
+        padding: 0 9px;
+        border: 0;
+        background: transparent;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted-fg);
+        cursor: pointer;
+        white-space: nowrap;
+        transition: color 0.2s;
+      }
+      .seg-opt:hover,
+      .seg-opt[aria-checked="true"] {
+        color: var(--foreground);
+      }
+      .seg-opt:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: 1px;
+      }
+      .seg-ind {
+        position: absolute;
+        z-index: 0;
+        top: 2px;
+        bottom: 2px;
+        left: 0;
+        width: 0;
+        border-radius: 6px;
+        background: var(--background);
+        box-shadow:
+          0 1px 2px rgba(0, 0, 0, 0.18),
+          inset 0 0 0 1px var(--border);
+        transition:
+          transform 0.36s var(--snappy),
+          width 0.36s var(--snappy);
+      }
+      .dark .seg-ind {
+        background: rgba(255, 255, 255, 0.11);
+      }
+
+      /* ============================================================
+         Stage — a faithful slice of the chat pane
+         ============================================================ */
+      .stage {
+        position: relative;
+        height: 720px;
+        border-radius: 14px;
+        background: var(--background);
+        box-shadow: inset 0 0 0 1px var(--border);
+        overflow: hidden;
+      }
+      .scroller {
+        position: absolute;
+        inset: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+      }
+      .thread {
+        max-width: 736px;
+        margin: 0 auto;
+        padding: 36px 32px 118px;
+        display: flex;
+        flex-direction: column;
+        gap: 22px;
+      }
+      .msg-user {
+        align-self: flex-end;
+        max-width: 78%;
+        padding: 10px 16px;
+        border-radius: 18px;
+        background: var(--bubble);
+        font-size: 14.5px;
+        line-height: 1.55;
+        color: var(--foreground);
+      }
+      .composer-dock {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        padding: 36px 32px 20px;
+        pointer-events: none;
+        background: linear-gradient(to bottom, transparent, var(--background) 46%);
+      }
+      .composer {
+        pointer-events: auto;
+        max-width: 672px;
+        margin: 0 auto;
+        height: 54px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 10px 0 18px;
+        border-radius: 18px;
+        background: var(--card);
+        box-shadow:
+          inset 0 0 0 1px var(--border),
+          var(--composer-shadow);
+      }
+      .cmp-ph {
+        flex: 1;
+        color: var(--faint-fg);
+        font-size: 14px;
+      }
+      .cmp-model {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12.5px;
+        color: var(--muted-fg);
+      }
+      .cmp-model .pv {
+        width: 14px;
+        height: 14px;
+      }
+      .send {
+        width: 32px;
+        height: 32px;
+        border-radius: 999px;
+        border: 0;
+        display: grid;
+        place-items: center;
+        background: var(--foreground);
+        color: var(--background);
+        cursor: pointer;
+      }
+      .send .ic {
+        width: 15px;
+        height: 15px;
+      }
+      .send.stop .ic {
+        width: 12px;
+        height: 12px;
+        fill: currentColor;
+      }
+
+      /* ============================================================
+         Shared primitives: roll, shimmer, glyphs, prose, rows
+         ============================================================ */
+      .roll {
+        display: inline-grid;
+        grid-template-columns: minmax(0, auto);
+        overflow: hidden;
+        vertical-align: top;
+      }
+      .roll > .roll-item {
+        grid-area: 1 / 1;
+        justify-self: start;
+        white-space: nowrap;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .shimmer > .roll-item,
+      .shimmer-text {
+        background-image: linear-gradient(
+          100deg,
+          var(--muted-fg) 0%,
+          var(--muted-fg) 38%,
+          var(--shine) 50%,
+          var(--muted-fg) 62%,
+          var(--muted-fg) 100%
+        );
+        background-size: 300% 100%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        animation: text-sheen 2.2s linear infinite;
+      }
+      @keyframes text-sheen {
+        from {
+          background-position: 100% 0;
+        }
+        to {
+          background-position: -50% 0;
+        }
+      }
+
+      .pv {
+        width: 16px;
+        height: 16px;
+        flex: none;
+        display: block;
+      }
+      .run-mark {
+        width: 16px;
+        height: 16px;
+        flex: none;
+        transition: transform 0.6s var(--gentle);
+      }
+      [data-phase="working"] .run-mark {
+        animation: mark-spin 5.5s linear infinite;
+      }
+      [data-phase="working"] .run-mark path {
+        animation: mark-breathe 1.8s ease-in-out infinite;
+        transform-origin: center;
+        transform-box: fill-box;
+      }
+      @keyframes mark-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes mark-breathe {
+        50% {
+          transform: scale(0.82);
+          opacity: 0.75;
+        }
+      }
+
+      .gl {
+        width: 16px;
+        height: 16px;
+        display: inline-grid;
+        place-items: center;
+        flex: none;
+        color: var(--faint-fg);
+      }
+      .gl > svg {
+        grid-area: 1 / 1;
+        width: 16px;
+        height: 16px;
+        overflow: visible;
+      }
+      .gl[data-state="ok"] {
+        color: var(--ok);
+      }
+      .gl[data-state="fail"] {
+        color: var(--k-fail);
+      }
+      .gl[data-state="think"],
+      .gl[data-state="thought"] {
+        color: var(--k-think);
+      }
+      .gl[data-state="thought"] {
+        opacity: 0.7;
+      }
+      .gl-spin {
+        animation: spin 0.85s linear infinite;
+      }
+      .gl[data-state="think"] svg {
+        animation: breathe 1.4s ease-in-out infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes breathe {
+        50% {
+          transform: scale(0.72) rotate(45deg);
+          opacity: 0.6;
+        }
+      }
+
+      .prose {
+        font-size: 14.5px;
+        line-height: 1.62;
+        color: var(--prose);
+        text-wrap: pretty;
+        margin: 0;
+      }
+      .prose code,
+      .dv code {
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        padding: 1px 6px;
+        border-radius: 6px;
+        background: var(--code-bg);
+        box-shadow: inset 0 0 0 1px var(--border);
+        white-space: nowrap;
+      }
+      .w {
+        animation: word-in 0.45s var(--gentle) both;
+      }
+      @keyframes word-in {
+        from {
+          opacity: 0;
+          filter: blur(3px);
+        }
+        to {
+          opacity: 1;
+          filter: blur(0);
+        }
+      }
+      .caret::after {
+        content: "";
+        display: inline-block;
+        width: 7px;
+        height: 14px;
+        margin-left: 2px;
+        vertical-align: -2px;
+        border-radius: 2px;
+        background: var(--foreground);
+        opacity: 0.55;
+        animation: caret 1s steps(2) infinite;
+      }
+      @keyframes caret {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      /* Run header shared by A / B / C */
+      .run-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 30px;
+        width: calc(100% + 16px);
+        margin: 0 -8px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        cursor: pointer;
+        text-align: left;
+        font-size: 13.5px;
+        color: var(--muted-fg);
+      }
+      .run-head:hover {
+        background: var(--accent);
+      }
+      .run-head:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: -2px;
+      }
+      .run-status {
+        color: var(--muted-fg);
+      }
+      .run-clock {
+        color: var(--faint-fg);
+        margin-left: -2px;
+      }
+      [data-phase="done"] .run-clock {
+        color: var(--muted-fg);
+      }
+      .run-head .grow {
+        flex: 1;
+      }
+      .run-sum {
+        font-size: 12.5px;
+        color: var(--faint-fg);
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .run-chev {
+        width: 14px;
+        height: 14px;
+        color: var(--faint-fg);
+        transition: transform 0.3s var(--gentle);
+      }
+      .run-head[aria-expanded="false"] .run-chev {
+        transform: rotate(-90deg);
+      }
+
+      /* Step rows */
+      .steps {
+        display: flex;
+        flex-direction: column;
+      }
+      .row {
+        position: relative;
+        transition: opacity 0.45s var(--gentle);
+      }
+      .r-main {
+        width: calc(100% + 16px);
+        margin: 0 -8px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 30px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        text-align: left;
+        cursor: pointer;
+        color: var(--muted-fg);
+        font-size: 13.5px;
+      }
+      .r-main:hover {
+        background: var(--accent);
+      }
+      .r-main:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: -2px;
+      }
+      .r-label {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        overflow: hidden;
+        white-space: nowrap;
+      }
+      .r-verb {
+        flex: none;
+        color: var(--muted-fg);
+      }
+      .r-count {
+        flex: none;
+        color: var(--muted-fg);
+      }
+      .r-target {
+        flex: 0 1 auto;
+        color: var(--foreground);
+        opacity: 0.86;
+      }
+      .r-target.mono > .roll-item {
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+      }
+      .r-target.faint {
+        color: var(--faint-fg);
+        opacity: 1;
+      }
+      .r-target.tail > .roll-item {
+        color: var(--faint-fg);
+        font-size: 12.5px;
+      }
+      .r-meta {
+        flex: none;
+        margin-left: auto;
+        padding-left: 12px;
+        font-size: 12.5px;
+        color: var(--faint-fg);
+        font-variant-numeric: tabular-nums;
+      }
+      .r-meta.fail {
+        color: var(--k-fail);
+      }
+      .add {
+        color: var(--add);
+      }
+      .del {
+        color: var(--del);
+      }
+      .r-meta .add + .del {
+        margin-left: 6px;
+      }
+      .row.flash > .r-main {
+        animation: row-flash 1.4s var(--ease);
+      }
+      @keyframes row-flash {
+        0%,
+        35% {
+          background: color-mix(in srgb, var(--foreground) 10%, transparent);
+        }
+        100% {
+          background: transparent;
+        }
+      }
+
+      .r-win {
+        margin: -4px 0 6px 26px;
+        height: 40px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        font-size: 12.5px;
+        line-height: 20px;
+        color: var(--faint-fg);
+        -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 70%);
+        mask-image: linear-gradient(to bottom, transparent 0, #000 70%);
+      }
+      .r-detail {
+        padding: 2px 0 10px 26px;
+      }
+      .dv {
+        font-size: 12.5px;
+        color: var(--muted-fg);
+        border-radius: 9px;
+        background: var(--code-bg);
+        box-shadow: inset 0 0 0 1px var(--hair);
+        padding: 8px 12px;
+        max-height: 220px;
+        overflow: auto;
+      }
+      .dv-think {
+        background: none;
+        box-shadow: none;
+        padding: 0 0 0 0;
+        line-height: 1.6;
+        color: var(--faint-fg);
+        max-height: none;
+      }
+      .dv-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .dv-li {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+      }
+      .dv-li .mono {
+        font-size: 12px;
+        color: var(--foreground);
+        opacity: 0.8;
+      }
+      .dv-li .n {
+        margin-left: auto;
+        color: var(--faint-fg);
+        font-variant-numeric: tabular-nums;
+      }
+      .dv pre {
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        color: var(--muted-fg);
+      }
+      .dv pre .cmd {
+        color: var(--foreground);
+      }
+      .dv pre .lp {
+        color: var(--add);
+      }
+      .dv pre .lm {
+        color: var(--del);
+      }
+      .dv pre .err {
+        color: var(--k-fail);
+      }
+      .dv-foot {
+        margin-top: 6px;
+        font-size: 11.5px;
+        color: var(--faint-fg);
+      }
+
+      .chips {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 12px;
+        color: var(--faint-fg);
+        white-space: nowrap;
+      }
+      .chip .roll {
+        grid-template-columns: auto;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .chip[hidden] {
+        display: none;
+      }
+      .chip .ic {
+        width: 13px;
+        height: 13px;
+        opacity: 0.85;
+      }
+      .chip.fail {
+        color: var(--k-fail);
+      }
+      .chip-diff {
+        gap: 5px;
+      }
+
+      /* Changed files (A / B / C share this compact form) */
+      .changes {
+        border-radius: 11px;
+        box-shadow: inset 0 0 0 1px var(--border);
+        overflow: hidden;
+      }
+      .ch-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 40px;
+        padding: 0 8px 0 12px;
+        font-size: 13px;
+        color: var(--muted-fg);
+      }
+      .ch-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border: 0;
+        background: none;
+        padding: 0;
+        cursor: pointer;
+        color: var(--foreground);
+        font-size: 13px;
+      }
+      .ch-toggle .ic {
+        color: var(--muted-fg);
+      }
+      .ch-toggle .run-chev {
+        transition: transform 0.3s var(--gentle);
+      }
+      .ch-toggle[aria-expanded="false"] .run-chev {
+        transform: rotate(-90deg);
+      }
+      .ch-stat {
+        font-size: 12.5px;
+        font-variant-numeric: tabular-nums;
+      }
+      .ch-act {
+        height: 28px;
+        padding: 0 9px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted-fg);
+        cursor: pointer;
+        font-size: 12.5px;
+      }
+      .ch-act:hover {
+        background: var(--accent);
+        color: var(--foreground);
+      }
+      .ch-act .ic {
+        width: 13px;
+        height: 13px;
+      }
+      .ch-files {
+        border-top: 1px solid var(--hair);
+        padding: 4px 0;
+      }
+      .ch-file {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 30px;
+        padding: 0 12px;
+        font-size: 12.5px;
+      }
+      .ch-file:hover {
+        background: var(--accent);
+      }
+      .ch-file .nm {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--foreground);
+        opacity: 0.86;
+      }
+      .ch-file .dir {
+        color: var(--faint-fg);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      .ch-file .ch-stat {
+        margin-left: auto;
+      }
+
+      /* ============================================================
+         Today — faithful to MessagesTimeline as it ships
+         ============================================================ */
+      .t-run {
+        display: flex;
+        flex-direction: column;
+      }
+      .t-fold {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 34px;
+        border: 0;
+        background: none;
+        padding: 0;
+        cursor: pointer;
+        font-size: 13px;
+        color: color-mix(in srgb, var(--muted-fg) 70%, transparent);
+      }
+      .t-fold .ic {
+        width: 14px;
+        height: 14px;
+        color: color-mix(in srgb, var(--muted-fg) 55%, transparent);
+        transition: transform 0.2s ease-out;
+      }
+      .t-fold[aria-expanded="true"] .ic {
+        transform: rotate(90deg);
+      }
+      .t-rule {
+        height: 1px;
+        background: var(--border);
+        margin-bottom: 14px;
+      }
+      .t-body {
+        display: flex;
+        flex-direction: column;
+      }
+      .t-msg {
+        padding-bottom: 16px;
+      }
+      .t-msg .prose {
+        font-size: 14px;
+        line-height: 1.625;
+        color: color-mix(in srgb, var(--foreground) 80%, transparent);
+      }
+      .t-meta {
+        margin-top: 4px;
+        font-size: 10px;
+        color: color-mix(in srgb, var(--muted-fg) 30%, transparent);
+        font-variant-numeric: tabular-nums;
+      }
+      .t-row {
+        display: grid;
+        grid-template-columns: 1.25rem 1fr auto;
+        align-items: center;
+        column-gap: 8px;
+        min-height: 30px;
+        padding: 0 8px;
+        margin: 0 -8px 8px;
+        border: 0;
+        border-radius: 6px;
+        background: none;
+        cursor: pointer;
+        text-align: left;
+        font-size: 12px;
+        line-height: 20px;
+        color: color-mix(in srgb, var(--muted-fg) 70%, transparent);
+      }
+      .t-row:hover {
+        color: var(--foreground);
+        background: var(--accent);
+      }
+      .t-row .ic {
+        width: 14px;
+        height: 14px;
+      }
+      .t-row .ic.err {
+        color: #f87171;
+      }
+      .t-row .chev {
+        width: 12px;
+        height: 12px;
+        transition: transform 0.2s ease-out;
+      }
+      .t-row[aria-expanded="true"] .chev {
+        transform: rotate(90deg);
+      }
+      .t-entries {
+        display: flex;
+        flex-direction: column;
+        margin: -6px 0 8px;
+      }
+      .t-entry {
+        display: grid;
+        grid-template-columns: 1.25rem 1fr;
+        column-gap: 8px;
+        align-items: center;
+        min-height: 26px;
+        font-size: 12px;
+        color: color-mix(in srgb, var(--muted-fg) 70%, transparent);
+      }
+      .t-entry .ic {
+        width: 14px;
+        height: 14px;
+      }
+      .t-entry span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .t-thinking {
+        font-size: 13px;
+        padding-bottom: 12px;
+      }
+      .t-card {
+        border-radius: 0.65rem;
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent);
+        overflow: hidden;
+        font-size: 12px;
+      }
+      .t-card-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        background: color-mix(in srgb, var(--muted) 40%, transparent);
+      }
+      .t-card-title {
+        display: flex;
+        flex-direction: column;
+        color: color-mix(in srgb, var(--foreground) 92%, transparent);
+        font-size: 13px;
+      }
+      .t-card-file {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-top: 1px solid var(--hair);
+        font-size: 13px;
+      }
+      .t-ts {
+        font-family: var(--font-sans);
+        font-size: 10px;
+        font-weight: 700;
+        color: #3b82f6;
+      }
+
+      /* ============================================================
+         A · Ledger — every step on one quiet rail
+         ============================================================ */
+      .a-body {
+        position: relative;
+        padding: 4px 0 0 26px;
+      }
+      .a-rail {
+        position: absolute;
+        left: 7px;
+        top: 8px;
+        bottom: 6px;
+        width: 1px;
+        background: var(--hair);
+      }
+      .a-railmark {
+        position: absolute;
+        left: 6px;
+        top: 0;
+        width: 3px;
+        height: 18px;
+        border-radius: 3px;
+        background: var(--foreground);
+        opacity: 0;
+        box-shadow: 0 0 10px color-mix(in srgb, var(--foreground) 35%, transparent);
+        transition:
+          transform 0.5s var(--snappy),
+          opacity 0.4s,
+          height 0.4s var(--gentle);
+      }
+      [data-phase="working"] .a-railmark {
+        opacity: 0.75;
+      }
+      .a-prose {
+        margin: 6px 0 8px;
+        cursor: default;
+      }
+      .a-prose.clamped {
+        display: -webkit-box;
+        -webkit-line-clamp: 1;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        cursor: pointer;
+        color: var(--muted-fg);
+        font-size: 13.5px;
+        margin: 2px 0 4px;
+      }
+      .a-prose.clamped:hover {
+        color: var(--foreground);
+      }
+
+      /* ============================================================
+         B · Track — the run as a live, scrubbable timeline
+         ============================================================ */
+      .b-run {
+        position: relative;
+      }
+      .b-track {
+        position: relative;
+        height: 44px;
+        margin-top: 4px;
+        cursor: crosshair;
+      }
+      .b-marks {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 14px;
+      }
+      .b-mark {
+        position: absolute;
+        top: 1px;
+        width: 9px;
+        height: 9px;
+        margin-left: -4.5px;
+        border-radius: 50%;
+        padding: 0;
+        border: 0;
+        background: var(--background);
+        box-shadow: inset 0 0 0 1.5px var(--muted-fg);
+        cursor: pointer;
+        transition:
+          transform 0.25s var(--snappy),
+          background 0.3s,
+          box-shadow 0.3s;
+      }
+      .b-mark::after {
+        content: "";
+        position: absolute;
+        left: 4px;
+        top: 10px;
+        width: 1px;
+        height: 8px;
+        background: var(--hair);
+      }
+      .b-mark:hover,
+      .b-mark.hot {
+        transform: scale(1.35);
+      }
+      .b-mark.cur {
+        background: var(--foreground);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--foreground) 14%, transparent);
+      }
+      .b-mark.final {
+        background: var(--ok);
+        box-shadow: none;
+      }
+      .b-lane {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 16px;
+        height: 28px;
+      }
+      .b-lane::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 50%;
+        height: 1px;
+        background: var(--hair);
+      }
+      .b-seg {
+        position: absolute;
+        top: 50%;
+        left: 0;
+        width: 2px;
+        height: var(--sh, 10px);
+        margin-top: calc(var(--sh, 10px) / -2);
+        border-radius: 2.5px;
+        background-color: var(--kc, var(--k-read));
+        transform-origin: 50% 50%;
+        transition:
+          opacity 0.2s,
+          filter 0.2s;
+      }
+      .b-seg[data-kind="think"] {
+        --sh: 4px;
+        --kc: var(--k-think);
+        border-radius: 2px;
+      }
+      .b-seg[data-kind="read"] {
+        --sh: 8px;
+        --kc: var(--k-read);
+      }
+      .b-seg[data-kind="search"] {
+        --sh: 10px;
+        --kc: var(--k-search);
+      }
+      .b-seg[data-kind="edit"],
+      .b-seg[data-kind="create"] {
+        --sh: 18px;
+        --kc: var(--k-edit);
+      }
+      .b-seg[data-kind="run"] {
+        --sh: 13px;
+        --kc: var(--k-run);
+      }
+      .b-seg[data-kind="web"] {
+        --sh: 10px;
+        --kc: var(--k-web);
+      }
+      .b-seg[data-kind="agent"] {
+        --sh: 16px;
+        --kc: var(--k-agent);
+      }
+      .b-seg[data-kind="say"] {
+        --sh: 2px;
+        --kc: var(--faint-fg);
+      }
+      .b-seg.fail {
+        --kc: var(--k-fail);
+        --sh: 20px;
+      }
+      .b-seg.live {
+        background-image: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(255, 255, 255, 0.55) 50%,
+          transparent 100%
+        );
+        background-size: 40px 100%;
+        background-repeat: no-repeat;
+        animation: seg-sheen 1.1s linear infinite;
+      }
+      @keyframes seg-sheen {
+        from {
+          background-position: -40px 0;
+        }
+        to {
+          background-position: calc(100% + 40px) 0;
+        }
+      }
+      .b-lane.hovering .b-seg:not(.hot) {
+        opacity: 0.3;
+      }
+      .b-seg.hot {
+        filter: brightness(1.25);
+      }
+      .b-playhead {
+        position: absolute;
+        top: 14px;
+        bottom: -2px;
+        width: 1px;
+        left: 0;
+        background: var(--foreground);
+        opacity: 0;
+        transition: opacity 0.4s;
+        pointer-events: none;
+      }
+      .b-playhead::before {
+        content: "";
+        position: absolute;
+        left: -2px;
+        top: -2px;
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: var(--foreground);
+      }
+      [data-phase="working"] .b-playhead {
+        opacity: 0.6;
+      }
+      .b-cap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 28px;
+        margin-top: 2px;
+        font-size: 13px;
+        color: var(--muted-fg);
+      }
+      .b-cap-text {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      .b-cap-text .mono {
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        color: var(--foreground);
+        opacity: 0.85;
+      }
+      .b-cap-meta {
+        flex: none;
+        font-size: 12.5px;
+        color: var(--faint-fg);
+      }
+      .b-para {
+        margin-top: 10px;
+      }
+      .b-para:empty {
+        display: none;
+      }
+      .b-ghost {
+        position: absolute;
+        pointer-events: none;
+        z-index: 6;
+        transform-origin: 0 0;
+        margin: 0;
+      }
+      .b-pop {
+        position: absolute;
+        z-index: 20;
+        left: 0;
+        bottom: calc(100% + 6px);
+        width: max-content;
+        max-width: 420px;
+        padding: 8px 11px;
+        border-radius: 10px;
+        background: var(--popover);
+        box-shadow:
+          var(--pop-shadow),
+          inset 0 0 0 1px var(--border);
+        font-size: 12.5px;
+        color: var(--muted-fg);
+        pointer-events: none;
+        opacity: 0;
+        transform: translateY(4px);
+        transition:
+          opacity 0.14s,
+          transform 0.2s var(--gentle);
+      }
+      .b-pop.show {
+        opacity: 1;
+        transform: none;
+      }
+      .b-pop .pop-title {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--foreground);
+      }
+      .b-pop .pop-title .mono {
+        font-size: 12px;
+      }
+      .b-pop .pop-sub {
+        margin-top: 3px;
+        color: var(--faint-fg);
+        font-size: 11.5px;
+      }
+      .b-pop .pop-para {
+        line-height: 1.55;
+        color: var(--prose);
+        font-size: 13px;
+      }
+      .b-log {
+        margin-top: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .b-log[hidden] {
+        display: none;
+      }
+      .b-log-ch {
+        display: flex;
+        flex-direction: column;
+      }
+      .b-log-ch .prose {
+        font-size: 13.5px;
+        color: var(--muted-fg);
+        margin: 8px 0 4px;
+      }
+
+      /* ============================================================
+         C · Chapters — each update folds into one line
+         ============================================================ */
+      .c-chs {
+        position: relative;
+        padding: 2px 0 0 26px;
+      }
+      .c-line {
+        position: absolute;
+        left: 7px;
+        top: 14px;
+        width: 1px;
+        height: var(--len, 0px);
+        background: var(--hair);
+        transition: height 0.5s var(--gentle);
+      }
+      .c-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1px;
+        height: var(--fill, 0px);
+        background: var(--muted-fg);
+        opacity: 0.55;
+        transition: height 0.6s var(--gentle);
+      }
+      .c-flow {
+        position: absolute;
+        left: 0;
+        width: 1px;
+        top: var(--fill, 0px);
+        height: calc(var(--len, 0px) - var(--fill, 0px));
+        background: linear-gradient(to bottom, transparent, var(--foreground), transparent) 0 0 /
+          1px 48px no-repeat;
+        opacity: 0;
+        animation: flow 1.6s linear infinite;
+      }
+      [data-phase="working"] .c-flow {
+        opacity: 0.55;
+      }
+      @keyframes flow {
+        from {
+          background-position: 0 -48px;
+        }
+        to {
+          background-position: 0 100%;
+        }
+      }
+      .c-ch {
+        position: relative;
+        padding: 1px 0;
+      }
+      .c-node {
+        position: absolute;
+        left: -23.5px;
+        top: 10px;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--background);
+        box-shadow: inset 0 0 0 1.5px var(--muted-fg);
+        transition:
+          top 0.4s var(--gentle),
+          background 0.3s,
+          box-shadow 0.3s,
+          transform 0.4s var(--snappy);
+      }
+      .c-node::after {
+        content: "";
+        position: absolute;
+        inset: -5px;
+        border-radius: 50%;
+        border: 1px solid var(--foreground);
+        opacity: 0;
+      }
+      .c-ch[data-state="active"] .c-node {
+        box-shadow: inset 0 0 0 1.5px var(--foreground);
+      }
+      [data-phase="working"] .c-ch[data-state="active"] .c-node::after {
+        animation: halo 1.8s var(--ease) infinite;
+      }
+      @keyframes halo {
+        0% {
+          transform: scale(0.6);
+          opacity: 0.55;
+        }
+        100% {
+          transform: scale(1.5);
+          opacity: 0;
+        }
+      }
+      .c-ch[data-state="done"] .c-node {
+        background: var(--faint-fg);
+        box-shadow: none;
+        transform: scale(0.7);
+      }
+      .c-ch[data-state="done"] .c-node.fail {
+        background: var(--k-fail);
+      }
+      .c-top {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 30px;
+        width: calc(100% + 16px);
+        margin: 0 -8px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        cursor: pointer;
+        text-align: left;
+      }
+      .c-top:hover {
+        background: var(--accent);
+      }
+      .c-title {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        font-size: 13.5px;
+        color: var(--prose);
+      }
+      .c-title.ghost {
+        color: var(--faint-fg);
+      }
+      .c-title code {
+        font-family: var(--font-mono);
+        font-size: 12px;
+      }
+      .c-dur {
+        flex: none;
+        font-size: 12px;
+        color: var(--faint-fg);
+        min-width: 44px;
+        text-align: right;
+      }
+      .c-ch[data-open="true"] .c-top {
+        display: none;
+      }
+      .c-body {
+        padding: 0 0 4px;
+      }
+      .c-body[hidden] {
+        display: none;
+      }
+      .c-para {
+        margin: 2px 0 6px;
+      }
+      .c-para:empty {
+        display: none;
+      }
+      .c-more {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 22px;
+        border: 0;
+        background: none;
+        padding: 0;
+        cursor: pointer;
+        font-size: 12px;
+        color: var(--faint-fg);
+      }
+      .c-more:hover {
+        color: var(--muted-fg);
+      }
+      .c-more[hidden] {
+        display: none;
+      }
+      .c-more .ic {
+        width: 12px;
+        height: 12px;
+      }
+      .c-foot {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 26px;
+      }
+      .c-foot .c-dur {
+        margin-left: auto;
+      }
+      .row[data-age="1"] {
+        opacity: 0.8;
+      }
+      .row[data-age="2"] {
+        opacity: 0.56;
+      }
+      .row[data-age="3"] {
+        opacity: 0.34;
+      }
+
+      /* ============================================================
+         Notes
+         ============================================================ */
+      .notes {
+        margin-top: 26px;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 28px;
+      }
+      .notes h3 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted-fg);
+        letter-spacing: 0.01em;
+      }
+      .notes p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--foreground);
+        opacity: 0.86;
+      }
+      .notes-foot {
+        margin-top: 22px;
+        font-size: 12px;
+        color: var(--faint-fg);
+        max-width: 820px;
+      }
+      .notes-foot code {
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+      }
+      @media (max-width: 860px) {
+        .notes {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="lab">
+      <header class="lab-bar">
+        <div>
+          <h1 class="lab-title">Agent work log</h1>
+          <p class="lab-sub">
+            Three directions for what the chat shows while a model works: reasoning, tool calls and
+            the short updates it writes in between. Each run is a scripted replay you can scrub,
+            speed up and click into.
+          </p>
+        </div>
+        <div class="lab-controls">
+          <div id="tabs-slot"></div>
+          <button
+            class="lab-icon-btn"
+            id="theme-btn"
+            type="button"
+            aria-label="Toggle theme"
+          ></button>
+          <button class="lab-icon-btn" id="motion-btn" type="button" aria-pressed="true">
+            Motion
+          </button>
+        </div>
+      </header>
+
+      <div class="toolbar">
+        <div class="scenarios" id="scenarios"><span>Run</span></div>
+        <div class="transport">
+          <button class="tp-btn primary" id="play-btn" type="button" aria-label="Play"></button>
+          <button class="tp-btn" id="restart-btn" type="button" aria-label="Restart"></button>
+          <div class="scrub" id="scrub" role="slider" aria-label="Playback position" tabindex="0">
+            <div class="scrub-track"></div>
+            <div class="scrub-fill" id="scrub-fill"></div>
+            <div id="scrub-ticks"></div>
+            <div class="scrub-thumb" id="scrub-thumb"></div>
+          </div>
+          <span class="tp-time tnum" id="tp-time">0:00 / 0:00</span>
+          <div id="speed-slot"></div>
+          <button class="tp-btn" id="end-btn" type="button" aria-label="Skip to end"></button>
+        </div>
+      </div>
+
+      <div class="stage" id="stage">
+        <div class="scroller" id="scroller"><div class="thread" id="thread"></div></div>
+        <div class="composer-dock">
+          <div class="composer">
+            <span class="cmp-ph">Ask for follow-up changes</span>
+            <span class="cmp-model" id="cmp-model"></span>
+            <button class="send" id="send-btn" type="button" aria-label="Send"></button>
+          </div>
+        </div>
+      </div>
+
+      <section class="notes" id="notes"></section>
+      <p class="notes-foot" id="notes-foot"></p>
+    </div>
+
+    <script>
+      /* ==========================================================
+         Utilities
+         ========================================================== */
+      const EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
+      const GENTLE = "cubic-bezier(0.22, 1, 0.36, 1)";
+      const SNAPPY = "cubic-bezier(0.3, 1.36, 0.44, 1)";
+      const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+      const $ = (s, r = document) => r.querySelector(s);
+      let motion = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+      /** True while seeking: everything renders in its end state, no animation. */
+      let INSTANT = false;
+      const live = () => motion && !INSTANT;
+
+      function h(tag, attrs, ...children) {
+        const el = document.createElement(tag);
+        if (attrs)
+          for (const [k, v] of Object.entries(attrs)) {
+            if (v == null || v === false) continue;
+            if (k === "class") el.className = v;
+            else if (k === "style")
+              for (const [sk, sv] of Object.entries(v)) el.style.setProperty(sk, String(sv));
+            else if (k.startsWith("on") && typeof v === "function")
+              el.addEventListener(k.slice(2).toLowerCase(), v);
+            else el.setAttribute(k, v === true ? "" : String(v));
+          }
+        for (const c of children.flat(Infinity)) {
+          if (c == null || c === false) continue;
+          el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        }
+        return el;
+      }
+
+      const PATHS = {
+        chevronDown: '<path d="m6 9 6 6 6-6"/>',
+        chevronRight: '<path d="m9 18 6-6-6-6"/>',
+        chevronUp: '<path d="m18 15-6-6-6 6"/>',
+        check: '<path d="M20 6 9 17l-5-5"/>',
+        x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+        alert:
+          '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>',
+        fileText:
+          '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+        search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+        pencil:
+          '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+        filePlus:
+          '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M9 15h6"/><path d="M12 18v-6"/>',
+        fileDiff:
+          '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/>',
+        terminal: '<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>',
+        gitBranch:
+          '<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+        globe:
+          '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+        bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+        sparkle:
+          '<path d="M12 3c.5 4.4 2.6 6.5 7 7-4.4.5-6.5 2.6-7 7-.5-4.4-2.6-6.5-7-7 4.4-.5 6.5-2.6 7-7Z"/>',
+        play: '<polygon points="7 4 19 12 7 20 7 4"/>',
+        pause:
+          '<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/>',
+        rotateCcw:
+          '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+        skipEnd: '<polygon points="5 4 15 12 5 20 5 4"/><line x1="19" x2="19" y1="5" y2="19"/>',
+        undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>',
+        arrowUp: '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+        square: '<rect width="14" height="14" x="5" y="5" rx="2"/>',
+        moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+        sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+        listTree:
+          '<path d="M21 12h-8"/><path d="M21 6H8"/><path d="M21 18h-8"/><path d="M3 6v4c0 1.1.9 2 2 2h3"/><path d="M3 10v6c0 1.1.9 2 2 2h3"/>',
+      };
+      function icon(name, cls = "") {
+        const t = document.createElement("template");
+        t.innerHTML = `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${PATHS[name]}</svg>`;
+        return t.content.firstElementChild;
+      }
+      const CLAUDE_D =
+        "m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z";
+      function claudeMark(cls = "") {
+        const t = document.createElement("template");
+        t.innerHTML = `<svg class="pv ${cls}" viewBox="0 0 256 257" aria-hidden="true"><path fill="#d97757" d="${CLAUDE_D}"/></svg>`;
+        return t.content.firstElementChild;
+      }
+
+      /* ---------- formatting ---------- */
+      const fmtDur = (s) => {
+        if (s < 1) return `${Math.max(1, Math.round(s * 1000))}ms`;
+        if (s < 10) return `${s.toFixed(1)}s`;
+        if (s < 60) return `${Math.round(s)}s`;
+        const m = Math.floor(s / 60);
+        return `${m}m ${Math.round(s - m * 60)}s`;
+      };
+      const fmtTimer = (s) => {
+        s = Math.floor(s);
+        if (s < 60) return `${s}s`;
+        return `${Math.floor(s / 60)}m ${s % 60}s`;
+      };
+      const fmtClock = (s) =>
+        `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+      const BASE_TIME = 9 * 3600 + 32 * 60 - 3;
+      const fmtWall = (s) => {
+        const t = Math.floor(BASE_TIME + s);
+        const p = (n) => String(n).padStart(2, "0");
+        return `${Math.floor(t / 3600) % 24}:${p(Math.floor(t / 60) % 60)}:${p(t % 60)}`;
+      };
+      const plural = (n, [one, many]) => `${n} ${n === 1 ? one : many}`;
+      const shortPath = (p) => p.split("/").slice(-2).join("/");
+      const baseName = (p) => p.split("/").pop();
+      const stripTicks = (t) => t.replace(/`/g, "");
+
+      /* ==========================================================
+         Motion helpers — all no-ops while seeking or motion is off
+         ========================================================== */
+      function holdOverflow(el, a) {
+        el._clip = (el._clip || 0) + 1;
+        el.style.overflow = "hidden";
+        const done = () => {
+          el._clip -= 1;
+          if (!el._clip) el.style.overflow = "";
+        };
+        a.addEventListener("finish", done);
+        a.addEventListener("cancel", done);
+      }
+      /** Insert: grow height from 0 while fading up out of a blur. */
+      function enter(el, { delay = 0, dur = 420, y = 6, blur = 4 } = {}) {
+        if (!live() || !el.isConnected) return;
+        const hgt = el.getBoundingClientRect().height;
+        const a = el.animate(
+          [
+            {
+              height: "0px",
+              opacity: 0,
+              transform: `translateY(${y}px)`,
+              filter: `blur(${blur}px)`,
+            },
+            { height: `${hgt}px`, opacity: 1, transform: "none", filter: "blur(0px)" },
+          ],
+          { duration: dur, delay, easing: GENTLE, fill: "backwards" },
+        );
+        holdOverflow(el, a);
+        return a;
+      }
+      /** Collapse to 0 height then run `done` (hide/remove). */
+      function leave(el, done, { dur = 300, y = -4 } = {}) {
+        if (!live() || !el.isConnected) return done?.();
+        const hgt = el.getBoundingClientRect().height;
+        const a = el.animate(
+          [
+            { height: `${hgt}px`, opacity: 1, transform: "none" },
+            { height: "0px", opacity: 0, transform: `translateY(${y}px)` },
+          ],
+          { duration: dur, easing: EASE, fill: "forwards" },
+        );
+        holdOverflow(el, a);
+        a.onfinish = () => {
+          done?.();
+          a.cancel();
+        };
+      }
+      /** Animate an element's height across a DOM mutation. */
+      function morphHeight(el, mutate, { dur = 380 } = {}) {
+        const h0 = el.getBoundingClientRect().height;
+        mutate();
+        if (!live() || !el.isConnected) return;
+        const h1 = el.getBoundingClientRect().height;
+        if (Math.abs(h1 - h0) < 1) return;
+        const a = el.animate([{ height: `${h0}px` }, { height: `${h1}px` }], {
+          duration: dur,
+          easing: GENTLE,
+        });
+        holdOverflow(el, a);
+      }
+      function fadeIn(el, { delay = 0, dur = 320, y = 4 } = {}) {
+        if (!live() || !el.isConnected) return;
+        el.animate(
+          [
+            { opacity: 0, transform: `translateY(${y}px)` },
+            { opacity: 1, transform: "none" },
+          ],
+          { duration: dur, delay, easing: GENTLE, fill: "backwards" },
+        );
+      }
+      /** Vertical roll between two labels; direction follows the change. */
+      function swapRoll(
+        container,
+        content,
+        dir = 1,
+        key = typeof content === "string" ? content : undefined,
+      ) {
+        if (key !== undefined && container.dataset.text === key && container.childElementCount)
+          return;
+        container.dataset.text = key ?? "";
+        const next = h("span", { class: "roll-item" }, content);
+        const current = [...container.children].filter((c) => !c.classList.contains("leaving"));
+        if (!live() || !current.length || !container.isConnected) {
+          container.replaceChildren(next);
+          return;
+        }
+        const w0 = container.getBoundingClientRect().width;
+        container.append(next);
+        const w1 = next.getBoundingClientRect().width;
+        const d = dir >= 0 ? 1 : -1;
+        for (const c of current) {
+          c.classList.add("leaving");
+          c.animate(
+            [
+              { transform: "translateY(0)", opacity: 1, filter: "blur(0px)" },
+              { transform: `translateY(${-d * 80}%)`, opacity: 0, filter: "blur(3px)" },
+            ],
+            { duration: 220, easing: "cubic-bezier(.4,0,.7,1)", fill: "forwards" },
+          ).onfinish = () => c.remove();
+        }
+        next.animate(
+          [
+            { transform: `translateY(${d * 80}%)`, opacity: 0, filter: "blur(3px)" },
+            { transform: "translateY(0)", opacity: 1, filter: "blur(0px)" },
+          ],
+          { duration: 340, easing: GENTLE },
+        );
+        if (Math.abs(w1 - w0) > 0.5)
+          container.animate([{ width: `${w0}px` }, { width: `${w1}px` }], {
+            duration: 340,
+            easing: GENTLE,
+          });
+      }
+      /** Count a number up (or down) with an ease-out. */
+      function tween(
+        el,
+        to,
+        { from = Number(el.dataset.v ?? 0), dur = 560, fmt = (v) => String(v) } = {},
+      ) {
+        el.dataset.v = String(to);
+        cancelAnimationFrame(el._tw);
+        if (!live() || from === to) {
+          el.textContent = fmt(to);
+          return;
+        }
+        const t0 = performance.now();
+        const step = (now) => {
+          const k = clamp((now - t0) / dur, 0, 1);
+          const e = 1 - Math.pow(1 - k, 3);
+          el.textContent = fmt(Math.round(from + (to - from) * e));
+          if (k < 1) el._tw = requestAnimationFrame(step);
+        };
+        el._tw = requestAnimationFrame(step);
+      }
+      function pop(el, scale = 1.35) {
+        if (!live() || !el?.isConnected) return;
+        el.animate(
+          [
+            { transform: "scale(1)" },
+            { transform: `scale(${scale})`, offset: 0.4 },
+            { transform: "scale(1)" },
+          ],
+          { duration: 420, easing: EASE },
+        );
+      }
+      function flash(rowEl) {
+        rowEl.classList.remove("flash");
+        void rowEl.offsetWidth;
+        rowEl.classList.add("flash");
+      }
+
+      /* ---------- status glyph: spinner → drawn check / cross ---------- */
+      const GLYPH_SVG = {
+        run: '<svg class="gl-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="6" opacity=".25"/><path d="M8 2a6 6 0 0 1 6 6"/></svg>',
+        ok: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path data-draw d="M3.2 8.6 6.4 11.6 12.8 4.6" pathLength="1" stroke-dasharray="1" stroke-dashoffset="0"/></svg>',
+        fail: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path data-draw d="M4.5 4.5l7 7M11.5 4.5l-7 7" pathLength="1" stroke-dasharray="1" stroke-dashoffset="0"/></svg>',
+        think:
+          '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.8c.4 3.4 2 5 5.4 5.4v.2c-3.4.4-5 2-5.4 5.4h-.2c-.4-3.4-2-5-5.4-5.4v-.2c3.4-.4 5-2 5.4-5.4Z"/></svg>',
+        thought:
+          '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.8c.4 3.4 2 5 5.4 5.4v.2c-3.4.4-5 2-5.4 5.4h-.2c-.4-3.4-2-5-5.4-5.4v-.2c3.4-.4 5-2 5.4-5.4Z"/></svg>',
+        dot: '<svg viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="2.2"/></svg>',
+      };
+      function glyph(state) {
+        const box = h("span", { class: "gl" });
+        setGlyph(box, state);
+        return box;
+      }
+      function setGlyph(box, state) {
+        if (box.dataset.state === state) return;
+        box.dataset.state = state;
+        const t = document.createElement("template");
+        t.innerHTML = GLYPH_SVG[state];
+        const next = t.content.firstElementChild;
+        const prev = [...box.children];
+        box.append(next);
+        if (!live() || !prev.length || !box.isConnected) {
+          prev.forEach((p) => p.remove());
+          return;
+        }
+        for (const p of prev)
+          p.animate(
+            [
+              { opacity: 1, transform: "none" },
+              { opacity: 0, transform: "scale(.4)" },
+            ],
+            {
+              duration: 160,
+              easing: EASE,
+              fill: "forwards",
+            },
+          ).onfinish = () => p.remove();
+        next.animate(
+          [
+            { opacity: 0, transform: "scale(.5)" },
+            { opacity: 1, transform: "none" },
+          ],
+          { duration: 300, easing: SNAPPY },
+        );
+        next
+          .querySelector("[data-draw]")
+          ?.animate([{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }], {
+            duration: 380,
+            delay: 60,
+            easing: GENTLE,
+            fill: "backwards",
+          });
+      }
+
+      /* ---------- streamed prose: words fade in as they arrive ---------- */
+      function tokenize(text) {
+        const out = [];
+        for (const part of text.split(/(`[^`]+`)/)) {
+          if (!part) continue;
+          if (part.startsWith("`")) out.push({ code: true, s: part.slice(1, -1) });
+          else for (const w of part.match(/\S+\s*|\s+/g) ?? []) out.push({ code: false, s: w });
+        }
+        return out;
+      }
+      function renderInline(text) {
+        return tokenize(text).map((t) => (t.code ? h("code", null, t.s) : t.s));
+      }
+      function streamer(el, text, { caret = true } = {}) {
+        const toks = tokenize(text);
+        let shown = 0;
+        const api = {
+          set(f) {
+            const n = Math.min(toks.length, Math.ceil(f * toks.length - 1e-6));
+            if (n <= shown) return;
+            const frag = document.createDocumentFragment();
+            const anim = live();
+            while (shown < n) {
+              const t = toks[shown++];
+              if (t.code) frag.append(h("code", { class: anim ? "w" : null }, t.s));
+              else if (anim) frag.append(h("span", { class: "w" }, t.s));
+              else frag.append(t.s);
+            }
+            el.append(frag);
+            if (caret) el.classList.toggle("caret", shown < toks.length);
+          },
+          finish() {
+            api.set(1);
+            el.classList.remove("caret");
+          },
+        };
+        if (caret) el.classList.add("caret");
+        return api;
+      }
+
+      /** Segmented control with a sliding indicator; radiogroup semantics. */
+      function segmented(options, value, onChange, { label, cls = "" } = {}) {
+        const ind = h("span", { class: "seg-ind", "aria-hidden": "true" });
+        const el = h("div", { class: `seg ${cls}`, role: "radiogroup", "aria-label": label }, ind);
+        let cur = value;
+        let placed = false;
+        const btns = options.map((o) => {
+          const b = h(
+            "button",
+            {
+              class: "seg-opt",
+              type: "button",
+              role: "radio",
+              "aria-checked": "false",
+              "data-id": o.id,
+              title: o.title,
+            },
+            o.content ?? o.label,
+          );
+          b.addEventListener("click", () => onChange(o.id));
+          el.append(b);
+          return b;
+        });
+        function place(animate) {
+          const b = btns[options.findIndex((o) => o.id === cur)];
+          if (!b) return;
+          if (!b.offsetWidth) return requestAnimationFrame(() => place(false));
+          if (!animate || !placed || !motion) ind.style.transition = "none";
+          ind.style.width = `${b.offsetWidth}px`;
+          ind.style.transform = `translateX(${b.offsetLeft - 2}px)`;
+          void ind.offsetWidth;
+          ind.style.transition = "";
+          placed = true;
+        }
+        function sync(animate = true) {
+          for (const b of btns) b.setAttribute("aria-checked", String(b.dataset.id === cur));
+          place(animate);
+        }
+        return {
+          el,
+          set(v) {
+            if (v === cur) return;
+            cur = v;
+            sync(true);
+          },
+          sync,
+        };
+      }
+
+      /* ==========================================================
+         Tool kinds
+         ========================================================== */
+      const KIND = {
+        think: {
+          icon: "sparkle",
+          live: "Thinking",
+          done: "Thought",
+          noun: ["thought", "thoughts"],
+        },
+        read: {
+          icon: "fileText",
+          live: "Reading",
+          done: "Read",
+          noun: ["file", "files"],
+          mono: true,
+          merge: true,
+        },
+        search: {
+          icon: "search",
+          live: "Searching",
+          done: "Searched",
+          noun: ["pattern", "patterns"],
+          merge: true,
+        },
+        edit: {
+          icon: "pencil",
+          live: "Editing",
+          done: "Edited",
+          noun: ["file", "files"],
+          mono: true,
+        },
+        create: {
+          icon: "filePlus",
+          live: "Creating",
+          done: "Created",
+          noun: ["file", "files"],
+          mono: true,
+        },
+        run: {
+          icon: "terminal",
+          live: "Running",
+          done: "Ran",
+          noun: ["command", "commands"],
+          mono: true,
+        },
+        web: { icon: "globe", live: "Fetching", done: "Fetched", noun: ["page", "pages"] },
+        agent: {
+          icon: "bot",
+          live: "Delegating",
+          done: "Delegated",
+          noun: ["subagent", "subagents"],
+        },
+      };
+      /** Chip order + which kinds share a chip. */
+      const CHIP_KINDS = [
+        ["read", ["read"]],
+        ["search", ["search"]],
+        ["edit", ["edit", "create"]],
+        ["run", ["run"]],
+        ["web", ["web"]],
+        ["agent", ["agent"]],
+      ];
+
+      /* ==========================================================
+         Scenarios — scripted runs shaped like real Ryco turns
+         ========================================================== */
+      const T = (text, o) => ({ t: "think", text, ...o });
+      const S = (text, o) => ({ t: "say", text, ...o });
+      const F = (text, o) => ({ t: "final", text, ...o });
+      const R = (target, o) => ({ t: "tool", kind: "read", target, ...o });
+      const Q = (target, o) => ({ t: "tool", kind: "search", target, ...o });
+      const E = (target, add, del, o) => ({ t: "tool", kind: "edit", target, add, del, ...o });
+      const C = (target, add, o) => ({ t: "tool", kind: "create", target, add, del: 0, ...o });
+      const X = (target, o) => ({ t: "tool", kind: "run", target, ...o });
+      const W = (target, o) => ({ t: "tool", kind: "web", target, ...o });
+      const G = (target, o) => ({ t: "tool", kind: "agent", target, ...o });
+      const P = (...items) => ({ t: "batch", items });
+
+      const PH = "apps/web/src/components/phone/";
+      const CR = "packages/client-runtime/src/";
+      const PV = "apps/server/src/provider/";
+
+      const SCENARIOS = [
+        {
+          id: "relay",
+          label: "Relay backoff",
+          hint: "short",
+          prompt:
+            "Add exponential backoff to the relay client's reconnects, and cover it with tests.",
+          script: [
+            T(
+              "The relay client lives in client-runtime. If reconnects go through one scheduleReconnect path on a fixed delay, the fix is a small pure helper (base, factor, cap, jitter) that the client consults, plus a reset once a connection is accepted. A fake clock can drive the tests.",
+              { dur: 3.8 },
+            ),
+            S(
+              "I'll look at how the relay client schedules reconnects today, then pull the delay math into a small pure helper so it's easy to test.",
+            ),
+            P(
+              R(CR + "relay/client.ts", { lines: "1–286" }),
+              Q("reconnect", {
+                results: 14,
+                files: [
+                  ["relay/client.ts", 6],
+                  ["relay/client.test.ts", 4],
+                  ["connection/supervisor.ts", 3],
+                  ["state/connection.ts", 1],
+                ],
+              }),
+            ),
+            R(CR + "connection/supervisor.ts", { lines: "40–132" }),
+            T(
+              "scheduleReconnect waits a constant 1000ms and the attempt counter never resets after a successful handshake. Backoff should be min(cap, base·2^n) with full jitter, reset on an accepted snapshot rather than on socket open, so a relay that accepts and immediately drops still backs off.",
+              { dur: 2.9 },
+            ),
+            S(
+              "Reconnects retry on a flat 1s timer and the attempt counter never resets. I'll add `computeBackoff` with full jitter and a 30s cap, and reset it only once a snapshot is accepted so a flapping relay still backs off.",
+            ),
+            E(CR + "relay/client.ts", 11, 2, {
+              diff: [
+                "@@ -212,8 +212,17 @@ export function makeRelayClient(",
+                "-    const delay = RECONNECT_DELAY_MS;",
+                "-    timer = setTimeout(connect, delay);",
+                "+    const delay = computeBackoff(attempt++, {",
+                "+      baseMs: 500,",
+                "+      capMs: 30_000,",
+                "+      random: options.random ?? Math.random,",
+                "+    });",
+                "+    timer = setTimeout(connect, delay);",
+                "   }",
+                "+  function onSnapshotAccepted() {",
+                "+    attempt = 0;",
+                "+  }",
+              ],
+            }),
+            C(CR + "relay/backoff.ts", 52, {
+              diff: [
+                "+export interface BackoffOptions {",
+                "+  readonly baseMs: number;",
+                "+  readonly capMs: number;",
+                "+  readonly random: () => number;",
+                "+}",
+                "+",
+                "+/** Full-jitter exponential backoff. */",
+                "+export function computeBackoff(attempt: number, o: BackoffOptions): number {",
+                "+  const ceiling = Math.min(o.capMs, o.baseMs * 2 ** attempt);",
+                "+  return Math.round(o.random() * ceiling);",
+                "+}",
+              ],
+            }),
+            C(CR + "relay/backoff.test.ts", 64),
+            X("bun run test relay", {
+              dur: 6.2,
+              summary: "42 passed",
+              out: [
+                " ✓ src/relay/backoff.test.ts (9 tests) 14ms",
+                " ✓ src/relay/client.test.ts (33 tests) 412ms",
+                "",
+                " Test Files  2 passed (2)",
+                "      Tests  42 passed (42)",
+              ],
+            }),
+            F(
+              "Reconnects now back off exponentially. `computeBackoff` doubles from 500ms up to a 30s cap with full jitter, and the attempt counter resets only after a snapshot is accepted, so a relay that accepts and drops still backs off. Nine new tests cover the curve, the cap, jitter bounds and the reset; the relay suite passes (42 tests).",
+            ),
+          ],
+        },
+        {
+          id: "fixtures",
+          label: "PhoneHome fixtures",
+          hint: "3 updates",
+          prompt:
+            "The PhoneHome archive tests fail on the hosted-readiness branch. Fix the fixtures, but keep the production readiness checks intact.",
+          script: [
+            T(
+              "Archive is disabled in the failing test, which means mutation readiness never flips. PhoneHome reads readiness from the owning connection, so the fixture probably hands it an API without an accepted snapshot. The router stub may also be missing location.href, since the error mentions href.",
+              { dur: 6.4 },
+            ),
+            S(
+              "I'll fix the PhoneHome test fixtures in this worktree, keep production readiness checks intact, and verify that Archive succeeds with an accepted attempt and is denied without one.",
+            ),
+            P(
+              R(PH + "PhoneHome.tsx", { lines: "1–240" }),
+              R(PH + "PhoneHome.browser.tsx", { lines: "1–188" }),
+              Q("acceptedAttempt", { results: 14 }),
+              Q("mutationReady", { results: 9 }),
+            ),
+            R(CR + "state/connection.ts", { lines: "1–318" }),
+            P(
+              Q("location.href", { results: 6 }),
+              Q("createOwningConnection", { results: 3 }),
+              Q("archiveThread", { results: 11 }),
+            ),
+            R("apps/web/src/test/routerFixture.ts"),
+            Q("snapshotAccepted", { results: 8 }),
+            R(CR + "state/readiness.ts"),
+            P(
+              Q("canUndo", { results: 5 }),
+              Q("PhoneHome", { results: 22 }),
+              Q("hostedLifecycle", { results: 7 }),
+            ),
+            R("apps/web/src/hosted/hostedLifecycle.ts"),
+            R(PH + "phoneActions.ts"),
+            T(
+              "Both gaps confirmed: routerFixture never sets state.location.href, and the API object is created standalone, so readiness sees no accepted attempt and Archive is disabled. That is exactly the failure. Building it through the real connection constructor keeps the readiness semantics honest instead of stubbing them.",
+              { dur: 4.1 },
+            ),
+            S(
+              "The fixture has both diagnosed gaps: it lacks `router.state.location.href` and provides an API without an accepted owning connection. I'll add a synthetic snapshot through the real shared connection constructor, then test false/omitted Undo capability and rejection before snapshot acceptance.",
+            ),
+            E(PH + "PhoneHome.browser.tsx", 38, 6, {
+              diff: [
+                '@@ -18,9 +18,41 @@ import { PhoneHome } from "./PhoneHome";',
+                "-const api = createFixtureApi();",
+                "+const connection = createTestConnection({",
+                "+  snapshot: syntheticSnapshot({ accepted: true }),",
+                "+});",
+                "+const api = connection.api;",
+                '   router.navigate({ to: "/" });',
+                '+  router.state.location.href = "/";',
+              ],
+            }),
+            C("apps/web/src/test/testConnection.ts", 41),
+            R(CR + "state/connection.ts", { lines: "140–212" }),
+            X("bun run --cwd apps/web test:browser PhoneHome", {
+              dur: 24,
+              ok: false,
+              summary: "timed out",
+              out: [
+                " RUN  v3.2.4  apps/web",
+                " ❯ src/components/phone/PhoneHome.browser.tsx (0/6)",
+                "!Error: Timed out after 20000ms waiting for the module graph",
+                "!  at loadModules (@vitest/browser/context)",
+                "",
+                " Test Files  1 failed (1)",
+              ],
+            }),
+            X("bun run --cwd apps/web test:browser PhoneHome -- --reporter=verbose", {
+              dur: 31,
+              ok: false,
+              summary: "timed out",
+            }),
+            X('rg -n "state/connection" apps/web/src', { dur: 0.4, summary: "17 matches" }),
+            X('rg -n "testConnection" apps/web/src', { dur: 0.3, summary: "3 matches" }),
+            X("node scripts/import-graph.mjs apps/web/src/test/testConnection.ts", {
+              dur: 1.9,
+              summary: "1 cycle",
+              out: [
+                "testConnection.ts",
+                "  → state/connection.ts",
+                "  → hosted/hostedLifecycle.ts",
+                "  → test/testConnection.ts   (cycle)",
+              ],
+            }),
+            X('rg -n "getConnection" ' + CR, { dur: 0.4, summary: "9 matches" }),
+            X("bun run --cwd apps/web test PhoneHome.logic", { dur: 4.2, summary: "12 passed" }),
+            X("git diff --stat", { dur: 0.3, summary: "2 files" }),
+            T(
+              "The stall is an import cycle: testConnection imports state/connection, which pulls hostedLifecycle, which imports the fixture registry back. Wrapping just the connection getter avoids importing that module eagerly, and Archive still goes through the real handlers.",
+              { dur: 3.2 },
+            ),
+            S(
+              "The first browser run stalled during module loading. I'm changing the fixture to wrap only the connection getter, with fallback to the original implementation, to avoid the import cycle. Archive will still run through the real handlers and readiness checks.",
+            ),
+            E(PH + "PhoneHome.browser.tsx", 14, 22),
+            P(
+              R(CR + "state/readiness.ts", { lines: "60–131" }),
+              R("apps/web/src/hosted/hostedLifecycle.ts"),
+              R("apps/web/src/test/testConnection.ts"),
+            ),
+            Q("getOwningConnection", { results: 1 }),
+            E("apps/web/src/test/testConnection.ts", 6, 9),
+            X("bun run --cwd apps/web test:browser PhoneHome", {
+              dur: 18,
+              summary: "6 passed",
+              out: [
+                " ✓ src/components/phone/PhoneHome.browser.tsx (6 tests) 2.41s",
+                "",
+                " Test Files  1 passed (1)",
+                "      Tests  6 passed (6)",
+              ],
+            }),
+            X('bun run --cwd apps/web test:browser PhoneHome -t "archive"', {
+              dur: 9,
+              summary: "2 passed",
+            }),
+            X("bun typecheck --filter=@ryco/web", { dur: 41, summary: "0 errors" }),
+            X("bun lint", { dur: 6, summary: "0 problems" }),
+            X("bun run fmt:check", { dur: 3.1, summary: "clean" }),
+            F(
+              "Fixed the PhoneHome fixtures without touching production readiness. The fixture now builds its API through the real shared connection constructor with a synthetic accepted snapshot, and wraps only the connection getter (falling back to the original), so the import cycle that stalled the first browser run is gone. Archive succeeds with an accepted attempt and is denied without one, and Undo stays hidden when the capability is false or omitted. All 6 PhoneHome browser tests pass; typecheck, lint and format are clean.",
+            ),
+          ],
+        },
+        {
+          id: "release",
+          label: "Release v0.1.28",
+          hint: "long command",
+          prompt:
+            "ok merged it - please trigger a new release in github and update the changelog at marketing site etc. for the latest updates",
+          script: [
+            T(
+              "Need the commits since the last tag for the changelog entry, then dispatch the release workflow. The marketing changelog is a typed array in marketing/src/data/changelog.ts, newest first.",
+              { dur: 2.4 },
+            ),
+            S(
+              "I'll check what landed since v0.1.27, dispatch the release workflow, and write the changelog entry while it builds.",
+            ),
+            P(
+              X("git fetch --tags origin", { dur: 1.6, summary: "up to date" }),
+              X("gh release list -L 3", { dur: 1.1, summary: "v0.1.27 latest" }),
+            ),
+            X("git log v0.1.27..origin/main --oneline --no-merges", {
+              dur: 0.4,
+              summary: "23 commits",
+              out: [
+                "186710315 Add integrated model tuning controls to the chat composer",
+                "46f786059 feat(web): restore remembered hosted conversations before reconnect",
+                "b2c09e1d4 fix(hosted): keep device picker open across relay retries",
+                "…20 more",
+              ],
+            }),
+            R("marketing/src/data/changelog.ts", { lines: "1–96" }),
+            X("gh workflow run release.yml -f version=0.1.28", { dur: 2.1, summary: "dispatched" }),
+            E("marketing/src/data/changelog.ts", 40, 0),
+            T(
+              "The Hub pins the Ryco version it serves, and its AGENTS.md says to bump that pin only deliberately, to a reviewed commit. Worth mentioning, not doing.",
+              { dur: 2.0 },
+            ),
+            S(
+              "While that runs: the marketing changelog is done. The \"etc.\" might also cover the Hub's pinned Ryco version, but its AGENTS.md says to bump that pin only deliberately, to a reviewed commit, so I'll leave it unless you ask.",
+            ),
+            X("gh run watch 18342117 --exit-status", {
+              dur: 68,
+              summary: "release ✓",
+              out: [
+                "✓ build-desktop (macos-14)  4m12s",
+                "✓ build-desktop (ubuntu)    3m51s",
+                "✓ publish-npm               38s",
+                "✓ github-release            12s",
+              ],
+            }),
+            X("gh release view v0.1.28 --json isLatest,url", { dur: 0.9, summary: "latest" }),
+            F(
+              "v0.1.28 is released: the GitHub release is published and marked as latest, and the marketing site changelog has a v0.1.28 entry covering the 23 commits since v0.1.27.",
+            ),
+          ],
+        },
+        {
+          id: "registry",
+          label: "Registry migration",
+          hint: "6 updates · stress",
+          prompt:
+            "Move provider instance construction onto scoped Effect layers so hot reload drains in-flight turns instead of dropping them.",
+          script: [
+            T(
+              "Hot reload replaces the instance map wholesale. If the old driver's scope closes immediately, any turn streaming through it gets cut. Scoped layers with a generation counter would let the old generation drain first. Start by mapping construction, teardown, and every reader of the registry.",
+              { dur: 5.2 },
+            ),
+            S(
+              "I'll map how `ProviderInstanceRegistryLive` builds and tears down driver instances today, and where hot reload cuts in-flight turns.",
+            ),
+            G("Explore · provider lifecycle", { dur: 46, summary: "11 files mapped" }),
+            P(
+              R(PV + "Layers/ProviderInstanceRegistryLive.ts"),
+              R(PV + "Layers/ProviderService.ts"),
+              R(PV + "builtInDrivers.ts"),
+            ),
+            P(
+              Q("makeProviderInstance", { results: 4 }),
+              Q("registry.reload", { results: 6 }),
+              Q("Layer.scoped", { results: 12 }),
+            ),
+            W("effect.website/docs/resource-management/scope", { dur: 2.6, summary: "Scope" }),
+            R(PV + "Drivers/ClaudeDriver.ts"),
+            R(PV + "Drivers/CodexDriver.ts"),
+            Q("ProviderInstanceId", { results: 41 }),
+            R("apps/server/src/orchestration/Services/ProviderCommandReactor.ts"),
+            T(
+              "Construction happens inside Ref.update, so a reload swaps the map and the finalizers of the old instances run right away. A generation counter plus Layer.scoped per instance lets the registry keep the old scope open until its turn count reaches zero.",
+              { dur: 3.6 },
+            ),
+            S(
+              "Instances are built eagerly into a `Ref` and replaced wholesale on reload, so the old driver's scope closes while turns are still streaming. I'll move construction into `Layer.scoped` with a generation counter, and drain before release.",
+            ),
+            E(PV + "Layers/ProviderInstanceRegistryLive.ts", 86, 41),
+            C(PV + "Layers/instanceGeneration.ts", 64),
+            E(PV + "Layers/ProviderService.ts", 22, 9),
+            X("bun typecheck --filter=ryco-cli", { dur: 38, ok: false, summary: "3 errors" }),
+            R(PV + "Layers/ProviderService.ts", { lines: "88–140" }),
+            E(PV + "Layers/ProviderService.ts", 7, 4),
+            X("bun typecheck --filter=ryco-cli", { dur: 36, summary: "0 errors" }),
+            T(
+              "Adapters keep session handles in module-level maps, outside any scope, so draining the generation would not wait for them. acquireRelease around the handle ties it to the instance scope.",
+              { dur: 2.8 },
+            ),
+            S(
+              "The Codex and Claude adapters hold session handles outside the layer scope. I'm threading them through `acquireRelease` so the drain step can await them.",
+            ),
+            P(R(PV + "Layers/ClaudeAdapter.ts"), R(PV + "Layers/CodexAdapter.ts")),
+            Q("sessionHandle", { results: 17 }),
+            E(PV + "Layers/ClaudeAdapter.ts", 31, 18),
+            E(PV + "Layers/CodexAdapter.ts", 27, 15),
+            X("bun run --cwd apps/server test provider", {
+              dur: 52,
+              ok: false,
+              summary: "2 failed",
+            }),
+            R("apps/server/src/orchestration/Services/ProviderCommandReactor.test.ts"),
+            T(
+              "Both failures assert the new driver is live right after reload(). With draining, that only holds once the test clock passes the drain window.",
+              { dur: 2.2 },
+            ),
+            S(
+              "Two reactor tests assumed reload is immediate. I'm updating them to advance the test clock past the drain window rather than weakening the assertion.",
+            ),
+            E("apps/server/src/orchestration/Services/ProviderCommandReactor.test.ts", 12, 5),
+            X("bun run --cwd apps/server test ProviderCommandReactor", {
+              dur: 14,
+              summary: "28 passed",
+            }),
+            Q("registry.get(", { results: 5 }),
+            R("apps/server/src/orchestration/Services/ProviderRuntimeIngestion.ts"),
+            T(
+              "ProviderRuntimeIngestion reads the registry synchronously during reload and can observe the half-swapped map. Routing through withInstance makes it wait for the new generation.",
+              { dur: 2.4 },
+            ),
+            S(
+              "One orchestration path still read the registry synchronously during reload. I'm routing it through `ProviderService.withInstance` so it waits for the new generation instead of reading a half-built map.",
+            ),
+            E("apps/server/src/orchestration/Services/ProviderRuntimeIngestion.ts", 18, 11),
+            X("bun typecheck --filter=ryco-cli", { dur: 35, summary: "0 errors" }),
+            X("bun run --cwd apps/server test orchestration", { dur: 61, summary: "214 passed" }),
+            S(
+              "Everything is green. Last pass: a regression test that reloads mid-turn and asserts the turn completes on the old generation.",
+            ),
+            C(PV + "Layers/ProviderInstanceRegistryLive.reload.test.ts", 96),
+            X("bun run --cwd apps/server test ProviderInstanceRegistryLive", {
+              dur: 11,
+              summary: "17 passed",
+            }),
+            P(
+              X("bun lint", { dur: 7, summary: "0 problems" }),
+              X("bun run fmt:check", { dur: 3, summary: "clean" }),
+            ),
+            F(
+              "Hot reload now drains instead of dropping. Each provider instance is built in its own `Layer.scoped` tagged with a generation; reload starts the new generation, routes new turns to it, and keeps the old scope open until its in-flight turns finish. Adapter session handles are acquired inside that scope, and ingestion waits for the new generation via `ProviderService.withInstance`. A new regression test reloads mid-turn and asserts the turn completes on the old generation. Server tests (214), typecheck, lint and format all pass.",
+            ),
+          ],
+        },
+      ];
+
+      /* ==========================================================
+         Compile: sim-time (what the UI reports) + play-time (how
+         long the replay lingers on it). Fast reads still get enough
+         screen time to read; long commands are capped.
+         ========================================================== */
+      const hash = (s) => [...s].reduce((a, c) => (Math.imul(a, 31) + c.charCodeAt(0)) >>> 0, 7);
+      const SAMPLE_FILES = [
+        "state/connection.ts",
+        "relay/client.ts",
+        "hosted/hostedLifecycle.ts",
+        "components/phone/PhoneHome.tsx",
+        "test/routerFixture.ts",
+        "state/readiness.ts",
+        "provider/Layers/ProviderService.ts",
+        "orchestration/OrchestrationEngine.ts",
+      ];
+      const DEFAULT_DUR = {
+        read: 0.5,
+        search: 0.8,
+        edit: 1.2,
+        create: 1.6,
+        run: 3.5,
+        web: 2.4,
+        agent: 30,
+      };
+      const GAP = { tool: 1.1, say: 1.2, think: 0.3, final: 1.0 };
+      const P_GAP = 150;
+
+      function normalize(b) {
+        if (b.t === "say" || b.t === "final") {
+          b.words = b.text.split(/\s+/).length;
+          b.sDur = b.words / (b.t === "say" ? 26 : 32);
+          return;
+        }
+        if (b.t === "think") {
+          b.sDur = b.dur ?? b.text.split(/\s+/).length / 9;
+          return;
+        }
+        const k = hash(b.target);
+        b.sDur = b.dur ?? DEFAULT_DUR[b.kind];
+        b.ok = b.ok !== false;
+        if (b.kind === "read") b.lines ??= `1–${120 + (k % 260)}`;
+        if (b.kind === "search") {
+          b.results ??= 2 + (k % 13);
+          b.files ??= Array.from(
+            { length: Math.min(4, Math.max(1, Math.ceil(b.results / 3))) },
+            (_, i) => [
+              SAMPLE_FILES[(k + i * 3) % SAMPLE_FILES.length],
+              Math.max(1, Math.round(b.results / (i + 2))),
+            ],
+          );
+        }
+        if (b.kind === "edit" || b.kind === "create") {
+          b.diff ??= [
+            `@@ -${(k % 90) + 10},${b.del + 4} +${(k % 90) + 10},${b.add + 4} @@`,
+            ...Array.from(
+              { length: Math.min(3, b.del) },
+              (_, i) =>
+                `-  ${["const value = read();", "return state;", "yield* Effect.sync(build);"][i]}`,
+            ),
+            ...Array.from(
+              { length: Math.min(4, b.add) },
+              (_, i) =>
+                `+  ${["const scope = yield* Scope.make();", "yield* registry.drain(previous);", "return { generation, instance };", "yield* Effect.addFinalizer(release);"][i]}`,
+            ),
+          ];
+        }
+        if (b.kind === "run") {
+          b.out ??= b.ok
+            ? [`done in ${fmtDur(b.sDur)}`]
+            : ["!error: command failed", `!exit code 1 after ${fmtDur(b.sDur)}`];
+        }
+      }
+      function playMs(b) {
+        switch (b.t) {
+          case "think":
+            return clamp(900 + b.sDur * 260, 1500, 3600);
+          case "say":
+            return clamp(b.words * 36, 900, 4000);
+          case "final":
+            return clamp(b.words * 24, 1000, 4000);
+          default:
+            return clamp(200 + b.sDur * 120, 400, 2600);
+        }
+      }
+
+      function compile(scn) {
+        const beats = [];
+        const keys = [[0, 0]];
+        let s = 0;
+        let p = 450;
+        let id = 0;
+        const add = (raw, sStart, pStart) => {
+          const b = { ...raw, id: id++ };
+          normalize(b);
+          b.sStart = sStart;
+          b.pStart = pStart;
+          b.pDur = playMs(b);
+          beats.push(b);
+          return b;
+        };
+        for (const raw of scn.script) {
+          if (raw.t === "batch") {
+            const sStart = s + (raw.gap ?? GAP.tool);
+            const pStart = p + P_GAP;
+            let sEnd = sStart;
+            let pEnd = pStart;
+            raw.items.forEach((it, i) => {
+              const b = add(it, sStart + i * 0.04, pStart + i * 110);
+              b.batch = true;
+              sEnd = Math.max(sEnd, b.sStart + b.sDur);
+              pEnd = Math.max(pEnd, b.pStart + b.pDur);
+            });
+            keys.push([pStart, sStart], [pEnd, sEnd]);
+            s = sEnd;
+            p = pEnd;
+          } else {
+            const b = add(raw, s + (raw.gap ?? GAP[raw.t === "tool" ? "tool" : raw.t]), p + P_GAP);
+            keys.push([b.pStart, b.sStart], [b.pStart + b.pDur, b.sStart + b.sDur]);
+            s = b.sStart + b.sDur;
+            p = b.pStart + b.pDur;
+          }
+        }
+
+        // Chapters: each commentary paragraph opens one; thinking right
+        // before it belongs to it. Anything before the first is a preamble.
+        const work = beats.filter((b) => b.t !== "final");
+        const bounds = new Set();
+        work.forEach((b, i) => {
+          if (b.t !== "say") return;
+          let j = i;
+          while (j > 0 && work[j - 1].t === "think") j--;
+          bounds.add(j);
+        });
+        const chapters = [];
+        let cur = null;
+        work.forEach((b, i) => {
+          if (!cur || (bounds.has(i) && cur.beats.length)) {
+            cur = { index: chapters.length, say: null, beats: [] };
+            chapters.push(cur);
+          }
+          cur.beats.push(b);
+          b.ch = cur.index;
+          if (b.t === "say") cur.say = b;
+        });
+        for (const ch of chapters) {
+          ch.sStart = ch.beats[0].sStart;
+          ch.sEnd = Math.max(...ch.beats.map((b) => b.sStart + b.sDur));
+        }
+
+        const changes = new Map();
+        for (const b of beats) {
+          if (b.kind !== "edit" && b.kind !== "create") continue;
+          const c = changes.get(b.target) ?? {
+            path: b.target,
+            add: 0,
+            del: 0,
+            created: b.kind === "create",
+          };
+          c.add += b.add;
+          c.del += b.del;
+          changes.set(b.target, c);
+        }
+
+        const final = beats.find((b) => b.t === "final");
+        return {
+          scn,
+          beats,
+          keys,
+          chapters,
+          final,
+          changes: [...changes.values()],
+          pTotal: p + 200,
+          sTotal: s,
+          workDur: s,
+          tools: beats.filter((b) => b.t === "tool"),
+        };
+      }
+
+      /** Piecewise-linear play-time → sim-time. */
+      function simAt(comp, P) {
+        const k = comp.keys;
+        if (P <= k[0][0]) return 0;
+        for (let i = 1; i < k.length; i++) {
+          if (P <= k[i][0]) {
+            const [p0, s0] = k[i - 1];
+            const [p1, s1] = k[i];
+            return p1 === p0 ? s1 : s0 + ((P - p0) / (p1 - p0)) * (s1 - s0);
+          }
+        }
+        return k[k.length - 1][1];
+      }
+
+      /* ==========================================================
+         Shared components
+         ========================================================== */
+      function targetText(b) {
+        if (b.kind === "search") return `“${b.target}”`;
+        if (b.kind === "read" || b.kind === "edit" || b.kind === "create")
+          return shortPath(b.target);
+        return b.target;
+      }
+      function isMono(b) {
+        return b.kind === "read" || b.kind === "edit" || b.kind === "create" || b.kind === "run";
+      }
+      /** Present-tense description for captions: "Reading relay/client.ts". */
+      function liveText(b) {
+        if (b.t === "think") return "Thinking";
+        if (b.t === "say") return "Writing an update";
+        return `${KIND[b.kind].live} ${targetText(b)}`;
+      }
+      function diffStat(add, del, { created = false } = {}) {
+        const out = h("span", { class: "tnum" }, h("span", { class: "add" }, `+${add}`));
+        if (del > 0) out.append(" ", h("span", { class: "del" }, `−${del}`));
+        return out;
+      }
+      function resultMeta(beats) {
+        const ended = beats.filter((b) => b._done);
+        if (!ended.length) return null;
+        const b = ended[ended.length - 1];
+        switch (b.kind) {
+          case "search": {
+            const n = ended.reduce((a, x) => a + x.results, 0);
+            return { kind: "count", n, fmt: (v) => plural(v, ["result", "results"]) };
+          }
+          case "edit":
+          case "create":
+            return {
+              kind: "node",
+              node: diffStat(
+                ended.reduce((a, x) => a + x.add, 0),
+                ended.reduce((a, x) => a + x.del, 0),
+                { created: ended.every((x) => x.kind === "create") },
+              ),
+            };
+          case "run":
+          case "web":
+          case "agent":
+            return { kind: "text", text: b.summary ?? fmtDur(b.sDur), fail: b.ok === false };
+          default:
+            return null;
+        }
+      }
+
+      /** Expanded detail for one row (single or merged beats). */
+      function detailView(beats) {
+        const b = beats[0];
+        if (b.t === "think") return h("div", { class: "dv dv-think" }, b.text);
+        if (b.kind === "read")
+          return h(
+            "div",
+            { class: "dv dv-list" },
+            beats.map((x) =>
+              h(
+                "div",
+                { class: "dv-li" },
+                h("span", { class: "mono" }, x.target),
+                h("span", { class: "n" }, `lines ${x.lines}`),
+              ),
+            ),
+          );
+        if (b.kind === "search") {
+          if (beats.length > 1)
+            return h(
+              "div",
+              { class: "dv dv-list" },
+              beats.map((x) =>
+                h(
+                  "div",
+                  { class: "dv-li" },
+                  h("span", null, `“${x.target}”`),
+                  h(
+                    "span",
+                    { class: "n" },
+                    x._done ? plural(x.results, ["result", "results"]) : "…",
+                  ),
+                ),
+              ),
+            );
+          return h(
+            "div",
+            { class: "dv dv-list" },
+            b.files.map(([f, n]) =>
+              h(
+                "div",
+                { class: "dv-li" },
+                h("span", { class: "mono" }, f),
+                h("span", { class: "n" }, n),
+              ),
+            ),
+          );
+        }
+        if (b.kind === "edit" || b.kind === "create")
+          return h(
+            "div",
+            { class: "dv" },
+            h(
+              "pre",
+              null,
+              b.diff.map((l) =>
+                h(
+                  "div",
+                  {
+                    class: l[0] === "+" ? "lp" : l[0] === "-" ? "lm" : l[0] === "@" ? "cmd" : null,
+                  },
+                  l[0] === "@" ? l : l,
+                ),
+              ),
+            ),
+            h("div", { class: "dv-foot" }, b.target),
+          );
+        if (b.kind === "run")
+          return h(
+            "div",
+            { class: "dv" },
+            h(
+              "pre",
+              null,
+              h("div", { class: "cmd" }, `$ ${b.target}`),
+              (b._done ? b.out : ["…"]).map((l) =>
+                l.startsWith("!")
+                  ? h("div", { class: "err" }, l.slice(1))
+                  : h("div", null, l || " "),
+              ),
+            ),
+            h(
+              "div",
+              { class: "dv-foot" },
+              b._done ? `exit ${b.ok ? 0 : 1} · ${fmtDur(b.sDur)}` : "running…",
+            ),
+          );
+        if (b.kind === "agent")
+          return h(
+            "div",
+            { class: "dv" },
+            h("div", null, b.target),
+            h(
+              "div",
+              { class: "dv-foot" },
+              b._done ? `${b.summary} · ran for ${fmtDur(b.sDur)}` : "working…",
+            ),
+          );
+        return h(
+          "div",
+          { class: "dv" },
+          h("div", { class: "mono" }, `https://${b.target}`),
+          h("div", { class: "dv-foot" }, b.summary ?? ""),
+        );
+      }
+
+      /**
+       * One step row: glyph · verb · target · meta. Same-kind exploration
+       * calls can merge into it ("Read 4 files"). Thinking rows can stream
+       * the reasoning through a two-line window (`thinkWin`).
+       */
+      function createRow(b0, { thinkWin = false } = {}) {
+        const isThink = b0.t === "think";
+        const k = isThink ? KIND.think : KIND[b0.kind];
+        const beats = [b0];
+        const g = glyph(isThink ? "think" : "run");
+        const verb = h("span", { class: "r-verb roll" });
+        const count = h("span", { class: "r-count roll", hidden: true });
+        const target = isThink
+          ? h("span", { class: "r-target faint" })
+          : h("span", { class: `r-target roll ${isMono(b0) ? "mono" : ""}` });
+        const meta = h("span", { class: "r-meta tnum" });
+        const main = h(
+          "button",
+          { class: "r-main", type: "button", "aria-expanded": "false" },
+          g,
+          h("span", { class: "r-label" }, verb, count, target),
+          meta,
+        );
+        const el = h("div", { class: "row", "data-kind": isThink ? "think" : b0.kind }, main);
+        let win = null;
+        let winInner = null;
+        let winStream = null;
+        let winH = 0;
+        let detail = null;
+        let lastSec = -1;
+        let tailN = -1;
+        if (isThink && thinkWin) {
+          winInner = h("div");
+          win = h("div", { class: "r-win" }, winInner);
+          el.append(win);
+          winStream = streamer(winInner, b0.text, { caret: false });
+        }
+        main.title = isThink ? "" : beats.map((b) => b.target).join("\n");
+
+        const running = () => beats.some((b) => !b._done);
+        const failed = () => beats.some((b) => b._done && b.ok === false);
+        function paint() {
+          const run = running();
+          el.dataset.state = run ? "run" : failed() ? "fail" : "ok";
+          setGlyph(
+            g,
+            isThink ? (run ? "think" : "thought") : run ? "run" : failed() ? "fail" : "ok",
+          );
+          verb.classList.toggle("shimmer", run);
+          if (isThink) {
+            swapRoll(verb, run ? "Thinking" : `Thought for ${fmtDur(b0.sDur)}`);
+            if (!run) target.textContent = "";
+          } else {
+            swapRoll(verb, run ? k.live : k.done);
+            if (beats.length > 1) {
+              count.hidden = false;
+              swapRoll(count, plural(beats.length, k.noun));
+              target.classList.add("faint");
+              swapRoll(target, baseName(beats[beats.length - 1].target));
+            } else swapRoll(target, targetText(b0));
+          }
+          const r = run ? null : resultMeta(beats);
+          if (r) {
+            meta.classList.toggle("fail", !!r.fail);
+            if (r.kind === "count") tween(meta, r.n, { fmt: r.fmt });
+            else if (r.kind === "node") meta.replaceChildren(r.node);
+            else meta.textContent = r.text;
+            fadeIn(meta, { y: 0, dur: 260 });
+          } else if (run && !isThink && beats.length > 1 && b0.kind === "search") {
+            const r2 = resultMeta(beats);
+            if (r2) tween(meta, r2.n, { fmt: r2.fmt });
+          }
+          main.title = isThink ? "" : beats.map((b) => b.target).join("\n");
+        }
+        paint();
+
+        main.addEventListener("click", () => {
+          const open = main.getAttribute("aria-expanded") === "true";
+          main.setAttribute("aria-expanded", String(!open));
+          if (open) {
+            const d = detail;
+            detail = null;
+            leave(d, () => d.remove());
+          } else {
+            detail = h("div", { class: "r-detail" }, detailView(beats));
+            el.append(detail);
+            enter(detail, { blur: 0 });
+          }
+        });
+
+        return {
+          el,
+          beats,
+          get kind() {
+            return isThink ? "think" : b0.kind;
+          },
+          canMerge(b) {
+            return (
+              !isThink && b.t === "tool" && b.kind === b0.kind && KIND[b.kind].merge && !detail
+            );
+          },
+          add(b) {
+            beats.push(b);
+            paint();
+            pop(count, 1.12);
+          },
+          progress(b, f) {
+            if (!isThink) return;
+            if (winStream) {
+              winStream.set(f);
+              const nh = winInner.offsetHeight;
+              if (winH && nh > winH && live())
+                winInner.animate(
+                  [{ transform: `translateY(${nh - winH}px)` }, { transform: "none" }],
+                  {
+                    duration: 320,
+                    easing: GENTLE,
+                  },
+                );
+              winH = nh;
+            } else if (b._started && !b._done) {
+              const n = Math.floor(f * b.text.length);
+              if (n - tailN < 3) return;
+              tailN = n;
+              const s = b.text.slice(Math.max(0, n - 60), n);
+              target.textContent = n > 60 ? `…${s.slice(s.indexOf(" ") + 1)}` : s;
+            }
+          },
+          end() {
+            paint();
+            if (win && !beats.some((x) => !x._done)) {
+              const w = win;
+              win = null;
+              leave(w, () => w.remove(), { dur: 380 });
+            }
+          },
+          tick(sim) {
+            if (isThink || !running()) return;
+            const b = beats.find((x) => !x._done);
+            if (!b || !["run", "web", "agent"].includes(b.kind)) return;
+            const sec = Math.floor(sim - b.sStart);
+            if (sec === lastSec || sec < 1) return;
+            lastSec = sec;
+            meta.classList.remove("fail");
+            meta.textContent = fmtTimer(sec);
+          },
+          flash() {
+            flash(el);
+          },
+          finishInstant() {
+            paint();
+          },
+        };
+      }
+
+      /**
+       * Ordered rows with optional merging (`merge`) and a fixed-height
+       * ticker window (`window` rows; older ones scroll out the top).
+       */
+      function createStepList({ merge = false, thinkWin = false, window = 0, onMore } = {}) {
+        const el = h("div", { class: "steps" });
+        const rows = [];
+        const byId = new Map();
+        let tail = null;
+        let hiddenCount = 0;
+        const moreLabel = h("span", { class: "roll" });
+        const more = window
+          ? h(
+              "button",
+              { class: "c-more", type: "button", hidden: true },
+              icon("chevronUp"),
+              moreLabel,
+            )
+          : null;
+        if (more) {
+          el.append(more);
+          more.addEventListener("click", () => onMore?.());
+        }
+        const visible = () => rows.filter((r) => !r.gone);
+        function age() {
+          if (!window) return;
+          const v = visible();
+          v.forEach((r, i) => (r.el.dataset.age = String(Math.min(3, v.length - 1 - i))));
+        }
+        return {
+          el,
+          rows,
+          breakMerge() {
+            tail = null;
+          },
+          appendBlock(node) {
+            el.append(node);
+            enter(node);
+            tail = null;
+          },
+          start(b) {
+            let row;
+            if (merge && tail && tail.canMerge(b)) {
+              row = tail;
+              row.add(b);
+            } else {
+              row = createRow(b, { thinkWin });
+              rows.push(row);
+              el.append(row.el);
+              enter(row.el);
+              tail = row;
+              if (window) {
+                const v = visible();
+                if (v.length > window) {
+                  const old = v[0];
+                  old.gone = true;
+                  hiddenCount++;
+                  leave(old.el, () => old.el.remove(), { dur: 360, y: -8 });
+                  if (more.hidden) {
+                    more.hidden = false;
+                    enter(more, { blur: 0 });
+                  }
+                  swapRoll(moreLabel, plural(hiddenCount, ["earlier step", "earlier steps"]));
+                }
+                age();
+              }
+            }
+            byId.set(b.id, row);
+            return row;
+          },
+          progress(b, f) {
+            byId.get(b.id)?.progress(b, f);
+          },
+          end(b) {
+            byId.get(b.id)?.end(b);
+          },
+          tick(sim) {
+            for (const r of rows) if (!r.gone) r.tick(sim);
+          },
+          row(id) {
+            return byId.get(id);
+          },
+          get hidden() {
+            return hiddenCount;
+          },
+        };
+      }
+
+      /** Per-kind counters: icon + rolling number. Fail + diffstat chips last. */
+      function createChips({ diff = true } = {}) {
+        const el = h("span", { class: "chips" });
+        const map = new Map();
+        for (const [key, kinds] of CHIP_KINDS) {
+          const n = h("span", { class: "roll tnum" });
+          const c = h("span", { class: "chip", hidden: true }, icon(KIND[key].icon), n);
+          el.append(c);
+          for (const kk of kinds) map.set(kk, { key, c, n, v: 0 });
+        }
+        const failN = h("span", { class: "roll tnum" });
+        const failC = h(
+          "span",
+          { class: "chip fail", hidden: true, title: "Failed steps" },
+          icon("alert"),
+          failN,
+        );
+        const addN = h("span", { class: "add tnum" });
+        const delN = h("span", { class: "del tnum" });
+        const diffC = h("span", { class: "chip chip-diff", hidden: true }, addN, delN);
+        el.append(failC, diffC);
+        let fails = 0;
+        let add = 0;
+        let del = 0;
+        const reveal = (c) => {
+          if (!c.hidden) return;
+          c.hidden = false;
+          if (live())
+            c.animate(
+              [
+                { opacity: 0, transform: "scale(.6)" },
+                { opacity: 1, transform: "none" },
+              ],
+              { duration: 320, easing: SNAPPY },
+            );
+        };
+        const shared = new Map();
+        return {
+          el,
+          count(b) {
+            const m = map.get(b.kind);
+            if (!m) return;
+            const v = (shared.get(m.key) ?? 0) + 1;
+            shared.set(m.key, v);
+            reveal(m.c);
+            swapRoll(m.n, String(v));
+            m.c.title = `${plural(v, KIND[m.key].noun)}`;
+            pop(m.c.firstElementChild, 1.3);
+          },
+          end(b) {
+            if (b.ok === false) {
+              fails++;
+              reveal(failC);
+              swapRoll(failN, String(fails));
+              pop(failC.firstElementChild, 1.4);
+            }
+            if (diff && (b.kind === "edit" || b.kind === "create")) {
+              tween(addN, (add += b.add), { fmt: (v) => `+${v}` });
+              tween(delN, (del += b.del), { fmt: (v) => `−${v}` });
+              reveal(diffC);
+            }
+          },
+        };
+      }
+
+      /** Compact changed-files summary (A / B / C). */
+      function createChanges(changes) {
+        const add = changes.reduce((a, c) => a + c.add, 0);
+        const del = changes.reduce((a, c) => a + c.del, 0);
+        const files = h(
+          "div",
+          { class: "ch-files", hidden: true },
+          changes.map((c) => {
+            const parts = c.path.split("/");
+            return h(
+              "div",
+              { class: "ch-file" },
+              h("span", { class: "nm" }, parts.pop()),
+              h("span", { class: "dir" }, parts.join("/")),
+              h("span", { class: "ch-stat" }, diffStat(c.add, c.del, { created: c.created })),
+            );
+          }),
+        );
+        const toggle = h(
+          "button",
+          { class: "ch-toggle", type: "button", "aria-expanded": "false" },
+          icon("fileDiff"),
+          `${plural(changes.length, ["file", "files"])} changed`,
+          icon("chevronDown", "run-chev"),
+        );
+        const el = h(
+          "div",
+          { class: "changes" },
+          h(
+            "div",
+            { class: "ch-head" },
+            toggle,
+            h("span", { class: "ch-stat" }, diffStat(add, del)),
+            h("span", { style: { flex: "1" } }),
+            h("button", { class: "ch-act", type: "button" }, icon("undo"), "Undo"),
+            h("button", { class: "ch-act", type: "button" }, "Review", icon("chevronRight")),
+          ),
+          files,
+        );
+        toggle.addEventListener("click", () => {
+          const open = toggle.getAttribute("aria-expanded") === "true";
+          toggle.setAttribute("aria-expanded", String(!open));
+          morphHeight(el, () => (files.hidden = open));
+        });
+        return el;
+      }
+
+      /** Shared run header: mark · status · timer · summary · chevron. */
+      function createRunHead({ onToggle } = {}) {
+        const mark = claudeMark("run-mark");
+        const status = h("span", { class: "run-status roll shimmer" });
+        swapRoll(status, "Working");
+        const clock = h("span", { class: "run-clock tnum" }, "0s");
+        const sum = h("span", { class: "run-sum" });
+        const chev = icon("chevronDown", "run-chev");
+        const el = h(
+          "button",
+          { class: "run-head", type: "button", "aria-expanded": "true" },
+          mark,
+          status,
+          clock,
+          h("span", { class: "grow" }),
+          sum,
+          chev,
+        );
+        el.addEventListener("click", () => onToggle?.());
+        let lastSec = -1;
+        return {
+          el,
+          sum,
+          tick(sim) {
+            const s = Math.floor(sim);
+            if (s !== lastSec) {
+              lastSec = s;
+              clock.textContent = fmtTimer(s);
+            }
+          },
+          done(total) {
+            status.classList.remove("shimmer");
+            swapRoll(status, "Worked for");
+            clock.textContent = fmtDur(total);
+            fadeIn(clock, { y: 0 });
+          },
+          setOpen(open) {
+            el.setAttribute("aria-expanded", String(open));
+          },
+        };
+      }
+
+      /* ==========================================================
+         Today — MessagesTimeline as it ships, for comparison
+         ========================================================== */
+      function todayIcon(b) {
+        if (b.ok === false) return icon("alert", "err");
+        if (b.kind === "run") return icon(/^(git|gh) /.test(b.target) ? "gitBranch" : "terminal");
+        if (b.kind === "edit" || b.kind === "create") return icon("pencil");
+        if (b.kind === "web") return icon("globe");
+        if (b.kind === "agent") return icon("bot");
+        return icon("search");
+      }
+      function todaySummary(entries) {
+        const files = (kinds) =>
+          new Set(entries.filter((b) => kinds.includes(b.kind)).map((b) => b.target)).size;
+        const n = (kinds) => entries.filter((b) => kinds.includes(b.kind)).length;
+        const parts = [];
+        if (n(["run"])) parts.push(`Ran ${plural(n(["run"]), ["command", "commands"])}`);
+        if (files(["edit", "create"]))
+          parts.push(`Edited ${plural(files(["edit", "create"]), ["file", "files"])}`);
+        if (files(["read"])) parts.push(`Read ${plural(files(["read"]), ["file", "files"])}`);
+        if (n(["search"])) parts.push(`Searched ${plural(n(["search"]), ["file", "files"])}`);
+        if (n(["agent"])) parts.push(`Ran ${plural(n(["agent"]), ["agent task", "agent tasks"])}`);
+        if (n(["web"])) parts.push(`Used ${plural(n(["web"]), ["tool", "tools"])}`);
+        return parts.join(", ");
+      }
+      function mountToday(host, { comp }) {
+        const label = h("span", { class: "tnum" }, "Working for 0s");
+        const fold = h(
+          "button",
+          { class: "t-fold", type: "button", "aria-expanded": "true" },
+          label,
+          icon("chevronRight"),
+        );
+        const body = h("div", { class: "t-body" });
+        const thinking = h(
+          "div",
+          { class: "t-thinking", hidden: true },
+          h("span", { class: "shimmer-text" }, "Thinking"),
+        );
+        const root = h(
+          "div",
+          { class: "t-run" },
+          fold,
+          h("div", { class: "t-rule" }),
+          body,
+          thinking,
+        );
+        host.append(root);
+        let group = null;
+        const groupOf = new Map();
+        let lastMsgEnd = 0;
+        let open = true;
+        let lastSec = -1;
+        const streams = new Map();
+        let done = false;
+        fold.addEventListener("click", () => {
+          if (!done) return;
+          open = !open;
+          fold.setAttribute("aria-expanded", String(open));
+          morphHeight(root, () => (body.hidden = !open));
+        });
+
+        function newGroup() {
+          const ic = h("span", { style: { display: "inline-grid" } });
+          const text = h("span", null);
+          const row = h(
+            "button",
+            { class: "t-row", type: "button", "aria-expanded": "false" },
+            ic,
+            text,
+            icon("chevronRight", "chev"),
+          );
+          const list = h("div", { class: "t-entries", hidden: true });
+          const g = { entries: [], row, list, ic, text };
+          row.addEventListener("click", () => {
+            const o = row.getAttribute("aria-expanded") === "true";
+            row.setAttribute("aria-expanded", String(!o));
+            morphHeight(list, () => (list.hidden = o));
+          });
+          body.append(row, list);
+          enter(row, { blur: 0 });
+          return g;
+        }
+        function paintGroup(g) {
+          const running = g.entries.some((b) => !b._done);
+          if (g.entries.length === 1) {
+            const b = g.entries[0];
+            g.text.textContent = `${running ? KIND[b.kind].live : KIND[b.kind].done} ${b.target}${running ? "" : ` · ${b.ok === false ? "Failed" : "Completed"}`}`;
+          } else g.text.textContent = `${todaySummary(g.entries)}${running ? " · Running" : ""}`;
+          g.ic.replaceChildren(todayIcon(g.entries[0]));
+          g.list.replaceChildren(
+            ...g.entries.map((b) =>
+              h(
+                "div",
+                { class: "t-entry" },
+                todayIcon(b),
+                h("span", null, `${KIND[b.kind].done} ${b.target}`),
+              ),
+            ),
+          );
+        }
+        return {
+          start(b) {
+            if (b.t === "think") {
+              thinking.hidden = false;
+              return;
+            }
+            if (b.t === "say") {
+              thinking.hidden = true;
+              group = null;
+              const p = h("div", { class: "prose" });
+              const meta = h("div", { class: "t-meta" }, fmtWall(b.sStart));
+              const msg = h("div", { class: "t-msg" }, p, meta);
+              body.append(msg);
+              fadeIn(msg);
+              streams.set(b.id, { s: streamer(p, b.text, { caret: false }), meta, b });
+              return;
+            }
+            thinking.hidden = true;
+            if (!group) group = newGroup();
+            group.entries.push(b);
+            groupOf.set(b, group);
+            paintGroup(group);
+          },
+          progress(b, f) {
+            streams.get(b.id)?.s.set(f);
+          },
+          end(b) {
+            const st = streams.get(b.id);
+            if (st) {
+              st.s.finish();
+              const endS = b.sStart + b.sDur;
+              st.meta.textContent = `${fmtWall(b.sStart)} • ${fmtDur(endS - lastMsgEnd)}`;
+              lastMsgEnd = endS;
+              return;
+            }
+            const g = groupOf.get(b);
+            if (g) paintGroup(g);
+          },
+          finalMeta(b) {
+            return `${fmtWall(b.sStart)} • ${fmtDur(b.sStart + b.sDur - lastMsgEnd)}`;
+          },
+          tick(sim) {
+            if (done) return;
+            const s = Math.floor(sim);
+            if (s !== lastSec) {
+              lastSec = s;
+              label.textContent = `Working for ${fmtTimer(s)}`;
+            }
+          },
+          finalStart() {
+            done = true;
+            thinking.hidden = true;
+            label.textContent = `Worked for ${fmtDur(comp.workDur)}`;
+            open = false;
+            fold.setAttribute("aria-expanded", "false");
+            morphHeight(root, () => (body.hidden = true));
+          },
+          renderChanges() {
+            const add = comp.changes.reduce((a, c) => a + c.add, 0);
+            const del = comp.changes.reduce((a, c) => a + c.del, 0);
+            return h(
+              "div",
+              { class: "t-card" },
+              h(
+                "div",
+                { class: "t-card-head" },
+                icon("fileDiff"),
+                h(
+                  "div",
+                  { class: "t-card-title" },
+                  `Edited ${plural(comp.changes.length, ["file", "files"])}`,
+                  h(
+                    "span",
+                    { class: "tnum", style: { "font-size": "12px" } },
+                    h("span", { class: "add" }, `+${add}`),
+                    " / ",
+                    h("span", { class: "del" }, `-${del}`),
+                  ),
+                ),
+                h("span", { style: { flex: "1" } }),
+                h("button", { class: "ch-act", type: "button" }, "Undo", icon("undo")),
+                h(
+                  "button",
+                  { class: "ch-act", type: "button" },
+                  "Review changes",
+                  icon("chevronDown"),
+                ),
+              ),
+              comp.changes
+                .slice(0, 6)
+                .map((c) =>
+                  h(
+                    "div",
+                    { class: "t-card-file" },
+                    h("span", { class: "t-ts" }, "TS"),
+                    h("span", { style: { flex: "1" } }, c.path),
+                    h(
+                      "span",
+                      { class: "tnum", style: { "font-size": "12px" } },
+                      h("span", { class: "add" }, `+${c.add}`),
+                      " / ",
+                      h("span", { class: "del" }, `-${c.del}`),
+                    ),
+                  ),
+                ),
+            );
+          },
+        };
+      }
+
+      /* ==========================================================
+         A · Ledger — one quiet rail, every step on it
+         ========================================================== */
+      function mountA(host, { comp }) {
+        const root = h("div", { class: "a-run", "data-phase": "working" });
+        const body = h("div", { class: "a-body" });
+        const railMark = h("span", { class: "a-railmark" });
+        const list = createStepList({ merge: true, thinkWin: true });
+        body.append(h("span", { class: "a-rail" }), railMark, list.el);
+        let open = true;
+        const head = createRunHead({ onToggle: () => setOpen(!open) });
+        const chips = createChips({ diff: false });
+        head.sum.append(chips.el);
+        root.append(head.el, body);
+        host.append(root);
+        const proses = [];
+        const streams = new Map();
+        let activeEl = null;
+        let railY = -1;
+        let railH = -1;
+
+        function setOpen(next) {
+          open = next;
+          head.setOpen(open);
+          if (!open) leave(body, () => (body.hidden = true), { dur: 460, y: -6 });
+          else {
+            body.hidden = false;
+            enter(body, { blur: 0, dur: 480 });
+            [...list.el.children]
+              .slice(0, 28)
+              .forEach((c, i) => fadeIn(c, { delay: 60 + i * 16, y: 8 }));
+          }
+        }
+        function clampProse(p, on) {
+          morphHeight(p, () => p.classList.toggle("clamped", on));
+        }
+        return {
+          start(b) {
+            if (b.t === "say") {
+              for (const p of proses)
+                if (!p.classList.contains("clamped") && !p.dataset.pinned) clampProse(p, true);
+              const p = h("p", { class: "a-prose prose" });
+              p.addEventListener("click", () => {
+                if (!p.classList.contains("clamped") && !p.dataset.pinned) return;
+                const pin = p.classList.contains("clamped");
+                p.dataset.pinned = pin ? "1" : "";
+                clampProse(p, !pin);
+              });
+              list.appendBlock(p);
+              proses.push(p);
+              streams.set(b.id, streamer(p, b.text));
+              activeEl = p;
+              return;
+            }
+            activeEl = list.start(b).el;
+            if (b.t === "tool") chips.count(b);
+          },
+          progress(b, f) {
+            if (b.t === "say") streams.get(b.id).set(f);
+            else list.progress(b, f);
+          },
+          end(b) {
+            if (b.t === "say") streams.get(b.id).finish();
+            else {
+              list.end(b);
+              if (b.t === "tool") chips.end(b);
+            }
+          },
+          tick(sim) {
+            if (root.dataset.phase === "working") head.tick(sim);
+            list.tick(sim);
+            if (activeEl?.isConnected && !body.hidden) {
+              const y = activeEl.offsetTop + 6;
+              const hh = clamp(activeEl.offsetHeight - 12, 14, 160);
+              if (y !== railY || hh !== railH) {
+                railY = y;
+                railH = hh;
+                railMark.style.transform = `translateY(${y}px)`;
+                railMark.style.height = `${hh}px`;
+              }
+            }
+          },
+          finalStart() {
+            root.dataset.phase = "done";
+            head.done(comp.workDur);
+            setOpen(false);
+          },
+        };
+      }
+
+      /* ==========================================================
+         B · Track — the run as a live timeline; updates collapse
+         into markers on it
+         ========================================================== */
+      function mountB(host, { comp }) {
+        const root = h("div", { class: "b-run", "data-phase": "working" });
+        let logOpen = false;
+        const head = createRunHead({ onToggle: () => toggleLog() });
+        head.setOpen(false);
+        const marks = h("div", { class: "b-marks" });
+        const lane = h("div", { class: "b-lane" });
+        const playhead = h("div", { class: "b-playhead" });
+        const popEl = h("div", { class: "b-pop" });
+        const track = h("div", { class: "b-track" }, marks, lane, playhead, popEl);
+        const capGlyph = glyph("dot");
+        const capText = h("span", { class: "b-cap-text roll" });
+        const capMeta = h("span", { class: "b-cap-meta tnum" });
+        const cap = h("div", { class: "b-cap" }, capGlyph, capText, capMeta);
+        const para = h("div", { class: "b-para prose" });
+        const log = h("div", { class: "b-log", hidden: true });
+        root.append(head.el, track, cap, para, log);
+        host.append(root);
+
+        const chips = createChips({ diff: false });
+        const segs = new Map();
+        const markers = [];
+        const logChapters = new Map();
+        const streams = new Map();
+        const runningBeats = new Set();
+        let lastDone = null;
+        let capKey = "";
+        let capTail = null;
+        let capBeat = null;
+        let paraBeat = null;
+        let paraStream = null;
+        let win = 40;
+        let simNow = 0;
+        let done = false;
+        let hover = null;
+        swapRoll(capText, "Starting", 1, "start");
+
+        function logChapter(i) {
+          let c = logChapters.get(i);
+          if (c) return c;
+          const p = h("p", { class: "prose" });
+          const steps = createStepList();
+          c = { el: h("div", { class: "b-log-ch" }, p, steps.el), p, steps };
+          logChapters.set(i, c);
+          log.append(c.el);
+          return c;
+        }
+        function toggleLog(force) {
+          logOpen = force ?? !logOpen;
+          head.setOpen(logOpen);
+          morphHeight(root, () => {
+            log.hidden = !logOpen;
+            para.hidden = logOpen;
+          });
+        }
+        const scale = () => (lane.clientWidth || 600) / win;
+        function segBounds(b) {
+          const s = scale();
+          const x0 = b.sStart * s;
+          const end = b._done ? b.sStart + b.sDur : Math.max(b.sStart, simNow);
+          return [x0, Math.max(2, end * s - x0 - 1)];
+        }
+
+        /* caption: what is happening right now */
+        function paintCaption() {
+          if (done) return;
+          const run = [...runningBeats];
+          let key;
+          let content;
+          let state;
+          let beat = null;
+          if (run.length > 1 && run.every((b) => b.kind === run[0].kind)) {
+            const k = KIND[run[0].kind];
+            key = `multi:${run[0].kind}:${run.length}`;
+            content = [`${k.live} `, h("span", null, plural(run.length, k.noun))];
+            state = "run";
+          } else if (run.length) {
+            beat = run[run.length - 1];
+            key = `run:${beat.id}`;
+            state = beat.t === "think" ? "think" : "run";
+            if (beat.t === "think") {
+              capTail = h("span", { style: { color: "var(--faint-fg)", "margin-left": "6px" } });
+              content = [h("span", { class: "shimmer-text" }, "Thinking"), capTail];
+            } else
+              content = [
+                `${KIND[beat.kind].live} `,
+                h("span", { class: isMono(beat) ? "mono" : "" }, targetText(beat)),
+              ];
+          } else if (lastDone) {
+            beat = lastDone;
+            key = `done:${beat.id}`;
+            state = beat.t === "think" ? "thought" : beat.ok === false ? "fail" : "ok";
+            content =
+              beat.t === "think"
+                ? [`Thought for ${fmtDur(beat.sDur)}`]
+                : [
+                    `${KIND[beat.kind].done} `,
+                    h("span", { class: isMono(beat) ? "mono" : "" }, targetText(beat)),
+                  ];
+          } else return;
+          if (key === capKey) return;
+          capKey = key;
+          capBeat = beat;
+          setGlyph(capGlyph, state);
+          swapRoll(capText, content, 1, key);
+          capMeta.textContent = "";
+          if (beat && !runningBeats.has(beat)) {
+            const r = resultMeta([beat]);
+            if (r)
+              capMeta.replaceChildren(
+                r.kind === "node" ? r.node : r.kind === "count" ? r.fmt(r.n) : r.text,
+              );
+          }
+        }
+
+        /* the ¶ markers: each update folds into one */
+        function addMarker(b, cls = "") {
+          const m = h("button", {
+            class: `b-mark ${cls}`,
+            type: "button",
+            "aria-label": "Show update",
+          });
+          m._beat = b;
+          m.addEventListener("pointerenter", () => showPop(m));
+          m.addEventListener("pointerleave", hidePop);
+          m.addEventListener("click", () => {
+            if (b.t !== "say") return;
+            toggleLog(true);
+            const c = logChapters.get(b.ch);
+            requestAnimationFrame(() =>
+              c?.p.scrollIntoView({ block: "center", behavior: motion ? "smooth" : "auto" }),
+            );
+          });
+          marks.append(m);
+          markers.push(m);
+          if (live())
+            m.animate(
+              [
+                { transform: "scale(0)" },
+                { transform: "scale(1.5)", offset: 0.6 },
+                { transform: "scale(1)" },
+              ],
+              { duration: 420, easing: EASE },
+            );
+          return m;
+        }
+        function flyIntoMarker(marker) {
+          if (!para.childNodes.length) return;
+          if (!live() || logOpen) {
+            para.replaceChildren();
+            return;
+          }
+          const rr = root.getBoundingClientRect();
+          const pr = para.getBoundingClientRect();
+          const ghost = para.cloneNode(true);
+          ghost.classList.add("b-ghost");
+          ghost.classList.remove("caret");
+          Object.assign(ghost.style, {
+            left: `${pr.left - rr.left}px`,
+            top: `${pr.top - rr.top}px`,
+            width: `${pr.width}px`,
+          });
+          root.append(ghost);
+          morphHeight(para, () => para.replaceChildren(), { dur: 420 });
+          const mr = marker.getBoundingClientRect();
+          const dx = mr.left + mr.width / 2 - pr.left;
+          const dy = mr.top + mr.height / 2 - pr.top;
+          ghost.animate(
+            [
+              { transform: "none", opacity: 1, filter: "blur(0px)" },
+              {
+                transform: `translate(${dx * 0.35}px, ${dy * 0.5}px) scale(0.45)`,
+                opacity: 0.55,
+                filter: "blur(1px)",
+                offset: 0.55,
+              },
+              {
+                transform: `translate(${dx}px, ${dy}px) scale(0.01)`,
+                opacity: 0,
+                filter: "blur(4px)",
+              },
+            ],
+            { duration: 640, easing: "cubic-bezier(.55,0,.25,1)", fill: "forwards" },
+          ).onfinish = () => {
+            ghost.remove();
+            pop(marker, 1.8);
+          };
+        }
+
+        /* hover: segments + markers explain themselves */
+        function showPop(target, x) {
+          hover = target;
+          const b = target._beat ?? target;
+          let content;
+          if (target.classList?.contains("b-mark")) {
+            marks.querySelectorAll(".hot").forEach((n) => n.classList.remove("hot"));
+            target.classList.add("hot");
+            content =
+              b.t === "final"
+                ? [
+                    h("div", { class: "pop-para" }, "Final answer"),
+                    h("div", { class: "pop-sub" }, fmtWall(b.sStart)),
+                  ]
+                : [
+                    h("div", { class: "pop-para" }, renderInline(b.text)),
+                    h("div", { class: "pop-sub" }, `Update ${b.ch + 1} · ${fmtWall(b.sStart)}`),
+                  ];
+            x = target.offsetLeft;
+          } else {
+            const r = b._done ? resultMeta([b]) : null;
+            content = [
+              h(
+                "div",
+                { class: "pop-title" },
+                glyph(
+                  b.t === "think"
+                    ? b._done
+                      ? "thought"
+                      : "think"
+                    : !b._done
+                      ? "run"
+                      : b.ok === false
+                        ? "fail"
+                        : "ok",
+                ),
+                b.t === "think"
+                  ? b._done
+                    ? `Thought for ${fmtDur(b.sDur)}`
+                    : "Thinking"
+                  : `${b._done ? KIND[b.kind].done : KIND[b.kind].live} `,
+                b.t === "tool"
+                  ? h("span", { class: isMono(b) ? "mono" : "" }, targetText(b))
+                  : null,
+              ),
+              h(
+                "div",
+                { class: "pop-sub" },
+                [
+                  fmtWall(b.sStart),
+                  b._done ? fmtDur(b.sDur) : "running",
+                  r ? (r.kind === "count" ? r.fmt(r.n) : r.kind === "text" ? r.text : null) : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · "),
+                r?.kind === "node" ? [" · ", r.node] : null,
+              ),
+            ];
+          }
+          popEl.replaceChildren(...content);
+          const tw = track.clientWidth;
+          const pw = Math.min(420, popEl.offsetWidth);
+          popEl.style.left = `${clamp(x - pw / 2, 0, tw - pw)}px`;
+          popEl.classList.add("show");
+        }
+        function hidePop() {
+          hover = null;
+          popEl.classList.remove("show");
+          lane.classList.remove("hovering");
+          lane.querySelectorAll(".hot").forEach((n) => n.classList.remove("hot"));
+          marks.querySelectorAll(".hot").forEach((n) => n.classList.remove("hot"));
+        }
+        function beatAtX(x) {
+          let best = null;
+          let bestD = 7;
+          for (const [b] of segs) {
+            const [x0, w] = segBounds(b);
+            const d = x < x0 ? x0 - x : x > x0 + w ? x - x0 - w : 0;
+            if (d < bestD || (d === 0 && best && w < segBounds(best)[1])) {
+              best = b;
+              bestD = d;
+            }
+          }
+          return best;
+        }
+        lane.addEventListener("pointermove", (e) => {
+          const x = e.clientX - lane.getBoundingClientRect().left;
+          const b = beatAtX(x);
+          if (!b) return hidePop();
+          lane.classList.add("hovering");
+          lane.querySelectorAll(".hot").forEach((n) => n.classList.remove("hot"));
+          segs.get(b).classList.add("hot");
+          showPop(b, x);
+        });
+        lane.addEventListener("pointerleave", hidePop);
+        lane.addEventListener("click", (e) => {
+          const b = beatAtX(e.clientX - lane.getBoundingClientRect().left);
+          if (!b) return;
+          toggleLog(true);
+          const row = logChapters.get(b.ch)?.steps.row(b.id);
+          if (row)
+            requestAnimationFrame(() => {
+              row.el.scrollIntoView({ block: "center", behavior: motion ? "smooth" : "auto" });
+              row.flash();
+            });
+        });
+
+        return {
+          start(b) {
+            const lc = logChapter(b.ch);
+            if (b.t === "say") {
+              const prev = markers.filter((m) => m._beat.t === "say").pop();
+              prev?.classList.remove("cur");
+              if (prev) flyIntoMarker(prev);
+              addMarker(b, "cur");
+              paraBeat = b;
+              paraStream = streamer(para, b.text);
+              streams.set(b.id, streamer(lc.p, b.text, { caret: false }));
+              return;
+            }
+            lc.steps.start(b);
+            const seg = h("span", {
+              class: `b-seg live${b.ok === false ? "" : ""}`,
+              "data-kind": b.t === "think" ? "think" : b.kind,
+            });
+            segs.set(b, seg);
+            lane.append(seg);
+            if (live())
+              seg.animate([{ transform: "scaleY(0)" }, { transform: "scaleY(1)" }], {
+                duration: 360,
+                easing: SNAPPY,
+              });
+            runningBeats.add(b);
+            if (b.t === "tool") chips.count(b);
+            paintCaption();
+          },
+          progress(b, f) {
+            if (b.t === "say") {
+              if (b === paraBeat) paraStream.set(f);
+              streams.get(b.id)?.set(f);
+              return;
+            }
+            logChapters.get(b.ch)?.steps.progress(b, f);
+            if (b.t === "think" && b === capBeat && capTail) {
+              const n = Math.floor(f * b.text.length);
+              const s = b.text.slice(Math.max(0, n - 56), n);
+              capTail.textContent = n > 56 ? `…${s.slice(s.indexOf(" ") + 1)}` : s;
+            }
+          },
+          end(b) {
+            if (b.t === "say") {
+              if (b === paraBeat) paraStream.finish();
+              streams.get(b.id)?.finish();
+              return;
+            }
+            logChapters.get(b.ch)?.steps.end(b);
+            const seg = segs.get(b);
+            seg.classList.remove("live");
+            if (b.ok === false) {
+              seg.classList.add("fail");
+              if (live())
+                seg.animate([{ transform: "scaleY(1.6)" }, { transform: "scaleY(1)" }], {
+                  duration: 420,
+                  easing: SNAPPY,
+                });
+            }
+            runningBeats.delete(b);
+            lastDone = b;
+            if (b.t === "tool") chips.end(b);
+            paintCaption();
+          },
+          tick(sim) {
+            simNow = sim;
+            if (!done) {
+              head.tick(sim);
+              win = Math.max(40, sim * 1.06);
+            } else win += (comp.workDur - win) * (live() ? 0.12 : 1);
+            const s = scale();
+            for (const [b, seg] of segs) {
+              const [x0, w] = segBounds(b);
+              seg.style.left = `${x0}px`;
+              seg.style.width = `${w}px`;
+            }
+            for (const m of markers) m.style.left = `${m._beat.sStart * s}px`;
+            playhead.style.left = `${Math.min(lane.clientWidth, sim * s)}px`;
+            if (!done) {
+              const b = capBeat && runningBeats.has(capBeat) ? capBeat : null;
+              if (b && (b.t === "think" || ["run", "web", "agent"].includes(b.kind))) {
+                const t = fmtTimer(sim - b.sStart);
+                if (capMeta.textContent !== t && sim - b.sStart >= 1) capMeta.textContent = t;
+              }
+            }
+            for (const c of logChapters.values()) c.steps.tick(sim);
+          },
+          finalStart() {
+            done = true;
+            root.dataset.phase = "done";
+            head.done(comp.workDur);
+            const prev = markers.filter((m) => m._beat.t === "say").pop();
+            prev?.classList.remove("cur");
+            if (prev) flyIntoMarker(prev);
+            addMarker(comp.final, "final");
+            setGlyph(capGlyph, "ok");
+            swapRoll(capText, chips.el, 1, "summary");
+            capMeta.textContent = plural(comp.tools.length, ["step", "steps"]);
+          },
+        };
+      }
+
+      /* ==========================================================
+         C · Chapters — each update is a chapter; finished ones fold
+         to a single line, the live one keeps a 3-row ticker
+         ========================================================== */
+      function mountC(host, { comp }) {
+        const root = h("div", { class: "c-run", "data-phase": "working" });
+        let open = true;
+        const head = createRunHead({ onToggle: () => setOpen(!open) });
+        const line = h(
+          "div",
+          { class: "c-line" },
+          h("div", { class: "c-fill" }),
+          h("div", { class: "c-flow" }),
+        );
+        const chs = h("div", { class: "c-chs" }, line);
+        root.append(head.el, chs);
+        host.append(root);
+        const chapters = [];
+        let active = null;
+        let lineKey = "";
+
+        function setOpen(next) {
+          open = next;
+          head.setOpen(open);
+          if (!open) leave(chs, () => (chs.hidden = true), { dur: 420 });
+          else {
+            chs.hidden = false;
+            enter(chs, { blur: 0 });
+          }
+        }
+
+        function createChapter(meta) {
+          const node = h("span", { class: "c-node" });
+          const title = h("span", { class: "c-title ghost" });
+          const dur = h("span", { class: "c-dur tnum" }, "0s");
+          const chips = createChips();
+          const metaBox = h("span", { style: { display: "contents" } }, chips.el, dur);
+          const top = h("button", { class: "c-top", type: "button" }, title);
+          const para = h("p", { class: "c-para prose" });
+          const ch = { meta, state: "active", userOpen: false, streams: null, lastSec: -1 };
+          const ticker = createStepList({ window: 3, onMore: () => expand(ch, true) });
+          const full = createStepList();
+          full.el.hidden = true;
+          const foot = h("div", { class: "c-foot" });
+          const body = h("div", { class: "c-body" }, para, ticker.el, full.el, foot);
+          const el = h(
+            "section",
+            { class: "c-ch", "data-state": "active", "data-open": "true" },
+            node,
+            top,
+            body,
+          );
+          foot.append(chips.el, dur);
+          Object.assign(ch, {
+            el,
+            node,
+            title,
+            dur,
+            chips,
+            top,
+            para,
+            ticker,
+            full,
+            foot,
+            body,
+            metaBox,
+          });
+          top.addEventListener("click", () => expand(ch, true));
+          foot.addEventListener("click", () => {
+            if (ch.state === "done") expand(ch, false);
+          });
+          title.textContent = "Thinking";
+          return ch;
+        }
+        /** Move chips + duration between the open footer and the folded title row (FLIP). */
+        function moveMeta(ch, to) {
+          const nodes = [ch.chips.el, ch.dur];
+          const first = nodes.map((n) => n.getBoundingClientRect());
+          to.append(...nodes);
+          return () => {
+            if (!live()) return;
+            nodes.forEach((n, i) => {
+              const last = n.getBoundingClientRect();
+              const dx = first[i].left - last.left;
+              const dy = first[i].top - last.top;
+              if (Math.abs(dx) + Math.abs(dy) > 1)
+                n.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], {
+                  duration: 520,
+                  easing: GENTLE,
+                });
+            });
+          };
+        }
+        function fold(ch) {
+          ch.state = "done";
+          ch.el.dataset.state = "done";
+          ch.dur.textContent = fmtDur(ch.meta.sEnd - ch.meta.sStart);
+          if (!ch.meta.say) {
+            ch.title.textContent = `Thought for ${fmtDur(ch.meta.sEnd - ch.meta.sStart)}`;
+          }
+          collapse(ch);
+        }
+        function collapse(ch) {
+          let play;
+          morphHeight(
+            ch.el,
+            () => {
+              ch.el.dataset.open = "false";
+              ch.body.hidden = true;
+              play = moveMeta(ch, ch.top);
+            },
+            { dur: 460 },
+          );
+          play?.();
+          fadeIn(ch.title, { y: 8, dur: 420 });
+          ch.userOpen = false;
+        }
+        function expand(ch, on) {
+          if (ch.state === "active") {
+            // live chapter: "N earlier steps" swaps the ticker for the full list
+            morphHeight(ch.el, () => {
+              ch.ticker.el.hidden = on;
+              ch.full.el.hidden = !on;
+            });
+            return;
+          }
+          if (!on) return collapse(ch);
+          let play;
+          morphHeight(
+            ch.el,
+            () => {
+              ch.el.dataset.open = "true";
+              ch.body.hidden = false;
+              ch.ticker.el.hidden = true;
+              ch.full.el.hidden = false;
+              play = moveMeta(ch, ch.foot);
+            },
+            { dur: 460 },
+          );
+          play?.();
+          ch.userOpen = true;
+        }
+        function chapterFor(b) {
+          let ch = chapters[b.ch];
+          if (ch) return ch;
+          if (active) fold(active);
+          ch = createChapter(comp.chapters[b.ch]);
+          chapters[b.ch] = ch;
+          chs.append(ch.el);
+          enter(ch.el, { dur: 460 });
+          if (live())
+            ch.node.animate(
+              [
+                { transform: "scale(0)" },
+                { transform: "scale(1.4)", offset: 0.6 },
+                { transform: "scale(1)" },
+              ],
+              { duration: 480, delay: 120, easing: EASE, fill: "backwards" },
+            );
+          active = ch;
+          return ch;
+        }
+        function paintLine() {
+          const list = chapters.filter(Boolean);
+          if (!list.length) return;
+          const y0 = list[0].el.offsetTop + 15;
+          const lastEl = list[list.length - 1].el;
+          const working = root.dataset.phase === "working";
+          const end = working ? lastEl.offsetTop + lastEl.offsetHeight - 8 : lastEl.offsetTop + 15;
+          const fill = (active && working ? active.el.offsetTop + 15 : end) - y0;
+          const key = `${y0}|${end}|${fill}`;
+          if (key === lineKey) return;
+          lineKey = key;
+          line.style.top = `${y0}px`;
+          line.style.setProperty("--len", `${Math.max(0, end - y0)}px`);
+          line.style.setProperty("--fill", `${Math.max(0, fill)}px`);
+        }
+
+        return {
+          start(b) {
+            const ch = chapterFor(b);
+            if (b.t === "say") {
+              ch.title.classList.remove("ghost");
+              ch.title.replaceChildren(...renderInline(b.text));
+              ch.stream = streamer(ch.para, b.text);
+              return;
+            }
+            ch.ticker.start(b);
+            ch.full.start(b);
+            if (b.t === "tool") ch.chips.count(b);
+          },
+          progress(b, f) {
+            const ch = chapters[b.ch];
+            if (b.t === "say") ch.stream.set(f);
+            else {
+              ch.ticker.progress(b, f);
+              ch.full.progress(b, f);
+            }
+          },
+          end(b) {
+            const ch = chapters[b.ch];
+            if (b.t === "say") ch.stream.finish();
+            else {
+              ch.ticker.end(b);
+              ch.full.end(b);
+              if (b.t === "tool") ch.chips.end(b);
+            }
+          },
+          tick(sim) {
+            if (root.dataset.phase === "working") head.tick(sim);
+            if (active?.state === "active") {
+              const s = Math.floor(sim - active.meta.sStart);
+              if (s !== active.lastSec && s >= 0) {
+                active.lastSec = s;
+                active.dur.textContent = fmtTimer(s);
+              }
+              active.ticker.tick(sim);
+              active.full.tick(sim);
+            }
+            if (!chs.hidden) paintLine();
+          },
+          finalStart() {
+            root.dataset.phase = "done";
+            if (active) fold(active);
+            head.done(comp.workDur);
+          },
+        };
+      }
+
+      /* ==========================================================
+         Directions + notes
+         ========================================================== */
+      const DIRS = {
+        T: {
+          name: "Today",
+          mount: mountToday,
+          notes: [
+            [
+              "What ships",
+              "MessagesTimeline as it is: a “Working for” fold, assistant updates as full paragraphs with a 10px timestamp, and runs of tool calls folded into one summary row (“Ran 13 commands, Edited 1 file”).",
+            ],
+            [
+              "Live",
+              "No spinner and no per-step state. The only signals are the timer, “· Running” on the open group and a “Thinking” shimmer with no content.",
+            ],
+            [
+              "Density",
+              "Every update stays at full height, so three updates plus their groups fill the pane. When the turn settles, everything except the answer folds away.",
+            ],
+            [
+              "Gap",
+              "Reasoning is not shown. Adapters stream it, but ingestion keeps only assistant_text. Directions A–C assume it is projected as a thinking entry.",
+            ],
+          ],
+        },
+        A: {
+          name: "Ledger",
+          mount: mountA,
+          notes: [
+            [
+              "Live",
+              "Every step is a row on one quiet rail: a spinner that draws into a check, a verb that rolls from “Reading” to “Read”, and a live timer on long commands. A marker on the rail glides to whatever is happening now.",
+            ],
+            [
+              "Density",
+              "Back-to-back reads and searches merge into one row (“Read 4 files”) with a rolling count. Older updates clamp to one line and expand on click. Reasoning streams through a two-line window, then becomes “Thought for 6s”.",
+            ],
+            [
+              "Motion",
+              "Rows grow in from a blur, results count up, diffstats tick. The header tallies files, searches, edits and commands as they happen. At the end the ledger folds into “Worked for”.",
+            ],
+            [
+              "Build",
+              "Closest to today. It reuses the work-group rows with a status glyph per entry and merges by kind instead of summarising mixed runs. Lowest risk: same rows, just better states.",
+            ],
+          ],
+        },
+        B: {
+          name: "Track",
+          mount: mountB,
+          notes: [
+            [
+              "Live",
+              "The run is drawn as a timeline. Each step is a bar whose width is its real duration and whose height and tint show its kind, so a 40s typecheck reads very differently from a burst of reads. A playhead records it live, and one caption says what is happening now.",
+            ],
+            [
+              "Density",
+              "Only the latest update is shown as text. When the next one starts, the previous paragraph shrinks into a marker on the track. Hover any bar or marker to read it; click to open the full log at that step.",
+            ],
+            [
+              "Motion",
+              "Bars grow from the centre, the scale compresses as the run gets longer, failed bars flare red, paragraphs fly into their markers, and the caption rolls between steps. At the end the caption becomes the run’s tallies.",
+            ],
+            [
+              "Build",
+              "Needs startedAt and a completion time per work entry (both already exist) plus a small SVG/DOM lane. The most distinctive option and the most compact: about three lines plus the current update.",
+            ],
+          ],
+        },
+        C: {
+          name: "Chapters",
+          mount: mountC,
+          notes: [
+            [
+              "Live",
+              "Each update the model writes opens a chapter. The live chapter shows its full paragraph and a three-row ticker of steps. Older steps scroll out of the top into a “12 earlier steps” link.",
+            ],
+            [
+              "Density",
+              "When the next update starts, the finished chapter folds to one line: the update’s text, its per-kind tallies and its duration. A long run reads as a short table of contents.",
+            ],
+            [
+              "Motion",
+              "Tallies and duration slide from the footer into the title line as the chapter folds. The connecting line fills down to the new node, and a pulse travels the active segment.",
+            ],
+            [
+              "Build",
+              "Groups work entries by the assistant message that precedes them, which deriveTurnFolds already knows. Reuses Ledger’s rows inside each chapter. A medium-sized change with the strongest story structure.",
+            ],
+          ],
+        },
+      };
+
+      /* ==========================================================
+         Player
+         ========================================================== */
+      const thread = $("#thread");
+      const scroller = $("#scroller");
+      const state = {
+        dir: "A",
+        scn: "fixtures",
+        comp: null,
+        P: 0,
+        playing: true,
+        speed: 1,
+      };
+      let view = null;
+      let stick = true;
+      let stickUntil = 0;
+
+      function build() {
+        for (const b of state.comp.beats) b._started = b._done = false;
+        thread.replaceChildren();
+        const scn = state.comp.scn;
+        const user = h("div", { class: "msg-user" }, scn.prompt);
+        const runHost = h("div");
+        const finalEl = h("p", { class: "prose final" });
+        const finalMeta = h("div", { class: "t-meta", hidden: true });
+        const after = h("div");
+        thread.append(user, runHost, h("div", null, finalEl, finalMeta), after);
+        view = {
+          runHost,
+          finalEl,
+          finalMeta,
+          after,
+          dir: DIRS[state.dir].mount(runHost, { comp: state.comp }),
+          finalStream: null,
+          finished: false,
+        };
+      }
+      function route(type, b, f) {
+        if (b.t === "final") {
+          if (type === "start") {
+            view.dir.finalStart?.(state.comp);
+            view.finalStream = streamer(view.finalEl, b.text);
+          } else if (type === "progress") view.finalStream.set(f);
+          else {
+            view.finalStream.finish();
+            if (view.dir.finalMeta) {
+              view.finalMeta.hidden = false;
+              view.finalMeta.textContent = view.dir.finalMeta(b);
+            }
+          }
+          return;
+        }
+        view.dir[type]?.(b, f);
+      }
+      function advance(P) {
+        const comp = state.comp;
+        for (const b of comp.beats) {
+          if (b.pStart > P) break;
+          if (!b._started) {
+            b._started = true;
+            route("start", b);
+          }
+          if (!b._done) {
+            const f = clamp((P - b.pStart) / b.pDur, 0, 1);
+            route("progress", b, f);
+            if (f >= 1) {
+              b._done = true;
+              route("end", b);
+            }
+          }
+        }
+        if (P >= comp.pTotal && !view.finished) {
+          view.finished = true;
+          if (comp.changes.length) {
+            const el = view.dir.renderChanges?.() ?? createChanges(comp.changes);
+            view.after.append(el);
+            enter(el, { blur: 0 });
+          }
+          state.playing = false;
+          stickUntil = performance.now() + 1200;
+        }
+      }
+      /** Rebuild instantly at play-time P (seek / direction switch). */
+      function seek(P) {
+        state.P = clamp(P, 0, state.comp.pTotal);
+        INSTANT = true;
+        try {
+          build();
+          advance(state.P);
+          view.dir.tick?.(simAt(state.comp, state.P), state.P);
+        } finally {
+          INSTANT = false;
+        }
+        stick = true;
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+      function load(id) {
+        state.scn = id;
+        state.comp = compile(SCENARIOS.find((s) => s.id === id));
+        for (const b of $("#scenarios").querySelectorAll(".scenario"))
+          b.setAttribute("aria-pressed", String(b.dataset.id === id));
+        paintTicks();
+        seek(0);
+        state.playing = true;
+      }
+
+      scroller.addEventListener("scroll", () => {
+        stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+      });
+
+      let lastTs = performance.now();
+      function frame(ts) {
+        const dt = Math.min(64, ts - lastTs);
+        lastTs = ts;
+        if (state.playing && !view.finished) {
+          state.P = Math.min(state.comp.pTotal, state.P + dt * state.speed);
+          advance(state.P);
+        }
+        view.dir.tick?.(simAt(state.comp, state.P), state.P);
+        paintTransport();
+        if (stick && (state.playing || ts < stickUntil)) scroller.scrollTop = scroller.scrollHeight;
+        requestAnimationFrame(frame);
+      }
+
+      /* ==========================================================
+         Lab chrome: tabs, scenarios, transport
+         ========================================================== */
+      const tabs = segmented(
+        Object.entries(DIRS).map(([id, d]) => ({
+          id,
+          content: [h("b", null, id === "T" ? "0" : id), d.name],
+        })),
+        state.dir,
+        (id) => mountDir(id),
+        { label: "Direction", cls: "lab-tabs" },
+      );
+      $("#tabs-slot").append(tabs.el);
+
+      function mountDir(id) {
+        state.dir = id;
+        tabs.set(id);
+        $("#notes").replaceChildren(
+          ...DIRS[id].notes.map(([t, p]) => h("div", null, h("h3", null, t), h("p", null, p))),
+        );
+        history.replaceState(null, "", `#${id}`);
+        if (state.comp) {
+          const wasPlaying = state.playing;
+          seek(state.P);
+          state.playing = wasPlaying;
+        }
+      }
+
+      for (const s of SCENARIOS)
+        $("#scenarios").append(
+          h(
+            "button",
+            {
+              class: "scenario",
+              type: "button",
+              "data-id": s.id,
+              "aria-pressed": "false",
+              onclick: () => load(s.id),
+            },
+            s.label,
+            h("small", null, s.hint),
+          ),
+        );
+
+      const playBtn = $("#play-btn");
+      const sendBtn = $("#send-btn");
+      let paintedPlaying = null;
+      function togglePlay() {
+        if (view.finished) {
+          seek(0);
+          state.playing = true;
+          return;
+        }
+        state.playing = !state.playing;
+      }
+      playBtn.addEventListener("click", togglePlay);
+      sendBtn.addEventListener("click", togglePlay);
+      $("#restart-btn").append(icon("rotateCcw"));
+      $("#restart-btn").addEventListener("click", () => {
+        seek(0);
+        state.playing = true;
+      });
+      $("#end-btn").append(icon("skipEnd"));
+      $("#end-btn").addEventListener("click", () => seek(state.comp.pTotal));
+      $("#cmp-model").append(claudeMark(), "Opus 5.5");
+
+      const speed = segmented(
+        [0.5, 1, 2, 4].map((v) => ({ id: String(v), label: `${v}×` })),
+        "1",
+        (v) => {
+          state.speed = Number(v);
+          speed.set(v);
+        },
+        { label: "Speed" },
+      );
+      $("#speed-slot").append(speed.el);
+
+      const scrub = $("#scrub");
+      const scrubFill = $("#scrub-fill");
+      const scrubThumb = $("#scrub-thumb");
+      const tpTime = $("#tp-time");
+      function paintTicks() {
+        const comp = state.comp;
+        $("#scrub-ticks").replaceChildren(
+          ...comp.beats
+            .filter((b) => b.t === "say" || b.t === "final")
+            .map((b) =>
+              h("span", {
+                class: `scrub-tick ${b.t === "final" ? "final" : ""}`,
+                style: { left: `${(b.pStart / comp.pTotal) * 100}%` },
+              }),
+            ),
+        );
+      }
+      let lastPaint = "";
+      function paintTransport() {
+        const comp = state.comp;
+        const pct = (state.P / comp.pTotal) * 100;
+        const t = `${fmtClock(simAt(comp, state.P))} / ${fmtClock(comp.sTotal)}`;
+        const playing = state.playing && !view.finished;
+        const key = `${pct.toFixed(2)}|${t}|${playing}`;
+        if (key === lastPaint) return;
+        lastPaint = key;
+        scrubFill.style.width = `${pct}%`;
+        scrubThumb.style.left = `${pct}%`;
+        tpTime.textContent = t;
+        if (paintedPlaying !== playing) {
+          paintedPlaying = playing;
+          playBtn.replaceChildren(icon(playing ? "pause" : "play"));
+          playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
+          sendBtn.className = `send ${playing ? "stop" : ""}`;
+          sendBtn.replaceChildren(icon(playing ? "square" : "arrowUp"));
+        }
+      }
+      let dragging = false;
+      let resumeAfterDrag = false;
+      let pendingSeek = null;
+      function scrubTo(e) {
+        const r = scrub.getBoundingClientRect();
+        const P = clamp((e.clientX - r.left) / r.width, 0, 1) * state.comp.pTotal;
+        if (pendingSeek == null)
+          requestAnimationFrame(() => {
+            seek(pendingSeek);
+            pendingSeek = null;
+          });
+        pendingSeek = P;
+      }
+      scrub.addEventListener("pointerdown", (e) => {
+        dragging = true;
+        resumeAfterDrag = state.playing && !view.finished;
+        state.playing = false;
+        scrub.setPointerCapture(e.pointerId);
+        scrubTo(e);
+      });
+      scrub.addEventListener("pointermove", (e) => dragging && scrubTo(e));
+      scrub.addEventListener("pointerup", () => {
+        dragging = false;
+        requestAnimationFrame(() => {
+          if (resumeAfterDrag && !view.finished) state.playing = true;
+        });
+      });
+      scrub.addEventListener("keydown", (e) => {
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+        e.preventDefault();
+        e.stopPropagation();
+        seek(state.P + (e.key === "ArrowLeft" ? -1 : 1) * state.comp.pTotal * 0.04);
+      });
+
+      const themeBtn = $("#theme-btn");
+      function paintThemeBtn() {
+        const dark = document.documentElement.classList.contains("dark");
+        themeBtn.replaceChildren(icon(dark ? "moon" : "sun"), dark ? "Dark" : "Light");
+      }
+      themeBtn.addEventListener("click", () => {
+        document.documentElement.classList.toggle("dark");
+        paintThemeBtn();
+      });
+      paintThemeBtn();
+      const motionBtn = $("#motion-btn");
+      function paintMotion() {
+        document.documentElement.dataset.motion = motion ? "on" : "off";
+        motionBtn.setAttribute("aria-pressed", String(motion));
+        motionBtn.textContent = motion ? "Motion on" : "Motion off";
+      }
+      motionBtn.addEventListener("click", () => {
+        motion = !motion;
+        paintMotion();
+      });
+      paintMotion();
+
+      document.addEventListener("keydown", (e) => {
+        if (e.metaKey || e.ctrlKey || e.altKey || e.target.matches?.("input, textarea")) return;
+        const id = { 0: "T", 1: "A", 2: "B", 3: "C" }[e.key];
+        if (id) return mountDir(id);
+        if (e.key === " ") {
+          e.preventDefault();
+          togglePlay();
+        } else if (e.key === "r") {
+          seek(0);
+          state.playing = true;
+        } else if (e.key === "e") seek(state.comp.pTotal);
+        else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          seek(state.P + (e.key === "ArrowLeft" ? -1 : 1) * state.comp.pTotal * 0.04);
+        }
+      });
+
+      $("#notes-foot").append(
+        "Today mirrors ",
+        h("code", null, "MessagesTimeline"),
+        " (turn fold, summarizeToolCallGroup labels, the “Thinking” placeholder). A–C need two data changes: project ",
+        h("code", null, "reasoning_text"),
+        " into a thinking work entry (it is dropped in ProviderRuntimeIngestion today), and give each entry a completion time next to ",
+        h("code", null, "startedAt"),
+        ". Kinds come from itemType, requestKind and deriveReadableCommandDisplay. Keys: Space play/pause · R restart · E end · ←/→ seek · 0–3 directions.",
+      );
+
+      const initial = location.hash.slice(1).toUpperCase();
+      state.dir = DIRS[initial] ? initial : "A";
+      tabs.sync(false);
+      tabs.set(state.dir);
+      $("#notes").replaceChildren(
+        ...DIRS[state.dir].notes.map(([t, p]) => h("div", null, h("h3", null, t), h("p", null, p))),
+      );
+      load("fixtures");
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

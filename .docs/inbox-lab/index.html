@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ryco · Inbox Rows Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="directions.css" />
+  </head>
+  <body>
+    <div class="lab">
+      <header class="lab-bar">
+        <div>
+          <h1 class="lab-title">Inbox rows</h1>
+          <p class="lab-sub">
+            Three directions for the sidebar inbox entry. Same five tasks, live simulation running.
+            Hover rows, wait on them, right-click, click the asks, and use ↑ ↓ E P Space.
+          </p>
+        </div>
+        <div class="lab-controls">
+          <button class="lab-btn" id="live-btn" type="button" aria-pressed="true"></button>
+          <button
+            class="lab-btn icon"
+            id="reset-btn"
+            type="button"
+            data-tip="Reset simulation"
+          ></button>
+          <div class="seg" id="width-seg" role="radiogroup" aria-label="Sidebar width">
+            <button class="seg-opt" role="radio" data-w="240">240</button>
+            <button class="seg-opt" role="radio" data-w="256" aria-checked="true">256</button>
+            <button class="seg-opt" role="radio" data-w="300">300</button>
+          </div>
+          <button
+            class="lab-btn icon"
+            id="theme-btn"
+            type="button"
+            data-tip="Toggle theme"
+          ></button>
+          <button class="lab-btn" id="motion-btn" type="button" aria-pressed="true">
+            Motion on
+          </button>
+        </div>
+      </header>
+      <nav class="seg lab-tabs" id="tabs" role="tablist" aria-label="Direction">
+        <button class="seg-opt" role="tab" data-tab="T"><b>0</b>Today</button>
+        <button class="seg-opt" role="tab" data-tab="A"><b>A</b>Glyph</button>
+        <button class="seg-opt" role="tab" data-tab="B"><b>B</b>Lanes</button>
+        <button class="seg-opt" role="tab" data-tab="C"><b>C</b>Avatars</button>
+        <button class="seg-opt" role="tab" data-tab="compare">Compare all</button>
+      </nav>
+      <main id="stage"></main>
+    </div>
+    <div id="measure" aria-hidden="true"></div>
+    <script src="data.js"></script>
+    <script src="core.js"></script>
+    <script src="dir-today.js"></script>
+    <script src="dir-a.js"></script>
+    <script src="dir-b.js"></script>
+    <script src="dir-c.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

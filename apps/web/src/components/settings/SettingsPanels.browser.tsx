@@ -39,8 +39,14 @@ import { useState } from "react";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { WorktreeSubmoduleEditor } from "./WorktreeSubmoduleSettings";
 import { WorktreeRootEditor } from "./WorktreeRootSettings";
+import { ProjectScopeSelect } from "./ProjectDefaultsSection";
 import { GeneralSettingsPanel } from "./SettingsPanels";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
+
+const WORKTREE_PROJECTS = [
+  { id: "projectA", title: "Project A" },
+  { id: "projectB", title: "Project B" },
+];
 
 const authAccessHarness = vi.hoisted(() => {
   type Snapshot = AuthAccessSnapshot;
@@ -602,6 +608,7 @@ describe("GeneralSettingsPanel observability", () => {
     disabled?: boolean;
     olderNode?: boolean;
   }) {
+    const [projectId, setProjectId] = useState("");
     const [config, setConfig] = useState<ServerConfig>(() => ({
       ...createBaseServerConfig(),
       environment: {
@@ -639,18 +646,20 @@ describe("GeneralSettingsPanel observability", () => {
             canManage: !disabled,
           }}
         >
+          <ProjectScopeSelect
+            projects={WORKTREE_PROJECTS}
+            value={projectId}
+            onChange={setProjectId}
+            disabled={disabled}
+          />
           <WorktreeSubmoduleEditor
-            projects={[
-              { id: "projectA", title: "Project A" },
-              { id: "projectB", title: "Project B" },
-            ]}
+            projectId={projectId}
+            projects={WORKTREE_PROJECTS}
             disabled={disabled}
           />
           <WorktreeRootEditor
-            projects={[
-              { id: "projectA", title: "Project A" },
-              { id: "projectB", title: "Project B" },
-            ]}
+            projectId={projectId}
+            projects={WORKTREE_PROJECTS}
             disabled={disabled}
           />
         </SettingsTargetProvider>
@@ -674,7 +683,7 @@ describe("GeneralSettingsPanel observability", () => {
         .toEqual(["environment-local", { worktreeSubmodules: value }]);
       await expect.element(mode).toHaveTextContent(label);
     }
-    await page.getByRole("combobox", { name: "Worktree submodules scope" }).click();
+    await page.getByRole("combobox", { name: "Project default scope" }).click();
     await page.getByRole("option", { name: "Project A", exact: true }).click();
     await expect.element(mode).toHaveTextContent("Inherit");
     await mode.click();
@@ -696,7 +705,7 @@ describe("GeneralSettingsPanel observability", () => {
       .element(page.getByRole("combobox", { name: "Worktree submodule initialization" }))
       .toBeDisabled();
     await expect
-      .element(page.getByRole("combobox", { name: "Worktree submodules scope" }))
+      .element(page.getByRole("combobox", { name: "Project default scope" }))
       .toBeDisabled();
     expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
   });
@@ -706,9 +715,6 @@ describe("GeneralSettingsPanel observability", () => {
     mockUpdateEnvironmentServerSettings.mockImplementation(async () => DEFAULT_SERVER_SETTINGS);
     await expect
       .element(page.getByRole("combobox", { name: "Worktree submodule initialization" }))
-      .toBeDisabled();
-    await expect
-      .element(page.getByRole("combobox", { name: "Worktree submodules scope" }))
       .toBeDisabled();
     await expect
       .element(
@@ -742,10 +748,10 @@ describe("GeneralSettingsPanel observability", () => {
     await expect
       .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
       .toEqual(["environment-local", { worktreeRoot: "/volumes/new-default" }]);
-    await page.getByRole("combobox", { name: "Worktree root scope" }).click();
+    await page.getByRole("combobox", { name: "Project default scope" }).click();
     await page.getByRole("option", { name: "Project A", exact: true }).click();
     await expect.element(directory).toHaveValue("/volumes/project-a");
-    await page.getByRole("button", { name: "Use environment default" }).click();
+    await page.getByRole("button", { name: "Use device default for worktree root" }).click();
     await expect
       .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
       .toEqual(["environment-local", { projectWorktreeRoots: { projectA: null } }]);
@@ -753,9 +759,9 @@ describe("GeneralSettingsPanel observability", () => {
     await directory.fill("/volumes/new-project");
     await userEvent.keyboard("{Enter}");
     await expect.element(page.getByText("Effective: /volumes/new-project")).toBeVisible();
-    await page.getByRole("combobox", { name: "Worktree root scope" }).click();
-    await page.getByRole("option", { name: "Environment default", exact: true }).click();
-    await page.getByRole("button", { name: "Reset worktree root" }).click();
+    await page.getByRole("combobox", { name: "Project default scope" }).click();
+    await page.getByRole("option", { name: "All projects", exact: true }).click();
+    await page.getByRole("button", { name: "Reset worktree root to default" }).click();
     await expect.element(page.getByText("Effective: Ryco-managed directory")).toBeVisible();
   });
 
@@ -775,7 +781,7 @@ describe("GeneralSettingsPanel observability", () => {
       .element(page.getByRole("textbox", { name: "Worktree root directory" }))
       .toBeDisabled();
     await expect
-      .element(page.getByRole("combobox", { name: "Worktree root scope" }))
+      .element(page.getByRole("combobox", { name: "Project default scope" }))
       .toBeDisabled();
     expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
   });
@@ -1336,7 +1342,7 @@ describe("GeneralSettingsPanel observability", () => {
     expect(confirm).toHaveBeenCalledTimes(2);
   });
 
-  it("disables the keybindings file opener when no editor is available", async () => {
+  it("edits locally without depending on a node editor", async () => {
     installSettingsNativeApi();
     setServerConfigSnapshot({
       ...createBaseServerConfig(),
@@ -1349,8 +1355,9 @@ describe("GeneralSettingsPanel observability", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("No available editors found.")).toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: "Open file" })).toBeDisabled();
+    await expect.element(page.getByText("Saved in this app")).toBeInTheDocument();
+    await expect.element(page.getByRole("button", { name: "Restore defaults" })).toBeEnabled();
+    expect(page.getByRole("button", { name: "Open file" }).elements()).toHaveLength(0);
   });
 
   it("labels the default editor file-manager option as Finder on macOS", async () => {
@@ -2063,8 +2070,8 @@ describe("SourceControlSettingsPanel discovery states", () => {
 
     mounted = await renderSourceControlSettingsPanel();
 
-    await expect.element(page.getByText("Version Control")).toBeInTheDocument();
-    await expect.element(page.getByText("Source Control Providers")).toBeInTheDocument();
+    await expect.element(page.getByText("Version control")).toBeInTheDocument();
+    await expect.element(page.getByText("Hosting providers", { exact: true })).toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Rescan server environment" }))
       .toBeDisabled();

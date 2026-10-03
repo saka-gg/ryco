@@ -1,16 +1,22 @@
 import { ComputerBetaSettings } from "./ComputerBetaSettings";
 import { useEffect, useRef, useState } from "react";
 import type { ComputerBrowser, ComputerUsePolicy, ComputerUseState } from "@ryco/contracts";
-import {
-  MonitorIcon,
-  MousePointer2Icon,
-  SquareIcon,
-  CheckCircle2Icon,
-  XCircleIcon,
-  CircleHelpIcon,
-} from "lucide-react";
+import { FolderOpenIcon, MousePointer2Icon, SquareIcon } from "lucide-react";
+import { cn } from "../../lib/utils";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
+import { Textarea } from "../ui/textarea";
+import { PermissionStatusBadge } from "./PermissionStatusBadge";
+import {
+  SETTINGS_INSET_CLASS,
+  SettingsBlock,
+  SettingsNotice,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
+import { SettingsSelect } from "./SettingsSelect";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 
 const BROWSERS: ReadonlyArray<{ id: ComputerBrowser; label: string }> = [
@@ -19,32 +25,6 @@ const BROWSERS: ReadonlyArray<{ id: ComputerBrowser; label: string }> = [
   { id: "brave", label: "Brave" },
   { id: "edge", label: "Microsoft Edge" },
 ];
-
-function PermissionBadge({ status, checked }: { status: string; checked: boolean }) {
-  const granted = status === "granted";
-  const denied = status === "denied" || status === "restricted";
-  const Icon = granted ? CheckCircle2Icon : denied ? XCircleIcon : CircleHelpIcon;
-  const label = granted
-    ? "Granted"
-    : status === "restricted"
-      ? "Restricted"
-      : denied
-        ? "Not granted"
-        : status === "not_required"
-          ? "Not required"
-          : checked
-            ? "Could not check"
-            : "Not checked";
-  return (
-    <span
-      data-permission-status={status}
-      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${granted ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : denied ? "bg-red-500/10 text-red-700 dark:text-red-300" : "bg-muted text-muted-foreground"}`}
-    >
-      <Icon aria-hidden="true" className="size-3" />
-      {label}
-    </span>
-  );
-}
 
 /** Local machine settings; a remote environment never becomes the computer target implicitly. */
 export function ComputerUseSettings() {
@@ -131,163 +111,187 @@ export function ComputerUseSettings() {
   for (const entry of state?.apps ?? []) appEntries.set(entry.id, entry);
   for (const browser of BROWSERS)
     appEntries.set(`browser:${browser.id}`, { id: `browser:${browser.id}`, name: browser.label });
+  const enabled = state?.policy.enabled ?? false;
+  const permissionChecked = Boolean(state?.permissionInfo?.checkedAt);
+  const visibleApps = state
+    ? [...appEntries.values()].filter(
+        (entry) =>
+          !search ||
+          entry.name.toLowerCase().includes(search.toLowerCase()) ||
+          state.policy.apps[entry.id] !== undefined,
+      )
+    : [];
   return (
     <>
       <ComputerBetaSettings />
-      <section
-        data-settings-section="Computer Use"
-        className="scroll-mt-6 border-b p-6 sm:p-8"
-        aria-labelledby="computer-use-heading"
+      <SettingsSection
+        title="Browser and app control"
+        description="Let agents work in apps on this computer while you keep working. An independent Ryco cursor shows their actions. Native tools require Agent Control and a new provider session."
       >
-        <div className="mx-auto flex max-w-4xl flex-col gap-5">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <MonitorIcon className="size-4 text-muted-foreground" />
-                <h2 id="computer-use-heading" className="text-lg font-semibold">
-                  Browser and legacy computer controls
-                </h2>
-              </div>
-              <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-                Let agents work in apps on this computer while you keep working. An independent Ryco
-                cursor shows their actions. Native tools require Agent Control in Integrations and a
-                new provider session.
-              </p>
-            </div>
+        <SettingsRow
+          title="Enable on this computer"
+          description={
+            enabled
+              ? "Stop any time with ⌘/Ctrl + Shift + Escape. A stopped turn must be restarted."
+              : "Off. Agents cannot inspect or operate apps or browsers through Ryco."
+          }
+          control={
             <Switch
               aria-label="Enable computer use on this computer"
-              checked={state?.policy.enabled ?? false}
+              checked={enabled}
               disabled={busy || !state}
-              onCheckedChange={(enabled) => update({ enabled: Boolean(enabled) })}
+              onCheckedChange={(next) => update({ enabled: Boolean(next) })}
             />
-          </div>
-          {error || state?.error ? (
-            <p role="alert" className="text-sm text-destructive">
+          }
+        />
+        {error || state?.error ? (
+          <SettingsBlock>
+            <SettingsNotice tone="error" role="alert">
               {error ?? state?.error}
-            </p>
-          ) : null}
-          {state?.policy.enabled ? (
-            <>
-              <div
-                className="flex items-center justify-between gap-3 rounded-lg border bg-muted/20 p-3"
-                role="status"
-              >
-                <span className="flex items-center gap-2 text-sm">
-                  <MousePointer2Icon className="size-4" />
+            </SettingsNotice>
+          </SettingsBlock>
+        ) : null}
+        {state?.policy.enabled ? (
+          <>
+            <SettingsRow
+              title={
+                <span className="flex items-center gap-2" role="status">
+                  <MousePointer2Icon className="size-3.5 text-muted-foreground" />
                   {state.activity
                     ? `Working in ${state.activity.target} · ${state.activity.mode}`
-                    : "Enabled · waiting for an agent"}
+                    : "Waiting for an agent"}
                 </span>
-                <Button size="sm" variant="outline" onClick={() => void run(() => api.stop())}>
+              }
+              description="Current activity on this computer."
+              control={
+                <Button size="xs" variant="outline" onClick={() => void run(() => api.stop())}>
                   <SquareIcon className="size-3" />
                   Stop all
                 </Button>
-              </div>
-              <p className="-mt-3 text-xs text-muted-foreground">
-                Use ⌘/Ctrl + Shift + Escape while computer use is enabled to stop. A stopped turn
-                must be restarted.
-              </p>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium">Native permissions</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() =>
-                      void run(async () => {
-                        permissionCheckRequested.current = true;
-                        setState(await api.checkPermissions());
-                      })
-                    }
-                  >
-                    Check permissions
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => requestPermission("accessibility")}
-                  >
-                    Accessibility{" "}
-                    <PermissionBadge
-                      status={state.accessibility}
-                      checked={Boolean(state.permissionInfo?.checkedAt)}
-                    />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => requestPermission("screenRecording")}
-                  >
-                    Screen recording{" "}
-                    <PermissionBadge
-                      status={state.screenRecording}
-                      checked={Boolean(state.permissionInfo?.checkedAt)}
-                    />
-                  </Button>
-                </div>
-                {state.permissionInfo?.error ? (
-                  <p role="alert" className="text-sm text-destructive">
+              }
+            />
+            <SettingsRow
+              title="Native permissions"
+              description={
+                state.permissionInfo?.development
+                  ? `Development build: grant permissions to ${state.permissionInfo.appName} in macOS Settings. If Screen Recording stays denied after granting it, restart this build.`
+                  : "Click a permission to request it. Access is checked again when you return from System Settings."
+              }
+              status={
+                state.permissionInfo?.error ? (
+                  <span role="alert" className="text-destructive-foreground">
                     {state.permissionInfo.error}
-                  </p>
-                ) : null}
-                {state.permissionInfo?.development ? (
-                  <p className="text-xs text-muted-foreground">
-                    Development build: grant permissions to {state.permissionInfo.appName} in macOS
-                    Settings. Access is checked again when you return. If Screen Recording stays
-                    denied after granting it, restart this build.
-                  </p>
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    Permissions are checked automatically when you return from system settings.
-                  </p>
-                )}
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-medium">Allow foreground takeover requests</p>
-                    <p className="text-xs text-muted-foreground">
-                      Ask before taking over your mouse and keyboard when background control is
-                      unavailable.
-                    </p>
-                  </div>
-                  <Switch
-                    aria-label="Allow foreground takeover requests"
-                    checked={state.policy.foregroundEnabled}
+                  </span>
+                ) : undefined
+              }
+              control={
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  disabled={busy}
+                  onClick={() =>
+                    void run(async () => {
+                      permissionCheckRequested.current = true;
+                      setState(await api.checkPermissions());
+                    })
+                  }
+                >
+                  Check permissions
+                </Button>
+              }
+            >
+              <div className="grid gap-2 sm:grid-cols-2">
+                {(
+                  [
+                    ["Accessibility", "accessibility"],
+                    ["Screen recording", "screenRecording"],
+                  ] as const
+                ).map(([label, kind]) => (
+                  <button
+                    key={kind}
+                    type="button"
                     disabled={busy}
-                    onCheckedChange={(enabled) => update({ foregroundEnabled: Boolean(enabled) })}
-                  />
-                </div>
+                    onClick={() => requestPermission(kind)}
+                    className="flex items-center justify-between gap-2 rounded-[min(var(--radius-md),0.5rem)] bg-muted/50 px-2.5 py-2 text-left text-xs text-foreground outline-hidden transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+                  >
+                    {label}{" "}
+                    <PermissionStatusBadge status={state[kind]} checked={permissionChecked} />
+                  </button>
+                ))}
               </div>
-              <section
-                data-settings-section="Browser Use"
-                className="scroll-mt-6 space-y-3 border-t pt-4"
-              >
-                <h3 className="text-sm font-semibold">Browser Use</h3>
-                <p className="text-xs text-muted-foreground">
-                  Ryco Browser has a separate profile. Pair Chrome, Brave or Edge to use your
-                  existing tabs and sign-ins.
-                </p>
-                {BROWSERS.map((browser) => (
-                  <div key={browser.id} className="flex items-center justify-between gap-3">
-                    <div className="text-sm">
+            </SettingsRow>
+            <SettingsRow
+              title="Allow foreground takeover requests"
+              description="Ask before taking over your mouse and keyboard when background control is unavailable."
+              control={
+                <Switch
+                  aria-label="Allow foreground takeover requests"
+                  checked={state.policy.foregroundEnabled}
+                  disabled={busy}
+                  onCheckedChange={(next) => update({ foregroundEnabled: Boolean(next) })}
+                />
+              }
+            />
+          </>
+        ) : null}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Browser Use"
+        description={
+          state?.policy.enabled
+            ? "Ryco Browser has a separate profile. Pair Chrome, Brave, or Edge to use your existing tabs and sign-ins."
+            : "Enable browser and app control above to configure Ryco Browser or pair Chrome, Brave, and Edge."
+        }
+        headerAction={
+          state?.policy.enabled ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() =>
+                void run(async () => {
+                  setExtensionDirectory(await api.showExtension());
+                })
+              }
+            >
+              <FolderOpenIcon />
+              Show browser extension folder
+            </Button>
+          ) : null
+        }
+        bare={!state?.policy.enabled}
+      >
+        {state?.policy.enabled ? (
+          <>
+            {BROWSERS.map((browser) => {
+              const connected = state.connectedBrowsers.includes(browser.id);
+              return (
+                <SettingsRow
+                  key={browser.id}
+                  title={
+                    <span className="flex items-center gap-2">
                       {browser.label}
-                      <span className="ml-2 text-xs text-muted-foreground">
+                      <Badge
+                        size="sm"
+                        variant={
+                          browser.id === "ryco" ? "outline" : connected ? "success" : "outline"
+                        }
+                      >
                         {browser.id === "ryco"
                           ? "Built in"
-                          : state.connectedBrowsers.includes(browser.id)
+                          : connected
                             ? "Connected"
                             : "Not connected"}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3">
+                      </Badge>
+                    </span>
+                  }
+                  control={
+                    <>
                       {browser.id !== "ryco" && state.policy.browsers.includes(browser.id) ? (
                         <Button
-                          size="sm"
-                          variant="ghost"
+                          size="xs"
+                          variant="outline"
                           disabled={busy}
                           onClick={() =>
                             void run(async () => {
@@ -311,191 +315,164 @@ export function ComputerUseSettings() {
                           })
                         }
                       />
-                    </div>
-                  </div>
-                ))}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    void run(async () => {
-                      setExtensionDirectory(await api.showExtension());
-                    })
+                    </>
                   }
-                >
-                  Show browser extension folder
-                </Button>
-                {pairing ? (
-                  <div className="space-y-2 rounded-lg border p-3">
-                    <p className="text-sm font-medium">Connect your browser</p>
-                    <ol className="list-decimal space-y-1 pl-4 text-xs text-muted-foreground">
-                      <li>Open Extensions, enable Developer mode, then choose Load unpacked.</li>
-                      <li>
-                        Select the Ryco extension folder shown below. On macOS, paste its path with
-                        ⌘ + Shift + G in the folder chooser.
-                      </li>
-                      <li>
-                        Open Ryco Browser Control in the browser toolbar and paste the pairing
-                        configuration.
-                      </li>
-                    </ol>
-                    <div className="flex flex-wrap gap-2">
-                      {pairingBrowser ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={busy}
-                          onClick={() => void run(() => api.openBrowserSetup(pairingBrowser))}
-                        >
-                          Open browser Extensions
-                        </Button>
-                      ) : null}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() =>
-                          void run(async () => {
-                            setExtensionDirectory(await api.showExtension());
-                          })
-                        }
-                      >
-                        Show extension folder
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => copyToClipboard(pairing, undefined)}
-                      >
-                        Copy pairing configuration
-                      </Button>
-                    </div>
-                    {extensionDirectory ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          aria-label="Extension folder path"
-                          readOnly
-                          value={extensionDirectory}
-                          onFocus={(event) => event.currentTarget.select()}
-                          className="min-w-0 flex-1 rounded-md border bg-background p-2 font-mono text-xs"
-                        />
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => copyToClipboard(extensionDirectory, undefined)}
-                        >
-                          Copy folder path
-                        </Button>
-                      </div>
-                    ) : null}
-                    {isCopied ? (
-                      <p role="status" className="text-xs text-emerald-700 dark:text-emerald-300">
-                        Copied
-                      </p>
-                    ) : null}
-                    <p className="text-xs text-muted-foreground">
-                      Pairing replaces the previous connection. Pair again after restarting Ryco.
-                    </p>
-                    <textarea
-                      aria-label="Browser pairing configuration"
+                />
+              );
+            })}
+            {pairing ? (
+              <SettingsBlock className="bg-muted/30">
+                <p className="text-[13px] font-medium text-foreground">Connect your browser</p>
+                <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-muted-foreground">
+                  <li>Open Extensions, enable Developer mode, then choose Load unpacked.</li>
+                  <li>
+                    Select the Ryco extension folder shown below. On macOS, paste its path with ⌘ +
+                    Shift + G in the folder chooser.
+                  </li>
+                  <li>
+                    Open Ryco Browser Control in the browser toolbar and paste the pairing
+                    configuration.
+                  </li>
+                </ol>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {pairingBrowser ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => void run(() => api.openBrowserSetup(pairingBrowser))}
+                    >
+                      Open browser Extensions
+                    </Button>
+                  ) : null}
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() =>
+                      void run(async () => {
+                        setExtensionDirectory(await api.showExtension());
+                      })
+                    }
+                  >
+                    Show extension folder
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => copyToClipboard(pairing, undefined)}
+                  >
+                    Copy pairing configuration
+                  </Button>
+                  <Button size="xs" variant="ghost" onClick={() => setPairing(null)}>
+                    Hide configuration
+                  </Button>
+                </div>
+                {extensionDirectory ? (
+                  <div className="mt-3 flex items-center gap-2">
+                    <Input
+                      size="sm"
+                      aria-label="Extension folder path"
                       readOnly
-                      value={pairing}
-                      className="h-20 w-full rounded-md border bg-background p-2 font-mono text-xs"
+                      value={extensionDirectory}
+                      className="min-w-0 flex-1 font-mono text-xs"
                       onFocus={(event) => event.currentTarget.select()}
                     />
-                    <Button size="sm" variant="ghost" onClick={() => setPairing(null)}>
-                      Hide configuration
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => copyToClipboard(extensionDirectory, undefined)}
+                    >
+                      Copy folder path
                     </Button>
                   </div>
                 ) : null}
-              </section>
-              <div className="space-y-3 border-t pt-4">
-                <h3 className="text-sm font-semibold">App access</h3>
-                <p className="text-xs text-muted-foreground">
-                  Apps ask on first use. Blocked apps cannot be inspected or controlled. Changing
-                  permissions stops current work.
+                <Textarea
+                  aria-label="Browser pairing configuration"
+                  readOnly
+                  value={pairing}
+                  className="mt-3 font-mono text-xs"
+                  onFocus={(event) => event.currentTarget.select()}
+                />
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {isCopied ? (
+                    <span role="status" className="text-success-foreground">
+                      Copied.{" "}
+                    </span>
+                  ) : null}
+                  Pairing replaces the previous connection. Pair again after restarting Ryco.
                 </p>
-                <form
-                  className="flex gap-2"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void run(async () => {
-                      setState(await api.refresh(search || undefined));
-                    });
-                  }}
+              </SettingsBlock>
+            ) : null}
+          </>
+        ) : null}
+      </SettingsSection>
+
+      {state?.policy.enabled ? (
+        <SettingsSection
+          title="App access"
+          description="Apps ask on first use. Blocked apps cannot be inspected or controlled. Changing access stops current work."
+        >
+          <SettingsBlock>
+            <form
+              className="flex gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void run(async () => {
+                  setState(await api.refresh(search || undefined));
+                });
+              }}
+            >
+              <Input
+                size="sm"
+                aria-label="Find installed apps"
+                placeholder="Find installed apps…"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="min-w-0 flex-1"
+              />
+              <Button type="submit" variant="outline" size="sm" disabled={busy}>
+                Find apps
+              </Button>
+            </form>
+          </SettingsBlock>
+          <SettingsBlock flush>
+            <ul className="max-h-80 divide-y divide-border/60 overflow-y-auto">
+              {visibleApps.map((entry) => (
+                <li
+                  key={entry.id}
+                  className={cn(
+                    "flex items-center justify-between gap-4 py-2.5",
+                    SETTINGS_INSET_CLASS,
+                  )}
                 >
-                  <input
-                    aria-label="Find installed apps"
-                    placeholder="Find installed apps…"
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                    className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+                  <div className="min-w-0">
+                    <p className="truncate text-[13px] text-foreground">{entry.name}</p>
+                    <p className="truncate text-[11px] text-muted-foreground" title={entry.id}>
+                      {entry.id}
+                    </p>
+                  </div>
+                  <SettingsSelect<"ask" | "allow" | "block">
+                    ariaLabel={`Access to ${entry.name}`}
+                    width="sm"
+                    size="sm"
+                    disabled={busy}
+                    value={state.policy.apps[entry.id] ?? "ask"}
+                    onValueChange={(value) =>
+                      update({ apps: { ...state.policy.apps, [entry.id]: value } })
+                    }
+                    options={[
+                      { value: "ask", label: "Ask" },
+                      { value: "allow", label: "Always allow" },
+                      { value: "block", label: "Block" },
+                    ]}
                   />
-                  <Button variant="outline" size="sm" disabled={busy}>
-                    Find apps
-                  </Button>
-                </form>
-                <div className="max-h-80 divide-y overflow-y-auto">
-                  {[...appEntries.values()]
-                    .filter(
-                      (entry) =>
-                        !search ||
-                        entry.name.toLowerCase().includes(search.toLowerCase()) ||
-                        state.policy.apps[entry.id] !== undefined,
-                    )
-                    .map((entry) => (
-                      <div key={entry.id} className="flex items-center justify-between gap-4 py-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm">{entry.name}</p>
-                          <p
-                            className="truncate text-[11px] text-muted-foreground"
-                            title={entry.id}
-                          >
-                            {entry.id}
-                          </p>
-                        </div>
-                        <select
-                          aria-label={`Access to ${entry.name}`}
-                          className="rounded-md border bg-background px-2 py-1 text-sm"
-                          disabled={busy}
-                          value={state.policy.apps[entry.id] ?? "ask"}
-                          onChange={(event) =>
-                            update({
-                              apps: {
-                                ...state.policy.apps,
-                                [entry.id]: event.target.value as "ask" | "allow" | "block",
-                              },
-                            })
-                          }
-                        >
-                          <option value="ask">Ask</option>
-                          <option value="allow">Always allow</option>
-                          <option value="block">Block</option>
-                        </select>
-                      </div>
-                    ))}
-                </div>
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="text-sm text-muted-foreground">
-                Off. Agents cannot inspect or operate apps or browsers through Ryco computer use.
-              </p>
-              <section
-                data-settings-section="Browser Use"
-                className="scroll-mt-6 space-y-2 border-t pt-4"
-              >
-                <h3 className="text-sm font-semibold">Browser Use</h3>
-                <p className="text-xs text-muted-foreground">
-                  Enable Computer Use above to configure Ryco Browser or pair Chrome, Brave, and
-                  Edge.
-                </p>
-              </section>
-            </>
-          )}
-        </div>
-      </section>
+                </li>
+              ))}
+            </ul>
+          </SettingsBlock>
+        </SettingsSection>
+      ) : null}
     </>
   );
 }

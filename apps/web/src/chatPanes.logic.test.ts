@@ -5,8 +5,11 @@ import {
   decodePaneLayout,
   movePane,
   paneDropSide,
+  paneGeometry,
   paneLeaves,
   resizePane,
+  resolvePaneDrop,
+  sharesPaneLeaves,
   splitPane,
   type PaneNode,
 } from "./chatPanes.logic";
@@ -81,5 +84,52 @@ describe("bounded thread panes", () => {
     expect(paneDropSide(rect, 210, 219)).toBe("bottom");
     expect(paneDropSide(rect, 0, 0)).toBeNull();
     expect(paneDropSide({ ...rect, width: 0 }, 10, 20)).toBeNull();
+  });
+  it("lays out percentage rects and the edge each leaf entered from", () => {
+    const { leaves, dividers } = paneGeometry(resizePane(grid(), "", 0.6));
+    expect(leaves.map(({ ref, side }) => [ref.threadId, side])).toEqual([
+      ["a", "top"],
+      ["c", "bottom"],
+      ["b", "top"],
+      ["d", "bottom"],
+    ]);
+    expect(leaves[2]!.rect).toEqual({ left: 60, top: 0, width: 40, height: 50 });
+    expect(dividers.map((divider) => divider.path)).toEqual(["", "0", "1"]);
+    expect(paneGeometry(leaf).leaves).toEqual([
+      { ref: a, rect: { left: 0, top: 0, width: 100, height: 100 }, side: null },
+    ]);
+    expect(paneGeometry(pair()).leaves.map((entry) => entry.side)).toEqual(["left", "right"]);
+  });
+  it("explains every drop the tree would refuse", () => {
+    expect(resolvePaneDrop(leaf, a, b, "right")).toEqual({ kind: "split" });
+    expect(resolvePaneDrop(leaf, a, a, "right")).toEqual({ kind: "noop" });
+    expect(resolvePaneDrop(leaf, a, ref("b", "remote"), "right")).toMatchObject({
+      kind: "refused",
+      reason: "environment",
+    });
+    expect(resolvePaneDrop(grid(), a, ref("e"), "left")).toMatchObject({
+      kind: "refused",
+      reason: "full",
+    });
+    // b already sits beside a horizontally; a vertical split still fits.
+    expect(resolvePaneDrop(pair(), b, c, "right")).toEqual({
+      kind: "refused",
+      reason: "axis",
+      alternative: "vertical",
+    });
+    expect(resolvePaneDrop(pair(), b, c, "bottom")).toEqual({ kind: "split" });
+    // Dropping a pane back where it already is changes nothing.
+    expect(resolvePaneDrop(pair(), a, b, "right")).toEqual({ kind: "noop" });
+    expect(resolvePaneDrop(pair(), b, a, "right")).toEqual({ kind: "move" });
+    // Every leaf of a 2x2 has used both axes.
+    expect(resolvePaneDrop(grid(), b, a, "right")).toEqual({
+      kind: "refused",
+      reason: "axis",
+      alternative: null,
+    });
+  });
+  it("detects whether two layouts share a pane", () => {
+    expect(sharesPaneLeaves(pair(), leaf)).toBe(true);
+    expect(sharesPaneLeaves(pair(), { kind: "thread", ref: c })).toBe(false);
   });
 });

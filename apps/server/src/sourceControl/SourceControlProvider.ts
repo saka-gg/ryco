@@ -82,6 +82,8 @@ export interface SourceControlProviderShape {
     readonly headSelector: string;
     readonly state: ChangeRequestState | "all";
     readonly limit?: number;
+    /** Skip optional stack enrichment when only branch/status fields are consumed. */
+    readonly includeStackSummary?: boolean;
   }) => Effect.Effect<ReadonlyArray<ChangeRequest>, SourceControlProviderError>;
   readonly getChangeRequest: (input: {
     readonly cwd: string;

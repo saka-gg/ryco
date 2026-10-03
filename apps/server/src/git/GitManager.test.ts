@@ -653,8 +653,12 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       getPullRequestStack: () =>
         Effect.fail(new GitHubCliError({ operation: "getPullRequestStack", detail: "stub" })),
       getPullRequestStackSummaries: () =>
-        Effect.fail(
-          new GitHubCliError({ operation: "getPullRequestStackSummaries", detail: "stub" }),
+        Effect.sync(() => ghCalls.push("getPullRequestStackSummaries")).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new GitHubCliError({ operation: "getPullRequestStackSummaries", detail: "stub" }),
+            ),
+          ),
         ),
       getRepositoryMergeCapabilities: () =>
         Effect.fail(
@@ -1425,6 +1429,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
 
       expect(refreshed?.pr?.number).toBe(113);
       expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(2);
+      expect(ghCalls).not.toContain("getPullRequestStackSummaries");
     }),
   );
 

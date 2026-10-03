@@ -34,7 +34,7 @@ export function SidebarProjectGroupingDialog(props: {
         }
       }}
     >
-      <DialogPopup className="project-glass-surface max-w-lg" surface="glass">
+      <DialogPopup className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Project grouping</DialogTitle>
           <DialogDescription>

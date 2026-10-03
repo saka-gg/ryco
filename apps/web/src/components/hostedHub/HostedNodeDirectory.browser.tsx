@@ -62,7 +62,7 @@ import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { useUiStateStore } from "../../uiStateStore";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { HostedHubRoot } from "./HostedHubRoot";
-import { createBrowserWorkspaceMetadataCache } from "../../persistence/workspaceMetadataCache";
+import { getBrowserWorkspaceMetadataCache } from "../../persistence/workspaceMetadataCache";
 
 const account = {
   id: "acct_aaaaaaaaaaaaaaaaaaaaaa",
@@ -178,6 +178,10 @@ beforeEach(async () => {
     expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
   });
   localStorage.clear();
+  await getBrowserWorkspaceMetadataCache().purgeAccount({
+    hubOrigin: window.location.origin,
+    accountId: account.id,
+  });
   sessionStorage.clear();
   hostedHubController.resetForTests();
   resetDirectoryRouteForTests();
@@ -235,7 +239,7 @@ describe("hosted node directory", () => {
         },
       ],
     };
-    await createBrowserWorkspaceMetadataCache(localStorage).replace({
+    await getBrowserWorkspaceMetadataCache().replace({
       namespace: {
         hubOrigin: window.location.origin,
         accountId: account.id,
@@ -263,9 +267,14 @@ describe("hosted node directory", () => {
       document.querySelectorAll<HTMLButtonElement>('[data-testid="inbox-thread-row"]'),
     ).find((candidate) => candidate.textContent?.includes("Cached thread from another node"));
     expect(cachedThreadRow).toBeDefined();
-    expect(cachedThreadRow?.textContent).toContain("Studio");
-    expect(cachedThreadRow?.textContent).toContain("Cached workspace");
     expect(cachedThreadRow?.textContent).toContain("Local workspace");
+    // A single node and project are implicit on the row; the card names them.
+    await page.getByTestId("inbox-thread-row").first().hover();
+    await vi.waitFor(() => {
+      const card = document.querySelector('[data-testid="inbox-preview"]');
+      expect(card?.textContent).toContain("Studio");
+      expect(card?.textContent).toContain("Cached workspace");
+    });
     expect(selectNode).not.toHaveBeenCalled();
   });
 

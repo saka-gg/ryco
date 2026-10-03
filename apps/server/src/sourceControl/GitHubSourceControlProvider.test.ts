@@ -732,6 +732,46 @@ it.effect("enriches pull request lists with stack summaries", () =>
   }),
 );
 
+for (const state of ["open", "all"] as const) {
+  it.effect(`skips stack summary calls for lightweight ${state} branch lookups`, () =>
+    Effect.gen(function* () {
+      let summaryCalls = 0;
+      const provider = yield* makeProvider({
+        listOpenPullRequests: () => Effect.succeed([githubPullRequestDetail]),
+        execute: () =>
+          Effect.succeed(
+            processResult(
+              JSON.stringify([
+                {
+                  number: 42,
+                  title: "Middle",
+                  url: "https://github.com/owner/repo/pull/42",
+                  baseRefName: "feature/41",
+                  headRefName: "feature/42",
+                  state: "open",
+                  updatedAt: "2026-01-02T00:00:00.000Z",
+                },
+              ]),
+            ),
+          ),
+        getPullRequestStackSummaries: () => {
+          summaryCalls += 1;
+          return Effect.succeed(new Map());
+        },
+      });
+      const items = yield* provider.listChangeRequests({
+        cwd: "/repo",
+        state,
+        headSelector: "feature/42",
+        includeStackSummary: false,
+      });
+      assert.equal(items[0]?.number, 42);
+      assert.equal(items[0]?.stackSummary, undefined);
+      assert.equal(summaryCalls, 0);
+    }),
+  );
+}
+
 it.effect("preserves pull request list and search results when stack enrichment fails", () =>
   Effect.gen(function* () {
     const enrichmentFailure = () =>

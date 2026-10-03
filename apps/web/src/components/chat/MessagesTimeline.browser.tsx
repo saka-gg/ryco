@@ -4,13 +4,19 @@ import {
   ContextHandoffId,
   EnvironmentId,
   MessageId,
+  type OrchestrationThreadActivity,
   ProviderDriverKind,
   ProviderInstanceId,
   TurnId,
 } from "@ryco/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
-import type { ContextHandoffTimelineEntry } from "../../session-logic";
+import {
+  deriveThreadActivityViewModel,
+  deriveTimelineEntries,
+  type ContextHandoffTimelineEntry,
+} from "../../session-logic";
+import type { ChatMessage } from "../../types";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -787,7 +793,7 @@ describe("MessagesTimeline", () => {
     }
   });
 
-  it("renders live file edits as non-expandable rows with text-only shimmer", async () => {
+  it("streams a live edit as an Editing step that settles with its diff", async () => {
     const turnId = TurnId.make("turn-1");
     const editEntry = {
       id: "work-1",
@@ -813,46 +819,133 @@ describe("MessagesTimeline", () => {
         timelineEntries={[editEntry]}
       />,
     );
+    const step = () => document.querySelector<HTMLElement>("[data-chapter-step-kind='edit']");
 
     try {
-      await expect.element(page.getByText("Editing src/app.ts")).toBeVisible();
+      await expect.element(page.getByText("Editing", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("src/app.ts", { exact: true })).toBeVisible();
+      expect(step()?.dataset.chapterStepStatus).toBe("running");
+      // Stats of an edit still in flight are not reported anywhere yet.
       await expect.element(page.getByText("+255")).not.toBeInTheDocument();
-      await expect.element(page.getByText("-12")).not.toBeInTheDocument();
-
-      const fileEditRow = document.querySelector<HTMLElement>("[data-file-edit-work-row='true']");
-      const editText = document.querySelector<HTMLElement>(".chat-file-edit-text");
-
-      expect(fileEditRow).not.toBeNull();
-      expect(fileEditRow!.closest("[role='button']")).toBeNull();
-      expect(fileEditRow!.dataset.fileEditWorkState).toBe("editing");
-      expect(editText).not.toBeNull();
-      expect(editText!.className).toContain("chat-file-edit-text--active");
 
       await screen.rerender(
         <MessagesTimeline
           {...buildProps()}
           activeTurnId={turnId}
           isWorking
-          timelineEntries={[
-            {
-              ...editEntry,
-              entry: {
-                ...editEntry.entry,
-                completed: true,
-              },
-            },
-          ]}
+          timelineEntries={[{ ...editEntry, entry: { ...editEntry.entry, completed: true } }]}
         />,
       );
 
-      await expect.element(page.getByText("Edited src/app.ts")).toBeVisible();
-      await expect.element(page.getByText("+255")).toBeVisible();
-      await expect.element(page.getByText("-12")).toBeVisible();
+      await expect.element(page.getByText("Edited", { exact: true })).toBeVisible();
+      expect(step()?.dataset.chapterStepStatus).toBe("completed");
+      await expect.element(page.getByText("+255").first()).toBeVisible();
+      await expect.element(page.getByText("−12").first()).toBeVisible();
+    } finally {
+      await screen.unmount();
+    }
+  });
 
-      const completedRow = document.querySelector<HTMLElement>("[data-file-edit-work-row='true']");
-      const completedText = document.querySelector<HTMLElement>(".chat-file-edit-text");
-      expect(completedRow?.dataset.fileEditWorkState).toBe("completed");
-      expect(completedText?.className).not.toContain("chat-file-edit-text--active");
+  it("keeps live ticker steps mounted through updates, settling, and scrolling out", async () => {
+    const turnId = TurnId.make("turn-ticker");
+    // Real activities through the real projection: every lifecycle event of a
+    // tool call carries its own activity id, which is what used to re-key the
+    // step (a remount, plus a ghost copy collapsing in the leaving slot).
+    const command = (id: string, kind: string, callId: string, second: number, text: string) =>
+      ({
+        id,
+        kind,
+        tone: "tool",
+        summary: "Ran command",
+        payload: { itemType: "command_execution", providerItemId: callId, detail: text },
+        turnId,
+        createdAt: `2026-04-13T12:00:${String(second).padStart(2, "0")}.000Z`,
+      }) as unknown as OrchestrationThreadActivity;
+    const commentary = {
+      id: MessageId.make("message-ticker"),
+      role: "assistant",
+      text: "Checking the sidebar before mocking it up.",
+      turnId,
+      createdAt: "2026-04-13T12:00:01.000Z",
+      completedAt: "2026-04-13T12:00:01.000Z",
+      streaming: false,
+    } as ChatMessage;
+    const timelineFor = (activities: OrchestrationThreadActivity[]) =>
+      deriveTimelineEntries(
+        [commentary],
+        [],
+        deriveThreadActivityViewModel(activities, turnId).workLogEntries,
+      );
+    const props = {
+      ...buildProps(),
+      isWorking: true,
+      activeTurnInProgress: true,
+      activeTurnId: turnId,
+      latestTurn: {
+        turnId,
+        state: "running" as const,
+        startedAt: "2026-04-13T12:00:00.000Z",
+        completedAt: null,
+      },
+      activeTurnStartedAt: "2026-04-13T12:00:00.000Z",
+    };
+    const settled = [
+      command("a-start", "tool.updated", "call-a", 2, "rg -n one src"),
+      command("a-done", "tool.completed", "call-a", 3, "rg -n one src"),
+      command("b-start", "tool.updated", "call-b", 4, "rg -n two src"),
+      command("b-done", "tool.completed", "call-b", 5, "rg -n two src"),
+      command("c-start", "tool.updated", "call-c", 6, "rg -n three src"),
+      command("c-done", "tool.completed", "call-c", 7, "rg -n three src"),
+    ];
+    const screen = await render(
+      <MessagesTimeline {...props} timelineEntries={timelineFor(settled)} />,
+    );
+    const steps = () => [
+      ...document.querySelectorAll<HTMLElement>(
+        "[data-chapter-status='active'] [data-chapter-step-kind]",
+      ),
+    ];
+
+    try {
+      await expect.poll(() => steps().length).toBe(3);
+      const [oldest, middle, newest] = steps();
+
+      const started = [
+        ...settled,
+        command("d-start", "tool.updated", "call-d", 8, "rg -n four src"),
+      ];
+      await screen.rerender(<MessagesTimeline {...props} timelineEntries={timelineFor(started)} />);
+      // The oldest step scrolls out in place; nothing that stays remounts.
+      expect(steps()).toHaveLength(4);
+      expect(steps().slice(0, 3)).toEqual([oldest, middle, newest]);
+      expect(oldest?.dataset.chapterStepLeaving).toBe("true");
+      const running = steps()[3]!;
+      expect(running.dataset.chapterStepStatus).toBe("running");
+
+      // Output streams in, then the call settles: still the same row, and no
+      // ghost of it appears in the leaving slot.
+      const streamed = [
+        ...started,
+        command("d-update", "tool.updated", "call-d", 9, "rg -n four src"),
+      ];
+      await screen.rerender(
+        <MessagesTimeline {...props} timelineEntries={timelineFor(streamed)} />,
+      );
+      const done = [
+        ...streamed,
+        command("d-done", "tool.completed", "call-d", 10, "rg -n four src"),
+      ];
+      await screen.rerender(<MessagesTimeline {...props} timelineEntries={timelineFor(done)} />);
+      expect(steps()[3]).toBe(running);
+      expect(running.dataset.chapterStepStatus).toBe("completed");
+      expect(steps().filter((step) => step.dataset.chapterStepLeaving === "true")).toEqual([
+        oldest,
+      ]);
+
+      // Once its collapse has played, the scrolled-out step unmounts.
+      await expect.poll(() => oldest?.isConnected, { timeout: 2_000 }).toBe(false);
+      expect(steps()).toEqual([middle, newest, running]);
+      await expect.element(page.getByRole("button", { name: "1 earlier step" })).toBeVisible();
     } finally {
       await screen.unmount();
     }
@@ -1182,16 +1275,16 @@ describe("MessagesTimeline", () => {
     const screen = await render(<MessagesTimeline {...props} timelineEntries={runningEntries} />);
 
     try {
-      const runningFold = page.getByRole("button", { name: /Working for/ });
+      const runningFold = page.getByRole("button", { name: /^Working/ });
       await expect.element(runningFold).toBeVisible();
       await expect.element(runningFold).toHaveAttribute("aria-expanded", "true");
+      // The live chapter: its paragraph and its steps, newest last.
       await expect
         .element(page.getByText("I am checking the current implementation."))
         .toBeVisible();
-      await expect
-        .element(page.getByText("Latest command · bun typecheck"))
-        .not.toBeInTheDocument();
-      await expect.element(page.getByText("Ran 2 tool calls · Running")).toBeVisible();
+      await expect.element(page.getByText("Latest command", { exact: true })).toBeVisible();
+      const liveChapter = document.querySelector<HTMLElement>("[data-chapter-status='active']");
+      expect(liveChapter?.dataset.chapterOpen).toBe("true");
 
       runningFold.element().focus();
       await userEvent.keyboard("{Enter}");
@@ -1241,10 +1334,10 @@ describe("MessagesTimeline", () => {
         />,
       );
 
+      // Folded while running, so it stays folded once it settles.
       const settledFold = page.getByRole("button", { name: "Worked for 40s" });
       await expect.element(settledFold).toBeVisible();
       await expect.element(settledFold).toHaveAttribute("aria-expanded", "false");
-      await expect.element(page.getByText("Response • Worked for 40s")).not.toBeInTheDocument();
       await expect.element(page.getByText("The redesign is complete.")).toBeVisible();
       await expect
         .element(page.getByText("I am checking the current implementation."))
@@ -1252,27 +1345,26 @@ describe("MessagesTimeline", () => {
 
       await settledFold.click();
       await expect.element(settledFold).toHaveAttribute("aria-expanded", "true");
-      await expect
-        .element(page.getByText("I am checking the current implementation."))
-        .toBeVisible();
-      await expect.element(page.getByText("Ran 2 tool calls · Running")).toBeVisible();
-
-      const previousToolsToggle = page.getByRole("button", {
-        name: "Ran 2 tool calls · Running",
+      // Finished chapters fold to one line: the paragraph as a title, no steps.
+      const chapterLine = page.getByRole("button", {
+        name: /I am checking the current implementation\./,
       });
-      previousToolsToggle.element().focus();
-      await userEvent.keyboard(" ");
-      await expect.element(page.getByText("First command · rg -n Working")).toBeVisible();
-      await expect.element(page.getByText("Latest command · bun typecheck")).toBeVisible();
-      await expect.element(previousToolsToggle).toHaveAttribute("aria-expanded", "true");
-      await userEvent.keyboard(" ");
-      await expect.element(page.getByText("First command · rg -n Working")).not.toBeInTheDocument();
+      await expect.element(chapterLine).toBeVisible();
       await expect
-        .element(page.getByText("Latest command · bun typecheck"))
+        .element(page.getByText("Latest command", { exact: true }))
         .not.toBeInTheDocument();
-      // The recap keeps its label in both states — the chevron carries the
-      // open/closed meaning, so the row does not rewrite itself on toggle.
-      await expect.element(previousToolsToggle).toHaveAttribute("aria-expanded", "false");
+
+      chapterLine.element().focus();
+      await userEvent.keyboard("{Enter}");
+      await expect.element(page.getByText("First command", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Latest command", { exact: true })).toBeVisible();
+
+      const foldChapter = page.getByRole("button", { name: "Fold chapter" });
+      await foldChapter.click();
+      await expect
+        .element(page.getByText("First command", { exact: true }))
+        .not.toBeInTheDocument();
+      await expect.element(chapterLine).toBeVisible();
     } finally {
       await screen.unmount();
     }

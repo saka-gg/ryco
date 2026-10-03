@@ -306,7 +306,7 @@ function useAccountAction() {
  * which made every involuntary teardown destroy a secret the Hub had already
  * made authoritative — and this panel is torn down for reasons that are not the
  * user's: `clearWebHostedNodeScopedState` calls `closeSettings()` on every
- * hosted node deactivate, suspend, and switch, and `LazySettingsDialogMount`
+ * hosted node deactivate, suspend, and switch, and `SettingsSurfaceMount`
  * remounts it at a new position whenever the presentation tier flips. Both left
  * the account holding recovery codes nobody had ever seen. The codes and the
  * enrolment secret now go away on an explicit acknowledgement (the buttons

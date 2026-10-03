@@ -1,3 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
+import { runMigrations } from "../persistence/Migrations.ts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -123,6 +129,62 @@ const insertWorktree = (
   `;
 
 statisticsLayer("StatisticsQuery", (it) => {
+  it.effect(
+    "reuses unchanged snapshots, shares concurrent reads, and invalidates after writes",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const statistics = yield* StatisticsQuery;
+        yield* clean(sql);
+        yield* insertProject(sql, "cached-project", "Cached");
+        yield* insertThread(
+          sql,
+          "cached-thread",
+          "cached-project",
+          "codex",
+          "gpt-5.4",
+          "2026-06-10T00:00:00.000Z",
+        );
+        const snapshots = yield* Effect.all(
+          Array.from({ length: 8 }, () => statistics.getStatistics()),
+          { concurrency: "unbounded" },
+        );
+        for (const snapshot of snapshots) assert.strictEqual(snapshot, snapshots[0]);
+        yield* sql`UPDATE projection_projects SET title = 'Renamed' WHERE project_id = 'cached-project'`;
+        const updated = yield* statistics.getStatistics();
+        assert.notStrictEqual(updated, snapshots[0]);
+        assert.equal(updated.projects[0]?.title, "Renamed");
+        assert.strictEqual(yield* statistics.getStatistics(), updated);
+      }),
+  );
+
+  it.effect("does not cache data inspected in a transaction that rolls back", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "rollback-project", "Saved");
+      yield* insertThread(
+        sql,
+        "rollback-thread",
+        "rollback-project",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`UPDATE projection_projects SET title = 'Uncommitted' WHERE project_id = 'rollback-project'`;
+            assert.equal((yield* statistics.getStatistics()).projects[0]?.title, "Uncommitted");
+            return yield* Effect.fail("rollback");
+          }),
+        )
+        .pipe(Effect.catch(() => Effect.void));
+      assert.equal((yield* statistics.getStatistics()).projects[0]?.title, "Saved");
+    }),
+  );
+
   it.effect("aggregates per-turn token deltas, file changes, and worktrees", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -527,3 +589,41 @@ statisticsLayer("StatisticsQuery", (it) => {
     }),
   );
 });
+
+it.effect("invalidates statistics after another SQLite connection commits", () =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(
+      Effect.sync(() => mkdtempSync(join(tmpdir(), "ryco-statistics-cache-"))),
+      (directory) => Effect.sync(() => rmSync(directory, { recursive: true, force: true })),
+    );
+    const filename = join(directory, "state.sqlite");
+    const persistence = Layer.effectDiscard(runMigrations()).pipe(
+      Layer.provideMerge(NodeSqliteClient.layer({ filename })),
+    );
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* insertProject(sql, "external", "Before");
+      yield* insertThread(
+        sql,
+        "external-thread",
+        "external",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      const previous = yield* statistics.getStatistics();
+      const other = yield* Effect.acquireRelease(
+        Effect.sync(() => new DatabaseSync(filename)),
+        (db) => Effect.sync(() => db.close()),
+      );
+      yield* Effect.sync(() =>
+        other.exec("UPDATE projection_projects SET title = 'After' WHERE project_id = 'external'"),
+      );
+      const refreshed = yield* statistics.getStatistics();
+      assert.notStrictEqual(previous, refreshed);
+      assert.equal(refreshed.projects[0]?.title, "After");
+      assert.strictEqual(yield* statistics.getStatistics(), refreshed);
+    }).pipe(Effect.provide(StatisticsQueryLive.pipe(Layer.provideMerge(persistence))));
+  }).pipe(Effect.scoped),
+);

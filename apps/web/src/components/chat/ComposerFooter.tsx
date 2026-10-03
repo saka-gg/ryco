@@ -25,6 +25,8 @@ import { ContextWindowMeter } from "./ContextWindowMeter";
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import { PhoneSessionPolicyControl } from "./PhoneSessionPolicySheet";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import type { ModelPickMeta } from "./modelPickerTuningBridge";
+import type { ModelTuningSummary } from "./modelTuning.logic";
 import {
   CAUTION_RUNTIME_MODE,
   CAUTION_RUNTIME_MODE_CLASS_NAME,
@@ -493,6 +495,7 @@ export interface ComposerFooterProps {
     instanceId: ProviderInstanceId,
     model: string,
     options?: ReadonlyArray<ProviderOptionSelection>,
+    meta?: ModelPickMeta,
   ) => void;
 
   // Mode controls
@@ -504,8 +507,16 @@ export interface ComposerFooterProps {
   tokenMode: AgentTokenMode;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
+  /** Every provider option, as menu rows: the phone tier's traits overflow. */
   providerTraitsMenuContent: ReactNode;
+  /** Only the options the tuning dial does not own: the desktop compact overflow. */
+  providerExtraTraitsMenuContent: ReactNode;
+  /** Chips for the options the tuning dial does not own (agent, variants). */
   providerTraitsChips: ReactNode;
+  /** Effort / fast mode / context dial docked in the model picker (desktop). */
+  providerModelTuning: ReactNode;
+  /** The model pill's readout of the same options. */
+  providerModelTuningSummary: ModelTuningSummary | null;
   onInteractionModeChange: (mode: ProviderInteractionMode) => void;
   onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
@@ -587,6 +598,12 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           {...(props.modelPickerIconClassName
             ? { activeProviderIconClassName: props.modelPickerIconClassName }
             : {})}
+          {...(isPhoneTier
+            ? {}
+            : {
+                tuning: props.providerModelTuning,
+                triggerTraits: props.providerModelTuningSummary,
+              })}
           onOpenChange={props.onModelPickerOpenChange}
           onInstanceModelChange={props.onProviderModelSelect}
         />
@@ -705,7 +722,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             tokenMode={props.tokenMode}
             showInteractionModeToggle={props.showInteractionModeToggle}
             askModeSupported={props.askModeSupported}
-            traitsMenuContent={props.providerTraitsMenuContent}
+            traitsMenuContent={props.providerExtraTraitsMenuContent}
             onInteractionModeChange={props.onInteractionModeChange}
             onTogglePlanSidebar={props.onTogglePlanSidebar}
             onRuntimeModeChange={props.onRuntimeModeChange}

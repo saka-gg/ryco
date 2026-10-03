@@ -94,6 +94,21 @@ export function formatElapsedDurationLabel(isoDate: string, nowMs: number = Date
 }
 
 /**
+ * Elapsed time since an ISO instant as a stopwatch reading: `4:12`, `1:02:09`.
+ * Suited to live counters that tick every second.
+ */
+export function formatElapsedClockLabel(isoDate: string, nowMs: number = Date.now()): string {
+  const totalSeconds = Math.max(0, Math.floor((nowMs - new Date(isoDate).getTime()) / 1000));
+  if (!Number.isFinite(totalSeconds)) return "0:00";
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`
+    : `${minutes}:${seconds}`;
+}
+
+/**
  * Relative time until an ISO instant (e.g. expiry). Mirrors {@link formatRelativeTime} but for future times.
  */
 export function formatRelativeTimeUntil(isoDate: string): { value: string; suffix: string | null } {

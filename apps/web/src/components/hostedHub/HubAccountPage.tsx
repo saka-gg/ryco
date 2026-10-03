@@ -7,6 +7,8 @@ import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 import { HubPage, HubPanel } from "./shell/HubPage";
 import { HubShell } from "./shell/HubShell";
+import { setHostedReadCacheEnabled, useHostedReadCache } from "../../hostedHub/readCache";
+import { Checkbox } from "../ui/checkbox";
 
 // Both panels are large and neither is on the Hub's first paint.
 const AccountSettingsPanel = lazy(() =>
@@ -91,7 +93,10 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
 
           <div className="min-w-0 flex-1">
             {section === "overview" ? (
-              <HubAccountOverview />
+              <div className="space-y-6">
+                <HubAccountOverview />
+                <RememberBrowserPanel />
+              </div>
             ) : (
               <Suspense fallback={<Skeleton className="h-64 w-full rounded-2xl" />}>
                 {section === "security" ? (
@@ -109,6 +114,31 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
         </div>
       </HubPage>
     </HubShell>
+  );
+}
+
+function RememberBrowserPanel() {
+  const cache = useHostedReadCache();
+  return (
+    <HubPanel
+      title="Instant reopening"
+      description="Keep recent conversations and text drafts in this browser so you can read and type while your devices reconnect."
+    >
+      <label className="flex items-center gap-3 text-sm">
+        <Checkbox
+          checked={cache.enabled}
+          onCheckedChange={(checked) => {
+            void setHostedReadCacheEnabled(checked === true);
+          }}
+        />
+        Remember this browser
+      </label>
+      <p className="mt-3 text-xs text-muted-foreground">
+        Only text is saved; draft attachments need to be added again. Anyone with access to this
+        browser profile can read the saved copy, including offline. Sending work still requires a
+        fresh connection. Turning this off or signing out removes the saved copy.
+      </p>
+    </HubPanel>
   );
 }
 

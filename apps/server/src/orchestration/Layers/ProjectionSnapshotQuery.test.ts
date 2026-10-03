@@ -1,3 +1,4 @@
+import { encodeMessageTextFallback, messageTextForSearch } from "../../persistence/messageText.ts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import {
   CheckpointRef,
@@ -13,6 +14,7 @@ import { assert, it } from "@effect/vitest";
 import { Effect, Fiber, Layer, Option } from "effect";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlStatement from "effect/unstable/sql/Statement";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
@@ -106,6 +108,70 @@ it.effect("loads every project and its history when optional Git identity probes
 });
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("looks up latest turns by thread without scanning turn history", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      for (const threadId of ["latest-lookup-active", "latest-lookup-deleted"]) {
+        yield* sql`INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at, latest_turn_id, deleted_at
+        ) VALUES (
+          ${threadId}, 'latest-lookup-project', ${threadId},
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          '2026-09-12T00:00:00.000Z', '2026-09-12T00:00:00.000Z', 'latest-lookup-turn-64',
+          ${threadId.endsWith("deleted") ? "2026-09-12T00:00:00.000Z" : null}
+        )`;
+        yield* sql`WITH RECURSIVE history(n) AS (
+          SELECT 1 UNION ALL SELECT n + 1 FROM history WHERE n < 64
+        ) INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, completed_at, checkpoint_files_json)
+        SELECT ${threadId}, 'latest-lookup-turn-' || n, 'completed',
+          '2026-09-12T00:00:00.000Z', '2026-09-12T00:01:00.000Z', '[]' FROM history`;
+      }
+      const latestQueries: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+      const capture: SqlStatement.Transformer = (statement) =>
+        Effect.sync(() => {
+          const compiled = statement.compile();
+          if (compiled[0].includes("JOIN projection_turns turns")) latestQueries.push(compiled);
+          return statement;
+        });
+      const shell = yield* query
+        .getShellSnapshot()
+        .pipe(Effect.provideService(SqlStatement.CurrentTransformer, capture));
+      yield* query
+        .getCommandReadModel()
+        .pipe(Effect.provideService(SqlStatement.CurrentTransformer, capture));
+      assert.equal(
+        shell.threads.find((thread) => thread.id === "latest-lookup-active")?.latestTurn?.turnId,
+        "latest-lookup-turn-64",
+      );
+      assert.isFalse(shell.threads.some((thread) => thread.id === "latest-lookup-deleted"));
+      assert.equal(latestQueries.length, 2);
+      for (const [statement, params] of latestQueries) {
+        const rows = yield* sql.unsafe(statement, params);
+        const previousRows = yield* sql.unsafe(
+          statement.replace("ORDER BY threads.thread_id ASC", "ORDER BY turns.thread_id ASC"),
+          params,
+        );
+        assert.deepEqual(rows, previousRows);
+        const plan = yield* sql.unsafe<{ detail: string }>(
+          `EXPLAIN QUERY PLAN ${statement}`,
+          params,
+        );
+        assert.isTrue(
+          plan.some((row) => /SEARCH turns .*thread_id=\? AND turn_id=\?/.test(row.detail)),
+          JSON.stringify(plan),
+        );
+        assert.isFalse(
+          plan.some((row) => /SCAN turns/.test(row.detail)),
+          JSON.stringify(plan),
+        );
+      }
+      yield* sql`DELETE FROM projection_turns WHERE thread_id IN ('latest-lookup-active', 'latest-lookup-deleted')`;
+      yield* sql`DELETE FROM projection_threads WHERE thread_id IN ('latest-lookup-active', 'latest-lookup-deleted')`;
+    }),
+  );
+
   it.effect(
     "keeps inbox completion recency stable during live turns in snapshots and shell updates",
     () =>
@@ -892,6 +958,63 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         wildcardResults.map((result) => result.messageId),
         [asMessageId("message-search-wildcard")],
       );
+
+      // Compare the indexed path against the previous exact predicate over
+      // punctuation, Unicode, JSON fallback bodies, and split streaming text.
+      const bodies = [
+        "Alpha_100% mixed CASE",
+        "alphaX100x",
+        "Ünicode 日本語 alpha",
+        "before\0alpha after",
+        "plain short",
+        "foo\\bar",
+        'quotes " AND OR',
+        "😀alpha",
+        "lone \ud800 alpha",
+      ];
+      for (const [index, body] of bodies.entries()) {
+        yield* sql`INSERT INTO projection_thread_messages(message_id, thread_id, role, text, text_json, is_streaming, created_at, updated_at)
+          VALUES(${`parity-${index}`}, 'thread-search-a', 'assistant', ${body}, ${encodeMessageTextFallback(body)}, 0, '2026-03-01T01:00:00.000Z', '2026-03-01T01:00:00.000Z')`;
+      }
+      yield* sql`INSERT INTO projection_thread_messages(message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        VALUES('parity-stream', 'thread-search-a', 'assistant', 'alp', 1, '2026-03-01T01:00:00.000Z', '2026-03-01T01:00:00.000Z')`;
+      yield* sql`INSERT INTO projection_message_chunks(message_id, event_sequence, text_json) VALUES('parity-stream', 1, '"ha_100% streamed"')`;
+      for (const query of [
+        "alpha",
+        "ALPHA_100%",
+        "100%",
+        "日本語",
+        "Ünicode",
+        "lo",
+        "%",
+        "_",
+        "foo\\bar",
+        "AND OR",
+        "😀alpha",
+        "before\0alpha",
+        "missing-token",
+        "uthent",
+      ]) {
+        const pattern = `%${query
+          .trim()
+          .toLowerCase()
+          .replace(/[\\%_]/g, "\\$&")}%`;
+        const expected = yield* sql<{ messageId: string }>`SELECT messages.message_id AS "messageId"
+          FROM projection_thread_messages messages
+          WHERE messages.thread_id = 'thread-search-a'
+            AND lower(${messageTextForSearch(sql, "messages")}) LIKE ${pattern} ESCAPE '\\'
+          ORDER BY messages.created_at DESC, messages.message_id DESC LIMIT 50`;
+        const actual = yield* snapshotQuery.searchThreadMessages({
+          query,
+          threadId: ThreadId.make("thread-search-a"),
+          limit: 50,
+        });
+        assert.deepEqual(
+          actual.map((row) => row.messageId),
+          expected.map((row) => row.messageId),
+          query,
+        );
+      }
     }),
   );
 

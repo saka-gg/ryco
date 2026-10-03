@@ -9,8 +9,15 @@ import {
   type ServerProvider,
 } from "@ryco/contracts";
 import type { WsRpcClient } from "@ryco/client-runtime/rpc";
+import { SearchIcon } from "lucide-react";
+
+import { cn } from "../../lib/utils";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
+import { SETTINGS_INSET_CLASS, SettingsBlock, SettingsNotice, SettingsRow } from "./settingsLayout";
+import { SettingsSelect } from "./SettingsSelect";
 
 export interface SessionImportPanelProps {
   readonly nodeLabel: string;
@@ -225,247 +232,315 @@ export function SessionImportPanel({
       if (attempt === generation.current) setBusy(false);
     }
   };
+  const changeSource = (value: SessionImportSource) => {
+    setSource(value);
+    generation.current++;
+    setStores([]);
+    setRecovery({});
+    setStoreKey("");
+    setItems([]);
+    setNext(null);
+    setInstance("");
+    setModel("");
+    setSelected(new Set());
+    setStatuses({});
+  };
+  const changeStore = (value: string) => {
+    generation.current++;
+    setStoreKey(value);
+    setItems([]);
+    setSelected(new Set());
+    setRecovery({});
+    setNext(null);
+    setStatuses({});
+  };
+  const visibleItems = allowed ? items : [];
+  const importable = visibleItems.filter(
+    (item) =>
+      selected.has(item.key) &&
+      !item.importedThreadId &&
+      !item.quarantined &&
+      statuses[item.key] !== "Imported",
+  ).length;
   return (
-    <section aria-label="Import local conversations" className="space-y-4">
-      <p className="text-sm text-muted-foreground">
-        Read Codex or Claude history from {nodeLabel}. Originals stay unchanged. New turns use
-        separate native session copies. Only supported user and assistant text is displayed.
-      </p>
-      <div className="flex flex-wrap items-center gap-3">
-        <label>
-          Source{" "}
-          <select
-            aria-label="Import source"
-            value={source}
-            disabled={busy}
-            onChange={(event) => {
-              setSource(event.target.value as SessionImportSource);
-              generation.current++;
-              setStores([]);
-              setRecovery({});
-              setStoreKey("");
-              setItems([]);
-              setNext(null);
-              setInstance("");
-              setModel("");
-              setSelected(new Set());
-              setStatuses({});
-            }}
-          >
-            <option value="codex">Codex</option>
-            <option value="claudeAgent">Claude Code</option>
-          </select>
-        </label>
-        <label>
-          Source store{" "}
-          <select
-            aria-label="Import source store"
-            value={activeStore?.key ?? ""}
-            disabled={busy || !allowed}
-            onChange={(event) => {
-              generation.current++;
-              setStoreKey(event.target.value);
-              setItems([]);
-              setSelected(new Set());
-              setRecovery({});
-              setNext(null);
-              setStatuses({});
-            }}
-          >
-            {!activeStore && <option value="">Choose a configured store</option>}
-            {stores.map((store) => (
-              <option key={store.key} value={store.key}>
-                {store.label}
-                {store.instanceIds.length ? "" : " (no enabled continuation instance)"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <Input
-          aria-label="Search local conversations"
-          placeholder="Search title or project folder"
-          value={search}
-          maxLength={200}
-          disabled={busy}
-          onChange={(event) => setSearch(event.target.value)}
-        />
-        <label className="flex gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={archived}
-            disabled={busy}
-            onChange={(event) => setArchived(event.target.checked)}
-          />
-          Include archived
-        </label>
-        <Button
-          variant="outline"
-          disabled={busy || !allowed || !activeStore}
-          onClick={() => void discover()}
-        >
-          Find conversations
-        </Button>
-      </div>
-      <div role="status" className="text-sm">
-        {notices.map((notice) => (
-          <p key={notice}>{notice}</p>
-        ))}
-      </div>
-      <div className="max-h-80 overflow-auto divide-y">
-        {(allowed ? items : []).map((item) => (
-          <div key={item.key} className="flex gap-3 py-3 text-sm">
-            <input
-              type="checkbox"
-              aria-label={`Select ${item.title}`}
-              disabled={
-                busy ||
-                !!item.importedThreadId ||
-                item.quarantined ||
-                statuses[item.key] === "Imported"
-              }
-              checked={selected.has(item.key)}
-              onChange={(event) =>
-                setSelected((previous) => {
-                  const updated = new Set(previous);
-                  if (event.target.checked) updated.add(item.key);
-                  else updated.delete(item.key);
-                  return updated;
-                })
-              }
+    <div aria-label="Import local conversations" role="group">
+      <SettingsRow
+        title="Source"
+        description="Which agent's history to read. Originals stay unchanged."
+        control={
+          <>
+            <SettingsSelect<SessionImportSource>
+              ariaLabel="Import source"
+              width="sm"
+              value={source}
+              disabled={busy}
+              onValueChange={changeSource}
+              options={[
+                { value: "codex", label: "Codex" },
+                { value: "claudeAgent", label: "Claude Code" },
+              ]}
             />
-            <div className="min-w-0">
-              <span className="block break-words">
-                {item.title}
-                {item.archived ? " (archived)" : ""}
-              </span>
-              <span className="block break-all text-muted-foreground">
-                {item.cwd || "Original folder unknown"} · {item.messageCount} messages
-              </span>
-              <span role="status">
-                {item.quarantined
-                  ? statuses[item.key] || "Import outcome uncertain — item quarantined"
-                  : item.importedThreadId
-                    ? "Already imported"
-                    : statuses[item.key]}
-              </span>
-              {item.quarantined && (
-                <div className="mt-2 space-y-2">
-                  <Button
-                    variant="outline"
-                    disabled={busy || !allowed}
-                    onClick={() => void inspect(item)}
-                  >
-                    Inspect existing copies
-                  </Button>
-                  {recovery[item.key] && (
-                    <div aria-label={`Recovery for ${item.title}`}>
-                      <p role="status">{recovery[item.key]!.notice}</p>
-                      {recovery[item.key]!.candidates.map((candidate) => (
-                        <p key={candidate.id}>
-                          Copy {candidate.id} · {candidate.messageCount} messages
-                        </p>
-                      ))}
-                      {recovery[item.key]!.nextCursor && (
-                        <Button
-                          variant="outline"
-                          disabled={busy || !allowed}
-                          onClick={() => void inspect(item, recovery[item.key]!.nextCursor!)}
-                        >
-                          Inspect next page
-                        </Button>
-                      )}
-                      {recovery[item.key]!.state === "unique" &&
-                        recovery[item.key]!.adoptionToken && (
-                          <Button
-                            disabled={busy || !allowed}
-                            onClick={() => void adopt(item, recovery[item.key]!.adoptionToken!)}
-                          >
-                            Adopt proven copy
-                          </Button>
-                        )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-      {next !== null && (
-        <Button variant="outline" disabled={busy || !allowed} onClick={() => void discover(next)}>
-          Search next page
-        </Button>
-      )}
-      <label className="block text-sm">
-        Target project (also for moved or missing folders)
-        <select
-          className="ml-2 max-w-full"
-          aria-label="Import target project"
-          value={project}
-          disabled={busy}
-          onChange={(event) => setProject(event.target.value)}
-        >
-          <option value="">Choose an existing project</option>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      {!projects.length && (
-        <p className="text-sm">Add a project folder in the sidebar, then return here to import.</p>
-      )}
-      <label className="block text-sm">
-        Continue with
-        <select
-          className="ml-2"
-          aria-label="Import provider instance"
-          value={activeProvider?.instanceId || ""}
-          disabled={busy}
-          onChange={(event) => {
-            setInstance(event.target.value);
-            setModel("");
+            <SettingsSelect
+              ariaLabel="Import source store"
+              value={activeStore?.key ?? ""}
+              disabled={busy || !allowed}
+              placeholder="Choose a store"
+              onValueChange={changeStore}
+              options={stores.map((store) => ({
+                value: store.key,
+                label: store.instanceIds.length
+                  ? store.label
+                  : `${store.label} (no enabled continuation instance)`,
+                triggerLabel: store.label,
+              }))}
+            />
+          </>
+        }
+      />
+      <SettingsBlock>
+        <form
+          className="flex flex-col gap-3 sm:flex-row sm:items-center"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!busy && allowed && activeStore) void discover();
           }}
         >
-          {providers.map((p) => (
-            <option key={p.instanceId} value={p.instanceId}>
-              {p.displayName || p.driver}
-            </option>
-          ))}
-        </select>
-      </label>
-      {!providers.length && (
-        <p className="text-sm">
-          Enable a matching provider instance to import and continue these conversations.
-        </p>
-      )}
-      <label className="block text-sm">
-        Model for new turns{" "}
-        <select
-          aria-label="Continuation model"
-          value={activeModel?.slug ?? ""}
-          disabled={busy || !activeModel}
-          onChange={(event) => setModel(event.target.value)}
-        >
-          {!activeModel && (
-            <option value="">No available models — refresh Providers settings</option>
-          )}
-          {activeProvider?.models.map((choice) => (
-            <option key={choice.slug} value={choice.slug}>
-              {choice.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <Button
-        disabled={
-          busy || !allowed || !project || !providers.length || !activeModel || !selected.size
+          <Input
+            aria-label="Search local conversations"
+            placeholder={`Search ${nodeLabel} by title or project folder`}
+            value={search}
+            maxLength={200}
+            disabled={busy}
+            className="min-w-0 flex-1"
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <div className="flex shrink-0 items-center gap-3">
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+              <Checkbox
+                checked={archived}
+                disabled={busy}
+                onCheckedChange={(checked) => setArchived(checked === true)}
+              />
+              Include archived
+            </label>
+            <Button
+              type="submit"
+              size="sm"
+              variant="outline"
+              disabled={busy || !allowed || !activeStore}
+            >
+              <SearchIcon />
+              Find conversations
+            </Button>
+          </div>
+        </form>
+        {notices.length > 0 ? (
+          <div role="status" className="mt-3 flex flex-col gap-2">
+            {notices.map((notice) => (
+              <SettingsNotice key={notice}>{notice}</SettingsNotice>
+            ))}
+          </div>
+        ) : null}
+      </SettingsBlock>
+      {visibleItems.length > 0 ? (
+        <SettingsBlock flush>
+          <ul className="max-h-96 divide-y divide-border/60 overflow-y-auto">
+            {visibleItems.map((item) => {
+              const status = item.quarantined
+                ? statuses[item.key] || "Import outcome uncertain — item quarantined"
+                : item.importedThreadId
+                  ? "Already imported"
+                  : statuses[item.key];
+              const itemRecovery = recovery[item.key];
+              return (
+                <li key={item.key} className={cn("flex gap-3 py-3", SETTINGS_INSET_CLASS)}>
+                  <Checkbox
+                    className="mt-0.5"
+                    aria-label={`Select ${item.title}`}
+                    disabled={
+                      busy ||
+                      !!item.importedThreadId ||
+                      item.quarantined ||
+                      statuses[item.key] === "Imported"
+                    }
+                    checked={selected.has(item.key)}
+                    onCheckedChange={(checked) =>
+                      setSelected((previous) => {
+                        const updated = new Set(previous);
+                        if (checked === true) updated.add(item.key);
+                        else updated.delete(item.key);
+                        return updated;
+                      })
+                    }
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="flex min-w-0 items-center gap-2 text-[13px] font-medium text-foreground">
+                      <span className="min-w-0 break-words">{item.title}</span>
+                      {item.archived ? (
+                        <Badge variant="outline" size="sm">
+                          Archived
+                        </Badge>
+                      ) : null}
+                    </p>
+                    <p className="mt-0.5 break-all text-xs text-muted-foreground">
+                      {item.cwd || "Original folder unknown"} · {item.messageCount} messages
+                    </p>
+                    {status ? (
+                      <p
+                        role="status"
+                        className={cn(
+                          "mt-1 text-xs",
+                          status === "Imported" || status === "Already imported"
+                            ? "text-success-foreground"
+                            : item.quarantined
+                              ? "text-warning-foreground"
+                              : "text-muted-foreground",
+                        )}
+                      >
+                        {status}
+                      </p>
+                    ) : null}
+                    {item.quarantined ? (
+                      <div className="mt-2 flex flex-col items-start gap-2">
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          disabled={busy || !allowed}
+                          onClick={() => void inspect(item)}
+                        >
+                          Inspect existing copies
+                        </Button>
+                        {itemRecovery ? (
+                          <div
+                            aria-label={`Recovery for ${item.title}`}
+                            className="flex flex-col items-start gap-1.5 text-xs text-muted-foreground"
+                          >
+                            <p role="status">{itemRecovery.notice}</p>
+                            {itemRecovery.candidates.map((candidate) => (
+                              <p key={candidate.id} className="break-all font-mono text-[11px]">
+                                Copy {candidate.id} · {candidate.messageCount} messages
+                              </p>
+                            ))}
+                            <div className="flex flex-wrap gap-2">
+                              {itemRecovery.nextCursor ? (
+                                <Button
+                                  size="xs"
+                                  variant="outline"
+                                  disabled={busy || !allowed}
+                                  onClick={() => void inspect(item, itemRecovery.nextCursor!)}
+                                >
+                                  Inspect next page
+                                </Button>
+                              ) : null}
+                              {itemRecovery.state === "unique" && itemRecovery.adoptionToken ? (
+                                <Button
+                                  size="xs"
+                                  disabled={busy || !allowed}
+                                  onClick={() => void adopt(item, itemRecovery.adoptionToken!)}
+                                >
+                                  Adopt proven copy
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          {next !== null ? (
+            <div className={cn("border-t border-border/60 py-2.5", SETTINGS_INSET_CLASS)}>
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={busy || !allowed}
+                onClick={() => void discover(next)}
+              >
+                Search next page
+              </Button>
+            </div>
+          ) : null}
+        </SettingsBlock>
+      ) : null}
+      <SettingsRow
+        title="Add to project"
+        description="Imported threads join this project, including ones whose original folder moved."
+        status={
+          !projects.length
+            ? "Add a project folder in the sidebar, then return here to import."
+            : undefined
         }
-        onClick={() => void run()}
-      >
-        {busy ? "Working…" : "Import selected / retry failed"}
-      </Button>
-    </section>
+        control={
+          <SettingsSelect
+            ariaLabel="Import target project"
+            value={project}
+            disabled={busy}
+            placeholder="Choose a project"
+            onValueChange={setProject}
+            options={projects.map((entry) => ({ value: entry.id, label: entry.name }))}
+          />
+        }
+      />
+      <SettingsRow
+        title="Continue with"
+        description="The agent and model that take over new turns in imported threads."
+        status={
+          !providers.length
+            ? "Enable a matching provider instance to import and continue these conversations."
+            : !activeModel
+              ? "No available models — refresh Providers settings."
+              : undefined
+        }
+        control={
+          <>
+            <SettingsSelect
+              ariaLabel="Import provider instance"
+              width="sm"
+              value={activeProvider?.instanceId ?? ""}
+              disabled={busy || !providers.length}
+              placeholder="No provider"
+              onValueChange={(value) => {
+                setInstance(value);
+                setModel("");
+              }}
+              options={providers.map((entry) => ({
+                value: entry.instanceId,
+                label: entry.displayName || entry.driver,
+              }))}
+            />
+            <SettingsSelect
+              ariaLabel="Continuation model"
+              value={activeModel?.slug ?? ""}
+              disabled={busy || !activeModel}
+              placeholder="No model"
+              onValueChange={setModel}
+              options={(activeProvider?.models ?? []).map((choice) => ({
+                value: choice.slug,
+                label: choice.name,
+              }))}
+            />
+          </>
+        }
+      />
+      <SettingsBlock className="flex items-center justify-end gap-3">
+        {selected.size > 0 ? (
+          <span className="text-xs text-muted-foreground">
+            {importable === 1 ? "1 conversation" : `${importable} conversations`} selected
+          </span>
+        ) : null}
+        <Button
+          size="sm"
+          disabled={
+            busy || !allowed || !project || !providers.length || !activeModel || !selected.size
+          }
+          onClick={() => void run()}
+        >
+          {busy ? "Working…" : "Import selected"}
+        </Button>
+      </SettingsBlock>
+    </div>
   );
 }

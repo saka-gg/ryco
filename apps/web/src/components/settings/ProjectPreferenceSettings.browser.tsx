@@ -11,7 +11,7 @@ import {
   type ServerSettingsPatch,
 } from "@ryco/contracts";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
-import { ProjectPreferenceSettings } from "./ProjectPreferenceSettings";
+import { ProjectDefaultsSection } from "./ProjectDefaultsSection";
 
 const harness = vi.hoisted(() => ({
   config: null as ServerConfig | null,
@@ -103,11 +103,11 @@ beforeEach(() => {
 
 describe("project inheritance controls", () => {
   it("shows effective inheritance, writes only one project field, and resets to node defaults", async () => {
-    await render(<ProjectPreferenceSettings />);
+    await render(<ProjectDefaultsSection />);
     await page.getByRole("combobox", { name: "Project default scope" }).click();
     await page.getByRole("option", { name: "Fixture project" }).click();
     await expect
-      .element(page.getByText("Inherited from node defaults", { exact: true }).first())
+      .element(page.getByText("Inherited from device defaults", { exact: true }).first())
       .toBeVisible();
     await page.getByRole("combobox", { name: "Worktree setup" }).click();
     await page.getByRole("option", { name: "Skip setup" }).click();
@@ -123,13 +123,9 @@ describe("project inheritance controls", () => {
         ],
       ]);
     await expect
-      .element(
-        page.getByText(
-          "Overridden for this project. Run the project's existing setup script after creating a worktree.",
-        ),
-      )
+      .element(page.getByText("Overridden for this project", { exact: true }))
       .toBeVisible();
-    await page.getByRole("button", { name: "Use node default" }).click();
+    await page.getByRole("button", { name: "Use device default for worktree setup" }).click();
     await expect
       .poll(() => harness.update.mock.calls[1])
       .toEqual([
@@ -145,7 +141,7 @@ describe("project inheritance controls", () => {
     harness.connected = false;
     harness.canManage = false;
     harness.canMutate = false;
-    await render(<ProjectPreferenceSettings />);
+    await render(<ProjectDefaultsSection />);
     await expect
       .element(page.getByRole("combobox", { name: "Project default scope" }))
       .toBeDisabled();
@@ -159,7 +155,7 @@ describe("project inheritance controls", () => {
     harness.update.mockRejectedValue(
       new Error("Project preferences changed elsewhere. Reload before saving."),
     );
-    await render(<ProjectPreferenceSettings />);
+    await render(<ProjectDefaultsSection />);
     await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeEnabled();
     await page.getByRole("combobox", { name: "Worktree setup" }).click();
     await page.getByRole("option", { name: "Skip setup" }).click();
@@ -169,15 +165,15 @@ describe("project inheritance controls", () => {
     expect(harness.local).not.toHaveBeenCalled();
   });
   it("does not fall back to node defaults when a selected project is removed", async () => {
-    const mounted = await render(<ProjectPreferenceSettings />);
+    const mounted = await render(<ProjectDefaultsSection />);
     await page.getByRole("combobox", { name: "Project default scope" }).click();
     await page.getByRole("option", { name: "Fixture project" }).click();
     await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeEnabled();
     await expect
-      .element(page.getByText("Inherited from node defaults", { exact: true }).first())
+      .element(page.getByText("Inherited from device defaults", { exact: true }).first())
       .toBeVisible();
     harness.projects = [];
-    await mounted.rerender(<ProjectPreferenceSettings />);
+    await mounted.rerender(<ProjectDefaultsSection />);
     await expect.element(page.getByRole("alert")).toHaveTextContent("Project no longer exists");
     await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeDisabled();
     expect(harness.update).not.toHaveBeenCalled();

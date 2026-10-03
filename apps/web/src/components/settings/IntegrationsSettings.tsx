@@ -17,11 +17,9 @@ import {
   CheckIcon,
   ClipboardIcon,
   KeyRoundIcon,
-  Link2OffIcon,
   PlusIcon,
   RefreshCwIcon,
   SaveIcon,
-  ShieldCheckIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -31,7 +29,18 @@ import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { useSettingsTarget } from "../../settingsTarget";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
+import { Radio, RadioGroup } from "../ui/radio-group";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import {
+  SettingsBlock,
+  SettingsEmpty,
+  SettingsNotice,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
+import { SettingsSelect } from "./SettingsSelect";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { retryAgentControlStartup } from "./agentControlStartupRetry";
 
@@ -217,9 +226,9 @@ export function AgentControlIntegrationFormFields({
   readonly clientLocked?: boolean;
 }) {
   return (
-    <div className="grid gap-4">
+    <div className="grid gap-5">
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="grid gap-1.5 text-xs font-medium">
+        <label className="grid gap-1.5 text-xs font-medium text-foreground">
           Display name
           <Input
             value={form.displayName}
@@ -227,79 +236,77 @@ export function AgentControlIntegrationFormFields({
             onChange={(event) => onChange({ ...form, displayName: event.target.value })}
           />
         </label>
-        <label className="grid gap-1.5 text-xs font-medium">
+        <div className="grid gap-1.5 text-xs font-medium text-foreground">
           Client
-          <select
-            className="h-9 rounded-lg border border-input bg-background px-3 text-sm"
+          <SettingsSelect<AgentControlExternalClientKind>
+            ariaLabel="Client"
+            width="full"
             value={form.clientKind}
             disabled={clientLocked}
-            onChange={(event) =>
-              onChange({
-                ...form,
-                clientKind: event.target.value as AgentControlExternalClientKind,
-              })
-            }
-          >
-            {Object.entries(AGENT_CONTROL_CLIENT_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+            onValueChange={(clientKind) => onChange({ ...form, clientKind })}
+            options={Object.entries(AGENT_CONTROL_CLIENT_LABELS).map(([value, label]) => ({
+              value: value as AgentControlExternalClientKind,
+              label,
+            }))}
+          />
+        </div>
       </div>
 
       <fieldset className="grid gap-2">
-        <legend className="text-xs font-medium">Project scope</legend>
-        <label className="flex items-start gap-2 text-sm">
-          <input
-            type="radio"
-            checked={form.scopeKind === "all"}
-            onChange={() => onChange({ ...form, scopeKind: "all" })}
-          />
-          <span>
-            All current and future projects
-            <span className="block text-xs text-muted-foreground">
-              The client can discover every project on this local Ryco instance.
+        <legend className="mb-2 text-xs font-medium text-foreground">Project scope</legend>
+        <RadioGroup
+          value={form.scopeKind}
+          onValueChange={(value) =>
+            onChange({ ...form, scopeKind: value === "selected" ? "selected" : "all" })
+          }
+          className="gap-3"
+        >
+          <label className="flex cursor-pointer items-start gap-2.5 text-[13px] text-foreground">
+            <Radio value="all" className="mt-0.5" />
+            <span>
+              All current and future projects
+              <span className="block text-xs text-muted-foreground">
+                The client can discover every project on this local Ryco instance.
+              </span>
             </span>
-          </span>
-        </label>
-        <label className="flex items-start gap-2 text-sm">
-          <input
-            type="radio"
-            checked={form.scopeKind === "selected"}
-            onChange={() => onChange({ ...form, scopeKind: "selected" })}
-          />
-          <span className="min-w-0 flex-1">
-            Selected projects
-            <Input
-              className="mt-1.5"
-              value={form.projectIds}
-              disabled={form.scopeKind !== "selected"}
-              placeholder="project-id-1, project-id-2"
-              aria-label="Selected project IDs"
-              onChange={(event) => onChange({ ...form, projectIds: event.target.value })}
-            />
-            <span className="mt-1 block text-xs text-muted-foreground">
-              Comma-separated stable project IDs. Unknown IDs remain inaccessible.
+          </label>
+          <label className="flex cursor-pointer items-start gap-2.5 text-[13px] text-foreground">
+            <Radio value="selected" className="mt-0.5" />
+            <span className="min-w-0 flex-1">
+              Selected projects
+              <Input
+                className="mt-1.5"
+                value={form.projectIds}
+                disabled={form.scopeKind !== "selected"}
+                placeholder="project-id-1, project-id-2"
+                aria-label="Selected project IDs"
+                onChange={(event) => onChange({ ...form, projectIds: event.target.value })}
+              />
+              <span className="mt-1 block text-xs text-muted-foreground">
+                Comma-separated stable project IDs. Unknown IDs remain inaccessible.
+              </span>
             </span>
-          </span>
-        </label>
+          </label>
+        </RadioGroup>
       </fieldset>
 
-      <fieldset className="grid gap-2">
-        <legend className="text-xs font-medium">Capability grants</legend>
+      <fieldset className="grid gap-3">
+        <legend className="mb-2 text-xs font-medium text-foreground">Capability grants</legend>
         {CAPABILITY_OPTIONS.map((option) => (
-          <label key={option.capability} className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
+          <label
+            key={option.capability}
+            className="flex cursor-pointer items-start gap-2.5 text-[13px] text-foreground"
+          >
+            <Checkbox
+              className="mt-0.5"
               checked={form.capabilities.includes(option.capability)}
-              onChange={(event) =>
+              onCheckedChange={(checked) =>
                 onChange({
                   ...form,
-                  capabilities: event.target.checked
-                    ? [...form.capabilities, option.capability]
-                    : form.capabilities.filter((value) => value !== option.capability),
+                  capabilities:
+                    checked === true
+                      ? [...form.capabilities, option.capability]
+                      : form.capabilities.filter((value) => value !== option.capability),
                 })
               }
             />
@@ -312,7 +319,7 @@ export function AgentControlIntegrationFormFields({
       </fieldset>
 
       <div className="grid gap-3 sm:grid-cols-3">
-        <label className="grid gap-1.5 text-xs font-medium">
+        <label className="grid gap-1.5 text-xs font-medium text-foreground">
           Expires
           <Input
             type="datetime-local"
@@ -321,7 +328,7 @@ export function AgentControlIntegrationFormFields({
           />
           <span className="font-normal text-muted-foreground">Empty means no expiry.</span>
         </label>
-        <label className="grid gap-1.5 text-xs font-medium">
+        <label className="grid gap-1.5 text-xs font-medium text-foreground">
           Requests per minute
           <Input
             type="number"
@@ -331,7 +338,7 @@ export function AgentControlIntegrationFormFields({
             onChange={(event) => onChange({ ...form, rateLimitPerMinute: event.target.value })}
           />
         </label>
-        <label className="grid gap-1.5 text-xs font-medium">
+        <label className="grid gap-1.5 text-xs font-medium text-foreground">
           Concurrent active tasks
           <Input
             type="number"
@@ -343,6 +350,30 @@ export function AgentControlIntegrationFormFields({
         </label>
       </div>
     </div>
+  );
+}
+
+function CopyButton({
+  copied,
+  onClick,
+  label,
+  iconOnly = false,
+}: {
+  copied: boolean;
+  onClick: () => void;
+  label: string;
+  iconOnly?: boolean;
+}) {
+  return (
+    <Button
+      size={iconOnly ? "icon-xs" : "xs"}
+      variant="outline"
+      aria-label={iconOnly ? label : undefined}
+      onClick={onClick}
+    >
+      {copied ? <CheckIcon /> : <ClipboardIcon />}
+      {iconOnly ? null : label}
+    </Button>
   );
 }
 
@@ -459,155 +490,155 @@ export function ExternalIntegrationsSettings() {
   };
 
   return (
-    <section data-testid="external-integrations" className="border-b bg-muted/10 p-6 sm:p-8">
-      <div className="mx-auto grid w-full max-w-4xl gap-5">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-              <ShieldCheckIcon className="size-3.5" />
-              Agent Control
-            </div>
-            <h2 className="mt-1 text-lg font-semibold tracking-[-0.01em]">External integrations</h2>
-            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground/80">
-              Pair a local MCP client with a revocable identity. Every task request waits in Ryco
-              for explicit user approval before a thread is created.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Button
-              size="icon"
-              variant="outline"
-              aria-label="Refresh integrations"
-              onClick={() => void refresh()}
-            >
-              <RefreshCwIcon />
+    <SettingsSection
+      data-testid="external-integrations"
+      title="External integrations"
+      description="Pair a local MCP client with a revocable identity. Every task request waits in Ryco for explicit user approval before a thread is created."
+      headerAction={
+        <>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground"
+                  aria-label="Refresh integrations"
+                  onClick={() => void refresh()}
+                >
+                  <RefreshCwIcon />
+                </Button>
+              }
+            />
+            <TooltipPopup>Refresh</TooltipPopup>
+          </Tooltip>
+          <Button
+            size="xs"
+            disabled={!api || !state.topology.available}
+            onClick={() => {
+              setEditingId(null);
+              setForm(createAgentControlIntegrationForm());
+              setCreating((value) => !value);
+            }}
+          >
+            <PlusIcon />
+            New integration
+          </Button>
+        </>
+      }
+    >
+      {!state.topology.available ? (
+        <SettingsBlock>
+          <SettingsNotice tone="warning" title="Local pairing is unavailable">
+            {state.topology.reason ?? "Ryco could not prove a direct loopback-only topology."}{" "}
+            External setup fails closed while Ryco is remotely exposed or Hub-connected.
+          </SettingsNotice>
+        </SettingsBlock>
+      ) : null}
+
+      {creating ? (
+        <SettingsBlock className="settings-subsections-enter bg-muted/30">
+          <AgentControlIntegrationFormFields form={form} onChange={setForm} />
+          <div className="mt-5 flex justify-end gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setCreating(false)}>
+              Cancel
             </Button>
-            <Button
-              disabled={!api || !state.topology.available}
-              onClick={() => {
-                setEditingId(null);
-                setForm(createAgentControlIntegrationForm());
-                setCreating((value) => !value);
-              }}
-            >
-              <PlusIcon />
-              New integration
+            <Button size="sm" disabled={busyId === "new"} onClick={() => void create()}>
+              <KeyRoundIcon />
+              Create and pair
             </Button>
           </div>
-        </header>
+        </SettingsBlock>
+      ) : null}
 
-        {!state.topology.available ? (
-          <div className="flex gap-3 rounded-xl border border-warning/30 bg-warning/8 p-4 text-sm">
-            <Link2OffIcon className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
-            <div>
-              <p className="font-medium">Local pairing is unavailable</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {state.topology.reason ?? "Ryco could not prove a direct loopback-only topology."}{" "}
-                External setup fails closed while Ryco is remotely exposed or Hub-connected.
-              </p>
-            </div>
-          </div>
-        ) : null}
+      {state.integrations.length === 0 && !creating ? (
+        <SettingsEmpty
+          icon={<KeyRoundIcon />}
+          title="No external integrations"
+          description="Create one to pair an MCP client Ryco can't detect on its own."
+          className="py-8"
+        />
+      ) : null}
 
-        {creating ? (
-          <div className="grid gap-4 rounded-xl border bg-card p-4">
-            <AgentControlIntegrationFormFields form={form} onChange={setForm} />
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setCreating(false)}>
-                Cancel
-              </Button>
-              <Button disabled={busyId === "new"} onClick={() => void create()}>
-                <KeyRoundIcon />
-                Create and pair
-              </Button>
-            </div>
-          </div>
-        ) : null}
-
-        {state.integrations.length === 0 && !creating ? (
-          <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-            No external integrations are configured.
-          </div>
-        ) : null}
-
-        {state.integrations.map((detail) => {
-          const integration = detail.integration;
-          const status = statusFor(detail);
-          const pairingCode = state.pairingCodes[integration.integrationId];
-          const pairCommand = toCommand(
-            detail.setup.pairCommand.command,
-            detail.setup.pairCommand.args,
-          );
-          const isEditing = editingId === integration.integrationId;
-          return (
-            <article
-              key={integration.integrationId}
-              className="grid gap-4 rounded-xl border bg-card p-4"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="font-semibold">{integration.displayName}</h3>
-                    <Badge variant={status.variant}>{status.label}</Badge>
-                    <Badge variant="outline">
-                      {AGENT_CONTROL_CLIENT_LABELS[integration.clientKind]}
-                    </Badge>
-                  </div>
-                  <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-                    {integration.integrationId}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setEditingId(isEditing ? null : integration.integrationId);
-                      setForm(formFromDetail(detail));
-                    }}
-                  >
-                    {isEditing ? "Close editor" : "Edit"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={
-                      !state.topology.available ||
-                      busyId === integration.integrationId ||
-                      integration.revokedAt !== null
-                    }
-                    onClick={() => void resume(detail)}
-                  >
-                    <KeyRoundIcon />
-                    Pair again
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={
-                      busyId === integration.integrationId || integration.revokedAt !== null
-                    }
-                    onClick={() => void revoke(detail)}
-                  >
-                    Revoke
-                  </Button>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    aria-label={`Delete ${integration.displayName}`}
-                    disabled={busyId === integration.integrationId}
-                    onClick={() => void remove(detail)}
-                  >
-                    <Trash2Icon />
-                  </Button>
-                </div>
-              </div>
-
+      {state.integrations.map((detail) => {
+        const integration = detail.integration;
+        const status = statusFor(detail);
+        const pairingCode = state.pairingCodes[integration.integrationId];
+        const pairCommand = toCommand(
+          detail.setup.pairCommand.command,
+          detail.setup.pairCommand.args,
+        );
+        const isEditing = editingId === integration.integrationId;
+        return (
+          <SettingsRow
+            key={integration.integrationId}
+            title={
+              <span className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="truncate">{integration.displayName}</span>
+                <Badge size="sm" variant={status.variant}>
+                  {status.label}
+                </Badge>
+                <Badge size="sm" variant="outline">
+                  {AGENT_CONTROL_CLIENT_LABELS[integration.clientKind]}
+                </Badge>
+              </span>
+            }
+            description={
+              <span className="break-all font-mono text-[11px]">{integration.integrationId}</span>
+            }
+            control={
+              <>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => {
+                    setEditingId(isEditing ? null : integration.integrationId);
+                    setForm(formFromDetail(detail));
+                  }}
+                >
+                  {isEditing ? "Close editor" : "Edit"}
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={
+                    !state.topology.available ||
+                    busyId === integration.integrationId ||
+                    integration.revokedAt !== null
+                  }
+                  onClick={() => void resume(detail)}
+                >
+                  <KeyRoundIcon />
+                  Pair again
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={busyId === integration.integrationId || integration.revokedAt !== null}
+                  onClick={() => void revoke(detail)}
+                >
+                  Revoke
+                </Button>
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-destructive-foreground"
+                  aria-label={`Delete ${integration.displayName}`}
+                  disabled={busyId === integration.integrationId}
+                  onClick={() => void remove(detail)}
+                >
+                  <Trash2Icon />
+                </Button>
+              </>
+            }
+          >
+            <div className="flex flex-col gap-4">
               {isEditing ? (
-                <div className="grid gap-4 border-t pt-4">
+                <div className="settings-subsections-enter grid gap-5 rounded-[min(var(--radius-lg),0.625rem)] bg-muted/40 p-4">
                   <AgentControlIntegrationFormFields form={form} onChange={setForm} />
                   <div className="flex justify-end">
                     <Button
+                      size="sm"
                       disabled={busyId === integration.integrationId}
                       onClick={() => void save(detail)}
                     >
@@ -617,48 +648,50 @@ export function ExternalIntegrationsSettings() {
                   </div>
                 </div>
               ) : (
-                <div className="grid gap-3 text-xs sm:grid-cols-2">
-                  <div>
-                    <span className="text-muted-foreground">Project scope</span>
-                    <p className="mt-0.5 break-words font-medium">
+                <dl className="grid gap-x-6 gap-y-2.5 text-xs sm:grid-cols-2">
+                  <div className="min-w-0">
+                    <dt className="text-muted-foreground">Project scope</dt>
+                    <dd className="mt-0.5 break-words text-foreground">
                       {integration.projectScope.kind === "all"
                         ? "All current and future projects"
                         : integration.projectScope.projectIds.join(", ")}
-                    </p>
+                    </dd>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">Limits</span>
-                    <p className="mt-0.5 font-medium">
+                    <dt className="text-muted-foreground">Limits</dt>
+                    <dd className="mt-0.5 text-foreground tabular-nums">
                       {integration.rateLimitPerMinute}/minute · {integration.activeTaskCount}/
                       {integration.activeTaskLimit} active
-                    </p>
+                    </dd>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">Expiry</span>
-                    <p className="mt-0.5 font-medium">{formatDate(integration.expiresAt)}</p>
+                    <dt className="text-muted-foreground">Expiry</dt>
+                    <dd className="mt-0.5 text-foreground">{formatDate(integration.expiresAt)}</dd>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">Last used</span>
-                    <p className="mt-0.5 font-medium">{formatDate(integration.lastUsedAt)}</p>
+                    <dt className="text-muted-foreground">Last used</dt>
+                    <dd className="mt-0.5 text-foreground">{formatDate(integration.lastUsedAt)}</dd>
                   </div>
                   <div className="sm:col-span-2">
-                    <span className="text-muted-foreground">Capabilities</span>
-                    <div className="mt-1 flex flex-wrap gap-1">
+                    <dt className="text-muted-foreground">Capabilities</dt>
+                    <dd className="mt-1 flex flex-wrap gap-1">
                       {integration.capabilities.map((capability) => (
-                        <Badge key={capability} variant="outline">
+                        <Badge key={capability} size="sm" variant="outline">
                           {capability}
                         </Badge>
                       ))}
-                    </div>
+                    </dd>
                   </div>
-                </div>
+                </dl>
               )}
 
               {integration.pairingState === "pending" ? (
-                <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
+                <div className="grid min-w-0 gap-4 rounded-[min(var(--radius-lg),0.625rem)] bg-muted/40 p-4">
                   <div>
-                    <p className="text-sm font-medium">Finish pairing locally</p>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-[13px] font-medium text-foreground">
+                      Finish pairing locally
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
                       Pairing code expires {formatDate(integration.pairingCodeExpiresAt)}. The code
                       is shown only for this ceremony; the generated MCP configuration never
                       contains it.
@@ -668,22 +701,15 @@ export function ExternalIntegrationsSettings() {
                     <div className="flex flex-wrap items-center gap-2">
                       <code
                         data-testid="external-pairing-code"
-                        className="rounded bg-background px-3 py-2 font-mono text-sm tracking-[0.18em]"
+                        className="rounded-[min(var(--radius-md),0.5rem)] bg-background px-3 py-1.5 font-mono text-sm tracking-[0.18em] text-foreground"
                       >
                         {pairingCode}
                       </code>
-                      <Button
-                        size="sm"
-                        variant="outline"
+                      <CopyButton
+                        label="Copy code"
+                        copied={copied === `code-${integration.integrationId}`}
                         onClick={() => void copy(`code-${integration.integrationId}`, pairingCode)}
-                      >
-                        {copied === `code-${integration.integrationId}` ? (
-                          <CheckIcon />
-                        ) : (
-                          <ClipboardIcon />
-                        )}
-                        Copy code
-                      </Button>
+                      />
                     </div>
                   ) : (
                     <p className="text-xs text-warning-foreground">
@@ -691,58 +717,49 @@ export function ExternalIntegrationsSettings() {
                       one.
                     </p>
                   )}
-                  <div className="grid gap-1.5">
-                    <span className="text-xs font-medium">
+                  <div className="grid min-w-0 gap-1.5">
+                    <span className="text-xs font-medium text-foreground">
                       Run this bridge command, then enter the code
                     </span>
-                    <div className="flex min-w-0 gap-2">
-                      <code className="min-w-0 flex-1 overflow-x-auto rounded bg-background p-2 text-[11px]">
+                    <div className="flex min-w-0 items-start gap-2">
+                      <code className="min-w-0 flex-1 break-all rounded-[min(var(--radius-md),0.5rem)] bg-background px-2.5 py-2 font-mono text-[11px] text-foreground">
                         {pairCommand}
                       </code>
-                      <Button
-                        size="icon-sm"
-                        variant="outline"
-                        aria-label="Copy pairing command"
+                      <CopyButton
+                        iconOnly
+                        label="Copy pairing command"
+                        copied={copied === `pair-${integration.integrationId}`}
                         onClick={() => void copy(`pair-${integration.integrationId}`, pairCommand)}
-                      >
-                        {copied === `pair-${integration.integrationId}` ? (
-                          <CheckIcon />
-                        ) : (
-                          <ClipboardIcon />
-                        )}
-                      </Button>
+                      />
                     </div>
                   </div>
-                  <div className="grid gap-1.5">
-                    <span className="text-xs font-medium">MCP configuration</span>
+                  <div className="grid min-w-0 gap-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-foreground">MCP configuration</span>
+                      <CopyButton
+                        label="Copy configuration"
+                        copied={copied === `config-${integration.integrationId}`}
+                        onClick={() =>
+                          void copy(
+                            `config-${integration.integrationId}`,
+                            detail.setup.configuration,
+                          )
+                        }
+                      />
+                    </div>
                     <pre
                       data-testid="external-mcp-configuration"
-                      className="max-h-48 overflow-auto rounded bg-background p-3 text-[11px] leading-relaxed"
+                      className="max-h-48 min-w-0 overflow-auto rounded-[min(var(--radius-md),0.5rem)] bg-background p-3 font-mono text-[11px] leading-relaxed text-foreground"
                     >
                       {detail.setup.configuration}
                     </pre>
-                    <Button
-                      className="justify-self-start"
-                      size="sm"
-                      variant="outline"
-                      onClick={() =>
-                        void copy(`config-${integration.integrationId}`, detail.setup.configuration)
-                      }
-                    >
-                      {copied === `config-${integration.integrationId}` ? (
-                        <CheckIcon />
-                      ) : (
-                        <ClipboardIcon />
-                      )}
-                      Copy configuration
-                    </Button>
                   </div>
                 </div>
               ) : null}
-            </article>
-          );
-        })}
-      </div>
-    </section>
+            </div>
+          </SettingsRow>
+        );
+      })}
+    </SettingsSection>
   );
 }

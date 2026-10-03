@@ -54,7 +54,7 @@ interface PhoneSettingsItem {
 
 /**
  * The same section inventory the desktop dialog navigates (labels and order
- * match `SettingsDialog`'s `NAV_ITEMS`), split for the phone list into the
+ * match `SettingsPage`'s `NAV_ITEMS`), split for the phone list into the
  * general group and the progressive-disclosure "Advanced" group. Diagnostics
  * hosts the development-only tier-preview override, which stays gated inside
  * `DiagnosticsSettings` behind `import.meta.env.DEV` — grouping it under
@@ -67,7 +67,7 @@ interface PhoneSettingsItem {
  * a phone — and a programmatic `openSettings(id)` for it falls silently back to
  * the list, because `ALL_ITEMS.find` returns undefined. That is exactly what
  * happened to `security`. {@link PHONE_SETTINGS_SECTION_IDS} is exported so
- * `SettingsDialog.test.ts` can assert the two inventories agree, which no
+ * `SettingsPage.test.ts` can assert the two inventories agree, which no
  * "every label in this array is present" test could.
  */
 const GENERAL_ITEMS: ReadonlyArray<PhoneSettingsItem> = [
@@ -450,7 +450,8 @@ export function PhoneSettingsSurface() {
               ) : null}
             </div>
             <ScrollArea className="min-h-0 min-w-0 flex-1">
-              <div key={restoreSignal} className="flex flex-col">
+              {/* Panels no longer pad themselves; the host owns the gutter. */}
+              <div key={restoreSignal} className="flex flex-col p-6">
                 <SectionPanel section={activeItem.id} />
               </div>
             </ScrollArea>

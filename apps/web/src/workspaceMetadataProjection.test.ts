@@ -1,4 +1,8 @@
-import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, MessageId, ProjectId, ThreadId } from "@ryco/contracts";
+import {
+  hydrateEnvironmentStateFromCache,
+  selectThreadByRef,
+} from "@ryco/client-runtime/state/threads";
 import type { WorkspaceMetadataSnapshot } from "@ryco/client-runtime/state/workspace";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -59,6 +63,39 @@ describe("workspace metadata projection", () => {
       snoozedUntil: "2026-09-07T09:00:00.000Z",
     });
     expect(cached?.threads[0]?.summary).toMatchObject({ snoozedUntil: "2026-09-07T09:00:00.000Z" });
+    const hydrated = hydrateEnvironmentStateFromCache(
+      { activeEnvironmentId: null, environmentStateById: {} },
+      {
+        ...cached,
+        threads: cached.threads.map((thread) => ({
+          ...thread,
+          content: {
+            messages: [
+              {
+                id: MessageId.make("remembered-message"),
+                role: "assistant" as const,
+                text: "Saved text",
+                createdAt: "2026-09-06T10:00:00.000Z",
+                streaming: true,
+              },
+            ],
+          },
+        })),
+      },
+      hub,
+    );
+    expect(hydrated.environmentStateById[hub]?.bootstrapComplete).toBe(false);
+    expect(hydrated.environmentStateById[hub]?.hydratedFromCacheAt).toBe(1);
+    expect(
+      selectThreadByRef(hydrated, { environmentId: hub, threadId: ThreadId.make("snoozed") }),
+    ).toMatchObject({ session: null, messages: [{ text: "Saved text", streaming: false }] });
+    const live = {
+      ...hydrated,
+      environmentStateById: {
+        [hub]: { ...hydrated.environmentStateById[hub]!, bootstrapComplete: true },
+      },
+    };
+    expect(hydrateEnvironmentStateFromCache(live, cached, hub)).toBe(live);
     expect(remapWorkspaceMetadataSnapshotEnvironment(snapshot, hub)).toMatchObject({
       environmentId: hub,
       projects: [{ environmentId: hub, id: ProjectId.make("project-1") }],

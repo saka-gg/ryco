@@ -21,11 +21,10 @@ import { useComposerDraftStore } from "../../composerDraftStore";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { markSidebarExpandClick } from "../../perf/tabSwitchInstrumentation";
-import { stackedThreadToast, toastManager } from "../ui/toast";
 import { useSidebar } from "../ui/sidebar";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { isContextMenuPointerDown } from "../Sidebar.logic";
-import { readLocalApi } from "../../localApi";
+import { openExternalLink } from "../../lib/openExternalLink";
 import { SidebarWorktreeList, type SidebarThreadGitStatusTarget } from "./SidebarWorktreeList";
 import {
   createSidebarProjectDraftThreadsSelector,
@@ -116,25 +115,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
   const openPrLink = useCallback((event: React.MouseEvent<HTMLElement>, prUrl: string) => {
     event.preventDefault();
     event.stopPropagation();
-
-    const api = readLocalApi();
-    if (!api) {
-      toastManager.add({
-        type: "error",
-        title: "Link opening is unavailable.",
-      });
-      return;
-    }
-
-    void api.shell.openExternal(prUrl).catch((error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Unable to open pull request link",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    });
+    openExternalLink(prUrl, "Unable to open pull request link");
   }, []);
   const sidebarThreads = useStore(
     useShallow(

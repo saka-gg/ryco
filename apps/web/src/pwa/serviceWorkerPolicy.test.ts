@@ -41,7 +41,7 @@ describe("hosted PWA service-worker request policy", () => {
     expect(classify({ url: `${origin}/assets/main-AbCd1234.js` })).toBe("precache");
   });
 
-  it("uses network-first handling only for same-origin document navigation", () => {
+  it("uses the static boot document only for same-origin document navigation", () => {
     expect(classify({ url: `${origin}/thread/1`, mode: "navigate" })).toBe("navigation");
   });
 

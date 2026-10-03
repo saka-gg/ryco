@@ -74,7 +74,7 @@ export function getServerConfig(): ServerConfig | null {
   return appAtomRegistry.get(serverConfigAtom);
 }
 
-export function getServerKeybindings(): ServerConfig["keybindings"] {
+export function getLegacyServerKeybindings(): ServerConfig["keybindings"] {
   return selectKeybindings(getServerConfig());
 }
 

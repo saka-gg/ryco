@@ -76,3 +76,23 @@ export const messageTextForSearch = (sql: SqlClient.SqlClient, alias: string) =>
       FROM (${messageTextParts(sql, alias)}) AS parts) || '"', '$')
   END
 `;
+
+/** A bounded conjunction of safe ASCII trigrams narrows candidates only.
+ * Exact LIKE filtering still owns escaping, ordering, and SQLite case semantics.
+ * NUL patterns retain the legacy path because SQLite terminates LIKE at NUL.
+ * Queries without an ASCII trigram (including short/Unicode-only queries) also
+ * use the legacy path. detail=none FTS indexes require tokens of at most 3 chars.
+ */
+export const messageSearchCandidate = (normalizedQuery: string): string | null => {
+  if (normalizedQuery.includes("\0")) return null;
+  const trigrams = new Set<string>();
+  for (const match of normalizedQuery.matchAll(/[a-z0-9]{3,}/g)) {
+    const word = match[0];
+    const stride = Math.max(1, Math.floor((word.length - 3) / 7));
+    for (let index = 0; index <= word.length - 3 && trigrams.size < 8; index += stride) {
+      trigrams.add(word.slice(index, index + 3));
+    }
+    if (trigrams.size === 8) break;
+  }
+  return trigrams.size > 0 ? [...trigrams].map((part) => `"${part}"`).join(" AND ") : null;
+};

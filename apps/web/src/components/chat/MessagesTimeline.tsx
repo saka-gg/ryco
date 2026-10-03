@@ -1,7 +1,12 @@
 import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
+  readHostedThreadScroll,
+  saveHostedThreadScroll,
+} from "../../persistence/hostedReadViewState";
+import {
   type EnvironmentId,
   type MessageId,
+  type ProviderDriverKind,
   type ServerProviderSkill,
   type TurnId,
 } from "@ryco/contracts";
@@ -113,7 +118,6 @@ import { DisclosureChevron } from "../ui/DisclosureChevron";
 import { DisclosureRegion } from "../ui/DisclosureRegion";
 import { DISCLOSURE_CLEANUP_BUFFER_MS, DISCLOSURE_TRANSITION_MS } from "../../lib/disclosureMotion";
 import {
-  basenameOfPath,
   deriveReadableCommandDisplay,
   normalizeToolTextForComparison,
   resolveCommandVisualKind,
@@ -124,6 +128,9 @@ import {
   resolveWorkEntryStatus,
   workEntryActivityMeta,
 } from "./workEntryActivity";
+import { isFileReadToolEntry, workEntryPreview, workEntryRawCommand } from "./workChapters.logic";
+import { WorkChapterRow } from "./WorkChapterRow";
+import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by row components via useContext. Split into
@@ -237,6 +244,8 @@ interface MessagesTimelineProps {
     marker: ContextHandoffTimelineEntry,
     trigger: HTMLButtonElement,
   ) => void;
+  /** Driver of the thread's provider; its mark animates on the live turn header. */
+  providerDriverKind?: ProviderDriverKind | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +294,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   loadOlderError = null,
   onLoadOlder,
   onInspectContextHandoff,
+  providerDriverKind = null,
 }: MessagesTimelineProps) {
   usePerfMark("MessagesTimeline");
+  const initialScrollOffset = useMemo(
+    () => readHostedThreadScroll(routeThreadKey),
+    [routeThreadKey],
+  );
   const turnFoldExpandedById = useUiStateStore(
     (store) => store.threadTurnFoldExpandedById[routeThreadKey] ?? EMPTY_EXPANSION_OVERRIDES,
   );
@@ -297,12 +311,30 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   revertTurnCountRef.current = revertTurnCountByUserMessageId;
   const undoTurnCountRef = useRef(undoTurnCountByTurnId);
   undoTurnCountRef.current = undoTurnCountByTurnId;
+  // Turns seen running in this view keep their chapter outline open once they
+  // settle; a fresh load starts every settled turn folded.
+  const runningTurnIdForFolds = isWorking || activeTurnInProgress ? (activeTurnId ?? null) : null;
+  const [observedRunningTurnIds, setObservedRunningTurnIds] = useState<ReadonlySet<TurnId>>(
+    () => new Set(runningTurnIdForFolds === null ? [] : [runningTurnIdForFolds]),
+  );
+  useEffect(() => {
+    if (runningTurnIdForFolds === null) return;
+    setObservedRunningTurnIds((current) =>
+      current.has(runningTurnIdForFolds) ? current : new Set([...current, runningTurnIdForFolds]),
+    );
+  }, [runningTurnIdForFolds]);
+  // A search hit or deep link inside a folded chapter opens that chapter.
+  const revealedMessageIds = useMemo(() => {
+    const ids = new Set<string>(threadMessageSearchOccurrencesByMessageId.keys());
+    if (targetMessageId !== null) ids.add(targetMessageId);
+    return ids;
+  }, [threadMessageSearchOccurrencesByMessageId, targetMessageId]);
   const rawRows = useMemo(
     () =>
       deriveMessagesTimelineRows({
         timelineEntries,
         latestTurn,
-        runningTurnId: isWorking || activeTurnInProgress ? (activeTurnId ?? null) : null,
+        runningTurnId: runningTurnIdForFolds,
         turnFoldExpandedById,
         workGroupExpandedById,
         isWorking,
@@ -310,8 +342,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId: revertTurnCountRef.current,
         undoTurnCountByTurnId: undoTurnCountRef.current,
+        liveSettledTurnIds: observedRunningTurnIds,
+        revealedMessageIds,
       }),
     [
+      observedRunningTurnIds,
+      revealedMessageIds,
       timelineEntries,
       latestTurn,
       activeTurnInProgress,
@@ -368,6 +404,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const handleScroll = useCallback(() => {
     const isAtEnd = evaluateIsAtEnd();
     const scrollNode = listRef.current?.getScrollableNode?.();
+    if (scrollNode instanceof HTMLElement)
+      saveHostedThreadScroll(routeThreadKey, scrollNode.scrollTop);
     if (
       scrollNode instanceof HTMLElement &&
       scrollNode.scrollTop <= 320 &&
@@ -410,6 +448,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, [
     canLoadOlder,
     evaluateIsAtEnd,
+    routeThreadKey,
     isLoadingOlder,
     listRef,
     minimapItems,
@@ -609,7 +648,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
 
     const targetRowIndex = rows.findIndex(
-      (row) => row.kind === "message" && row.message.id === targetMessageId,
+      (row) =>
+        (row.kind === "message" && row.message.id === targetMessageId) ||
+        (row.kind === "chapter" && row.message?.id === targetMessageId),
     );
     if (targetRowIndex < 0) {
       setHighlightedMessageId(null);
@@ -706,9 +747,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         onCloseDiff: onCloseDiff ?? NOOP_CLOSE_DIFF,
         onOpenAgents,
         onOpenMessageActions,
+        providerDriverKind,
         ...(onInspectContextHandoff ? { onInspectContextHandoff } : {}),
       }),
     [
+      providerDriverKind,
       timestampFormat,
       routeThreadKey,
       markdownCwd,
@@ -761,7 +804,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             renderItem={renderItem}
             estimatedItemSize={56}
             recycleItems={false}
-            initialScrollAtEnd
+            initialScrollAtEnd={initialScrollOffset === undefined}
+            {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
             maintainScrollAtEnd={liveFollowEnabled}
             maintainScrollAtEndThreshold={0.1}
             maintainVisibleContentPosition
@@ -1034,6 +1078,16 @@ function TimelineMinimap({
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
 type TimelineRow = MessagesTimelineRow;
 
+function renderChapterEntryPanel(entry: TimelineWorkEntry, panelId: string) {
+  return (
+    <WorkEntryExpandedPanel
+      workEntry={entry}
+      panelId={panelId}
+      headingLabel={toolWorkEntryHeading(entry)}
+    />
+  );
+}
+
 function TimelineRowContent({ row }: { row: TimelineRow }) {
   // This row renderer reads both contexts (it depends on streaming + stable
   // fields), so it re-renders on streaming transitions as before. The merged
@@ -1079,6 +1133,23 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
     row.kind === "message"
       ? ctx.threadMessageSearchOccurrencesByMessageId.get(row.message.id)
       : undefined;
+  const chapterMessageId = row.kind === "chapter" ? (row.message?.id ?? null) : null;
+  const chapterSearchOccurrences = chapterMessageId
+    ? ctx.threadMessageSearchOccurrencesByMessageId.get(chapterMessageId)
+    : undefined;
+  const chapterSearchHighlight =
+    chapterMessageId !== null &&
+    chapterSearchOccurrences !== undefined &&
+    chapterSearchOccurrences.length > 0 &&
+    ctx.threadMessageSearchQuery.trim().length > 0
+      ? {
+          query: ctx.threadMessageSearchQuery,
+          activeOccurrenceIndex:
+            ctx.activeThreadMessageSearchOccurrence?.messageId === chapterMessageId
+              ? ctx.activeThreadMessageSearchOccurrence.messageOccurrenceIndex
+              : null,
+        }
+      : undefined;
   const messageSearchHighlight =
     row.kind === "message" &&
     messageSearchOccurrences !== undefined &&
@@ -1096,8 +1167,10 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
   return (
     <div
       className={cn(
-        row.kind === "work"
-          ? "pb-0.5"
+        row.kind === "work" || row.kind === "chapter"
+          ? row.kind === "chapter"
+            ? null
+            : "pb-0.5"
           : row.kind === "work-toggle" ||
               (row.kind === "message" &&
                 row.message.role === "assistant" &&
@@ -1119,6 +1192,18 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
       {row.kind === "work" && <WorkGroupSection groupedEntries={row.groupedEntries} />}
       {row.kind === "work-toggle" && <WorkGroupToggleTimelineRow row={row} />}
       {row.kind === "turn-fold" && <TurnFoldTimelineRow row={row} />}
+      {row.kind === "chapter" && (
+        <WorkChapterRow
+          row={row}
+          routeThreadKey={ctx.routeThreadKey}
+          workspaceRoot={ctx.workspaceRoot}
+          markdownCwd={ctx.markdownCwd}
+          environmentId={ctx.activeThreadEnvironmentId}
+          skills={ctx.skills}
+          searchHighlight={chapterSearchHighlight}
+          renderEntryPanel={renderChapterEntryPanel}
+        />
+      )}
 
       {row.kind === "context-compaction" && (
         <ContextCompactionMarkerRow createdAt={row.createdAt} label={row.marker.label} />
@@ -1294,65 +1379,95 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
   );
 }
 
-// The settled turn's disclosure and its live twin share one label tone, size,
-// and full-width divider, so a turn folding shut is a status change rather than
-// a change of shape. The label box stays flush with the timeline's content edge:
-// nudging it left to compensate for the leading "W" side bearing pushed the
-// glyph past the scroll container's clip and shaved its left stem.
+// The settled turn's disclosure and its live twin share one label tone and
+// size, so a turn folding shut is a status change rather than a change of
+// shape. While the turn runs, the provider's mark turns slowly beside it.
 const TURN_FOLD_LABEL_CLASS_NAME = "text-[13px] text-muted-foreground/70 tabular-nums";
+
+function TurnFoldMark({ running }: { running: boolean }) {
+  const { providerDriverKind } = use(TimelineStableCtx);
+  if (!running) return null;
+  const Mark = providerDriverKind ? PROVIDER_ICON_BY_PROVIDER[providerDriverKind] : undefined;
+  return Mark ? (
+    <Mark aria-hidden className="turn-fold-mark size-3.5 shrink-0" />
+  ) : (
+    <svg
+      aria-hidden
+      viewBox="0 0 16 16"
+      className="size-3.5 shrink-0 animate-spin text-muted-foreground/60"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+    >
+      <circle cx="8" cy="8" r="6" opacity=".25" />
+      <path d="M8 2a6 6 0 0 1 6 6" />
+    </svg>
+  );
+}
 
 function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-fold" }> }) {
   const { routeThreadKey } = use(TimelineStableCtx);
   const setExpanded = useUiStateStore((store) => store.setThreadTurnFoldExpanded);
+  const running = row.status === "running";
 
   return (
-    <div className="pt-1 pb-2" data-turn-fold-status={row.status}>
+    <div className="pt-1 pb-1" data-turn-fold-status={row.status}>
       <button
         type="button"
         aria-expanded={row.expanded}
         onClick={() => setExpanded(routeThreadKey, row.foldId, !row.expanded)}
         className={cn(
           TURN_FOLD_LABEL_CLASS_NAME,
-          "flex cursor-pointer select-none items-center gap-1 pb-2 transition-colors duration-200 hover:text-muted-foreground/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+          "-mx-2 flex h-[30px] w-[calc(100%+1rem)] cursor-pointer select-none items-center gap-2 rounded-lg px-2 text-left transition-colors duration-200 hover:bg-accent/50 hover:text-muted-foreground/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
         )}
       >
-        <span>
-          {row.status === "running" ? (
-            row.durationStart ? (
-              <>
-                Working for <WorkingTimer createdAt={row.durationStart} />
-              </>
-            ) : (
-              "Working…"
-            )
+        <TurnFoldMark running={running} />
+        <span className="min-w-0 truncate">
+          {running ? (
+            <>
+              <span className="shimmer thinking-status-shimmer">Working</span>
+              {row.durationStart ? (
+                <span className="ml-1.5 text-muted-foreground/50">
+                  <WorkingTimer createdAt={row.durationStart} />
+                </span>
+              ) : null}
+            </>
           ) : (
             (row.label ?? "Worked")
           )}
         </span>
+        <span className="flex-1" />
         <DisclosureChevron open={row.expanded} className="text-muted-foreground/55" />
       </button>
-      <div className="h-px w-full bg-border" />
     </div>
   );
 }
 
 /**
- * The live twin of a settled turn's "Worked for …" disclosure: the same label
- * tone and divider counting up, with a waving "Thinking" line beneath it so an
- * agent that has not emitted anything yet still reads as busy rather than stuck.
+ * The live twin of a settled turn's "Worked for …" disclosure before anything
+ * has streamed: the same header counting up, with a pulsing chapter node and a
+ * "Thinking" line so an agent that has not emitted yet reads as busy.
  */
 function PendingWorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
   return (
     <div className="pt-1 pb-2">
-      {row.createdAt ? (
-        <>
-          <div className={cn(TURN_FOLD_LABEL_CLASS_NAME, "flex items-center pb-2")}>
-            Working for <WorkingTimer createdAt={row.createdAt} />
-          </div>
-          <div className="h-px w-full bg-border" />
-        </>
-      ) : null}
-      <div className="pt-1.5 text-[13px] text-muted-foreground/70">
+      <div className={cn(TURN_FOLD_LABEL_CLASS_NAME, "flex h-[30px] items-center gap-2")}>
+        <TurnFoldMark running />
+        <span>
+          <span className="shimmer thinking-status-shimmer">Working</span>
+          {row.createdAt ? (
+            <span className="ml-1.5 text-muted-foreground/50">
+              <WorkingTimer createdAt={row.createdAt} />
+            </span>
+          ) : null}
+        </span>
+      </div>
+      <div className="relative flex h-[30px] items-center pl-[26px] text-[13px] text-muted-foreground/70">
+        <span
+          aria-hidden
+          className="chapter-node-live absolute top-[10px] left-[2.5px] size-2.5 rounded-full bg-background shadow-[inset_0_0_0_1.5px_var(--color-foreground)]"
+        />
         <span className="shimmer thinking-status-shimmer">Thinking</span>
       </div>
     </div>
@@ -2148,78 +2263,6 @@ function workToneIcon(tone: TimelineWorkEntry["tone"]): LucideIcon {
   return ZapIcon;
 }
 
-/**
- * The short trailing phrase after the row's verb: the humanized command target,
- * a filename, or a clean detail line. Returns null when the heading already
- * says everything, so a row never reads "Read - Read".
- */
-function workEntryPreview(
-  workEntry: Pick<
-    TimelineWorkEntry,
-    "detail" | "command" | "rawCommand" | "changedFiles" | "requestKind" | "itemType"
-  >,
-  workspaceRoot: string | undefined,
-): string | null {
-  const command = workEntry.command ?? workEntry.rawCommand;
-  if (command) {
-    return deriveReadableCommandDisplay(command).target;
-  }
-
-  if ((workEntry.changedFiles?.length ?? 0) > 0) {
-    const changedFiles = workEntry.changedFiles!;
-    const [firstPath] = changedFiles;
-    if (firstPath) {
-      return changedFiles.length === 1
-        ? basenameOfPath(formatWorkspaceRelativePath(firstPath, workspaceRoot))
-        : `${changedFiles.length} files`;
-    }
-  }
-
-  const detail = workEntry.detail?.trim();
-  if (!detail) {
-    return null;
-  }
-
-  const filePath = extractFilePathFromDetail(detail);
-  if (filePath) {
-    return basenameOfPath(filePath);
-  }
-
-  const isFileRelated =
-    workEntry.requestKind === "file-read" ||
-    workEntry.requestKind === "file-change" ||
-    workEntry.itemType === "file_change";
-  // For file rows the heading alone is enough — never surface raw arguments.
-  if (isFileRelated) {
-    return null;
-  }
-  if (detail.startsWith("{") || detail.startsWith("[")) {
-    return null;
-  }
-  return detail;
-}
-
-/**
- * Pulls a file path out of a detail string that may be a JSON argument blob,
- * so a `Read {"file_path":"/a/b.ts"}` row can show just `b.ts`.
- */
-function extractFilePathFromDetail(detail: string): string | null {
-  const plainPathMatch = /^(.+?\.[A-Za-z0-9][A-Za-z0-9._-]*)(?::\d+)?(?::\d+)?$/u.exec(
-    detail.trim(),
-  );
-  if (plainPathMatch?.[1]?.includes("/")) {
-    return plainPathMatch[1].trim();
-  }
-  const jsonMatch = /"(?:file_path|filePath|path|filename)"\s*:\s*"([^"]+)"/u.exec(detail);
-  return jsonMatch?.[1]?.trim() ?? null;
-}
-
-function workEntryRawCommand(
-  workEntry: Pick<TimelineWorkEntry, "command" | "rawCommand">,
-): string | null {
-  return workEntry.rawCommand?.trim() || workEntry.command?.trim() || null;
-}
-
 // Command rows reuse the wrapper-aware classifier so wrapped git/gh commands get
 // the branch mark and read-only inspections get the search glyph, rather than
 // every command collapsing to one terminal icon.
@@ -2234,14 +2277,6 @@ function commandWorkEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
     case "terminal":
       return TerminalIcon;
   }
-}
-
-// Provider read tools (e.g. Claude's `Read`) arrive as generic dynamic tool calls
-// without a `file-read` requestKind, so match the tool name to surface the search
-// icon instead of the generic tool fallback.
-function isFileReadToolEntry(workEntry: TimelineWorkEntry): boolean {
-  const name = (workEntry.toolTitle ?? "").toLowerCase().replace(/[^a-z]/g, "");
-  return name === "read" || name === "readfile" || name === "viewfile";
 }
 
 function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {

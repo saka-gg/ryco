@@ -3,12 +3,12 @@ import type { SettingsSectionId } from "../../settingsDialogStore";
 /**
  * Which settings sections a reader can actually open, as one predicate.
  *
- * IT LIVES HERE RATHER THAN IN `SettingsDialog.tsx` BECAUSE IT HAS A THIRD
+ * IT LIVES HERE RATHER THAN IN `SettingsPage.tsx` BECAUSE IT HAS A THIRD
  * CALLER. The desktop dialog and the phone surface filter their navs with it,
  * and `HostedE2eeVerification` now asks the same question before it draws a
  * sentence that sends a reader to Settings → Security (docs/relay-e2ee-protocol
  * §13.5's accompanying text). That component sits in the eagerly loaded shell
- * and the settings dialog is deliberately behind a dynamic import
+ * and the settings page is deliberately behind a dynamic import
  * (`perf/webBundleSplitting.test.ts`), so importing the predicate from the
  * dialog would have pulled the dialog into the app entry to answer a question
  * about copy. This module imports nothing but a type.
@@ -28,7 +28,7 @@ const SETTINGS_SCOPE_BY_SECTION = {
   integrations: "mixed",
   "computer-use": "device",
   appearance: "browser",
-  keybindings: "node",
+  keybindings: "browser",
   "source-control": "mixed",
   connections: "device",
   security: "node",
@@ -82,7 +82,6 @@ const HOSTED_OWNER_SECTIONS = new Set<SettingsSectionId>([
   "mcp-servers",
   "integrations",
   "computer-use",
-  "keybindings",
   "source-control",
   // Node-scoped and owner-only, like the rest of this set. In hosted mode the
   // node's operator routes are unreachable anyway (the relay carries `ryco.rpc`
@@ -108,7 +107,7 @@ export function hostedSettingsSectionAllowed(
   role: HostedSettingsRole,
 ): boolean {
   if (section === "connections") return false;
-  if (section === "appearance") return true;
+  if (section === "appearance" || section === "keybindings") return true;
   // Account management is a Hub page now, not a tab of this dialog, so the
   // hosted client never opens the dialog on it. Kept closed rather than
   // deleted: `SettingsSectionId` still carries the id, and a stale caller
@@ -175,12 +174,14 @@ export function settingsSectionInDestination(
   scope: "client" | "node",
   desktop: boolean,
 ): boolean {
-  if (scope === "node") return !["account", "appearance", "computer-use"].includes(section);
+  if (scope === "node")
+    return !["account", "appearance", "computer-use", "keybindings"].includes(section);
   if (section === "integrations") return desktop;
   return [
     "general",
     "inbox",
     "appearance",
+    "keybindings",
     "source-control",
     "connections",
     "diagnostics",

@@ -79,7 +79,13 @@ import {
 import { Input } from "../ui/input";
 import { QRCodeSvg } from "../ui/qr-code";
 import { Switch } from "../ui/switch";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+  SettingsToolbar,
+} from "./settingsLayout";
+import { cn } from "../../lib/utils";
 import {
   nodeApproveConfirmation,
   nodeClientListingNotices,
@@ -748,18 +754,24 @@ function PrimaryNodeSecuritySettings() {
 
   return (
     <SettingsPageContainer>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <h1 className="text-base font-semibold">Security</h1>
-          <p className="mt-1 text-muted-foreground text-xs">{NODE_PANEL_SUBTITLE}</p>
-        </div>
-        {availability.available ? (
-          <Button size="xs" variant="outline" disabled={busy} onClick={() => void refreshCurrent()}>
-            <RefreshCwIcon className="size-3.5" />
-            Refresh
-          </Button>
-        ) : null}
-      </div>
+      <SettingsToolbar
+        actions={
+          availability.available ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              className="text-muted-foreground hover:text-foreground"
+              disabled={busy}
+              onClick={() => void refreshCurrent()}
+            >
+              <RefreshCwIcon className={cn("size-3.5", busy && "animate-spin")} />
+              Refresh
+            </Button>
+          ) : null
+        }
+      >
+        {NODE_PANEL_SUBTITLE}
+      </SettingsToolbar>
 
       {/* `error !== null` rather than truthiness: a refusal that arrived as an
           empty string would otherwise render as no message at all, and a guard
@@ -1130,7 +1142,7 @@ function PrimaryNodeSecuritySettings() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogClose>Leave it</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>Leave it</AlertDialogClose>
             <Button
               // Red only when the node will shut live channels or the change
               // reduces what it enforces. Every policy change drawing the same
@@ -1166,7 +1178,7 @@ function PrimaryNodeSecuritySettings() {
             </div>
           ) : null}
           <AlertDialogFooter>
-            <AlertDialogClose>Cancel</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
             <Button
               variant={activeConfirmation?.destructive ? "destructive" : "default"}
               data-testid="node-confirmation-confirm"

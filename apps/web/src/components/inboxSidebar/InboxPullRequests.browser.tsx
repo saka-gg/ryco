@@ -17,6 +17,10 @@ import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 const harness = vi.hoisted(() => ({
   detail: null as SourceControlChangeRequestDetail | null,
   query: vi.fn(),
+  openExternal: vi.fn((_url: string, _failureTitle: string) => undefined),
+}));
+vi.mock("../../lib/openExternalLink", () => ({
+  openExternalLink: (url: string, failureTitle: string) => harness.openExternal(url, failureTitle),
 }));
 vi.mock("../../rpc/useSourceControl", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../rpc/useSourceControl")>()),
@@ -40,6 +44,7 @@ afterEach(() => {
   resetGitStatusStateForTests();
   harness.detail = null;
   harness.query.mockClear();
+  harness.openExternal.mockClear();
 });
 
 it.each([null, "/repo/worktrees/feature"])(
@@ -152,6 +157,24 @@ it.each([null, "/repo/worktrees/feature"])(
           enabled: true,
         }),
       );
+      // Hovering the chip names that PR, and only that: the row card stays shut.
+      await page.getByLabelText("PR #42 · Open", { exact: true }).hover();
+      await vi.waitFor(() => {
+        const hint = [...document.querySelectorAll('[data-slot="tooltip-popup"]')].find((popup) =>
+          popup.textContent?.includes("Live PR"),
+        );
+        expect(hint?.textContent).toContain("PR #42 · Open");
+        expect(hint?.textContent).toContain("Open on");
+      });
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      expect(document.querySelector('[data-testid="inbox-preview"]')).toBeNull();
+      // Clicking it opens the pull request instead of the thread.
+      await page.getByLabelText("PR #42 · Open", { exact: true }).click();
+      expect(harness.openExternal).toHaveBeenCalledWith(
+        "https://github.com/acme/ryco/pull/42",
+        "Unable to open pull request link",
+      );
+      expect(props.onOpenThread).not.toHaveBeenCalled();
       harness.detail = {
         provider: "github",
         number: 42,
@@ -165,6 +188,18 @@ it.each([null, "/repo/worktrees/feature"])(
         body: "",
         comments: [],
         truncated: false,
+        additions: 212,
+        deletions: 58,
+        changedFiles: 9,
+        checkRollup: ["lint", "test", "build"].map((name) => ({
+          kind: "check-run" as const,
+          name,
+          status: Option.some("COMPLETED"),
+          conclusion: Option.some(name === "test" ? "FAILURE" : "SUCCESS"),
+          url: Option.none(),
+          startedAt: Option.none(),
+          completedAt: Option.none(),
+        })),
         stack: {
           number: 7,
           size: 4,
@@ -184,9 +219,32 @@ it.each([null, "/repo/worktrees/feature"])(
         },
       };
       emit({ ...status, pr: { ...status.pr!, state: "merged" } });
+      const row = host.querySelector<HTMLElement>('[data-testid="inbox-thread-row"]')!;
+      // The row carries only its own change request and the stack position.
       await expect
         .element(page.getByLabelText("Stack #7, pull request 2 of 4", { exact: true }))
         .toBeVisible();
+      await expect.element(page.getByLabelText("PR #42 · Merged", { exact: true })).toBeVisible();
+      expect(row.querySelector('[aria-label="PR #42 · Merged"]')?.className).toContain(
+        "text-violet-",
+      );
+      expect(row.querySelector('[aria-label="PR #41 · Closed"]')).toBeNull();
+      expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+      // The hover card lists the whole stack in its states' colors.
+      await page.getByTestId("inbox-thread-row").hover();
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-testid="inbox-preview"]')).not.toBeNull(),
+      );
+      const card = document.querySelector<HTMLElement>('[data-testid="inbox-preview"]')!;
+      // Checks as dots plus one verdict, then the pull request's diff.
+      await vi.waitFor(() => {
+        const stats = card.querySelector<HTMLElement>('[data-testid="inbox-preview-stats"]');
+        expect(stats?.textContent).toContain("1 failing");
+        expect(stats?.textContent).toContain("+212");
+        expect(stats?.textContent).toContain("−58");
+        expect(stats?.textContent).toContain("9 files");
+        expect(stats?.querySelector('[role="img"]')?.getAttribute("aria-label")).toBeTruthy();
+      });
       for (const [number, state, color] of [
         [41, "Closed", "rose"],
         [42, "Merged", "violet"],
@@ -194,13 +252,39 @@ it.each([null, "/repo/worktrees/feature"])(
         [44, "Open", "emerald"],
       ] as const) {
         const label = `PR #${number} · ${state}`;
-        await expect.element(page.getByLabelText(label, { exact: true })).toBeVisible();
-        expect(host.querySelector(`[aria-label="${label}"]`)?.className).toContain(
-          `text-${color}-`,
+        await vi.waitFor(() =>
+          expect(card.querySelector(`[aria-label="${label}"]`)?.className).toContain(
+            `text-${color}-`,
+          ),
         );
       }
-      const row = host.querySelector<HTMLElement>('[data-testid="inbox-thread-row"]')!;
-      expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+
+      // On the way into an open card the pointer crosses the row's PR chip:
+      // the card stays, and the chip's own hint stays quiet.
+      const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      await page
+        .getByTestId("inbox-thread-row")
+        .getByLabelText("PR #42 · Merged", { exact: true })
+        .hover();
+      await pause(450);
+      expect(document.querySelector('[data-testid="inbox-preview"]')).not.toBeNull();
+      expect(
+        [...document.querySelectorAll('[data-slot="tooltip-popup"]')].some((popup) =>
+          popup.textContent?.includes("Open on"),
+        ),
+      ).toBe(false);
+      // Inside the card it stays open and its links work.
+      await page.getByTestId("inbox-preview").hover();
+      await pause(450);
+      expect(document.querySelector('[data-testid="inbox-preview"]')).not.toBeNull();
+      await page
+        .getByTestId("inbox-preview")
+        .getByLabelText("PR #41 · Closed", { exact: true })
+        .click();
+      expect(harness.openExternal).toHaveBeenLastCalledWith(
+        "https://github.com/acme/ryco/pull/41",
+        "Unable to open pull request link",
+      );
     } finally {
       await mounted.unmount();
       host.remove();

@@ -10,21 +10,18 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  AlertTriangleIcon,
-  KeyboardIcon,
-  PlusIcon,
-  SearchIcon,
-  Undo2Icon,
-  XIcon,
-} from "lucide-react";
+import { AlertTriangleIcon, PlusIcon, SearchIcon, Undo2Icon, XIcon } from "lucide-react";
 import {
   type KeybindingCommand,
   type KeybindingRule,
   type KeybindingShortcut,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import { DEFAULT_KEYBINDINGS } from "@ryco/shared/keybindings";
+import {
+  DEFAULT_KEYBINDINGS,
+  DEFAULT_RESOLVED_KEYBINDINGS,
+  parseKeybindingShortcut,
+} from "@ryco/shared/keybindings";
 import { useShallow } from "zustand/react/shallow";
 
 import { cn, isMacPlatform } from "../../lib/utils";
@@ -45,26 +42,33 @@ import {
   formatShortcutTokens,
   serializeShortcut,
 } from "../../lib/shortcutCapture";
-import { resolveAndPersistPreferredEditor } from "../../editorPreferences";
-import { readEnvironmentApi } from "../../environmentApi";
-import { ensureLocalApi } from "../../localApi";
+import { Schema } from "effect";
+import { KeybindingsConfig } from "@ryco/contracts";
+import { scopedScriptCommand } from "@ryco/client-runtime/state/settings";
 import {
-  useServerAvailableEditors,
-  useServerConfig,
-  useServerKeybindingsConfigPath,
-} from "../../rpc/serverState";
+  useAllAppKeybindings,
+  useAppKeybindingsState,
+  retryAppKeybindings,
+  replaceAppKeybindings,
+  resetAppKeybindings,
+  importLegacyKeybindings,
+} from "../../appKeybindings";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
-import { useSettingsTarget } from "../../settingsTarget";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
+import { Badge } from "../ui/badge";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "../ui/input-group";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingsEmpty,
+  SettingsNotice,
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
 
 type DraftRule = KeybindingRule & { __id: string };
-
-const EMPTY_RESOLVED: ResolvedKeybindingsConfig = [];
 
 interface CommandRowData {
   readonly command: KeybindingCommand;
@@ -167,49 +171,14 @@ interface PanelContextValue {
 }
 
 export function KeybindingsSettingsPanel() {
-  const settingsTarget = useSettingsTarget();
-  const serverConfig = useServerConfig();
-  const keybindingsConfigPath = useServerKeybindingsConfigPath();
-  const availableEditors = useServerAvailableEditors();
+  const { hydrated, error: persistenceError } = useAppKeybindingsState();
+  const resolvedKeybindings = useAllAppKeybindings();
   const platform = typeof navigator !== "undefined" ? navigator.platform : "";
   const isMac = isMacPlatform(platform);
-  const [isOpeningKeybindingsFile, setIsOpeningKeybindingsFile] = useState(false);
-  const [openKeybindingsFileError, setOpenKeybindingsFileError] = useState<string | null>(null);
-  const canOpenKeybindingsFile = !settingsTarget || settingsTarget.primary;
-  const keybindingsApi = settingsTarget
-    ? readEnvironmentApi(settingsTarget.environmentId)?.keybindings
-    : ensureLocalApi().keybindings;
-
-  const openKeybindingsFile = useCallback(() => {
-    if (!keybindingsConfigPath) return;
-    if (!canOpenKeybindingsFile) {
-      setOpenKeybindingsFileError(
-        `This file lives on ${settingsTarget?.nodeLabel ?? "the selected node"} and cannot be opened in a local editor.`,
-      );
-      return;
-    }
-    setOpenKeybindingsFileError(null);
-    setIsOpeningKeybindingsFile(true);
-
-    const editor = resolveAndPersistPreferredEditor(availableEditors ?? []);
-    if (!editor) {
-      setOpenKeybindingsFileError("No available editors found.");
-      setIsOpeningKeybindingsFile(false);
-      return;
-    }
-
-    void ensureLocalApi()
-      .shell.openInEditor(keybindingsConfigPath, editor)
-      .catch((error: unknown) => {
-        setOpenKeybindingsFileError(
-          error instanceof Error ? error.message : "Unable to open keybindings file.",
-        );
-      })
-      .finally(() => {
-        setIsOpeningKeybindingsFile(false);
-      });
-  }, [availableEditors, canOpenKeybindingsFile, keybindingsConfigPath, settingsTarget?.nodeLabel]);
-
+  const [importRules, setImportRules] = useState<readonly KeybindingRule[] | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importProject, setImportProject] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
   // Subscribe to the project list with shallow-equal compare (the array
   // identity is unstable across renders but its element references are stable
   // until a project actually changes — exactly what `useShallow` is for).
@@ -219,42 +188,43 @@ export function KeybindingsSettingsPanel() {
     const titles = new Map<KeybindingCommand, string>();
     for (const project of projects) {
       for (const script of project.scripts) {
-        const command = `script.${script.id}.run` as KeybindingCommand;
+        const command = scopedScriptCommand(
+          { environmentId: project.environmentId, projectId: project.id },
+          script.id,
+        );
         commands.add(command);
         if (!titles.has(command)) {
-          titles.set(command, `Run: ${script.name}`);
+          titles.set(command, `Run: ${script.name} · ${project.name} · ${project.environmentId}`);
         }
       }
     }
     return { commandList: Array.from(commands), titles };
   }, [projects]);
 
-  const resolvedKeybindings = serverConfig?.keybindings ?? EMPTY_RESOLVED;
-
   const [draft, setDraft] = useState<DraftRule[]>(() => snapshotToDraft(resolvedKeybindings));
-  const [serverSnapshotKey, setServerSnapshotKey] = useState(() =>
+  const [localSnapshotKey, setLocalSnapshotKey] = useState(() =>
     JSON.stringify(stripDraftIds(snapshotToDraft(resolvedKeybindings))),
   );
   const draftDirtyRef = useRef(false);
+  const [saving, setSaving] = useState(false);
 
-  // Reconcile draft with server snapshot when it changes externally.
+  // Reconcile with local preference changes. Node configuration never enters this snapshot.
   useEffect(() => {
     const nextKey = JSON.stringify(stripDraftIds(snapshotToDraft(resolvedKeybindings)));
-    if (nextKey === serverSnapshotKey) return;
-    setServerSnapshotKey(nextKey);
+    if (nextKey === localSnapshotKey) return;
+    setLocalSnapshotKey(nextKey);
     if (!draftDirtyRef.current) {
       setDraft(snapshotToDraft(resolvedKeybindings));
     }
-  }, [resolvedKeybindings, serverSnapshotKey]);
+  }, [resolvedKeybindings, localSnapshotKey]);
 
   const persistDraft = useCallback(
     async (nextDraft: ReadonlyArray<DraftRule>) => {
+      if (draftDirtyRef.current) return;
       draftDirtyRef.current = true;
+      setSaving(true);
       try {
-        if (!keybindingsApi) throw new Error("Keybinding settings are unavailable on this node.");
-        await keybindingsApi.replaceCustom({
-          rules: stripDraftIds(nextDraft),
-        });
+        await replaceAppKeybindings(stripDraftIds(nextDraft).filter((rule) => rule.key.length > 0));
       } catch (error: unknown) {
         toastManager.add(
           stackedThreadToast({
@@ -263,17 +233,19 @@ export function KeybindingsSettingsPanel() {
             description: error instanceof Error ? error.message : "An unknown error occurred.",
           }),
         );
-        // Revert local draft on persistence failure — server snapshot is the truth.
+        // Revert the editor when local persistence fails.
         setDraft(snapshotToDraft(resolvedKeybindings));
       } finally {
         draftDirtyRef.current = false;
+        setSaving(false);
       }
     },
-    [keybindingsApi, resolvedKeybindings],
+    [resolvedKeybindings],
   );
 
   const handleRebind = useCallback(
     (index: number, shortcut: KeybindingShortcut) => {
+      if (draftDirtyRef.current) return;
       setDraft((current) => {
         const next = current.slice();
         const existing = next[index];
@@ -289,6 +261,7 @@ export function KeybindingsSettingsPanel() {
   );
 
   const handleAddBinding = useCallback((command: KeybindingCommand) => {
+    if (draftDirtyRef.current) return;
     setDraft((current) => {
       const placeholder: DraftRule = {
         command,
@@ -318,6 +291,7 @@ export function KeybindingsSettingsPanel() {
 
   const handleRemoveBinding = useCallback(
     (index: number) => {
+      if (draftDirtyRef.current) return;
       setDraft((current) => {
         const next = current.slice();
         next.splice(index, 1);
@@ -330,6 +304,7 @@ export function KeybindingsSettingsPanel() {
 
   const handleChangeWhen = useCallback(
     (index: number, when: string | undefined) => {
+      if (draftDirtyRef.current) return;
       setDraft((current) => {
         const next = current.slice();
         const existing = next[index];
@@ -345,6 +320,7 @@ export function KeybindingsSettingsPanel() {
 
   const handleResetBinding = useCallback(
     (index: number) => {
+      if (draftDirtyRef.current) return;
       setDraft((current) => {
         const target = current[index];
         if (!target) return current;
@@ -371,6 +347,7 @@ export function KeybindingsSettingsPanel() {
 
   const handleResetCommand = useCallback(
     (command: KeybindingCommand) => {
+      if (draftDirtyRef.current) return;
       setDraft((current) => {
         const next = current.filter((rule) => rule.command !== command);
         if (DEFAULT_COMMANDS.has(command)) {
@@ -389,10 +366,12 @@ export function KeybindingsSettingsPanel() {
   );
 
   const handleRestoreAllDefaults = useCallback(async () => {
-    setDraft([]);
+    if (draftDirtyRef.current) return;
+    draftDirtyRef.current = true;
+    setSaving(true);
     try {
-      if (!keybindingsApi) throw new Error("Keybinding settings are unavailable on this node.");
-      await keybindingsApi.replaceCustom({ rules: [] });
+      await resetAppKeybindings();
+      setDraft(snapshotToDraft(DEFAULT_RESOLVED_KEYBINDINGS));
     } catch (error: unknown) {
       toastManager.add(
         stackedThreadToast({
@@ -402,8 +381,11 @@ export function KeybindingsSettingsPanel() {
         }),
       );
       setDraft(snapshotToDraft(resolvedKeybindings));
+    } finally {
+      draftDirtyRef.current = false;
+      setSaving(false);
     }
-  }, [keybindingsApi, resolvedKeybindings]);
+  }, [resolvedKeybindings]);
 
   const rowRefs = useRef(new Map<KeybindingCommand, HTMLDivElement | null>());
   const scrollToCommand = useCallback((command: KeybindingCommand) => {
@@ -513,123 +495,214 @@ export function KeybindingsSettingsPanel() {
     ],
   );
 
-  const issues =
-    serverConfig?.issues.filter((issue) => issue.kind.startsWith("keybindings.")) ?? [];
-  const hasAvailableEditors = (availableEditors ?? []).length > 0;
+  const hasLegacyScripts = importRules?.some((rule) => rule.command.startsWith("script.")) ?? false;
+  const importTarget = projects.find(
+    (project) => JSON.stringify([project.environmentId, project.id]) === importProject,
+  );
+  const importReady = importRules !== null && (!hasLegacyScripts || importTarget !== undefined);
+  const readImport = async (file: File) => {
+    setImportError(null);
+    setImportRules(null);
+    try {
+      if (file.size > 1024 * 1024) throw new Error("Keybindings files must be smaller than 1 MiB.");
+      const rules = Schema.decodeUnknownSync(KeybindingsConfig)(JSON.parse(await file.text()));
+      setImportRules(rules);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "Invalid keybindings file.");
+    }
+  };
+  const importReviewed = async () => {
+    if (!importRules || !importReady) return;
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      const mapped = importRules.map((rule) => {
+        if (!rule.command.startsWith("script.")) return rule;
+        const id = rule.command.slice("script.".length, -".run".length);
+        if (!importTarget?.scripts.some((script) => script.id === id)) {
+          throw new Error(
+            `Script ${id} does not exist in the selected project. Choose the correct project or assign its shortcut from Actions.`,
+          );
+        }
+        return {
+          ...rule,
+          command: scopedScriptCommand(
+            {
+              environmentId: importTarget.environmentId,
+              projectId: importTarget.id,
+            },
+            id,
+          ),
+        };
+      });
+      await importLegacyKeybindings(mapped);
+      setImportRules(null);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "Could not import keybindings.");
+    } finally {
+      setImportBusy(false);
+    }
+  };
 
   return (
     <SettingsPageContainer>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="grid size-9 place-items-center rounded-lg bg-accent text-foreground/70">
-            <KeyboardIcon className="size-4" />
-          </span>
-          <div>
-            <h1 className="text-lg font-semibold tracking-tight">Keybindings</h1>
-            <p className="text-xs text-muted-foreground">
-              Click any shortcut and press a new combination to rebind. Press Esc to cancel,
-              Backspace to clear.
-            </p>
-          </div>
-        </div>
-        <Button
-          variant="outline"
-          size="xs"
-          onClick={() => void handleRestoreAllDefaults()}
-          disabled={draft.length === 0}
-        >
-          <Undo2Icon className="size-3.5" />
-          Restore defaults
-        </Button>
-      </div>
-
-      <SettingsSection title="Configuration file">
-        <SettingsRow
-          title="Keybindings file"
-          description="Open the persisted `keybindings.json` file to edit advanced bindings directly."
-          status={
-            <>
-              <span className="block break-all font-mono text-[11px] text-foreground">
-                {keybindingsConfigPath ?? "Resolving keybindings path..."}
-              </span>
-              {openKeybindingsFileError ? (
-                <span className="mt-1 block text-destructive">{openKeybindingsFileError}</span>
-              ) : (
-                <span className="mt-1 block">
-                  {!canOpenKeybindingsFile
-                    ? `Stored on ${settingsTarget?.nodeLabel ?? "the selected node"}; use an editor on that machine.`
-                    : hasAvailableEditors
-                      ? "Opens in your preferred editor."
-                      : "No available editors found."}
-                </span>
-              )}
-            </>
-          }
-          control={
+      {persistenceError ? (
+        <SettingsNotice tone="warning" title="Local keybindings need attention">
+          <p>{persistenceError}</p>
+          <p>Retry loading, or deliberately replace the local document with defaults.</p>
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => void retryAppKeybindings().catch(() => undefined)}
+          >
+            Retry loading
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={saving}
+            onClick={() => void handleRestoreAllDefaults()}
+          >
+            Replace local bindings with defaults
+          </Button>
+        </SettingsNotice>
+      ) : null}
+      <fieldset disabled={!hydrated || saving || importBusy} className="contents">
+        <SettingsSection
+          title="App shortcuts"
+          headerAction={
             <Button
+              variant="ghost"
               size="xs"
-              variant="outline"
-              disabled={
-                !canOpenKeybindingsFile ||
-                !keybindingsConfigPath ||
-                !hasAvailableEditors ||
-                isOpeningKeybindingsFile
-              }
-              onClick={openKeybindingsFile}
+              onClick={() => void handleRestoreAllDefaults()}
+              disabled={!hydrated}
             >
-              {isOpeningKeybindingsFile ? "Opening..." : "Open file"}
+              <Undo2Icon /> Restore defaults
             </Button>
           }
-        />
-      </SettingsSection>
-
-      {issues.length > 0 ? (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
-          <div className="flex-1 space-y-0.5">
-            {issues.map((issue) => (
-              <p key={`${issue.kind}-${issue.message}`}>{issue.message}</p>
-            ))}
-            {keybindingsConfigPath ? (
-              <p className="opacity-70">
-                Edit <code className="rounded bg-amber-500/20 px-1">{keybindingsConfigPath}</code>{" "}
-                to resolve.
-              </p>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-
-      <div className="relative">
-        <SearchIcon className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
-        <Input
-          type="search"
-          placeholder="Search by command, shortcut, or when…"
-          className="pl-9"
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
-        />
-      </div>
-
-      {totalVisibleRows === 0 ? (
-        <div className="rounded-lg border border-dashed border-border/60 px-6 py-12 text-center text-sm text-muted-foreground">
-          No commands match your search.
-        </div>
-      ) : (
-        groups.map((group) => (
-          <SettingsSection key={group.category.id} title={group.category.label}>
-            {group.rows.map((row) => (
-              <CommandRow
-                key={row.command}
-                row={row}
-                context={context}
-                isMac={isMac}
-                scriptTitle={projectScriptCommands.titles.get(row.command)}
+        >
+          <SettingsRow
+            title="Saved in this app"
+            description="Shortcuts belong to this desktop installation or browser profile and apply across connected nodes."
+          />
+        </SettingsSection>
+        <SettingsSection title="Import legacy bindings">
+          <SettingsRow
+            title="Import keybindings.json"
+            description="Select an existing node's keybindings.json. Review before importing; locally configured and disabled commands are preserved."
+            status={
+              <input
+                type="file"
+                accept=".json,application/json"
+                aria-label="Import legacy keybindings file"
+                disabled={!hydrated || importBusy}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void readImport(file);
+                  event.target.value = "";
+                }}
               />
-            ))}
-          </SettingsSection>
-        ))
-      )}
+            }
+          />
+          {importRules ? (
+            <div className="flex flex-col gap-3 p-4">
+              <p className="text-xs text-muted-foreground">
+                {importRules.length} rules selected. Existing local commands take precedence.
+              </p>
+              <ul className="max-h-48 overflow-y-auto text-xs font-mono">
+                {importRules.map((rule, index) => (
+                  <li key={ruleKeyId(rule, index)}>
+                    {rule.command}: {rule.key}
+                    {rule.when ? ` · ${rule.when}` : ""}
+                  </li>
+                ))}
+              </ul>
+              {hasLegacyScripts ? (
+                <label className="text-xs">
+                  Assign legacy script shortcuts to a project
+                  <select
+                    aria-label="Import script project"
+                    value={importProject}
+                    onChange={(event) => setImportProject(event.target.value)}
+                  >
+                    <option value="">Choose project and node</option>
+                    {projects.map((project) => (
+                      <option
+                        key={JSON.stringify([project.environmentId, project.id])}
+                        value={JSON.stringify([project.environmentId, project.id])}
+                      >
+                        {project.name} · {project.environmentId}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              <div className="flex gap-2">
+                <Button
+                  size="xs"
+                  disabled={!importReady || importBusy}
+                  onClick={() => void importReviewed()}
+                >
+                  Import reviewed bindings
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={importBusy}
+                  onClick={() => setImportRules(null)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {importError ? (
+            <SettingsNotice tone="warning" title="Could not import bindings">
+              {importError}
+            </SettingsNotice>
+          ) : null}
+        </SettingsSection>
+
+        <div className="flex flex-col gap-2">
+          <InputGroup>
+            <InputGroupAddon>
+              <SearchIcon />
+            </InputGroupAddon>
+            <InputGroupInput
+              type="search"
+              aria-label="Search keybindings"
+              placeholder="Search by command, shortcut, or when…"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+            />
+          </InputGroup>
+          <p className="px-0.5 text-xs text-muted-foreground">
+            Click a shortcut and press a new combination to rebind. Esc cancels, Backspace clears.
+          </p>
+        </div>
+
+        {totalVisibleRows === 0 ? (
+          <SettingsEmpty
+            icon={<SearchIcon />}
+            title="No commands match your search"
+            description="Try a command name, a key like ⌘K, or a context such as terminal."
+          />
+        ) : (
+          groups.map((group) => (
+            <SettingsSection key={group.category.id} title={group.category.label}>
+              {group.rows.map((row) => (
+                <CommandRow
+                  key={row.command}
+                  row={row}
+                  context={context}
+                  isMac={isMac}
+                  scriptTitle={projectScriptCommands.titles.get(row.command)}
+                />
+              ))}
+            </SettingsSection>
+          ))
+        )}
+      </fieldset>
     </SettingsPageContainer>
   );
 }
@@ -661,20 +734,20 @@ const CommandRow = memo(function CommandRow({
         context.rowRefs.current.set(row.command, node);
       }}
       className={cn(
-        "group flex flex-col gap-2 border-t border-border/60 px-4 py-3 first:border-t-0 transition-colors data-[flash=true]:bg-amber-500/10 sm:px-5",
+        "group flex flex-col gap-2 border-t border-border/60 px-4 py-3.5 first:border-t-0 transition-colors duration-300 data-[flash=true]:bg-primary/8 sm:px-5",
       )}
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-[13px] font-medium tracking-tight text-foreground">
-              {row.title}
-            </span>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[13px] font-medium text-foreground">{row.title}</span>
             <StatusPill status={row.status} />
           </div>
-          <code className="block truncate text-[10px] text-muted-foreground/60">{row.command}</code>
+          <code className="mt-0.5 block truncate font-mono text-[11px] text-muted-foreground">
+            {row.command}
+          </code>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
           {ruleEntries.length === 0 ? (
             <ShortcutChip
               key="placeholder"
@@ -737,7 +810,7 @@ const CommandRow = memo(function CommandRow({
       </div>
 
       {visibleConflicts.length > 0 ? (
-        <div className="animate-in fade-in slide-in-from-top-1 flex flex-col gap-1 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive-foreground/90">
+        <div className="settings-subsections-enter flex flex-col gap-1 rounded-[min(var(--radius-md),0.5rem)] border border-destructive/28 bg-destructive/6 px-2.5 py-1.5 text-[11px] text-destructive-foreground">
           {visibleConflicts.map((conflict) => (
             <ConflictLine
               key={`${conflict.key}-${conflict.otherCommand}`}
@@ -759,16 +832,9 @@ const CommandRow = memo(function CommandRow({
 function StatusPill({ status }: { status: CommandRowData["status"] }) {
   if (status === "default") return null;
   return (
-    <span
-      className={cn(
-        "rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.06em]",
-        status === "modified"
-          ? "bg-amber-500/15 text-amber-300"
-          : "bg-indigo-500/15 text-indigo-300",
-      )}
-    >
+    <Badge size="sm" variant={status === "modified" ? "warning" : "info"}>
       {status === "modified" ? "Modified" : "Custom"}
-    </span>
+    </Badge>
   );
 }
 
@@ -781,7 +847,7 @@ interface ConflictLineProps {
 
 function ConflictLine({ conflict, platform, isMac, onSelect }: ConflictLineProps) {
   const meta = getCommandMeta(conflict.otherCommand);
-  const parsedKey = parseSerializedShortcut(conflict.key);
+  const parsedKey = parseKeybindingShortcut(conflict.key);
   const tokens = parsedKey ? formatShortcutTokens(parsedKey, { platform }) : [conflict.key];
 
   return (
@@ -833,7 +899,7 @@ function ShortcutChip({
 
   const parsedShortcut = useMemo<KeybindingShortcut | null>(() => {
     if (rule.key.length === 0) return null;
-    return parseSerializedShortcut(rule.key);
+    return parseKeybindingShortcut(rule.key);
   }, [rule.key]);
 
   const tokens = parsedShortcut
@@ -935,14 +1001,13 @@ function ShortcutChip({
         onClick={startRecording}
         onKeyDown={onChipKeyDown}
         className={cn(
-          "inline-flex h-6 items-center gap-1 rounded-md border px-2 font-mono text-[11px] transition-all duration-150",
+          "inline-flex h-6 items-center gap-1 rounded-[min(var(--radius-md),0.4rem)] border px-2 font-mono text-[11px] transition-[background-color,border-color,color] duration-150",
           isRecording
-            ? "kb-chip-recording border-indigo-500/60 bg-indigo-500/15 text-indigo-100 shadow-[0_0_0_4px_rgba(99,102,241,0.18)]"
+            ? "keybinding-chip-recording border-primary/60 bg-primary/10 text-foreground"
             : savedFlash
-              ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-100"
+              ? "border-success/50 bg-success/12 text-foreground"
               : "border-border bg-muted/60 text-foreground hover:bg-muted",
         )}
-        style={isRecording ? { animation: "keybindings-pulse 1.4s ease-in-out infinite" } : {}}
       >
         {isRecording ? (
           <span className="text-[11px] tracking-[0.04em]">Press shortcut…</span>
@@ -970,7 +1035,6 @@ function ShortcutChip({
           <XIcon className="size-3 text-muted-foreground/60 hover:text-destructive" />
         </button>
       ) : null}
-      <PanelStyles />
     </span>
   );
 }
@@ -1004,7 +1068,7 @@ function WhenChip({ currentWhen, onChange, disabled }: WhenChipProps) {
             type="button"
             disabled={disabled}
             className={cn(
-              "inline-flex h-5 items-center gap-1 rounded bg-muted/40 px-1.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50",
+              "inline-flex h-5 items-center gap-1 rounded-[min(var(--radius-sm),0.3rem)] bg-muted/50 px-1.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50",
               currentWhen === undefined && "italic opacity-70",
             )}
             aria-label={`When: ${description}`}
@@ -1041,62 +1105,6 @@ function WhenChip({ currentWhen, onChange, disabled }: WhenChipProps) {
   );
 }
 
-function PanelStyles() {
-  // Inline the keyframes so we don't need to register them in CSS.
-  return (
-    <style>
-      {`@keyframes keybindings-pulse {
-        0%, 100% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
-        50% { box-shadow: 0 0 0 8px rgba(99, 102, 241, 0.30); }
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .kb-chip-recording { animation: none !important; }
-      }`}
-    </style>
-  );
-}
-
 function hasModifier(event: KeyboardEvent | ReactKeyboardEvent): boolean {
   return event.metaKey || event.ctrlKey || event.altKey || event.shiftKey;
-}
-
-function parseSerializedShortcut(value: string): KeybindingShortcut | null {
-  // Tiny parser that mirrors parseKeybindingShortcut for client-side display
-  // without pulling in the shared module (the resolved server data is already
-  // structured; this is only used when a freshly-saved chip has a raw key).
-  const parts = value.toLowerCase().split("+");
-  let key: string | null = null;
-  let metaKey = false;
-  let ctrlKey = false;
-  let altKey = false;
-  let shiftKey = false;
-  let modKey = false;
-  for (const part of parts) {
-    switch (part) {
-      case "cmd":
-      case "meta":
-        metaKey = true;
-        break;
-      case "ctrl":
-      case "control":
-        ctrlKey = true;
-        break;
-      case "alt":
-      case "option":
-        altKey = true;
-        break;
-      case "shift":
-        shiftKey = true;
-        break;
-      case "mod":
-        modKey = true;
-        break;
-      default:
-        if (key !== null) return null;
-        key = part === "space" ? " " : part;
-        break;
-    }
-  }
-  if (key === null) return null;
-  return { key, metaKey, ctrlKey, altKey, shiftKey, modKey };
 }

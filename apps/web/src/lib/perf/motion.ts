@@ -25,6 +25,21 @@ export function syncDocumentMotionVisibility(
   return () => documentTarget.removeEventListener("visibilitychange", sync);
 }
 
+/**
+ * A house motion duration in milliseconds. Appearance preferences and reduced
+ * motion rewrite the tokens to zero, so a zero result means "do not animate".
+ */
+export function readMotionDurationMs(
+  token: `--app-motion-duration-${string}`,
+  fallbackMs: number,
+): number {
+  if (typeof document === "undefined") return 0;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+  const value = Number.parseFloat(raw);
+  if (!Number.isFinite(value)) return fallbackMs;
+  return raw.endsWith("ms") ? value : value * 1000;
+}
+
 export type InactivePanelContentVisibilityStyle = CSSProperties & {
   contentVisibility: "hidden";
   containIntrinsicSize: string;

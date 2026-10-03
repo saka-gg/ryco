@@ -286,6 +286,7 @@ const make = Effect.gen(function* () {
     readonly turnId: TurnId | null;
     readonly createdAt: string;
     readonly requestId?: string;
+    readonly messageId?: MessageId;
     readonly approvalIdentity?: ApprovalResponseIdentity;
     readonly userInputIdentity?: ApprovalResponseIdentity;
     readonly responseAttemptId?: CommandId;
@@ -302,6 +303,7 @@ const make = Effect.gen(function* () {
         summary: input.summary,
         payload: {
           detail: input.detail,
+          ...(input.messageId ? { messageId: input.messageId } : {}),
           ...(input.requestId ? { requestId: input.requestId } : {}),
           ...(input.approvalIdentity ? { approvalIdentity: input.approvalIdentity } : {}),
           ...(input.userInputIdentity ? { userInputIdentity: input.userInputIdentity } : {}),
@@ -1128,6 +1130,7 @@ const make = Effect.gen(function* () {
       yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.start.failed",
+        messageId: event.payload.messageId,
         summary: "Provider turn start rejected",
         detail: `Thread already has active turn '${thread.session.activeTurnId}'. Queuing overlapping turns is not supported; wait for the active turn to finish before starting another.`,
         turnId: null,
@@ -1141,6 +1144,7 @@ const make = Effect.gen(function* () {
       yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.start.failed",
+        messageId: event.payload.messageId,
         summary: "Provider turn start failed",
         detail: `User message '${event.payload.messageId}' was not found for turn start request.`,
         turnId: null,
@@ -1168,6 +1172,7 @@ const make = Effect.gen(function* () {
           appendProviderFailureActivity({
             threadId: event.payload.threadId,
             kind: "provider.turn.start.failed",
+            messageId: event.payload.messageId,
             summary: "Provider turn start failed",
             detail,
             turnId: null,
@@ -1216,6 +1221,7 @@ const make = Effect.gen(function* () {
       yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.start.failed",
+        messageId: event.payload.messageId,
         summary: "Delegated return was not submitted",
         detail:
           "The originating runtime is no longer live. Inspect this result before sending it manually.",

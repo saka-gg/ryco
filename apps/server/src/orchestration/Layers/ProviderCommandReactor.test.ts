@@ -2490,6 +2490,7 @@ describe("ProviderCommandReactor", () => {
     ).toMatchObject({
       payload: {
         detail: expect.stringContaining("cannot switch to 'claudeAgent'"),
+        messageId: "user-message-stopped-provider-switch",
       },
     });
   });
@@ -2852,6 +2853,7 @@ describe("ProviderCommandReactor", () => {
     ).toMatchObject({
       payload: {
         detail: expect.stringContaining("without a provider instance id"),
+        messageId: "user-message-missing-instance",
       },
     });
   });

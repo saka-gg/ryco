@@ -18,6 +18,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type OrchestrationLatestTurn,
+  type ProviderDriverKind,
   type ServerProviderSkill,
   type TurnId,
 } from "@ryco/contracts";
@@ -25,6 +26,7 @@ import { type TimestampFormat } from "@ryco/contracts/settings";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
 import { summarizeToolCallGroup, type ToolCallGroupSummary } from "./toolCallGroup.logic";
+import { classifyChapterStep } from "./workChapters.logic";
 
 const MIN_COLLAPSIBLE_WORK_LOG_ENTRIES = 2;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
@@ -212,6 +214,8 @@ export interface TimelineStableState {
     marker: ContextHandoffTimelineEntry,
     trigger: HTMLButtonElement,
   ) => void;
+  /** Driver of the thread's provider, for the live turn header's mark. */
+  providerDriverKind?: ProviderDriverKind | null;
 }
 
 /**
@@ -258,6 +262,7 @@ export function buildTimelineStableState(input: TimelineStableState): TimelineSt
     ...(input.onInspectContextHandoff
       ? { onInspectContextHandoff: input.onInspectContextHandoff }
       : {}),
+    ...(input.providerDriverKind ? { providerDriverKind: input.providerDriverKind } : {}),
   };
 }
 
@@ -332,7 +337,39 @@ export type MessagesTimelineRow =
       createdAt: string;
       marker: ContextHandoffTimelineEntry;
     }
+  | {
+      /**
+       * One commentary paragraph plus the steps (tool calls, reasoning) that
+       * followed it inside an expanded turn. Finished chapters fold to a single
+       * line; the live one shows its paragraph and a short step ticker.
+       */
+      kind: "chapter";
+      id: string;
+      createdAt: string;
+      turnId: TurnId;
+      /** The paragraph that opened the chapter; null when the agent started working first. */
+      message: ChatMessage | null;
+      entries: WorkLogEntry[];
+      status: "active" | "done";
+      /** User opened a finished chapter (or a search hit lives in it). */
+      expanded: boolean;
+      /** The live chapter shows every step instead of the ticker window. */
+      stepsExpanded: boolean;
+      isFirstInTurn: boolean;
+      isLastInTurn: boolean;
+      startedAt: string;
+      /** Null while the chapter is live. */
+      endedAt: string | null;
+    }
   | { kind: "working"; id: string; createdAt: string | null };
+
+export function chapterExpansionKey(chapterId: string): string {
+  return chapterId;
+}
+
+export function chapterStepsExpansionKey(chapterId: string): string {
+  return `${chapterId}:steps`;
+}
 
 export function deriveTimelineMinimapItems(
   rows: ReadonlyArray<MessagesTimelineRow>,
@@ -368,6 +405,12 @@ function resolveFinalAssistantTextForTimelineTurn(
 
   for (let index = userRowIndex + 1; index < rows.length; index += 1) {
     const row = rows[index];
+    if (row?.kind === "chapter") {
+      if (row.message) {
+        finalAssistantText = row.message.text;
+      }
+      continue;
+    }
     if (row?.kind !== "message") {
       continue;
     }
@@ -477,6 +520,7 @@ interface TurnFold {
   label: string | null;
   hiddenEntryIds: ReadonlySet<string>;
   expanded: boolean;
+  completedAt: string | null;
 }
 
 function computeElapsedMs(startIso: string, endIso: string): number | null {
@@ -534,6 +578,7 @@ function deriveTurnFolds(input: {
   unsettledTurnId: TurnId | null;
   activeTurnStartedAt: string | null;
   turnFoldExpandedById: Readonly<Record<string, boolean>>;
+  liveSettledTurnIds: ReadonlySet<TurnId>;
 }): ReadonlyMap<string, TurnFold> {
   interface TurnGroup {
     entries: TimelineEntry[];
@@ -607,6 +652,7 @@ function deriveTurnFolds(input: {
       firstEntry.createdAt;
 
     let label: string | null = null;
+    let effectiveEnd: string | null = null;
     if (!isRunning) {
       const authoritativeEnd =
         input.latestTurn?.turnId === turnId ? input.latestTurn.completedAt : null;
@@ -615,7 +661,11 @@ function deriveTurnFolds(input: {
           group.terminalEntry ? timelineEntryEnd(group.terminalEntry) : null,
           timelineEntryEnd(lastEntry),
         ) ?? timelineEntryEnd(lastEntry);
-      const elapsedMs = computeElapsedMs(durationStart, authoritativeEnd ?? fallbackEnd);
+      // A turn cannot end before its last visible output. Older projections
+      // stamped completion at the first finished assistant message, which made
+      // a long turn with an early progress update read "Worked for 4s".
+      effectiveEnd = maxIsoTimestamp(authoritativeEnd, fallbackEnd) ?? fallbackEnd;
+      const elapsedMs = computeElapsedMs(durationStart, effectiveEnd);
       const duration = elapsedMs === null ? null : formatDuration(elapsedMs);
       const interrupted =
         input.latestTurn?.turnId === turnId && input.latestTurn.state === "interrupted";
@@ -636,7 +686,15 @@ function deriveTurnFolds(input: {
       durationStart,
       label,
       hiddenEntryIds,
-      expanded: input.turnFoldExpandedById[foldId] ?? isRunning,
+      // A turn the user watched finish keeps its chapter outline open (unless
+      // they folded it while it ran); older turns and a fresh load start
+      // folded down to their final answer.
+      expanded:
+        input.turnFoldExpandedById[foldId] ??
+        (isRunning ||
+          (input.liveSettledTurnIds.has(turnId) &&
+            (input.turnFoldExpandedById[`turn-fold:running:${turnId}`] ?? true))),
+      completedAt: effectiveEnd,
     });
   }
   return foldsByAnchorEntryId;
@@ -715,6 +773,143 @@ export function deriveUndoTurnCountByTurnId(input: {
   return byTurnId;
 }
 
+const EMPTY_TURN_ID_SET: ReadonlySet<TurnId> = new Set();
+const EMPTY_STRING_SET: ReadonlySet<string> = new Set();
+
+type ChapterRow = Extract<MessagesTimelineRow, { kind: "chapter" }>;
+
+interface OpenChapter {
+  fold: TurnFold;
+  message: ChatMessage | null;
+  entries: WorkLogEntry[];
+  createdAt: string;
+}
+
+/** Thinking and runtime notices lead into the paragraph that follows them. */
+function isPreludeEntry(entry: WorkLogEntry): boolean {
+  const kind = classifyChapterStep(entry);
+  return kind === "think" || kind === "note";
+}
+
+function entryStart(entry: WorkLogEntry): string {
+  return entry.startedAt ?? entry.createdAt;
+}
+
+/**
+ * Builds chapter rows while the main loop walks the timeline. Every assistant
+ * paragraph inside an expanded fold opens a chapter; work entries join the
+ * open one. Reasoning that immediately precedes a paragraph moves into that
+ * paragraph's chapter — it is the thinking the paragraph reports on.
+ */
+class ChapterAccumulator {
+  private open: OpenChapter | null = null;
+  private readonly rowsByTurn = new Map<TurnId, ChapterRow[]>();
+
+  constructor(
+    private readonly options: {
+      workGroupExpandedById: Readonly<Record<string, boolean>>;
+      revealedMessageIds: ReadonlySet<string>;
+      rows: MessagesTimelineRow[];
+    },
+  ) {}
+
+  addEntry(fold: TurnFold, entry: WorkLogEntry) {
+    if (!this.open || this.open.fold !== fold) {
+      this.close();
+      this.open = { fold, message: null, entries: [], createdAt: entry.createdAt };
+    }
+    this.open.entries.push(entry);
+  }
+
+  openWithMessage(fold: TurnFold, message: ChatMessage) {
+    let carried: WorkLogEntry[] = [];
+    if (this.open && this.open.fold === fold) {
+      let cut = this.open.entries.length;
+      while (cut > 0 && isPreludeEntry(this.open.entries[cut - 1]!)) {
+        cut -= 1;
+      }
+      carried = this.open.entries.slice(cut);
+      this.open.entries = this.open.entries.slice(0, cut);
+      if (!this.open.message && this.open.entries.length === 0) {
+        // Only thinking/notices so far: they belong to this paragraph, not a chapter of their own.
+        this.open = null;
+      }
+    }
+    this.close();
+    this.open = {
+      fold,
+      message,
+      entries: carried,
+      createdAt: carried[0]?.createdAt ?? message.createdAt,
+    };
+  }
+
+  close() {
+    const open = this.open;
+    if (!open) return;
+    this.open = null;
+    const anchorId = open.message?.id ?? open.entries[0]?.id;
+    if (!anchorId) return;
+    const id = `chapter:${anchorId}`;
+    const firstEntry = open.entries[0];
+    const starts = [
+      ...(open.message ? [open.message.createdAt] : []),
+      ...(firstEntry ? [entryStart(firstEntry)] : []),
+    ].toSorted();
+    const row: ChapterRow = {
+      kind: "chapter",
+      id,
+      createdAt: open.createdAt,
+      turnId: open.fold.turnId,
+      message: open.message,
+      entries: open.entries,
+      status: "done",
+      expanded:
+        this.options.workGroupExpandedById[chapterExpansionKey(id)] ??
+        (open.message !== null && this.options.revealedMessageIds.has(open.message.id)),
+      stepsExpanded: this.options.workGroupExpandedById[chapterStepsExpansionKey(id)] ?? false,
+      isFirstInTurn: false,
+      isLastInTurn: false,
+      startedAt: starts[0] ?? open.createdAt,
+      endedAt: null,
+    };
+    this.options.rows.push(row);
+    const turnRows = this.rowsByTurn.get(row.turnId);
+    if (turnRows) turnRows.push(row);
+    else this.rowsByTurn.set(row.turnId, [row]);
+  }
+
+  /** Chapter state needs its neighbours: position, live/done, and end time. */
+  finalize(folds: ReadonlyMap<string, TurnFold>) {
+    const foldByTurnId = new Map<TurnId, TurnFold>();
+    for (const fold of folds.values()) foldByTurnId.set(fold.turnId, fold);
+    for (const [turnId, turnRows] of this.rowsByTurn) {
+      const fold = foldByTurnId.get(turnId);
+      turnRows.forEach((row, index) => {
+        const next = turnRows[index + 1];
+        const isLast = next === undefined;
+        row.isFirstInTurn = index === 0;
+        row.isLastInTurn = isLast;
+        if (isLast && fold?.status === "running") {
+          row.status = "active";
+          row.endedAt = null;
+          return;
+        }
+        row.endedAt = next ? next.startedAt : (fold?.completedAt ?? chapterLastActivity(row));
+      });
+    }
+  }
+}
+
+function chapterLastActivity(row: ChapterRow): string {
+  let latest = row.message?.completedAt ?? row.message?.createdAt ?? row.startedAt;
+  for (const entry of row.entries) {
+    const at = entry.lastActivityAt ?? entry.createdAt;
+    if (at > latest) latest = at;
+  }
+  return latest;
+}
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestTurn?: TimelineLatestTurn | null;
@@ -727,6 +922,10 @@ export function deriveMessagesTimelineRows(input: {
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
   /** Per-turn rollback target for the changed-files card's Undo action. */
   undoTurnCountByTurnId?: ReadonlyMap<TurnId, number> | undefined;
+  /** Turns seen running in this view; they stay expanded once they settle. */
+  liveSettledTurnIds?: ReadonlySet<TurnId> | undefined;
+  /** Messages a search or deep link points at — their chapter renders open. */
+  revealedMessageIds?: ReadonlySet<string> | undefined;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
   const durationStartByMessageId = computeMessageDurationStart(
@@ -744,16 +943,26 @@ export function deriveMessagesTimelineRows(input: {
     unsettledTurnId,
     activeTurnStartedAt: input.activeTurnStartedAt,
     turnFoldExpandedById: input.turnFoldExpandedById ?? {},
+    liveSettledTurnIds: input.liveSettledTurnIds ?? EMPTY_TURN_ID_SET,
   });
   const collapsedEntryIds = new Set<string>();
+  // Members of an expanded fold render as chapters instead of loose rows.
+  const chapterFoldByEntryId = new Map<string, TurnFold>();
   for (const fold of foldsByAnchorEntryId.values()) {
-    if (!fold.expanded) {
-      for (const entryId of fold.hiddenEntryIds) {
+    for (const entryId of fold.hiddenEntryIds) {
+      if (fold.expanded) {
+        chapterFoldByEntryId.set(entryId, fold);
+      } else {
         collapsedEntryIds.add(entryId);
       }
     }
   }
   let hasRunningFold = false;
+  const chapters = new ChapterAccumulator({
+    workGroupExpandedById: input.workGroupExpandedById ?? {},
+    revealedMessageIds: input.revealedMessageIds ?? EMPTY_STRING_SET,
+    rows: nextRows,
+  });
 
   for (let index = 0; index < input.timelineEntries.length; index += 1) {
     const timelineEntry = input.timelineEntries[index];
@@ -763,6 +972,7 @@ export function deriveMessagesTimelineRows(input: {
 
     const turnFold = foldsByAnchorEntryId.get(timelineEntry.id);
     if (turnFold) {
+      chapters.close();
       hasRunningFold ||= turnFold.status === "running";
       nextRows.push({
         kind: "turn-fold",
@@ -780,6 +990,23 @@ export function deriveMessagesTimelineRows(input: {
     if (collapsedEntryIds.has(timelineEntry.id)) {
       continue;
     }
+
+    const chapterFold = chapterFoldByEntryId.get(timelineEntry.id);
+    if (chapterFold) {
+      if (timelineEntry.kind === "work") {
+        // Approvals are answered from the composer's pending card; inside a
+        // chapter they would read as phantom running commands.
+        if (timelineEntry.entry.approvalLifecycle !== true) {
+          chapters.addEntry(chapterFold, timelineEntry.entry);
+        }
+        continue;
+      }
+      if (timelineEntry.kind === "message" && timelineEntry.message.role === "assistant") {
+        chapters.openWithMessage(chapterFold, timelineEntry.message);
+        continue;
+      }
+    }
+    chapters.close();
 
     if (timelineEntry.kind === "work") {
       const groupedEntries = [timelineEntry.entry];
@@ -911,6 +1138,9 @@ export function deriveMessagesTimelineRows(input: {
     });
   }
 
+  chapters.close();
+  chapters.finalize(foldsByAnchorEntryId);
+
   if (input.isWorking && !hasRunningFold) {
     nextRows.push({
       kind: "working",
@@ -984,6 +1214,32 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "context-compaction":
       return a.marker === (b as typeof a).marker;
+
+    case "chapter": {
+      const bc = b as typeof a;
+      if (
+        a.createdAt !== bc.createdAt ||
+        a.status !== bc.status ||
+        a.expanded !== bc.expanded ||
+        a.stepsExpanded !== bc.stepsExpanded ||
+        a.isFirstInTurn !== bc.isFirstInTurn ||
+        a.isLastInTurn !== bc.isLastInTurn ||
+        a.startedAt !== bc.startedAt ||
+        a.endedAt !== bc.endedAt ||
+        a.entries.length !== bc.entries.length
+      ) {
+        return false;
+      }
+      if (
+        a.message !== bc.message &&
+        (!a.message || !bc.message || !areMessagesUnchanged(a.message, bc.message))
+      ) {
+        return false;
+      }
+      return a.entries.every((entry, index) =>
+        areWorkLogEntriesUnchanged(entry, bc.entries[index]!),
+      );
+    }
 
     case "context-handoff":
       return a.marker === (b as typeof a).marker;

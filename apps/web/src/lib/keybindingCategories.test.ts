@@ -47,6 +47,16 @@ describe("keybindingCategories", () => {
     expect(getCommandMeta("thread.jump.9").category).toBe(KEYBINDING_CATEGORIES.thread);
   });
 
+  it("maps split-view commands to the Split view category", () => {
+    expect(getCommandMeta("pane.split")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.pane,
+      title: "Open a thread in split view",
+    });
+    expect(getCommandMeta("pane.close").category).toBe(KEYBINDING_CATEGORIES.pane);
+    expect(getCommandMeta("pane.focusNext").category).toBe(KEYBINDING_CATEGORIES.pane);
+    expect(getCommandMeta("pane.focusPrevious").category).toBe(KEYBINDING_CATEGORIES.pane);
+  });
+
   it("maps model-picker commands to the Model picker category", () => {
     expect(getCommandMeta("modelPicker.toggle").category).toBe(KEYBINDING_CATEGORIES.modelPicker);
     expect(getCommandMeta("modelPicker.jump.5").category).toBe(KEYBINDING_CATEGORIES.modelPicker);

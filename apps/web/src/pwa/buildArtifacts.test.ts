@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vite-plus/test";
+import { runInNewContext } from "node:vm";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { renderHostedPwaServiceWorker, resolveHostedPwaPrecache } from "./buildArtifacts";
 import { renderHostedPwaOfflineDocument } from "./offlineDocument";
@@ -106,5 +107,65 @@ describe("hosted PWA build artifacts", () => {
     expect(source).not.toContain("<script");
     expect(source).not.toContain("/api/");
     expect(source).not.toContain("localStorage");
+  });
+
+  it("serves immutable module scripts offline when Origin differs from the precache request", async () => {
+    const origin = "https://ryco.example";
+    const cached = new Response("export default 'static shell'", {
+      headers: { Vary: "Origin", "Content-Type": "text/javascript" },
+    });
+    const network = vi.fn(() => Promise.reject(new Error("offline")));
+    const handlers = new Map<string, (event: unknown) => void>();
+    runInNewContext(
+      renderHostedPwaServiceWorker(
+        resolveHostedPwaPrecache({ base: "/", entries, offlineDocument }),
+      ),
+      {
+        URL,
+        self: {
+          registration: { scope: `${origin}/` },
+          location: { origin },
+          addEventListener: (type: string, handler: (event: unknown) => void) =>
+            handlers.set(type, handler),
+        },
+        caches: {
+          open: async () => ({
+            // Cache.addAll uses no Origin; a module request includes it.
+            match: async (request: Request, options?: CacheQueryOptions) =>
+              options?.ignoreVary || !request.headers.has("Origin") ? cached : undefined,
+          }),
+        },
+        fetch: network,
+      },
+    );
+    let response: Promise<Response> | undefined;
+    handlers.get("fetch")!({
+      request: new Request(`${origin}/assets/main-AbCd1234.js`, {
+        headers: { Origin: origin },
+        mode: "cors",
+      }),
+      respondWith: (result: Promise<Response>) => {
+        response = result;
+      },
+    });
+    expect(await (await response)!.text()).toBe("export default 'static shell'");
+    expect(network).not.toHaveBeenCalled();
+  });
+
+  it("boots the remembered-browser app from only build-generated entry points", () => {
+    const source = renderHostedPwaOfflineDocument({
+      startUrl: "/",
+      scripts: ["/assets/index-abcdefgh.js"],
+      styles: ["/assets/index-abcdefgh.css"],
+    });
+    expect(source).toContain('<div id="root"></div>');
+    expect(source).toContain('src="/assets/index-abcdefgh.js"');
+    expect(source).not.toContain("/api/");
+    expect(source).not.toContain("localStorage");
+    const worker = renderHostedPwaServiceWorker(
+      resolveHostedPwaPrecache({ base: "/", entries, offlineDocument: source }),
+    );
+    expect(worker).toContain("(await cache.match(offlineUrl)) ?? fetch(request)");
+    expect(worker).not.toContain("cache.put(");
   });
 });

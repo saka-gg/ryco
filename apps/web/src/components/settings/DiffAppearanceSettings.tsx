@@ -105,11 +105,12 @@ function DiffPreview({ layout }: { layout: DiffRenderMode }) {
 export function DiffAppearanceSettings() {
   const [layout, setLayout] = useDiffLayout();
   return (
-    <SettingsSection title="Diff style">
-      <p className="px-4 pt-4 text-xs text-muted-foreground">
-        Choose how code changes appear in the diff viewer. You can also switch from its toolbar.
-      </p>
-      <div role="group" aria-label="Diff style" className="grid gap-4 p-4 lg:grid-cols-2">
+    <SettingsSection
+      title="Diff style"
+      description="How code changes appear in the diff viewer. You can also switch from its toolbar."
+      bare
+    >
+      <div role="group" aria-label="Diff style" className="grid gap-3 lg:grid-cols-2">
         {LAYOUTS.map((option) => (
           <button
             key={option.value}
@@ -118,14 +119,14 @@ export function DiffAppearanceSettings() {
             aria-label={`${option.label} diff style`}
             onClick={() => setLayout(option.value)}
             className={cn(
-              "min-w-0 rounded-xl border p-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+              "min-w-0 rounded-[min(var(--radius-xl),0.875rem)] border bg-card p-3 text-left outline-none transition-[border-color,box-shadow,background-color] duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring",
               layout === option.value
-                ? "border-primary bg-muted/40"
-                : "border-border hover:bg-muted/20",
+                ? "border-primary/70 shadow-[0_0_0_1px_var(--color-primary)]"
+                : "border-border/70 hover:border-foreground/20 hover:bg-muted/30",
             )}
           >
             <DiffPreview layout={option.value} />
-            <span className="mt-3 flex items-center justify-between text-sm font-medium">
+            <span className="mt-3 flex items-center justify-between text-[13px] font-medium text-foreground">
               {option.label}
               {layout === option.value && <CheckIcon aria-hidden="true" className="size-4" />}
             </span>

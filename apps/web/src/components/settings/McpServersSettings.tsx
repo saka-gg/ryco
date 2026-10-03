@@ -10,10 +10,9 @@ import {
   ServerIcon,
   TerminalIcon,
   Trash2Icon,
-  TriangleAlertIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type EnvironmentApi,
   McpServerName,
@@ -42,6 +41,7 @@ import {
 import { formatProviderDriverKindLabel } from "../../providerModels";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
   DialogDescription,
@@ -58,6 +58,15 @@ import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { getDriverOption } from "./providerDriverMeta";
+import {
+  SETTINGS_INSET_CLASS,
+  SettingsBlock,
+  SettingsEmpty,
+  SettingsNotice,
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
 
 type McpApi = NonNullable<EnvironmentApi["mcp"]>;
 const EMPTY_WORKSPACES: readonly McpWorkspace[] = [];
@@ -170,7 +179,7 @@ function TransportToggle({
   readonly onChange: (value: "stdio" | "http") => void;
 }) {
   return (
-    <div className="grid grid-cols-2 rounded-lg border bg-muted/30 p-1">
+    <div className="grid grid-cols-2 rounded-[min(var(--radius-lg),0.625rem)] bg-muted/70 p-0.5">
       {[
         { value: "stdio" as const, label: "Stdio", icon: TerminalIcon },
         { value: "http" as const, label: "HTTP", icon: Globe2Icon },
@@ -183,8 +192,10 @@ function TransportToggle({
             type="button"
             onClick={() => onChange(option.value)}
             className={cn(
-              "flex h-8 items-center justify-center gap-2 rounded-md text-xs font-medium transition-colors",
-              active ? "bg-background text-foreground shadow-xs" : "text-muted-foreground",
+              "flex h-7 items-center justify-center gap-2 rounded-[min(var(--radius-md),0.5rem)] text-xs font-medium transition-[background-color,color,box-shadow] duration-(--app-motion-duration-chip)",
+              active
+                ? "bg-background text-foreground shadow-xs"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
             <Icon className="size-3.5" />
@@ -213,9 +224,12 @@ function McpServerDialog({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const editing = server !== null;
+  // The dialog folds into the card of the server it just saved.
+  const savedServerNameRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    savedServerNameRef.current = null;
     setForm(server ? formFromMcpServer(server) : createEmptyMcpServerForm());
     setValidationError(null);
   }, [open, server]);
@@ -233,6 +247,7 @@ function McpServerDialog({
     setSaving(true);
     try {
       await onSubmit(form);
+      savedServerNameRef.current = form.name.trim();
       onOpenChange(false);
     } catch (cause) {
       showErrorToast("Failed to save MCP server", cause);
@@ -243,7 +258,20 @@ function McpServerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogPopup className="max-w-2xl" bottomStickOnMobile={false}>
+      <DialogPopup
+        className="max-w-2xl"
+        bottomStickOnMobile={false}
+        morph={{
+          target: (origin) => {
+            const saved = savedServerNameRef.current;
+            if (!saved) return origin;
+            return (
+              document.querySelector<HTMLElement>(`[data-mcp-server="${CSS.escape(saved)}"]`) ??
+              origin
+            );
+          },
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{editing ? "Edit MCP server" : "Add MCP server"}</DialogTitle>
           <DialogDescription>
@@ -427,31 +455,28 @@ function McpServerDialog({
                 Select a field only when you want it removed on save.
               </p>
               {form.secretFields.map((field) => (
-                <label key={field} className="flex items-center gap-2 text-xs">
-                  <input
-                    type="checkbox"
+                <div key={field} className="flex items-center gap-2 text-xs">
+                  <Checkbox
+                    aria-label={`Clear ${field}`}
                     checked={form.clearedSecretFields.includes(field)}
-                    onChange={(event) =>
+                    onCheckedChange={(checked) =>
                       setField(
                         "clearedSecretFields",
-                        event.target.checked
+                        checked === true
                           ? [...form.clearedSecretFields, field]
                           : form.clearedSecretFields.filter((entry) => entry !== field),
                       )
                     }
                   />
-                  Clear <code className="font-mono">{field}</code>
-                </label>
+                  <span aria-hidden>
+                    Clear <code className="font-mono">{field}</code>
+                  </span>
+                </div>
               ))}
             </fieldset>
           ) : null}
 
-          {validationError ? (
-            <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-xs text-destructive-foreground">
-              <TriangleAlertIcon className="mt-0.5 size-3.5" />
-              <span>{validationError}</span>
-            </div>
-          ) : null}
+          {validationError ? <SettingsNotice tone="error">{validationError}</SettingsNotice> : null}
         </DialogPanel>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
@@ -465,6 +490,10 @@ function McpServerDialog({
       </DialogPopup>
     </Dialog>
   );
+}
+
+function workspaceOptionLabel(workspace: McpWorkspace): string {
+  return `${workspaceProviderDisplayName(workspace)} · ${workspace.nativeScope} scope`;
 }
 
 function WorkspaceSelect({
@@ -486,13 +515,18 @@ function WorkspaceSelect({
         if (workspaceId) onChange(workspaceId);
       }}
     >
-      <SelectTrigger className="w-full sm:w-72" aria-label="MCP workspace">
-        <SelectValue>{selected?.displayPath ?? "Select workspace"}</SelectValue>
+      <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="MCP workspace">
+        <SelectValue>{selected ? workspaceOptionLabel(selected) : "Select workspace"}</SelectValue>
       </SelectTrigger>
       <SelectPopup align="end" alignItemWithTrigger={false}>
         {workspaces.map((workspace) => (
           <SelectItem hideIndicator key={workspace.id} value={workspace.id}>
-            <span className="truncate">{workspace.displayPath}</span>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate">{workspaceOptionLabel(workspace)}</span>
+              <span className="truncate font-mono text-[11px] text-muted-foreground">
+                {workspace.displayPath}
+              </span>
+            </span>
           </SelectItem>
         ))}
       </SelectPopup>
@@ -512,47 +546,41 @@ function ProviderSupportSection({
   if (providers.length === 0) return null;
 
   return (
-    <section className="overflow-hidden rounded-lg border bg-card text-card-foreground shadow-sm/4">
-      <div className="border-b px-4 py-3">
-        <h3 className="text-sm font-semibold">Provider MCP support</h3>
-      </div>
-      <div className="divide-y">
-        {providers.map((provider) => {
-          const driverOption = getDriverOption(provider.driver);
-          const Icon = driverOption?.icon ?? ServerIcon;
-          const workspaceSelected =
-            provider.workspaceId !== undefined && provider.workspaceId === selectedWorkspaceId;
-          const canSelectWorkspace = provider.workspaceId !== undefined && !workspaceSelected;
+    <SettingsSection
+      title="Provider support"
+      description="Each agent manages MCP servers in its own configuration. Pick one to view its servers."
+    >
+      {providers.map((provider) => {
+        const driverOption = getDriverOption(provider.driver);
+        const Icon = driverOption?.icon ?? ServerIcon;
+        const workspaceSelected =
+          provider.workspaceId !== undefined && provider.workspaceId === selectedWorkspaceId;
+        const canSelectWorkspace = provider.workspaceId !== undefined && !workspaceSelected;
 
-          return (
-            <div
-              key={provider.instanceId}
-              className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-            >
-              <div className="flex min-w-0 items-start gap-3">
-                <div className="relative mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border bg-background">
+        return (
+          <SettingsRow
+            key={provider.instanceId}
+            title={
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="relative flex size-5 shrink-0 items-center justify-center">
                   <Icon className="size-4 text-muted-foreground" />
                   {provider.accentColor ? (
                     <span
-                      className="absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full border border-background"
+                      className="absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2 ring-card"
                       style={{ backgroundColor: provider.accentColor }}
                     />
                   ) : null}
-                </div>
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="text-sm font-medium">{providerDisplayName(provider)}</span>
-                    <span className="font-mono text-[11px] text-muted-foreground/70">
-                      {provider.instanceId}
-                    </span>
-                  </div>
-                  <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground/80">
-                    {provider.message}
-                  </p>
-                </div>
-              </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
-                <Badge variant={providerSupportVariant(provider)}>
+                </span>
+                <span className="truncate">{providerDisplayName(provider)}</span>
+                <span className="truncate font-mono text-[11px] font-normal text-muted-foreground/70">
+                  {provider.instanceId}
+                </span>
+              </span>
+            }
+            description={provider.message}
+            control={
+              <>
+                <Badge size="sm" variant={providerSupportVariant(provider)}>
                   {providerSupportLabel(provider)}
                 </Badge>
                 {provider.workspaceId ? (
@@ -564,16 +592,49 @@ function ProviderSupportSection({
                       if (provider.workspaceId) onSelectWorkspace(provider.workspaceId);
                     }}
                   >
-                    {driverOption?.label ?? formatProviderDriverKindLabel(provider.driver)}{" "}
-                    workspace
+                    {workspaceSelected ? "Showing" : "Show servers"}
                   </Button>
                 ) : null}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </section>
+              </>
+            }
+          />
+        );
+      })}
+    </SettingsSection>
+  );
+}
+
+function InventoryColumn({
+  title,
+  items,
+}: {
+  readonly title: string;
+  readonly items: ReadonlyArray<{
+    readonly key: string;
+    readonly name: string;
+    readonly detail?: string | undefined;
+  }>;
+}) {
+  return (
+    <div className="min-w-0">
+      <h4 className="mb-1.5 text-xs font-medium text-foreground">
+        {title} <span className="font-normal text-muted-foreground">{items.length}</span>
+      </h4>
+      {items.length === 0 ? (
+        <p className="text-xs text-muted-foreground/70">None</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {items.map((item) => (
+            <li key={item.key} className="min-w-0">
+              <p className="truncate text-xs text-foreground">{item.name}</p>
+              {item.detail ? (
+                <p className="line-clamp-2 text-[11px] text-muted-foreground">{item.detail}</p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -587,58 +648,42 @@ function InventoryList({ server }: { readonly server: McpServer }) {
   }
 
   return (
-    <div className="grid gap-4 md:grid-cols-3">
-      <div>
-        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-          Tools
-        </h4>
-        <div className="space-y-1">
-          {server.tools.slice(0, 12).map((tool) => (
-            <div key={tool.name} className="rounded-md border bg-background/60 px-2 py-1.5">
-              <div className="truncate text-xs font-medium">{tool.title ?? tool.name}</div>
-              {tool.description ? (
-                <div className="line-clamp-2 text-[11px] text-muted-foreground/75">
-                  {tool.description}
-                </div>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div>
-        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-          Resources
-        </h4>
-        <div className="space-y-1">
-          {server.resources.slice(0, 10).map((resource) => (
-            <div key={resource.uri} className="rounded-md border bg-background/60 px-2 py-1.5">
-              <div className="truncate text-xs font-medium">{resource.title ?? resource.name}</div>
-              <div className="truncate text-[11px] text-muted-foreground/75">{resource.uri}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div>
-        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-          Templates
-        </h4>
-        <div className="space-y-1">
-          {server.resourceTemplates.slice(0, 10).map((template) => (
-            <div
-              key={template.uriTemplate}
-              className="rounded-md border bg-background/60 px-2 py-1.5"
-            >
-              <div className="truncate text-xs font-medium">{template.title ?? template.name}</div>
-              <div className="truncate text-[11px] text-muted-foreground/75">
-                {template.uriTemplate}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+    <div className="grid gap-5 md:grid-cols-3">
+      <InventoryColumn
+        title="Tools"
+        items={server.tools.slice(0, 12).map((tool) => ({
+          key: tool.name,
+          name: tool.title ?? tool.name,
+          detail: tool.description ?? undefined,
+        }))}
+      />
+      <InventoryColumn
+        title="Resources"
+        items={server.resources.slice(0, 10).map((resource) => ({
+          key: resource.uri,
+          name: resource.title ?? resource.name,
+          detail: resource.uri,
+        }))}
+      />
+      <InventoryColumn
+        title="Templates"
+        items={server.resourceTemplates.slice(0, 10).map((template) => ({
+          key: template.uriTemplate,
+          name: template.title ?? template.name,
+          detail: template.uriTemplate,
+        }))}
+      />
     </div>
   );
 }
+
+const AUTH_STATUS_LABELS: Record<McpServer["authStatus"], string | null> = {
+  unsupported: null,
+  notLoggedIn: "Signed out",
+  bearerToken: "Bearer token",
+  oAuth: "OAuth",
+  unknown: null,
+};
 
 function McpServerCard({
   server,
@@ -666,54 +711,64 @@ function McpServerCard({
     ? `${server.tools.length} tools · ${server.resources.length + server.resourceTemplates.length} resources`
     : "Inventory not available";
 
+  const authLabel = AUTH_STATUS_LABELS[server.authStatus];
+  const meta = [server.config.transport.toUpperCase(), inventoryLabel, authLabel].filter(Boolean);
+
   return (
-    <article className="rounded-lg border bg-card text-card-foreground shadow-sm/4">
-      <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between">
+    <div
+      data-mcp-server={server.name}
+      className={cn("min-w-0 border-t border-border/60 first:border-t-0")}
+    >
+      <div
+        className={cn(
+          "flex min-w-0 flex-col gap-3 py-3.5 sm:flex-row sm:items-center",
+          SETTINGS_INSET_CLASS,
+        )}
+      >
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              {server.config.transport === "http" ? (
-                <Globe2Icon className="size-4 text-muted-foreground" />
-              ) : (
-                <TerminalIcon className="size-4 text-muted-foreground" />
-              )}
-              <h3 className="truncate text-sm font-semibold">{server.name}</h3>
-            </div>
-            <Badge variant={statusVariant(server)}>{statusLabel(server)}</Badge>
-            <Badge variant="outline">{sourceLabel(server.source)}</Badge>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            {server.config.transport === "http" ? (
+              <Globe2Icon className="size-3.5 shrink-0 text-muted-foreground" />
+            ) : (
+              <TerminalIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            )}
+            <h3 className="min-w-0 truncate text-[13px] font-medium text-foreground">
+              {server.name}
+            </h3>
+            <Badge size="sm" variant={statusVariant(server)}>
+              {statusLabel(server)}
+            </Badge>
+            <Badge size="sm" variant="outline">
+              {sourceLabel(server.source)}
+            </Badge>
           </div>
-          <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground/80">
+          <p
+            className="mt-1 truncate font-mono text-[11px] text-muted-foreground"
+            title={connection}
+          >
             {connection}
           </p>
-          <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-            <span>{server.config.transport.toUpperCase()}</span>
-            <span>{inventoryLabel}</span>
-            <span>Auth: {server.authStatus}</span>
-          </div>
-          {server.error ? <p className="mt-2 text-xs text-destructive">{server.error}</p> : null}
+          <p className="mt-1 text-[11px] text-muted-foreground/80">{meta.join(" · ")}</p>
+          {server.error ? (
+            <p className="mt-1.5 break-words text-xs text-destructive-foreground">{server.error}</p>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
           {capabilities.oauth === "available" && server.authStatus === "notLoggedIn" ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    size="icon-sm"
-                    variant="outline"
-                    disabled={mutating}
-                    onClick={() => onOauthLogin(server)}
-                    aria-label={`Log in to ${server.name}`}
-                  >
-                    <LogInIcon />
-                  </Button>
-                }
-              />
-              <TooltipPopup>Start OAuth login</TooltipPopup>
-            </Tooltip>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={mutating}
+              onClick={() => onOauthLogin(server)}
+              aria-label={`Log in to ${server.name}`}
+            >
+              <LogInIcon />
+              Log in
+            </Button>
           ) : null}
           {writable && capabilities.upsert === "available" ? (
-            <Button size="sm" variant="outline" onClick={() => onEdit(server)} disabled={mutating}>
+            <Button size="xs" variant="outline" onClick={() => onEdit(server)} disabled={mutating}>
               Edit
             </Button>
           ) : null}
@@ -722,8 +777,9 @@ function McpServerCard({
               <TooltipTrigger
                 render={
                   <Button
-                    size="icon-sm"
-                    variant="destructive-outline"
+                    size="icon-xs"
+                    variant="ghost"
+                    className="text-muted-foreground hover:text-destructive-foreground"
                     disabled={mutating}
                     onClick={() => onRemove(server)}
                     aria-label={`Remove ${server.name}`}
@@ -745,23 +801,34 @@ function McpServerCard({
           ) : null}
           {inventoryAvailable ? (
             <Button
-              size="icon-sm"
+              size="icon-xs"
               variant="ghost"
               onClick={() => setExpanded((current) => !current)}
+              aria-expanded={expanded}
               aria-label={`Toggle ${server.name} inventory`}
             >
-              <ChevronDownIcon className={cn("transition-transform", expanded && "rotate-180")} />
+              <ChevronDownIcon
+                className={cn(
+                  "transition-transform duration-(--app-motion-duration-chip)",
+                  expanded && "rotate-180",
+                )}
+              />
             </Button>
           ) : null}
         </div>
       </div>
 
       {expanded && inventoryAvailable ? (
-        <div className="border-t bg-muted/20 p-4">
+        <div
+          className={cn(
+            "settings-subsections-enter border-t border-border/60 bg-muted/30 py-3.5",
+            SETTINGS_INSET_CLASS,
+          )}
+        >
           <InventoryList server={server} />
         </div>
       ) : null}
-    </article>
+    </div>
   );
 }
 
@@ -939,22 +1006,31 @@ export function McpServersSettings() {
     setDialogOpen(true);
   };
 
+  const limits = selectedWorkspace
+    ? [
+        selectedWorkspace.capabilities.health !== "available"
+          ? `${selectedProviderName} doesn't report live health`
+          : null,
+        selectedWorkspace.capabilities.inventory !== "available"
+          ? "tool inventory unavailable"
+          : null,
+        selectedWorkspace.capabilities.enableDisable !== "available"
+          ? "no per-server toggle"
+          : null,
+      ].filter((entry): entry is string => entry !== null)
+    : [];
+
   return (
-    <div className="flex-1 p-6 sm:p-8">
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-              <ServerIcon className="size-3.5" />
-              Provider MCP
-            </div>
-            <h2 className="mt-1 text-lg font-semibold tracking-[-0.01em]">MCP Servers</h2>
-            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground/80">
-              Manage MCP servers through each provider&apos;s native configuration surface. Controls
-              appear only when that provider exposes a reliable operation.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
+    <SettingsPageContainer>
+      <SettingsSection
+        title="Servers"
+        description={
+          selectedWorkspace
+            ? `Read from ${selectedProviderName}'s own configuration. Controls appear only where it exposes a reliable operation.`
+            : "Read from each agent's own configuration."
+        }
+        headerAction={
+          <>
             <WorkspaceSelect
               workspaces={workspaces}
               selectedWorkspaceId={selectedWorkspaceId}
@@ -967,8 +1043,9 @@ export function McpServersSettings() {
               <TooltipTrigger
                 render={
                   <Button
-                    size="icon"
-                    variant="outline"
+                    size="icon-xs"
+                    variant="ghost"
+                    className="text-muted-foreground hover:text-foreground"
                     onClick={() => void refresh()}
                     disabled={loading || refreshing}
                     aria-label="Refresh MCP servers"
@@ -981,6 +1058,7 @@ export function McpServersSettings() {
             </Tooltip>
             {selectedCapabilities?.reload === "available" ? (
               <Button
+                size="xs"
                 variant="outline"
                 disabled={!selectedWorkspaceId || refreshing}
                 onClick={() => void reload()}
@@ -990,107 +1068,72 @@ export function McpServersSettings() {
               </Button>
             ) : null}
             {selectedCapabilities?.upsert === "available" ? (
-              <Button disabled={!selectedWorkspaceId} onClick={openAddDialog}>
+              <Button size="xs" disabled={!selectedWorkspaceId} onClick={openAddDialog}>
                 <PlusIcon />
                 Add server
               </Button>
             ) : null}
-          </div>
-        </header>
-
-        <ProviderSupportSection
-          providers={providers}
-          selectedWorkspaceId={selectedWorkspaceId}
-          onSelectWorkspace={(workspaceId) => {
-            setSelectedWorkspaceId(workspaceId);
-            void loadServers(workspaceId);
-          }}
-        />
-
+          </>
+        }
+      >
         {selectedWorkspace ? (
-          <div className="rounded-lg border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-              <span className="min-w-0 break-all font-mono">{selectedWorkspace.displayPath}</span>
-              <span>
-                {selectedWorkspace.nativeScope} scope · {selectedWorkspace.formatGeneration}
-              </span>
-              <span>
-                Used by{" "}
-                {selectedWorkspace.providerInstances
+          <SettingsBlock className="bg-muted/30 py-3">
+            <p
+              className="truncate font-mono text-[11px] text-foreground"
+              title={snapshot?.configPath ?? selectedWorkspace.displayPath}
+            >
+              {snapshot?.configPath ?? selectedWorkspace.displayPath}
+            </p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              {[
+                `${selectedWorkspace.nativeScope} scope`,
+                `used by ${selectedWorkspace.providerInstances
                   .map((instance) => instance.displayName ?? instance.instanceId)
-                  .join(", ")}
-              </span>
-            </div>
-            {snapshot?.configPath ? (
-              <div className="mt-1 break-all font-mono text-[11px] text-muted-foreground/70">
-                {snapshot.configPath}
-              </div>
-            ) : null}
-          </div>
+                  .join(", ")}`,
+                ...limits,
+              ].join(" · ")}
+            </p>
+          </SettingsBlock>
         ) : null}
 
-        {workspacesResult?.issues.length ? (
-          <div className="space-y-2 rounded-lg border border-warning/30 bg-warning/6 p-3">
-            {workspacesResult.issues.map((issue) => (
-              <div key={`${issue.instanceId}:${issue.message}`} className="flex gap-2 text-xs">
-                <TriangleAlertIcon className="mt-0.5 size-3.5 text-warning-foreground" />
-                <span>
-                  <span className="font-medium">{issue.instanceId}</span>: {issue.message}
-                </span>
-              </div>
+        {workspacesResult?.issues.length || error ? (
+          <SettingsBlock className="flex flex-col gap-2">
+            {workspacesResult?.issues.map((issue) => (
+              <SettingsNotice key={`${issue.instanceId}:${issue.message}`} tone="warning">
+                <span className="font-medium text-foreground">{issue.instanceId}</span>:{" "}
+                {issue.message}
+              </SettingsNotice>
             ))}
-          </div>
-        ) : null}
-
-        {error ? (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/6 p-3 text-sm text-destructive-foreground">
-            {error}
-          </div>
-        ) : null}
-
-        {selectedWorkspace ? (
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            {selectedWorkspace.capabilities.health !== "available" ? (
-              <span>Live health is not reported by {selectedProviderName}.</span>
-            ) : null}
-            {selectedWorkspace.capabilities.inventory !== "available" ? (
-              <span>Tool and resource inventory is unavailable.</span>
-            ) : null}
-            {selectedWorkspace.capabilities.enableDisable !== "available" ? (
-              <span>Individual enable/disable is not supported.</span>
-            ) : null}
-          </div>
+            {error ? <SettingsNotice tone="error">{error}</SettingsNotice> : null}
+          </SettingsBlock>
         ) : null}
 
         {loading ? (
-          <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed">
+          <SettingsBlock className="flex min-h-40 items-center justify-center">
             <LoaderIcon className="size-5 animate-spin text-muted-foreground" />
-          </div>
+          </SettingsBlock>
         ) : workspaces.length === 0 ? (
-          <div className="rounded-lg border border-dashed p-8 text-center">
-            <ServerIcon className="mx-auto size-7 text-muted-foreground/60" />
-            <h3 className="mt-3 text-sm font-semibold">No MCP provider profiles</h3>
-            <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground/80">
-              Add or enable a provider instance with a supported MCP configuration surface.
-            </p>
-          </div>
+          <SettingsEmpty
+            icon={<ServerIcon />}
+            title="No MCP provider profiles"
+            description="Add or enable a provider instance with a supported MCP configuration surface."
+          />
         ) : snapshot?.servers.length === 0 ? (
-          <div className="rounded-lg border border-dashed p-8 text-center">
-            <CheckCircle2Icon className="mx-auto size-7 text-muted-foreground/60" />
-            <h3 className="mt-3 text-sm font-semibold">No MCP servers configured</h3>
-            <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground/80">
-              Add a stdio or HTTP server to make its tools available to {selectedProviderName}
-              sessions.
-            </p>
-            {selectedCapabilities?.upsert === "available" ? (
-              <Button className="mt-4" onClick={openAddDialog}>
-                <PlusIcon />
-                Add server
-              </Button>
-            ) : null}
-          </div>
+          <SettingsEmpty
+            icon={<CheckCircle2Icon />}
+            title="No MCP servers configured"
+            description={`Add a stdio or HTTP server to make its tools available to ${selectedProviderName} sessions.`}
+            action={
+              selectedCapabilities?.upsert === "available" ? (
+                <Button size="sm" onClick={openAddDialog}>
+                  <PlusIcon />
+                  Add server
+                </Button>
+              ) : null
+            }
+          />
         ) : (
-          <div className="grid gap-3">
+          <div className="min-w-0 border-t border-border/60 first:border-t-0">
             {snapshot?.servers.map((server) => (
               <McpServerCard
                 key={server.name}
@@ -1123,7 +1166,16 @@ export function McpServersSettings() {
             ))}
           </div>
         )}
-      </div>
+      </SettingsSection>
+
+      <ProviderSupportSection
+        providers={providers}
+        selectedWorkspaceId={selectedWorkspaceId}
+        onSelectWorkspace={(workspaceId) => {
+          setSelectedWorkspaceId(workspaceId);
+          void loadServers(workspaceId);
+        }}
+      />
 
       <McpServerDialog
         open={dialogOpen}
@@ -1132,6 +1184,6 @@ export function McpServersSettings() {
         onOpenChange={setDialogOpen}
         onSubmit={submitForm}
       />
-    </div>
+    </SettingsPageContainer>
   );
 }

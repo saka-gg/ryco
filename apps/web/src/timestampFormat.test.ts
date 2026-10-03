@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  formatElapsedClockLabel,
   formatElapsedDurationLabel,
   formatExpiresInLabel,
   formatRelativeTimeUntilLabel,
@@ -110,5 +111,22 @@ describe("formatElapsedDurationLabel", () => {
     expect(formatElapsedDurationLabel("2026-04-07T11:45:00.000Z")).toBe("15m");
     expect(formatElapsedDurationLabel("2026-04-07T06:00:00.000Z")).toBe("6h");
     expect(formatElapsedDurationLabel("2026-04-03T12:00:00.000Z")).toBe("4d");
+  });
+});
+
+describe("formatElapsedClockLabel", () => {
+  const start = "2026-04-07T12:00:00.000Z";
+  const at = (seconds: number) => Date.parse(start) + seconds * 1000;
+
+  it("reads like a stopwatch", () => {
+    expect(formatElapsedClockLabel(start, at(0))).toBe("0:00");
+    expect(formatElapsedClockLabel(start, at(7))).toBe("0:07");
+    expect(formatElapsedClockLabel(start, at(252))).toBe("4:12");
+    expect(formatElapsedClockLabel(start, at(3729))).toBe("1:02:09");
+  });
+
+  it("never runs backwards or breaks on bad input", () => {
+    expect(formatElapsedClockLabel(start, at(-30))).toBe("0:00");
+    expect(formatElapsedClockLabel("not a date", at(30))).toBe("0:00");
   });
 });

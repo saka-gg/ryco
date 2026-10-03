@@ -375,15 +375,14 @@
   --app-glass-panel-filter: none;
   --app-glass-panel-light-alpha: 100%;
   --app-glass-panel-dark-alpha: 100%;
-  /* The composer keeps a glass floor even at the Solid step — it is the one
-     surface content deliberately scrolls beneath, so it always reads as
-     floating material rather than a slab. Steps above Solid follow the
-     shared surface plate/blur. */
-  --app-composer-alpha: 93%;
-  --app-composer-dark-alpha: 92%;
-  --app-composer-filter: blur(10px) saturate(158%);
-  /* Toasts use the composer's liquid plate and frost, with semantic color
-     mixed in separately by toast type. */
+  /* The composer's tone: one step off the page at rest and one more while it
+     holds focus. Derived from the theme pair so custom themes re-tint it; the
+     dark variant below re-weights the steps. Its translucency and frost come
+     from the shared surface material (`.app-composer-surface`). */
+  --app-composer-surface: color-mix(in srgb, var(--foreground) 4.5%, var(--background));
+  --app-composer-surface-focus: color-mix(in srgb, var(--foreground) 6.5%, var(--background));
+  /* Toasts use a translucent plate and frost, with semantic color mixed in
+     separately by toast type. */
   --app-toast-alpha: 52%;
   --app-toast-dark-alpha: 40%;
   --app-toast-filter: blur(24px) saturate(185%);
@@ -391,12 +390,7 @@
   --app-dialog-viewport-dark-alpha: 28%;
   --app-sheet-backdrop-alpha: 32%;
   --app-command-backdrop-opacity: 60%;
-  --app-glass-light-start-alpha: 0%;
-  --app-glass-light-end-alpha: 0%;
-  --app-glass-foreground-alpha: 0%;
   --app-glass-light-popover-alpha: 100%;
-  --app-glass-dark-start-alpha: 0%;
-  --app-glass-dark-end-alpha: 0%;
   --app-glass-dark-popover-alpha: 100%;
   /* Phone material tiers. These are the `Solid` step: opaque, unblurred, no
      scrim. `themes/appearancePreferences.ts` rewrites all of them from the
@@ -447,7 +441,7 @@
      the durations to 0s when motion is reduced by the OS or by the phone
      Motion preference; these are the pre-script defaults. */
   --app-motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
-  /* Spring pair for the liquid-glass chrome: `snappy` for controls (press,
+  /* Spring pair for the chrome motion: `snappy` for controls (press,
      chip, popover entrance), `gentle` for panes and fades. Durations reuse the
      three house steps so reduced motion zeroes springs for free. */
   --app-motion-spring-snappy: cubic-bezier(0.3, 1.36, 0.44, 1);
@@ -456,6 +450,9 @@
   --app-motion-duration-stack: 260ms;
   --app-motion-duration-chip: 120ms;
   --app-motion-duration-pop: 200ms;
+  /* Large layout surfaces that move as a whole: split chat panes and the
+     workspace panel slide on the same 360ms house curve. */
+  --app-motion-duration-pane: 360ms;
   --app-motion-activity-play-state: running;
   --background: var(--color-white);
   --app-chrome-background: var(--background);
@@ -547,6 +544,8 @@
     --success-foreground: var(--color-emerald-400);
     --warning: var(--color-amber-500);
     --warning-foreground: var(--color-amber-400);
+    --app-composer-surface: color-mix(in srgb, var(--foreground) 6.5%, var(--background));
+    --app-composer-surface-focus: color-mix(in srgb, var(--foreground) 9%, var(--background));
     --scrollbar-thumb: rgba(255, 255, 255, 0.1);
     --scrollbar-thumb-hover: rgba(255, 255, 255, 0.18);
     --scrollbar-thumb-thin: rgba(255, 255, 255, 0.08);
@@ -554,14 +553,11 @@
   }
 }
 
-/* The composer glass floor yields to the OS transparency setting: fully
+/* The toast glass floor yields to the OS transparency setting: fully
    opaque, no filter. Declared on :root (not the component) so the injected
    preference style cannot out-cascade it. */
 @media (prefers-reduced-transparency: reduce) {
   :root {
-    --app-composer-alpha: 100% !important;
-    --app-composer-dark-alpha: 100% !important;
-    --app-composer-filter: none !important;
     --app-toast-alpha: 100% !important;
     --app-toast-dark-alpha: 100% !important;
     --app-toast-filter: none !important;
@@ -577,6 +573,7 @@
     --app-motion-duration-stack: 0s;
     --app-motion-duration-chip: 0s;
     --app-motion-duration-pop: 0s;
+    --app-motion-duration-pane: 0s;
     --app-motion-activity-play-state: paused;
   }
 }
@@ -683,10 +680,69 @@ code {
     );
   }
 
+  /* The composer plate: `.app-surface`'s material — the same plate alpha and
+     frost the dialogs use, both driven by the Transparency setting — over the
+     composer's own tone instead of the popover colour. Solid resolves to an
+     opaque tone with no filter. Focus steps the tone, not the material. */
+  .app-composer-surface {
+    --app-composer-tone: var(--app-composer-surface);
+    background-color: color-mix(
+      in srgb,
+      var(--app-composer-tone) var(--app-surface-opacity),
+      transparent
+    );
+    -webkit-backdrop-filter: var(--app-surface-filter);
+    backdrop-filter: var(--app-surface-filter);
+  }
+
+  .dark .app-composer-surface {
+    background-color: color-mix(
+      in srgb,
+      var(--app-composer-tone) var(--app-surface-dark-opacity),
+      transparent
+    );
+  }
+
+  .app-composer-surface:has(:focus-visible) {
+    --app-composer-tone: var(--app-composer-surface-focus);
+  }
+
+  /* The floating composer bar's scroll-edge scrim, in two layers. The strip
+     under the composer (`--app-composer-scrim-strip`: the branch toolbar row,
+     or just the bottom padding) is always solid so its labels stay legible. The fade behind and above the composer weighs
+     with the composer's own opacity: full over an opaque plate (Solid), so
+     lines soften before they meet it, and gone once the plate is frosted
+     glass (weight 0 at the 80% plate), so the composer shows the transcript
+     blurred beneath it the way a dialog does. */
+  .app-composer-scrim {
+    --app-composer-scrim-weight: clamp(0%, calc(var(--app-surface-opacity) * 5 - 400%), 100%);
+    background:
+      linear-gradient(
+        to top,
+        var(--background) 0,
+        var(--background) var(--app-composer-scrim-strip, 1rem),
+        transparent calc(var(--app-composer-scrim-strip, 1rem) + 0.375rem)
+      ),
+      linear-gradient(
+        to top,
+        color-mix(in srgb, var(--background) var(--app-composer-scrim-weight), transparent),
+        color-mix(
+            in srgb,
+            var(--background) calc(var(--app-composer-scrim-weight) * 0.45),
+            transparent
+          )
+          50%,
+        transparent
+      );
+  }
+
+  .dark .app-composer-scrim {
+    --app-composer-scrim-weight: clamp(0%, calc(var(--app-surface-dark-opacity) * 5 - 400%), 100%);
+  }
+
   /* The toast card's material. Unlike .app-surface it never resolves to a
      solid plate: notifications drop in over arbitrary content, so the alpha
-     is floored below full opacity and the filter never resolves to `none`
-     (same rationale as the composer's glass floor). */
+     is floored below full opacity and the filter never resolves to `none`. */
   .app-toast-surface {
     background-color: color-mix(
       in srgb,
@@ -839,107 +895,35 @@ code {
     backdrop-filter: none;
   }
 
-  /* Experimental composer liquid glass (ComposerLiquidGlass.tsx). When the
-     layer is active, the host's plate and blur move onto the empty warp
-     layer beneath the content — in Chromium the warp also carries the SVG
-     displacement filter, refracting the backdrop at the rim. Double bezel:
-     two 1px gradient rims via mask-composite, one screen glint, one overlay
-     contrast ring, angle driven by the pointer. */
-  /* The liquid material lives entirely on the host: thin plate + a
-     backdrop-filter chain the component composes per engine (Chromium:
-     url(#sdf-displacement) blur saturate — the backdrop is refracted at the
-     rim, then frosted; others: plain heavy frost). Child layers cannot carry
-     the frost here — backdrop-filter on descendants of this subtree does not
-     composite in current Chromium — which is why the filter must ride the
-     host itself. Content stays sharp: backdrop-filter never touches the
-     element's own painting. */
-  [data-liquid-glass="true"] {
-    position: relative;
-    /* Variable-driven plate: the !important guards against the host's own
-       utility background, while state tints (the composer drag-over target)
-       re-point --lg-plate-color/alpha instead of fighting the declaration. */
-    background: color-mix(
-      in srgb,
-      var(--lg-plate-color, var(--card)) var(--lg-plate-alpha, 52%),
-      transparent
-    ) !important;
-    -webkit-backdrop-filter: var(--composer-liquid-backdrop, blur(24px) saturate(185%)) !important;
-    backdrop-filter: var(--composer-liquid-backdrop, blur(24px) saturate(185%)) !important;
+  /* A morphing popup's surface is carried by its ghost (`surfaceMorph.ts`).
+     While the two overlap, the surface paints only its content — otherwise
+     two translucent plates, frosts and shadows stack, and the popup visibly
+     turns see-through the instant the ghost is removed. Important because
+     it must beat whatever surface utilities the popup was given. */
+  [data-surface-morphing] {
+    background: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
   }
 
-  .dark [data-liquid-glass="true"] {
-    --lg-plate-alpha: 40%;
+  [data-surface-morphing]::before {
+    visibility: hidden !important;
   }
 
-  /* Sheen and bezel rings paint above static content; the real children are
-     lifted one layer up so text and controls always sit on top. */
-  [data-liquid-glass="true"] > :not(.liquid-glass-sheen):not(.liquid-glass-ring):not(svg) {
-    position: relative;
-    z-index: 1;
+  /* A swapped glyph arrives with a small spin-in instead of popping. Keyed
+     remounts replay it; the house durations zero it under reduced motion. */
+  .app-icon-swap {
+    animation: app-icon-swap var(--app-motion-duration-stack) var(--app-motion-spring-snappy) both;
   }
 
-  /* Specular sheen: unfiltered sibling so it never gets displaced. */
-  .liquid-glass-sheen {
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    pointer-events: none;
-    background:
-      linear-gradient(165deg, rgb(255 255 255 / 0.5), transparent 38%),
-      radial-gradient(120% 90% at 50% -30%, rgb(255 255 255 / 0.35), transparent 60%);
-  }
-
-  .dark .liquid-glass-sheen {
-    background:
-      linear-gradient(165deg, rgb(255 255 255 / 0.09), transparent 38%),
-      radial-gradient(120% 90% at 50% -30%, rgb(255 255 255 / 0.1), transparent 60%);
-  }
-
-  /* Enhancer-injected sheen paints above popup/dialog content (their children
-     are not lifted like the composer's), so it stays a whisper. */
-  .liquid-glass-sheen--subtle {
-    background: linear-gradient(170deg, rgb(255 255 255 / 0.16), transparent 34%);
-  }
-
-  .dark .liquid-glass-sheen--subtle {
-    background: linear-gradient(170deg, rgb(255 255 255 / 0.05), transparent 34%);
-  }
-
-  .liquid-glass-ring {
-    position: absolute;
-    inset: 0;
-    z-index: 2;
-    border-radius: inherit;
-    padding: 1px;
-    pointer-events: none;
-    background: linear-gradient(
-      var(--lg-bezel-angle, 135deg),
-      transparent 8%,
-      rgb(255 255 255 / 0.5) 36%,
-      transparent 60%,
-      rgb(255 255 255 / 0.26) 92%
-    );
-    -webkit-mask:
-      linear-gradient(#000 0 0) content-box,
-      linear-gradient(#000 0 0);
-    -webkit-mask-composite: xor;
-    mask:
-      linear-gradient(#000 0 0) content-box,
-      linear-gradient(#000 0 0);
-    mask-composite: exclude;
-    mix-blend-mode: screen;
-    opacity: 0.5;
-  }
-
-  .liquid-glass-ring--overlay {
-    background: linear-gradient(
-      calc(var(--lg-bezel-angle, 135deg) + 180deg),
-      transparent 16%,
-      rgb(255 255 255 / 0.2) 55%,
-      transparent 90%
-    );
-    mix-blend-mode: overlay;
-    opacity: 0.9;
+  @keyframes app-icon-swap {
+    from {
+      opacity: 0;
+      scale: 0.5;
+      rotate: -25deg;
+    }
   }
 
   /* Chrome-layer panels: the desktop sidebar and bars. Same architecture as
@@ -1099,31 +1083,21 @@ code {
     backdrop-filter: none;
   }
 
+  /* The overlay material: menus, selects, comboboxes, pickers, the command
+     palette. Flat — one hairline, one soft shadow, no sheen, tint or inset
+     highlights — and only a little translucent: the Transparency step thins
+     the plate to an ~88% floor (`DESKTOP_POPOVER_PLATE_FLOOR`) and frosts
+     what shows through, so text over busy content stays readable. */
   .selection-glass-surface {
     background-color: color-mix(
       in srgb,
       var(--popover) var(--app-glass-light-popover-alpha),
       transparent
     );
-    background-image:
-      linear-gradient(
-        135deg,
-        rgb(255 255 255 / var(--app-glass-light-start-alpha)),
-        rgb(255 255 255 / var(--app-glass-light-end-alpha))
-      ),
-      linear-gradient(
-        color-mix(in srgb, var(--foreground) var(--app-glass-foreground-alpha), transparent),
-        color-mix(in srgb, var(--foreground) var(--app-glass-foreground-alpha), transparent)
-      );
-    border-color: color-mix(in srgb, var(--border) 52%, rgb(255 255 255 / 0.28));
+    border-color: var(--border);
     box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.36),
-      inset 0 -1px 0 rgb(255 255 255 / 0.08),
-      0 18px 54px rgb(15 23 42 / 0.09),
-      0 2px 10px rgb(15 23 42 / 0.035);
-    /* The Material step drives the blur (Solid → none), replacing the old
-       hardcoded blur(10px) that ran even over an opaque plate and was too
-       weak to frost text once the plate thinned. */
+      0 12px 32px -10px rgb(0 0 0 / 0.16),
+      0 2px 6px -1px rgb(0 0 0 / 0.06);
     -webkit-backdrop-filter: var(--app-glass-popover-filter);
     backdrop-filter: var(--app-glass-popover-filter);
   }
@@ -1134,17 +1108,9 @@ code {
       var(--popover) var(--app-glass-dark-popover-alpha),
       transparent
     );
-    background-image: linear-gradient(
-      135deg,
-      rgb(255 255 255 / var(--app-glass-dark-start-alpha)),
-      rgb(255 255 255 / var(--app-glass-dark-end-alpha))
-    );
-    border-color: color-mix(in srgb, var(--border) 58%, rgb(255 255 255 / 0.1));
     box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.1),
-      inset 0 -1px 0 rgb(255 255 255 / 0.03),
-      0 22px 64px rgb(0 0 0 / 0.24),
-      0 2px 12px rgb(0 0 0 / 0.14);
+      0 18px 44px -12px rgb(0 0 0 / 0.6),
+      0 2px 8px rgb(0 0 0 / 0.35);
   }
 
   @supports not (backdrop-filter: blur(1px)) {
@@ -1154,6 +1120,12 @@ code {
   }
 
   @media (prefers-reduced-transparency: reduce) {
+    .app-composer-surface {
+      background-color: var(--app-composer-tone);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+
     .app-surface,
     .app-toast-surface {
       background-color: color-mix(
@@ -1163,10 +1135,6 @@ code {
       );
       -webkit-backdrop-filter: none;
       backdrop-filter: none;
-    }
-
-    .app-toast-surface > .liquid-glass-ring {
-      display: none;
     }
 
     .app-chrome-glass {
@@ -1224,6 +1192,7 @@ code {
 
   @media (forced-colors: active) {
     .app-surface,
+    .app-composer-surface,
     .app-toast-surface,
     .app-muted-surface,
     .app-muted-before::before,
@@ -1235,10 +1204,6 @@ code {
 
     .app-toast-surface {
       border-color: CanvasText;
-    }
-
-    .app-toast-surface > .liquid-glass-ring {
-      display: none;
     }
 
     .selection-glass-surface {
@@ -2032,6 +1997,377 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* Transcript chapters (WorkChapterRow): steps grow in, scroll out of the live
+   ticker, settle with a drawn check; the live node breathes and its rail
+   carries a travelling highlight. Every loop is transform/opacity only, so the
+   compositor runs it without repainting text.
+
+   Step enter and leave are mirror images on one curve and duration: while a
+   step scrolls out of the live ticker and the next grows in, their heights
+   always sum to one row, so the chapter (and the list measuring it) never
+   wobbles. Opacity eases to/from whatever the row's age fade is. */
+@keyframes chapter-step-enter {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    grid-template-rows: 1fr;
+    transform: none;
+  }
+}
+
+@keyframes chapter-step-leave {
+  from {
+    grid-template-rows: 1fr;
+  }
+  to {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes chapter-roll-in {
+  from {
+    opacity: 0;
+    transform: translateY(70%);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes chapter-glyph-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes chapter-glyph-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes chapter-node-halo {
+  0% {
+    opacity: 0.5;
+    transform: scale(0.6);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+@keyframes chapter-rail-flow {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(50%);
+  }
+}
+
+@keyframes chapter-think-breathe {
+  50% {
+    opacity: 0.6;
+    transform: scale(0.72) rotate(45deg);
+  }
+}
+
+@keyframes turn-fold-mark-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.chapter-step-enter,
+.chapter-step-leave {
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+/* The grid track clips vertically only, so a row's hover wash (which bleeds
+   past the text column) is never cut off at the sides. */
+:is(.chapter-step-enter, .chapter-step-leave) > .chapter-step-body {
+  min-height: 0;
+  overflow-y: clip;
+}
+
+.chapter-step-enter {
+  animation: chapter-step-enter 380ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+/* Keep in sync with STEP_LEAVE_MS in WorkChapterRow.tsx. */
+.chapter-step-leave {
+  animation: chapter-step-leave 380ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.chapter-verb,
+.chapter-count {
+  display: inline-block;
+  animation: chapter-roll-in 340ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.chapter-glyph-draw {
+  stroke-dasharray: 1;
+  animation: chapter-glyph-draw 380ms cubic-bezier(0.22, 1, 0.36, 1) 60ms backwards;
+}
+
+.chapter-glyph-pop {
+  animation: chapter-glyph-pop 360ms cubic-bezier(0.3, 1.36, 0.44, 1);
+}
+
+.chapter-node-live::after {
+  position: absolute;
+  inset: -4px;
+  border: 1px solid var(--color-foreground);
+  border-radius: 9999px;
+  content: "";
+  opacity: 0;
+  animation: chapter-node-halo 1.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.chapter-rail-flow {
+  top: -100%;
+  height: 200%;
+  background: linear-gradient(
+    to bottom,
+    transparent calc(50% - 28px),
+    color-mix(in oklab, var(--color-foreground) 55%, transparent) 50%,
+    transparent calc(50% + 28px)
+  );
+  animation: chapter-rail-flow 1.8s linear infinite;
+}
+
+.chapter-think-breathe {
+  transform-origin: center;
+  animation: chapter-think-breathe 1.4s ease-in-out infinite;
+}
+
+.turn-fold-mark {
+  animation: turn-fold-mark-spin 6s linear infinite;
+}
+
+:root[data-ryco-motion-paused] :is(.chapter-rail-flow, .chapter-think-breathe, .turn-fold-mark),
+:root[data-ryco-motion-paused] .chapter-node-live::after {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Without the collapse a leaving step would just sit there; drop it. */
+  .chapter-step-leave {
+    display: none;
+  }
+
+  .chapter-step-enter,
+  .chapter-step-leave,
+  .chapter-verb,
+  .chapter-count,
+  .chapter-glyph-draw,
+  .chapter-glyph-pop,
+  .chapter-node-live::after,
+  .chapter-rail-flow,
+  .chapter-think-breathe,
+  .turn-fold-mark {
+    animation: none;
+  }
+}
+
+/* Inbox rows (InboxSidebar): running glyphs spin, settling strikes the title
+   through. Enter motion (glyph morph, line roll, row moves) runs through WAAPI
+   in useInboxListMotion. Transform/opacity only. */
+.inbox-glyph-spin {
+  animation: turn-fold-mark-spin 0.9s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.inbox-glyph-spin-slow {
+  animation: turn-fold-mark-spin 3s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.inbox-row-title::after {
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 1px;
+  background: currentColor;
+  content: "";
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform calc(var(--app-motion-duration-stack, 260ms) * 1.5)
+    cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+[data-settling] .inbox-row-title::after {
+  transform: scaleX(1);
+}
+
+:root[data-ryco-motion-paused] :is(.inbox-glyph-spin, .inbox-glyph-spin-slow) {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inbox-glyph-spin,
+  .inbox-glyph-spin-slow {
+    animation: none;
+  }
+
+  .inbox-row-title::after {
+    transition: none;
+  }
+}
+
+/* Split chat panes (ChatPanes). Geometry eases through CSS transitions on the
+   pane token; these keyframes cover what CSS transitions cannot. An opened
+   pane is pushed in from the edge it was dropped on by exactly its own size,
+   on the same curve and duration as its sibling's geometry, so the two edges
+   travel together and never overlap; a closed pane is pushed back out the same
+   way. The strip above a pane grows and folds with the split. The drop preview
+   fades in once per drag, then glides between edges. The pane token collapses
+   to zero under reduced motion. */
+.chat-pane-enter {
+  animation: chat-pane-enter var(--app-motion-duration-pane, 360ms) var(--app-motion-ease) backwards;
+}
+
+@keyframes chat-pane-enter {
+  from {
+    transform: translate(var(--chat-pane-shift-x, 0), var(--chat-pane-shift-y, 0));
+  }
+}
+
+.chat-pane-exit {
+  animation: chat-pane-exit var(--app-motion-duration-pane, 360ms) var(--app-motion-ease) forwards;
+}
+
+@keyframes chat-pane-exit {
+  to {
+    transform: translate(var(--chat-pane-shift-x, 0), var(--chat-pane-shift-y, 0));
+  }
+}
+
+.chat-pane-header-in {
+  animation: chat-pane-header-in var(--app-motion-duration-pane, 360ms) var(--app-motion-ease)
+    backwards;
+}
+
+@keyframes chat-pane-header-in {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+.chat-pane-header-out {
+  animation: chat-pane-header-out var(--app-motion-duration-pane, 360ms) var(--app-motion-ease)
+    forwards;
+}
+
+@keyframes chat-pane-header-out {
+  to {
+    height: 0;
+    border-bottom-width: 0;
+    opacity: 0;
+  }
+}
+
+.chat-pane-drop-in {
+  animation: chat-pane-drop-in var(--app-motion-duration-pop, 200ms) var(--app-motion-spring-gentle);
+}
+
+@keyframes chat-pane-drop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-pane-enter,
+  .chat-pane-exit,
+  .chat-pane-header-in,
+  .chat-pane-header-out,
+  .chat-pane-drop-in {
+    animation: none;
+  }
+}
+
+/* Side chat (SideChatPanel): the panel grows out of the launcher's corner and
+   folds back into it; the launcher pops back once the panel has gone; new
+   questions and answers rise in. Durations ride the house tokens. */
+.side-chat-panel-enter {
+  animation: side-chat-panel-in var(--app-motion-duration-stack, 260ms)
+    var(--app-motion-spring-gentle) backwards;
+}
+
+.side-chat-panel-exit {
+  animation: side-chat-panel-out var(--app-motion-duration-pop, 200ms) cubic-bezier(0.4, 0, 1, 1)
+    forwards;
+}
+
+@keyframes side-chat-panel-in {
+  from {
+    opacity: 0;
+    transform: translate(10px, 10px) scale(0.96);
+  }
+}
+
+@keyframes side-chat-panel-out {
+  to {
+    opacity: 0;
+    transform: translate(10px, 10px) scale(0.96);
+  }
+}
+
+.side-chat-launcher-enter {
+  animation: side-chat-launcher-in var(--app-motion-duration-pop, 200ms)
+    var(--app-motion-spring-snappy) var(--app-motion-duration-chip, 120ms) backwards;
+}
+
+@keyframes side-chat-launcher-in {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+}
+
+.side-chat-rise {
+  animation: side-chat-rise var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle)
+    backwards;
+}
+
+@keyframes side-chat-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-chat-panel-enter,
+  .side-chat-panel-exit,
+  .side-chat-launcher-enter,
+  .side-chat-rise {
+    animation: none;
+  }
+}
+
 /* Keep the desktop draft mounted while reclaiming transcript space at rest. */
 [data-chat-composer-compact] [data-testid="composer-editor"] {
   transition:
@@ -2080,4 +2416,457 @@ label:has(> select#reasoning-effort) select {
   max-width: 100%;
   height: auto;
   margin: 0 auto;
+}
+
+/* ---------------------------------------------------------------------------
+   Model tuning: reasoning tones, rolling labels and the picker's effort dial
+   (ModelTuningDial.tsx, ModelTriggerTraits.tsx, RollingText.tsx).
+   --------------------------------------------------------------------------- */
+@property --model-dial-t {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+:root {
+  --reasoning-tone-low: var(--color-slate-500);
+  --reasoning-tone-medium: var(--color-blue-600);
+  --reasoning-tone-high: var(--color-indigo-600);
+  --reasoning-tone-xhigh: var(--color-violet-600);
+  --reasoning-tone-max: var(--color-fuchsia-600);
+  --reasoning-tone-ultra: var(--color-pink-600);
+  --reasoning-tone-ultracode: #6d5ce8;
+  --reasoning-tone-thinking: var(--color-sky-600);
+  --reasoning-tone-off: var(--color-zinc-500);
+  --reasoning-tone-shine: #c9c1ff;
+  --ultracode-sheen-1: #6d5ce8;
+  --ultracode-sheen-2: #9d90ff;
+  --ultracode-sheen-3: #ece8ff;
+  --fast-mode-tone: var(--color-amber-600);
+  --model-dial-track: color-mix(in srgb, var(--color-black) 6%, transparent);
+  --model-dial-notch: color-mix(in srgb, var(--color-black) 22%, transparent);
+  --model-dial-thumb: var(--color-white);
+  --model-dial-thumb-shadow: 0 1px 2px rgb(0 0 0 / 0.18), 0 4px 12px rgb(0 0 0 / 0.14);
+}
+.dark {
+  --reasoning-tone-low: var(--color-slate-400);
+  --reasoning-tone-medium: var(--color-blue-400);
+  --reasoning-tone-high: var(--color-indigo-400);
+  --reasoning-tone-xhigh: var(--color-violet-400);
+  --reasoning-tone-max: var(--color-fuchsia-400);
+  --reasoning-tone-ultra: var(--color-pink-400);
+  --reasoning-tone-ultracode: #b3a8ff;
+  --reasoning-tone-thinking: var(--color-sky-400);
+  --reasoning-tone-off: var(--color-zinc-400);
+  --reasoning-tone-shine: #ffffff;
+  --ultracode-sheen-1: #6f63d9;
+  --ultracode-sheen-2: #b0a5ff;
+  --ultracode-sheen-3: #f3f0ff;
+  --fast-mode-tone: var(--color-yellow-400);
+  --model-dial-track: color-mix(in srgb, var(--color-white) 6.5%, transparent);
+  --model-dial-notch: color-mix(in srgb, var(--color-white) 30%, transparent);
+  --model-dial-thumb: #f4f4f5;
+  --model-dial-thumb-shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 6px 18px rgb(0 0 0 / 0.45);
+}
+
+[data-reasoning-tone] {
+  --reasoning-tone: var(--reasoning-tone-low);
+  --reasoning-tone-text: color-mix(in srgb, var(--reasoning-tone) 88%, var(--foreground));
+}
+[data-reasoning-tone="medium"] {
+  --reasoning-tone: var(--reasoning-tone-medium);
+}
+[data-reasoning-tone="high"] {
+  --reasoning-tone: var(--reasoning-tone-high);
+}
+[data-reasoning-tone="xhigh"] {
+  --reasoning-tone: var(--reasoning-tone-xhigh);
+}
+[data-reasoning-tone="max"] {
+  --reasoning-tone: var(--reasoning-tone-max);
+}
+[data-reasoning-tone="ultra"] {
+  --reasoning-tone: var(--reasoning-tone-ultra);
+}
+[data-reasoning-tone="ultracode"] {
+  --reasoning-tone: var(--reasoning-tone-ultracode);
+}
+[data-reasoning-tone="thinking"] {
+  --reasoning-tone: var(--reasoning-tone-thinking);
+}
+[data-reasoning-tone="off"] {
+  --reasoning-tone: var(--reasoning-tone-off);
+}
+
+/* Rolling labels: the old value leaves in the direction of travel. */
+.rolling-text {
+  display: inline-grid;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+.rolling-text > * {
+  grid-area: 1 / 1;
+  justify-self: start;
+  white-space: nowrap;
+}
+.rolling-text[data-align="center"] > * {
+  justify-self: center;
+}
+.rolling-text > [data-roll-phase="enter"] {
+  animation: rolling-text-in var(--app-motion-duration-stack, 260ms)
+    var(--app-motion-spring-gentle, ease-out) both;
+}
+.rolling-text > [data-roll-phase="leave"] {
+  animation: rolling-text-out var(--app-motion-duration-pop, 200ms) cubic-bezier(0.4, 0, 0.7, 1)
+    forwards;
+}
+.rolling-text > [data-roll-direction="up"] {
+  --rolling-text-from: 85%;
+  --rolling-text-to: -85%;
+}
+.rolling-text > [data-roll-direction="down"] {
+  --rolling-text-from: -85%;
+  --rolling-text-to: 85%;
+}
+@keyframes rolling-text-in {
+  from {
+    transform: translateY(var(--rolling-text-from));
+    opacity: 0;
+    filter: blur(3px);
+  }
+}
+@keyframes rolling-text-out {
+  to {
+    transform: translateY(var(--rolling-text-to));
+    opacity: 0;
+    filter: blur(3px);
+  }
+}
+
+/* Ultracode label: a slow light sweep through the tone. */
+.reasoning-tone-shimmer {
+  background-image: linear-gradient(
+    100deg,
+    var(--reasoning-tone) 0%,
+    var(--reasoning-tone) 42%,
+    var(--reasoning-tone-shine) 50%,
+    var(--reasoning-tone) 58%,
+    var(--reasoning-tone) 100%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: reasoning-tone-sheen 3.2s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+@keyframes reasoning-tone-sheen {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: -150% 0;
+  }
+}
+
+.model-trigger-pop,
+.model-dial-pop {
+  animation: model-tuning-pop calc(var(--app-motion-duration-pop, 200ms) * 2.1)
+    var(--app-motion-ease) both;
+}
+@keyframes model-tuning-pop {
+  0% {
+    transform: scale(0.3) rotate(-30deg);
+    opacity: 0.2;
+  }
+  55% {
+    transform: scale(1.3) rotate(8deg);
+    opacity: 1;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* The dial: the thumb rides --model-dial-t (0..1) between the end stops. */
+.model-dial-track {
+  --model-dial-r: 15px;
+  position: relative;
+  height: 26px;
+  border-radius: 9999px;
+  background: var(--model-dial-track);
+  cursor: pointer;
+  touch-action: none;
+  outline: none;
+  transition: --model-dial-t calc(var(--app-motion-duration-stack, 260ms) * 1.9)
+    var(--app-motion-spring-snappy);
+}
+.model-dial-track[data-dragging] {
+  transition: none;
+  cursor: grabbing;
+}
+.model-dial-track[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.55;
+}
+.model-dial-fill {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  width: calc(
+    2 * var(--model-dial-r) + (100% - 2 * var(--model-dial-r)) * clamp(0, var(--model-dial-t), 1)
+  );
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--reasoning-tone) 45%, transparent),
+    var(--reasoning-tone)
+  );
+  transition: box-shadow 0.4s;
+}
+.model-dial[data-reasoning-tone="max"] .model-dial-fill {
+  box-shadow: 0 0 18px -3px var(--reasoning-tone);
+}
+.model-dial[data-reasoning-tone="ultracode"] .model-dial-fill {
+  background-image: linear-gradient(
+    90deg,
+    var(--ultracode-sheen-1),
+    var(--ultracode-sheen-2) 40%,
+    var(--ultracode-sheen-3) 50%,
+    var(--ultracode-sheen-2) 60%,
+    var(--ultracode-sheen-1)
+  );
+  background-size: 200% 100%;
+  box-shadow: 0 0 20px -5px var(--ultracode-sheen-2);
+  animation: model-dial-sheen 2.8s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+@keyframes model-dial-sheen {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.model-dial-sparks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  pointer-events: none;
+}
+.model-dial-notch {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--model-dial-r) + (100% - 2 * var(--model-dial-r)) * var(--model-dial-i));
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 9999px;
+  background: var(--model-dial-notch);
+  pointer-events: none;
+  transition: background-color 0.25s;
+}
+.model-dial-notch[data-lit] {
+  background: rgb(255 255 255 / 0.72);
+}
+.model-dial-thumb {
+  position: absolute;
+  top: 50%;
+  left: calc(
+    var(--model-dial-r) + (100% - 2 * var(--model-dial-r)) * clamp(0, var(--model-dial-t), 1)
+  );
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 9999px;
+  background: var(--model-dial-thumb);
+  box-shadow: var(--model-dial-thumb-shadow);
+  pointer-events: none;
+  transition:
+    transform var(--app-motion-duration-chip, 120ms) var(--app-motion-ease),
+    box-shadow 0.2s;
+}
+.model-dial-track:not([aria-disabled="true"]):hover .model-dial-thumb {
+  transform: scale(1.04);
+}
+.model-dial-track[data-dragging] .model-dial-thumb {
+  transform: scale(0.94);
+}
+.model-dial-track:focus-visible .model-dial-thumb {
+  box-shadow:
+    var(--model-dial-thumb-shadow),
+    0 0 0 3px color-mix(in srgb, var(--reasoning-tone) 55%, transparent);
+}
+.model-dial[data-reasoning-tone="max"] .model-dial-thumb::after,
+.model-dial[data-reasoning-tone="ultracode"] .model-dial-thumb::after {
+  position: absolute;
+  inset: -4px;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 1.5px var(--reasoning-tone);
+  content: "";
+  animation: model-dial-halo 1.9s var(--app-motion-ease) infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+.model-dial[data-reasoning-tone="max"] .model-dial-thumb::after {
+  animation-duration: 2.8s;
+}
+@keyframes model-dial-halo {
+  0% {
+    transform: scale(0.88);
+    opacity: 0.75;
+  }
+  100% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
+}
+.model-dial-burst {
+  position: absolute;
+  inset: 3px;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 1.5px var(--fast-mode-tone);
+  pointer-events: none;
+  animation: model-dial-ring-out calc(var(--app-motion-duration-pop, 200ms) * 3)
+    var(--app-motion-ease) forwards;
+}
+@keyframes model-dial-ring-out {
+  from {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+.model-dial-spin {
+  animation: model-dial-spin calc(var(--app-motion-duration-stack, 260ms) * 2.1)
+    var(--app-motion-spring-gentle);
+}
+@keyframes model-dial-spin {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+:root[data-ryco-motion-paused] :is(.reasoning-tone-shimmer, .model-dial-fill) {
+  animation-play-state: paused;
+}
+:root[data-ryco-motion-paused] .model-dial-thumb::after {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .model-dial-track {
+    transition: none;
+  }
+  .model-dial-thumb::after,
+  .model-dial-burst {
+    display: none;
+  }
+}
+
+/* ── Settings page motion ────────────────────────────────────────────────
+   One entrance for every settings panel: a short rise and fade on the house
+   curve. Durations come from the motion tokens, which appearancePreferences.ts
+   zeroes under reduced motion, so these collapse to an instant swap there. */
+@keyframes settings-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes settings-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.settings-panel-enter {
+  animation: settings-panel-enter var(--app-motion-duration-stack, 260ms) var(--app-motion-ease)
+    both;
+}
+.settings-subsections-enter {
+  animation: settings-fade-in var(--app-motion-duration-pop, 200ms) var(--app-motion-ease) both;
+}
+.settings-search-result {
+  animation: settings-panel-enter var(--app-motion-duration-pop, 200ms) var(--app-motion-ease) both;
+  animation-delay: calc(var(--i, 0) * 16ms * var(--settings-stagger, 1));
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-search-result {
+    --settings-stagger: 0;
+  }
+}
+
+/* Keybinding capture: the chip breathes while it waits for a combination. */
+@keyframes keybinding-chip-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--primary) 26%, transparent);
+  }
+}
+.keybinding-chip-recording {
+  animation: keybinding-chip-pulse 1.4s ease-in-out infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+@media (prefers-reduced-motion: reduce) {
+  .keybinding-chip-recording {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
+  }
+}
+
+/* A themed native range input for settings editors. */
+.settings-range {
+  appearance: none;
+  background: transparent;
+  outline: none;
+}
+.settings-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+}
+.settings-range::-moz-range-track {
+  height: 6px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+}
+.settings-range::-webkit-slider-thumb {
+  appearance: none;
+  margin-top: -5px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--background);
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+}
+.settings-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--background);
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+}
+.settings-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 45%, transparent);
+}
+.settings-range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 45%, transparent);
 }

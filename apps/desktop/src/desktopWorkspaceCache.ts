@@ -1,4 +1,4 @@
-import * as FS from "node:fs";
+import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 
 import {
@@ -55,10 +55,9 @@ function isRecord(value: unknown): value is WorkspaceMetadataCacheRecord {
   );
 }
 
-function readDocument(filePath: string): DesktopWorkspaceCacheDocument {
+async function readDocument(filePath: string): Promise<DesktopWorkspaceCacheDocument> {
   try {
-    if (!FS.existsSync(filePath)) return emptyDocument();
-    const value = JSON.parse(FS.readFileSync(filePath, "utf8")) as unknown;
+    const value = JSON.parse(await FS.readFile(filePath, "utf8")) as unknown;
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       return emptyDocument();
     }
@@ -79,12 +78,22 @@ function readDocument(filePath: string): DesktopWorkspaceCacheDocument {
   }
 }
 
-function writeDocument(filePath: string, document: DesktopWorkspaceCacheDocument): void {
+async function writeDocument(
+  filePath: string,
+  document: DesktopWorkspaceCacheDocument,
+): Promise<void> {
   const directory = Path.dirname(filePath);
   const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  FS.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  FS.writeFileSync(temporary, `${JSON.stringify(document)}\n`, { encoding: "utf8", mode: 0o600 });
-  FS.renameSync(temporary, filePath);
+  await FS.mkdir(directory, { recursive: true, mode: 0o700 });
+  try {
+    await FS.writeFile(temporary, `${JSON.stringify(document)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await FS.rename(temporary, filePath);
+  } finally {
+    await FS.rm(temporary, { force: true });
+  }
 }
 
 /**
@@ -103,25 +112,35 @@ export function createDesktopWorkspaceMetadataCache(filePath: string): Workspace
     return run;
   };
 
+  let cached: DesktopWorkspaceCacheDocument | undefined;
+  const read = async () => (cached ??= await readDocument(filePath));
+  const write = async (document: DesktopWorkspaceCacheDocument) => {
+    await writeDocument(filePath, document);
+    cached = document;
+  };
+
   return {
-    load: async (namespace) => {
-      const key = workspaceMetadataNamespaceKey(namespace);
-      return (
-        readDocument(filePath).records.find(
-          (record) => workspaceMetadataNamespaceKey(record.namespace) === key,
-        ) ?? null
-      );
-    },
-    list: async ({ hubOrigin, accountId }) =>
-      readDocument(filePath).records.filter(
-        (record) =>
-          normalizeOrigin(record.namespace.hubOrigin) === normalizeOrigin(hubOrigin) &&
-          record.namespace.accountId === accountId,
+    load: (namespace) =>
+      exclusive(async () => {
+        const key = workspaceMetadataNamespaceKey(namespace);
+        return (
+          (await read()).records.find(
+            (record) => workspaceMetadataNamespaceKey(record.namespace) === key,
+          ) ?? null
+        );
+      }),
+    list: ({ hubOrigin, accountId }) =>
+      exclusive(async () =>
+        (await read()).records.filter(
+          (record) =>
+            normalizeOrigin(record.namespace.hubOrigin) === normalizeOrigin(hubOrigin) &&
+            record.namespace.accountId === accountId,
+        ),
       ),
     replace: (incoming) =>
       exclusive(async () => {
         if (!isRecord(incoming)) throw new TypeError("Invalid Desktop workspace metadata record.");
-        const document = readDocument(filePath);
+        const document = await read();
         const plan = planWorkspaceMetadataCacheEvictions({
           existing: document.records,
           incoming,
@@ -129,7 +148,7 @@ export function createDesktopWorkspaceMetadataCache(filePath: string): Workspace
         if (!plan.accepted) return;
         const incomingKey = workspaceMetadataNamespaceKey(incoming.namespace);
         const evicted = new Set(plan.evict.map(workspaceMetadataNamespaceKey));
-        writeDocument(filePath, {
+        await write({
           version: DOCUMENT_VERSION,
           records: [
             ...document.records.filter((record) => {
@@ -143,8 +162,8 @@ export function createDesktopWorkspaceMetadataCache(filePath: string): Workspace
     purgeEnvironment: (namespace) =>
       exclusive(async () => {
         const key = workspaceMetadataNamespaceKey(namespace);
-        const document = readDocument(filePath);
-        writeDocument(filePath, {
+        const document = await read();
+        await write({
           version: DOCUMENT_VERSION,
           records: document.records.filter(
             (record) => workspaceMetadataNamespaceKey(record.namespace) !== key,
@@ -153,8 +172,8 @@ export function createDesktopWorkspaceMetadataCache(filePath: string): Workspace
       }),
     purgeAccount: ({ hubOrigin, accountId }) =>
       exclusive(async () => {
-        const document = readDocument(filePath);
-        writeDocument(filePath, {
+        const document = await read();
+        await write({
           version: DOCUMENT_VERSION,
           records: document.records.filter(
             (record) =>

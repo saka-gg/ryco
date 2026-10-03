@@ -391,6 +391,47 @@ export function getPrCheckStatusFromChangeRequest(
   });
 }
 
+/** Per-check states plus the aggregate verdict, for compact check strips. */
+export interface CheckRollupSummary {
+  readonly view: PrCheckStatusView;
+  /** One entry per reported check, in rollup order; `id` is unique. */
+  readonly items: ReadonlyArray<{ readonly id: string; readonly kind: PrCheckStatusKind }>;
+  readonly passed: number;
+  readonly failed: number;
+  readonly active: number;
+  readonly total: number;
+}
+
+export function summarizeCheckRollup(
+  pr: Pick<ChangeRequest, "checkRollup" | "headSha">,
+): CheckRollupSummary | null {
+  const rollup = pr.checkRollup;
+  if (!rollup || rollup.length === 0) return null;
+  const seen = new Map<string, number>();
+  const items = rollup.map((item) => {
+    const name = `${item.workflowName ?? ""}/${item.name}`;
+    const occurrence = (seen.get(name) ?? 0) + 1;
+    seen.set(name, occurrence);
+    return {
+      id: `${name}#${occurrence}`,
+      kind: statusKindForCheck({
+        status: optionValue(item.status),
+        conclusion: optionValue(item.conclusion),
+      }),
+    };
+  });
+  const kinds = items.map((item) => item.kind);
+  const count = (match: (kind: PrCheckStatusKind) => boolean) => kinds.filter(match).length;
+  return {
+    view: getPrCheckStatusFromChangeRequest(pr),
+    items,
+    passed: count((kind) => kind === "passed"),
+    failed: count((kind) => kind === "failed"),
+    active: count((kind) => kind === "running" || kind === "pending"),
+    total: kinds.length,
+  };
+}
+
 export function getCheckStatusFromWorkflowRun(run: SourceControlWorkflowRun): PrCheckStatusView {
   return getCheckStatusFromRaw({
     headSha: run.commit.oid,

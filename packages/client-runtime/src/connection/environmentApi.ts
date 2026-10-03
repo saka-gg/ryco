@@ -1,3 +1,4 @@
+import { rejectRemoteKeybindingWrite } from "../state/settings/appKeybindings.ts";
 import type { EnvironmentApi, EnvironmentId } from "@ryco/contracts";
 
 import type { WsRpcClient } from "../rpc/index.ts";
@@ -17,10 +18,17 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       getAcpRegistryAuthMethods: rpcClient.server.getAcpRegistryAuthMethods,
       authenticateAcpRegistry: rpcClient.server.authenticateAcpRegistry,
       updateProvider: rpcClient.server.updateProvider,
+      listLocalTasks: rpcClient.server.listLocalTasks,
+      getLocalTask: rpcClient.server.getLocalTask,
+      createLocalTask: rpcClient.server.createLocalTask,
+      updateLocalTask: rpcClient.server.updateLocalTask,
+      deleteLocalTask: rpcClient.server.deleteLocalTask,
+      delegateLocalTask: rpcClient.server.delegateLocalTask,
+      getDailyRecap: rpcClient.server.getDailyRecap,
       getSettings: rpcClient.server.getSettings,
       getProjectPreferences: rpcClient.server.getProjectPreferences,
       updateSettings: rpcClient.server.updateSettings,
-      upsertKeybinding: rpcClient.server.upsertKeybinding,
+      upsertKeybinding: rejectRemoteKeybindingWrite,
       getResourceTelemetryHistory: rpcClient.server.getResourceTelemetryHistory,
       retryResourceTelemetry: rpcClient.server.retryResourceTelemetry,
       signalDiagnosticProcess: rpcClient.server.signalDiagnosticProcess,
@@ -33,7 +41,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
     ...(rpcClient.keybindings
       ? {
           keybindings: {
-            replaceCustom: rpcClient.keybindings.replaceCustom,
+            replaceCustom: rejectRemoteKeybindingWrite,
           },
         }
       : {}),

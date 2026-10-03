@@ -19,6 +19,7 @@ export function resolveCanonicalPrimaryEnvironmentId(input: {
 export function shouldApplyBootstrapThreadRedirect(input: {
   readonly pathname: string;
   readonly tier: PresentationTier;
+  readonly hostedHome?: boolean;
 }): boolean {
-  return input.pathname === "/" && input.tier !== "phone";
+  return input.pathname === "/" && input.tier !== "phone" && !input.hostedHome;
 }

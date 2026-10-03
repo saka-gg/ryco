@@ -70,6 +70,7 @@ import {
 } from "../../hostedHub/hubRoutes";
 import { hubPageTitle } from "../../hubBranding";
 import {
+  getHostedNodeRouteNotice,
   selectHostedNodeRoute,
   parseHostedScopedThreadPath,
   useHostedNodeRouteNotice,
@@ -120,6 +121,7 @@ import {
   githubProviderPolicy,
 } from "./ExternalIdentityWeb.logic";
 import { HostedRelayTrustNotice } from "./HostedRelayTrustNotice";
+import { canShowHostedReadPreview, useHostedReadCache } from "../../hostedHub/readCache";
 
 // Browser suites and callers keep importing the menu from the hosted root.
 export { HostedNodeMenu } from "./HostedConnectionControls";
@@ -183,6 +185,10 @@ function useHubDocumentTitle(): void {
 }
 
 export function HostedHubRoot() {
+  const readCache = useHostedReadCache();
+  const directoryNodes = useHostedHubStore((state) => state.nodes);
+  const directoryStatus = useHostedHubStore((state) => state.directoryStatus);
+  const selectionStatus = useHostedHubStore((state) => state.selectionStatus);
   const [emailVerificationLink, setEmailVerificationLink] = useState<EmailVerificationLink | null>(
     consumeInitialEmailVerificationLink,
   );
@@ -203,7 +209,13 @@ export function HostedHubRoot() {
   );
   const routeNotice = useHostedNodeRouteNotice();
   useHostedNodeRouteOrchestrator();
-  useEffect(() => startHostedWorkspaceCoordinator(), []);
+  useEffect(
+    () =>
+      startHostedWorkspaceCoordinator({
+        canDiscoverHome: () => getHostedNodeRouteNotice() === null,
+      }),
+    [],
+  );
   // The single browser lifecycle owner, above the presentation-tier seam: the
   // tier shells mount no lifecycle listeners of their own.
   useHostedBrowserLifecycle();
@@ -235,7 +247,39 @@ export function HostedHubRoot() {
   }
 
   // No shell: there is no account to configure yet.
-  if (accountStatus !== "authenticated") return <HostedAuthenticationSurface />;
+  const cachedNodeMatchesRoute =
+    routedThreadRef !== null &&
+    !(
+      selectedNode?.id === routedNode.nodeId &&
+      (selectionStatus === "revoked" ||
+        selectionStatus === "authorization-removed" ||
+        selectionStatus === "incompatible")
+    ) &&
+    (directoryNodes.some(
+      (node) =>
+        node.id === routedNode.nodeId &&
+        node.environmentId === routedThreadRef.environmentId &&
+        node.revokedAt === null &&
+        !node.capabilities?.nativeClientRequired,
+    ) ||
+      (directoryStatus !== "ready" &&
+        canShowHostedReadPreview() &&
+        readCache.nodes.some(
+          (node) =>
+            node.nodeId === routedNode.nodeId &&
+            node.environmentId === routedThreadRef.environmentId,
+        )));
+  const canReadCachedRoute = hasCachedRoutedThread && cachedNodeMatchesRoute;
+  if (accountStatus !== "authenticated") {
+    if (
+      canShowHostedReadPreview() &&
+      !hubRoute &&
+      (canReadCachedRoute || routedNode.nodeId === null)
+    ) {
+      return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
+    }
+    return <HostedAuthenticationSurface />;
+  }
   // The post-bootstrap "save your codes" step owns the viewport because at that
   // point there is no shell to show it inside. Once a surface within the running
   // app is displaying them — account settings regenerating them — taking the
@@ -256,9 +300,9 @@ export function HostedHubRoot() {
   if (hubRoute?.kind === "nodes" || hubRoute?.kind === "nodes-enroll") {
     return <HostedNodeDirectory />;
   }
-  // Unscoped workspace navigation owns no connection. The Hub home renders the
-  // unified cached workspace even before metadata exists; machine administration
-  // remains the explicit `/nodes` route handled above.
+  // Home paints cached rows immediately. The workspace coordinator discovers
+  // missing lists in the background through ordinary, disposable demand leases.
+  // Machine administration remains the explicit `/nodes` route handled above.
   if (routedNode.nodeId === null) {
     if (routeNotice || routedNode.malformed) return <HostedNodeDirectory />;
     if (selectedNode && sessionEstablished) {
@@ -270,9 +314,11 @@ export function HostedHubRoot() {
   // render another environment merely because it remains the compatibility
   // `selectedNode` while the scoped coordinator switches targets.
   if (!selectedNode || selectedNode.id !== routedNode.nodeId) {
+    if (canReadCachedRoute) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
     return <HostedNodeRestoringSurface />;
   }
   if (transportStatus === "terminal-failure") {
+    if (canReadCachedRoute) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
     return <HostedNodeFailureSurface node={selectedNode} message={errorMessage} />;
   }
   if (!sessionEstablished) {

@@ -5,6 +5,7 @@
  * motion get a native scroll-snap strip instead.
  */
 import { SHOTS } from "@/data/content";
+import { screenshotImageProps } from "@/lib/screenshotAssets";
 import { cn } from "@/lib/cn";
 import { gsap, ScrollTrigger, useGsap } from "@/lib/motion";
 import { revealText } from "./ui/reveal";
@@ -119,7 +120,9 @@ export function Gallery() {
                 style={{ aspectRatio: `${Math.min(Math.max(shot.aspect, 0.95), 1.7)}` }}
               >
                 <img
-                  src={shot.src}
+                  /* responsive lossless variants from scripts/optimize-assets.mjs;
+                     the image is 114% of its frame for the parallax drift */
+                  {...screenshotImageProps(shot.src, "(min-width: 1024px) 80vw, 96vw")}
                   alt={shot.alt}
                   loading="lazy"
                   decoding="async"

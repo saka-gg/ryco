@@ -55,7 +55,7 @@ export const BackgroundLivenessChip = memo(function BackgroundLivenessChip(props
       role="status"
       aria-label={label}
       data-background-liveness-chip="true"
-      className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-border/70 bg-popover/95 px-2.5 py-1 text-[11px] leading-4 text-muted-foreground shadow-sm backdrop-blur-xs"
+      className="selection-glass-surface inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] leading-4 text-muted-foreground shadow-sm"
     >
       <BotIcon className={cn("size-3.5 shrink-0", working && "animate-status-pulse")} aria-hidden />
       <button

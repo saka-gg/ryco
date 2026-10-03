@@ -17,6 +17,7 @@ export const KEYBINDING_CATEGORIES: Record<string, KeybindingCategory> = {
   editor: { id: "editor", label: "Editor", sortWeight: 80 },
   modelPicker: { id: "modelPicker", label: "Model picker", sortWeight: 90 },
   thread: { id: "thread", label: "Threads", sortWeight: 100 },
+  pane: { id: "pane", label: "Split view", sortWeight: 105 },
   script: { id: "script", label: "Project scripts", sortWeight: 110 },
 } as const;
 
@@ -66,6 +67,10 @@ const STATIC_COMMAND_META: Record<string, Omit<KeybindingCommandMeta, "category"
   "thread.jump.7": { title: "Jump to thread 7", sortWeight: 11 },
   "thread.jump.8": { title: "Jump to thread 8", sortWeight: 12 },
   "thread.jump.9": { title: "Jump to thread 9", sortWeight: 13 },
+  "pane.split": { title: "Open a thread in split view", sortWeight: 1 },
+  "pane.close": { title: "Close focused pane", sortWeight: 2 },
+  "pane.focusNext": { title: "Focus next pane", sortWeight: 3 },
+  "pane.focusPrevious": { title: "Focus previous pane", sortWeight: 4 },
 };
 
 function categoryForCommand(command: KeybindingCommand): KeybindingCategory {

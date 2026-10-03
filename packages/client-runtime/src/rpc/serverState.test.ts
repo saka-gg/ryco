@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import {
   getServerConfig,
-  getServerKeybindings,
+  getLegacyServerKeybindings,
   onProvidersUpdated,
   onServerConfigUpdated,
   onWelcome,
@@ -145,7 +145,7 @@ afterEach(() => {
 describe("serverState", () => {
   it("uses default keybindings before a server config snapshot is available", () => {
     expect(getServerConfig()).toBeNull();
-    expect(getServerKeybindings()).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);
+    expect(getLegacyServerKeybindings()).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);
   });
 
   it("bootstraps the server config snapshot and replays it to late subscribers", async () => {

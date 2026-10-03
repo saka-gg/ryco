@@ -418,10 +418,12 @@ export const makeSendTurn =
               pathLineEntries.push({ attachment });
               return null;
             }
-            const persisted = readPersistedAttachment({
-              attachmentsDir: deps.serverConfig.attachmentsDir,
-              attachment,
-            });
+            const persisted = yield* Effect.promise(() =>
+              readPersistedAttachment({
+                attachmentsDir: deps.serverConfig.attachmentsDir,
+                attachment,
+              }),
+            );
             if (!persisted.ok) {
               return yield* new ProviderAdapterRequestError({
                 provider: COPILOT_DRIVER_KIND,

@@ -1,4 +1,4 @@
-import { ProjectId, ServerSettingsError } from "@ryco/contracts";
+import { ProjectId, ServerSettingsError, KeybindingsConfigError } from "@ryco/contracts";
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
 import { CodexSettings, CodexResetCreditError } from "@ryco/contracts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
@@ -268,27 +268,34 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "server",
         },
       ),
-    [WS_METHODS.serverUpsertKeybinding]: (rule) =>
+    // Older clients receive an actionable failure within the existing access/observability policy.
+    [WS_METHODS.serverUpsertKeybinding]: (_rule) =>
       observeRpcEffect(
         WS_METHODS.serverUpsertKeybinding,
         ownerEffect(
           WS_METHODS.serverUpsertKeybinding,
-          Effect.gen(function* () {
-            const keybindingsConfig = yield* keybindings.upsertKeybindingRule(rule);
-            return { keybindings: keybindingsConfig, issues: [] };
-          }),
+          Effect.fail(
+            new KeybindingsConfigError({
+              configPath: "<app preferences>",
+              detail:
+                "Keybindings are app-owned. Update them in App preferences or explicitly import the legacy file.",
+            }),
+          ),
         ),
         { "rpc.aggregate": "server" },
       ),
-    [WS_METHODS.keybindingsReplaceCustom]: ({ rules }) =>
+    [WS_METHODS.keybindingsReplaceCustom]: (_input) =>
       observeRpcEffect(
         WS_METHODS.keybindingsReplaceCustom,
         ownerEffect(
           WS_METHODS.keybindingsReplaceCustom,
-          Effect.gen(function* () {
-            const keybindingsConfig = yield* keybindings.replaceCustomKeybindings(rules);
-            return { keybindings: keybindingsConfig, issues: [] };
-          }),
+          Effect.fail(
+            new KeybindingsConfigError({
+              configPath: "<app preferences>",
+              detail:
+                "Keybindings are app-owned. Update them in App preferences or explicitly import the legacy file.",
+            }),
+          ),
         ),
         { "rpc.aggregate": "server" },
       ),

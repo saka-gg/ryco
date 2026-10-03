@@ -48,10 +48,11 @@ function collectByIds<TKey extends string, TValue>(
     return cached as TValue[];
   }
 
-  const nextValues = ids.flatMap((id) => {
+  const nextValues: TValue[] = [];
+  for (const id of ids) {
     const value = byId[id];
-    return value ? [value] : [];
-  });
+    if (value) nextValues.push(value);
+  }
   const nextCachedByRecord = cachedByRecord ?? new WeakMap<object, readonly unknown[]>();
   nextCachedByRecord.set(byId, nextValues);
   if (!cachedByRecord) {

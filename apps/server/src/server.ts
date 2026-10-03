@@ -1,3 +1,5 @@
+import { LocalTaskServiceLive } from "./tasks/LocalTaskService.ts";
+import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
 import { ProviderProtectedPathsLive } from "./storage/providerProtection.ts";
 import { SessionImportLive } from "./imports/SessionImport.ts";
@@ -461,6 +463,8 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
 // registry from the runtime dependencies, and its endpoint never touches
 // the public HTTP server, router, or any client-visible state.
 const RuntimeServicesLive = Layer.mergeAll(
+  DailyRecapQueryLive,
+  LocalTaskServiceLive,
   StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
   SessionImportLive,
   AutomationCentreLive.pipe(

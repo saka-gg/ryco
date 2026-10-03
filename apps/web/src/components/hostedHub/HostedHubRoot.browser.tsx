@@ -149,8 +149,9 @@ function userScrollableAncestor(element: HTMLElement): HTMLElement | null {
 }
 
 describe("HostedHubRoot accessibility and responsive flows", () => {
-  it("opens the unified workspace at the signed-in Hub root without selecting a node", async () => {
+  it("opens home and discovers uncached device lists without replacing the workspace", async () => {
     navigateHubPathname("/", { replace: true });
+    installHostedNodeHistory(window);
     const selectable = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
     useHostedHubStore.setState({
       accountStatus: "authenticated",
@@ -159,7 +160,13 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       directoryStatus: "ready",
       nodes: [selectable],
     });
-    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
+    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockImplementation(async () => {
+      useHostedHubStore.setState({
+        selectedNode: selectable,
+        transportStatus: "connecting",
+        sessionEstablished: false,
+      });
+    });
 
     mounted = await render(<HostedHubRoot />);
 
@@ -169,7 +176,11 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect
       .element(page.getByRole("heading", { name: /^Your nodes?$/ }))
       .not.toBeInTheDocument();
-    expect(selectNode).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(selectable.id));
+    expect(window.location.pathname).toBe("/");
+    await expect
+      .element(page.getByRole("heading", { name: /Connecting to/ }))
+      .not.toBeInTheDocument();
   });
 
   it("shows GitHub sign-in only when the provider policy advertises it", async () => {
