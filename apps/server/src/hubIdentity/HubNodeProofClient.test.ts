@@ -307,14 +307,28 @@ describe("Hub node proof client", () => {
         failure: "network",
       },
       {
-        name: "identity rejection",
+        // The Hub's challenge route never answers 401 or 403, so either one
+        // is an intermediary — a WAF or CDN — and must not park the node.
+        name: "intermediary unauthorized",
         fetch: async () => Response.json({ error: "IDENTITY-CANARY" }, { status: 401 }),
-        failure: "authentication_failed",
+        failure: "network",
       },
       {
-        name: "forbidden",
+        name: "intermediary forbidden",
         fetch: async () => Response.json({ error: "FORBIDDEN-CANARY" }, { status: 403 }),
-        failure: "authentication_failed",
+        failure: "network",
+      },
+      {
+        name: "other intermediary client error",
+        fetch: async () => new Response("PROXY-CANARY", { status: 451 }),
+        failure: "network",
+      },
+      {
+        // The one status the challenge route itself returns for a refused
+        // request: a body this node and the Hub disagree on.
+        name: "request shape rejected",
+        fetch: async () => Response.json({ error: "SHAPE-CANARY" }, { status: 400 }),
+        failure: "protocol_invalid",
       },
       {
         // A proxy that has not picked up the Hub's routes yet mid-deploy.

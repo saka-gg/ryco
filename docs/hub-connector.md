@@ -405,9 +405,12 @@ Only one connection generation and one reconnect timer can exist for the configu
 
 Configuration, key custody, origin mismatch, enrollment failure, authentication rejection,
 connection replacement, revocation, version incompatibility, and repeated early protocol failure
-require operator action. Restarting the process does not make a revoked identity retry. A proof
-preflight answered with a status a proxy gives while a Hub deploys — 404, 405, 408, 409, 421, or
-425 — retries like a network failure; 400, 401, and 403 still require operator action.
+require operator action. Restarting the process does not make a revoked identity retry. The Hub's
+proof-preflight route never refuses a node by status — it issues a challenge to every well-formed
+request and answers 400 only for a malformed one — so any other client error there (401, 403, 404,
+408, and the rest) comes from a proxy, CDN, or WAF in front of the Hub and retries like a network
+failure. A 400 means this node and the Hub disagree about the request shape: it retries once, then
+stops for an update like any repeated protocol failure.
 
 The connector also watches for the two events that silently kill an outbound socket: the machine
 waking from sleep (its wall clock jumps past its timers) and its external addresses changing. An
