@@ -33,6 +33,7 @@ import type {
 } from "../../hostedHub/e2eeSession";
 import type { E2eeTrustClassification } from "../../platform/e2eeTrustModel";
 import {
+  cancelE2eeApprovalRequest,
   CHANNEL_LABELS,
   CHANNEL_MESSAGES,
   createE2eeVerificationDraft,
@@ -46,6 +47,7 @@ import {
   isE2eeSafetyNumberDisplay,
   E2EE_APPROVAL_AWAITING_NODE_MESSAGE,
   E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE,
+  E2EE_APPROVAL_CANCEL_UNAVAILABLE,
   E2EE_APPROVAL_INTRO_MESSAGE,
   E2EE_APPROVAL_REQUESTED_MESSAGE,
   E2EE_APPROVAL_SAFETY_NUMBER_CAPTION,
@@ -1118,6 +1120,35 @@ describe("one-scan cross-device approval", () => {
     );
     expect(beginPairing).not.toHaveBeenCalled();
     expect(intoPairing).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it("withdraws only a pending request, by the selection's own handle", async () => {
+    const cancelPairing = vi.spyOn(mobileE2eeTrustStore, "cancelPairing").mockResolvedValue();
+    const base = qrSession();
+    const withRecord = (localRecordState: "unverified" | "unpinned") => ({
+      ...base,
+      selection: { ...base.selection!, localNodeHandle: "handle-qr", localRecordState },
+    });
+
+    await expect(cancelE2eeApprovalRequest(withRecord("unverified"))).resolves.toBeNull();
+    expect(cancelPairing).toHaveBeenCalledWith({
+      hubOrigin: HUB,
+      accountId: ACCOUNT,
+      localNodeHandle: "handle-qr",
+    });
+
+    cancelPairing.mockClear();
+    await expect(cancelE2eeApprovalRequest(withRecord("unpinned"))).resolves.toBe(
+      E2EE_APPROVAL_CANCEL_UNAVAILABLE,
+    );
+    await expect(cancelE2eeApprovalRequest(base)).resolves.toBe(E2EE_APPROVAL_CANCEL_UNAVAILABLE);
+    expect(cancelPairing).not.toHaveBeenCalled();
+
+    cancelPairing.mockRejectedValue(new Error("refused"));
+    await expect(cancelE2eeApprovalRequest(withRecord("unverified"))).resolves.toBe(
+      E2EE_APPROVAL_CANCEL_UNAVAILABLE,
+    );
     vi.restoreAllMocks();
   });
 

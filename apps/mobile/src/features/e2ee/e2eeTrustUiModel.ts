@@ -706,6 +706,37 @@ export async function requestE2eeApproval(session: MobileE2eeSessionState): Prom
   }
 }
 
+export const E2EE_APPROVAL_CANCEL_UNAVAILABLE =
+  "Ryco could not cancel the request on this device. Nothing was changed. Try again.";
+
+/**
+ * Withdraw a pending approval request. The record leaves pairing, so the next
+ * connection takes the account grant again; nothing becomes trusted and nothing
+ * else the owner recorded is forgotten.
+ */
+export async function cancelE2eeApprovalRequest(
+  session: MobileE2eeSessionState,
+): Promise<string | null> {
+  const selection = session.selection;
+  if (
+    selection === null ||
+    selection.localNodeHandle === null ||
+    !isE2eeApprovalRequested(session)
+  ) {
+    return E2EE_APPROVAL_CANCEL_UNAVAILABLE;
+  }
+  try {
+    await mobileE2eeTrustStore.cancelPairing({
+      hubOrigin: selection.hubOrigin,
+      accountId: selection.accountId,
+      localNodeHandle: selection.localNodeHandle,
+    });
+    return null;
+  } catch {
+    return E2EE_APPROVAL_CANCEL_UNAVAILABLE;
+  }
+}
+
 /**
  * Whether this phone has asked the node for approval: its record is in §13.2
  * pairing. A handle alone is not that, because a legacy consent's no-pin record

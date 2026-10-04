@@ -9,6 +9,7 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import { E2eeActionButton, E2eeIdentityColumn, E2eeSafetyNumberCard } from "./E2eeTrustParts";
 import { E2EE_ACKNOWLEDGEMENT_SYMBOLS } from "./e2eeTrustSymbols";
 import {
+  cancelE2eeApprovalRequest,
   createE2eeVerificationDraft,
   confirmE2eeApprovalQr,
   deriveE2eeApprovalRequestStatus,
@@ -55,6 +56,7 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
   const [requestReconnectFailed, setRequestReconnectFailed] = useState(false);
   const approvalRequested = isE2eeApprovalRequested(session) && !requestReconnectFailed;
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const scanHandledRef = useRef(false);
   const placeholderColor = useThemeColor("--color-foreground-muted");
   const iconColor = useThemeColor("--color-icon-muted");
@@ -152,6 +154,33 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
       setRequestReconnectFailed(true);
       setApprovalError(
         "The approval request was saved, but Ryco could not reconnect. Try Request approval again.",
+      );
+    } finally {
+      setApprovalBusy(false);
+    }
+  }, [session, target]);
+
+  const cancelApproval = useCallback(async () => {
+    setApprovalBusy(true);
+    setCancelError(null);
+    const failure = await cancelE2eeApprovalRequest(session);
+    if (failure !== null) {
+      setApprovalBusy(false);
+      setCancelError(failure);
+      return;
+    }
+    setRequestReconnectFailed(false);
+    setApprovalError(null);
+    try {
+      if (!target) throw new Error("Invalid machine route");
+      const reconnected = await getMobileHostedConnectionCoordinator().reconnectNode(
+        target.nodeId,
+        target.environmentId,
+      );
+      if (!reconnected) throw new Error("Machine reconnect refused");
+    } catch {
+      setCancelError(
+        "The request was cancelled, but Ryco could not reconnect yet. Close this screen and reconnect to the node.",
       );
     } finally {
       setApprovalBusy(false);
@@ -261,6 +290,27 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
           caption={approval.comparison.caption}
           value={approval.comparison.value}
         />
+      ) : null}
+
+      {/* Withdrawing the request returns the node to the account grant; the
+          record is in pairing even while a failed reconnect offers a retry. */}
+      {!recoveryMode && isE2eeApprovalRequested(session) ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Cancel approval request"
+            disabled={approvalBusy}
+            onPress={() => void cancelApproval()}
+            className="mx-5 mt-3 h-11 items-center justify-center rounded-full px-4 active:opacity-70 disabled:opacity-50"
+          >
+            <Text className="font-ryco-bold text-sm text-foreground-muted">Cancel request</Text>
+          </Pressable>
+          {cancelError ? (
+            <Text className="mx-5 mt-1 font-sans text-xs leading-relaxed text-danger-foreground">
+              {cancelError}
+            </Text>
+          ) : null}
+        </>
       ) : null}
 
       {/* §13.2.1 situation 2 alone: the previously verified pair beside the newly

@@ -621,6 +621,11 @@ export interface MobileE2eeTrustStore {
    * record already in pairing is left as it is.
    */
   readonly beginPairingForRecord: (index: E2eeTrustRecordIndex) => Promise<void>;
+  /**
+   * The owner withdrawing an approval request before §13.2 step 5. Only a
+   * pairing record changes; a selection that is not in pairing is left alone.
+   */
+  readonly cancelPairing: (index: E2eeTrustRecordIndex) => Promise<void>;
   /** §13.2 step 5. The only path to a `verified` record, and it is atomic. */
   readonly promote: (decision: E2eeOwnerVerificationDecision) => Promise<void>;
   /** §12.1's native set condition and §13.3's silent pin update. */
@@ -987,6 +992,26 @@ export function makeMobileE2eeTrustStore(
         // approval. The handle and hints carry over, and so does the consent:
         // §13.1 lets a pairing record hold one, and it stays the owner's.
         await commit(replaceRecord(state, { ...existing, state: "unverified" }));
+      }),
+
+    cancelPairing: (index) =>
+      exclusive(async () => {
+        const state = await mutable();
+        const existing = state.records.find((record) => sameIndex(record.index, index));
+        if (existing === undefined || existing.state === "none") return;
+        // A completed ceremony is a verified pin, which only §13.3's re-pair clears.
+        if (isE2eeVerifiedPinRecord(existing)) trustError("trust_store_selection_verified");
+        // An unverified record backs no marker. A consent the owner recorded stays
+        // theirs, so the record returns to §13.1's no-pin shape; without one it
+        // holds nothing the owner chose, and it goes.
+        await commit(
+          existing.legacyConsent.kind === "recorded"
+            ? replaceRecord(state, { ...existing, state: "none" })
+            : {
+                ...state,
+                records: state.records.filter((record) => !sameIndex(record.index, index)),
+              },
+        );
       }),
 
     promote: (decision) =>
