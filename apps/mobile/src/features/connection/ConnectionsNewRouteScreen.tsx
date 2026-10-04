@@ -119,7 +119,7 @@ export function ConnectionsNewRouteScreen(props: ConnectionsNewRouteScreenProps)
       <Text className="font-sans text-base leading-normal text-foreground-muted">
         {repairRecord
           ? `${repairRecord.label} no longer accepts this device's saved pairing. Enter a new pairing code from the machine to pair it again.`
-          : "Pair this device straight to one of your machines. Direct credentials stay separate from your Hub account."}
+          : "Pair this device straight to one of your machines. Direct credentials stay separate from your Hub account. The pairing renews itself while you use it; pair again after 30 days without use, or one year after pairing."}
       </Text>
       {error ? <ErrorBanner message={error} /> : null}
 

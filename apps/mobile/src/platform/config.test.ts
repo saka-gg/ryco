@@ -236,6 +236,7 @@ function createGuardCatalog() {
     list: () => [],
     get: () => null,
     readBearerToken: async () => null,
+    writeBearerToken: async () => false,
   };
   return { catalog, subscribeRegistry, waitForHydration };
 }
@@ -258,6 +259,9 @@ describe("two-plane isolation guard", () => {
           throw new Error("The guard never reaches a real connect.");
         },
         resolveRemoteWebSocketConnectionUrl: async () => "ws://node.local/?wsToken=t",
+        rotateRemoteBearerSession: async () => {
+          throw new Error("The guard never reaches a real connect.");
+        },
       },
       subscribeResume,
       connectSavedEnvironment: async (record: SavedEnvironmentRecord) =>

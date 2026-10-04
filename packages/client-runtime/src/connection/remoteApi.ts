@@ -106,6 +106,20 @@ export function createRemoteEnvironmentApi(httpClient: HttpClientService, baseOr
         pathname: "/api/auth/session",
         bearerToken: input.bearerToken,
       }),
+    /**
+     * Renews a direct pairing's bearer: the node answers with its successor,
+     * which supersedes the presented bearer once first used.
+     */
+    rotateRemoteBearerSession: async (input: {
+      readonly httpBaseUrl: string;
+      readonly bearerToken: string;
+    }) =>
+      fetchRemoteJson<AuthBearerBootstrapResult>(httpClient, {
+        httpBaseUrl: input.httpBaseUrl,
+        pathname: "/api/auth/bearer/rotate",
+        method: "POST",
+        bearerToken: input.bearerToken,
+      }),
     fetchRemoteEnvironmentDescriptor: async (input: { readonly httpBaseUrl: string }) =>
       fetchRemoteJson<ExecutionEnvironmentDescriptor>(httpClient, {
         httpBaseUrl: input.httpBaseUrl,

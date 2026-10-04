@@ -39,14 +39,17 @@ vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 // The saved-environment socket is replaced by a recorder: tests drive its
 // lifecycle callbacks the way the protocol would.
 const socketHolder = vi.hoisted(() => ({
+  urls: [] as Array<() => Promise<string>>,
   options: [] as Array<WsProtocolLifecycleHandlers>,
   clientDisposals: 0,
 }));
 vi.mock("../rpc/wsTransport", () => ({
   WsTransport: class {
-    constructor(_url: unknown, options: WsProtocolLifecycleHandlers) {
+    constructor(url: () => Promise<string>, options: WsProtocolLifecycleHandlers) {
+      socketHolder.urls.push(url);
       socketHolder.options.push(options);
     }
+    dispose = async () => {};
   },
 }));
 vi.mock("../rpc/wsRpcClient", async (importOriginal) => ({
@@ -119,6 +122,10 @@ function createFakeCatalog() {
     list: () => [...byId.values()],
     get: (environmentId) => byId.get(environmentId) ?? null,
     readBearerToken: async (environmentId) => tokens.get(environmentId) ?? null,
+    writeBearerToken: async (environmentId, token) => {
+      tokens.set(environmentId, token);
+      return true;
+    },
   };
   return {
     catalog,
@@ -168,6 +175,10 @@ const sessionState = (authenticated: boolean) =>
 const noopRemoteApi = {
   fetchRemoteSessionState: async () => sessionState(true),
   resolveRemoteWebSocketConnectionUrl: async () => "ws://node.local/?wsToken=t",
+  // The sessions above carry no lifetime, so nothing here is due for renewal.
+  rotateRemoteBearerSession: async (): Promise<never> => {
+    throw new Error("No renewal is due in this test.");
+  },
 };
 
 describe("mobile environment driver", () => {
@@ -180,6 +191,7 @@ describe("mobile environment driver", () => {
       catalog: fake.catalog,
       // An expired or revoked bearer: the node answers 200 authenticated:false.
       remoteApi: {
+        ...noopRemoteApi,
         fetchRemoteSessionState: async () => sessionState(false),
         resolveRemoteWebSocketConnectionUrl,
       },
@@ -206,6 +218,7 @@ describe("mobile environment driver", () => {
     const driver = createMobileEnvironmentDriver({
       catalog: fake.catalog,
       remoteApi: {
+        ...noopRemoteApi,
         fetchRemoteSessionState: async () => {
           throw new Error("Network request failed");
         },
@@ -310,6 +323,54 @@ describe("mobile environment driver", () => {
     expect(fake.runtime(ENV_ID)).toMatchObject({ authState: "authenticated", role: "owner" });
   });
 
+  it("renews a direct pairing in use before its socket asks for a ws-token", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-1");
+    fake.upsert(record());
+    const dayMs = 24 * 60 * 60 * 1000;
+    const resolveRemoteWebSocketConnectionUrl = vi.fn(
+      async (input: { readonly bearerToken: string }) =>
+        `ws://node.local/?wsToken=for-${input.bearerToken}`,
+    );
+    const rotateRemoteBearerSession = vi.fn(
+      async () =>
+        ({ sessionToken: "bearer-2", role: "owner" }) as unknown as Awaited<
+          ReturnType<(typeof noopRemoteApi)["rotateRemoteBearerSession"]>
+        >,
+    );
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: {
+        // Twenty days left of thirty: due for renewal; the renewal is fresh.
+        fetchRemoteSessionState: async (input: { readonly bearerToken: string }) =>
+          ({
+            authenticated: true,
+            role: "owner",
+            sessionMethod: "bearer-session-token",
+            expiresAt: new Date(
+              Date.now() + (input.bearerToken === "bearer-1" ? 20 : 30) * dayMs,
+            ).toISOString(),
+          }) as unknown as AuthSessionState,
+        resolveRemoteWebSocketConnectionUrl,
+        rotateRemoteBearerSession,
+      },
+      subscribeResume: () => () => {},
+    });
+
+    await driver.connectSavedEnvironment(record());
+
+    expect(rotateRemoteBearerSession).toHaveBeenCalledExactlyOnceWith({
+      httpBaseUrl: "http://node.local:44342/",
+      bearerToken: "bearer-1",
+    });
+    await expect(fake.catalog.readBearerToken(ENV_ID)).resolves.toBe("bearer-2");
+    await socketHolder.urls.at(-1)!();
+    expect(resolveRemoteWebSocketConnectionUrl).toHaveBeenLastCalledWith(
+      expect.objectContaining({ bearerToken: "bearer-2" }),
+    );
+    await driver.supervisor.remove(ENV_ID);
+  });
+
   it("lets a cancelled connect fail without touching the connection that replaced it", async () => {
     const fake = createFakeCatalog();
     fake.setBearerToken(ENV_ID, "old-bearer-token");
@@ -318,6 +379,7 @@ describe("mobile environment driver", () => {
     const driver = createMobileEnvironmentDriver({
       catalog: fake.catalog,
       remoteApi: {
+        ...noopRemoteApi,
         fetchRemoteSessionState: () =>
           new Promise<AuthSessionState>((_resolve, reject) => {
             failSessionCheck = reject;

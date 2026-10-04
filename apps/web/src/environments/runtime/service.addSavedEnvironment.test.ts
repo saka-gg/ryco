@@ -15,6 +15,7 @@ const mockBootstrapRemoteBearerSession = vi.fn();
 const mockFetchRemoteSessionState = vi.fn();
 const mockIsRemoteEnvironmentAuthHttpError = vi.fn((_: unknown) => false);
 const mockResolveRemoteWebSocketConnectionUrl = vi.fn();
+const mockRotateRemoteBearerSession = vi.fn();
 const mockBootstrapSshBearerSession = vi.fn();
 const mockFetchSshSessionState = vi.fn();
 const mockPersistSavedEnvironmentRecord = vi.fn();
@@ -74,6 +75,7 @@ vi.mock("../remote/api", () => ({
   fetchRemoteSessionState: mockFetchRemoteSessionState,
   isRemoteEnvironmentAuthHttpError: mockIsRemoteEnvironmentAuthHttpError,
   resolveRemoteWebSocketConnectionUrl: mockResolveRemoteWebSocketConnectionUrl,
+  rotateRemoteBearerSession: mockRotateRemoteBearerSession,
 }));
 
 vi.mock("~/localApi", () => ({
@@ -680,6 +682,69 @@ describe("addSavedEnvironment", () => {
     // The record and its bearer stay; pairing again replaces the credential.
     expect(mockRemoveSavedEnvironmentBearerToken).not.toHaveBeenCalled();
     expect(mockRemove).not.toHaveBeenCalled();
+
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("renews a direct pairing in use before building its socket, and connects with the renewal", async () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    mockSavedRecords = [
+      {
+        environmentId,
+        label: "Remote environment",
+        httpBaseUrl: "https://remote.example.com/",
+        wsBaseUrl: "wss://remote.example.com/",
+        createdAt: "2026-04-14T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ];
+    let storedBearer = "bearer-1";
+    mockReadSavedEnvironmentBearerToken.mockImplementation(async () => storedBearer);
+    mockWriteSavedEnvironmentBearerToken.mockImplementation(
+      async (_environmentId: EnvironmentId, token: string) => {
+        storedBearer = token;
+        return true;
+      },
+    );
+    // Twenty days left of thirty: the pairing is due for renewal.
+    mockFetchRemoteSessionState.mockImplementation(
+      async (input: { readonly bearerToken: string }) => ({
+        authenticated: true,
+        role: "owner",
+        sessionMethod: "bearer-session-token",
+        expiresAt: new Date(
+          Date.now() + (input.bearerToken === "bearer-1" ? 20 : 30) * 24 * 60 * 60 * 1000,
+        ).toISOString(),
+      }),
+    );
+    mockRotateRemoteBearerSession.mockResolvedValue({
+      authenticated: true,
+      role: "owner",
+      sessionMethod: "bearer-session-token",
+      sessionToken: "bearer-2",
+    });
+    vi.stubGlobal("window", { ...window, location: { origin: "http://localhost:5733" } });
+
+    const {
+      reconnectSavedEnvironment,
+      listEnvironmentConnections,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    await reconnectSavedEnvironment(environmentId);
+
+    expect(listEnvironmentConnections()).toHaveLength(1);
+    expect(mockRotateRemoteBearerSession).toHaveBeenCalledExactlyOnceWith({
+      httpBaseUrl: "https://remote.example.com/",
+      bearerToken: "bearer-1",
+    });
+    expect(storedBearer).toBe("bearer-2");
+    // The socket asks for its ws-token with the bearer stored now.
+    const socketUrl = mockWsTransport.mock.calls.at(-1)?.[0] as () => Promise<string>;
+    await socketUrl();
+    expect(mockResolveRemoteWebSocketConnectionUrl).toHaveBeenLastCalledWith(
+      expect.objectContaining({ bearerToken: "bearer-2" }),
+    );
 
     await resetEnvironmentServiceForTests();
   });

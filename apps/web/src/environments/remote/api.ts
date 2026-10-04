@@ -20,6 +20,10 @@ export const fetchRemoteSessionState = (input: {
   readonly httpBaseUrl: string;
   readonly bearerToken: string;
 }) => api().fetchRemoteSessionState(input);
+export const rotateRemoteBearerSession = (input: {
+  readonly httpBaseUrl: string;
+  readonly bearerToken: string;
+}) => api().rotateRemoteBearerSession(input);
 export const fetchRemoteEnvironmentDescriptor = (input: { readonly httpBaseUrl: string }) =>
   api().fetchRemoteEnvironmentDescriptor(input);
 export const issueRemoteWebSocketToken = (input: {

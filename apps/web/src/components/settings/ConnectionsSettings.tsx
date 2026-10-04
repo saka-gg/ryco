@@ -2285,7 +2285,8 @@ export function ConnectionsSettings() {
       <div>
         <span className="mt-1 block text-[11px] text-muted-foreground">
           Paste a full pairing URL here to fill both fields automatically. The pairing code is not
-          kept; this client stores a session token that expires 30 days after pairing.
+          kept; this client stores a session token that renews itself while in use. Pair again after
+          30 days without use, or one year after pairing.
         </span>
       </div>
     </div>

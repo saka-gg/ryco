@@ -24,6 +24,7 @@ import {
 import {
   checkSavedEnvironmentSession,
   createEnvironmentConnectionSupervisor,
+  createSavedSessionRenewal,
   createDeviceFrameSource,
   isSavedEnvironmentAwaitingRepair,
   isSavedEnvironmentCredentialRejection,
@@ -54,6 +55,7 @@ import {
   fetchRemoteSessionState,
   isRemoteEnvironmentAuthHttpError,
   resolveRemoteWebSocketConnectionUrl,
+  rotateRemoteBearerSession,
 } from "../remote/api";
 import { resolveRemotePairingTarget } from "../remote/target";
 import {
@@ -961,15 +963,57 @@ async function resolveSavedEnvironmentSocketUrl(
   return url.toString();
 }
 
+/**
+ * Direct pairings renew their bearer while in use. The renewed bearer replaces
+ * the stored one, so every use reads the bearer stored now; the one a connect
+ * started with is only the fallback.
+ */
+const savedSessionRenewal = createSavedSessionRenewal({
+  readBearerToken: (environmentId) => readSavedEnvironmentBearerToken(environmentId),
+  writeBearerToken: (environmentId, token) =>
+    writeSavedEnvironmentBearerToken(environmentId, token),
+});
+
+async function readCurrentSavedEnvironmentBearerToken(
+  environmentId: EnvironmentId,
+  fallback: string,
+): Promise<string> {
+  return (await readSavedEnvironmentBearerToken(environmentId).catch(() => null)) ?? fallback;
+}
+
+/** Keeps a registered direct connection's pairing renewed while it stays connected. */
+function keepSavedEnvironmentSessionRenewed(
+  record: SavedEnvironmentRecord,
+  connection: EnvironmentConnection,
+  session: AuthSessionState,
+) {
+  if (record.desktopSsh) return;
+  savedSessionRenewal.keepRenewed({
+    environmentId: record.environmentId,
+    session,
+    isCurrent: () => getEnvironmentSupervisor().read(record.environmentId) === connection,
+    fetchSessionState: (bearerToken) =>
+      fetchRemoteSessionState({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
+    rotate: (bearerToken) =>
+      rotateRemoteBearerSession({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
+  });
+}
+
 function createSavedEnvironmentClient(
   environmentId: EnvironmentId,
   bearerToken: string,
   onCredentialRejected: () => void = NOOP,
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
+  const socketUrl = async (pathname: "/ws" | "/ws/device" | "/ws/device-frames") =>
+    resolveSavedEnvironmentSocketUrl(
+      environmentId,
+      await readCurrentSavedEnvironmentBearerToken(environmentId, bearerToken),
+      pathname,
+    );
 
   return createWsRpcClient(
-    new WsTransport(() => resolveSavedEnvironmentSocketUrl(environmentId, bearerToken, "/ws"), {
+    new WsTransport(() => socketUrl("/ws"), {
       getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
       getEnvironmentId: () => environmentId,
       // A remote machine can be asleep or offline for hours; keep trying on a
@@ -1019,21 +1063,17 @@ function createSavedEnvironmentClient(
       },
     }),
     createDeviceRpcClient(
-      new DeviceWsTransport(
-        () => resolveSavedEnvironmentSocketUrl(environmentId, bearerToken, "/ws/device"),
-        {
-          getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
-          isTerminalUrlError: isSavedEnvironmentCredentialRejection,
-        },
-      ),
+      new DeviceWsTransport(() => socketUrl("/ws/device"), {
+        getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
+        isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+      }),
       {
         openFrameSource: (udid, handlers) =>
           createDeviceFrameSource({
             udid,
             handlers,
             socket: webSocket,
-            resolveUrl: () =>
-              resolveSavedEnvironmentSocketUrl(environmentId, bearerToken, "/ws/device-frames"),
+            resolveUrl: () => socketUrl("/ws/device-frames"),
           }),
       },
     ),
@@ -1292,12 +1332,12 @@ async function connectSavedEnvironment(
     const prepared = await prepareSavedEnvironmentRecordForConnection(activeRecord);
     activeRecord = prepared.record;
 
-    const activeBearerToken = bearerToken;
+    const presentedBearerToken = bearerToken;
     // The bearer is checked before any socket exists, so a credential the node
     // no longer accepts never requests a ws-token or opens a socket.
     let session: AuthSessionState | null;
     try {
-      session = await readSavedEnvironmentSession(activeRecord, activeBearerToken);
+      session = await readSavedEnvironmentSession(activeRecord, presentedBearerToken);
     } catch (error) {
       if (attemptSpeaksForEnvironment()) setRuntimeError(activeRecord.environmentId, error);
       throw error;
@@ -1316,6 +1356,23 @@ async function connectSavedEnvironment(
     if (isCancelled()) {
       throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
     }
+    // A pairing in use renews its bearer before a socket is built on it. SSH
+    // environments mint a fresh bearer through their tunnel instead.
+    const renewalRecord = activeRecord;
+    const activeBearerToken = renewalRecord.desktopSsh
+      ? presentedBearerToken
+      : await savedSessionRenewal.renew({
+          environmentId: renewalRecord.environmentId,
+          session,
+          bearerToken: presentedBearerToken,
+          fetchSessionState: (token) =>
+            fetchRemoteSessionState({ httpBaseUrl: renewalRecord.httpBaseUrl, bearerToken: token }),
+          rotate: (token) =>
+            rotateRemoteBearerSession({
+              httpBaseUrl: renewalRecord.httpBaseUrl,
+              bearerToken: token,
+            }),
+        });
 
     let credentialRejected = false;
     let registered = false;
@@ -1357,7 +1414,10 @@ async function connectSavedEnvironment(
         try {
           await refreshSavedEnvironmentMetadata(
             activeRecord.environmentId,
-            activeBearerToken,
+            await readCurrentSavedEnvironmentBearerToken(
+              activeRecord.environmentId,
+              activeBearerToken,
+            ),
             client,
           );
         } catch (error) {
@@ -1430,6 +1490,7 @@ async function connectSavedEnvironment(
       }
       registerConnection(connection);
       registered = true;
+      keepSavedEnvironmentSessionRenewed(activeRecord, connection, session);
       return connection;
     } catch (error) {
       if (error instanceof SavedEnvironmentConnectionCancelledError) {

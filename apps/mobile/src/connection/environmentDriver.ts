@@ -3,6 +3,7 @@ import {
   checkSavedEnvironmentSession,
   createEnvironmentConnection,
   createEnvironmentConnectionSupervisor,
+  createSavedSessionRenewal,
   isSavedEnvironmentAwaitingRepair,
   isSavedEnvironmentCredentialRejection,
   SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
@@ -146,13 +147,14 @@ export interface MobileCatalogLike {
   readonly list: () => ReadonlyArray<SavedEnvironmentRecord>;
   readonly get: (environmentId: EnvironmentId) => SavedEnvironmentRecord | null;
   readonly readBearerToken: (environmentId: EnvironmentId) => Promise<string | null>;
+  readonly writeBearerToken: (environmentId: EnvironmentId, token: string) => Promise<boolean>;
 }
 
 export interface MobileEnvironmentDriverDeps {
   readonly catalog: MobileCatalogLike;
   readonly remoteApi: Pick<
     MobileRemoteEnvironmentApi,
-    "fetchRemoteSessionState" | "resolveRemoteWebSocketConnectionUrl"
+    "fetchRemoteSessionState" | "resolveRemoteWebSocketConnectionUrl" | "rotateRemoteBearerSession"
   >;
   readonly stateSink?: EnvironmentStateSink;
   readonly subscribeResume?: (listener: (reason: string) => void) => () => void;
@@ -268,6 +270,21 @@ export function createMobileEnvironmentDriver(
   const setRuntimeRequiresAuth = (environmentId: EnvironmentId) =>
     patchRuntime(environmentId, savedEnvironmentRequiresAuthState(nowIso()));
 
+  // Direct pairings renew their bearer while in use (shared with web and
+  // desktop). The renewal replaces the stored bearer, so every use reads it.
+  const savedSessionRenewal = createSavedSessionRenewal({
+    readBearerToken: (environmentId) => catalog.readBearerToken(environmentId),
+    writeBearerToken: (environmentId, token) => catalog.writeBearerToken(environmentId, token),
+    setTimeout: boundSetTimeout,
+    clearTimeout: boundClearTimeout,
+  });
+  const renewalCalls = (record: SavedEnvironmentRecord) => ({
+    fetchSessionState: (bearerToken: string) =>
+      remoteApi.fetchRemoteSessionState({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
+    rotate: (bearerToken: string) =>
+      remoteApi.rotateRemoteBearerSession({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
+  });
+
   function createSavedEnvironmentClient(
     environmentId: EnvironmentId,
     bearerToken: string,
@@ -282,7 +299,8 @@ export function createMobileEnvironmentDriver(
           return remoteApi.resolveRemoteWebSocketConnectionUrl({
             wsBaseUrl: record.wsBaseUrl,
             httpBaseUrl: record.httpBaseUrl,
-            bearerToken,
+            bearerToken:
+              (await catalog.readBearerToken(environmentId).catch(() => null)) ?? bearerToken,
           });
         },
         {
@@ -355,8 +373,15 @@ export function createMobileEnvironmentDriver(
         role: sessionCheck.session.role ?? null,
       });
     }
+    // A pairing in use renews its bearer before a socket is built on it.
+    const activeBearerToken = await savedSessionRenewal.renew({
+      environmentId: record.environmentId,
+      session: sessionCheck.session,
+      bearerToken,
+      ...renewalCalls(record),
+    });
 
-    const client = createSavedEnvironmentClient(record.environmentId, bearerToken, () => {
+    const client = createSavedEnvironmentClient(record.environmentId, activeBearerToken, () => {
       if (!speaksForEnvironment()) return;
       setRuntimeRequiresAuth(record.environmentId);
       // Its transport has stopped; the dead connection leaves the supervisor so
@@ -410,6 +435,12 @@ export function createMobileEnvironmentDriver(
         throw new SavedEnvironmentConnectionCancelledError(record.environmentId);
       }
       registered = getSupervisor().register(connection);
+      savedSessionRenewal.keepRenewed({
+        environmentId: record.environmentId,
+        session: sessionCheck.session,
+        isCurrent: () => getSupervisor().read(record.environmentId) === registered,
+        ...renewalCalls(record),
+      });
       return connection;
     } catch (error) {
       if (!(error instanceof SavedEnvironmentConnectionCancelledError)) {
