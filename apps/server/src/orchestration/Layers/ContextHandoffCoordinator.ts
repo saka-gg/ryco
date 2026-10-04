@@ -25,6 +25,7 @@ import {
   type TurnId,
 } from "@ryco/contracts";
 import { DEFAULT_CONTEXT_HANDOFF_INPUT_BUDGET } from "@ryco/shared/contextWindow";
+import { truncateUnicodeSafe } from "@ryco/shared/String";
 import { getModelDisplayLabel } from "@ryco/shared/model";
 import { Cause, Effect, Layer, Option, Ref, Schema } from "effect";
 
@@ -62,7 +63,6 @@ import {
   ContextHandoffService,
   type PreparedContextHandoffArtifact,
 } from "../contextHandoff/ContextHandoffService.ts";
-import { truncateUnicodeSafe } from "../contextHandoff/ContextHandoffBuilder.ts";
 
 interface HandoffPresentation {
   readonly source: ContextHandoffEndpointSnapshot;
