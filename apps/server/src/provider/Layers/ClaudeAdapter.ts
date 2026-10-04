@@ -502,6 +502,15 @@ function toMessage(cause: unknown, fallback: string): string {
   return fallback;
 }
 
+/** A typed adapter error's user-level text: its `detail` or `issue`, not its prefixed message. */
+function adapterFailureDetail(error: { readonly message: string }): string {
+  const fields = error as { readonly detail?: unknown; readonly issue?: unknown };
+  for (const value of [fields.detail, fields.issue]) {
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return error.message;
+}
+
 function toError(cause: unknown, fallback: string): Error {
   return cause instanceof Error ? cause : new Error(toMessage(cause, fallback));
 }
@@ -5712,7 +5721,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           return yield* snapshotThread(reopened.success);
         }
 
-        const refusal = reopened.failure.message;
+        // The error's own detail, not its message: that wraps the detail in the
+        // adapter's internal prefix and the thread id.
+        const refusal = adapterFailureDetail(reopened.failure);
         const restored = yield* Effect.result(
           openSessionContext(
             { ...reopenInput, resumeCursor: previousCursor },

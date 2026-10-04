@@ -4249,6 +4249,12 @@ describe("ClaudeAdapterLive", () => {
           error.message,
           "Claude refused to rewind this conversation, so nothing was changed.",
         );
+        // The user sees the detail; it carries no adapter prefix or thread id.
+        assert.equal(error._tag, "ProviderAdapterRequestError");
+        assert.equal(
+          "detail" in error ? error.detail : undefined,
+          "Claude refused to rewind this conversation, so nothing was changed. Resume rejected by the test CLI.",
+        );
         assert.equal(harness.inputs.length, 3);
         assert.equal(harness.inputs[2]?.options.resume, REWIND_SESSION_ID);
         assert.equal(harness.inputs[2]?.options.resumeSessionAt, undefined);
@@ -4410,7 +4416,10 @@ describe("ClaudeAdapterLive", () => {
         yield* TestClock.adjust("1 second");
         const error = yield* Fiber.join(rewinding);
 
-        assert.include(error.message, "Claude did not respond while reopening the conversation.");
+        assert.equal(
+          "detail" in error ? error.detail : undefined,
+          "Claude refused to rewind this conversation, so nothing was changed. Claude did not respond while reopening the conversation.",
+        );
         assert.equal(harness.inputs.length, 3);
         assert.equal(harness.inputs[2]?.options.resumeSessionAt, undefined);
         assert.deepEqual(exitOrErrorEvents(events), []);
