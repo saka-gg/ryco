@@ -281,6 +281,8 @@ export const CheckpointRevertFailureReason = Schema.Literals([
   "provider-failed",
   "files-failed",
   "restart",
+  // Ryco itself failed (journal write, storage, defect), not the provider or files.
+  "internal-error",
 ]);
 export type CheckpointRevertFailureReason = typeof CheckpointRevertFailureReason.Type;
 export const CheckpointRevertActivityPayload = Schema.Struct({

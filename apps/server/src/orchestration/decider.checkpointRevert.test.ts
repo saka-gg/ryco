@@ -261,6 +261,25 @@ describe("checkpoint revert admission", () => {
     expect(activityEvent.payload.activity.payload).not.toHaveProperty("fromTurnCount");
     expect(events.every((event) => event.commandId === "cmd-revert")).toBe(true);
   });
+
+  it("stamps the pending revert with server time, not the client's clock", async () => {
+    // A client clock far behind the server must not sort this revert before an
+    // older, server-stamped revert phase.
+    const before = Date.now();
+    const exit = await decide(
+      revertCommand({ createdAt: "2020-01-01T00:00:00.000Z" }),
+      makeThread({ updatedAt: "2020-01-01T00:00:00.000Z" }),
+    );
+    const after = Date.now();
+    expect(Exit.isSuccess(exit)).toBe(true);
+    if (!Exit.isSuccess(exit)) return;
+    const events = Array.isArray(exit.value) ? exit.value : [exit.value];
+    const activityEvent = events[0];
+    if (activityEvent?.type !== "thread.activity-appended") throw new Error("expected activity");
+    const stampedAt = Date.parse(activityEvent.payload.activity.createdAt);
+    expect(stampedAt).toBeGreaterThanOrEqual(before);
+    expect(stampedAt).toBeLessThanOrEqual(after);
+  });
 });
 
 describe("turn start during a pending revert", () => {

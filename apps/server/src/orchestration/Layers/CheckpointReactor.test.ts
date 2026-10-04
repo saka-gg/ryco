@@ -45,7 +45,14 @@ import {
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../Services/ProjectionSnapshotQuery.ts";
+import type { CheckpointStoreShape } from "../../checkpointing/Services/CheckpointStore.ts";
+import { CheckpointInvariantError } from "../../checkpointing/Errors.ts";
+import { OrchestrationCommandInvariantError } from "../Errors.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -338,6 +345,12 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    /** Fault injection: wrap the services the reactor sees. */
+    readonly wrapEngine?: (engine: OrchestrationEngineShape) => OrchestrationEngineShape;
+    readonly wrapCheckpointStore?: (store: CheckpointStoreShape) => CheckpointStoreShape;
+    readonly wrapSnapshotQuery?: (
+      query: ProjectionSnapshotQueryShape,
+    ) => ProjectionSnapshotQueryShape;
   }) {
     const cwd = createGitRepository();
     tempDirs.push(cwd);
@@ -363,11 +376,35 @@ describe("CheckpointReactor", () => {
       Layer.provide(RepositoryIdentityResolverLive),
       Layer.provide(SqlitePersistenceMemory),
     );
-    const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    const baseProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(ThreadBackgroundLiveness.layer),
       Layer.provide(RepositoryIdentityResolverLive),
       Layer.provide(SqlitePersistenceMemory),
     );
+    const wrapSnapshotQuery = options?.wrapSnapshotQuery;
+    const projectionSnapshotLayer = wrapSnapshotQuery
+      ? Layer.effect(
+          ProjectionSnapshotQuery,
+          Effect.map(Effect.service(ProjectionSnapshotQuery), wrapSnapshotQuery),
+        ).pipe(Layer.provide(baseProjectionSnapshotLayer))
+      : baseProjectionSnapshotLayer;
+    const wrapEngine = options?.wrapEngine;
+    const engineLayer = wrapEngine
+      ? Layer.effect(
+          OrchestrationEngineService,
+          Effect.map(Effect.service(OrchestrationEngineService), wrapEngine),
+        ).pipe(Layer.provide(orchestrationLayer))
+      : orchestrationLayer;
+    const baseCheckpointStoreLayer = CheckpointStoreLive.pipe(
+      Layer.provide(VcsDriverRegistry.layer),
+    );
+    const wrapCheckpointStore = options?.wrapCheckpointStore;
+    const checkpointStoreLayer = wrapCheckpointStore
+      ? Layer.effect(
+          CheckpointStore,
+          Effect.map(Effect.service(CheckpointStore), wrapCheckpointStore),
+        ).pipe(Layer.provide(baseCheckpointStoreLayer))
+      : baseCheckpointStoreLayer;
 
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
       prefix: "ryco-checkpoint-reactor-test-",
@@ -392,13 +429,13 @@ describe("CheckpointReactor", () => {
     });
 
     const layer = CheckpointReactorLive.pipe(
-      Layer.provideMerge(orchestrationLayer),
+      Layer.provideMerge(engineLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(RuntimeReceiptBusLive),
       Layer.provideMerge(LocalDiagnosticsMetricsLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
-      Layer.provideMerge(CheckpointStoreLive.pipe(Layer.provide(VcsDriverRegistry.layer))),
+      Layer.provideMerge(checkpointStoreLayer),
       Layer.provideMerge(
         WorkspaceEntriesLive.pipe(
           Layer.provide(WorkspacePathsLive),
@@ -1474,10 +1511,131 @@ describe("CheckpointReactor", () => {
     );
 
     expect(activity.reason).toBe("provider-failed");
-    expect(activity.detail).toContain("Ryco could not rewind the agent's conversation");
+    // The adapter's own detail, not its internal "Provider adapter request failed" wrapper.
+    expect(activity.detail).toBe(
+      "Ryco could not rewind the agent's conversation. boom. Nothing was changed.",
+    );
     expect(readme(harness.cwd)).toBe("v3\n");
     expect(gitRefExists(harness.cwd, ref(2))).toBe(true);
     expect(await hasReverted(harness.engine)).toBe(false);
+  });
+
+  it("says nothing was changed only once when the provider already says so", async () => {
+    const harness = await createHarness();
+    await seedCheckpoints(harness, { sessionStatus: "ready" });
+    harness.provider.rollbackConversation.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: "claudeAgent",
+          method: "thread/rollback",
+          detail:
+            "Claude refused to rewind this conversation, so nothing was changed. Resume rejected",
+        }),
+      ),
+    );
+
+    await requestRevert(harness, "cmd-revert-claude-refused", 1);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-claude-refused",
+      "failed",
+    );
+
+    expect(activity.detail).toBe(
+      "Ryco could not rewind the agent's conversation. Claude refused to rewind this conversation, so nothing was changed. Resume rejected.",
+    );
+  });
+
+  it("marks the revert interrupted when the provider rollback dies midway", async () => {
+    const harness = await createHarness();
+    await seedCheckpoints(harness, { sessionStatus: "ready" });
+    harness.provider.rollbackConversation.mockImplementationOnce(() =>
+      Effect.die(new Error("adapter crashed")),
+    );
+
+    await requestRevert(harness, "cmd-revert-provider-dies", 1);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-provider-dies",
+      "interrupted",
+    );
+
+    expect(activity.reason).toBe("provider-failed");
+    expect(activity.detail).toContain("The agent may already have forgotten the newer turns");
+    expect(activity.detail).not.toContain("adapter crashed");
+    expect(readme(harness.cwd)).toBe("v3\n");
+    expect(await hasReverted(harness.engine)).toBe(false);
+  });
+
+  it("does not call the provider when the rolling-back phase cannot be journaled", async () => {
+    const harness = await createHarness({
+      wrapEngine: (engine) =>
+        Object.assign(Object.create(engine) as OrchestrationEngineShape, {
+          dispatch: ((command, options) =>
+            command.type === "thread.activity.append" &&
+            command.activity.kind === "checkpoint.revert" &&
+            (command.activity.payload as { status?: string }).status === "rolling-back"
+              ? Effect.fail(
+                  new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail: "journal unavailable",
+                  }),
+                )
+              : engine.dispatch(command, options)) satisfies OrchestrationEngineShape["dispatch"],
+        }),
+    });
+    await seedCheckpoints(harness, { sessionStatus: "ready" });
+
+    await requestRevert(harness, "cmd-revert-journal-fails", 1);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-journal-fails",
+      "failed",
+    );
+
+    expect(activity.reason).toBe("internal-error");
+    expect(activity.detail).toBe(
+      "Ryco could not record the revert before rewinding the agent's conversation. Nothing was changed.",
+    );
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+    expect(readme(harness.cwd)).toBe("v3\n");
+  });
+
+  it("still projects the revert when the checkpoint store fails after the provider rewound", async () => {
+    let storeDown = false;
+    const harness = await createHarness({
+      wrapCheckpointStore: (store) => ({
+        ...store,
+        hasCheckpointRef: (input) =>
+          storeDown
+            ? Effect.fail(
+                new CheckpointInvariantError({
+                  operation: "hasCheckpointRef",
+                  detail: "git is locked",
+                }),
+              )
+            : store.hasCheckpointRef(input),
+      }),
+    });
+    await seedCheckpoints(harness, { sessionStatus: "ready" });
+    harness.provider.rollbackConversation.mockImplementationOnce(() =>
+      Effect.sync(() => {
+        storeDown = true;
+      }),
+    );
+
+    await requestRevert(harness, "cmd-revert-store-fails", 1);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-store-fails",
+      "files-not-restored",
+    );
+
+    expect(await hasReverted(harness.engine)).toBe(true);
+    expect(activity.reason).toBe("files-failed");
+    expect(activity.detail).toContain("git is locked");
+    expect(activity.detail).toContain("The checkout still contains changes from those turns.");
+    expect(readme(harness.cwd)).toBe("v3\n");
   });
 
   it("rolls the provider back before restoring files", async () => {
@@ -1680,9 +1838,10 @@ describe("CheckpointReactor", () => {
         readonly revertRequestId: string;
         readonly status: "requested" | "rolling-back" | "restoring-files";
         readonly cwd?: string;
+        readonly createdAt?: string;
       },
     ) {
-      const createdAt = new Date().toISOString();
+      const createdAt = input.createdAt ?? new Date().toISOString();
       await Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.activity.append",
@@ -1700,6 +1859,150 @@ describe("CheckpointReactor", () => {
         }),
       );
     }
+
+    const revertedEventCount = async (engine: OrchestrationEngineShape) =>
+      (await readAllEvents(engine)).filter((event) => event.type === "thread.reverted").length;
+
+    it("does not finish a revert when the thread moved past it before the restart", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+      await seedRevertActivity(harness, {
+        revertRequestId: "cmd-recover-moved-on",
+        status: "restoring-files",
+        cwd: harness.cwd,
+      });
+      // The pending revert went stale and the user kept working: turn 3 landed.
+      fs.writeFileSync(path.join(harness.cwd, "README.md"), "v4\n", "utf8");
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make("cmd-seed-diff-3"),
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-3"),
+          completedAt: new Date(Date.now() + 1_000).toISOString(),
+          checkpointRef: ref(3),
+          status: "ready",
+          files: [],
+          checkpointTurnCount: 3,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+
+      await Effect.runPromise(harness.reactor.recover());
+      const activity = await waitForRevertStatus(
+        harness.engine,
+        "cmd-recover-moved-on",
+        "interrupted",
+      );
+
+      expect(activity.reason).toBe("restart");
+      expect(activity.detail).toContain("this thread changed afterwards");
+      expect(await hasReverted(harness.engine)).toBe(false);
+      expect(readme(harness.cwd)).toBe("v4\n");
+      expect(gitRefExists(harness.cwd, ref(2))).toBe(true);
+    });
+
+    it("does not restore files for a pending revert older than the stale window", async () => {
+      const base = Date.now() - 30 * 60_000;
+      const iso = (offsetMs: number) => new Date(base + offsetMs).toISOString();
+      const harness = await createHarness();
+      await seedCheckpoints(harness, {
+        sessionStatus: "ready",
+        completedAt: [iso(0), iso(60_000)],
+      });
+      await seedRevertActivity(harness, {
+        revertRequestId: "cmd-recover-stale",
+        status: "restoring-files",
+        cwd: harness.cwd,
+        createdAt: iso(120_000),
+      });
+
+      await Effect.runPromise(harness.reactor.recover());
+      const activity = await waitForRevertStatus(
+        harness.engine,
+        "cmd-recover-stale",
+        "interrupted",
+      );
+
+      expect(activity.detail).toContain("too long ago to finish safely");
+      expect(await hasReverted(harness.engine)).toBe(false);
+      expect(readme(harness.cwd)).toBe("v3\n");
+    });
+
+    it("does not revert again when only the final status was lost", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+      await seedRevertActivity(harness, {
+        revertRequestId: "cmd-recover-projected",
+        status: "restoring-files",
+        cwd: harness.cwd,
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.revert.complete",
+          commandId: CommandId.make("cmd-recover-projected-complete"),
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 1,
+          droppedTurnIds: [asTurnId("turn-2")],
+          createdAt: new Date().toISOString(),
+        }),
+      );
+
+      await Effect.runPromise(harness.reactor.recover());
+      const activity = await waitForRevertStatus(
+        harness.engine,
+        "cmd-recover-projected",
+        "interrupted",
+      );
+
+      expect(activity.detail).toContain("The conversation was reverted to checkpoint 1");
+      expect(await revertedEventCount(harness.engine)).toBe(1);
+      expect(readme(harness.cwd)).toBe("v3\n");
+    });
+
+    it("keeps recovering other threads when one thread's recovery fails", async () => {
+      let detailReadsFail = false;
+      const harness = await createHarness({
+        wrapSnapshotQuery: (query) => ({
+          ...query,
+          getThreadDetailById: (threadId) =>
+            detailReadsFail && threadId === ThreadId.make("thread-1")
+              ? Effect.fail(
+                  new PersistenceSqlError({
+                    operation: "getThreadDetailById",
+                    detail: "database is locked",
+                  }),
+                )
+              : query.getThreadDetailById(threadId),
+        }),
+      });
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+      await createNeighbour(harness, { worktreePath: "/tmp/ryco-unrelated-neighbour" });
+      await seedRevertActivity(harness, {
+        revertRequestId: "cmd-recover-broken",
+        status: "restoring-files",
+        cwd: harness.cwd,
+      });
+      await seedRevertActivity(harness, {
+        threadId: ThreadId.make("thread-2"),
+        revertRequestId: "cmd-recover-after-broken",
+        status: "requested",
+      });
+      detailReadsFail = true;
+
+      await Effect.runPromise(harness.reactor.recover());
+
+      // thread-1 sorts first; its failure must not leave thread-2 pending.
+      const failed = await waitForRevertStatus(
+        harness.engine,
+        "cmd-recover-after-broken",
+        "failed",
+      );
+      expect(failed.reason).toBe("restart");
+      const broken = await waitForRevertStatus(harness.engine, "cmd-recover-broken", "interrupted");
+      expect(broken.reason).toBe("restart");
+      expect(readme(harness.cwd)).toBe("v3\n");
+    });
 
     it("finishes a revert that stopped while restoring files", async () => {
       const harness = await createHarness();

@@ -4,6 +4,7 @@ import {
   EventId,
   MessageId,
   type CheckpointRef,
+  type CheckpointRevertActivityPayload,
   type CheckpointRevertFailureReason,
   type CheckpointRevertStatus,
   type ProjectId,
@@ -11,6 +12,7 @@ import {
   TurnId,
   type OrchestrationEvent,
   type OrchestrationThread,
+  type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
 import { Cause, Effect, Layer, Option, Schema, Stream } from "effect";
@@ -37,12 +39,14 @@ import {
   isCaseSensitiveFileSystem,
 } from "../../git/worktreeReconciliation.ts";
 import {
+  CHECKPOINT_REVERT_PENDING_STALE_MS,
   makeCheckpointRevertActivity,
   threadBusyMessage,
   threadBusyReason,
 } from "../checkpointRevertPolicy.ts";
 import { latestTurnFromCheckpoint } from "../projector.ts";
 import { threadShellSettlementInput } from "../threadSettlementInput.ts";
+import { userFacingFailureDetail } from "../userFacingErrors.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
@@ -161,6 +165,41 @@ export function providerRollbackEpochViolation(
 const serverCommandId = (tag: string): CommandId =>
   CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
 
+/** How far a live revert got, so an unexpected failure is journaled honestly. */
+type RevertProgress = { phase: "validating" | "rolling-back" | "restoring-files" };
+
+type PendingCheckpointRevert = {
+  readonly threadId: ThreadId;
+  readonly activity: OrchestrationThreadActivity;
+  readonly payload: CheckpointRevertActivityPayload;
+};
+
+function asSentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/** Ends a refusal with "Nothing was changed." unless it already says so, in any case. */
+function withNothingChanged(detail: string): string {
+  return /\bnothing was changed\b/i.test(detail)
+    ? detail.trim()
+    : `${asSentence(detail)} Nothing was changed.`;
+}
+
+/** Whether the thread gained messages, turns, or checkpoints after `sinceIso`. */
+function threadChangedSince(thread: OrchestrationThread, sinceIso: string): boolean {
+  const sinceMs = Date.parse(sinceIso);
+  if (!Number.isFinite(sinceMs)) return true;
+  const after = (value: string | null | undefined) =>
+    value !== null && value !== undefined && Date.parse(value) > sinceMs;
+  return (
+    thread.messages.some((message) => after(message.createdAt)) ||
+    thread.checkpoints.some((checkpoint) => after(checkpoint.completedAt)) ||
+    after(thread.latestTurn?.requestedAt) ||
+    after(thread.latestTurn?.startedAt)
+  );
+}
+
 const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -171,7 +210,7 @@ const make = Effect.gen(function* () {
   const workspaceEntries = yield* WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
 
-  const updateRevert = (input: {
+  type RevertPhaseInput = {
     readonly threadId: ThreadId;
     readonly revertRequestId: CommandId;
     readonly turnCount: number;
@@ -180,7 +219,10 @@ const make = Effect.gen(function* () {
     readonly reason?: CheckpointRevertFailureReason | undefined;
     readonly detail?: string | undefined;
     readonly cwd?: string | undefined;
-  }) => {
+  };
+
+  /** Journals one revert phase; fails when the phase could not be recorded. */
+  const recordRevertPhase = (input: RevertPhaseInput) => {
     const createdAt = new Date().toISOString();
     return orchestrationEngine
       .dispatch({
@@ -190,18 +232,21 @@ const make = Effect.gen(function* () {
         activity: makeCheckpointRevertActivity({ ...input, createdAt }),
         createdAt,
       })
-      .pipe(
-        Effect.asVoid,
-        Effect.catch((error) =>
-          Effect.logWarning("failed to record checkpoint revert phase", {
-            threadId: input.threadId,
-            revertRequestId: input.revertRequestId,
-            status: input.status,
-            detail: error.message,
-          }),
-        ),
-      );
+      .pipe(Effect.asVoid);
   };
+
+  /** Best-effort journal update: a lost update is logged, never fatal. */
+  const updateRevert = (input: RevertPhaseInput) =>
+    recordRevertPhase(input).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("failed to record checkpoint revert phase", {
+          threadId: input.threadId,
+          revertRequestId: input.revertRequestId,
+          status: input.status,
+          detail: error.message,
+        }),
+      ),
+    );
 
   const appendCaptureFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -841,18 +886,18 @@ const make = Effect.gen(function* () {
     const { thread, revertRequestId, turnCount, cwd } = input;
     const threadId = thread.id;
     const outcome = revertOutcome(thread, turnCount);
-    const plan = yield* resolveRestorePlan({ thread, turnCount, cwd });
+    const unavailableText = `the files for checkpoint ${turnCount} are no longer available`;
 
-    let filesNotRestoredReason: {
+    type FilesNotRestored = {
       readonly reason: CheckpointRevertFailureReason;
       readonly text: string;
-    } | null = null;
-    if (plan === null) {
-      filesNotRestoredReason = {
-        reason: "files-failed",
-        text: `the files for checkpoint ${turnCount} are no longer available`,
-      };
-    } else {
+    };
+    const restoreFiles = Effect.fn("restoreRevertFiles")(function* (): Effect.fn.Return<
+      FilesNotRestored | null,
+      CheckpointStoreError
+    > {
+      const plan = yield* resolveRestorePlan({ thread, turnCount, cwd });
+      if (plan === null) return { reason: "files-failed", text: unavailableText };
       const safety = yield* evaluateRestoreSafety({
         thread,
         turnCount,
@@ -860,29 +905,35 @@ const make = Effect.gen(function* () {
         source: plan.source,
       });
       const conflictText = restoreConflictText(safety, turnCount);
-      if (conflictText !== null) {
-        filesNotRestoredReason = { reason: "shared-checkout", text: conflictText };
-      } else {
-        const restored = yield* Effect.result(
-          checkpointStore.restoreCheckpoint({
-            cwd,
-            checkpointRef: plan.targetRef,
-            fallbackToHead: plan.source === "head-fallback",
-          }),
-        );
-        if (restored._tag === "Failure") {
-          filesNotRestoredReason = { reason: "files-failed", text: restored.failure.message };
-        } else if (!restored.success) {
-          filesNotRestoredReason = {
-            reason: "files-failed",
-            text: `the files for checkpoint ${turnCount} are no longer available`,
-          };
-        } else {
-          // Keep the @-mention file picker in step with the reverted files.
-          yield* workspaceEntries.invalidate(cwd);
-        }
-      }
-    }
+      if (conflictText !== null) return { reason: "shared-checkout", text: conflictText };
+      const restored = yield* checkpointStore.restoreCheckpoint({
+        cwd,
+        checkpointRef: plan.targetRef,
+        fallbackToHead: plan.source === "head-fallback",
+      });
+      if (!restored) return { reason: "files-failed", text: unavailableText };
+      // Keep the @-mention file picker in step with the reverted files.
+      yield* workspaceEntries.invalidate(cwd);
+      return null;
+    });
+    // The provider may already have forgotten the dropped turns, so nothing
+    // here may skip projecting the revert: any file failure is reported.
+    const filesNotRestoredReason = yield* restoreFiles().pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("failed to restore checkpoint files after revert", {
+              threadId,
+              turnCount,
+              cause: Cause.pretty(cause),
+            }).pipe(
+              Effect.as<FilesNotRestored>({
+                reason: "files-failed",
+                text: userFacingFailureDetail(cause),
+              }),
+            ),
+      ),
+    );
 
     const fromTurnCount = outcome.currentTurnCount;
     if (outcome.dropped.length === 0 && filesNotRestoredReason !== null) {
@@ -959,10 +1010,11 @@ const make = Effect.gen(function* () {
 
   const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
     event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
+    revertRequestId: CommandId,
+    progress: RevertProgress,
   ) {
     const threadId = event.payload.threadId;
     const turnCount = event.payload.turnCount;
-    const revertRequestId = event.commandId ?? serverCommandId("checkpoint-revert-request");
     const fail = (reason: CheckpointRevertFailureReason, detail: string) =>
       updateRevert({
         threadId,
@@ -970,9 +1022,7 @@ const make = Effect.gen(function* () {
         turnCount,
         status: "failed",
         reason,
-        detail: detail.includes("Nothing was changed.")
-          ? detail
-          : `${detail.replace(/\s+$/, "")} Nothing was changed.`,
+        detail: withNothingChanged(detail),
       });
 
     // 1. Load the authoritative thread state.
@@ -1049,14 +1099,30 @@ const make = Effect.gen(function* () {
     // 8. Provider first: files and history stay untouched if it refuses.
     const fromTurnCount = outcome.currentTurnCount;
     if (outcome.dropped.length > 0) {
-      yield* updateRevert({
-        threadId,
-        revertRequestId,
-        turnCount,
-        fromTurnCount,
-        status: "rolling-back",
-        cwd,
-      });
+      // The journal must say "rolling-back" before the provider can forget
+      // anything, or a crash would be recovered as "nothing was changed".
+      const journaled = yield* Effect.result(
+        recordRevertPhase({
+          threadId,
+          revertRequestId,
+          turnCount,
+          fromTurnCount,
+          status: "rolling-back",
+          cwd,
+        }),
+      );
+      if (journaled._tag === "Failure") {
+        yield* Effect.logWarning("failed to journal checkpoint revert before provider rollback", {
+          threadId,
+          revertRequestId,
+          detail: journaled.failure.message,
+        });
+        return yield* fail(
+          "internal-error",
+          "Ryco could not record the revert before rewinding the agent's conversation.",
+        );
+      }
+      progress.phase = "rolling-back";
       const rolledBack = yield* Effect.result(
         providerService.rollbackConversation({
           threadId,
@@ -1071,10 +1137,13 @@ const make = Effect.gen(function* () {
           ? fail("provider-unsupported", error.message)
           : fail(
               "provider-failed",
-              `Ryco could not rewind the agent's conversation, so nothing was changed. ${error.message}`,
+              `Ryco could not rewind the agent's conversation. ${asSentence(
+                userFacingFailureDetail(Cause.fail(error)),
+              )}`,
             );
       }
     }
+    progress.phase = "restoring-files";
     yield* updateRevert({
       threadId,
       revertRequestId,
@@ -1088,71 +1157,193 @@ const make = Effect.gen(function* () {
     yield* finishRevert({ thread, revertRequestId, turnCount, cwd });
   });
 
+  // An unexpected failure is journaled by how far the revert got: before the
+  // provider nothing changed; during it the agent may have forgotten turns;
+  // after it the journal stays "restoring-files" so recovery can finish it.
+  const handleRevertRequestedSafely = (
+    event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
+  ) => {
+    const threadId = event.payload.threadId;
+    const turnCount = event.payload.turnCount;
+    const revertRequestId = event.commandId ?? serverCommandId("checkpoint-revert-request");
+    const progress: RevertProgress = { phase: "validating" };
+    return handleRevertRequested(event, revertRequestId, progress).pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) {
+          return Effect.failCause(cause);
+        }
+        const logged = Effect.logError("checkpoint revert failed unexpectedly", {
+          threadId,
+          revertRequestId,
+          phase: progress.phase,
+          cause: Cause.pretty(cause),
+        });
+        const base = { threadId, revertRequestId, turnCount };
+        switch (progress.phase) {
+          case "validating":
+            return logged.pipe(
+              Effect.andThen(
+                updateRevert({
+                  ...base,
+                  status: "failed",
+                  reason: "internal-error",
+                  detail: withNothingChanged(userFacingFailureDetail(cause)),
+                }),
+              ),
+            );
+          case "rolling-back":
+            return logged.pipe(
+              Effect.andThen(
+                updateRevert({
+                  ...base,
+                  status: "interrupted",
+                  reason: "provider-failed",
+                  detail: `Ryco hit an unexpected error while rewinding the agent's conversation. The agent may already have forgotten the newer turns, but files and history were not changed. Revert to checkpoint ${turnCount} again to finish.`,
+                }),
+              ),
+            );
+          case "restoring-files":
+            return logged;
+        }
+      }),
+    );
+  };
+
+  /** Finishes a revert that stopped after the provider rewound, unless the thread moved on. */
+  const recoverRestoringFiles = Effect.fn("recoverRestoringFiles")(function* (
+    entry: PendingCheckpointRevert,
+  ) {
+    const { threadId, activity, payload } = entry;
+    const turnCount = payload.turnCount;
+    const interrupt = (detail: string) =>
+      updateRevert({
+        threadId,
+        revertRequestId: payload.revertRequestId,
+        turnCount,
+        fromTurnCount: payload.fromTurnCount,
+        cwd: payload.cwd,
+        status: "interrupted",
+        reason: "restart",
+        detail,
+      });
+    const thread = yield* resolveThreadDetail(threadId);
+    if (!thread) {
+      return yield* interrupt(
+        `Ryco stopped while restoring files and could not finish. Revert to checkpoint ${turnCount} again to finish.`,
+      );
+    }
+    const outcome = revertOutcome(thread, turnCount);
+    const fromTurnCount = payload.fromTurnCount;
+    if (
+      fromTurnCount !== undefined &&
+      fromTurnCount > turnCount &&
+      outcome.currentTurnCount === turnCount
+    ) {
+      // thread.reverted was projected; only the final journal update was lost.
+      return yield* interrupt(
+        `The conversation was reverted to checkpoint ${turnCount}, but Ryco stopped before it recorded whether files were restored. Check the files in Changes, or revert to checkpoint ${turnCount} again to restore them.`,
+      );
+    }
+    // Finishing recomputes the dropped turns from SQL, so it is only safe while
+    // the thread is exactly where the revert left it.
+    if (
+      fromTurnCount === undefined ||
+      outcome.currentTurnCount !== fromTurnCount ||
+      threadChangedSince(thread, activity.createdAt)
+    ) {
+      return yield* interrupt(
+        `Ryco stopped while restoring files, and this thread changed afterwards, so the revert was not finished. Files and history were not changed, but the agent may already have forgotten the turns after checkpoint ${turnCount}. Review the thread before continuing, or start a new thread.`,
+      );
+    }
+    const pendingSinceMs = Date.parse(activity.createdAt);
+    if (
+      !Number.isFinite(pendingSinceMs) ||
+      Date.now() - pendingSinceMs >= CHECKPOINT_REVERT_PENDING_STALE_MS
+    ) {
+      // Too old to restore files blindly: the checkout may hold newer work.
+      return yield* interrupt(
+        `Ryco stopped while restoring files too long ago to finish safely. Files and history were not changed, but the agent may already have forgotten the turns after checkpoint ${turnCount}. Revert to checkpoint ${turnCount} again to finish.`,
+      );
+    }
+    const cwd =
+      payload.cwd ??
+      (yield* resolveCheckpointCwd({
+        threadId,
+        thread,
+        projects: yield* resolveThreadProjects(thread.projectId),
+        preferSessionRuntime: false,
+      }));
+    if (!cwd) {
+      return yield* interrupt(
+        `Ryco stopped while restoring files and could not finish. Revert to checkpoint ${turnCount} again to finish.`,
+      );
+    }
+    yield* finishRevert({
+      thread,
+      revertRequestId: payload.revertRequestId,
+      turnCount,
+      cwd,
+    });
+  });
+
+  const recoverEntry = (entry: PendingCheckpointRevert) => {
+    const { threadId, payload } = entry;
+    const base = {
+      threadId,
+      revertRequestId: payload.revertRequestId,
+      turnCount: payload.turnCount,
+      fromTurnCount: payload.fromTurnCount,
+      cwd: payload.cwd,
+    };
+    switch (payload.status) {
+      case "requested":
+        return updateRevert({
+          ...base,
+          status: "failed",
+          reason: "restart",
+          detail: "Ryco restarted before this revert started. Nothing was changed.",
+        });
+      case "rolling-back":
+        return updateRevert({
+          ...base,
+          status: "interrupted",
+          reason: "restart",
+          detail: `Ryco stopped while rewinding the agent's conversation. The agent may already have forgotten the newer turns, but files and history were not changed. Revert to checkpoint ${payload.turnCount} again to finish.`,
+        });
+      case "restoring-files":
+        return recoverRestoringFiles(entry).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logError("checkpoint revert recovery failed", {
+                  threadId,
+                  revertRequestId: payload.revertRequestId,
+                  cause: Cause.pretty(cause),
+                }).pipe(
+                  // Never retry a failing entry on every startup.
+                  Effect.andThen(
+                    updateRevert({
+                      ...base,
+                      status: "interrupted",
+                      reason: "restart",
+                      detail: `Ryco stopped while restoring files and could not finish after restarting. The agent may already have forgotten the turns after checkpoint ${payload.turnCount}. Revert to checkpoint ${payload.turnCount} again to finish.`,
+                    }),
+                  ),
+                ),
+          ),
+        );
+      default:
+        return Effect.void;
+    }
+  };
+
   const recover: CheckpointReactorShape["recover"] = () =>
     Effect.gen(function* () {
       const listPending = projectionSnapshotQuery.listPendingCheckpointReverts;
       if (!listPending) return;
       const pending = yield* listPending();
-      yield* Effect.forEach(
-        pending,
-        ({ threadId, payload }) => {
-          const base = {
-            threadId,
-            revertRequestId: payload.revertRequestId,
-            turnCount: payload.turnCount,
-            fromTurnCount: payload.fromTurnCount,
-            cwd: payload.cwd,
-          };
-          switch (payload.status) {
-            case "requested":
-              return updateRevert({
-                ...base,
-                status: "failed",
-                reason: "restart",
-                detail: "Ryco restarted before this revert started. Nothing was changed.",
-              });
-            case "rolling-back":
-              return updateRevert({
-                ...base,
-                status: "interrupted",
-                reason: "restart",
-                detail: `Ryco stopped while rewinding the agent's conversation. The agent may already have forgotten the newer turns, but files and history were not changed. Revert to checkpoint ${payload.turnCount} again to finish.`,
-              });
-            case "restoring-files":
-              return Effect.gen(function* () {
-                // Checkpoints above K are still present: thread.reverted was not projected.
-                const thread = yield* resolveThreadDetail(threadId);
-                const cwd =
-                  payload.cwd ??
-                  (thread
-                    ? yield* resolveCheckpointCwd({
-                        threadId,
-                        thread,
-                        projects: yield* resolveThreadProjects(thread.projectId),
-                        preferSessionRuntime: false,
-                      })
-                    : undefined);
-                if (!thread || !cwd) {
-                  return yield* updateRevert({
-                    ...base,
-                    status: "interrupted",
-                    reason: "restart",
-                    detail: `Ryco stopped while restoring files and could not finish. Revert to checkpoint ${payload.turnCount} again to finish.`,
-                  });
-                }
-                yield* finishRevert({
-                  thread,
-                  revertRequestId: payload.revertRequestId,
-                  turnCount: payload.turnCount,
-                  cwd,
-                });
-              });
-            default:
-              return Effect.void;
-          }
-        },
-        { discard: true },
-      ).pipe(Effect.asVoid);
+      // Each entry is isolated: one thread's failure never skips the others.
+      yield* Effect.forEach(pending, recoverEntry, { discard: true });
     }).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
@@ -1168,21 +1359,7 @@ const make = Effect.gen(function* () {
     }
 
     if (event.type === "thread.checkpoint-revert-requested") {
-      yield* handleRevertRequested(event).pipe(
-        Effect.catchCause((cause) => {
-          if (Cause.hasInterruptsOnly(cause)) {
-            return Effect.failCause(cause);
-          }
-          return updateRevert({
-            threadId: event.payload.threadId,
-            revertRequestId: event.commandId ?? serverCommandId("checkpoint-revert-request"),
-            turnCount: event.payload.turnCount,
-            status: "failed",
-            reason: "provider-failed",
-            detail: `Ryco hit an unexpected error while reverting: ${Cause.pretty(cause).slice(0, 1_000)}`,
-          });
-        }),
-      );
+      yield* handleRevertRequestedSafely(event);
       return;
     }
 

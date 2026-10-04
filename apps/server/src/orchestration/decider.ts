@@ -1442,7 +1442,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               revertRequestId: command.commandId,
               turnCount: command.turnCount,
               status: "requested",
-              createdAt: command.createdAt,
+              // Server time, like every later phase: the journal orders reverts by
+              // createdAt, so it must not mix the client's clock with the server's.
+              createdAt: nowIso(),
             }),
           },
         },
