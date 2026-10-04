@@ -51,7 +51,7 @@ async function main() {
     const decoded = (value: Awaited<ReturnType<typeof execute>>) =>
       JSON.parse((value.content[0] as { text: string }).text);
     const tab = decoded(
-      await execute({ action: "open", url: `http://127.0.0.1:${address.port}`, visible: false }),
+      await execute({ action: "open", url: `http://127.0.0.1:${address.port}`, visible: true }),
     ).id;
     const assertBackground = () => {
       assert.equal(BrowserWindow.getFocusedWindow(), null, "Agent tabs must not take native focus");
@@ -60,6 +60,8 @@ async function main() {
         "Agent hosts must stay hidden",
       );
     };
+    assertBackground();
+    await execute({ action: "show", tab });
     assertBackground();
     let state = decoded(await execute({ action: "observe", tab }));
     const ref = (name: string) =>

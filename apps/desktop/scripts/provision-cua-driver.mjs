@@ -15,6 +15,8 @@ import {
   LINUX_CUA_INPUT_SCOPE,
   LINUX_CUA_SIDECAR_PATHS,
 } from "./cua-artifact-provenance.mjs";
+import { cuaBuildCacheKey } from "./cua-build-cache.mjs";
+import { nativeBuildCacheDirectory } from "./native-build-cache.mjs";
 const release = JSON.parse(
   await readFile(
     new URL("../../../packages/shared/src/cuaDriverRelease.json", import.meta.url),
@@ -234,7 +236,15 @@ try {
     const workspace = await readFile(join(rust, "Cargo.toml"), "utf8");
     if (!workspace.includes(`version = "${release.version}"`))
       throw new Error("Cua source package version mismatch.");
-    const targetDir = resolve(process.env.CARGO_TARGET_DIR || join(temporary, "target"));
+    const targetDir = resolve(
+      process.env.CARGO_TARGET_DIR ||
+        join(
+          nativeBuildCacheDirectory(),
+          "cargo",
+          "cua",
+          cuaBuildCacheKey(release, platform, arch),
+        ),
+    );
     const binaries = [];
     for (const architecture of architectures) {
       const target = sourceTargets[platform][architecture];

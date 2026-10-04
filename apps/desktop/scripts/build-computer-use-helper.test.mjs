@@ -14,7 +14,7 @@ afterEach(() => {
   roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }));
 });
 
-function fixture(platform, environment = {}) {
+function fixture(platform, environment = {}, cacheRoot) {
   const root = mkdtempSync(join(tmpdir(), "ryco-helper-build-test-"));
   roots.push(root);
   const desktop = join(root, "CloudStorage", "Dropbox", "checkout", "apps", "desktop");
@@ -27,7 +27,7 @@ function fixture(platform, environment = {}) {
     ...process,
     platform,
     arch: "arm64",
-    env: environment,
+    env: { RYCO_NATIVE_BUILD_CACHE_DIR: cacheRoot ?? join(root, "cache"), ...environment },
   });
   spawnSync.mockImplementation((command, args) => {
     if (args[0] === "+1.98.1") {
@@ -42,7 +42,7 @@ function fixture(platform, environment = {}) {
       if (!targetDirectory.startsWith(root)) roots.push(targetDirectory);
       mkdirSync(dirname(binary), { recursive: true });
       writeFileSync(binary, "helper");
-    } else if (command === "xcrun") {
+    } else if (command === "xcrun" && args[0] === "lipo") {
       const outputIndex = args.indexOf("-output");
       for (const binary of args.slice(2, outputIndex))
         expect(readFileSync(binary, "utf8")).toBe("helper");
@@ -50,7 +50,7 @@ function fixture(platform, environment = {}) {
     } else if (args[0] === "--hello") {
       return { status: 0, stdout: JSON.stringify({ protocolVersion: 3 }) };
     }
-    return { status: 0 };
+    return { status: 0, stdout: "toolchain" };
   });
   return { desktop, source };
 }
@@ -103,22 +103,47 @@ describe("computer-use helper build", () => {
     },
   );
 
-  it("reuses a checkout's cache while separating different checkouts", () => {
+  it("reuses verified binaries across worktrees and rebuilds changed sources", () => {
     const first = fixture("darwin");
+    const cache = process.env.RYCO_NATIVE_BUILD_CACHE_DIR;
     buildComputerUseHelper(first.desktop);
     buildComputerUseHelper(first.desktop);
-    const second = fixture("darwin");
+    const second = fixture("darwin", {}, cache);
     buildComputerUseHelper(second.desktop);
-    const directories = cargoCalls().map(([, args]) => args[args.indexOf("--target-dir") + 1]);
-    expect(directories[0]).toBe(directories[2]);
-    expect(directories[0]).not.toBe(directories[4]);
+    expect(cargoCalls()).toHaveLength(2);
+    writeFileSync(join(second.source, "new.rs"), "changed source");
+    buildComputerUseHelper(second.desktop);
+    expect(cargoCalls()).toHaveLength(4);
+  });
+
+  it("builds only the host slice in development, then both slices for a normal build", () => {
+    const f = fixture("darwin");
+    buildComputerUseHelper(f.desktop, { development: true });
+    expect(cargoCalls()).toHaveLength(1);
+    expect(cargoCalls()[0][1]).toContain("aarch64-apple-darwin");
+    expect(
+      spawnSync.mock.calls.some(([command, args]) => command === "xcrun" && args[0] === "lipo"),
+    ).toBe(false);
+    buildComputerUseHelper(f.desktop);
+    expect(cargoCalls()).toHaveLength(3);
+  });
+
+  it("respects an explicit architecture in development", () => {
+    const f = fixture("darwin", { RYCO_DESKTOP_ARCH: "x64" });
+    buildComputerUseHelper(f.desktop, { development: true });
+    expect(cargoCalls()).toHaveLength(1);
+    expect(cargoCalls()[0][1]).toContain("x86_64-apple-darwin");
   });
 
   it("reports a failed Cargo command without diagnosing a missing toolchain", () => {
     const f = fixture("darwin");
-    spawnSync.mockReturnValue({ status: 1 });
-    spawnSync.mockReturnValueOnce({ status: 0 });
+    spawnSync.mockImplementation((command, args) => ({
+      status: args[0] === "+1.98.1" ? 1 : 0,
+      stdout: "toolchain",
+    }));
     expect(() => buildComputerUseHelper(f.desktop)).toThrow(/cargo \+1\.98\.1 build .*exit 1/);
-    expect(spawnSync.mock.calls.some(([command]) => command === "xcrun")).toBe(false);
+    expect(
+      spawnSync.mock.calls.some(([command, args]) => command === "xcrun" && args[0] === "lipo"),
+    ).toBe(false);
   });
 });

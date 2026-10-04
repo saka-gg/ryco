@@ -2075,6 +2075,15 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
       const tokenUsage = events.find((event) => event.type === "thread.token-usage.updated");
       if (tokenUsage?.type === "thread.token-usage.updated") {
+        assert.deepEqual(tokenUsage.payload.usage.processedUsage, {
+          scope: "request",
+          requestId: "root-message-1",
+          inputTokens: 130,
+          cachedInputTokens: 25,
+          outputTokens: 50,
+          reasoningOutputTokens: 10,
+          totalTokens: 180,
+        });
         assert.equal(tokenUsage.payload.usage.usedTokens, 180);
         assert.equal(tokenUsage.payload.usage.inputTokens, 130);
         assert.equal(tokenUsage.payload.usage.cachedInputTokens, 25);

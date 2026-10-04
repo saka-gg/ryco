@@ -10,6 +10,8 @@ The toolbar provides back/forward, reload/stop, viewport width presets, zoom, De
 
 Manual browsing does not require computer-use permission. To let an agent use these same tabs, enable Agent Control and Ryco Browser in Computer use settings, start a fresh provider session and ask it to use `ryco_browser` with browser `ryco`. App consent, turn ownership and emergency stop still apply. Agent-created tabs also appear in the browser UI. **Stop agent** invokes the existing computer-use stop control.
 
+Agent-created Ryco tabs stay in the background without opening a separate window or switching the workspace panel, including agent `visible:true` and `show` requests. A compact browser preview beneath the thread's desktop Overview opens the Browser panel when clicked. It pauses thumbnail capture while offscreen or while Ryco is hidden. Use **Pop out** yourself to open a separate preview window. The driver's separate `computer_browser_*` headless tabs appear in the computer preview beneath Overview; they do not share the built-in browser's tab strip or profile.
+
 ## Desktop sign-in popups
 
 For a site that signs in through a popup, focus its docked browser tab, choose **Allow sign-in popup**, then click the site's sign-in button. This allows one popup for 30 seconds. A blocked-popup hint explains how to retry; Ryco does not replay a blocked URL because doing so would lose the opener or form POST body. Website content cannot grant this permission. Consent applies to the next eligible popup from that tab, so grant it only while deliberately signing in.

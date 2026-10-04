@@ -1,6 +1,9 @@
 import type { UsageProviderKind, UsageTokenTotals } from "@ryco/contracts";
 
+export type UsageSpeed = "standard" | "fast" | "ultrafast";
+
 export interface UsageRecord {
+  readonly speed?: UsageSpeed;
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
   readonly model: string;

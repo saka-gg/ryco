@@ -11,7 +11,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
  *
  * Idempotent, because `runMigrations` also runs it as an unconditional repair: the
  * Effect migrator skips ids at or below the latest recorded one, so a database that
- * recorded 074 first would never run 073.
+ * recorded 075 first would never run 074.
  */
 export const ensureRestartContinuationTables = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

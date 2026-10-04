@@ -1,5 +1,5 @@
 import { RotateCwIcon, TriangleAlertIcon, XIcon } from "lucide-react";
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 
@@ -19,6 +19,7 @@ export type {
 } from "./overview/overviewTypes";
 
 export interface PlanSidebarProps extends OverviewLayoutProps {
+  preview?: ReactNode;
   mode?: OverviewPanelMode;
   /**
    * Renders a visible close affordance in the panel header. Passed for
@@ -80,6 +81,7 @@ function HeaderTrailing({ layoutProps }: { layoutProps: OverviewLayoutProps }) {
 const PlanSidebar = memo(function PlanSidebar({
   mode = "sidebar",
   onClose,
+  preview,
   ...layoutProps
 }: PlanSidebarProps) {
   const empty = isOverviewEmpty(layoutProps);
@@ -144,10 +146,12 @@ const PlanSidebar = memo(function PlanSidebar({
           data-slot="scroll-area-viewport"
         >
           {body}
+          {preview}
         </div>
       ) : (
         <ScrollArea className="min-h-0 flex-1" scrollbarGutter>
           {body}
+          {preview}
         </ScrollArea>
       )}
 

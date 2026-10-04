@@ -1,13 +1,20 @@
-/** Text is displayed as escaped source, never as an executable document. */
+/** Text is bounded and never displayed as an executable document. */
 export const ATTACHMENT_TEXT_PREVIEW_MAX_BYTES = 512 * 1024;
 
 export function attachmentPreviewKind(attachment: {
   name: string;
   mimeType: string;
-}): "pdf" | "text" | null {
+}): "pdf" | "markdown" | "text" | null {
   const mime = attachment.mimeType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
   const extension = attachment.name.split(".").pop()?.toLowerCase();
   if (mime === "application/pdf") return "pdf";
+  if (
+    mime === "text/markdown" ||
+    mime === "text/x-markdown" ||
+    (["", "application/octet-stream", "text/plain"].includes(mime) &&
+      (extension === "md" || extension === "markdown"))
+  )
+    return "markdown";
   if (
     mime.startsWith("text/") ||
     ["application/json", "application/xml", "application/javascript"].includes(mime)

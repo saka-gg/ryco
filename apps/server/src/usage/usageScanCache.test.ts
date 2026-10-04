@@ -92,7 +92,7 @@ describe("usage scan cache", () => {
   });
 });
 
-it("preserves authoritative totals and unavailable reasoning in new provider caches, while reading v2", () => {
+it("preserves authoritative totals and unavailable reasoning in new provider caches, while retaining legacy non-transcript caches", () => {
   const cached = record({
     provider: "opencode",
     totals: {
@@ -121,10 +121,32 @@ it("preserves authoritative totals and unavailable reasoning in new provider cac
   expect(decodeUsageScanCache(document).get("new")?.records[0]?.totals).toEqual(cached.totals);
   const old = encodeUsageScanCache(
     new Map([
-      ["old", { rootKey: "root", size: 1, mtimeMs: 1, provider: "claude", records: [record()] }],
+      [
+        "old",
+        {
+          rootKey: "root",
+          size: 1,
+          mtimeMs: 1,
+          provider: "opencode",
+          records: [record({ provider: "opencode" })],
+        },
+      ],
     ]),
   ) as unknown as { version: number; files: Record<string, { r: unknown[][] }> };
   old.version = 2;
   old.files.old!.r[0]!.splice(10);
   expect(decodeUsageScanCache(old).get("old")?.records[0]?.totals.totalTokens).toBe(10);
+});
+
+it("invalidates transcript caches without speed and round-trips recorded tiers", () => {
+  const entry = {
+    rootKey: "root",
+    size: 1,
+    mtimeMs: 1,
+    provider: "codex" as const,
+    records: [record({ provider: "codex", speed: "fast" })],
+  };
+  const encoded = encodeUsageScanCache(new Map([["file", entry]]));
+  expect(decodeUsageScanCache(encoded).get("file")?.records[0]?.speed).toBe("fast");
+  for (const version of [2, 3]) expect(decodeUsageScanCache({ ...encoded, version }).size).toBe(0);
 });

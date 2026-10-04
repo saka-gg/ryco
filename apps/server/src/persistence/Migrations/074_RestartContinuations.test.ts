@@ -34,13 +34,13 @@ const insertRow = (input: { readonly kind: string; readonly status: string }) =>
     `;
   });
 
-it.layer(NodeSqliteClient.layerMemory())("073 restart continuations migration", (it) => {
+it.layer(NodeSqliteClient.layerMemory())("074 restart continuations migration", (it) => {
   it.effect("creates the ledger, its indexes and the hints table", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 72 });
+      yield* runMigrations({ toMigrationInclusive: 73 });
       assert.deepStrictEqual(yield* objectNames, []);
 
-      yield* runMigrations({ toMigrationInclusive: 73 });
+      yield* runMigrations({ toMigrationInclusive: 74 });
       assert.deepStrictEqual(yield* objectNames, [
         "restart_continuations",
         "restart_continuations_pending",
@@ -61,15 +61,15 @@ it.layer(NodeSqliteClient.layerMemory())("073 restart continuations migration", 
 });
 
 it.layer(NodeSqliteClient.layerMemory())(
-  "073 restart continuations repair after a later migration",
+  "074 restart continuations repair after a later migration",
   (it) => {
-    it.effect("creates the tables when 074 was recorded first", () =>
+    it.effect("creates the tables when 075 was recorded first", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        yield* runMigrations({ toMigrationInclusive: 72 });
+        yield* runMigrations({ toMigrationInclusive: 73 });
         yield* sql`
           INSERT INTO effect_sql_migrations (migration_id, created_at, name)
-          VALUES (74, CURRENT_TIMESTAMP, 'ProjectionThreadsUsageLimit')
+          VALUES (75, CURRENT_TIMESTAMP, 'ProjectionThreadsUsageLimit')
         `;
         yield* runMigrations();
         assert.strictEqual((yield* objectNames).length, 4);

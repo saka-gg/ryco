@@ -2508,12 +2508,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // This does NOT represent the current context window size.
     // Prefer the last main-loop request gauge (legacy main-task telemetry is
     // a fallback) and keep cumulative totals separate as totalProcessedTokens.
+    const accumulatedSnapshot = normalizeClaudeTokenUsage(
+      result?.usage,
+      resultContextWindow ?? context.lastKnownContextWindow,
+    );
     const rawUsageSnapshot = selectClaudeResultUsageGauge({
       lastGauge: context.lastKnownTokenUsage,
-      cumulative: normalizeClaudeTokenUsage(
-        result?.usage,
-        resultContextWindow ?? context.lastKnownContextWindow,
-      ),
+      cumulative: accumulatedSnapshot,
       maxTokens: resultContextWindow ?? context.lastKnownContextWindow,
       cumulativeIsGauge: !context.cumulativeUsageSpansCompaction,
     });
@@ -2524,6 +2525,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ? withAutomaticCompactionCapability(
           {
             ...rawUsageSnapshot,
+            ...(accumulatedSnapshot
+              ? {
+                  processedUsage: {
+                    scope: "turn" as const,
+                    inputTokens: accumulatedSnapshot.inputTokens ?? 0,
+                    cachedInputTokens: accumulatedSnapshot.cachedInputTokens ?? 0,
+                    outputTokens: accumulatedSnapshot.outputTokens ?? 0,
+                    reasoningOutputTokens: accumulatedSnapshot.reasoningOutputTokens ?? 0,
+                    totalTokens:
+                      accumulatedSnapshot.totalProcessedTokens ?? accumulatedSnapshot.usedTokens,
+                  },
+                }
+              : {}),
             ...(context.cacheObservation ? { claudeCache: context.cacheObservation } : {}),
           },
           context.supportsAutomaticCompaction,

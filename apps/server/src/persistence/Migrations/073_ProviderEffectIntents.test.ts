@@ -24,13 +24,13 @@ const insertIntent = (kind: string) =>
     `;
   });
 
-it.layer(NodeSqliteClient.layerMemory())("072 provider effect intents migration", (it) => {
+it.layer(NodeSqliteClient.layerMemory())("073 provider effect intents migration", (it) => {
   it.effect("creates the ledger and rejects unknown kinds", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 71 });
+      yield* runMigrations({ toMigrationInclusive: 72 });
       assert.strictEqual(yield* tableCount, 0);
 
-      yield* runMigrations({ toMigrationInclusive: 72 });
+      yield* runMigrations({ toMigrationInclusive: 73 });
       assert.strictEqual(yield* tableCount, 2);
 
       const rejected = yield* Effect.exit(insertIntent("checkpoint-revert"));
@@ -47,17 +47,17 @@ it.layer(NodeSqliteClient.layerMemory())("072 provider effect intents migration"
 });
 
 it.layer(NodeSqliteClient.layerMemory())(
-  "072 provider effect intents repair after a later migration",
+  "073 provider effect intents repair after a later migration",
   (it) => {
     it.effect("creates the ledger when a later migration number was recorded first", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        yield* runMigrations({ toMigrationInclusive: 71 });
-        // A database that ran a later-numbered migration before 072 landed: the
-        // migrator never runs 072 there, so the repair must create the ledger.
+        yield* runMigrations({ toMigrationInclusive: 72 });
+        // A database that ran a later-numbered migration before 073 landed: the
+        // migrator never runs 073 there, so the repair must create the ledger.
         yield* sql`
           INSERT INTO effect_sql_migrations (migration_id, created_at, name)
-          VALUES (74, CURRENT_TIMESTAMP, 'ProjectionThreadsUsageLimit')
+          VALUES (75, CURRENT_TIMESTAMP, 'ProjectionThreadsUsageLimit')
         `;
         yield* runMigrations();
         assert.strictEqual(yield* tableCount, 2);

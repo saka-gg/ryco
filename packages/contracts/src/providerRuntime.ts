@@ -337,7 +337,23 @@ export type ProviderThreadGoalUpdatedPayload = typeof ProviderThreadGoalUpdatedP
 const ProviderThreadGoalClearedPayload = Schema.Struct({});
 export type ProviderThreadGoalClearedPayload = typeof ProviderThreadGoalClearedPayload.Type;
 
+/** Billing/work counters are separate from the current context-window gauge. */
+export const ProcessedTokenUsage = Schema.Struct({
+  scope: Schema.Literals(["session", "turn", "request"]),
+  requestId: Schema.optional(TrimmedNonEmptyStringSchema),
+  sessionId: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Includes cache reads and writes. */
+  inputTokens: NonNegativeInt,
+  cachedInputTokens: NonNegativeInt,
+  /** Includes reasoning output; reasoning is not charged a second time. */
+  outputTokens: NonNegativeInt,
+  reasoningOutputTokens: NonNegativeInt,
+  totalTokens: NonNegativeInt,
+});
+export type ProcessedTokenUsage = typeof ProcessedTokenUsage.Type;
+
 export const ThreadTokenUsageSnapshot = Schema.Struct({
+  processedUsage: Schema.optional(ProcessedTokenUsage),
   claudeCache: Schema.optional(ClaudeCacheObservation),
   usedTokens: NonNegativeInt,
   totalProcessedTokens: Schema.optional(NonNegativeInt),

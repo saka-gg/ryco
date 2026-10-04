@@ -1,6 +1,6 @@
 /**
  * RestartContinuationRepository - the restart continuation ledger and graceful
- * shutdown hints (migration 073).
+ * shutdown hints (migration 074).
  *
  * One row per (thread, source turn) a restart cut off. Rows are inserted once at
  * capture and leave `pending` exactly once (`settle` is a compare-and-set on

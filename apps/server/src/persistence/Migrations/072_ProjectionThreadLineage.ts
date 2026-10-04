@@ -8,7 +8,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
  *
  * Idempotent, because `runMigrations` also runs it as an unconditional repair:
  * the Effect migrator skips ids at or below the latest recorded one, so a
- * database that recorded a later number first would never run 071.
+ * database that recorded a later number first would never run 072.
  */
 export const ensureProjectionThreadLineageColumns = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

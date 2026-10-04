@@ -139,14 +139,15 @@ export class BrowserComputerDriver {
     const args = context.request.args;
     const action = textArg(args, "action");
     if (action === "tabs") return result(await transport.tabs(context.signal));
-    const visible = action === "show" || (action === "open" && args.visible === true);
+    const visible =
+      browser !== "ryco" && (action === "show" || (action === "open" && args.visible === true));
     // Showing an external tab changes the user's selected tab; even an inactive
     // preview can cover their work. Presentation is a consent-gated operation.
     if (visible) await context.authorizeForeground();
     if (action === "open") {
       const tab = await transport.open(
         browserUrl(textArg(args, "url", 8192)),
-        args.visible === true,
+        visible,
         context.signal,
       );
       context.claim(`browser:${browser}:${tab.id}`);
@@ -171,7 +172,9 @@ export class BrowserComputerDriver {
     });
     if (action === "show") {
       await transport.show(tab, context.signal);
-      return result({ shown: true });
+      return result(
+        browser === "ryco" ? { shown: false, presentation: "workspace" } : { shown: true },
+      );
     }
     if (action === "close") {
       await transport.close(tab, context.signal);

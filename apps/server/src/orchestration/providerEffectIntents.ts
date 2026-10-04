@@ -1,6 +1,6 @@
 /**
  * Durable provider-bound intents: the pure planner for the
- * `provider_effect_intents` ledger (migration 072).
+ * `provider_effect_intents` ledger (migration 073).
  *
  * Each tracked request event gets one row, keyed by its event sequence. The
  * row is recorded in the engine's commit transaction for that event and

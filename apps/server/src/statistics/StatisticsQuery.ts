@@ -6,12 +6,10 @@
  * on demand. No dedicated statistics tables exist; everything is derived from
  * data already persisted by the projection pipeline.
  *
- * Token figures prefer per-turn attribution: for each `(thread, turn)` with
- * exact `last*` breakdowns we read the final `context-window.updated` activity
- * and bucket its provider-reported turn total by day/project/provider/model.
- * Threads without exact deltas (older data / providers that only report
- * cumulative context usage) fall back to attributing the latest cumulative
- * total to the thread's primary model and last-activity day.
+ * Processed billing counters are read from indexed activity event history, with
+ * projection-only/imported rows as a fallback. Session counters are differenced;
+ * turn and request counters retain their final snapshots. Context-window gauges
+ * remain a best-effort fallback for older/provider-limited data.
  *
  * @module StatisticsQuery
  */
@@ -29,6 +27,8 @@ import {
 import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+
+import { collectProcessedTokenUsage } from "./processedTokenUsage.ts";
 
 import {
   toPersistenceDecodeError,
@@ -225,14 +225,29 @@ const makeStatisticsQuery = Effect.gen(function* () {
     execute: () =>
       sql`
         SELECT
-          thread_id AS "threadId",
-          turn_id AS "turnId",
-          sequence,
-          created_at AS "createdAt",
-          payload_json AS "payloadJson"
-        FROM projection_thread_activities
+          stream_id AS "threadId",
+          json_extract(payload_json, '$.activity.turnId') AS "turnId",
+          COALESCE(json_extract(payload_json, '$.activity.sequence'), sequence) AS sequence,
+          json_extract(payload_json, '$.activity.createdAt') AS "createdAt",
+          json_extract(payload_json, '$.activity.payload') AS "payloadJson"
+        FROM orchestration_events
+        WHERE event_type = 'thread.activity-appended'
+          AND json_extract(payload_json, '$.activity.kind') = 'context-window.updated'
+        UNION ALL
+        SELECT
+          thread_id AS "threadId", turn_id AS "turnId", sequence,
+          created_at AS "createdAt", payload_json AS "payloadJson"
+        FROM projection_thread_activities a
         WHERE kind = 'context-window.updated'
-        ORDER BY thread_id ASC, turn_id ASC, sequence ASC, created_at ASC, activity_id ASC
+          AND NOT EXISTS (
+            SELECT 1 FROM orchestration_events e
+            WHERE e.event_type = 'thread.activity-appended'
+              AND json_extract(e.payload_json, '$.activity.kind') = 'context-window.updated'
+              AND e.stream_id = a.thread_id
+              AND json_extract(e.payload_json, '$.activity.id') = a.activity_id
+              AND json_extract(e.payload_json, '$.activity.createdAt') = a.created_at
+          )
+        ORDER BY "threadId", "createdAt", sequence
       `,
   });
 
@@ -372,6 +387,10 @@ const makeStatisticsQuery = Effect.gen(function* () {
         model: string,
         provider: string | undefined,
       ): MutableBucket => {
+        modelRefs.set(
+          `${provider ?? ""}\u0000${model}`,
+          provider ? { model, provider } : { model },
+        );
         const key = `${date}\u0000${projectId}\u0000${provider ?? ""}\u0000${model}`;
         let bucket = buckets.get(key);
         if (!bucket) {
@@ -412,6 +431,32 @@ const makeStatisticsQuery = Effect.gen(function* () {
       // write is the turn's final snapshot. Across turns we must NOT rely on
       // iteration order (turn_id is opaque/non-chronological), so the per-thread
       // pick uses an explicit latest-by-(createdAt, sequence) comparison.
+      const processed = collectProcessedTokenUsage(
+        tokenRows,
+        (threadId) => threadMeta.get(threadId)?.provider,
+      );
+      let usedExactPerTurn = false;
+      let usedCumulativeFallback = false;
+      for (const entry of processed.entries) {
+        const meta = threadMeta.get(entry.row.threadId);
+        const date = dayOf(entry.row.createdAt);
+        if (!meta || !date) continue;
+        considerIso(entry.row.createdAt);
+        const bucket = getBucket(
+          date,
+          meta.projectId,
+          entry.model ?? meta.model,
+          entry.provider ?? meta.provider,
+        );
+        bucket.inputTokens += entry.inputTokens;
+        bucket.cachedInputTokens += entry.cachedInputTokens;
+        bucket.outputTokens += entry.outputTokens;
+        bucket.reasoningTokens += entry.reasoningTokens;
+        bucket.totalTokens += entry.totalTokens;
+        if (entry.approximate) usedCumulativeFallback = true;
+        else usedExactPerTurn = true;
+      }
+
       const lastPerTurn = new Map<string, (typeof tokenRows)[number]>();
       const isLater = (a: (typeof tokenRows)[number], b: (typeof tokenRows)[number]): boolean => {
         if (a.createdAt !== b.createdAt) {
@@ -422,6 +467,7 @@ const makeStatisticsQuery = Effect.gen(function* () {
       for (const row of tokenRows) {
         considerIso(row.createdAt);
         const turnKey = `${row.threadId}\u0000${row.turnId ?? ""}`;
+        if (processed.sessionThreads.has(row.threadId) || processed.turns.has(turnKey)) continue;
         const prevTurn = lastPerTurn.get(turnKey);
         if (!prevTurn || isLater(row, prevTurn)) {
           lastPerTurn.set(turnKey, row);
@@ -451,9 +497,6 @@ const makeStatisticsQuery = Effect.gen(function* () {
           cumulativeFallbackByThread.set(row.threadId, row);
         }
       }
-      let usedExactPerTurn = false;
-      let usedCumulativeFallback = false;
-
       for (const row of lastPerTurn.values()) {
         const payload = safeParse(row.payloadJson);
         if (!hasExactPerTurnBreakdown(payload)) continue;

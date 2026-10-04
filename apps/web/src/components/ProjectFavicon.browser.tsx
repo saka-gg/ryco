@@ -161,6 +161,29 @@ describe("hosted project icons", () => {
     expect(view.container.querySelector("img")).toBeNull();
     expect(read).not.toHaveBeenCalled();
   });
+  it("shows the named fallback's initials when the project has no artwork", async () => {
+    const read = vi.fn(async () => null);
+    connect(read);
+    const view = await render(
+      <TestFavicon
+        environmentId={env}
+        cwd="/project"
+        projectId={projectId}
+        fallbackName="ryco-hub"
+      />,
+    );
+    await expect.poll(() => read.mock.calls.length).toBe(1);
+    await expect.poll(() => view.container.querySelector("svg text")?.textContent).toBe("RH");
+    expect(view.container.querySelector("img")).toBeNull();
+  });
+  it("replaces the initials once artwork loads", async () => {
+    connect(vi.fn(async () => icon));
+    const view = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} fallbackName="ryco" />,
+    );
+    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    expect(view.container.querySelector("svg text")).toBeNull();
+  });
 });
 
 function TestFavicon(props: ComponentProps<typeof ProjectFavicon>) {

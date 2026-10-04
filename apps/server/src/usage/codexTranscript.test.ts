@@ -135,3 +135,23 @@ describe("parseCodexTranscriptLine", () => {
     ).toBeNull();
   });
 });
+
+it("carries billing speed across requests and resets it when default settings are applied", () => {
+  const state = initialCodexTranscriptState();
+  parseCodexTranscriptLine(turnContext, state);
+  for (const [tier, speed] of [
+    ["priority", "fast"],
+    ["ultrafast", "ultrafast"],
+    ["default", "standard"],
+  ]) {
+    parseCodexTranscriptLine(
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "thread_settings_applied", thread_settings: { service_tier: tier } },
+      }),
+      state,
+    );
+    parseCodexTranscriptLine(turnContext, state);
+    expect(parseCodexTranscriptLine(tokenCount(1000, 100, 10, 0), state)?.speed).toBe(speed);
+  }
+});

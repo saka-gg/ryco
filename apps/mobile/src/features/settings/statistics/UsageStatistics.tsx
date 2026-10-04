@@ -262,8 +262,8 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
                 </Text>
                 <View style={{ marginTop: 12 }}>
                   <Note>
-                    Estimate based on base API rates. Subscription, credits, batch, negotiated, and
-                    provider billing may differ.
+                    Estimate based on published API rates and recorded billing speed. Subscription,
+                    credits, batch, negotiated, and provider billing may differ.
                   </Note>
                 </View>
               </View>

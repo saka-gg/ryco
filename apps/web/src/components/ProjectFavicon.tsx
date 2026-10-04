@@ -1,6 +1,6 @@
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { FolderIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { resolveEnvironmentHttpUrl } from "../environments/runtime";
 import { isHostedHubMode } from "../env";
 import { useAtomValue } from "@effect/atom-react";
@@ -9,6 +9,7 @@ import { usePrimaryEnvironmentId } from "../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../environments/runtime";
 import { readEnvironmentApi } from "../environmentApi";
 import { readProjectIconSource } from "./projectIconSource";
+import { deriveProjectMonogram } from "./projectMonogram";
 import { cn } from "../lib/utils";
 
 export function ProjectFavicon(input: {
@@ -18,6 +19,8 @@ export function ProjectFavicon(input: {
   customAvatarContentHash?: string | null;
   className?: string;
   fillContainer?: boolean;
+  /** Without artwork, show this name's colored initials instead of a folder. */
+  fallbackName?: string;
 }) {
   const primaryId = usePrimaryEnvironmentId();
   const primaryConfig = useAtomValue(serverConfigAtom);
@@ -92,6 +95,7 @@ export function ProjectFavicon(input: {
       src={src}
       className={input.className}
       fillContainer={input.fillContainer}
+      fallbackName={input.fallbackName}
     />
   );
 }
@@ -100,6 +104,7 @@ function ProjectFaviconImage(input: {
   src: string | null;
   className?: string | undefined;
   fillContainer?: boolean | undefined;
+  fallbackName?: string | undefined;
 }) {
   const { src } = input;
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
@@ -108,8 +113,20 @@ function ProjectFaviconImage(input: {
     ? cn("size-full text-muted-foreground/50", input.className)
     : cn("size-3.5 shrink-0 text-muted-foreground/50", input.className);
 
+  const fallback =
+    input.fallbackName === undefined ? (
+      <FolderIcon className={fallbackClass} />
+    ) : (
+      <ProjectMonogram
+        name={input.fallbackName}
+        className={
+          input.fillContainer ? cn("size-full", input.className) : cn("size-3.5", input.className)
+        }
+      />
+    );
+
   if (!src || status === "error") {
-    return <FolderIcon className={fallbackClass} />;
+    return fallback;
   }
 
   const imgClass = input.fillContainer
@@ -122,7 +139,7 @@ function ProjectFaviconImage(input: {
 
   return (
     <>
-      {status !== "loaded" ? <FolderIcon className={fallbackClass} /> : null}
+      {status !== "loaded" ? fallback : null}
       <img
         src={src}
         alt=""
@@ -133,5 +150,33 @@ function ProjectFaviconImage(input: {
         onError={() => setStatus("error")}
       />
     </>
+  );
+}
+
+/** Colored initials on a rounded square; scales with its size class. */
+export function ProjectMonogram(input: { name: string; className?: string | undefined }) {
+  const { initials, color } = useMemo(() => deriveProjectMonogram(input.name), [input.name]);
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={cn("size-3.5 shrink-0", input.className)}
+      aria-hidden="true"
+      focusable="false"
+    >
+      <rect width="16" height="16" rx="4" fill={color} />
+      <text
+        x="8"
+        y="8.5"
+        dominantBaseline="central"
+        textAnchor="middle"
+        fill="white"
+        fontSize={initials.length > 1 ? 7 : 9}
+        fontWeight={600}
+        letterSpacing={initials.length > 1 ? -0.2 : 0}
+        className="font-sans select-none"
+      >
+        {initials}
+      </text>
+    </svg>
   );
 }

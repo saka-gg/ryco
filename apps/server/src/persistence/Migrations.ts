@@ -1,12 +1,13 @@
-import Migration0071, {
-  ensureProjectionThreadLineageColumns,
-} from "./Migrations/071_ProjectionThreadLineage.ts";
+import Migration0071 from "./Migrations/071_StatisticsUsageHistory.ts";
 import Migration0072, {
-  ensureProviderEffectIntentsTable,
-} from "./Migrations/072_ProviderEffectIntents.ts";
+  ensureProjectionThreadLineageColumns,
+} from "./Migrations/072_ProjectionThreadLineage.ts";
 import Migration0073, {
+  ensureProviderEffectIntentsTable,
+} from "./Migrations/073_ProviderEffectIntents.ts";
+import Migration0074, {
   ensureRestartContinuationTables,
-} from "./Migrations/073_RestartContinuations.ts";
+} from "./Migrations/074_RestartContinuations.ts";
 import Migration0070 from "./Migrations/070_LocalTasks.ts";
 import Migration0069 from "./Migrations/069_DailyRecapIndexes.ts";
 import Migration0068 from "./Migrations/068_ProjectionMessageSearch.ts";
@@ -93,9 +94,9 @@ import Migration0051 from "./Migrations/051_AgentControlMcpInstallations.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadsSettled.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsSnoozed.ts";
 import Migration0053 from "./Migrations/053_ThreadPriorityRankings.ts";
-import Migration0074, {
+import Migration0075, {
   ensureProjectionThreadUsageLimitColumn,
-} from "./Migrations/074_ProjectionThreadsUsageLimit.ts";
+} from "./Migrations/075_ProjectionThreadsUsageLimit.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -177,10 +178,11 @@ export const migrationEntries = [
   [68, "ProjectionMessageSearch", Migration0068],
   [69, "DailyRecapIndexes", Migration0069],
   [70, "LocalTasks", Migration0070],
-  [71, "ProjectionThreadLineage", Migration0071],
-  [72, "ProviderEffectIntents", Migration0072],
-  [73, "RestartContinuations", Migration0073],
-  [74, "ProjectionThreadsUsageLimit", Migration0074],
+  [71, "StatisticsUsageHistory", Migration0071],
+  [72, "ProjectionThreadLineage", Migration0072],
+  [73, "ProviderEffectIntents", Migration0073],
+  [74, "RestartContinuations", Migration0074],
+  [75, "ProjectionThreadsUsageLimit", Migration0075],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -383,7 +385,7 @@ export const repairProjectionThreadSubagentNestingColumns = Effect.fn(
 });
 
 // Not only a numbered migration: the Effect migrator skips ids at or below the latest
-// applied one, so a database that recorded a later migration before 074 landed would
+// applied one, so a database that recorded a later migration before 075 landed would
 // never get the column. The migration is idempotent; run it again as a repair.
 export const repairProjectionThreadUsageLimitColumn = Effect.fn(
   "repairProjectionThreadUsageLimitColumn",
@@ -530,19 +532,19 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 44) {
     yield* repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47);
   }
-  // Repair: 071 is skipped by the migrator when a later number was recorded first.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 71) {
-    yield* ensureProjectionThreadLineageColumns;
-  }
   // Repair: 072 is skipped by the migrator when a later number was recorded first.
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 72) {
-    yield* ensureProviderEffectIntentsTable;
+    yield* ensureProjectionThreadLineageColumns;
   }
   // Repair: 073 is skipped by the migrator when a later number was recorded first.
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 73) {
+    yield* ensureProviderEffectIntentsTable;
+  }
+  // Repair: 074 is skipped by the migrator when a later number was recorded first.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 74) {
     yield* ensureRestartContinuationTables;
   }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 74) {
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 75) {
     yield* repairProjectionThreadUsageLimitColumn();
   }
   yield* Effect.log("Migrations ran successfully").pipe(

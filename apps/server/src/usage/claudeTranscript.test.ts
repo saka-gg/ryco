@@ -78,3 +78,9 @@ describe("parseClaudeTranscriptLine", () => {
     ).toBeNull();
   });
 });
+
+it("retains Claude's recorded fast billing speed", () => {
+  const parsed = JSON.parse(claudeLine());
+  parsed.message.usage.speed = "fast";
+  expect(parseClaudeTranscriptLine(JSON.stringify(parsed))?.speed).toBe("fast");
+});

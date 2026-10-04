@@ -4,7 +4,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
-import ProjectionThreadsUsageLimit from "./074_ProjectionThreadsUsageLimit.ts";
+import ProjectionThreadsUsageLimit from "./075_ProjectionThreadsUsageLimit.ts";
 
 const readSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -19,12 +19,12 @@ const readSchema = Effect.gen(function* () {
   };
 });
 
-it.layer(NodeSqliteClient.layerMemory())("074 projection thread usage limit", (it) => {
+it.layer(NodeSqliteClient.layerMemory())("075 projection thread usage limit", (it) => {
   it.effect("adds the column and partial index, and is a no-op when run again", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 70 });
       assert.deepEqual(yield* readSchema, { hasColumn: false, hasIndex: false });
-      yield* runMigrations({ toMigrationInclusive: 74 });
+      yield* runMigrations({ toMigrationInclusive: 75 });
       assert.deepEqual(yield* readSchema, { hasColumn: true, hasIndex: true });
       yield* ProjectionThreadsUsageLimit;
       yield* runMigrations();
@@ -33,15 +33,15 @@ it.layer(NodeSqliteClient.layerMemory())("074 projection thread usage limit", (i
   );
 });
 
-it.layer(NodeSqliteClient.layerMemory())("074 repair", (it) => {
-  it.effect("adds the column when a later migration was recorded first and 074 was skipped", () =>
+it.layer(NodeSqliteClient.layerMemory())("075 repair", (it) => {
+  it.effect("adds the column when a later migration was recorded first and 075 was skipped", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 70 });
-      // A build that shipped a higher id before 074: the migrator now skips 074.
+      // A build that shipped a higher id before 075: the migrator now skips 075.
       yield* sql`
         INSERT INTO effect_sql_migrations (migration_id, name)
-        VALUES (74, 'ProjectionThreadsUsageLimit')
+        VALUES (75, 'ProjectionThreadsUsageLimit')
       `;
       assert.deepEqual(yield* readSchema, { hasColumn: false, hasIndex: false });
       yield* runMigrations();

@@ -29,7 +29,7 @@ const lineageIndexCount = Effect.gen(function* () {
   return rows.length;
 });
 
-it.layer(NodeSqliteClient.layerMemory())("071 projection thread lineage migration", (it) => {
+it.layer(NodeSqliteClient.layerMemory())("072 projection thread lineage migration", (it) => {
   it.effect("adds nullable lineage columns and a partial index without touching rows", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -74,7 +74,7 @@ it.layer(NodeSqliteClient.layerMemory())("071 projection thread lineage migratio
         SELECT thread_id, title, parent_thread_id FROM projection_threads
       `;
 
-      yield* runMigrations({ toMigrationInclusive: 71 });
+      yield* runMigrations({ toMigrationInclusive: 72 });
       assert.deepStrictEqual(yield* lineageColumnNames, [...LINEAGE_COLUMNS].toSorted());
       assert.strictEqual(yield* lineageIndexCount, 1);
       assert.deepStrictEqual(
@@ -97,7 +97,7 @@ it.layer(NodeSqliteClient.layerMemory())("071 projection thread lineage migratio
         },
       ]);
 
-      yield* runMigrations({ toMigrationInclusive: 71 });
+      yield* runMigrations({ toMigrationInclusive: 72 });
       assert.deepStrictEqual(yield* lineageColumnNames, [...LINEAGE_COLUMNS].toSorted());
       assert.strictEqual(yield* lineageIndexCount, 1);
     }),
@@ -107,8 +107,8 @@ it.layer(NodeSqliteClient.layerMemory())("071 projection thread lineage migratio
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
-      // Simulate a database that recorded 071 (or a later id) without the schema:
-      // the migrator will not rerun 071, so only the repair hook can restore it.
+      // Simulate a database that recorded 072 (or a later id) without the schema:
+      // the migrator will not rerun 072, so only the repair hook can restore it.
       yield* sql`DROP INDEX projection_threads_lineage_parent`;
       yield* sql`ALTER TABLE projection_threads DROP COLUMN lineage_parent_thread_id`;
       yield* sql`ALTER TABLE projection_threads DROP COLUMN lineage_root_thread_id`;

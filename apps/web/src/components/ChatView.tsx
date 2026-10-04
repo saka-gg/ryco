@@ -4,6 +4,7 @@ import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
+import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
 import { ComputerBetaPreview } from "./chat/ComputerBetaPreview";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import {
@@ -2209,6 +2210,7 @@ export default function ChatView(props: ChatViewProps) {
     onOpenReviewPanel,
     onToggleDiff,
     onOpenFilesPanel,
+    onOpenBrowserPanel,
     onOpenTerminalPanel,
     onOpenSimulatorPanel,
     onToggleWorkspacePanel,
@@ -4592,14 +4594,23 @@ export default function ChatView(props: ChatViewProps) {
     return <NoActiveThreadState />;
   }
 
+  const workspacePreview =
+    !isPhoneTier && activeThread.environmentId === localComputerEnvironmentId ? (
+      <>
+        <ComputerBetaPreview key={activeThread.id} threadId={activeThread.id} inline />
+        <BackgroundBrowserPreview
+          environmentId={environmentId}
+          cwd={activeWorkspaceRoot ?? null}
+          onOpen={onOpenBrowserPanel}
+        />
+      </>
+    ) : null;
+
   return (
     <div
       ref={chatShellRef}
       className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
     >
-      {!isPhoneTier && activeThread && activeThread.environmentId === localComputerEnvironmentId ? (
-        <ComputerBetaPreview key={activeThread.id} threadId={activeThread.id} />
-      ) : null}
       {!isPhoneTier && activeThreadRef ? (
         <TranscriptSelectionActions
           key={activeThreadKey}
@@ -4901,6 +4912,7 @@ export default function ChatView(props: ChatViewProps) {
                   markdownCwd={gitCwd ?? undefined}
                   workspaceRoot={activeWorkspaceRoot}
                   mode="floating"
+                  preview={workspacePreview}
                   onClose={closePlanSidebar}
                   onOpenFiles={onOpenFilesPanel}
                   onOpenReview={onOpenReviewPanel}
@@ -5273,6 +5285,9 @@ export default function ChatView(props: ChatViewProps) {
             }}
             onOpenChange={setProjectExplorerOpen}
           />
+          {!isPhoneTier && expandedImage ? (
+            <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} contained />
+          ) : null}
         </div>
         {/* end chat column */}
         {inspectedContextHandoff && !shouldUsePlanSidebarSheet && !isPhoneTier ? (
@@ -5310,6 +5325,7 @@ export default function ChatView(props: ChatViewProps) {
               markdownCwd={gitCwd ?? undefined}
               workspaceRoot={activeWorkspaceRoot}
               mode="sidebar"
+              preview={workspacePreview}
               onOpenFiles={onOpenFilesPanel}
               onOpenReview={onOpenReviewPanel}
               onOpenSubagent={onOpenSubagentPanel}
@@ -5429,6 +5445,7 @@ export default function ChatView(props: ChatViewProps) {
             markdownCwd={gitCwd ?? undefined}
             workspaceRoot={activeWorkspaceRoot}
             mode="sheet"
+            preview={workspacePreview}
             onOpenFiles={onOpenFilesPanel}
             onOpenReview={onOpenReviewPanel}
             onOpenSubagent={onOpenSubagentPanel}
@@ -5438,7 +5455,7 @@ export default function ChatView(props: ChatViewProps) {
         </RightPanelSheet>
       ) : null}
 
-      {expandedImage && (
+      {isPhoneTier && expandedImage && (
         <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} />
       )}
     </div>

@@ -1,6 +1,6 @@
 /**
  * ProviderEffectIntentRepository - the open-intent ledger for provider-bound
- * side effects (migration 072).
+ * side effects (migration 073).
  *
  * Rows are recorded and settled only as a function of committed orchestration
  * events (`applyEvent`, inside the engine's commit transaction), plus the

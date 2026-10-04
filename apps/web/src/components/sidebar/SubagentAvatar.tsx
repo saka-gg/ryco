@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { fnv1a32 } from "~/lib/diffRendering";
 import { cn } from "~/lib/utils";
 
 /**
@@ -29,17 +30,8 @@ const AVATAR_DIM = AVATAR_GRID * AVATAR_CELL;
 const AVATAR_CELL_INSET = 0.4;
 const AVATAR_CELL_SIZE = AVATAR_CELL - AVATAR_CELL_INSET * 2;
 
-function hashString(value: string): number {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash >>> 0;
-}
-
 export function subagentAvatarColor(seed: string): string {
-  return SUBAGENT_AVATAR_PALETTE[hashString(seed) % SUBAGENT_AVATAR_PALETTE.length]!;
+  return SUBAGENT_AVATAR_PALETTE[fnv1a32(seed) % SUBAGENT_AVATAR_PALETTE.length]!;
 }
 
 interface SubagentAvatarShape {
@@ -51,7 +43,7 @@ function buildSubagentAvatar(seed: string): SubagentAvatarShape {
   const color = subagentAvatarColor(seed);
   // A second, decorrelated hash drives the pixel pattern so two seeds that share
   // a color still get visually distinct glyphs.
-  const patternHash = hashString(`avatar:${seed}`);
+  const patternHash = fnv1a32(`avatar:${seed}`);
   const cells: boolean[] = [];
   for (let row = 0; row < AVATAR_GRID; row += 1) {
     for (let col = 0; col < AVATAR_GRID; col += 1) {

@@ -5,10 +5,11 @@
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
-    "dev": "bun run build:native && bun run --parallel dev:bundle dev:electron",
+    "dev": "bun run build:native:dev && bun run --parallel dev:bundle dev:electron",
     "dev:bundle": "tsdown --watch",
     "dev:electron": "node scripts/dev-electron.mjs",
     "build": "bun run build:native && tsdown",
+    "build:native:dev": "node scripts/build-native-security-helper.mjs --dev && node scripts/build-computer-use-helper.mjs --dev && node scripts/build-computer-beta.mjs",
     "build:native": "node scripts/build-native-security-helper.mjs && node scripts/build-computer-use-helper.mjs && node scripts/build-computer-beta.mjs",
     "start": "node scripts/start-electron.mjs",
     "typecheck": "tsc --noEmit",
