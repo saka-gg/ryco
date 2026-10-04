@@ -432,6 +432,58 @@ describe("mobile environment driver", () => {
     }
   });
 
+  it("keeps a connection's pairing renewed from its renewal, and stops with the connection", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = createFakeCatalog();
+      fake.setBearerToken(ENV_ID, "bearer-1");
+      fake.upsert(record());
+      const dayMs = 24 * 60 * 60 * 1000;
+      const fetchRemoteSessionState = vi.fn(
+        async (input: { readonly bearerToken: string }) =>
+          ({
+            authenticated: true,
+            role: "owner",
+            sessionMethod: "bearer-session-token",
+            // Twenty days left of thirty: due for renewal; the renewal is fresh.
+            expiresAt: new Date(
+              Date.now() + (input.bearerToken === "bearer-1" ? 20 : 30) * dayMs,
+            ).toISOString(),
+          }) as unknown as AuthSessionState,
+      );
+      const driver = createMobileEnvironmentDriver({
+        catalog: fake.catalog,
+        remoteApi: {
+          ...noopRemoteApi,
+          fetchRemoteSessionState,
+          rotateRemoteBearerSession: async () =>
+            ({ sessionToken: "bearer-2", role: "owner" }) as unknown as Awaited<
+              ReturnType<(typeof noopRemoteApi)["rotateRemoteBearerSession"]>
+            >,
+        },
+        subscribeResume: () => () => {},
+      });
+
+      await driver.connectSavedEnvironment(record());
+      // The session check, then the renewal's first use.
+      expect(fetchRemoteSessionState.mock.calls.map(([input]) => input.bearerToken)).toEqual([
+        "bearer-1",
+        "bearer-2",
+      ]);
+
+      // The renewal is next due a day after the renewed session began, not now.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fetchRemoteSessionState).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(1);
+
+      // Removed: its renewal stops with it rather than waiting out the day.
+      await driver.supervisor.remove(ENV_ID);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lets a cancelled connect fail without touching the connection that replaced it", async () => {
     const fake = createFakeCatalog();
     fake.setBearerToken(ENV_ID, "old-bearer-token");

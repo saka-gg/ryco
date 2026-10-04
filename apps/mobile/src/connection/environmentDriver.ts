@@ -374,7 +374,7 @@ export function createMobileEnvironmentDriver(
       });
     }
     // A pairing in use renews its bearer before a socket is built on it.
-    await savedSessionRenewal.renew({
+    const renewal = await savedSessionRenewal.renew({
       environmentId: record.environmentId,
       session: sessionCheck.session,
       bearerToken,
@@ -401,6 +401,9 @@ export function createMobileEnvironmentDriver(
       source: "manual",
       target: { httpBaseUrl: record.httpBaseUrl, wsBaseUrl: record.wsBaseUrl },
     });
+    // The pairing's renewal, kept while this connection is registered, stops
+    // with it.
+    let stopRenewal: () => void = () => undefined;
     const connection = createEnvironmentConnection({
       kind: "saved",
       knownEnvironment: {
@@ -427,6 +430,7 @@ export function createMobileEnvironmentDriver(
         getSupervisor().syncShellSnapshot(snapshot, environmentId),
       // Terminal streaming is deferred to v1.1.
       applyTerminalEvent: () => undefined,
+      onDispose: () => stopRenewal(),
     });
 
     try {
@@ -435,9 +439,9 @@ export function createMobileEnvironmentDriver(
         throw new SavedEnvironmentConnectionCancelledError(record.environmentId);
       }
       registered = getSupervisor().register(connection);
-      savedSessionRenewal.keepRenewed({
+      stopRenewal = savedSessionRenewal.keepRenewed({
         environmentId: record.environmentId,
-        session: sessionCheck.session,
+        session: renewal.session,
         isCurrent: () => getSupervisor().read(record.environmentId) === registered,
         ...renewalCalls(record),
       });

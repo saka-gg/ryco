@@ -68,6 +68,17 @@ export interface SavedSessionRenewalRequest {
   readonly rotate: (bearerToken: string) => Promise<AuthBearerBootstrapResult>;
 }
 
+export interface SavedSessionRenewalResult {
+  /** The bearer to use from now on. */
+  readonly bearerToken: string;
+  /**
+   * The node's latest answer for it. Where a renewed bearer's first use went
+   * unanswered, this is the presented bearer's answer, which is already due: a
+   * renewal kept from it checks the pairing again straight away.
+   */
+  readonly session: AuthSessionState;
+}
+
 export interface SavedSessionRenewal {
   /**
    * The bearer to present now: the one stored now, read on every use. Rejects
@@ -80,12 +91,13 @@ export interface SavedSessionRenewal {
    * use from now on. Never rejects: the presented bearer stays valid on the
    * node until its successor is first used, so a failed renewal keeps it.
    */
-  readonly renew: (request: SavedSessionRenewalRequest) => Promise<string>;
+  readonly renew: (request: SavedSessionRenewalRequest) => Promise<SavedSessionRenewalResult>;
   /**
    * While `isCurrent()` holds, renews the pairing each time it falls due: a
    * client that stays connected for weeks never reconnects, which is where
    * renewal otherwise happens. Arms one timer per due time, from `session`, and
-   * none for a session that never renews.
+   * none for a session that never renews. The returned stop cancels the timer;
+   * call it once the connection it serves is gone.
    */
   readonly keepRenewed: (
     request: Omit<SavedSessionRenewalRequest, "bearerToken"> & {
@@ -110,7 +122,7 @@ export function createSavedSessionRenewal(input: {
   const now = input.now ?? Date.now;
   const schedule = input.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const cancel = input.clearTimeout ?? ((timeoutId) => clearTimeout(timeoutId));
-  const inFlight = new Map<EnvironmentId, Promise<string>>();
+  const inFlight = new Map<EnvironmentId, Promise<SavedSessionRenewalResult>>();
   // Bearers the node declined to renew (renewed recently, a year old, or a node
   // without rotation): not asked again while this client runs.
   const declined = new Set<string>();
@@ -126,7 +138,14 @@ export function createSavedSessionRenewal(input: {
     return stored;
   };
 
-  const rotateAndStore = async (request: SavedSessionRenewalRequest): Promise<string> => {
+  const kept = (request: SavedSessionRenewalRequest): SavedSessionRenewalResult => ({
+    bearerToken: request.bearerToken,
+    session: request.session,
+  });
+
+  const rotateAndStore = async (
+    request: SavedSessionRenewalRequest,
+  ): Promise<SavedSessionRenewalResult> => {
     // A renewal sits on the connect path, so neither of its requests may hold a
     // connect longer than a session check would. A rotation that runs out of
     // time keeps the presented bearer: the node keeps it valid, and asking again
@@ -142,34 +161,39 @@ export function createSavedSessionRenewal(input: {
       if (isRemoteEnvironmentAuthHttpError(error) && error.status !== 401 && error.status < 500) {
         declined.add(request.bearerToken);
       }
-      return request.bearerToken;
+      return kept(request);
     }
     // The successor replaces only the bearer it renews. Pairing again or
     // removing the environment while the rotation was in flight replaced or
     // dropped that one, and the old pairing's successor must not come back.
     const holding = await input.readBearerToken(request.environmentId).catch(() => null);
-    if (holding !== request.bearerToken) return holding ?? request.bearerToken;
+    if (holding !== request.bearerToken) {
+      return holding === null ? kept(request) : { ...kept(request), bearerToken: holding };
+    }
     // The successor is used only once it is durably stored: written and read
     // back. Until it is used, the node keeps the presented bearer valid.
     const written = await input
       .writeBearerToken(request.environmentId, rotated.sessionToken)
       .catch(() => false);
-    if (!written) return request.bearerToken;
+    if (!written) return kept(request);
     const stored = await input.readBearerToken(request.environmentId).catch(() => null);
-    if (stored !== rotated.sessionToken) return request.bearerToken;
+    if (stored !== rotated.sessionToken) return kept(request);
     // Its first use supersedes the presented bearer on the node. Unanswered, the
     // socket's next ws-token request is that first use instead.
-    await withSavedEnvironmentTimeout(
+    const activated = await withSavedEnvironmentTimeout(
       request.fetchSessionState(rotated.sessionToken),
       SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS,
       "The environment did not answer its session check in time.",
-    ).catch(() => undefined);
-    return rotated.sessionToken;
+    ).catch(() => null);
+    return {
+      bearerToken: rotated.sessionToken,
+      session: activated?.authenticated ? activated : request.session,
+    };
   };
 
   const renew: SavedSessionRenewal["renew"] = (request) => {
     if (declined.has(request.bearerToken) || !shouldRenewSavedSession(request.session, now())) {
-      return Promise.resolve(request.bearerToken);
+      return Promise.resolve(kept(request));
     }
     const running = inFlight.get(request.environmentId);
     if (running) return running;
@@ -224,15 +248,13 @@ export function createSavedSessionRenewal(input: {
       if (answer.status !== "authenticated") return stop();
       if (!shouldRenewSavedSession(answer.session, now())) return arm(answer.session);
       const renewed = await renew({ ...request, session: answer.session, bearerToken });
-      if (renewed === bearerToken) {
+      if (renewed.bearerToken === bearerToken) {
         // Declined (a year old, say) for good, or the node was out of reach.
         if (declined.has(bearerToken)) stop();
         else after(SAVED_SESSION_RENEWAL_RETRY_MS);
         return;
       }
-      const renewedAnswer = await ask(renewed);
-      if (renewedAnswer?.status === "authenticated") arm(renewedAnswer.session);
-      else after(SAVED_SESSION_RENEWAL_RETRY_MS);
+      arm(renewed.session);
     };
     arm(request.session);
     return stop;

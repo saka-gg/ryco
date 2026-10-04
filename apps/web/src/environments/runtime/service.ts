@@ -975,14 +975,17 @@ const savedSessionRenewal = createSavedSessionRenewal({
     writeSavedEnvironmentBearerToken(environmentId, token),
 });
 
-/** Keeps a registered direct connection's pairing renewed while it stays connected. */
+/**
+ * Keeps a registered direct connection's pairing renewed while it stays
+ * connected. Returns the stop the connection calls once it is disposed.
+ */
 function keepSavedEnvironmentSessionRenewed(
   record: SavedEnvironmentRecord,
   connection: EnvironmentConnection,
   session: AuthSessionState,
-) {
-  if (record.desktopSsh) return;
-  savedSessionRenewal.keepRenewed({
+): () => void {
+  if (record.desktopSsh) return NOOP;
+  return savedSessionRenewal.keepRenewed({
     environmentId: record.environmentId,
     session,
     isCurrent: () => getEnvironmentSupervisor().read(record.environmentId) === connection,
@@ -1352,8 +1355,8 @@ async function connectSavedEnvironment(
     // A pairing in use renews its bearer before a socket is built on it. SSH
     // environments mint a fresh bearer through their tunnel instead.
     const renewalRecord = activeRecord;
-    const activeBearerToken = renewalRecord.desktopSsh
-      ? presentedBearerToken
+    const renewal = renewalRecord.desktopSsh
+      ? { bearerToken: presentedBearerToken, session }
       : await savedSessionRenewal.renew({
           environmentId: renewalRecord.environmentId,
           session,
@@ -1366,6 +1369,7 @@ async function connectSavedEnvironment(
               bearerToken: token,
             }),
         });
+    const activeBearerToken = renewal.bearerToken;
 
     let credentialRejected = false;
     let registered = false;
@@ -1386,6 +1390,9 @@ async function connectSavedEnvironment(
           markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
         }
       });
+    // The pairing's renewal, kept while this connection is registered, stops
+    // with it.
+    let stopRenewal: () => void = NOOP;
     const initialConfigSnapshot = createDeferredPromise<ServerConfig>();
     const knownEnvironment = createKnownEnvironment({
       id: activeRecord.environmentId,
@@ -1436,6 +1443,7 @@ async function connectSavedEnvironment(
         });
       },
       ...createEnvironmentConnectionHandlers(null, undefined, { resumeShell: true }),
+      onDispose: () => stopRenewal(),
     });
 
     try {
@@ -1480,7 +1488,7 @@ async function connectSavedEnvironment(
       }
       registerConnection(connection);
       registered = true;
-      keepSavedEnvironmentSessionRenewed(activeRecord, connection, session);
+      stopRenewal = keepSavedEnvironmentSessionRenewed(activeRecord, connection, renewal.session);
       return connection;
     } catch (error) {
       if (error instanceof SavedEnvironmentConnectionCancelledError) {

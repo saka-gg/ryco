@@ -82,7 +82,9 @@ describe("createSavedSessionRenewal", () => {
     // Two connects at once rotate once.
     const [first, second] = await Promise.all([renewal.renew(request), renewal.renew(request)]);
 
-    expect([first, second]).toEqual(["bearer-2", "bearer-2"]);
+    expect([first.bearerToken, second.bearerToken]).toEqual(["bearer-2", "bearer-2"]);
+    // The successor's own answer: its renewal falls due a day from now.
+    expect(first.session).toEqual(bearerSession(30 * DAY_MS));
     expect(rotate).toHaveBeenCalledOnce();
     expect(rotate).toHaveBeenCalledWith("bearer-1");
     expect(store.current()).toBe("bearer-2");
@@ -107,7 +109,7 @@ describe("createSavedSessionRenewal", () => {
         fetchSessionState,
         rotate: async () => rotation("bearer-2"),
       }),
-    ).resolves.toBe("bearer-1");
+    ).resolves.toMatchObject({ bearerToken: "bearer-1" });
     expect(fetchSessionState).not.toHaveBeenCalled();
   });
 
@@ -135,7 +137,7 @@ describe("createSavedSessionRenewal", () => {
           return rotation("bearer-2");
         },
       }),
-    ).resolves.toBe("owner-bearer");
+    ).resolves.toMatchObject({ bearerToken: "owner-bearer" });
     expect(store.current()).toBe("owner-bearer");
 
     // Removed while the rotation was in flight.
@@ -149,7 +151,7 @@ describe("createSavedSessionRenewal", () => {
           return rotation("bearer-2");
         },
       }),
-    ).resolves.toBe("bearer-1");
+    ).resolves.toMatchObject({ bearerToken: "bearer-1" });
     expect(store.write).not.toHaveBeenCalled();
     // Neither successor was ever used.
     expect(fetchSessionState).not.toHaveBeenCalled();
@@ -175,9 +177,15 @@ describe("createSavedSessionRenewal", () => {
       fetchSessionState: async () => bearerSession(20 * DAY_MS),
     };
 
-    await expect(renewal.renew({ ...request, rotate: outage })).resolves.toBe("bearer-1");
-    await expect(renewal.renew({ ...request, rotate: declined })).resolves.toBe("bearer-1");
-    await expect(renewal.renew({ ...request, rotate: declined })).resolves.toBe("bearer-1");
+    await expect(renewal.renew({ ...request, rotate: outage })).resolves.toMatchObject({
+      bearerToken: "bearer-1",
+    });
+    await expect(renewal.renew({ ...request, rotate: declined })).resolves.toMatchObject({
+      bearerToken: "bearer-1",
+    });
+    await expect(renewal.renew({ ...request, rotate: declined })).resolves.toMatchObject({
+      bearerToken: "bearer-1",
+    });
 
     expect(outage).toHaveBeenCalledOnce();
     expect(declined).toHaveBeenCalledOnce();
@@ -205,7 +213,7 @@ describe("createSavedSessionRenewal", () => {
       // bearer, which the node keeps valid.
       const stalled = renewal.renew({ ...request, rotate: hungRotate });
       await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS);
-      await expect(stalled).resolves.toBe("bearer-1");
+      await expect(stalled).resolves.toMatchObject({ bearerToken: "bearer-1" });
       expect(store.current()).toBe("bearer-1");
 
       // An unanswered rotation is not a refusal: the next connect asks again,
@@ -217,7 +225,7 @@ describe("createSavedSessionRenewal", () => {
         fetchSessionState: () => new Promise<AuthSessionState>(() => undefined),
       });
       await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS);
-      await expect(renewed).resolves.toBe("bearer-2");
+      await expect(renewed).resolves.toMatchObject({ bearerToken: "bearer-2" });
       expect(rotate).toHaveBeenCalledOnce();
       expect(store.current()).toBe("bearer-2");
     } finally {

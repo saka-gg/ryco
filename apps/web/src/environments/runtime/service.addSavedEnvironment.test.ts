@@ -821,6 +821,89 @@ describe("addSavedEnvironment", () => {
     await resetEnvironmentServiceForTests();
   });
 
+  it("keeps a connection's pairing renewed from its renewal, and stops with the connection", async () => {
+    vi.useFakeTimers();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const environmentId = EnvironmentId.make("environment-1");
+    mockSavedRecords = [
+      {
+        environmentId,
+        label: "Remote environment",
+        httpBaseUrl: "https://remote.example.com/",
+        wsBaseUrl: "wss://remote.example.com/",
+        createdAt: "2026-04-14T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ];
+    let storedBearer = "bearer-1";
+    mockReadSavedEnvironmentBearerToken.mockImplementation(async () => storedBearer);
+    mockWriteSavedEnvironmentBearerToken.mockImplementation(
+      async (_environmentId: EnvironmentId, token: string) => {
+        storedBearer = token;
+        return true;
+      },
+    );
+    // Twenty days left of thirty: due for renewal; the renewal is fresh.
+    mockFetchRemoteSessionState.mockImplementation(
+      async (input: { readonly bearerToken: string }) => ({
+        authenticated: true,
+        role: "owner",
+        sessionMethod: "bearer-session-token",
+        expiresAt: new Date(
+          Date.now() + (input.bearerToken === "bearer-1" ? 20 : 30) * dayMs,
+        ).toISOString(),
+      }),
+    );
+    mockRotateRemoteBearerSession.mockResolvedValue({
+      authenticated: true,
+      role: "owner",
+      sessionMethod: "bearer-session-token",
+      sessionToken: "bearer-2",
+    });
+    // The connection runs what it was given to stop once it is disposed.
+    mockCreateEnvironmentConnection.mockImplementation(
+      (input: {
+        knownEnvironment: { environmentId: EnvironmentId };
+        client: unknown;
+        onDispose?: () => void;
+      }) => ({
+        kind: "saved",
+        environmentId: input.knownEnvironment.environmentId,
+        knownEnvironment: input.knownEnvironment,
+        client: input.client,
+        ensureBootstrapped: async () => undefined,
+        reconnect: async () => undefined,
+        dispose: async () => input.onDispose?.(),
+      }),
+    );
+
+    const {
+      reconnectSavedEnvironment,
+      disconnectSavedEnvironment,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const connecting = reconnectSavedEnvironment(environmentId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await connecting;
+    // The session check, then the renewal's first use.
+    expect(mockFetchRemoteSessionState.mock.calls.map(([input]) => input.bearerToken)).toEqual([
+      "bearer-1",
+      "bearer-2",
+    ]);
+
+    // The renewal is next due a day after the renewed session began, not now.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockFetchRemoteSessionState).toHaveBeenCalledTimes(2);
+    const timersWhileConnected = vi.getTimerCount();
+
+    // Disconnected: its renewal stops with it rather than waiting out the day.
+    await disconnectSavedEnvironment(environmentId);
+    expect(vi.getTimerCount()).toBe(timersWhileConnected - 1);
+
+    await resetEnvironmentServiceForTests();
+  });
+
   it("fails a connect whose socket never delivers the server config", async () => {
     vi.useFakeTimers();
     mockSavedRecords = [
