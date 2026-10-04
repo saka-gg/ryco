@@ -248,6 +248,28 @@ describe("hosted runtime configuration", () => {
     },
   );
 
+  it("drops an account left waiting on the previous Hub when the profile changes", async () => {
+    await configureMobileHostedRuntime();
+    const clearAccount = vi.spyOn(hostedHubController, "clearAccount");
+    hostedHubStore.setState({ accountStatus: "unavailable", account: null } as never);
+
+    invalidateMobileHostedRuntime();
+
+    // Its access retry would otherwise bootstrap through the previous Hub's API.
+    expect(clearAccount).toHaveBeenCalledWith("signed-out");
+    expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
+  });
+
+  it("leaves an authenticated account to the profile-change flow", async () => {
+    await configureMobileHostedRuntime();
+    const clearAccount = vi.spyOn(hostedHubController, "clearAccount").mockResolvedValue();
+    hostedHubStore.setState({ accountStatus: "authenticated" } as never);
+
+    invalidateMobileHostedRuntime();
+
+    expect(clearAccount).not.toHaveBeenCalled();
+  });
+
   it("does not prepare an application channel before native enrollment is ready", async () => {
     hostedHubStore.setState({
       accountStatus: "signed-out",

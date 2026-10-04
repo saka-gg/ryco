@@ -1842,6 +1842,9 @@ class HostedHubController {
     this.#directoryPromise = null;
     this.#operation?.abort();
     this.#operation = null;
+    // The access check that abort just ended can publish nothing, so the next
+    // `bootstrap()` must start a fresh one rather than join it.
+    this.#bootstrapPromise = null;
     this.#clearAccountSurface();
     const previousEnvironmentId = hostedHubStore.getState().selectedNode?.environmentId ?? null;
     patchState({

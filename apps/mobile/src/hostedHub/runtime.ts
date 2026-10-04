@@ -391,6 +391,16 @@ export function invalidateMobileHostedRuntime(): void {
   // Enrollment invalidation synchronously revokes the hosted generation, warm
   // attempt, and session projection through its configured callback above.
   invalidateMobileHostedRuntimeConfig();
+  // An account that is not authenticated belongs to the Hub being left, and
+  // nothing may keep working on it: an `unavailable` one still has its access
+  // retry armed, and that retry (or a foreground) would bootstrap through the
+  // previous Hub's API until the runtime is configured again, and a later
+  // session setup could join a check still in flight. Resetting it to
+  // signed-out aborts the check and cancels the retry. An authenticated
+  // account is torn down by the profile-change flow itself.
+  if (hostedHubStore.getState().accountStatus !== "authenticated") {
+    void hostedHubController.clearAccount("signed-out");
+  }
 }
 
 /** Test seam: drop the configured/available flags between cases. */

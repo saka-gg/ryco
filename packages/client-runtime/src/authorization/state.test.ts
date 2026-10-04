@@ -450,6 +450,21 @@ describe("hosted account state", () => {
     expect(hostedHubStore.getState().accountStatus).toBe("authenticating");
   });
 
+  it("starts a fresh access check after an account teardown ends the one in flight", async () => {
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    void hostedHubController.bootstrap();
+    await hostedHubController.clearAccount("signed-out");
+    await hostedHubController.bootstrap();
+
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+  });
+
   it("keeps an adopted credential when the replaced session's check is rejected mid-commit", async () => {
     let rejectReplaced: (error: unknown) => void = () => undefined;
     let replacedSignal: AbortSignal | undefined;
