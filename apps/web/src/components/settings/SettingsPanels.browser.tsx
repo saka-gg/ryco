@@ -2651,6 +2651,26 @@ describe("ConnectionsSettings Hub section", () => {
       .not.toBeInTheDocument();
   });
 
+  it("holds enrollment back while saved Hub settings wait on a restart", async () => {
+    // The running connector enrols against the Hub it launched with, while the
+    // approval hint named the saved address the restart would switch to.
+    stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({
+      enabled: true,
+      origin: "https://new-hub.example.com",
+      hostedIdentitySupported: false,
+      restartRequired: true,
+    });
+
+    await expect.element(page.getByRole("button", { name: "Restart Ryco" })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Start enrollment" }))
+      .not.toBeInTheDocument();
+  });
+
   it("offers Finish setup when account login completed before the local node claim", async () => {
     const connectHostedIdentity = vi.fn().mockResolvedValue({ status: "ready" as const });
     stubHubFetch({

@@ -4,6 +4,7 @@ import type { DesktopHubLaunchConfig, HubIdentitySummary } from "@ryco/contracts
 import {
   consumeHubEnrollmentIntent,
   ENROLL_AFTER_ENABLE_TTL_MS,
+  offeredHubAction,
   presentHubSetup,
   recordHubEnrollmentIntent,
 } from "./hubSetup.logic";
@@ -106,6 +107,40 @@ describe("presentHubSetup", () => {
         action: "enroll",
       }),
     ).toMatchObject({ path: "device-code", showAccountRow: false });
+  });
+});
+
+describe("offeredHubAction", () => {
+  it("holds enrollment back while saved Hub settings wait on a restart", () => {
+    // The running connector enrols against the Hub it launched with; an
+    // address saved for the restart would leave the approval on the old Hub.
+    expect(
+      offeredHubAction({
+        action: "enroll",
+        automaticNativeSetupWaiting: false,
+        restartRequired: true,
+      }),
+    ).toBe("none");
+    expect(
+      offeredHubAction({
+        action: "enroll",
+        automaticNativeSetupWaiting: false,
+        restartRequired: false,
+      }),
+    ).toBe("enroll");
+    // Other actions act on what already runs.
+    for (const action of ["retry", "leave", "cancel-enrollment", "disable"] as const) {
+      expect(
+        offeredHubAction({ action, automaticNativeSetupWaiting: false, restartRequired: true }),
+      ).toBe(action);
+    }
+    expect(
+      offeredHubAction({
+        action: "enable",
+        automaticNativeSetupWaiting: true,
+        restartRequired: false,
+      }),
+    ).toBe("none");
   });
 });
 

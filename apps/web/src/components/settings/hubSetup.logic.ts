@@ -49,6 +49,25 @@ export function presentHubSetup(input: {
   };
 }
 
+/**
+ * The Connection row's action once setup and saved launch changes are known.
+ *
+ * Automatic native setup waits on the account, so the row offers nothing.
+ * While saved Hub settings wait on a restart, enrollment waits too: the
+ * running connector enrols against the Hub it launched with, so an address
+ * change saved meanwhile would leave the approved identity on a Hub the next
+ * launch no longer uses. The row offers the restart instead.
+ */
+export function offeredHubAction(input: {
+  readonly action: HubAction;
+  readonly automaticNativeSetupWaiting: boolean;
+  readonly restartRequired: boolean;
+}): HubAction {
+  if (input.automaticNativeSetupWaiting) return "none";
+  if (input.restartRequired && input.action === "enroll") return "none";
+  return input.action;
+}
+
 const ENROLL_AFTER_ENABLE_KEY = "ryco:hub-enroll-after-enable";
 /** Long enough to survive a relaunch, short enough to never surprise anyone later. */
 export const ENROLL_AFTER_ENABLE_TTL_MS = 10 * 60_000;

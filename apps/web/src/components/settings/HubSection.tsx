@@ -57,6 +57,7 @@ import { canEditHubOrigin, presentHubStatus, type HubAction } from "./hubStatus"
 import {
   clearHubEnrollmentIntent,
   consumeHubEnrollmentIntent,
+  offeredHubAction,
   presentHubSetup,
   recordHubEnrollmentIntent,
 } from "./hubSetup.logic";
@@ -508,11 +509,15 @@ export function HubSection({
   // once the restarted connector is ready to enrol. The intent is taken once,
   // so a cancelled or failed enrolment never restarts itself.
   const connectorState = snapshot?.status.state;
+  // Saved settings waiting on a restart hold it back, as they hold back the
+  // Start enrollment button (see `offeredHubAction`).
+  const restartRequired = config?.restartRequired === true;
   useEffect(() => {
     if (connectorState !== "enrolling" || !enrollAfterEnable || pendingAction !== null) return;
+    if (restartRequired) return;
     if (!consumeHubEnrollmentIntent(readIntentStorage(), Date.now())) return;
     void runAction("enroll");
-  }, [connectorState, enrollAfterEnable, pendingAction, runAction]);
+  }, [connectorState, enrollAfterEnable, pendingAction, restartRequired, runAction]);
 
   const handleOriginBlur = useCallback(async () => {
     if (!desktopBridge || originDraft.trim() === "") {
@@ -695,7 +700,7 @@ export function HubSection({
               </span>
             )}
             {error ? <span className="block text-destructive">{error}</span> : null}
-            {config?.restartRequired === true ? (
+            {restartRequired ? (
               <span className="block text-warning">
                 Saved Hub settings apply after Ryco restarts.
               </span>
@@ -705,15 +710,23 @@ export function HubSection({
         control={
           presentation === null ? null : (
             <>
-              {config?.restartRequired === true && presentation.action !== "restart"
+              {restartRequired && presentation.action !== "restart"
                 ? renderAction("restart", "outline")
                 : null}
               {renderAction(
-                automaticNativeSetupWaiting ? "none" : presentation.action,
+                offeredHubAction({
+                  action: presentation.action,
+                  automaticNativeSetupWaiting,
+                  restartRequired,
+                }),
                 presentation.action === "leave" ? "destructive-outline" : "outline",
               )}
               {renderAction(
-                automaticNativeSetupWaiting ? "none" : presentation.secondaryAction,
+                offeredHubAction({
+                  action: presentation.secondaryAction,
+                  automaticNativeSetupWaiting,
+                  restartRequired,
+                }),
                 presentation.secondaryAction === "leave" ? "destructive-outline" : "outline",
               )}
             </>
@@ -766,11 +779,13 @@ export function HubSection({
                   {snapshot.enrollment.deviceCode}
                 </DataListItem>
               </DataList>
-              {config?.origin ? (
-                <p className="pt-2 text-xs text-muted-foreground/80">
-                  {`Approve it at ${config.origin}: open your machines, choose Enroll node, and enter the device code.`}
-                </p>
-              ) : null}
+              {/* The saved address is the running connector's only while no
+                  saved change waits on a restart; never name another Hub. */}
+              <p className="pt-2 text-xs text-muted-foreground/80">
+                {config?.origin && !restartRequired
+                  ? `Approve it at ${config.origin}: open your machines, choose Enroll node, and enter the device code.`
+                  : "Approve it on your Hub: open your machines, choose Enroll node, and enter the device code."}
+              </p>
               <p className="pt-2 text-[11px] text-muted-foreground/70">
                 The device code only routes the request. It does not prove which machine you are
                 approving.
