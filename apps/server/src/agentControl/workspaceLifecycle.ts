@@ -358,11 +358,33 @@ export const AgentControlWorkspacesLive = Layer.effect(
               stat && registered ? yield* run(directory, ["rev-parse", "--verify", "HEAD"]) : null;
             const dirty =
               stat && registered
-                ? (yield* run(
-                    directory,
-                    ["status", "--porcelain=v1", "--untracked-files=all", "--ignored"],
-                    256 * 1024,
-                  )).length > 0
+                ? yield* git
+                    .execute({
+                      operation: "Agent Control workspace changes inspection",
+                      cwd: directory,
+                      // Directory summaries are sufficient for a boolean safety check.
+                      // Keep ignored content protected without enumerating dependencies.
+                      args: [
+                        "-c",
+                        "core.fsmonitor=false",
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=normal",
+                        "--ignored",
+                      ],
+                      timeoutMs: 10_000,
+                      maxOutputBytes: 256 * 1024,
+                      truncateOutputAtMaxBytes: true,
+                      env: { GIT_OPTIONAL_LOCKS: "0" },
+                    })
+                    .pipe(
+                      Effect.map(
+                        (result) =>
+                          result.stdoutTruncated ||
+                          result.stderrTruncated ||
+                          result.stdout.length > 0,
+                      ),
+                    )
                 : null;
             const unmerged = branchHead
               ? (yield* run(root, ["rev-list", "--count", `${baseHead}..${branchHead}`])) !== "0"

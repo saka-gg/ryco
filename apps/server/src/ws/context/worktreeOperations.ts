@@ -9,6 +9,7 @@ import {
   type GitManagerServiceError,
   type OrchestrationCommand,
   type OrchestrationDispatchCommandError,
+  type OrchestrationProjectShell,
   type ProjectId,
   type WorktreeSubmoduleInitialization,
   ThreadId,
@@ -154,6 +155,50 @@ export const makeWorktreeOperations = (deps: {
       ),
       Effect.asVoid,
     );
+
+  const ensureProjectMainWorktree = (project: OrchestrationProjectShell, operation: string) =>
+    Effect.gen(function* () {
+      const snapshot = yield* projectionSnapshotQuery
+        .getShellSnapshot()
+        .pipe(
+          Effect.mapError((cause) =>
+            toGitManagerError(operation, "Failed to load project workspaces.", cause),
+          ),
+        );
+      const existing = snapshot.worktrees?.find(
+        (worktree) =>
+          worktree.projectId === project.id &&
+          worktree.origin === "main" &&
+          worktree.archivedAt === null &&
+          (worktree.worktreePath === null ||
+            isProjectRootPath(worktree.worktreePath, project.workspaceRoot)),
+      );
+      if (existing) return existing.worktreeId;
+      const status = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
+      if (!status.isRepo) return null;
+      const worktreeId = WorktreeId.make(`worktree-${project.id}-main`);
+      if (snapshot.worktrees?.some((worktree) => worktree.worktreeId === worktreeId)) {
+        return yield* failGitWorkflow(operation, "The main workspace ID is already in use.");
+      }
+      yield* dispatchWorktreeCommand(
+        {
+          type: "worktree.create",
+          commandId: serverCommandId("project-main-worktree-create"),
+          worktreeId,
+          projectId: project.id,
+          branch: status.refName ?? "main",
+          worktreePath: null,
+          origin: "main",
+          prNumber: null,
+          issueNumber: null,
+          prTitle: null,
+          issueTitle: null,
+          createdAt: new Date().toISOString(),
+        },
+        operation,
+      );
+      return worktreeId;
+    });
 
   const launchSetupScriptForWorktreeInBackground = (input: {
     readonly threadId: ThreadId;
@@ -703,6 +748,9 @@ export const makeWorktreeOperations = (deps: {
             toGitManagerError(operation, "Failed to inspect git worktrees.", cause),
           ),
         );
+      // Projects linked before main workspace records existed need a destination
+      // for conversations preserved by governed workspace deletion.
+      yield* ensureProjectMainWorktree(project, operation);
       const snapshot = yield* projectionSnapshotQuery
         .getShellSnapshot()
         .pipe(
@@ -1089,27 +1137,10 @@ export const makeWorktreeOperations = (deps: {
             toGitManagerError(operation, "Failed to initialize git repository.", cause),
           ),
         );
-      const status = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
-      const branch = status.refName ?? "main";
-      const worktreeId = WorktreeId.make(`worktree-${projectId}-main`);
+      const worktreeId = yield* ensureProjectMainWorktree(project, operation);
+      if (worktreeId === null)
+        return yield* failGitWorkflow(operation, "The initialized repository is unavailable.");
       const now = new Date().toISOString();
-      yield* dispatchWorktreeCommand(
-        {
-          type: "worktree.create",
-          commandId: serverCommandId("project-main-worktree-create"),
-          worktreeId,
-          projectId,
-          branch,
-          worktreePath: null,
-          origin: "main",
-          prNumber: null,
-          issueNumber: null,
-          prTitle: null,
-          issueTitle: null,
-          createdAt: now,
-        },
-        operation,
-      );
       const snapshot = yield* projectionSnapshotQuery
         .getShellSnapshot()
         .pipe(
