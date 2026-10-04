@@ -4,6 +4,7 @@ import { Context, Effect, Exit, Layer, Scope } from "effect";
 import { WsHostedRpcGroup } from "@ryco/contracts";
 import type { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
 
+import { AgentControlExternalTopologyService } from "../agentControl/Services/AgentControlExternalTopology.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import {
@@ -405,6 +406,7 @@ export const HubConnectorLive = Layer.effect(
     const config = yield* ServerConfig;
     const environment = yield* ServerEnvironment;
     const descriptor = yield* environment.getDescriptor;
+    const externalTopology = yield* AgentControlExternalTopologyService;
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromiseWith(runtimeContext as Context.Context<R>)(effect);
@@ -692,6 +694,9 @@ export const HubConnectorLive = Layer.effect(
       },
       processLock,
       ownsIdentity: identityClaim !== undefined && identityClaim !== "held",
+      // A standby connector may gain its identity in this process; external
+      // integrations it left running close before this node is reachable.
+      beforeConnect: () => runPromise(externalTopology.yieldToHub),
     });
     const asIdentityOwner = <A>(operation: () => Promise<A>) =>
       connector.asIdentityOwner(operation);

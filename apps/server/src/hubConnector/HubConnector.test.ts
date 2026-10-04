@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RELAY_INITIAL_LIMITS,
@@ -291,6 +291,68 @@ describe("HubConnector", () => {
     await connector.start();
     expect(connector.status().state).toBe("disabled");
     expect(opens).toBe(0);
+    await connector.stop();
+  });
+
+  it("opens no relay socket until the process is handed to the Hub", async () => {
+    // A standby connector that gains its identity in this process must close
+    // external Agent Control integrations before it becomes reachable.
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let handOff!: () => void;
+    const handedOff = new Promise<void>((resolve) => {
+      handOff = resolve;
+    });
+    let refuse = false;
+    const beforeConnect = vi.fn(async () => {
+      if (refuse) throw new Error("external listener did not close");
+      await handedOff;
+    });
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      beforeConnect,
+    });
+    const starting = connector.start();
+    await settle();
+    expect(beforeConnect).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(0);
+
+    handOff();
+    await settle();
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await starting;
+    expect(connector.status().state).toBe("online");
+
+    // A hand-off that fails ends the attempt before any socket opens.
+    refuse = true;
+    sockets[0]!.emit("close", {} as CloseEvent);
+    await settle();
+    await clock.advance(1_000);
+    await settle();
+    expect(beforeConnect).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(1);
+    expect(connector.status().state).toBe("degraded");
     await connector.stop();
   });
 

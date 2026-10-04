@@ -22,6 +22,7 @@ import { readExternalCredentialFile } from "../ExternalMcp/runtimeFiles.ts";
 import { AgentControlExternalIntegrationService } from "../Services/AgentControlExternalIntegration.ts";
 import { AgentControlExternalIntegrationServiceLive } from "./AgentControlExternalIntegration.ts";
 import { AgentControlPolicyLive } from "./AgentControlPolicy.ts";
+import { AgentControlExternalTopologyLive } from "./AgentControlExternalTopology.ts";
 import { makeAgentControlExternalInstallation } from "./AgentControlExternalInstallation.ts";
 
 const capabilities = Schema.decodeSync(McpProviderCapabilities)({
@@ -141,6 +142,7 @@ function testLayer(stateDir: string) {
     Layer.provideMerge(AgentControlPolicyLive),
     Layer.provideMerge(AgentControlExternalRepositoryLive),
     Layer.provideMerge(ServerSettingsService.layerTest({ agentControl: { enabled: true } })),
+    Layer.provideMerge(AgentControlExternalTopologyLive),
   );
   return Layer.mergeAll(external, AgentControlMcpInstallationRepositoryLive).pipe(
     Layer.provideMerge(SqlitePersistenceMemory),

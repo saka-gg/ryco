@@ -132,6 +132,7 @@ import { AgentControlActionValidatorLive } from "./agentControl/Layers/AgentCont
 import { AgentControlExecutionLive } from "./agentControl/Layers/AgentControlExecution.ts";
 import { AgentControlProjectPlansLive } from "./agentControl/Layers/AgentControlProjectPlans.ts";
 import { AgentControlExternalIntegrationServiceLive } from "./agentControl/Layers/AgentControlExternalIntegration.ts";
+import { AgentControlExternalTopologyLive } from "./agentControl/Layers/AgentControlExternalTopology.ts";
 import { AgentControlExternalTaskServiceLive } from "./agentControl/Layers/AgentControlExternalTask.ts";
 import { AgentControlExternalMcpServerLive } from "./agentControl/Layers/AgentControlExternalMcpServer.ts";
 import { AgentControlAutomationServiceLive } from "./agentControl/Layers/AgentControlAutomation.ts";
@@ -279,6 +280,10 @@ const AgentControlLayerLive = Layer.mergeAll(
   Layer.provideMerge(AgentControlExternalRepositoryLive),
   Layer.provideMerge(AgentControlAutomationRepositoryLive),
   Layer.provideMerge(AgentControlMcpInstallationRepositoryLive),
+  // One process-wide external topology: the external integration surface, its
+  // listener, and the Hub connector (which hands the process over before its
+  // first relay connection) must all read the same value.
+  Layer.provideMerge(AgentControlExternalTopologyLive),
 );
 
 // In-memory credential/lease authority for the internal provider-session

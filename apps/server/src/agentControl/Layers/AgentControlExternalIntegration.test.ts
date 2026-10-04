@@ -14,6 +14,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlExternalIntegrationService } from "../Services/AgentControlExternalIntegration.ts";
 import { AgentControlExternalIntegrationServiceLive } from "./AgentControlExternalIntegration.ts";
 import { AgentControlPolicyLive } from "./AgentControlPolicy.ts";
+import { AgentControlExternalTopologyLive } from "./AgentControlExternalTopology.ts";
 
 const config = Layer.succeed(ServerConfig, {
   host: "127.0.0.1",
@@ -28,6 +29,7 @@ const layer = it.layer(
     Layer.provideMerge(AgentControlExternalRepositoryLive),
     Layer.provideMerge(ServerSettingsService.layerTest({ agentControl: { enabled: true } })),
     Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(AgentControlExternalTopologyLive),
     Layer.provide(config),
   ),
 );

@@ -18,6 +18,10 @@ import { hubIdentityHoldsKeyMaterial } from "./HubIdentityRuntime.ts";
  * directory. Standby then resolves to disabled: it never connects an identity
  * nobody asked it to, and never opens the credential store to find out. An
  * unreadable state resolves the same way.
+ *
+ * A running standby connector is marked `standby`: it is not Hub-connected
+ * yet, so external Agent Control integrations stay available until it hands
+ * the process to the Hub before its first relay connection.
  */
 export async function resolveStandbyHubConnectorConfig(input: {
   readonly config: HubConnectorConfig;
@@ -36,5 +40,5 @@ export async function resolveStandbyHubConnectorConfig(input: {
   } catch {
     holds = true;
   }
-  return holds ? DEFAULT_HUB_CONNECTOR_CONFIG : input.config;
+  return holds ? DEFAULT_HUB_CONNECTOR_CONFIG : { ...input.config, standby: true };
 }

@@ -25,12 +25,12 @@ import {
   parseExternalAuthorization,
 } from "../externalCredential.ts";
 import { currentExternalSetupRuntime, makeExternalIntegrationSetup } from "../externalSetup.ts";
-import { evaluateExternalMcpTopology } from "../externalTopology.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import {
   AgentControlExternalIntegrationService,
   type AgentControlExternalIntegrationServiceShape,
 } from "../Services/AgentControlExternalIntegration.ts";
+import { AgentControlExternalTopologyService } from "../Services/AgentControlExternalTopology.ts";
 
 const EXTERNAL_CAPABILITIES = new Set<AgentControlCapability>([
   AGENT_CONTROL_CAPABILITIES.externalListProjects,
@@ -85,12 +85,13 @@ const makeAgentControlExternalIntegration = Effect.gen(function* () {
   const policy = yield* AgentControlPolicy;
   const repository = yield* AgentControlExternalRepository;
   const changes = yield* PubSub.unbounded<AgentControlIntegrationId>();
-  const topology = evaluateExternalMcpTopology(config);
+  // Read per call: a standby Hub connector can take this process over.
+  const topology = yield* AgentControlExternalTopologyService;
   const runtime = currentExternalSetupRuntime(config.stateDir);
 
   const requireSetupAvailable = Effect.gen(function* () {
     yield* policy.requireEnabled("external integration setup");
-    if (!topology.available) return yield* fail("topology-unavailable");
+    if (!topology.current().available) return yield* fail("topology-unavailable");
   });
 
   const detailFor: AgentControlExternalIntegrationServiceShape["detailFor"] = (stored) => ({
@@ -100,7 +101,7 @@ const makeAgentControlExternalIntegration = Effect.gen(function* () {
       clientKind: stored.clientKind,
       runtime,
     }),
-    topology,
+    topology: topology.current(),
   });
 
   const getStored = (integrationId: AgentControlIntegrationId) =>
@@ -139,7 +140,7 @@ const makeAgentControlExternalIntegration = Effect.gen(function* () {
     Effect.gen(function* () {
       yield* policy.requireEnabled("external integration list");
       const integrations = yield* repository.listIntegrations();
-      return { integrations: integrations.map(detailFor), topology };
+      return { integrations: integrations.map(detailFor), topology: topology.current() };
     });
 
   const create: AgentControlExternalIntegrationServiceShape["create"] = (input) =>

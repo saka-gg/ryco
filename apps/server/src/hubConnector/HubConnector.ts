@@ -160,6 +160,7 @@ export class HubConnector {
    * lock could not be used at all, or no lock is configured.
    */
   #ownsIdentity: boolean;
+  readonly #beforeConnect: () => Promise<void>;
   #watchTimer: unknown;
   #watchLastTickAt: number | undefined;
   #watchLastNetwork: string | undefined;
@@ -241,6 +242,13 @@ export class HubConnector {
      * connector claims the lock itself, when it first needs the identity.
      */
     readonly ownsIdentity?: boolean;
+    /**
+     * Awaited before every relay connection attempt opens its socket. The
+     * server hands the process to the Hub here, which closes external Agent
+     * Control integrations first. A failure ends the attempt like any other
+     * connection failure, so the socket never opens without it.
+     */
+    readonly beforeConnect?: () => Promise<void>;
   }) {
     this.#config = options.config;
     this.#identity = options.identity;
@@ -261,6 +269,7 @@ export class HubConnector {
     this.#livenessWatchEnabled = options.livenessWatch ?? true;
     this.#processLock = options.processLock;
     this.#ownsIdentity = options.processLock === undefined || options.ownsIdentity === true;
+    this.#beforeConnect = options.beforeConnect ?? (async () => undefined);
   }
 
   /**
@@ -882,6 +891,11 @@ export class HubConnector {
     this.#session = session;
     this.#state.transition("authenticating");
     try {
+      await this.#beforeConnect();
+      if (!this.#state.isCurrent(generation) || this.#stopping) {
+        session.close();
+        return;
+      }
       const ready = await session.authenticate();
       if (!this.#state.isCurrent(generation) || this.#stopping) {
         session.close();

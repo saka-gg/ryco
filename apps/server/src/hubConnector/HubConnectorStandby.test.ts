@@ -23,7 +23,7 @@ describe("resolveStandbyHubConnectorConfig", () => {
         statePath: "/unused",
         holdsKeyMaterial: async () => false,
       }),
-    ).toBe(enabled);
+    ).toEqual({ ...enabled, standby: true });
   });
 
   it("stays disabled for any existing identity or unreadable state", async () => {
@@ -70,9 +70,10 @@ describe("resolveStandbyHubConnectorConfig", () => {
     const root = await mkdtemp(join(tmpdir(), "ryco-hub-standby-"));
     const fresh = join(root, "fresh", "hub-identity.json");
     await mkdir(join(root, "fresh"), { recursive: true, mode: 0o700 });
-    expect(await resolveStandbyHubConnectorConfig({ config: enabled, statePath: fresh })).toBe(
-      enabled,
-    );
+    expect(await resolveStandbyHubConnectorConfig({ config: enabled, statePath: fresh })).toEqual({
+      ...enabled,
+      standby: true,
+    });
 
     const pending = join(root, "pending", "hub-identity.json");
     await mkdir(join(root, "pending"), { recursive: true, mode: 0o700 });
