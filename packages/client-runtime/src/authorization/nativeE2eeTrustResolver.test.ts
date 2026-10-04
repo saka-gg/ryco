@@ -579,6 +579,18 @@ describe("native E2EE trust resolver", () => {
     });
   });
 
+  it("reads the Hub's enrollment_revoked refusal as a revoked enrollment, not an outage", async () => {
+    const { api, resolve, request } = harness();
+    vi.mocked(api.issueAccountGrantRelayTicket).mockRejectedValue(
+      new HostedHubApiError("enrollment_revoked", 409),
+    );
+
+    await expect(resolve(request)).resolves.toEqual({
+      kind: "blocked",
+      reason: "enrollment-revoked",
+    });
+  });
+
   it("preserves bounded retry guidance for temporary account authorization loss", async () => {
     const { api, resolve, request } = harness();
     vi.mocked(api.issueAccountGrantRelayTicket).mockRejectedValue(

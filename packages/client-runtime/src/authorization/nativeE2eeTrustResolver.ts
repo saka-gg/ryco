@@ -20,7 +20,7 @@ import {
 import type { NativeE2eeAccountTrustedNode, NativeE2eePlatformService } from "../platform/index.ts";
 import { decodeBase64Url } from "../relay/base64url.ts";
 import { HostedHubApiError, type HostedHubApi } from "./api.ts";
-import type { NativeE2eeReadyEnrollment } from "./nativeE2eeEnrollment.ts";
+import { isHubEnrollmentRevoked, type NativeE2eeReadyEnrollment } from "./nativeE2eeEnrollment.ts";
 
 export interface NativeE2eeVerifiedPin {
   readonly identityFingerprint: Uint8Array;
@@ -252,7 +252,10 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
         keysetRefreshed = true;
       }
     } catch (cause) {
-      if (cause instanceof HostedHubApiError && cause.code === "revoked") {
+      if (
+        (cause instanceof HostedHubApiError && cause.code === "revoked") ||
+        isHubEnrollmentRevoked(cause)
+      ) {
         return { kind: "blocked", reason: "enrollment-revoked" };
       }
       if (cause instanceof HostedHubApiError && cause.code === "unsupported_version") {

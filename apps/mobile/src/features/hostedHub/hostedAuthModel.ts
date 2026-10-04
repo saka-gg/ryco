@@ -209,6 +209,14 @@ export interface HostedAccountViewInput {
   readonly actionStatus: HostedAccountActionStatus;
 }
 
+/**
+ * The Hub revoked this device's encrypted enrollment (`Device removed`). The
+ * revoked enrollment cannot be restored from this session; a new sign-in is
+ * what enrolls fresh keys, so that is the one step the copy names.
+ */
+export const HOSTED_DEVICE_REMOVED_MESSAGE =
+  "This device was removed from your Hub's encrypted devices, so it cannot reach your nodes. Sign out, then sign in again to set it up again.";
+
 const DELIVERY_UNKNOWN_MESSAGE =
   "A request may or may not have reached the node. Ryco did not resend it automatically.";
 
@@ -285,6 +293,7 @@ const HOSTED_ATTENTION_LABELS: ReadonlySet<string> = new Set([
   "Unconfirmed",
   "No access",
   "Revoked",
+  "Removed",
   "Incompatible",
   "Failed",
   // docs/relay-e2ee-protocol.md §13.1's release gate: an E2EE channel with no
@@ -635,7 +644,10 @@ export function deriveHostedAccountView(input: HostedAccountViewInput): HostedAc
     // password or a recovery code — the one thing the account copy must never
     // do. The DPoP binding, by contrast, is true of every session this app
     // holds.
-    detail: "Every request from this device is signed with a key held in its secure hardware.",
+    detail:
+      input.nativeDeviceSecurityStatus === "revoked"
+        ? HOSTED_DEVICE_REMOVED_MESSAGE
+        : "Every request from this device is signed with a key held in its secure hardware.",
     displayName: state.account.displayName,
     roleLabel: roleLabel(state),
     statusText: status.text,

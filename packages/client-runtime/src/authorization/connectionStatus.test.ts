@@ -91,6 +91,12 @@ describe("deriveHostedConnectionStatusText", () => {
         input({ transportStatus: "idle", nativeDeviceSecurityStatus: "unavailable" }),
       ),
     ).toBe("Device encryption unavailable");
+    // A revoked device enrollment is not the selected node's `Revoked`.
+    expect(
+      deriveHostedConnectionStatusText(
+        input({ transportStatus: "idle", nativeDeviceSecurityStatus: "revoked" }),
+      ),
+    ).toBe("Device removed");
     expect(
       deriveHostedConnectionStatusIndicator(
         input({ e2eeStatus: "verified", nativeDeviceSecurityStatus: "securing" }),

@@ -16,7 +16,7 @@ import type {
   NativeE2eePlatformService,
   NativeE2eePrekeyDescriptor,
 } from "../platform/index.ts";
-import type { HostedHubApi } from "./api.ts";
+import { HostedHubApiError, type HostedHubApi } from "./api.ts";
 import type { HostedRelayEnrollmentRevocation } from "./types.ts";
 
 export type NativeE2eeEnrollmentStatus =
@@ -45,7 +45,17 @@ export type NativeE2eeEnrollmentErrorCode =
   | "device_material_unavailable"
   | "device_material_invalid"
   | "enrollment_unavailable"
-  | "enrollment_refused";
+  | "enrollment_refused"
+  /**
+   * The Hub answered this installation's enrollment as revoked: an HTTP 409
+   * `enrollment_revoked` refusal, or a non-active summary of the same
+   * enrollment. Carried by status `revoked`; retrying from the same session
+   * cannot succeed, only a fresh sign-in can enroll again.
+   */
+  | "enrollment_revoked";
+
+/** The Hub's stable refusal code for an upsert of an enrollment it has revoked. */
+export const HUB_ENROLLMENT_REVOKED_CODE = "enrollment_revoked";
 
 export class NativeE2eeEnrollmentError extends Error {
   readonly code: NativeE2eeEnrollmentErrorCode;
@@ -89,6 +99,19 @@ const decodeEnrollmentRequest = Schema.decodeUnknownSync(NativeE2eeEnrollmentUps
 
 function enrollmentError(code: NativeE2eeEnrollmentErrorCode): never {
   throw new NativeE2eeEnrollmentError(code);
+}
+
+/**
+ * The Hub refusing this installation's enrollment because it revoked it (HTTP
+ * 409 `enrollment_revoked`). Matched on the code the Hub sent, never on the
+ * status alone: a 409 `enrollment_revision` race is an ordinary conflict.
+ */
+export function isHubEnrollmentRevoked(cause: unknown): boolean {
+  return (
+    cause instanceof HostedHubApiError &&
+    !cause.inferred &&
+    cause.code === HUB_ENROLLMENT_REVOKED_CODE
+  );
 }
 
 function sameNamespace(
@@ -172,10 +195,13 @@ export function createNativeE2eeEnrollmentCoordinator(
     state = { ...patch, generation };
     listeners.forEach((listener) => listener());
   };
-  const invalidateCurrent = (status: "idle" | "revoked") => {
+  const invalidateCurrent = (
+    status: "idle" | "revoked",
+    errorCode: "enrollment_revoked" | null = null,
+  ) => {
     generation += 1;
     operation = null;
-    publish({ status, ready: null, errorCode: null });
+    publish({ status, ready: null, errorCode });
     input.invalidateHostedGeneration?.();
   };
 
@@ -246,13 +272,26 @@ export function createNativeE2eeEnrollmentCoordinator(
           return enrollmentError("device_material_invalid");
         }
         phase = "enrollment";
-        const enrollment = await input.api.upsertE2eeDeviceEnrollment(request);
+        let enrollment: AccountE2eeDeviceSummary;
+        try {
+          enrollment = await input.api.upsertE2eeDeviceEnrollment(request);
+        } catch (cause) {
+          // The Hub's answer, not an outage: retrying the same upsert from this
+          // session can never succeed, so it must not read as `unavailable`
+          // and feed a retry loop.
+          if (!isHubEnrollmentRevoked(cause)) throw cause;
+          if (issued === generation && sameNamespace(namespace, nextNamespace)) {
+            invalidateCurrent("revoked", "enrollment_revoked");
+          }
+          return enrollmentError("enrollment_revoked");
+        }
         if (issued !== generation || !sameNamespace(namespace, nextNamespace)) {
           return enrollmentError("enrollment_refused");
         }
         if (!exactEnrollmentResponse(enrollment, request)) {
           if (enrollment.enrollmentId === request.enrollmentId && enrollment.status !== "active") {
-            invalidateCurrent("revoked");
+            invalidateCurrent("revoked", "enrollment_revoked");
+            return enrollmentError("enrollment_revoked");
           }
           return enrollmentError("enrollment_refused");
         }

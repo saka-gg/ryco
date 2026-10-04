@@ -5,6 +5,7 @@ import {
   type HostedAccountActionStatus,
   type HostedE2eeChannelStatus,
   type HostedHubState,
+  type HostedNativeDeviceSecurityStatus,
 } from "@ryco/client-runtime/authorization";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -27,6 +28,7 @@ import {
   deriveHostedAccountView,
   deriveHostedBrowserSignInAction,
   deriveHostedSignInView,
+  HOSTED_DEVICE_REMOVED_MESSAGE,
   hostedStatusTone,
   type HostedAccountView,
   type HostedSignInView,
@@ -139,12 +141,16 @@ function accountView(
     readonly hostedModeAvailable?: boolean;
     readonly actionStatus?: HostedAccountActionStatus;
     readonly e2eeStatus?: HostedE2eeChannelStatus;
+    readonly nativeDeviceSecurityStatus?: HostedNativeDeviceSecurityStatus;
   } = {},
 ): HostedAccountView {
   return deriveHostedAccountView({
     state: hostedState(overrides),
     hostedModeAvailable: options.hostedModeAvailable ?? true,
     e2eeStatus: options.e2eeStatus ?? "unavailable",
+    ...(options.nativeDeviceSecurityStatus === undefined
+      ? {}
+      : { nativeDeviceSecurityStatus: options.nativeDeviceSecurityStatus }),
     onSignIn: vi.fn(),
     actionStatus: options.actionStatus ?? "idle",
   });
@@ -388,6 +394,17 @@ describe("hosted account surface", () => {
       "Every request from this device is signed with a key held in its secure hardware.",
     );
     expect(view.detail).not.toMatch(/passkey/i);
+  });
+
+  it("names a removed device as removed and points at a fresh sign-in", () => {
+    const view = accountView(
+      { ...AUTHENTICATED, ...ONLINE_NODE },
+      { nativeDeviceSecurityStatus: "revoked" },
+    );
+    expect(view.statusText).toBe("Device removed");
+    expect(view.statusIndicator?.shortLabel).toBe("Removed");
+    expect(view.detail).toBe(HOSTED_DEVICE_REMOVED_MESSAGE);
+    expect(view.rows.map((row) => row.id)).toEqual(["sign-out"]);
   });
 
   it("acknowledges rotated recovery codes only from the explicit action", () => {

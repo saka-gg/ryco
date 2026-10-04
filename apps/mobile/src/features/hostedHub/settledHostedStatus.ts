@@ -121,6 +121,7 @@ export const HOSTED_STATUS_SETTLEMENT = {
   "Delivery unknown": "settled",
   "Authorization removed": "settled",
   Revoked: "settled",
+  "Device removed": "settled",
   Incompatible: "settled",
   "Not verified": "settled",
   "terminal failure": "settled",

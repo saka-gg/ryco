@@ -10,7 +10,7 @@ import {
 } from "@ryco/shared/relayE2eeTranscripts";
 import type { NativeE2eePlatformService } from "../platform/index.ts";
 import { encodeBase64Url } from "../relay/base64url.ts";
-import type { HostedHubApi } from "./api.ts";
+import { HostedHubApiError, type HostedHubApi } from "./api.ts";
 import {
   createNativeE2eeEnrollmentCoordinator,
   NativeE2eeEnrollmentError,
@@ -239,6 +239,53 @@ describe("native E2EE enrollment coordinator", () => {
       coordinator.applyRevocation({ enrollmentId: ENROLLMENT_ID, enrollmentRevision: 2 }),
     ).toBe(false);
     expect(coordinator.getState().status).toBe("ready");
+  });
+
+  it("treats the Hub's 409 enrollment_revoked refusal as revoked, not unavailable", async () => {
+    const { coordinator, api, invalidateHostedGeneration } = harness();
+    await coordinator.ensure(ACCOUNT_ID);
+    invalidateHostedGeneration.mockClear();
+    vi.mocked(api.upsertE2eeDeviceEnrollment).mockRejectedValueOnce(
+      new HostedHubApiError("enrollment_revoked", 409),
+    );
+
+    await expect(coordinator.ensure(ACCOUNT_ID)).rejects.toMatchObject({
+      code: "enrollment_revoked",
+    });
+    expect(coordinator.getState()).toMatchObject({
+      status: "revoked",
+      ready: null,
+      errorCode: "enrollment_revoked",
+    });
+    expect(invalidateHostedGeneration).toHaveBeenCalledOnce();
+  });
+
+  it("treats a non-active summary of this enrollment as the Hub's revocation", async () => {
+    const { coordinator, api } = harness();
+    vi.mocked(api.upsertE2eeDeviceEnrollment).mockResolvedValueOnce(summary(2, "revoked"));
+
+    await expect(coordinator.ensure(ACCOUNT_ID)).rejects.toMatchObject({
+      code: "enrollment_revoked",
+    });
+    expect(coordinator.getState()).toMatchObject({
+      status: "revoked",
+      errorCode: "enrollment_revoked",
+    });
+  });
+
+  it("keeps other Hub conflicts retryable rather than revoked", async () => {
+    const { coordinator, api } = harness();
+    vi.mocked(api.upsertE2eeDeviceEnrollment).mockRejectedValueOnce(
+      new HostedHubApiError("conflict", 409),
+    );
+
+    await expect(coordinator.ensure(ACCOUNT_ID)).rejects.toMatchObject({
+      code: "enrollment_unavailable",
+    });
+    expect(coordinator.getState()).toMatchObject({
+      status: "unavailable",
+      errorCode: "enrollment_unavailable",
+    });
   });
 
   it("rejects mismatched device material without reflecting it in the error", async () => {
