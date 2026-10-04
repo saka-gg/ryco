@@ -1640,6 +1640,42 @@ describe("hosted registration and directory state", () => {
     expect(activateHostedNode).not.toHaveBeenCalled();
   });
 
+  it("revalidates access when the user leaves a node during an access check", async () => {
+    const selected = resumableSelection();
+    let finishCheck: (value: HostedHubSessionResponse) => void = () => undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishCheck = resolve;
+          }),
+      );
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selected]);
+
+    hostedHubController.suspendBrowser("hidden");
+    void hostedHubController.resumeBrowser();
+    expect(hostedHubStore.getState().browserStatus).toBe("checking-access");
+
+    await hostedHubController.returnToDirectory();
+
+    // Back to the directory must not stand in for the session and directory
+    // check the aborted resume never finished.
+    expect(hostedHubStore.getState()).toMatchObject({
+      selectedNode: null,
+      browserStatus: "checking-access",
+    });
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await hostedHubController.selectNode(selected.id);
+    expect(activateHostedNode).not.toHaveBeenCalled();
+
+    finishCheck(sessionResponse);
+    await vi.waitFor(() => expect(hostedHubStore.getState().browserStatus).toBe("current"));
+    expect(listNodes).toHaveBeenCalledOnce();
+    expect(activateHostedNode).not.toHaveBeenCalled();
+  });
+
   it("switches nodes through the ordered environment teardown boundary", async () => {
     const first = node();
     const second = node("node_bbbbbbbbbbbbbbbbbbbbbb", "owner");

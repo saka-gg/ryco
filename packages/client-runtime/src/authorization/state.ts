@@ -2022,6 +2022,12 @@ class HostedHubController {
     this.#retrySelectedNodeOperation = null;
     this.#retrySelectedNodePromise = null;
     this.#clearSessionSyncTimer();
+    // A `synchronizing` resume had already revalidated the session and the
+    // directory and was only waiting on the node's snapshot, so the directory
+    // it returns to is current. A `checking-access` one had not: the browser
+    // goes `stale` and a fresh resume, with no selection left to reconnect,
+    // re-runs that check rather than handing back `current` unverified.
+    const accessUnchecked = state.browserStatus === "checking-access";
     patchState({
       selectedNode: null,
       selectionStatus: preserve ? state.selectionStatus : "none",
@@ -2031,13 +2037,16 @@ class HostedHubController {
       sessionEstablished: false,
       sessionRecoveredAfterUnknown: false,
       browserStatus:
-        state.browserStatus === "synchronizing" || state.browserStatus === "checking-access"
+        state.browserStatus === "synchronizing"
           ? "current"
-          : state.browserStatus,
+          : accessUnchecked
+            ? "stale"
+            : state.browserStatus,
       errorMessage: preserve ? state.errorMessage : null,
       errorReason: preserve ? (state.errorReason ?? null) : null,
       generation: state.generation + 1,
     });
+    if (accessUnchecked) void this.resumeBrowser();
     await deactivateHostedNode(node.environmentId);
   }
 
