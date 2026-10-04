@@ -238,4 +238,41 @@ finishes. Ryco shows the thread as working from the moment Claude starts that re
 reasoning and text stream like any other turn. Stop ends a background turn too. If a background turn
 starts but produces no output for two minutes, Ryco ends it.
 
+## Steering A Running Turn
+
+A message you send while a Claude turn runs can steer that turn instead of waiting in the queue.
+Choose the default in Settings → Composer controls → Messages sent while a turn runs: Queue (the
+default) or Steer. While a turn runs, ⌘↵ / Ctrl+Enter does the opposite. Each queued row also has
+a Steer button.
+
+How it works:
+
+- Ryco sends the message to Claude Code as a user message with `priority: "now"` and its own id.
+  Claude Code either folds it into the running request at the next tool boundary, or stops the
+  current request and runs the message next. Either way it stays one Ryco turn: the message
+  appears in that turn and the reply continues there, with one working state and one completion.
+- The turn waits for the steered message's reply only while Claude Code reports more queued work
+  (`queued_turn_count > 0`). It never waits on a timer.
+- A steer that cannot be applied stays in the queue and is sent as the next turn. This happens
+  when the turn has already finished, while Claude waits for an approval or an answer, for slash
+  commands, and on Claude Code versions without the `interrupt_receipt_v1` capability. These
+  deferrals are quiet: no error and no work-log row.
+
+Stop also stops pending steers. On Claude Code versions with `interrupt_cancel_queued_v1`, Stop
+cancels the queued steer with the interrupt. On versions with only `interrupt_receipt_v1`, Ryco
+uses the interrupt receipt: if Claude Code still runs the steer later, Ryco interrupts it again
+and drops its output, so no new turn appears.
+
+Known edges:
+
+- A steer accepted just as Claude finishes the turn runs as its own Claude request. Its reply then
+  appears in a separate background turn, while your message stays in the finished turn.
+- A background wake that runs between the stopped request and the steered message is shown inside
+  the steered turn.
+- The token usage shown on the completed turn covers the last request only. The context meter is
+  updated after every request.
+- Dropping a stopped steer relies on Claude Code echoing message ids on its first streamed frame.
+  Ryco always enables partial messages, and every Claude Code version with the interrupt receipt
+  echoes them.
+
 See [observed cache usage and resume review](./claude-cache.md) for evidence scopes, compaction, and recovery behavior.
