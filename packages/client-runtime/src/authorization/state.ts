@@ -344,9 +344,17 @@ function refusedLocally(
   };
 }
 
+/**
+ * Whether the Hub itself answered that this session is gone. A `401` whose body
+ * is not the Hub's (a captive portal's or corporate proxy's own page decodes as
+ * `invalid_response`) is not that answer, and must not end a session — in
+ * bearer mode ending it deletes the only copy of the native token.
+ */
 function isSessionFailure(error: unknown): boolean {
   return (
-    error instanceof HostedHubApiError && (error.status === 401 || error.code === "session_invalid")
+    error instanceof HostedHubApiError &&
+    error.code !== "invalid_response" &&
+    (error.status === 401 || error.code === "session_invalid")
   );
 }
 

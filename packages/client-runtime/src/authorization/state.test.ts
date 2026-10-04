@@ -300,6 +300,7 @@ describe("hosted account state", () => {
     ],
     ["a proxy error page", new HostedHubApiError("invalid_response", 502)],
     ["a captive portal page", new HostedHubApiError("invalid_response", 200)],
+    ["a proxy's own 401 page", new HostedHubApiError("invalid_response", 401)],
     ["Hub rate limiting", new HostedHubApiError("rate_limited", 429, 5_000)],
     ["a failing Hub", new HostedHubApiError("unavailable", 503)],
   ])("keeps session material when bootstrap fails with %s", async (_label, failure) => {
