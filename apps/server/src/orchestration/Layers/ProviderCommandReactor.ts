@@ -44,6 +44,7 @@ import {
   type RuntimeMode,
   type AgentTokenMode,
   type TurnId,
+  type TurnSteerRejectionReason,
   type WorktreeId,
 } from "@ryco/contracts";
 import {
@@ -88,6 +89,7 @@ import {
   providerFailureActivityCommand,
 } from "../providerFailureActivity.ts";
 import { failureTag, userFacingFailureDetail } from "../userFacingErrors.ts";
+import { classifyTurnSteerFailure } from "../turnSteerFailure.ts";
 
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
@@ -1589,6 +1591,7 @@ const make = Effect.gen(function* () {
         | {
             readonly status: "rejected";
             readonly error: string;
+            readonly reason: TurnSteerRejectionReason;
             readonly resolvedAt: string;
           },
     ) => {
@@ -1629,21 +1632,23 @@ const make = Effect.gen(function* () {
           }),
         ),
         Effect.catchCause((cause) =>
-          Effect.logWarning("provider command reactor failed to steer turn", {
-            threadId: event.payload.threadId,
-            failureTag: failureTag(cause),
-            cause: Cause.pretty(cause),
-          }).pipe(
-            Effect.andThen(
-              resolve({
-                status: "rejected",
-                error: userFacingFailureDetail(cause, {
-                  fallback: "Provider rejected turn steering.",
-                }),
-                resolvedAt: new Date().toISOString(),
-              }),
-            ),
-          ),
+          Effect.gen(function* () {
+            const classified = classifyTurnSteerFailure(cause, (failed) =>
+              userFacingFailureDetail(failed, { fallback: "Provider rejected turn steering." }),
+            );
+            yield* Effect.logWarning("provider command reactor failed to steer turn", {
+              threadId: event.payload.threadId,
+              failureTag: failureTag(cause),
+              reason: classified.reason,
+              cause: Cause.pretty(cause),
+            });
+            yield* resolve({
+              status: "rejected",
+              error: classified.error,
+              reason: classified.reason,
+              resolvedAt: new Date().toISOString(),
+            });
+          }),
         ),
         Effect.forkScoped,
       );

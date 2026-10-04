@@ -35,6 +35,7 @@ import {
   Option,
   PubSub,
   Ref,
+  Schema,
   Scope,
   Stream,
 } from "effect";
@@ -43,6 +44,8 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
+  ProviderSessionNotFoundError,
+  ProviderTurnNotSteerableError,
   ProviderUnsupportedError,
   ProviderValidationError,
   type ProviderAdapterError,
@@ -102,8 +105,12 @@ function makeFakeCodexAdapter(
       input: ProviderSessionStartInput,
       makeSession: (input: ProviderSessionStartInput) => ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterError>;
+    /** Defaults to native for Codex only. */
+    readonly turnSteering?: "native" | "unsupported";
   } = {},
 ) {
+  const turnSteering =
+    options.turnSteering ?? (provider === CODEX_DRIVER ? "native" : "unsupported");
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
@@ -242,11 +249,11 @@ function makeFakeCodexAdapter(
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
-      turnSteering: provider === CODEX_DRIVER ? "native" : "unsupported",
+      turnSteering,
     },
     startSession,
     sendTurn,
-    ...(provider === CODEX_DRIVER ? { steerTurn } : {}),
+    ...(turnSteering === "native" ? { steerTurn } : {}),
     interruptTurn,
     respondToRequest,
     respondToUserInput,
@@ -2477,4 +2484,96 @@ it.effect(
       assert.equal(stop.mock.calls[1]?.[1], "legacy-task");
     }).pipe(Effect.provide(providerLayer.pipe(Layer.provideMerge(NodeServices.layer))));
   },
+);
+
+it.live("ProviderServiceLive routes steering to a Claude-shaped adapter and defers refusals", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER, { turnSteering: "native" });
+    const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
+    const providerLayer = makeStandaloneProviderServiceLayer([codex, claude, cursor]);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const claudeThread = asThreadId("thread-claude-steer");
+      yield* provider.startSession(claudeThread, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId: claudeThread,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* provider.sendTurn({
+        threadId: claudeThread,
+        input: "work",
+        attachments: [],
+      });
+      const steered = yield* provider.steerTurn({
+        threadId: claudeThread,
+        expectedTurnId: turn.turnId,
+        messageId: MessageId.make("message-claude-steer"),
+        input: "also this",
+        attachments: [],
+      });
+      assert.equal(steered.turnId, turn.turnId);
+      assert.equal(claude.steerTurn.mock.calls.length, 1);
+
+      const mismatch = yield* Effect.flip(
+        provider.steerTurn({
+          threadId: claudeThread,
+          expectedTurnId: TurnId.make("turn-ended-earlier"),
+          messageId: MessageId.make("message-claude-late"),
+          input: "late",
+          attachments: [],
+        }),
+      );
+      assert.isTrue(Schema.is(ProviderTurnNotSteerableError)(mismatch));
+      if (Schema.is(ProviderTurnNotSteerableError)(mismatch)) {
+        assert.equal(mismatch.reason, "turn-ended");
+        assert.include(mismatch.detail, "stays queued");
+      }
+      assert.equal(claude.steerTurn.mock.calls.length, 1);
+
+      const cursorThread = asThreadId("thread-cursor-steer");
+      yield* provider.startSession(cursorThread, {
+        provider: CURSOR_DRIVER,
+        providerInstanceId: ProviderInstanceId.make("cursor"),
+        threadId: cursorThread,
+        runtimeMode: "full-access",
+      });
+      const cursorTurn = yield* provider.sendTurn({
+        threadId: cursorThread,
+        input: "work",
+        attachments: [],
+      });
+      const unsupported = yield* Effect.flip(
+        provider.steerTurn({
+          threadId: cursorThread,
+          expectedTurnId: cursorTurn.turnId,
+          messageId: MessageId.make("message-cursor-steer"),
+          input: "also this",
+          attachments: [],
+        }),
+      );
+      assert.isTrue(Schema.is(ProviderTurnNotSteerableError)(unsupported));
+      if (Schema.is(ProviderTurnNotSteerableError)(unsupported)) {
+        assert.equal(unsupported.reason, "unsupported");
+        assert.equal(
+          unsupported.detail,
+          "Cursor can't steer a running turn. The message stays queued.",
+        );
+      }
+
+      claude.removeSession(claudeThread);
+      const inactive = yield* Effect.flip(
+        provider.steerTurn({
+          threadId: claudeThread,
+          expectedTurnId: turn.turnId,
+          messageId: MessageId.make("message-claude-gone"),
+          input: "gone",
+          attachments: [],
+        }),
+      );
+      assert.isTrue(Schema.is(ProviderSessionNotFoundError)(inactive));
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
 );

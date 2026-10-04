@@ -149,4 +149,107 @@ describe("turn steering decider", () => {
     ]);
     expect(events.some((event) => event.type === "thread.message-sent")).toBe(false);
   });
+
+  const steerCommand = (model: OrchestrationReadModel, expectedTurnId = turnId) =>
+    decideOrchestrationCommand({
+      readModel: model,
+      command: {
+        type: "thread.turn.steer",
+        commandId: CommandId.make("command-steer-late"),
+        threadId,
+        expectedTurnId,
+        message,
+        createdAt,
+        requestedAt,
+      },
+    });
+
+  const expectDeferredRejection = (result: unknown) => {
+    const events = (Array.isArray(result) ? result : [result]) as ReadonlyArray<{
+      readonly type: string;
+      readonly payload: Record<string, unknown>;
+    }>;
+    expect(events.map((event) => event.type)).toEqual([
+      "thread.turn-steer-rejected",
+      "thread.activity-appended",
+    ]);
+    expect(events[0]?.payload).toMatchObject({ messageId, reason: "deferred" });
+    expect(events[1]?.payload.activity).toMatchObject({
+      id: "turn-steer-rejected:command-steer-late",
+      kind: "provider.turn.steer.failed",
+      tone: "info",
+      summary: "Steer deferred",
+      payload: { messageId, reason: "deferred" },
+    });
+  };
+
+  it("defers a steer when the thread has no running session", async () => {
+    const idle: OrchestrationReadModel = {
+      ...readModel,
+      threads: [
+        {
+          ...thread,
+          session: { ...thread.session!, status: "ready", activeTurnId: null },
+        },
+      ],
+    };
+    expectDeferredRejection(await Effect.runPromise(steerCommand(idle)));
+  });
+
+  it("defers a steer aimed at a turn that is no longer active", async () => {
+    expectDeferredRejection(
+      await Effect.runPromise(steerCommand(readModel, TurnId.make("turn-ended"))),
+    );
+  });
+
+  const resolveRejected = (resolution: {
+    readonly error: string;
+    readonly reason?: "deferred" | "failed";
+  }) =>
+    decideOrchestrationCommand({
+      readModel,
+      command: {
+        type: "thread.turn.steer.resolve",
+        commandId: CommandId.make("command-steer-rejected"),
+        requestCommandId: CommandId.make("command-steer-request"),
+        threadId,
+        expectedTurnId: turnId,
+        message,
+        createdAt,
+        requestedAt,
+        resolution: { status: "rejected", resolvedAt, ...resolution },
+      },
+    });
+
+  it("records a deferred provider rejection as a quiet info activity", async () => {
+    const result = await Effect.runPromise(
+      resolveRejected({ error: "The turn finished.", reason: "deferred" }),
+    );
+    const events = Array.isArray(result) ? result : [result];
+    const activity = events[1];
+    expect(activity?.type).toBe("thread.activity-appended");
+    if (activity?.type !== "thread.activity-appended") return;
+    expect(activity.payload.activity).toMatchObject({
+      id: "turn-steer-rejected:command-steer-request",
+      tone: "info",
+      summary: "Steer deferred",
+      payload: { reason: "deferred", error: "The turn finished." },
+    });
+  });
+
+  it("reads a resolve without a reason as a failed steer", async () => {
+    const result = await Effect.runPromise(resolveRejected({ error: "Provider exploded." }));
+    const events = Array.isArray(result) ? result : [result];
+    const rejected = events[0];
+    expect(rejected?.type === "thread.turn-steer-rejected" && rejected.payload.reason).toBe(
+      "failed",
+    );
+    const activity = events[1];
+    if (activity?.type !== "thread.activity-appended") throw new Error("missing activity");
+    expect(activity.payload.activity).toMatchObject({
+      tone: "error",
+      summary: "Steer failed",
+      payload: { reason: "failed", error: "Provider exploded." },
+    });
+  });
 });

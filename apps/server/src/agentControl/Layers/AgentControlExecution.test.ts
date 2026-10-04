@@ -672,96 +672,101 @@ it.effect(
     }),
 );
 
-it.effect("falls back from rejected steering to queueing and records the delivery", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const targetTurnId = TurnId.make("turn-target");
-      const runningTarget = {
-        ...target,
-        session: {
-          threadId,
-          status: "running" as const,
-          providerName: "codex",
-          providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeSessionId: RuntimeSessionId.make("runtime-target"),
-          runtimeMode: "auto" as const,
-          activeTurnId: targetTurnId,
-          lastError: null,
-          updatedAt: now,
-        },
-      };
-      const steerPlan = { ...plan, delivery: "steer" as const };
-      const proposal: AgentControlProposal = {
-        ...approvedProposal,
-        proposalId: AgentControlProposalId.make("proposal-steer-fallback"),
-        requestId: AgentControlRequestId.make("request-steer-fallback"),
-        principal:
-          approvedProposal.principal.kind === "provider-session"
-            ? {
-                ...approvedProposal.principal,
-                targetSnapshots: [
-                  {
-                    threadId,
-                    projectId,
-                    runtimeMode: "auto",
-                    envMode: "local",
-                    archived: false,
-                    activeTurnId: targetTurnId,
-                  },
-                ],
-              }
-            : approvedProposal.principal,
-        plan: steerPlan,
-        planDigest: computeAgentControlPlanDigest(steerPlan),
-      };
-      const stores = yield* makeExecutionStores(proposal);
-      const events = yield* PubSub.unbounded<never>();
-      const commands = yield* Ref.make<ReadonlyArray<ClientOrchestrationCommand>>([]);
-      let reads = 0;
+for (const reason of [undefined, "deferred"] as const) {
+  it.effect(
+    `falls back from rejected steering to queueing and records the delivery (reason: ${String(reason)})`,
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const targetTurnId = TurnId.make("turn-target");
+          const runningTarget = {
+            ...target,
+            session: {
+              threadId,
+              status: "running" as const,
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeSessionId: RuntimeSessionId.make("runtime-target"),
+              runtimeMode: "auto" as const,
+              activeTurnId: targetTurnId,
+              lastError: null,
+              updatedAt: now,
+            },
+          };
+          const steerPlan = { ...plan, delivery: "steer" as const };
+          const proposal: AgentControlProposal = {
+            ...approvedProposal,
+            proposalId: AgentControlProposalId.make("proposal-steer-fallback"),
+            requestId: AgentControlRequestId.make("request-steer-fallback"),
+            principal:
+              approvedProposal.principal.kind === "provider-session"
+                ? {
+                    ...approvedProposal.principal,
+                    targetSnapshots: [
+                      {
+                        threadId,
+                        projectId,
+                        runtimeMode: "auto",
+                        envMode: "local",
+                        archived: false,
+                        activeTurnId: targetTurnId,
+                      },
+                    ],
+                  }
+                : approvedProposal.principal,
+            plan: steerPlan,
+            planDigest: computeAgentControlPlanDigest(steerPlan),
+          };
+          const stores = yield* makeExecutionStores(proposal);
+          const events = yield* PubSub.unbounded<never>();
+          const commands = yield* Ref.make<ReadonlyArray<ClientOrchestrationCommand>>([]);
+          let reads = 0;
 
-      const execution = yield* makeTestExecution({
-        proposalStore: stores.proposalStore,
-        operationStore: stores.operationStore,
-        engine: { subscribeDomainEvents: PubSub.subscribe(events) },
-        commandApplication: {
-          apply: (command: ClientOrchestrationCommand) =>
-            Effect.gen(function* () {
-              yield* Ref.update(commands, (current) => [...current, command]);
-              if (command.type === "thread.turn.steer") {
-                yield* PubSub.publish(events, {
-                  type: "thread.turn-steer-rejected",
-                  payload: {
-                    threadId,
-                    messageId: command.message.messageId,
-                  },
-                } as never);
-              }
-              return { sequence: (yield* Ref.get(commands)).length };
-            }),
-          applyWithDispatcher: () => Effect.die("unused"),
-        },
-        projections: {
-          getThreadShellById: () =>
-            Effect.sync(() => {
-              reads += 1;
-              return Option.some(reads === 1 ? runningTarget : target);
-            }),
-        },
-      });
+          const execution = yield* makeTestExecution({
+            proposalStore: stores.proposalStore,
+            operationStore: stores.operationStore,
+            engine: { subscribeDomainEvents: PubSub.subscribe(events) },
+            commandApplication: {
+              apply: (command: ClientOrchestrationCommand) =>
+                Effect.gen(function* () {
+                  yield* Ref.update(commands, (current) => [...current, command]);
+                  if (command.type === "thread.turn.steer") {
+                    yield* PubSub.publish(events, {
+                      type: "thread.turn-steer-rejected",
+                      payload: {
+                        threadId,
+                        messageId: command.message.messageId,
+                        ...(reason !== undefined ? { reason } : {}),
+                      },
+                    } as never);
+                  }
+                  return { sequence: (yield* Ref.get(commands)).length };
+                }),
+              applyWithDispatcher: () => Effect.die("unused"),
+            },
+            projections: {
+              getThreadShellById: () =>
+                Effect.sync(() => {
+                  reads += 1;
+                  return Option.some(reads === 1 ? runningTarget : target);
+                }),
+            },
+          });
 
-      yield* execution.executeApproved(proposal.proposalId);
+          yield* execution.executeApproved(proposal.proposalId);
 
-      assert.deepStrictEqual(
-        (yield* Ref.get(commands)).map((command) => command.type),
-        ["thread.turn.steer", "thread.turn.start"],
-      );
-      const settled = yield* Ref.get(stores.proposalRef);
-      assert.strictEqual(settled.result?.outcome, "completed");
-      if (settled.result?.outcome !== "completed") return;
-      assert.strictEqual(settled.result.execution?.delivery, "queued-after-steer-fallback");
-    }),
-  ),
-);
+          assert.deepStrictEqual(
+            (yield* Ref.get(commands)).map((command) => command.type),
+            ["thread.turn.steer", "thread.turn.start"],
+          );
+          const settled = yield* Ref.get(stores.proposalRef);
+          assert.strictEqual(settled.result?.outcome, "completed");
+          if (settled.result?.outcome !== "completed") return;
+          assert.strictEqual(settled.result.execution?.delivery, "queued-after-steer-fallback");
+        }),
+      ),
+  );
+}
 
 it.effect("records the requested turn and observed settled state for interrupts", () =>
   Effect.gen(function* () {
