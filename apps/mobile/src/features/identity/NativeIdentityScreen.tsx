@@ -338,15 +338,17 @@ export function NativeIdentityScreen() {
   const externalProviderActions = deriveHostedProviderSignInActions(externalIdentityConfiguration);
   const hostedAccountStatus = useHostedHubStore((state) => state.accountStatus);
   const hostedErrorReason = useHostedHubStore((state) => state.errorReason ?? null);
+  const hostedAccessRetrying = useHostedHubStore((state) => state.accessRecoveryPending === true);
   const [signInRequested, setSignInRequested] = useState(false);
   const [retryingSavedSession, setRetryingSavedSession] = useState(false);
   // A launch that could not reach the Hub keeps the stored session; the shared
-  // runtime retries it on its own and on foreground/online. Show that instead
-  // of a sign-in form the user does not need. Only the token's presence is
-  // read, and only for presentation.
+  // runtime retries it on its own (when the failure is transient) and on
+  // foreground/online. Show that instead of a sign-in form the user does not
+  // need. Only the token's presence is read, and only for presentation.
   const savedSession = deriveSavedHubSessionView({
     accountStatus: hostedAccountStatus,
     errorReason: hostedErrorReason,
+    retrying: hostedAccessRetrying,
     savedSession: (mobileSessionCredentials.readBearerToken?.() ?? null) !== null,
     entryScreen: screen.name === "entry",
     signInRequested,
@@ -806,7 +808,7 @@ export function NativeIdentityScreen() {
   };
 
   const title =
-    savedSession.kind === "reconnecting"
+    savedSession.kind === "saved-session"
       ? savedSession.title
       : screen.name === "entry"
         ? "Log in or sign up"
@@ -851,7 +853,7 @@ export function NativeIdentityScreen() {
             {title}
           </Text>
           <Text className="mx-auto mt-2 max-w-[330px] text-center text-sm leading-relaxed text-foreground-muted">
-            {savedSession.kind === "reconnecting"
+            {savedSession.kind === "saved-session"
               ? savedSession.detail
               : screen.name === "recovery-codes"
                 ? "Store these somewhere safe. Each code works once."
@@ -861,13 +863,13 @@ export function NativeIdentityScreen() {
                     ? mailboxCodePrompt(screen.presentation)
                     : "Native account access on Ryco Hub"}
           </Text>
-          {savedSession.kind === "reconnecting" ? (
+          {savedSession.kind === "saved-session" ? (
             <Text className="mx-auto mt-3 max-w-[330px] text-center text-sm leading-relaxed text-foreground-muted">
               {savedSession.note}
             </Text>
           ) : null}
 
-          {error && savedSession.kind !== "reconnecting" ? (
+          {error && savedSession.kind !== "saved-session" ? (
             <View className="mt-5">
               <ErrorBanner message={error} />
             </View>
@@ -875,7 +877,7 @@ export function NativeIdentityScreen() {
           {notice ? <Text className="mt-4 text-center text-sm text-success">{notice}</Text> : null}
 
           <View className="mt-7 gap-3">
-            {savedSession.kind === "reconnecting" ? (
+            {savedSession.kind === "saved-session" ? (
               <>
                 <Action
                   label="Try again"
@@ -1356,7 +1358,9 @@ export function NativeIdentityScreen() {
             ) : null}
           </View>
 
-          {busy || savedSession.kind === "reconnecting" ? (
+          {busy ||
+          (savedSession.kind === "saved-session" &&
+            (savedSession.waiting || retryingSavedSession)) ? (
             <ActivityIndicator className="mt-5" />
           ) : null}
         </View>

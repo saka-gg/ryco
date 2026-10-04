@@ -319,6 +319,7 @@ describe("hosted account state", () => {
       account: null,
       session: null,
       effectiveRole: null,
+      accessRecoveryPending: true,
     });
   });
 
@@ -344,12 +345,14 @@ describe("hosted account state", () => {
     // Bounded exponential backoff: the second retry waits twice as long.
     await vi.advanceTimersByTimeAsync(1_999);
     expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accessRecoveryPending).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
     expect(restoreSession).toHaveBeenCalledTimes(3);
     await vi.waitFor(() =>
       expect(hostedHubStore.getState()).toMatchObject({
         accountStatus: "authenticated",
         directoryStatus: "ready",
+        accessRecoveryPending: false,
       }),
     );
     expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
@@ -386,7 +389,11 @@ describe("hosted account state", () => {
 
     expect(restoreSession).toHaveBeenCalledOnce();
     expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
-    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+    // Surfaces must not promise an automatic retry that is not coming.
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "unavailable",
+      accessRecoveryPending: false,
+    });
   });
 
   it("holds a bootstrap retry that comes due in the background until the next foreground", async () => {
@@ -1514,6 +1521,7 @@ describe("hosted registration and directory state", () => {
       expect(hostedHubStore.getState()).toMatchObject({
         browserStatus: "stale",
         sessionStatus: "stale",
+        accessRecoveryPending: true,
       });
       expect(activateHostedNode).not.toHaveBeenCalled();
 
@@ -1618,7 +1626,10 @@ describe("hosted registration and directory state", () => {
     await vi.advanceTimersByTimeAsync(300_000);
 
     expect(restoreSession).toHaveBeenCalledOnce();
-    expect(hostedHubStore.getState().browserStatus).toBe("stale");
+    expect(hostedHubStore.getState()).toMatchObject({
+      browserStatus: "stale",
+      accessRecoveryPending: false,
+    });
   });
 
   it("still recovers a stale browser after the user returns to the directory", async () => {

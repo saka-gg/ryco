@@ -68,6 +68,16 @@ export interface HostedHubState {
   readonly errorMessage: string | null;
   /** Client-known failure category used by native/web presentation; never server detail. */
   readonly errorReason?: HostedHubFailureReason | null;
+  /**
+   * Whether the runtime re-runs a failed access check on its own — on its
+   * backoff timer, or on the next foreground when it came due in the
+   * background — so a surface may promise that it "keeps trying". `false` for
+   * a definite Hub answer, which only a lifecycle signal or the user re-checks.
+   * Published with every `unavailable` account and `stale` browser; it means
+   * nothing alongside any other status. Optional for the same fixture reason
+   * as `totpEnrollment`.
+   */
+  readonly accessRecoveryPending?: boolean;
   readonly generation: number;
 }
 
@@ -90,6 +100,7 @@ const initialState: HostedHubState = {
   totpEnrollment: null,
   errorMessage: null,
   errorReason: null,
+  accessRecoveryPending: false,
   generation: 0,
 };
 
@@ -540,7 +551,9 @@ class HostedHubController {
    */
   adoptSessionCredential(commit: () => Promise<boolean>): Promise<boolean> {
     const operation = this.#replaceOperation();
-    this.#resetAccessRetry();
+    // A new credential starts its backoff over. The published pending flag is
+    // left alone: a check is still coming, and its outcome replaces it.
+    this.#accessRetryPolicy.reset();
     let committed = false;
     const promise = commit()
       .catch(() => false)
@@ -592,12 +605,13 @@ class HostedHubController {
         // clearing it here turned every offline launch into a forced sign-in.
         // The material is kept and the access check retried instead; the
         // account stays `unavailable`, which grants nothing.
+        const retrying = this.#scheduleAccessRetry(error);
         patchState({
           ...initialState,
           accountStatus: "unavailable",
           ...hostedErrorPatch(error),
+          accessRecoveryPending: retrying,
         });
-        this.#scheduleAccessRetry(error);
         return undefined;
       });
   }
@@ -1799,12 +1813,16 @@ class HostedHubController {
         await this.expireSession(error);
         return;
       }
-      patchState({ browserStatus: "stale", ...hostedErrorPatch(error) });
       // Suspension already cleared the directory timer and this failure came
       // before `refreshDirectory`, so nothing else would ever resume a `stale`
       // browser short of another visibility/online event or a manual refresh.
       // The retry re-runs the whole resume, never a shortcut to `current`.
-      this.#scheduleAccessRetry(error);
+      const retrying = this.#scheduleAccessRetry(error);
+      patchState({
+        browserStatus: "stale",
+        ...hostedErrorPatch(error),
+        accessRecoveryPending: retrying,
+      });
     }
   }
 
@@ -2253,11 +2271,12 @@ class HostedHubController {
    * the surface stayed unavailable until the user found a manual repair. Only
    * transient failures are retried, the delay honors a Hub `retryAfterMs`, and
    * the retry re-enters through {@link recoverAfterConnectivity} after
-   * re-checking the state it was armed for.
+   * re-checking the state it was armed for. Returns whether a retry is now
+   * pending, for the failure patch to publish as `accessRecoveryPending`.
    */
-  #scheduleAccessRetry(error: unknown): void {
+  #scheduleAccessRetry(error: unknown): boolean {
     this.#cancelAccessRetry();
-    if (!isTransientAccessFailure(error)) return;
+    if (!isTransientAccessFailure(error)) return false;
     const delay = this.#accessRetryPolicy.nextDelay(
       error instanceof HostedHubApiError ? error.retryAfterMs : undefined,
     );
@@ -2265,6 +2284,7 @@ class HostedHubController {
       this.#accessRetryTimer = null;
       this.#runAccessRetry();
     }, delay);
+    return true;
   }
 
   #runAccessRetry(): void {
@@ -2301,6 +2321,9 @@ class HostedHubController {
   #resetAccessRetry(): void {
     this.#cancelAccessRetry();
     this.#accessRetryPolicy.reset();
+    if (hostedHubStore.getState().accessRecoveryPending) {
+      patchState({ accessRecoveryPending: false });
+    }
   }
 
   #scheduleDirectory(delay: number): void {
