@@ -3,7 +3,8 @@ import { useEffect } from "react";
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
 import { getMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
-import { hostedHubController, useHostedHubStore } from "./state";
+import { createRetainedWake } from "./retainedWake";
+import { hostedHubController, hostedHubStore, useHostedHubStore } from "./state";
 
 /**
  * Drives the hosted browser lifecycle from app foreground/background and
@@ -23,27 +24,38 @@ export function useHostedAppLifecycle(): void {
 
   useEffect(() => {
     if (!recoverable) return;
-    return mobileAppLifecycle.subscribe((event) => {
+    const retainedWake = createRetainedWake({
+      read: () => hostedHubStore.getState(),
+      subscribe: (listener) => hostedHubStore.subscribe(listener),
+      wake: () => getMobileHostedConnectionCoordinator().reconnectRetainedAfterForeground(),
+    });
+    const unsubscribe = mobileAppLifecycle.subscribe((event) => {
       switch (event) {
         case "background":
+          retainedWake.cancel();
           void (async () => {
             await getMobileHostedConnectionCoordinator().releaseNonRetainedForBackground();
             hostedHubController.suspendBrowser("hidden");
           })();
           return;
         case "offline":
+          retainedWake.cancel();
           hostedHubController.suspendBrowser("offline");
           return;
         case "foreground":
-        case "online":
-          void hostedHubController
-            .recoverAfterConnectivity()
-            .then(() => getMobileHostedConnectionCoordinator().reconnectRetainedAfterForeground());
+        case "online": {
+          const settled = retainedWake.begin();
+          void hostedHubController.recoverAfterConnectivity().then(settled);
           return;
+        }
         default:
           // "resume" is emitted alongside "foreground"; the resume above covers it.
           return;
       }
     });
+    return () => {
+      unsubscribe();
+      retainedWake.cancel();
+    };
   }, [recoverable]);
 }

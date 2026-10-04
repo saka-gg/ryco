@@ -398,8 +398,11 @@ export function hostedAccountRecoversOnConnectivity(status: HostedAccountStatus)
  * The states the access-recovery backoff exists to leave: an account whose
  * bootstrap could not reach the Hub, and an authenticated browser whose resume
  * could not revalidate access and is therefore `stale` (no mutation authority).
+ * Exported for platform work deferred until such a recovery has landed.
  */
-function awaitsAccessRecovery(state: HostedHubState): boolean {
+export function hostedAccessAwaitsRecovery(
+  state: Pick<HostedHubState, "accountStatus" | "browserStatus">,
+): boolean {
   return (
     state.accountStatus === "unavailable" ||
     (state.accountStatus === "authenticated" && state.browserStatus === "stale")
@@ -2364,7 +2367,7 @@ class HostedHubController {
   }
 
   #runAccessRetry(): void {
-    if (!awaitsAccessRecovery(hostedHubStore.getState())) return;
+    if (!hostedAccessAwaitsRecovery(hostedHubStore.getState())) return;
     const runtime = getHostedRuntimeConfiguration();
     if (!runtime.isForeground()) {
       // A background surface retries on its next foreground, not on a timer.
