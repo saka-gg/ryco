@@ -302,6 +302,13 @@ function isHostedWebConnectableNode(node: HostedHubNode): boolean {
  */
 export interface HostedDemandReadiness {
   readonly connectable: boolean;
+  /**
+   * The selected node's relay attempt ended in a terminal failure. A terminal
+   * failure (and the session-sync deadline) hands a `synchronizing` browser
+   * back as `current` in the same patch, so a readiness edge that arrives with
+   * one is the failure itself, not a reason the node could now be served.
+   */
+  readonly relayFailed: boolean;
   readonly eligible: ReadonlySet<EnvironmentId>;
 }
 
@@ -311,6 +318,7 @@ export function readHostedDemandReadiness(state: HostedHubState): HostedDemandRe
       state.accountStatus === "authenticated" &&
       state.directoryStatus === "ready" &&
       state.browserStatus === "current",
+    relayFailed: state.selectedNode !== null && state.transportStatus === "terminal-failure",
     eligible: new Set(
       state.nodes.filter(isHostedWebConnectableNode).map((node) => node.environmentId),
     ),
@@ -324,10 +332,13 @@ export function readHostedDemandReadiness(state: HostedHubState): HostedDemandRe
  *
  * Without this the coordinator re-planned only on scope changes and its 25s
  * renewal tick, so demand whose connect had been refused waited for the next
- * tick after the directory poll saw the node, about 45s at worst. It is edge
- * triggered on directory and browser state, never on a relay failure: a
- * terminal relay failure is retried by the renewal tick, which is the backoff
- * that keeps a node failing its handshake from being hot-retried.
+ * tick after the directory poll saw the node, about 45s at worst. A presence
+ * edge is a new answer from the directory and always counts. A readiness edge
+ * never counts while the selected relay is terminally failed: the failure is
+ * what turned the browser `current`, and re-planning then would open a fresh
+ * ticket and handshake at once — after an E2EE FATAL-PRE, which must never be
+ * hot-retried, or for a grant that was just revoked. Such a node is retried
+ * by the renewal tick, or by its presence coming back.
  */
 export function hostedDemandUnblocked(
   previous: HostedDemandReadiness,
@@ -337,7 +348,8 @@ export function hostedDemandUnblocked(
   if (!next.connectable) return false;
   for (const environmentId of demanded) {
     if (!next.eligible.has(environmentId)) continue;
-    if (!previous.connectable || !previous.eligible.has(environmentId)) return true;
+    if (!previous.eligible.has(environmentId)) return true;
+    if (!previous.connectable && !next.relayFailed) return true;
   }
   return false;
 }

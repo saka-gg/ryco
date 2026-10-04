@@ -313,6 +313,28 @@ describe("hosted Web demand follows directory state", () => {
     expect(hostedDemandUnblocked(offline, online, [other])).toBe(false);
     expect(hostedDemandUnblocked(online, offline, [env])).toBe(false);
     expect(hostedDemandUnblocked(offline, stale, [env])).toBe(false);
+
+    // A terminal relay failure hands a synchronizing browser back as current;
+    // that edge is the failure, but a presence edge is still the directory's.
+    const synchronizing = readHostedDemandReadiness({
+      ...hostedHubStore.getInitialState(),
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "synchronizing",
+      nodes: [hubNode(env, true)],
+      selectedNode: hubNode(env, true),
+      transportStatus: "connecting",
+    });
+    const failed = readHostedDemandReadiness({
+      ...hostedHubStore.getInitialState(),
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      nodes: [hubNode(env, true)],
+      selectedNode: hubNode(env, true),
+      transportStatus: "terminal-failure",
+    });
+    expect(hostedDemandUnblocked(synchronizing, failed, [env])).toBe(false);
+    expect(hostedDemandUnblocked(offline, failed, [env])).toBe(true);
   });
 
   it("connects held demand as soon as the directory sees its node come online", async () => {
@@ -368,6 +390,98 @@ describe("hosted Web demand follows directory state", () => {
     hostedHubStore.setState({ browserStatus: "current" });
 
     await vi.waitFor(() => expect(selectNode).toHaveBeenCalledOnce());
+    releaseScope();
+    stop();
+  });
+
+  it.each([
+    [
+      "an E2EE-fatal handshake close",
+      (generation: number) =>
+        hostedHubController.failure(generation, {
+          kind: "protocol",
+          retryable: false,
+          closeReason: "channel_rejected",
+        }),
+    ],
+    [
+      "a revoked grant",
+      (generation: number) =>
+        hostedHubController.failure(generation, { kind: "revoked", retryable: false }),
+    ],
+    [
+      // The session-sync deadline hands a `synchronizing` browser back the same
+      // way: terminal transport and `current` browser in one patch.
+      "the session-sync deadline",
+      () =>
+        hostedHubStore.setState({ transportStatus: "terminal-failure", browserStatus: "current" }),
+    ],
+  ])("never hot-retries a relay channel after %s hands the browser back", async (_label, fail) => {
+    const env = environment(8);
+    const node = hubNode(env, true);
+    signedInDirectory([node], "synchronizing");
+    hostedHubStore.setState({
+      selectedNode: node,
+      selectionStatus: "online",
+      transportStatus: "connecting",
+      generation: 3,
+    });
+    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
+    const retrySelectedNode = vi
+      .spyOn(hostedHubController, "retrySelectedNode")
+      .mockResolvedValue();
+    const stop = startWithoutRenewalTick();
+    const releaseScope = hostedWebConnectionScopes.retain(env, {
+      type: "thread-detail",
+      threadId: thread(8),
+    });
+    await settleCoordinator();
+
+    fail(3);
+    expect(hostedHubStore.getState()).toMatchObject({
+      transportStatus: "terminal-failure",
+      browserStatus: "current",
+    });
+    await settleCoordinator();
+    await settleCoordinator();
+
+    // The browser turning `current` here is the failure itself, not a new
+    // reason the node could be served; only the renewal tick may retry it.
+    expect(retrySelectedNode).not.toHaveBeenCalled();
+    expect(selectNode).not.toHaveBeenCalled();
+    releaseScope();
+    stop();
+  });
+
+  it("still reconnects a terminally failed node once the directory sees it come back", async () => {
+    const env = environment(9);
+    signedInDirectory([hubNode(env, false)]);
+    hostedHubStore.setState({
+      selectedNode: hubNode(env, false),
+      selectionStatus: "offline",
+      transportStatus: "terminal-failure",
+      generation: 3,
+    });
+    vi.spyOn(hostedHubController, "watchDirectoryPresence").mockReturnValue(() => undefined);
+    const retrySelectedNode = vi
+      .spyOn(hostedHubController, "retrySelectedNode")
+      .mockImplementation(async () => {
+        // A retry opens a fresh relay attempt for the same selection.
+        hostedHubStore.setState({ transportStatus: "connecting" });
+      });
+    const stop = startWithoutRenewalTick();
+    const releaseScope = hostedWebConnectionScopes.retain(env, {
+      type: "thread-detail",
+      threadId: thread(9),
+    });
+    await settleCoordinator();
+    expect(retrySelectedNode).not.toHaveBeenCalled();
+
+    // A presence edge is a new signal from the directory, not the failure
+    // echoing back, so it re-plans at once.
+    hostedHubStore.setState({ nodes: [hubNode(env, true)] });
+
+    await vi.waitFor(() => expect(retrySelectedNode).toHaveBeenCalledOnce());
     releaseScope();
     stop();
   });
