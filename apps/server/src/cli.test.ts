@@ -48,6 +48,7 @@ import {
   stubNativeNodeClaimService,
   stubPolicy,
 } from "./hubConnector/testUtils/e2eeOperatorStub.ts";
+import { E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY } from "./hubConnector/NodeE2eeOperator.ts";
 import { E2EE_CONTINUITY_UNRESOLVABLE_REMEDY } from "./hubIdentity/NodeIdentityContinuityStore.ts";
 import { E2EE_PREKEY_EXPIRED_REMEDY } from "./hubIdentity/NodeE2eePrekeyClient.ts";
 
@@ -1118,6 +1119,33 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
             status: "unavailable",
             reason: "anchor_disagrees",
             remedy: E2EE_CONTINUITY_UNRESOLVABLE_REMEDY,
+          }),
+        },
+      );
+    }),
+  );
+
+  it.effect("says a backend that does not own the identity did not read its continuity", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-e2ee-continuity-in-use-test-"));
+      yield* withLiveHubCliServer(
+        baseDir,
+        () =>
+          Effect.gen(function* () {
+            const continuity = yield* captureStdout(
+              runCli(["e2ee", "continuity", "show", "--base-dir", baseDir]),
+            );
+            // Not a lineage, so nothing that reads as one — and the sentence
+            // that says which copy of Ryco to ask instead.
+            assert.include(continuity.output, "Continuity: not read here");
+            assert.include(continuity.output, E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY);
+            assert.notInclude(continuity.output, "advertisable");
+            assert.notInclude(continuity.output, "Continuity id");
+          }),
+        {
+          readContinuity: async () => ({
+            status: "identity_in_use",
+            remedy: E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY,
           }),
         },
       );

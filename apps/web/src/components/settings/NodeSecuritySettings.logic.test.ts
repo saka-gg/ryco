@@ -1,7 +1,11 @@
 import { E2EE_SAFETY_NUMBER_DIGITS, E2EE_WEB_SAS_CHARS } from "@ryco/shared/relayE2eeConstants";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { NodeE2eeClientRecord } from "@ryco/client-runtime/connection";
+import type {
+  NodeE2eeClientListing,
+  NodeE2eeClientRecord,
+  NodeE2eeContinuity,
+} from "@ryco/client-runtime/connection";
 
 import {
   E2EE_WEB_SAS_ADVISORY,
@@ -16,6 +20,7 @@ import {
   nodeClientRows,
   nodeClientRowTitle,
   nodeConnectionStatement,
+  nodeContinuityRemedy,
   nodeContinuityRows,
   nodeE2eeActionConfirmation,
   nodeE2eePairingWindowConfirmation,
@@ -38,7 +43,9 @@ import {
   nodeRefusedAttemptsDescription,
   nodeSafetyNumberGroups,
   nodeSafetyNumberView,
+  mergeNodeSecurityReads,
   nodeSecurityMode,
+  nodeSecurityReadFailure,
   nodeSessionRows,
   nodeSessionVerificationView,
   NODE_APPROVAL_REVOKED_NOTICE,
@@ -1070,6 +1077,104 @@ describe("§6.4 and §7.5 carry their own remedies", () => {
       chainLength: 2,
     });
     expect(rows.find((row) => row.label === "Rotation generation")!.value).toBe("7");
+  });
+
+  it("says a chain another copy of Ryco owns was not read here, in the node's words", () => {
+    const continuity: NodeE2eeContinuity = {
+      status: "identity_in_use",
+      remedy: "Another copy of Ryco is using this machine's Hub identity.",
+    };
+    // No lineage row at all: nothing here read one, so nothing may look like one.
+    expect(nodeContinuityRows(continuity)).toEqual([
+      { label: "Continuity", value: "not read here" },
+    ]);
+    expect(nodeContinuityRemedy(continuity)).toBe(
+      "Another copy of Ryco is using this machine's Hub identity.",
+    );
+  });
+});
+
+describe("each operator read stands on its own", () => {
+  const LISTING: NodeE2eeClientListing = {
+    records: [],
+    pendingGlobalSaturated: false,
+    saturatedAccounts: [],
+    refusedPairingAttempts: 0,
+  };
+  const EMPTY = {
+    clients: null,
+    sessions: null,
+    policy: null,
+    prekey: null,
+    continuity: null,
+    fallback: null,
+  };
+  const answered = <A>(value: A): PromiseFulfilledResult<A> => ({ status: "fulfilled", value });
+  const refused = (message: string): PromiseRejectedResult => ({
+    status: "rejected",
+    reason: new Error(message),
+  });
+
+  it("draws every read that answered when one beside it fails", () => {
+    const results = {
+      clients: answered(LISTING),
+      sessions: answered({ sessions: [] }),
+      policy: refused("Unable to read the node admission policy."),
+      prekey: answered({ present: false }),
+      continuity: refused("Hub E2EE operation failed."),
+      fallback: answered({
+        peerLegacy: { occurrences: 0, ringOverflows: 0 },
+        advertisementUnavailable: { occurrences: 0, ringOverflows: 0 },
+        ring: [],
+      }),
+    };
+    const reads = mergeNodeSecurityReads(EMPTY, results);
+    expect(reads.clients).toBe(LISTING);
+    expect(reads.sessions).toEqual({ sessions: [] });
+    expect(reads.prekey).toEqual({ present: false });
+    expect(reads.fallback).not.toBeNull();
+    // The failures stay a stated absence, and the first one is the message.
+    expect(reads.policy).toBeNull();
+    expect(reads.continuity).toBeNull();
+    expect(nodeSecurityReadFailure(results)).toBe("Unable to read the node admission policy.");
+  });
+
+  it("keeps a failed read's last value rather than blanking it", () => {
+    const previous = { ...EMPTY, clients: LISTING };
+    const results = {
+      clients: refused("Unable to read client authorization records."),
+      sessions: answered({ sessions: [] }),
+      policy: refused("down"),
+      prekey: refused("down"),
+      continuity: refused("down"),
+      fallback: refused("down"),
+    };
+    // An emptied list would read as "nothing is authorized".
+    expect(mergeNodeSecurityReads(previous, results).clients).toBe(LISTING);
+    expect(nodeSecurityReadFailure(results)).toBe("Unable to read client authorization records.");
+  });
+
+  it("reports no failure once every read answers", () => {
+    const results = {
+      clients: answered(LISTING),
+      sessions: answered({ sessions: [] }),
+      policy: answered({
+        requireE2EE: false,
+        requireApprovedClientE2EE: false,
+        effectiveRequireE2EE: false,
+        admittedPatterns: ["IK" as const],
+        suiteRegistry: [1],
+        generation: 1,
+      }),
+      prekey: answered({ present: false }),
+      continuity: answered<NodeE2eeContinuity>({ status: "identity_in_use" }),
+      fallback: answered({
+        peerLegacy: { occurrences: 0, ringOverflows: 0 },
+        advertisementUnavailable: { occurrences: 0, ringOverflows: 0 },
+        ring: [],
+      }),
+    };
+    expect(nodeSecurityReadFailure(results)).toBeNull();
   });
 });
 

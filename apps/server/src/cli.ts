@@ -2384,6 +2384,13 @@ const formatE2eeContinuity = (view: E2eeContinuityView, json: boolean): string =
       .filter((line) => line.length > 0)
       .join("\n");
   }
+  if (view.status === "identity_in_use") {
+    // Not a lineage state: this backend does not own the identity, and the
+    // sentence says which copy to ask.
+    return ["Continuity: not read here", view.remedy ?? ""]
+      .filter((line) => line.length > 0)
+      .join("\n");
+  }
   return [
     "Continuity: advertisable",
     `Continuity id: ${view.continuityId ?? "unset"}`,

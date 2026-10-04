@@ -403,11 +403,13 @@ refuses everything that writes what the owning backend relies on — starting or
 enrollment, leaving, the desktop's native node claim and local trusted introduction, and every E2EE
 owner command that changes state (client approval, narrowing, revocation and purge, approval QR
 codes, the pairing window, policy changes and generation recovery, prekey rotation, continuity
-commands, and the fallback reset) — and reading the continuity status, which runs the same chain
-repairs as startup. The other reads are still answered; the prekey read reports the stored
-certificate without issuing one. A backend whose connector is switched off or misconfigured does not
-hold the lock; it claims it for the length of a leave or one of those operations, and refuses while
-another backend holds it.
+commands, and the fallback reset). It does not read the continuity status either, because that read
+runs the same chain repairs as startup: `ryco e2ee continuity show` answers `not read here` with a
+sentence saying another copy of Ryco is using the identity, and the desktop's Security panel shows
+that sentence in its Continuity row. The other reads are still answered, and the panel still draws
+them; the prekey read reports the stored certificate without issuing one. A backend whose connector
+is switched off or misconfigured does not hold the lock; it claims it for the length of a leave, one
+of those operations, or a continuity read, and while another backend holds it, behaves as above.
 
 A lock left by a process that died — or by one from before a reboot, whose pid may since have been
 reused — is reclaimed automatically. The lock records the kernel's boot id where there is one (Linux

@@ -178,6 +178,12 @@ describe("HubConnectorLive", () => {
         for (const [name, operation] of Object.entries(ownerOperations(service))) {
           await expect(operation(), name).rejects.toBeInstanceOf(HubIdentityInUseError);
         }
+        // The continuity read can repair the chain, so it stays off the identity
+        // as well — but it answers, so the owner's Security panel still loads
+        // every read beside it and says which copy holds the identity.
+        await expect(service.e2ee.readContinuity()).resolves.toMatchObject({
+          status: "identity_in_use",
+        });
         // Nothing the refused operations would have run reached the runtime,
         // and neither did the deferred startup work.
         expect(calls.filter((call) => !call.startsWith("lock"))).toEqual([

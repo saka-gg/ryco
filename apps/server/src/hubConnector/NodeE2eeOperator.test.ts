@@ -9,8 +9,12 @@ import { describe, expect, it } from "vite-plus/test";
 import { makeNodeClientAuthorizationClient } from "../hubIdentity/NodeClientAuthorizationClient.ts";
 import { makeNodeClientAuthorizationStore } from "../hubIdentity/NodeClientAuthorizationStore.ts";
 import { E2eeClientListingView, E2eeClientRecordView } from "./e2eeOperatorContract.ts";
+import { HubIdentityInUseError } from "./HubConnector.ts";
 import type { HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
-import { makeNodeE2eeOperator } from "./NodeE2eeOperator.ts";
+import {
+  E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY,
+  makeNodeE2eeOperator,
+} from "./NodeE2eeOperator.ts";
 import { makeNodeE2eeSessionDirectory } from "./NodeE2eeSessionDirectory.ts";
 
 const key = {
@@ -35,7 +39,7 @@ describe("node E2EE operator", () => {
       sessions: makeNodeE2eeSessionDirectory(),
       hubOrigin: () => key.hubOrigin,
       asIdentityOwner: async () => {
-        throw new Error("in use by another Ryco process");
+        throw new HubIdentityInUseError();
       },
     });
 
@@ -55,18 +59,40 @@ describe("node E2EE operator", () => {
       remintContinuityId: () => operator.remintContinuityId(),
       breakContinuityChain: () => operator.breakContinuityChain(),
       resetFallback: () => operator.resetFallback(),
-      // Repairs the continuity chain as it reads it.
-      readContinuity: () => operator.readContinuity(),
     };
     for (const [name, command] of Object.entries(commands)) {
       await expect(command(), name).rejects.toThrow("in use by another Ryco process");
     }
+    // The continuity read repairs the chain as it reads it, so the gate keeps it
+    // off the identity too — but it answers, naming the other copy, rather than
+    // failing a panel that loads it beside the reads that are still answered.
+    await expect(operator.readContinuity()).resolves.toEqual({
+      status: "identity_in_use",
+      remedy: E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY,
+    });
     expect(touched).toEqual([]);
 
     // Reads go straight to the identity.
     await expect(operator.listClients()).rejects.toThrow("identity read");
     expect(() => operator.readPolicy()).toThrow("identity read");
     await expect(operator.readPrekey()).rejects.toThrow("identity read");
+  });
+
+  it("answers a continuity read only for another copy's claim, and fails every other refusal", async () => {
+    let refusal: Error = new HubIdentityInUseError();
+    const operator = makeNodeE2eeOperator({
+      identity: {} as HubIdentityRuntimeShape,
+      sessions: makeNodeE2eeSessionDirectory(),
+      hubOrigin: () => key.hubOrigin,
+      asIdentityOwner: async () => {
+        throw refusal;
+      },
+    });
+    await expect(operator.readContinuity()).resolves.toMatchObject({ status: "identity_in_use" });
+    // Only "another copy owns it" is a statement about who reads the chain; any
+    // other refusal is a failure, and must not read as an answer.
+    refusal = new Error("Hub identity is unavailable while stopping.");
+    await expect(operator.readContinuity()).rejects.toThrow("unavailable while stopping");
   });
 });
 

@@ -238,9 +238,13 @@ export type E2eePrekeyView = typeof E2eePrekeyView.Type;
  *
  * `unresolvable` carries the remedy string §7.5 writes for exactly this state,
  * so the surface that prints it cannot drift from the condition that raised it.
+ *
+ * `identity_in_use` is not a lineage state. It is a backend that does not own
+ * the identity declining to read a chain that reading can repair, and it
+ * carries its own remedy so the surface says which copy to ask.
  */
 export const E2eeContinuityView = Schema.Struct({
-  status: Schema.Literals(["advertisable", "unavailable"]),
+  status: Schema.Literals(["advertisable", "unavailable", "identity_in_use"]),
   continuityId: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
   generation: Schema.optional(BoundedCount),
   chainLength: Schema.optional(BoundedCount),

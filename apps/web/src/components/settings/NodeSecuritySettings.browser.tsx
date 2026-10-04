@@ -88,7 +88,7 @@ vi.mock("~/environments/primary", async (importOriginal) => ({
   }),
   fetchNodeE2eeContinuity: vi.fn(async () => {
     calls.push("continuity");
-    return CONTINUITY;
+    return readContinuity();
   }),
   fetchNodeE2eeFallback: vi.fn(async () => {
     calls.push("fallback");
@@ -295,6 +295,9 @@ const CONTINUITY: NodeE2eeContinuity = {
   chainLength: 2,
 };
 
+/** What the continuity route does in the current test. */
+let readContinuity: () => Promise<NodeE2eeContinuity> = async () => CONTINUITY;
+
 const FALLBACK: NodeE2eeFallback = {
   windowStartedAt: 1_700_000_000_000,
   peerLegacy: { occurrences: 1, ringOverflows: 0, lastOccurrenceAt: 1_700_000_100_000 },
@@ -308,6 +311,7 @@ beforeEach(() => {
   calls.length = 0;
   localSessionRole = "owner";
   clients = CLIENTS;
+  readContinuity = async () => CONTINUITY;
   // Call history only — the factory's implementations stay in place. Without it
   // an assertion in one test would be satisfied by a click in an earlier one.
   vi.clearAllMocks();
@@ -444,6 +448,34 @@ describe("local mode: the node's operator state, and no alarm about a relay that
     // …and a native session gets the pointer at the long-term value instead of a
     // blank that reads as a missing code.
     expect(document.body.textContent).toContain("Native sessions have no per-session code");
+  });
+
+  it("draws every other read, and names the other copy, in a backend that does not own the identity", async () => {
+    // The node's own sentence, carried rather than restated.
+    const remedy =
+      "Another copy of Ryco is using this machine's Hub identity, and only that copy reads the continuity chain.";
+    readContinuity = async () => ({ status: "identity_in_use", remedy });
+    await mountLocalPanel();
+
+    await expect.element(page.getByText(remedy)).toBeVisible();
+    expect(document.body.textContent).toContain("not read here");
+    // Nothing that reads as a lineage this backend never read.
+    expect(document.body.textContent).not.toContain("lineage-1");
+    expect(document.body.textContent).not.toContain("advertisable");
+    // It is an answer, not a failure: the panel raises no error over it.
+    expect(document.body.textContent).not.toContain("That didn't work");
+  });
+
+  it("draws the reads that answered when one of them fails", async () => {
+    readContinuity = async () => {
+      throw new Error("Unable to read continuity state.");
+    };
+    // The client list is drawn — the one section an empty panel would misreport
+    // as "nothing is authorized" — beside the failure, not instead of it.
+    await mountLocalPanel();
+    await expect.element(page.getByText("Unable to read continuity state.")).toBeVisible();
+    await expect.element(page.getByText(PREKEY.prekeyId!)).toBeVisible();
+    expect(document.body.textContent).toContain(NODE_SESSION_CODE);
   });
 });
 

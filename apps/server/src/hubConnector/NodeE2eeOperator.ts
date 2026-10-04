@@ -35,6 +35,7 @@ import type {
   E2eePrekeyView,
   E2eeSessionView,
 } from "./e2eeOperatorContract.ts";
+import { HubIdentityInUseError } from "./HubConnector.ts";
 import type { HubConnectorE2eeOperator } from "./HubConnectorLive.ts";
 import type { HubIdentityRuntimeShape, NodeE2eeContinuityStatus } from "./HubIdentityRuntime.ts";
 import type {
@@ -236,6 +237,16 @@ function prekeyView(certificate: NodeE2eePrekeyCertificate | null, now: number):
     ...(validity === "expired" ? { remedy: E2EE_PREKEY_EXPIRED_REMEDY } : {}),
   };
 }
+
+/**
+ * What the continuity read answers in a backend that does not own the identity.
+ *
+ * Reading the chain can repair it, so only the owner reads it — but refusing
+ * the read outright left the owner's panel with a generic failure in place of
+ * every other read beside it, and no word about the other copy.
+ */
+export const E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY =
+  "Another copy of Ryco is using this machine's Hub identity, and only that copy reads the continuity chain, because reading it can repair it. Read it there, or stop that copy and read it here.";
 
 function continuityView(status: NodeE2eeContinuityStatus): E2eeContinuityView {
   if (status.status === "unavailable") {
@@ -487,12 +498,17 @@ export function makeNodeE2eeOperator(options: {
   // Every command that changes durable state, or signs as the node, goes
   // through the owner gate. So does the continuity read, which runs §7.5's
   // repairs — a mint, a restore from the anchor, a recorded chain break — as it
-  // reads. The other reads, and clearing this process's own in-memory refusal
-  // count, do not: the prekey read reports the stored certificate without
-  // issuing one.
+  // reads; refused, it answers `identity_in_use` rather than failing, so the
+  // reads beside it still reach the owner. The other reads, and clearing this
+  // process's own in-memory refusal count, do not: the prekey read reports the
+  // stored certificate without issuing one.
   return {
     ...operator,
-    readContinuity: () => owned(() => operator.readContinuity()),
+    readContinuity: () =>
+      owned(() => operator.readContinuity()).catch((error: unknown): E2eeContinuityView => {
+        if (!(error instanceof HubIdentityInUseError)) throw error;
+        return { status: "identity_in_use", remedy: E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY };
+      }),
     approveClient: (input) => owned(() => operator.approveClient(input)),
     narrowClient: (input) => owned(() => operator.narrowClient(input)),
     revokeClient: (key) => owned(() => operator.revokeClient(key)),

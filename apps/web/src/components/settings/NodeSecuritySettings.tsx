@@ -3,16 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   NodeE2eeAuthorizationRequest,
-  NodeE2eeClientListing,
   NodeE2eeClientRecord,
-  NodeE2eeContinuity,
   NodeE2eeCrossDeviceApproval,
-  NodeE2eeFallback,
-  NodeE2eePolicy,
   NodeE2eePolicyChange,
   NodeE2eePolicyProposal,
-  NodeE2eePrekey,
-  NodeE2eeSessionList,
 } from "@ryco/client-runtime/connection";
 
 import { isHostedHubMode } from "../../env";
@@ -109,6 +103,8 @@ import {
   nodePendingInPartition,
   nodePendingPartitionWarning,
   nodeOperatorDataAvailability,
+  mergeNodeSecurityReads,
+  nodeSecurityReadFailure,
   nodePairingWindowRows,
   nodePolicyChangeDestructive,
   nodePolicyChangeSummary,
@@ -129,6 +125,7 @@ import {
   type NodeE2eeStrictPolicyDisposition,
   type NodeLocalOperatorAccess,
   type NodeFactRow,
+  type NodeSecurityReads,
   NODE_CONTINUITY_DESCRIPTION,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
   NODE_FALLBACK_QUIET,
@@ -164,21 +161,15 @@ import {
  * is told, which mode they are in, or whether an action may run.
  *
  * Matches `HubSection`'s cadence: one poll for every state, and the last good
- * snapshot is kept while an error is shown rather than blanked — a panel that
- * empties on a transient failure reads as "no clients are authorized", which is
- * the one wrong answer this data has.
+ * value of each read is kept while an error is shown rather than blanked — a
+ * panel that empties on a transient failure reads as "no clients are
+ * authorized", which is the one wrong answer this data has.
  */
 const POLL_INTERVAL_MS = 5_000;
 /** The ceiling the back-off below climbs to while reads keep failing. */
 const POLL_MAX_INTERVAL_MS = 60_000;
 
-interface NodeSecuritySnapshot {
-  readonly clients: NodeE2eeClientListing | null;
-  readonly sessions: NodeE2eeSessionList | null;
-  readonly policy: NodeE2eePolicy | null;
-  readonly prekey: NodeE2eePrekey | null;
-  readonly continuity: NodeE2eeContinuity | null;
-  readonly fallback: NodeE2eeFallback | null;
+interface NodeSecuritySnapshot extends NodeSecurityReads {
   readonly enrollmentFingerprint: string | null;
 }
 
@@ -489,39 +480,35 @@ function PrimaryNodeSecuritySettings() {
 
   const refresh = useCallback(async () => {
     if (!availability.available) return;
-    try {
-      const [clients, sessions, policy, prekey, continuity, fallback] = await Promise.all([
-        fetchNodeE2eeClients(),
-        fetchNodeE2eeSessions(),
-        fetchNodeE2eePolicy(),
-        fetchNodeE2eePrekey(),
-        fetchNodeE2eeContinuity(),
-        fetchNodeE2eeFallback(),
-      ]);
-      // 404 is the normal answer once a ceremony is over, and the helper already
-      // returns null for it rather than throwing.
-      const enrollment = await fetchHubEnrollment().catch(() => null);
-      if (!mountedRef.current) return;
-      failuresRef.current = 0;
-      setSnapshot({
-        clients,
-        sessions,
-        policy,
-        prekey,
-        continuity,
-        fallback,
-        enrollmentFingerprint: enrollment?.fingerprint ?? null,
-      });
-      setError(null);
-    } catch (cause) {
-      if (!mountedRef.current) return;
-      failuresRef.current += 1;
-      // The last good snapshot stays on screen: blanking the client list on a
-      // transient read failure would read as "nothing is authorized".
-      setError(
-        cause instanceof Error ? cause.message : "Unable to read the node's security state.",
-      );
-    }
+    // Settled one by one: a route that refuses costs its own section, not the
+    // five beside it (`mergeNodeSecurityReads`).
+    const [clients, sessions, policy, prekey, continuity, fallback] = await Promise.allSettled([
+      fetchNodeE2eeClients(),
+      fetchNodeE2eeSessions(),
+      fetchNodeE2eePolicy(),
+      fetchNodeE2eePrekey(),
+      fetchNodeE2eeContinuity(),
+      fetchNodeE2eeFallback(),
+    ]);
+    const results = { clients, sessions, policy, prekey, continuity, fallback };
+    // 404 is the normal answer once a ceremony is over, and the helper already
+    // returns null for it rather than throwing. A read that does throw keeps the
+    // fingerprint already shown, as a failed read of any other value does.
+    const enrollmentFingerprint = await fetchHubEnrollment().then(
+      (enrollment) => enrollment?.fingerprint ?? null,
+      () => undefined,
+    );
+    if (!mountedRef.current) return;
+    const failure = nodeSecurityReadFailure(results);
+    failuresRef.current = failure === null ? 0 : failuresRef.current + 1;
+    setSnapshot((previous) => ({
+      ...mergeNodeSecurityReads(previous, results),
+      enrollmentFingerprint:
+        enrollmentFingerprint === undefined
+          ? previous.enrollmentFingerprint
+          : enrollmentFingerprint,
+    }));
+    setError(failure);
   }, [availability.available]);
 
   /**

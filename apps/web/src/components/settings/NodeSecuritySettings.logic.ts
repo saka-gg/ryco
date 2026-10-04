@@ -51,6 +51,7 @@ import type {
   NodeE2eePolicyProposal,
   NodeE2eePrekey,
   NodeE2eeSession,
+  NodeE2eeSessionList,
 } from "@ryco/client-runtime/connection";
 import type { HostedConnectionStatusIndicator } from "../../hostedHub/connectionStatus";
 import { hostedE2eeVerificationView } from "../hostedHub/HostedE2eeVerification.logic";
@@ -183,6 +184,72 @@ export function nodeOperatorDataAvailability(
     unavailableBody:
       "Your node's client list, live sessions, admission policy, prekey and fallback counters are held on the node and read over its own local interface, which the relay does not carry. Open Ryco on that machine to see them, or run `ryco e2ee` there.",
   };
+}
+
+/** The six operator reads one poll makes, by the panel field each fills. */
+export interface NodeSecurityReads {
+  readonly clients: NodeE2eeClientListing | null;
+  readonly sessions: NodeE2eeSessionList | null;
+  readonly policy: NodeE2eePolicy | null;
+  readonly prekey: NodeE2eePrekey | null;
+  readonly continuity: NodeE2eeContinuity | null;
+  readonly fallback: NodeE2eeFallback | null;
+}
+
+/** One poll's answers, each settled on its own. */
+export type NodeSecurityReadResults = {
+  readonly [Field in keyof NodeSecurityReads]: PromiseSettledResult<
+    NonNullable<NodeSecurityReads[Field]>
+  >;
+};
+
+/** The order the reads are made in, and so the order a failure is reported from. */
+const NODE_SECURITY_READ_FIELDS = [
+  "clients",
+  "sessions",
+  "policy",
+  "prekey",
+  "continuity",
+  "fallback",
+] as const satisfies ReadonlyArray<keyof NodeSecurityReads>;
+
+export const NODE_SECURITY_READ_FAILED = "Unable to read the node's security state.";
+
+/**
+ * Fold one poll into what the panel shows, ONE READ AT A TIME.
+ *
+ * The six reads were one `Promise.all`, so a single refused route — the
+ * continuity read once refused in a backend that does not own the identity —
+ * left every other section empty behind one generic error. A read that answered
+ * is drawn whatever its neighbours did. A read that failed keeps the value it
+ * last had rather than blanking: an emptied client list reads as "nothing is
+ * authorized", the one wrong answer this data has.
+ */
+export function mergeNodeSecurityReads(
+  previous: NodeSecurityReads,
+  results: NodeSecurityReadResults,
+): NodeSecurityReads {
+  const settled = <A>(result: PromiseSettledResult<A>, kept: A | null): A | null =>
+    result.status === "fulfilled" ? result.value : kept;
+  return {
+    clients: settled(results.clients, previous.clients),
+    sessions: settled(results.sessions, previous.sessions),
+    policy: settled(results.policy, previous.policy),
+    prekey: settled(results.prekey, previous.prekey),
+    continuity: settled(results.continuity, previous.continuity),
+    fallback: settled(results.fallback, previous.fallback),
+  };
+}
+
+/** Why the first failed read failed, or null when every read answered. */
+export function nodeSecurityReadFailure(results: NodeSecurityReadResults): string | null {
+  for (const field of NODE_SECURITY_READ_FIELDS) {
+    const result = results[field];
+    if (result.status === "rejected") {
+      return result.reason instanceof Error ? result.reason.message : NODE_SECURITY_READ_FAILED;
+    }
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -491,12 +558,18 @@ export function nodePrekeyRemedy(prekey: NodeE2eePrekey | null): string | null {
 
 /**
  * §7.5's lineage. An unresolvable one carries §7.5's own remedy, so this surface
- * cannot drift from the condition that raised it.
+ * cannot drift from the condition that raised it — and so does one this backend
+ * left unread because another copy of Ryco owns the identity.
  */
 export function nodeContinuityRows(
   continuity: NodeE2eeContinuity | null,
 ): ReadonlyArray<NodeFactRow> {
   if (continuity === null) return [{ label: "Continuity", value: UNKNOWN }];
+  if (continuity.status === "identity_in_use") {
+    // Not a lineage state: this backend did not read the chain, and the node's
+    // remedy says which copy of Ryco did.
+    return [{ label: "Continuity", value: "not read here" }];
+  }
   if (continuity.status === "unavailable") {
     return [
       { label: "Continuity", value: "unresolvable" },
@@ -1691,6 +1764,8 @@ export function everyNodeSecurityString(): ReadonlyArray<{
     "continuityRows(unavailable)",
     nodeContinuityRows({ status: "unavailable", reason: "anchor_disagrees" }),
   );
+  pushRows("continuityRows(identity_in_use)", nodeContinuityRows({ status: "identity_in_use" }));
+  push("readFailed", NODE_SECURITY_READ_FAILED);
   pushRows("policyRows(null)", nodePolicyRows(null));
   pushRows("pairingWindowRows(null)", nodePairingWindowRows(null));
   push("refusedAttempts(null)", nodeRefusedAttemptsDescription(null));
