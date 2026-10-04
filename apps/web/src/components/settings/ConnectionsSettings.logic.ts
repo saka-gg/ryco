@@ -22,3 +22,19 @@ export function savedBackendRepairHost(record: SavedEnvironmentRecord): string {
     ? url.origin
     : record.httpBaseUrl;
 }
+
+/**
+ * The row's connection button. Next to Re-pair it reads "Retry": the node's
+ * rejection may have been a passing fault on its side, and a retry checks the
+ * saved pairing again without replacing it.
+ */
+export function savedBackendConnectionActionLabel(input: {
+  readonly isConnected: boolean;
+  readonly isConnecting: boolean;
+  readonly isDisconnecting: boolean;
+  readonly needsRepair: boolean;
+}): string {
+  if (input.isConnected) return input.isDisconnecting ? "Disconnecting…" : "Disconnect";
+  if (input.isConnecting) return "Connecting…";
+  return input.needsRepair ? "Retry" : "Connect";
+}

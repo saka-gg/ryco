@@ -62,7 +62,11 @@ import { Button } from "../ui/button";
 import { Group, GroupSeparator } from "../ui/group";
 import { AnimatedHeight } from "../AnimatedHeight";
 import { HubSection } from "./HubSection";
-import { savedBackendNeedsRepair, savedBackendRepairHost } from "./ConnectionsSettings.logic";
+import {
+  savedBackendConnectionActionLabel,
+  savedBackendNeedsRepair,
+  savedBackendRepairHost,
+} from "./ConnectionsSettings.logic";
 import {
   Menu,
   MenuGroup,
@@ -1397,24 +1401,22 @@ function SavedBackendListRow({
             <Button size="xs" variant="outline" onClick={() => onRepair(environmentId)}>
               Re-pair
             </Button>
-          ) : (
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={isConnected ? isDisconnecting : isConnecting}
-              onClick={() =>
-                void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
-              }
-            >
-              {isConnected
-                ? isDisconnecting
-                  ? "Disconnecting…"
-                  : "Disconnect"
-                : isConnecting
-                  ? "Connecting…"
-                  : "Connect"}
-            </Button>
-          )}
+          ) : null}
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={isConnected ? isDisconnecting : isConnecting}
+            onClick={() =>
+              void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
+            }
+          >
+            {savedBackendConnectionActionLabel({
+              isConnected,
+              isConnecting,
+              isDisconnecting,
+              needsRepair,
+            })}
+          </Button>
           <Button
             size="xs"
             variant="destructive-outline"

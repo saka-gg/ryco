@@ -5,7 +5,11 @@ import type {
   SavedEnvironmentRecord,
   SavedEnvironmentRuntimeState,
 } from "~/environments/runtime/catalog";
-import { savedBackendNeedsRepair, savedBackendRepairHost } from "./ConnectionsSettings.logic";
+import {
+  savedBackendConnectionActionLabel,
+  savedBackendNeedsRepair,
+  savedBackendRepairHost,
+} from "./ConnectionsSettings.logic";
 
 const record: SavedEnvironmentRecord = {
   environmentId: EnvironmentId.make("environment-1"),
@@ -54,5 +58,31 @@ describe("savedBackendRepairHost", () => {
     expect(
       savedBackendRepairHost({ ...record, httpBaseUrl: "https://studio.tail1234.ts.net/" }),
     ).toBe("https://studio.tail1234.ts.net");
+  });
+});
+
+describe("savedBackendConnectionActionLabel", () => {
+  const idle = { isConnected: false, isConnecting: false, isDisconnecting: false };
+
+  it("keeps a retry beside Re-pair for a rejection that was only a passing fault", () => {
+    expect(savedBackendConnectionActionLabel({ ...idle, needsRepair: true })).toBe("Retry");
+    expect(
+      savedBackendConnectionActionLabel({ ...idle, isConnecting: true, needsRepair: false }),
+    ).toBe("Connecting…");
+  });
+
+  it("connects and disconnects an environment whose pairing still holds", () => {
+    expect(savedBackendConnectionActionLabel({ ...idle, needsRepair: false })).toBe("Connect");
+    expect(
+      savedBackendConnectionActionLabel({ ...idle, isConnected: true, needsRepair: false }),
+    ).toBe("Disconnect");
+    expect(
+      savedBackendConnectionActionLabel({
+        ...idle,
+        isConnected: true,
+        isDisconnecting: true,
+        needsRepair: false,
+      }),
+    ).toBe("Disconnecting…");
   });
 });

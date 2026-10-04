@@ -52,9 +52,12 @@ export function withSavedEnvironmentTimeout<T>(
 /**
  * The node rejected the saved bearer itself. Expired and revoked sessions answer
  * `/api/auth/ws-token` with 401; no retry can recover them, only pairing again.
+ * A 403 is not one: the node never answers a bearer with it, so it comes from
+ * something in front of the node — an access gateway, a proxy — that pairing
+ * again cannot satisfy.
  */
 export function isSavedEnvironmentCredentialRejection(error: unknown): boolean {
-  return isRemoteEnvironmentAuthHttpError(error) && (error.status === 401 || error.status === 403);
+  return isRemoteEnvironmentAuthHttpError(error) && error.status === 401;
 }
 
 export type SavedEnvironmentSessionCheck =
