@@ -17,9 +17,14 @@ const remote = "env-remote" as EnvironmentId;
 
 function makeSupervisor(
   connect: (record: Record, isCancelled: () => boolean) => Promise<EnvironmentConnection>,
-  overrides: { readonly isHostedMode?: boolean; readonly records?: ReadonlyArray<Record> } = {},
+  overrides: {
+    readonly isHostedMode?: boolean;
+    readonly records?: ReadonlyArray<Record>;
+    readonly isSavedEnvironmentAwaitingRepair?: (environmentId: EnvironmentId) => boolean;
+  } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
+  let registryListener: (() => void) | null = null;
   const input = {
     isHostedMode: () => overrides.isHostedMode ?? false,
     syncThreadDetailSnapshot: () => undefined,
@@ -35,9 +40,15 @@ function makeSupervisor(
     listSavedEnvironmentRecords: () => overrides.records ?? [{ environmentId: remote }],
     hasSavedEnvironmentRegistryHydrated: () => true,
     waitForSavedEnvironmentRegistryHydration: () => Promise.resolve(),
-    subscribeSavedEnvironmentRegistry: () => () => undefined,
+    subscribeSavedEnvironmentRegistry: (listener: () => void) => {
+      registryListener = listener;
+      return () => {
+        registryListener = null;
+      };
+    },
     connectSavedEnvironment: (record: Record, isCancelled: () => boolean) =>
       connect(record, isCancelled),
+    isSavedEnvironmentAwaitingRepair: overrides.isSavedEnvironmentAwaitingRepair,
     disconnectSavedEnvironment: () => Promise.resolve(),
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
     subscribeBrowserResume: (listener: (reason: string) => void) => {
@@ -48,7 +59,11 @@ function makeSupervisor(
     },
   } as unknown as EnvironmentSupervisorInput<Record>;
   const supervisor = createEnvironmentConnectionSupervisor(input);
-  return { supervisor, resume: (reason: string) => resume?.(reason) };
+  return {
+    supervisor,
+    resume: (reason: string) => resume?.(reason),
+    notifyRegistry: () => registryListener?.(),
+  };
 }
 
 const connectionFor = (record: Record) =>
@@ -100,6 +115,45 @@ describe("saved environment retry", () => {
 
     await vi.advanceTimersByTimeAsync(120_000);
     expect(attempts).toBe(1);
+    stop();
+  });
+
+  it("leaves an environment that needs pairing again out of background reconnects", async () => {
+    const needsRepair = "env-needs-repair" as EnvironmentId;
+    const offline = "env-offline" as EnvironmentId;
+    const attempts = new Map<EnvironmentId, number>();
+    let awaitingRepair = true;
+    const { supervisor, notifyRegistry } = makeSupervisor(
+      async (record) => {
+        attempts.set(record.environmentId, (attempts.get(record.environmentId) ?? 0) + 1);
+        if (record.environmentId === needsRepair) {
+          throw new SavedEnvironmentCredentialError("Pair it again.");
+        }
+        throw new Error("connect ECONNREFUSED");
+      },
+      {
+        records: [{ environmentId: needsRepair }, { environmentId: offline }],
+        isSavedEnvironmentAwaitingRepair: (environmentId) =>
+          awaitingRepair && environmentId === needsRepair,
+      },
+    );
+    const stop = supervisor.start();
+
+    // Every retry of the unreachable environment, and every registry change,
+    // runs a full sync; none of them presents the rejected credential again.
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts.get(offline)).toBe(4);
+    expect(attempts.get(needsRepair)).toBeUndefined();
+
+    // Pairing again replaces the credential; the next sync reaches it.
+    awaitingRepair = false;
+    notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts.get(needsRepair)).toBe(1);
     stop();
   });
 

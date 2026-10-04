@@ -226,6 +226,7 @@ function createGuardCatalog() {
     registryStore: { subscribe: subscribeRegistry, getState: () => ({ markConnected: () => {} }) },
     runtimeStore: {
       getState: () => ({
+        byId: {},
         ensure: () => {},
         patch: (_id: EnvironmentId, _patch: Partial<SavedEnvironmentRuntimeState>) => {},
       }),

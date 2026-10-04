@@ -3,6 +3,7 @@ import {
   checkSavedEnvironmentSession,
   createEnvironmentConnection,
   createEnvironmentConnectionSupervisor,
+  isSavedEnvironmentAwaitingRepair,
   isSavedEnvironmentCredentialRejection,
   SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentConnectionCancelledError,
@@ -132,6 +133,7 @@ export interface MobileCatalogLike {
   };
   readonly runtimeStore: {
     readonly getState: () => {
+      readonly byId: Readonly<Record<EnvironmentId, SavedEnvironmentRuntimeState | undefined>>;
       readonly ensure: (environmentId: EnvironmentId) => void;
       readonly patch: (
         environmentId: EnvironmentId,
@@ -345,6 +347,14 @@ export function createMobileEnvironmentDriver(
       if (speaksForEnvironment()) setRuntimeRequiresAuth(record.environmentId);
       throw new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE);
     }
+    if (speaksForEnvironment()) {
+      // The node accepts the credential again (after pairing again, say), so
+      // background reconnects resume.
+      patchRuntime(record.environmentId, {
+        authState: "authenticated",
+        role: sessionCheck.session.role ?? null,
+      });
+    }
 
     const client = createSavedEnvironmentClient(record.environmentId, bearerToken, () => {
       if (!speaksForEnvironment()) return;
@@ -442,6 +452,8 @@ export function createMobileEnvironmentDriver(
     subscribeSavedEnvironmentRegistry: (listener) => catalog.registryStore.subscribe(listener),
     connectSavedEnvironment: (record, isCancelled) =>
       (deps.connectSavedEnvironment ?? connectSavedEnvironment)(record, isCancelled),
+    isSavedEnvironmentAwaitingRepair: (environmentId) =>
+      isSavedEnvironmentAwaitingRepair(catalog.runtimeStore.getState().byId[environmentId]),
     disconnectSavedEnvironment: async (environmentId) => {
       await getSupervisor().remove(environmentId);
     },

@@ -1,5 +1,6 @@
 import {
   type AuthSessionRole,
+  type AuthSessionState,
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   type EnvironmentId,
@@ -24,6 +25,7 @@ import {
   checkSavedEnvironmentSession,
   createEnvironmentConnectionSupervisor,
   createDeviceFrameSource,
+  isSavedEnvironmentAwaitingRepair,
   isSavedEnvironmentCredentialRejection,
   type ReleaseThreadDetailSubscription,
   SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS,
@@ -162,6 +164,10 @@ function getEnvironmentSupervisor() {
     subscribeSavedEnvironmentRegistry: useSavedEnvironmentRegistryStore.subscribe,
     connectSavedEnvironment: (record, isCancelled) =>
       connectSavedEnvironment(record, undefined, isCancelled),
+    isSavedEnvironmentAwaitingRepair: (environmentId) =>
+      isSavedEnvironmentAwaitingRepair(
+        useSavedEnvironmentRuntimeStore.getState().byId[environmentId],
+      ),
     disconnectSavedEnvironment,
     waitForPrimaryShellSnapshotApplied,
     subscribeBrowserResume: subscribeBrowserResumeReconnects,
@@ -1034,31 +1040,51 @@ function createSavedEnvironmentClient(
   );
 }
 
+/**
+ * The node's answer for a saved bearer: its session, or `null` once the node no
+ * longer accepts it. The node answers an expired or revoked bearer with
+ * `authenticated: false`, so this is asked before anything waits on a socket,
+ * whose ws-token request for that bearer would fail on every reconnect.
+ */
+async function readSavedEnvironmentSession(
+  record: SavedEnvironmentRecord,
+  bearerToken: string,
+): Promise<AuthSessionState | null> {
+  try {
+    const check = await checkSavedEnvironmentSession({
+      fetchSessionState: () =>
+        record.desktopSsh
+          ? fetchDesktopSshSessionState(record.httpBaseUrl, bearerToken)
+          : fetchRemoteSessionState({
+              httpBaseUrl: record.httpBaseUrl,
+              bearerToken,
+            }),
+    });
+    return check.status === "authenticated" ? check.session : null;
+  } catch (error) {
+    const rejected = record.desktopSsh
+      ? isSshHttpAuthError(error, 401)
+      : isRemoteEnvironmentAuthHttpError(error) && error.status === 401;
+    if (rejected) return null;
+    throw error;
+  }
+}
+
 async function refreshSavedEnvironmentMetadata(
   environmentId: EnvironmentId,
   bearerToken: string,
   client: WsRpcClient,
   roleHint?: AuthSessionRole | null,
   configHint?: ServerConfig | null,
+  sessionHint?: AuthSessionState,
 ): Promise<void> {
   const record = getSavedEnvironmentRecord(environmentId);
   if (!record) {
     throw new Error(`Saved environment ${environmentId} not found.`);
   }
 
-  // The bearer is checked before anything waits on the socket: the node answers
-  // an expired or revoked one with `authenticated: false`, while the socket's
-  // ws-token request for it would fail on every reconnect attempt.
-  const sessionCheck = await checkSavedEnvironmentSession({
-    fetchSessionState: () =>
-      record.desktopSsh
-        ? fetchDesktopSshSessionState(record.httpBaseUrl, bearerToken)
-        : fetchRemoteSessionState({
-            httpBaseUrl: record.httpBaseUrl,
-            bearerToken,
-          }),
-  });
-  if (sessionCheck.status === "requires-auth") {
+  const session = sessionHint ?? (await readSavedEnvironmentSession(record, bearerToken));
+  if (session === null) {
     throw new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE);
   }
   const serverConfig =
@@ -1073,7 +1099,7 @@ async function refreshSavedEnvironmentMetadata(
     authState: "authenticated",
     descriptor: serverConfig.environment,
     serverConfig,
-    role: sessionCheck.session.role ?? roleHint ?? null,
+    role: session.role ?? roleHint ?? null,
   });
   useSavedEnvironmentRegistryStore
     .getState()
@@ -1222,6 +1248,23 @@ async function connectSavedEnvironment(
     options?.bearerToken ?? (await readSavedEnvironmentBearerToken(record.environmentId));
   let clientOverride = options?.client;
   let reissuedDesktopSshBearer = false;
+  // Before it registers a connection, the attempt reports the environment's
+  // state only while it is still the environment's attempt.
+  const attemptSpeaksForEnvironment = () =>
+    !isCancelled() && getEnvironmentSupervisor().read(record.environmentId) === null;
+  // SSH mints a fresh bearer through its own tunnel, once per connect: a node
+  // that rejects the fresh one too fails instead of looping.
+  const reissueDesktopSshBearerOnce = async (cause: unknown) => {
+    if (reissuedDesktopSshBearer) {
+      throw new Error("The SSH environment rejected its freshly issued credential.", { cause });
+    }
+    reissuedDesktopSshBearer = true;
+    const issued = await issueDesktopSshBearerSession(activeRecord);
+    activeRecord = issued.record;
+    bearerToken = issued.bearerToken;
+    roleHint = issued.role;
+    clientOverride = undefined;
+  };
 
   for (;;) {
     if (!bearerToken) {
@@ -1232,13 +1275,15 @@ async function connectSavedEnvironment(
         roleHint = issued.role;
       } else {
         await removeSavedEnvironmentBearerToken(record.environmentId).catch(() => undefined);
-        useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
-          authState: "requires-auth",
-          role: null,
-          connectionState: "disconnected",
-          lastError: "Saved environment is missing its saved credential. Pair it again.",
-          lastErrorAt: isoNow(),
-        });
+        if (attemptSpeaksForEnvironment()) {
+          useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
+            authState: "requires-auth",
+            role: null,
+            connectionState: "disconnected",
+            lastError: "Saved environment is missing its saved credential. Pair it again.",
+            lastErrorAt: isoNow(),
+          });
+        }
         throw new SavedEnvironmentCredentialError(
           "Saved environment is missing its saved credential.",
         );
@@ -1248,6 +1293,30 @@ async function connectSavedEnvironment(
     activeRecord = prepared.record;
 
     const activeBearerToken = bearerToken;
+    // The bearer is checked before any socket exists, so a credential the node
+    // no longer accepts never requests a ws-token or opens a socket.
+    let session: AuthSessionState | null;
+    try {
+      session = await readSavedEnvironmentSession(activeRecord, activeBearerToken);
+    } catch (error) {
+      if (attemptSpeaksForEnvironment()) setRuntimeError(activeRecord.environmentId, error);
+      throw error;
+    }
+    if (session === null) {
+      const rejected = new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE);
+      if (activeRecord.desktopSsh) {
+        await reissueDesktopSshBearerOnce(rejected);
+        continue;
+      }
+      // The bearer stays stored: the record keeps its place, and pairing again
+      // replaces the credential.
+      if (attemptSpeaksForEnvironment()) setRuntimeRequiresAuth(activeRecord.environmentId);
+      throw rejected;
+    }
+    if (isCancelled()) {
+      throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
+    }
+
     let credentialRejected = false;
     let registered = false;
     // Only the environment's live attempt, or the connection it registered,
@@ -1333,6 +1402,7 @@ async function connectSavedEnvironment(
           client,
           roleHint,
           initialServerConfig,
+          session,
         );
       } catch (error) {
         const isAuthError =
@@ -1345,26 +1415,13 @@ async function connectSavedEnvironment(
           throw error;
         }
         if (!activeRecord.desktopSsh) {
-          // The bearer stays stored: the record keeps its place, and pairing
-          // again replaces the credential.
+          // The socket's ws-token request was rejected after the session check
+          // passed: the session expired or was revoked in between.
           if (speaksForEnvironment()) setRuntimeRequiresAuth(activeRecord.environmentId);
           throw toSavedEnvironmentCredentialError(error);
         }
-        // SSH mints a fresh bearer through its own tunnel, once per connect: a
-        // node that rejects the fresh one too fails instead of looping.
-        if (reissuedDesktopSshBearer) {
-          throw new Error("The SSH environment rejected its freshly issued credential.", {
-            cause: error,
-          });
-        }
-        reissuedDesktopSshBearer = true;
-
-        const issued = await issueDesktopSshBearerSession(activeRecord);
-        activeRecord = issued.record;
-        bearerToken = issued.bearerToken;
-        roleHint = issued.role;
+        await reissueDesktopSshBearerOnce(error);
         await connection.dispose().catch(() => undefined);
-        clientOverride = undefined;
         continue;
       }
       if (isCancelled()) {

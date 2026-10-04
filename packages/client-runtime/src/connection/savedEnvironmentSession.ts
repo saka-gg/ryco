@@ -85,6 +85,17 @@ export async function checkSavedEnvironmentSession(input: {
   return session.authenticated ? { status: "authenticated", session } : { status: "requires-auth" };
 }
 
+/**
+ * The node rejected this saved environment's credential, so background
+ * reconnects leave it alone: each would only present the dead credential again.
+ * Pairing again, or the user's own Connect, still tries it.
+ */
+export function isSavedEnvironmentAwaitingRepair(
+  runtime: Pick<SavedEnvironmentRuntimeState, "authState"> | null | undefined,
+): boolean {
+  return runtime?.authState === "requires-auth";
+}
+
 /** The runtime state of a saved environment only pairing again can repair. */
 export function savedEnvironmentRequiresAuthState(
   nowIso: string,

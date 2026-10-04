@@ -68,6 +68,13 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
     record: SavedEnvironmentRecord,
     isCancelled: () => boolean,
   ) => Promise<EnvironmentConnection>;
+  /**
+   * A saved environment whose credential the node rejected. Syncs skip it: they
+   * run on every registry change and retry tick, and each attempt would only
+   * present the dead credential again. Pairing again and an explicit Connect go
+   * through `ensureSavedEnvironmentConnection` and still reach it.
+   */
+  readonly isSavedEnvironmentAwaitingRepair?: (environmentId: EnvironmentId) => boolean;
   readonly disconnectSavedEnvironment: (environmentId: EnvironmentId) => Promise<void>;
   readonly waitForPrimaryShellSnapshotApplied: (timeoutMs: number) => Promise<void>;
   readonly subscribeBrowserResume: (listener: (reason: string) => void) => () => void;
@@ -725,10 +732,15 @@ export function createEnvironmentConnectionSupervisor<
       stale.map((environmentId) => input.disconnectSavedEnvironment(environmentId)),
     );
     await input.waitForPrimaryShellSnapshotApplied(SAVED_ENVIRONMENT_STARTUP_DELAY_MS);
+    const awaitingRepair = (environmentId: EnvironmentId) =>
+      input.isSavedEnvironmentAwaitingRepair?.(environmentId) === true;
     for (const environmentId of savedRetries.keys()) {
-      if (!expected.has(environmentId)) clearSavedRetry(environmentId);
+      if (!expected.has(environmentId) || awaitingRepair(environmentId)) {
+        clearSavedRetry(environmentId);
+      }
     }
-    await runSavedEnvironmentConnectionQueue(orderSavedEnvironmentConnectionQueue(records), {
+    const connectable = records.filter((record) => !awaitingRepair(record.environmentId));
+    await runSavedEnvironmentConnectionQueue(orderSavedEnvironmentConnectionQueue(connectable), {
       concurrency: SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
       connect: async (record) => {
         try {

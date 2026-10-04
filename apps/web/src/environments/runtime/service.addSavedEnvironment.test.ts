@@ -498,7 +498,11 @@ describe("addSavedEnvironment", () => {
       expect.objectContaining({ connectionState: "error" }),
     );
     expect(listEnvironmentConnections()).toHaveLength(0);
-    expect(dispose).toHaveBeenCalledOnce();
+    // The rejected bearer never asks for a ws-token or opens a socket.
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    expect(mockWsTransport).not.toHaveBeenCalled();
+    expect(mockResolveRemoteWebSocketConnectionUrl).not.toHaveBeenCalled();
+    expect(dispose).not.toHaveBeenCalled();
     // The record and its bearer stay; pairing again replaces the credential.
     expect(mockRemoveSavedEnvironmentBearerToken).not.toHaveBeenCalled();
 
@@ -767,10 +771,12 @@ describe("addSavedEnvironment", () => {
       port: null,
     });
 
-    expect(createdConnections).toHaveLength(2);
-    expect(createdConnections[0]?.dispose).toHaveBeenCalledTimes(1);
+    // The rejected bearer is replaced before any socket is built on it.
+    expect(createdConnections).toHaveLength(1);
+    expect(mockWsTransport).toHaveBeenCalledOnce();
+    expect(createdConnections[0]?.dispose).not.toHaveBeenCalled();
     expect(listEnvironmentConnections()).toHaveLength(1);
-    expect(listEnvironmentConnections()[0]).toBe(createdConnections[1]);
+    expect(listEnvironmentConnections()[0]).toBe(createdConnections[0]);
 
     await resetEnvironmentServiceForTests();
   });
@@ -1073,7 +1079,9 @@ describe("addSavedEnvironment", () => {
     await expect(reconnectPromise).resolves.toBeUndefined();
 
     expect(listEnvironmentConnections()).toHaveLength(0);
-    expect(dispose).toHaveBeenCalledOnce();
+    // The cancelled attempt stops before it builds a socket.
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    expect(dispose).not.toHaveBeenCalled();
     expect(mockPatchRuntime).not.toHaveBeenCalledWith(
       EnvironmentId.make("environment-1"),
       expect.objectContaining({

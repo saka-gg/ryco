@@ -102,6 +102,10 @@ function createFakeCatalog() {
     },
     runtimeStore: {
       getState: () => ({
+        byId: Object.fromEntries(runtimeById) as Record<
+          EnvironmentId,
+          SavedEnvironmentRuntimeState
+        >,
         ensure: (environmentId) => {
           if (!runtimeById.has(environmentId)) runtimeById.set(environmentId, {});
         },
@@ -251,6 +255,59 @@ describe("mobile environment driver", () => {
     expect(fake.runtime(ENV_ID)?.authState).toBe("requires-auth");
     // The bearer stays; pairing again replaces it in place.
     await expect(fake.catalog.readBearerToken(ENV_ID)).resolves.toBe("bearer-token");
+  });
+
+  it("leaves a node that needs pairing again out of background reconnects", async () => {
+    const fake = createFakeCatalog();
+    const otherId = "env-2" as EnvironmentId;
+    fake.catalog.runtimeStore.getState().patch(ENV_ID, { authState: "requires-auth" });
+    const connect = vi.fn(async (rec: SavedEnvironmentRecord) => fakeConnection(rec.environmentId));
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: noopRemoteApi,
+      subscribeResume: () => () => {},
+      connectSavedEnvironment: connect,
+    });
+    driver.start();
+
+    fake.upsert(record());
+    fake.upsert(record(otherId));
+    await vi.waitFor(() =>
+      expect(connect).toHaveBeenCalledWith(
+        expect.objectContaining({ environmentId: otherId }),
+        expect.any(Function),
+      ),
+    );
+    expect(connect).not.toHaveBeenCalledWith(
+      expect.objectContaining({ environmentId: ENV_ID }),
+      expect.any(Function),
+    );
+
+    // Pairing again (or the user's Connect) got the node to accept it again.
+    fake.catalog.runtimeStore.getState().patch(ENV_ID, { authState: "authenticated" });
+    fake.upsert(record());
+    await vi.waitFor(() =>
+      expect(connect).toHaveBeenCalledWith(
+        expect.objectContaining({ environmentId: ENV_ID }),
+        expect.any(Function),
+      ),
+    );
+  });
+
+  it("clears Needs re-pair once the node accepts the saved credential again", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "new-bearer-token");
+    fake.upsert(record());
+    fake.catalog.runtimeStore.getState().patch(ENV_ID, { authState: "requires-auth" });
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: noopRemoteApi,
+      subscribeResume: () => () => {},
+    });
+
+    await driver.connectSavedEnvironment(record());
+
+    expect(fake.runtime(ENV_ID)).toMatchObject({ authState: "authenticated", role: "owner" });
   });
 
   it("lets a cancelled connect fail without touching the connection that replaced it", async () => {
