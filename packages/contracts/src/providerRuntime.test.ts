@@ -274,4 +274,53 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.parentAgentId).toBe("wf-1");
     expect(parsed.payload.timelineBypass).toBe(true);
   });
+  it("decodes usage_limit runtime errors with and without a reset", () => {
+    const base = {
+      type: "runtime.error",
+      eventId: "event-usage-limit",
+      provider: "claudeAgent",
+      createdAt: "2026-02-28T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    } as const;
+    const limited = decodeRuntimeEvent({
+      ...base,
+      payload: {
+        message: "Claude usage limit reached.",
+        class: "usage_limit",
+        resetAt: "2026-02-28T05:00:00.000Z",
+      },
+    });
+    expect(limited.type === "runtime.error" && limited.payload.class).toBe("usage_limit");
+    expect(limited.type === "runtime.error" && limited.payload.resetAt).toBe(
+      "2026-02-28T05:00:00.000Z",
+    );
+    const unknownReset = decodeRuntimeEvent({
+      ...base,
+      payload: { message: "Limited", class: "usage_limit", resetAt: null },
+    });
+    expect(unknownReset.type === "runtime.error" && unknownReset.payload.resetAt).toBeNull();
+    const legacy = decodeRuntimeEvent({
+      ...base,
+      payload: { message: "boom", class: "provider_error" },
+    });
+    expect(legacy.type === "runtime.error" && "resetAt" in legacy.payload).toBe(false);
+  });
+
+  it("decodes account.rate-limits.updated with a normalised usage-limit state", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "account.rate-limits.updated",
+      eventId: "event-rate-limits",
+      provider: "codex",
+      createdAt: "2026-02-28T00:00:00.000Z",
+      threadId: "thread-1",
+      payload: {
+        rateLimits: { primary: { usedPercent: 100 } },
+        usageLimitState: { exhausted: true, resetAt: null },
+      },
+    });
+    expect(parsed.type === "account.rate-limits.updated" && parsed.payload.usageLimitState).toEqual(
+      { exhausted: true, resetAt: null },
+    );
+  });
 });

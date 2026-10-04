@@ -587,6 +587,10 @@ export const ServerSettings = Schema.Struct({
   // entirely (no npm registry contact) instead of merely hiding the update
   // notification — for users who install providers via Nix/nixpkgs/etc.
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Usage limits: when a provider usage limit stops a thread, resume it at the reported
+  // reset and/or snooze it until then. Both off by default; limits are account-wide.
+  autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   storageRetention: StorageRetentionPolicy.pipe(
     Schema.withDecodingDefault(
       Effect.succeed({ automatic: false, completedWorktreeDays: null, temporaryDataDays: null }),
@@ -755,6 +759,8 @@ export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
+  snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   storageRetention: Schema.optionalKey(StorageRetentionPolicy),
   projectStorageRetention: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicy)),

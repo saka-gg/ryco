@@ -20,6 +20,7 @@ import {
   WorktreeId,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@ryco/contracts";
 import {
@@ -2773,6 +2774,146 @@ describe("delegated return fence across restarts", () => {
       await expect(system.run(system.engine.dispatch(command))).rejects.toThrow(
         "Delegated result origin changed",
       );
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("usage limits across projections and restarts", () => {
+  const limitThreadId = ThreadId.make("usage-limit-thread");
+  const limitTurnId = TurnId.make("usage-limit-turn");
+  const limitId = `usage-limit:${limitThreadId}:${limitTurnId}`;
+  const claude = ProviderInstanceId.make("claudeAgent");
+  const at = (seconds: number) => new Date(Date.UTC(2026, 9, 4, 10, 0, seconds)).toISOString();
+
+  async function seedLimitedThread(databasePath: string) {
+    const system = await createOrchestrationSystem(databasePath);
+    const projectId = ProjectId.make("usage-limit-project");
+    const modelSelection = { instanceId: claude, model: "claude-sonnet-4-5" };
+    const session = (overrides: Record<string, unknown>) => ({
+      threadId: limitThreadId,
+      status: "running" as const,
+      providerName: "claudeAgent",
+      providerInstanceId: claude,
+      runtimeSessionId: RuntimeSessionId.make("runtime-limit"),
+      runtimeMode: "full-access" as const,
+      activeTurnId: limitTurnId,
+      lastError: null,
+      updatedAt: at(2),
+      ...overrides,
+    });
+    const commands: OrchestrationCommand[] = [
+      {
+        type: "project.create",
+        commandId: CommandId.make("limit-project-create"),
+        projectId,
+        title: "Limits",
+        workspaceRoot: "/tmp/ryco-usage-limit-fixture",
+        defaultModelSelection: modelSelection,
+        createdAt: at(0),
+      },
+      {
+        type: "thread.create",
+        commandId: CommandId.make("limit-thread-create"),
+        threadId: limitThreadId,
+        projectId,
+        title: "Limited",
+        modelSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt: at(0),
+      },
+      {
+        type: "thread.turn.start",
+        commandId: CommandId.make("limit-start"),
+        threadId: limitThreadId,
+        message: {
+          messageId: MessageId.make("limit-message"),
+          role: "user",
+          text: "Work",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: at(1),
+      },
+      {
+        type: "thread.session.set",
+        commandId: CommandId.make("limit-running"),
+        threadId: limitThreadId,
+        session: session({}),
+        createdAt: at(2),
+      },
+      {
+        type: "thread.session.set",
+        commandId: CommandId.make("limit-error"),
+        threadId: limitThreadId,
+        session: session({ status: "error", activeTurnId: null, lastError: "Limited" }),
+        turnOutcome: { turnId: limitTurnId, state: "error", reason: "usage-limit" },
+        createdAt: at(3),
+      },
+      {
+        type: "thread.usage-limit.record",
+        commandId: CommandId.make(`usage-limit-record:${limitId}`),
+        threadId: limitThreadId,
+        limitId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: claude,
+        turnId: limitTurnId,
+        message: "Claude usage limit reached.",
+        resetAt: at(50),
+        createdAt: at(3),
+      },
+    ];
+    for (const command of commands) {
+      await system.run(system.engine.dispatch(command));
+    }
+    return system;
+  }
+
+  const resume = (commandId: string): OrchestrationCommand => ({
+    type: "thread.turn.start",
+    commandId: CommandId.make(commandId),
+    threadId: limitThreadId,
+    message: {
+      messageId: MessageId.make(commandId),
+      role: "user",
+      text: "Continue where you left off.",
+      attachments: [],
+    },
+    usageLimitResumeGuard: { limitId, origin: "auto" },
+    runtimeMode: "full-access",
+    interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+    createdAt: at(60),
+  });
+
+  it("projects the limit into shells, detail and the command model, and fences resumes after a restart", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-usage-limit-restart-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await seedLimitedThread(database);
+    try {
+      const shell = (await system.readShell()).threads.find((t) => t.id === limitThreadId);
+      expect(shell?.usageLimit).toMatchObject({ limitId, resetAt: at(50), autoResume: null });
+      const detail = (await system.readModel()).threads.find((t) => t.id === limitThreadId);
+      expect(detail?.usageLimit?.limitId).toBe(limitId);
+
+      await system.dispose();
+      system = await createOrchestrationSystem(database);
+      const hydrated = (await system.commandReadModel()).threads.find(
+        (t) => t.id === limitThreadId,
+      );
+      expect(hydrated?.usageLimit?.limitId).toBe(limitId);
+
+      await system.run(system.engine.dispatch(resume("usage-limit-resume-first")));
+      await expect(
+        system.run(system.engine.dispatch(resume("usage-limit-resume-second"))),
+      ).rejects.toThrow("usage-limit resume is stale");
+      const cleared = (await system.readShell()).threads.find((t) => t.id === limitThreadId);
+      expect(cleared?.usageLimit ?? null).toBeNull();
     } finally {
       await system.dispose();
       await fs.rm(directory, { recursive: true, force: true });

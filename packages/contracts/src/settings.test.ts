@@ -451,3 +451,22 @@ it("preserves explicit Cursor export settings through node settings patches", ()
   expect(decodeServerSettings({ providers: { cursor } }).providers.cursor).toMatchObject(cursor);
   expect(decodeServerSettings({}).providers.cursor.usageExportPath).toBeUndefined();
 });
+
+describe("ServerSettings usage-limit recovery", () => {
+  it("defaults both usage-limit settings off", () => {
+    expect(DEFAULT_SERVER_SETTINGS.autoResumeLimitedThreads).toBe(false);
+    expect(DEFAULT_SERVER_SETTINGS.snoozeLimitedThreads).toBe(false);
+    const decoded = decodeServerSettings({});
+    expect(decoded.autoResumeLimitedThreads).toBe(false);
+    expect(decoded.snoozeLimitedThreads).toBe(false);
+  });
+
+  it("accepts both keys in a settings patch", () => {
+    const patch = decodeServerSettingsPatch({
+      autoResumeLimitedThreads: true,
+      snoozeLimitedThreads: true,
+    });
+    expect(patch.autoResumeLimitedThreads).toBe(true);
+    expect(patch.snoozeLimitedThreads).toBe(true);
+  });
+});

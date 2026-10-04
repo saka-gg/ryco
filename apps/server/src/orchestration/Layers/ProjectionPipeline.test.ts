@@ -82,7 +82,13 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.unsettled"], ["projection.threads"]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.snoozed"], ["projection.threads"]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.unsnoozed"], ["projection.threads"]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 44);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.usage-limit-set"], [
+    "projection.threads",
+  ]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.usage-limit-cleared"], [
+    "projection.threads",
+  ]);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 46);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {

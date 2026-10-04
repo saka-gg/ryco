@@ -37,6 +37,8 @@ import {
   ThreadSettledPayload,
   ThreadSnoozedPayload,
   ThreadUnsnoozedPayload,
+  ThreadUsageLimitClearedPayload,
+  ThreadUsageLimitSetPayload,
   ThreadTokenModeSetPayload,
   ThreadGoalUpdatedPayload,
   ThreadGoalClearedPayload,
@@ -584,6 +586,38 @@ export function projectEvent(
             ...payload.restoredSidebarState,
           }),
         })),
+      );
+
+    case "thread.usage-limit-set":
+      return decodeForEvent(ThreadUsageLimitSetPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            usageLimit: payload.usageLimit,
+            updatedAt: payload.usageLimit.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.usage-limit-cleared":
+      return decodeForEvent(
+        ThreadUsageLimitClearedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          // A clear for an older limit must not drop a newer one.
+          if (thread?.usageLimit?.limitId !== payload.limitId) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              usageLimit: null,
+              updatedAt: payload.updatedAt,
+            }),
+          };
+        }),
       );
 
     case "thread.meta-updated":

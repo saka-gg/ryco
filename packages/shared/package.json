@@ -243,6 +243,10 @@
       "types": "./src/threadSnooze.ts",
       "import": "./src/threadSnooze.ts"
     },
+    "./usageLimit": {
+      "types": "./src/usageLimit.ts",
+      "import": "./src/usageLimit.ts"
+    },
     "./threadSettlement": {
       "types": "./src/threadSettlement.ts",
       "import": "./src/threadSettlement.ts"
