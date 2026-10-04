@@ -186,6 +186,31 @@ function withNothingChanged(detail: string): string {
     : `${asSentence(detail)} Nothing was changed.`;
 }
 
+/** Why a revert left the checkout without checkpoint K's files. */
+type FilesNotRestored = {
+  readonly reason: CheckpointRevertFailureReason;
+  /** Short user-facing cause, without a trailing period. */
+  readonly text: string;
+  /** Git may already have rewritten part of the checkout. */
+  readonly partial: boolean;
+};
+
+const withoutTrailingPeriod = (text: string) => text.replace(/[.\s]+$/, "");
+
+/** Detail for a files-only revert (nothing dropped) whose files were not restored. */
+function filesOnlyRevertFailureDetail(files: FilesNotRestored): string {
+  return files.partial
+    ? `Files may be only partly restored: ${withoutTrailingPeriod(files.text)}. Review them in Changes or with git before continuing.`
+    : `Files were not restored: ${withoutTrailingPeriod(files.text)}. Nothing was changed.`;
+}
+
+/** Detail for a projected revert whose files were not restored. */
+function filesNotRestoredDetail(files: FilesNotRestored): string {
+  return files.partial
+    ? `The agent forgot the discarded turns, but files may be only partly restored: ${withoutTrailingPeriod(files.text)}. Review them in Changes or with git before continuing.`
+    : `The agent forgot the discarded turns, but files were not restored: ${withoutTrailingPeriod(files.text)}. The checkout still contains changes from those turns. Review them in Changes or with git before continuing.`;
+}
+
 /** Whether the thread gained messages, turns, or checkpoints after `sinceIso`. */
 function threadChangedSince(thread: OrchestrationThread, sinceIso: string): boolean {
   const sinceMs = Date.parse(sinceIso);
@@ -876,64 +901,77 @@ const make = Effect.gen(function* () {
 
   // Shared by the live path and startup recovery: the provider conversation
   // already matches checkpoint K (or nothing was dropped), so project the
-  // revert and restore files when that is still safe.
+  // revert and restore files when that is still safe. `skipFiles` projects
+  // without touching the checkout.
   const finishRevert = Effect.fn("finishRevert")(function* (input: {
     readonly thread: OrchestrationThread;
     readonly revertRequestId: CommandId;
     readonly turnCount: number;
-    readonly cwd: string;
+    readonly cwd: string | undefined;
+    readonly skipFiles?: FilesNotRestored | undefined;
   }) {
     const { thread, revertRequestId, turnCount, cwd } = input;
     const threadId = thread.id;
     const outcome = revertOutcome(thread, turnCount);
     const unavailableText = `the files for checkpoint ${turnCount} are no longer available`;
 
-    type FilesNotRestored = {
-      readonly reason: CheckpointRevertFailureReason;
-      readonly text: string;
-    };
-    const restoreFiles = Effect.fn("restoreRevertFiles")(function* (): Effect.fn.Return<
-      FilesNotRestored | null,
-      CheckpointStoreError
-    > {
-      const plan = yield* resolveRestorePlan({ thread, turnCount, cwd });
-      if (plan === null) return { reason: "files-failed", text: unavailableText };
+    // Set once git may have started rewriting the checkout.
+    let restoreStarted = false;
+    const restoreFiles = Effect.fn("restoreRevertFiles")(function* (
+      restoreCwd: string,
+    ): Effect.fn.Return<FilesNotRestored | null, CheckpointStoreError> {
+      const plan = yield* resolveRestorePlan({ thread, turnCount, cwd: restoreCwd });
+      if (plan === null) return { reason: "files-failed", text: unavailableText, partial: false };
       const safety = yield* evaluateRestoreSafety({
         thread,
         turnCount,
-        cwd,
+        cwd: restoreCwd,
         source: plan.source,
       });
       const conflictText = restoreConflictText(safety, turnCount);
-      if (conflictText !== null) return { reason: "shared-checkout", text: conflictText };
+      if (conflictText !== null) {
+        return { reason: "shared-checkout", text: conflictText, partial: false };
+      }
+      restoreStarted = true;
       const restored = yield* checkpointStore.restoreCheckpoint({
-        cwd,
+        cwd: restoreCwd,
         checkpointRef: plan.targetRef,
         fallbackToHead: plan.source === "head-fallback",
       });
-      if (!restored) return { reason: "files-failed", text: unavailableText };
+      // `false` means the target commit did not resolve, before any file changed.
+      if (!restored) return { reason: "files-failed", text: unavailableText, partial: false };
       // Keep the @-mention file picker in step with the reverted files.
-      yield* workspaceEntries.invalidate(cwd);
+      yield* workspaceEntries.invalidate(restoreCwd);
       return null;
     });
     // The provider may already have forgotten the dropped turns, so nothing
     // here may skip projecting the revert: any file failure is reported.
-    const filesNotRestoredReason = yield* restoreFiles().pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterruptsOnly(cause)
-          ? Effect.failCause(cause)
-          : Effect.logWarning("failed to restore checkpoint files after revert", {
-              threadId,
-              turnCount,
-              cause: Cause.pretty(cause),
-            }).pipe(
-              Effect.as<FilesNotRestored>({
-                reason: "files-failed",
-                text: userFacingFailureDetail(cause),
-              }),
+    const filesNotRestoredReason: FilesNotRestored | null =
+      input.skipFiles ??
+      (cwd === undefined
+        ? {
+            // Only recovery lacks a cwd, after an earlier attempt that may have started.
+            reason: "files-failed",
+            text: "Ryco could not find this thread's git workspace",
+            partial: true,
+          }
+        : yield* restoreFiles(cwd).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logWarning("failed to restore checkpoint files after revert", {
+                    threadId,
+                    turnCount,
+                    cause: Cause.pretty(cause),
+                  }).pipe(
+                    Effect.as<FilesNotRestored>({
+                      reason: "files-failed",
+                      text: userFacingFailureDetail(cause),
+                      partial: restoreStarted,
+                    }),
+                  ),
             ),
-      ),
-    );
+          ));
 
     const fromTurnCount = outcome.currentTurnCount;
     if (outcome.dropped.length === 0 && filesNotRestoredReason !== null) {
@@ -945,13 +983,13 @@ const make = Effect.gen(function* () {
         fromTurnCount,
         status: "failed",
         reason: filesNotRestoredReason.reason,
-        detail: `Files were not restored: ${filesNotRestoredReason.text.replace(/[.\s]+$/, "")}. Nothing was changed.`,
+        detail: filesOnlyRevertFailureDetail(filesNotRestoredReason),
         cwd,
       });
       return;
     }
 
-    if (outcome.dropped.length > 0) {
+    if (outcome.dropped.length > 0 && cwd !== undefined) {
       yield* checkpointStore
         .deleteCheckpointRefs({
           cwd,
@@ -1002,7 +1040,7 @@ const make = Effect.gen(function* () {
             fromTurnCount,
             status: "files-not-restored",
             reason: filesNotRestoredReason.reason,
-            detail: `The agent forgot the discarded turns, but files were not restored: ${filesNotRestoredReason.text.replace(/[.\s]+$/, "")}. The checkout still contains changes from those turns. Review them in Changes or with git before continuing.`,
+            detail: filesNotRestoredDetail(filesNotRestoredReason),
             cwd,
           },
     );
@@ -1229,7 +1267,7 @@ const make = Effect.gen(function* () {
     const thread = yield* resolveThreadDetail(threadId);
     if (!thread) {
       return yield* interrupt(
-        `Ryco stopped while restoring files and could not finish. Revert to checkpoint ${turnCount} again to finish.`,
+        "Ryco stopped while restoring files and could not finish because this thread is no longer available.",
       );
     }
     const outcome = revertOutcome(thread, turnCount);
@@ -1252,19 +1290,16 @@ const make = Effect.gen(function* () {
       threadChangedSince(thread, activity.createdAt)
     ) {
       return yield* interrupt(
-        `Ryco stopped while restoring files, and this thread changed afterwards, so the revert was not finished. Files and history were not changed, but the agent may already have forgotten the turns after checkpoint ${turnCount}. Review the thread before continuing, or start a new thread.`,
+        `Ryco stopped while restoring files, and this thread changed afterwards, so the revert was not finished. The conversation history was not changed, but files may be partly restored and the agent may already have forgotten the turns after checkpoint ${turnCount}. Review the files in Changes and the thread before continuing, or start a new thread.`,
       );
     }
+    // "restoring-files" is journaled only once the provider rewound (or nothing
+    // was dropped), so the revert is always projected from here: retrying it
+    // would ask the provider to forget turns it already forgot.
     const pendingSinceMs = Date.parse(activity.createdAt);
-    if (
+    const stale =
       !Number.isFinite(pendingSinceMs) ||
-      Date.now() - pendingSinceMs >= CHECKPOINT_REVERT_PENDING_STALE_MS
-    ) {
-      // Too old to restore files blindly: the checkout may hold newer work.
-      return yield* interrupt(
-        `Ryco stopped while restoring files too long ago to finish safely. Files and history were not changed, but the agent may already have forgotten the turns after checkpoint ${turnCount}. Revert to checkpoint ${turnCount} again to finish.`,
-      );
-    }
+      Date.now() - pendingSinceMs >= CHECKPOINT_REVERT_PENDING_STALE_MS;
     const cwd =
       payload.cwd ??
       (yield* resolveCheckpointCwd({
@@ -1273,16 +1308,19 @@ const make = Effect.gen(function* () {
         projects: yield* resolveThreadProjects(thread.projectId),
         preferSessionRuntime: false,
       }));
-    if (!cwd) {
-      return yield* interrupt(
-        `Ryco stopped while restoring files and could not finish. Revert to checkpoint ${turnCount} again to finish.`,
-      );
-    }
     yield* finishRevert({
       thread,
       revertRequestId: payload.revertRequestId,
       turnCount,
       cwd,
+      // Too old to restore files blindly: the checkout may hold newer work.
+      skipFiles: stale
+        ? {
+            reason: "restart",
+            text: "Ryco stopped while restoring them too long ago to finish safely",
+            partial: true,
+          }
+        : undefined,
     });
   });
 
@@ -1326,7 +1364,7 @@ const make = Effect.gen(function* () {
                       ...base,
                       status: "interrupted",
                       reason: "restart",
-                      detail: `Ryco stopped while restoring files and could not finish after restarting. The agent may already have forgotten the turns after checkpoint ${payload.turnCount}. Revert to checkpoint ${payload.turnCount} again to finish.`,
+                      detail: `Ryco stopped while restoring files and could not finish after restarting. Files may be partly restored, and the agent may already have forgotten the turns after checkpoint ${payload.turnCount}. Review the files in Changes, then revert to checkpoint ${payload.turnCount} again to finish.`,
                     }),
                   ),
                 ),

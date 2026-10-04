@@ -1638,6 +1638,61 @@ describe("CheckpointReactor", () => {
     expect(readme(harness.cwd)).toBe("v3\n");
   });
 
+  // git restore rewrote README, then a later step (clean/reset) failed.
+  const partlyRestoringStore = (store: CheckpointStoreShape): CheckpointStoreShape => ({
+    ...store,
+    restoreCheckpoint: (input) =>
+      store.restoreCheckpoint(input).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new CheckpointInvariantError({
+              operation: "restoreCheckpoint",
+              detail: "git clean failed",
+            }),
+          ),
+        ),
+      ),
+  });
+
+  it("says files may be partly restored when a restore fails midway after the provider rewound", async () => {
+    const harness = await createHarness({ wrapCheckpointStore: partlyRestoringStore });
+    await seedCheckpoints(harness, { sessionStatus: "ready" });
+
+    await requestRevert(harness, "cmd-revert-partial", 1);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-partial",
+      "files-not-restored",
+    );
+
+    expect(await hasReverted(harness.engine)).toBe(true);
+    expect(activity.reason).toBe("files-failed");
+    expect(activity.detail).toBe(
+      "The agent forgot the discarded turns, but files may be only partly restored: git clean failed. Review them in Changes or with git before continuing.",
+    );
+    expect(readme(harness.cwd)).toBe("v2\n");
+  });
+
+  it("does not claim nothing changed when a files-only revert fails midway", async () => {
+    const harness = await createHarness({ wrapCheckpointStore: partlyRestoringStore });
+    await seedCheckpoints(harness, { sessionStatus: "ready" });
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "edited\n", "utf8");
+
+    await requestRevert(harness, "cmd-revert-files-only-partial", 2);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-files-only-partial",
+      "failed",
+    );
+
+    expect(activity.reason).toBe("files-failed");
+    expect(activity.detail).toBe(
+      "Files may be only partly restored: git clean failed. Review them in Changes or with git before continuing.",
+    );
+    expect(readme(harness.cwd)).toBe("v3\n");
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+  });
+
   it("rolls the provider back before restoring files", async () => {
     const harness = await createHarness();
     await seedCheckpoints(harness, { sessionStatus: "ready" });
@@ -1897,12 +1952,56 @@ describe("CheckpointReactor", () => {
 
       expect(activity.reason).toBe("restart");
       expect(activity.detail).toContain("this thread changed afterwards");
+      // Files may already have been restored before the crash; say so.
+      expect(activity.detail).toContain("files may be partly restored");
+      expect(activity.detail).not.toContain("Files and history were not changed");
       expect(await hasReverted(harness.engine)).toBe(false);
       expect(readme(harness.cwd)).toBe("v4\n");
       expect(gitRefExists(harness.cwd, ref(2))).toBe(true);
     });
 
-    it("does not restore files for a pending revert older than the stale window", async () => {
+    it("does not finish a revert when the thread gained a message without a new checkpoint", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+      // A message stamped after the journal entry (a client clock running ahead),
+      // whose turn produced no checkpoint before Ryco restarted.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-recover-new-message"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-after-revert"),
+            role: "user",
+            text: "keep going",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date(Date.now() + 60_000).toISOString(),
+        }),
+      );
+      await seedRevertActivity(harness, {
+        revertRequestId: "cmd-recover-new-message",
+        status: "restoring-files",
+        cwd: harness.cwd,
+      });
+      fs.writeFileSync(path.join(harness.cwd, "README.md"), "in-flight edit\n", "utf8");
+
+      await Effect.runPromise(harness.reactor.recover());
+      const activity = await waitForRevertStatus(
+        harness.engine,
+        "cmd-recover-new-message",
+        "interrupted",
+      );
+
+      expect(activity.detail).toContain("this thread changed afterwards");
+      expect(await hasReverted(harness.engine)).toBe(false);
+      expect(readme(harness.cwd)).toBe("in-flight edit\n");
+      expect(gitRefExists(harness.cwd, ref(2))).toBe(true);
+    });
+
+    it("projects a stale revert the provider already finished without restoring files", async () => {
       const base = Date.now() - 30 * 60_000;
       const iso = (offsetMs: number) => new Date(base + offsetMs).toISOString();
       const harness = await createHarness();
@@ -1921,12 +2020,23 @@ describe("CheckpointReactor", () => {
       const activity = await waitForRevertStatus(
         harness.engine,
         "cmd-recover-stale",
-        "interrupted",
+        "files-not-restored",
       );
 
-      expect(activity.detail).toContain("too long ago to finish safely");
-      expect(await hasReverted(harness.engine)).toBe(false);
+      // The agent already forgot turn 2, so the conversation must follow; the
+      // checkout may hold newer work, so files are left alone.
+      expect(activity.reason).toBe("restart");
+      expect(activity.detail).toBe(
+        "The agent forgot the discarded turns, but files may be only partly restored: Ryco stopped while restoring them too long ago to finish safely. Review them in Changes or with git before continuing.",
+      );
+      expect(await revertedEventCount(harness.engine)).toBe(1);
       expect(readme(harness.cwd)).toBe("v3\n");
+      expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.checkpoints.length === 1,
+      );
+      expect(thread.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount)).toEqual([1]);
     });
 
     it("does not revert again when only the final status was lost", async () => {
