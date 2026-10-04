@@ -181,6 +181,9 @@ export function classifyRestartCandidate(input: {
     status: "skipped",
     reason,
   });
+  // A check that could not be read hides only the reasons that need it: `usage-limited`
+  // needs no IO, so it still wins (and keeps its notice) over an unreadable earlier check.
+  const checkFailed = () => skip(input.usageLimited ? "usage-limited" : "check-failed");
   const latestTurn = input.thread.latestTurn;
   const signals = input.signals;
   if (!input.settingEnabled) return skip("disabled");
@@ -192,10 +195,10 @@ export function classifyRestartCandidate(input: {
   if (derivePendingThreadRequests(input.thread.activities).length > 0) {
     return skip("pending-request");
   }
-  if (signals === undefined) return skip("check-failed");
+  if (signals === undefined) return checkFailed();
   if (signals.unresolvedSteer) return skip("pending-steer");
   if (signals.computerUse) return skip("computer-use");
-  if (input.pendingDelegatedReturn === undefined) return skip("check-failed");
+  if (input.pendingDelegatedReturn === undefined) return checkFailed();
   if (input.pendingDelegatedReturn) return skip("delegated-child");
   if (input.usageLimited) return skip("usage-limited");
   if (input.resumable === undefined) return skip("check-failed");

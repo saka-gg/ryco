@@ -219,6 +219,20 @@ describe("restartCandidateShape + classifyRestartCandidate", () => {
     expect(classify(thread({ activities: pendingApproval }), { signals: undefined })).toEqual(
       skipped("pending-request"),
     );
+    expect(classify(thread(), { signals: undefined, usageLimited: true })).toEqual(
+      skipped("usage-limited"),
+    );
+    expect(classify(thread(), { pendingDelegatedReturn: undefined, usageLimited: true })).toEqual(
+      skipped("usage-limited"),
+    );
+    // Readable checks keep their place ahead of the limit.
+    expect(
+      classify(thread(), {
+        signals: { ...NO_RESTART_SIGNALS, unresolvedSteer: true },
+        pendingDelegatedReturn: undefined,
+        usageLimited: true,
+      }),
+    ).toEqual(skipped("pending-steer"));
     expect(restartSkipNotice("check-failed")).toBeNull();
   });
 
