@@ -17,11 +17,7 @@ import {
 } from "./environments/runtime";
 import { readHostedRpcCapability } from "./hostedHub/capabilities";
 import { useHostedHubStore } from "./hostedHub/state";
-import {
-  selectBootstrapCompleteForEnvironment,
-  selectEnvironmentHydratedFromCacheAt,
-  type AppState,
-} from "@ryco/client-runtime/state/threads";
+import { selectEnvironmentShellLive, type AppState } from "@ryco/client-runtime/state/threads";
 import { useStore } from "./store";
 
 /**
@@ -34,9 +30,7 @@ export function readWebQueueEnvironment(
   environmentId: EnvironmentId,
   state: AppState = useStore.getState(),
 ): QueueEnvironmentReadiness {
-  const shellLive =
-    selectBootstrapCompleteForEnvironment(state, environmentId) &&
-    selectEnvironmentHydratedFromCacheAt(state, environmentId) === null;
+  const shellLive = selectEnvironmentShellLive(state, environmentId);
   if (!shellLive) return { shellLive, mutationReady: false };
   if (readEnvironmentApi(environmentId) === undefined) return { shellLive, mutationReady: false };
   if (isHostedHubMode()) {

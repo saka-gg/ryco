@@ -14,11 +14,11 @@ import type { GitStatusState } from "../src/lib/gitStatusState";
 
 const IDLE_GIT_STATUS: GitStatusState = { data: null, error: null, cause: null, isPending: false };
 
-let refreshResult: VcsStatusResult | null = null;
+let localRefName: string | null | undefined;
 
-/** What a one-off `refreshGitStatus` read returns until the next reset (default: unknown). */
-export function setGitStatusRefreshResultForTests(result: VcsStatusResult | null): void {
-  refreshResult = result;
+/** What a one-off `readLocalGitRefName` read returns until the next reset (default: unknown). */
+export function setLocalGitRefNameForTests(refName: string | null | undefined): void {
+  localRefName = refName;
 }
 
 export function useGitStatus(): GitStatusState {
@@ -26,9 +26,13 @@ export function useGitStatus(): GitStatusState {
 }
 
 export function refreshGitStatus(): Promise<VcsStatusResult | null> {
-  return Promise.resolve(refreshResult);
+  return Promise.resolve(null);
+}
+
+export function readLocalGitRefName(): Promise<string | null | undefined> {
+  return Promise.resolve(localRefName);
 }
 
 export function resetGitStatusStateForTests(): void {
-  refreshResult = null;
+  localRefName = undefined;
 }

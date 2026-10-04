@@ -109,11 +109,17 @@ export function inspectMessageQueueDrain(threadKey: string) {
  * A queued send for this thread is in flight, or accepted while its turn has
  * not started. A background send is invisible to the composer's busy state, so
  * a direct send now could land in that turn's startSession bind window and be
- * orphaned; the composer queues it behind the outstanding send instead.
+ * orphaned; the composer queues it behind the outstanding send instead. Not
+ * while the queue is held (a stall, a Stop): a direct send stays allowed then,
+ * rather than vanishing behind a queue that needs Resume.
  */
 export function hasOutstandingQueuedDispatch(threadKey: string): boolean {
   const { inFlightMessageId, pendingDispatch } = getCoordinator().inspect(threadKey);
-  return inFlightMessageId !== null || pendingDispatch !== null;
+  if (inFlightMessageId !== null) return true;
+  return (
+    pendingDispatch !== null &&
+    useMessageQueueStore.getState().holdsByThreadKey[threadKey] === undefined
+  );
 }
 
 /**
@@ -186,20 +192,20 @@ export function createForegroundQueueSender(
 }
 
 /**
- * Registers the mounted ChatView as its thread's sender and retains the drain,
- * so a ChatView mounted on its own (browser suites) still drains.
+ * Registers the mounted ChatView as its thread's sender and retains the drain
+ * for as long as the ChatView is mounted, so it drains even where no
+ * `MessageQueueDrainBridge` is mounted. The retain has its own effect: swapping
+ * the sender on a thread switch must never take the retain count through zero,
+ * which would drop every pending turn-start wait and let the next head land in
+ * the previous send's bind window.
  */
 export function useForegroundQueueSender(
   threadKey: string | null,
   sender: WebQueueSender | null,
 ): void {
+  useEffect(() => retainMessageQueueDrain(), []);
   useEffect(() => {
-    const release = retainMessageQueueDrain();
-    const unregister =
-      threadKey && sender ? registerForegroundQueueSender(threadKey, sender) : null;
-    return () => {
-      unregister?.();
-      release();
-    };
+    if (!threadKey || !sender) return;
+    return registerForegroundQueueSender(threadKey, sender);
   }, [threadKey, sender]);
 }

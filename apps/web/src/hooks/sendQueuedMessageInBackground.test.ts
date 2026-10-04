@@ -14,7 +14,8 @@ import type { ExecuteChatSendTurnInput } from "./executeChatSendTurn";
 const harness = vi.hoisted(() => ({
   mutationReady: true,
   execute: vi.fn(),
-  gitStatus: vi.fn(),
+  gitRefName: vi.fn(),
+  gitRefresh: vi.fn(),
 }));
 
 vi.mock("./executeChatSendTurn", () => ({
@@ -27,7 +28,8 @@ vi.mock("../messageQueueEnvironment", () => ({
   readWebQueueEnvironment: () => ({ shellLive: true, mutationReady: harness.mutationReady }),
 }));
 vi.mock("../lib/gitStatusState", () => ({
-  refreshGitStatus: (target: unknown) => harness.gitStatus(target),
+  readLocalGitRefName: (target: unknown) => harness.gitRefName(target),
+  refreshGitStatus: (target: unknown) => harness.gitRefresh(target),
 }));
 
 import { toastManager } from "../components/ui/toast";
@@ -35,6 +37,8 @@ import type { WebQueuedMessage } from "../messageQueueStore";
 import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import {
+  MAX_UNREADABLE_BRANCH_ATTEMPTS,
+  QUEUED_BRANCH_UNREADABLE_MESSAGE,
   QUEUED_SELECTION_NEEDS_HANDOFF_MESSAGE,
   sendQueuedMessageInBackground,
 } from "./sendQueuedMessageInBackground";
@@ -111,8 +115,9 @@ const lastInput = () => harness.execute.mock.calls.at(-1)?.[0] as ExecuteChatSen
 
 beforeEach(() => {
   harness.mutationReady = true;
-  harness.gitStatus.mockReset();
-  harness.gitStatus.mockResolvedValue({ isRepo: true, refName: "main" });
+  harness.gitRefName.mockReset();
+  harness.gitRefName.mockResolvedValue("main");
+  harness.gitRefresh.mockReset();
   harness.execute.mockReset();
   harness.execute.mockImplementation(async (input: ExecuteChatSendTurnInput) => {
     input.onBeforeTurnStart?.();
@@ -205,9 +210,11 @@ describe("sendQueuedMessageInBackground", () => {
 
   it("materializes a legacy branch thread's worktree when the root has another branch checked out", async () => {
     seedThread("feature/queued");
-    harness.gitStatus.mockResolvedValue({ isRepo: true, refName: "main" });
+    harness.gitRefName.mockResolvedValue("main");
     await sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() });
-    expect(harness.gitStatus).toHaveBeenCalledWith({ environmentId: ENV, cwd: "/repo" });
+    expect(harness.gitRefName).toHaveBeenCalledWith({ environmentId: ENV, cwd: "/repo" });
+    // Local status only: never the remote and change-request refresh.
+    expect(harness.gitRefresh).not.toHaveBeenCalled();
     expect(lastInput().worktree).toEqual({
       shouldMaterializeLegacyBranchWorktree: true,
       baseBranchForWorktree: "feature/queued",
@@ -225,17 +232,47 @@ describe("sendQueuedMessageInBackground", () => {
     });
   });
 
-  it("defers a branch thread while the checked-out branch cannot be read", async () => {
+  it("sends a detached or non-repository checkout in place, like the foreground", async () => {
     seedThread("feature/queued");
-    harness.gitStatus.mockRejectedValue(new Error("socket closed"));
+    harness.gitRefName.mockResolvedValue(null);
     expect(
       await sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() }),
-    ).toEqual({ kind: "deferred" });
+    ).toEqual({ kind: "accepted" });
+    expect(lastInput().worktree.shouldCreateWorktree).toBe(false);
+  });
+
+  it("defers a branch thread while its checkout is unreadable, then fails it visibly", async () => {
+    seedThread("feature/queued");
+    harness.gitRefName.mockResolvedValue(undefined);
+    const send = () => sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() });
+    for (let attempt = 1; attempt < MAX_UNREADABLE_BRANCH_ATTEMPTS; attempt += 1) {
+      expect(await send()).toEqual({ kind: "deferred" });
+    }
+    expect(await send()).toEqual({ kind: "failed" });
+    expect(harness.gitRefName).toHaveBeenCalledTimes(MAX_UNREADABLE_BRANCH_ATTEMPTS);
     expect(harness.execute).not.toHaveBeenCalled();
+    expect(
+      selectThreadByRef(useStore.getState(), { environmentId: ENV, threadId: THREAD })?.error,
+    ).toBe(QUEUED_BRANCH_UNREADABLE_MESSAGE);
+    // The budget starts over: a later read that succeeds sends.
+    harness.gitRefName.mockResolvedValue("feature/queued");
+    expect(await send()).toEqual({ kind: "accepted" });
+  });
+
+  it("starts the unreadable-branch budget over after a successful read", async () => {
+    seedThread("feature/queued");
+    harness.gitRefName.mockResolvedValueOnce(undefined).mockResolvedValueOnce("main");
+    const send = () => sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() });
+    expect(await send()).toEqual({ kind: "deferred" });
+    expect(await send()).toEqual({ kind: "accepted" });
+    harness.gitRefName.mockResolvedValue(undefined);
+    for (let attempt = 1; attempt < MAX_UNREADABLE_BRANCH_ATTEMPTS; attempt += 1) {
+      expect(await send()).toEqual({ kind: "deferred" });
+    }
   });
 
   it("never reads git status for a thread without a branch", async () => {
     await sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() });
-    expect(harness.gitStatus).not.toHaveBeenCalled();
+    expect(harness.gitRefName).not.toHaveBeenCalled();
   });
 });

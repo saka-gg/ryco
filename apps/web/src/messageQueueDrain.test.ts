@@ -52,17 +52,64 @@ vi.mock("./hooks/sendQueuedMessageInBackground", () => ({
   sendQueuedMessageInBackground: (...args: unknown[]) => harness.background(...args),
 }));
 
+// A minimal passive-effect runner: enough to exercise a hook's effect deps
+// (apps/web unit tests have no DOM renderer).
+const effects = vi.hoisted(() => {
+  type Slot = { deps: readonly unknown[] | undefined; cleanup: void | (() => void) };
+  const state = {
+    slots: [] as Slot[],
+    queued: [] as Array<{
+      index: number;
+      effect: () => void | (() => void);
+      deps: readonly unknown[] | undefined;
+    }>,
+    index: 0,
+  };
+  const depsChanged = (previous: Slot | undefined, deps: readonly unknown[] | undefined) =>
+    !previous ||
+    !deps ||
+    !previous.deps ||
+    deps.length !== previous.deps.length ||
+    deps.some((value, index) => !Object.is(value, previous.deps![index]));
+  return {
+    useEffect(effect: () => void | (() => void), deps?: readonly unknown[]) {
+      const index = state.index++;
+      if (depsChanged(state.slots[index], deps)) state.queued.push({ index, effect, deps });
+    },
+    render(component: () => void) {
+      state.index = 0;
+      state.queued = [];
+      component();
+      // React runs every changed effect's cleanup before any new setup.
+      for (const { index } of state.queued) state.slots[index]?.cleanup?.();
+      for (const { index, effect, deps } of state.queued) {
+        state.slots[index] = { deps, cleanup: effect() };
+      }
+    },
+    unmount() {
+      for (const slot of state.slots) slot?.cleanup?.();
+      state.slots = [];
+    },
+  };
+});
+vi.mock("react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react")>()),
+  useEffect: effects.useEffect,
+}));
+
 import { useSavedEnvironmentRuntimeStore } from "./environments/runtime";
 import { hostedWebConnectionScopes } from "./hostedHub/hostedConnectionScopes";
 import { useHostedHubStore } from "./hostedHub/state";
 import {
   createForegroundQueueSender,
   hasOutstandingQueuedDispatch,
+  holdMessageQueueForInterrupt,
   inspectMessageQueueDrain,
   readWebQueueEnvironment,
   registerForegroundQueueSender,
   resolveWebQueueSender,
   retainMessageQueueDrain,
+  useForegroundQueueSender,
   type WebQueueSender,
 } from "./messageQueueDrain";
 import { useMessageQueueStore, type WebQueuedMessage } from "./messageQueueStore";
@@ -147,6 +194,19 @@ function queued(id: string): WebQueuedMessage {
       expiredTerminalContextCount: 0,
     },
     settings: { runtimeMode: "full-access", interactionMode: "default", tokenMode: "balanced" },
+  };
+}
+
+function threadDetail(overrides: { session?: { updatedAt: string } } = {}) {
+  const shell = shellSnapshot(true).threads[0]!;
+  return {
+    ...shell,
+    session: { ...shell.session!, ...overrides.session },
+    messages: [],
+    activities: [],
+    proposedPlans: [],
+    checkpoints: [],
+    deletedAt: null,
   };
 }
 
@@ -298,6 +358,64 @@ describe("web queue senders", () => {
     );
     await flush();
     expect(hasOutstandingQueuedDispatch(KEY)).toBe(false);
+  });
+
+  it("lets a direct send through while the outstanding queued send is held", async () => {
+    recordWsConnectionOpened({ environmentId: ENV });
+    releaseDrain = retainMessageQueueDrain();
+    useStore.getState().syncServerThreadDetail(threadDetail() as never, ENV);
+    harness.background.mockImplementation(
+      async (_key: string, _entry: unknown, hooks: { onBeforeTurnStart: () => void }) => {
+        hooks.onBeforeTurnStart();
+        return { kind: "accepted" };
+      },
+    );
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-2"));
+    await flush();
+    expect(inspectMessageQueueDrain(KEY).pendingDispatch?.messageId).toBe("q-1");
+    expect(hasOutstandingQueuedDispatch(KEY)).toBe(true);
+    // Stop in q-1's bind window: the queue holds and still waits on q-1's ack.
+    const stop = holdMessageQueueForInterrupt(ENV, THREAD);
+    await flush();
+    expect(inspectMessageQueueDrain(KEY).pendingDispatch?.messageId).toBe("q-1");
+    expect(hasOutstandingQueuedDispatch(KEY)).toBe(false);
+    stop.undo();
+    expect(hasOutstandingQueuedDispatch(KEY)).toBe(true);
+  });
+
+  it("keeps the drain retained while a mounted ChatView switches threads", async () => {
+    recordWsConnectionOpened({ environmentId: ENV });
+    useStore.getState().syncServerThreadDetail(threadDetail() as never, ENV);
+    const foreground: WebQueueSender = {
+      send: vi.fn(async (_entry, hooks) => {
+        hooks.onBeforeTurnStart();
+        return { kind: "accepted" as const };
+      }),
+    };
+    const otherSender: WebQueueSender = { send: vi.fn() };
+    effects.render(() => useForegroundQueueSender(KEY, foreground));
+    try {
+      useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+      useMessageQueueStore.getState().enqueue(KEY, queued("q-2"));
+      await flush();
+      expect(foreground.send).toHaveBeenCalledTimes(1);
+      expect(inspectMessageQueueDrain(KEY).pendingDispatch?.messageId).toBe("q-1");
+      // The same ChatView moves to another thread: its sender re-registers.
+      effects.render(() => useForegroundQueueSender(`${ENV}:other`, otherSender));
+      // startSession's bind for q-1: ready again, no turn yet.
+      useStore
+        .getState()
+        .syncServerThreadDetail(
+          threadDetail({ session: { updatedAt: "2026-10-01T10:00:05.000Z" } }) as never,
+          ENV,
+        );
+      await flush();
+      expect(inspectMessageQueueDrain(KEY).pendingDispatch?.messageId).toBe("q-1");
+      expect(harness.background).not.toHaveBeenCalled();
+    } finally {
+      effects.unmount();
+    }
   });
 
   it("drains a started off-screen thread through the background sender", async () => {

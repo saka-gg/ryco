@@ -10,7 +10,6 @@ import {
   ProviderInstanceId,
   ThreadId,
   type TurnId,
-  type VcsStatusResult,
   WS_METHODS,
   DEFAULT_AGENT_TOKEN_MODE,
 } from "@ryco/contracts";
@@ -18,7 +17,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { useMessageQueueStore } from "../messageQueueStore";
 import { inspectMessageQueueDrain } from "../messageQueueDrain";
-import { setGitStatusRefreshResultForTests } from "../../test/gitStatusStateMock";
+import { setLocalGitRefNameForTests } from "../../test/gitStatusStateMock";
 import { selectThreadByRef, useStore } from "../store";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
 import {
@@ -1021,7 +1020,7 @@ describe("ChatView Conversation (full app)", () => {
     const thread = snapshot.threads.find((entry) => entry.id === THREAD_ID)!;
     // A branch thread without a worktree: the background sender reads which
     // branch the project root has checked out before sending in place.
-    setGitStatusRefreshResultForTests({ isRepo: true, refName: thread.branch } as VcsStatusResult);
+    setLocalGitRefNameForTests(thread.branch);
     const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
     try {
       await waitForComposerEditor();
@@ -1048,7 +1047,7 @@ describe("ChatView Conversation (full app)", () => {
         undefined,
       );
     } finally {
-      setGitStatusRefreshResultForTests(null);
+      setLocalGitRefNameForTests(undefined);
       __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();
     }

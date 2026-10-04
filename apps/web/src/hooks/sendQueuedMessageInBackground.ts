@@ -10,7 +10,7 @@ import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 
 import { resolveChatSendWorktreePlan } from "../components/ChatView.logic";
 import { readEnvironmentApi } from "../environmentApi";
-import { refreshGitStatus } from "../lib/gitStatusState";
+import { readLocalGitRefName } from "../lib/gitStatusState";
 import { readWebQueueEnvironment } from "../messageQueueEnvironment";
 import type { WebQueuedMessage } from "../messageQueueStore";
 import { defaultQueryClient } from "../rpc/queryClient";
@@ -27,6 +27,16 @@ import { executeChatSendTurn, type SendTurnWorktreePlan } from "./executeChatSen
 
 export const QUEUED_SELECTION_NEEDS_HANDOFF_MESSAGE =
   "The queued provider or model needs a context handoff. Open the conversation to send it.";
+export const QUEUED_BRANCH_UNREADABLE_MESSAGE =
+  "The queued message could not check which branch the project checkout is on. Open the conversation to send it.";
+
+/**
+ * Background sends in a row that could not read the checkout's branch before
+ * the head fails visibly. Each read waits up to its own timeout, so this bounds
+ * the silent retrying to a few seconds instead of polling forever.
+ */
+export const MAX_UNREADABLE_BRANCH_ATTEMPTS = 3;
+const unreadableBranchAttemptsByThreadKey = new Map<string, number>();
 
 const noop = () => {};
 
@@ -40,8 +50,9 @@ const NO_WORKTREE_PLAN: SendTurnWorktreePlan = {
  * The same worktree plan the foreground ChatView computes for a started thread.
  * A legacy branch thread (a branch, no worktree) whose branch is not the one
  * checked out in the project root gets that branch's worktree materialized
- * first, so the agent never edits the root checkout on the wrong branch. null
- * when that check needs a git status that cannot be read now.
+ * first, so the agent never edits the root checkout on the wrong branch. The
+ * branch comes from local status only (no remote or change-request lookup);
+ * null when it cannot be read now.
  */
 export async function resolveBackgroundWorktreePlan(input: {
   readonly environmentId: EnvironmentId;
@@ -50,17 +61,17 @@ export async function resolveBackgroundWorktreePlan(input: {
   readonly worktreePath: string | null;
 }): Promise<SendTurnWorktreePlan | null> {
   if (input.branch === null || input.worktreePath !== null) return NO_WORKTREE_PLAN;
-  const status = await refreshGitStatus({
+  const refName = await readLocalGitRefName({
     environmentId: input.environmentId,
     cwd: input.projectCwd,
-  }).catch(() => null);
-  if (status === null) return null;
+  }).catch(() => undefined);
+  if (refName === undefined) return null;
   return resolveChatSendWorktreePlan({
     isServerThread: true,
     isFirstMessage: false,
     threadWorktreePath: null,
     activeThreadBranch: input.branch,
-    currentGitRefName: status.refName ?? null,
+    currentGitRefName: refName,
     // Only a first message reads the env mode.
     sendEnvMode: "local",
   });
@@ -125,9 +136,20 @@ export async function sendQueuedMessageInBackground(
     branch: thread.branch,
     worktreePath: thread.worktreePath,
   });
-  // The checkout's branch is unknown right now: sending could run the agent on
-  // whatever branch the project root has checked out, so try again shortly.
-  if (worktree === null) return { kind: "deferred" };
+  if (worktree === null) {
+    // The checkout's branch is unknown: sending could run the agent on whatever
+    // branch the project root has checked out. Retry a few times, then fail the
+    // head visibly (thread error and Retry) rather than wait forever unseen.
+    const attempts = (unreadableBranchAttemptsByThreadKey.get(threadKey) ?? 0) + 1;
+    if (attempts < MAX_UNREADABLE_BRANCH_ATTEMPTS) {
+      unreadableBranchAttemptsByThreadKey.set(threadKey, attempts);
+      return { kind: "deferred" };
+    }
+    unreadableBranchAttemptsByThreadKey.delete(threadKey);
+    setThreadError(QUEUED_BRANCH_UNREADABLE_MESSAGE);
+    return { kind: "failed" };
+  }
+  unreadableBranchAttemptsByThreadKey.delete(threadKey);
   const composer = await attachDevicePromptScreenshot({
     api,
     threadId: thread.id,
