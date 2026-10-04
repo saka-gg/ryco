@@ -97,6 +97,26 @@ function decodeForEvent<A>(
   });
 }
 
+/**
+ * Caps in-memory history without evicting the thread's first or latest user message.
+ * The command model depends on both: some(user) (thread started → context handoff,
+ * archive) and findLast(user) (delegated-return fence, settlement). Identical to
+ * slice(-MAX_THREAD_MESSAGES) whenever both anchors lie within the newest window.
+ */
+function capThreadMessagesPreservingUserAnchors(
+  messages: ReadonlyArray<OrchestrationMessage>,
+): ReadonlyArray<OrchestrationMessage> {
+  let excess = messages.length - MAX_THREAD_MESSAGES;
+  if (excess <= 0) return messages;
+  const firstUserId = messages.find((message) => message.role === "user")?.id;
+  const latestUserId = messages.findLast((message) => message.role === "user")?.id;
+  return messages.filter((message) => {
+    if (excess === 0 || message.id === firstUserId || message.id === latestUserId) return true;
+    excess -= 1;
+    return false;
+  });
+}
+
 function retainThreadMessagesAfterRevert(
   messages: ReadonlyArray<OrchestrationMessage>,
   retainedTurnIds: ReadonlySet<string>,
@@ -693,7 +713,7 @@ export function projectEvent(
                 : entry,
             )
           : [...thread.messages, message];
-        const cappedMessages = messages.slice(-MAX_THREAD_MESSAGES);
+        const cappedMessages = capThreadMessagesPreservingUserAnchors(messages);
 
         return {
           ...nextBase,

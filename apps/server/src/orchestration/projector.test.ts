@@ -1051,4 +1051,95 @@ describe("orchestration projector", () => {
     expect(thread?.checkpoints[0]?.turnId).toBe("turn-100");
     expect(thread?.checkpoints.at(-1)?.turnId).toBe("turn-599");
   });
+
+  describe("message cap user anchors", () => {
+    const threadId = "thread-anchored";
+    const createdAt = "2026-03-01T10:00:00.000Z";
+    const messageEvent = (
+      sequence: number,
+      messageId: string,
+      role: "user" | "assistant",
+    ): OrchestrationEvent => {
+      const at = new Date(Date.parse(createdAt) + sequence * 1000).toISOString();
+      return makeEvent({
+        sequence,
+        type: "thread.message-sent",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: at,
+        commandId: `cmd-${messageId}`,
+        payload: {
+          threadId,
+          messageId,
+          role,
+          text: messageId,
+          turnId: null,
+          streaming: false,
+          createdAt: at,
+          updatedAt: at,
+        },
+      });
+    };
+    const reduceEvents = (events: ReadonlyArray<OrchestrationEvent>) =>
+      [
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: createdAt,
+          commandId: "cmd-create-anchored",
+          payload: {
+            threadId,
+            projectId: "project-1",
+            title: "anchored",
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+        ...events,
+      ].reduce<Promise<ReturnType<typeof createEmptyReadModel>>>(
+        (statePromise, event) =>
+          statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+        Promise.resolve(createEmptyReadModel(createdAt)),
+      );
+    const assistantEvents = (firstSequence: number) =>
+      Array.from({ length: 2_100 }, (_, index) =>
+        messageEvent(firstSequence + index, `msg-${index}`, "assistant"),
+      );
+
+    it("keeps the first and latest user messages when the message cap evicts history", async () => {
+      const state = await reduceEvents([
+        messageEvent(2, "u-first", "user"),
+        messageEvent(3, "u-latest", "user"),
+        ...assistantEvents(4),
+      ]);
+
+      const messages = state.threads[0]?.messages ?? [];
+      expect(messages).toHaveLength(2_000);
+      expect(messages[0]?.id).toBe("u-first");
+      expect(messages[1]?.id).toBe("u-latest");
+      expect(messages[2]?.id).toBe("msg-102");
+      expect(messages.at(-1)?.id).toBe("msg-2099");
+      expect(messages.findLast((message) => message.role === "user")?.id).toBe("u-latest");
+    });
+
+    it("caps exactly like slice when the only user message is in the newest window", async () => {
+      const events = [...assistantEvents(2), messageEvent(2_102, "u-only", "user")];
+      const state = await reduceEvents(events);
+
+      const expectedIds = events
+        .map((event) => (event.payload as { messageId: string }).messageId)
+        .slice(-2_000);
+      expect(expectedIds[0]).toBe("msg-101");
+      expect(state.threads[0]?.messages.map((message) => message.id)).toEqual(expectedIds);
+    });
+  });
 });
