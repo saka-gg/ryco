@@ -83,6 +83,25 @@ function GlyphMark({ kind }: { readonly kind: InboxGlyphKind }) {
       );
     case "completed":
       return <CompletedMark />;
+    case "limited":
+      // A static gauge at its limit: on you, but nothing failed and nothing runs.
+      return (
+        <svg viewBox="0 0 14 14" className="size-[13px] text-warning" aria-hidden>
+          <path
+            d="M2.2 9.6a5 5 0 1 1 9.6 0"
+            className="fill-none stroke-current"
+            strokeWidth={1.6}
+            strokeLinecap="round"
+          />
+          <path
+            d="M7 8.4l2.9-2.4"
+            className="fill-none stroke-current"
+            strokeWidth={1.6}
+            strokeLinecap="round"
+          />
+          <circle cx="7" cy="8.6" r="1.1" className="fill-current" />
+        </svg>
+      );
     case "error":
       return (
         <svg viewBox="0 0 14 14" className="size-[13px]" aria-hidden>

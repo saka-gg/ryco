@@ -1,3 +1,5 @@
+import { formatUsageLimitReset } from "@ryco/client-runtime/state/threads";
+
 import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 
@@ -11,6 +13,7 @@ export type InboxGlyphKind =
   | "working"
   | "connecting"
   | "completed"
+  | "limited"
   | "error"
   | "offline"
   | "idle";
@@ -29,6 +32,8 @@ export function resolveInboxGlyph(
     case "connecting":
     case "reconnecting":
       return "connecting";
+    case "limited":
+      return "limited";
     case "error":
     case "delivery-unknown":
       return "error";
@@ -76,12 +81,28 @@ export function inboxAttentionDetail(row: Pick<InboxSidebarRow, "attention">): s
 
 const ERROR_FALLBACK = "The last turn failed";
 
+type UsageLimitRow = Pick<InboxSidebarRow, "state"> & {
+  readonly usageLimit?: InboxSidebarRow["usageLimit"];
+};
+
+/** "Resets Thu 15:40", "Reset time unknown" or "Limit reset · resume to continue". */
+export function inboxUsageLimitDetail(row: UsageLimitRow): string {
+  const limit = row.usageLimit ?? null;
+  if (limit?.phase === "reset") return "Limit reset · resume to continue";
+  if (limit?.resetAt) return `Resets ${formatUsageLimitReset(limit.resetAt)}`;
+  return "Reset time unknown";
+}
+
 export function resolveInboxStateLine(
-  row: Pick<InboxSidebarRow, "state" | "attention" | "errorDetail" | "statusLabel">,
+  row: Pick<InboxSidebarRow, "state" | "attention" | "errorDetail" | "statusLabel"> & {
+    readonly usageLimit?: InboxSidebarRow["usageLimit"];
+  },
 ): InboxStateLine {
   switch (row.state) {
     case "needs-input":
       return { kind: "attention", text: ATTENTION_LABEL[row.attention ?? "input"] };
+    case "limited":
+      return { kind: "status", text: inboxUsageLimitDetail(row) };
     case "error":
       return { kind: "error", text: row.errorDetail ?? ERROR_FALLBACK };
     case "delivery-unknown":
@@ -116,11 +137,13 @@ export function inboxGlyphHint(
   row: Pick<
     InboxSidebarRow,
     "state" | "attention" | "statusLabel" | "errorDetail" | "runningSince" | "latestTurnCompletedAt"
-  >,
+  > & { readonly usageLimit?: InboxSidebarRow["usageLimit"] },
   unseen: boolean,
 ): string {
   const label = inboxGlyphLabel(row, unseen);
   switch (row.state) {
+    case "limited":
+      return `${label} · ${inboxUsageLimitDetail(row)}`;
     case "needs-input":
       return `${label} · open the thread to respond`;
     case "working":

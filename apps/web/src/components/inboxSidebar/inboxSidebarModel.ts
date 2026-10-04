@@ -1,6 +1,10 @@
 import { inboxModelName } from "./inboxContextHandoff";
 import { getModelDisplayName } from "@ryco/shared/model";
-import { deriveThreadActivityStatus } from "@ryco/client-runtime/state/threads";
+import {
+  deriveThreadActivityStatus,
+  deriveUsageLimitStatus,
+  type UsageLimitStatus,
+} from "@ryco/client-runtime/state/threads";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { WsConnectionUiState } from "@ryco/client-runtime/rpc";
 import { PROVIDER_OPTIONS } from "@ryco/client-runtime/state/session";
@@ -30,6 +34,7 @@ export type InboxSidebarThreadState =
   | "delivery-unknown"
   | "working"
   | "connecting"
+  | "limited"
   | "error"
   | "reconnecting"
   | "offline"
@@ -97,6 +102,8 @@ export interface InboxSidebarRow {
   readonly attention: InboxSidebarAttention | null;
   /** Provider error text, set only while `state` is "error". */
   readonly errorDetail: string | null;
+  /** The usage limit's phase and reset, set only while `state` is "limited". */
+  readonly usageLimit?: Pick<UsageLimitStatus, "phase" | "resetAt"> | null;
   /** Start of the running turn, set only while `state` is "working". */
   readonly runningSince: string | null;
   /** Completion of the latest turn; compared against the last visit for unseen work. */
@@ -208,6 +215,7 @@ const ACTIVE_PRIORITY: Readonly<
 > = {
   "delivery-unknown": 0,
   error: 1,
+  limited: 1,
   working: 2,
   connecting: 3,
   reconnecting: 4,
@@ -228,6 +236,7 @@ function resolveThreadState(
   thread: SidebarThreadSummary,
   environment: InboxSidebarEnvironment | undefined,
   deliveryUnknownThreadKeys: ReadonlySet<string>,
+  nowMs: number,
 ): InboxSidebarThreadState {
   if (environment?.stale || environment?.connectionState === "offline") return "offline";
   const activity = deriveThreadActivityStatus(thread);
@@ -245,6 +254,8 @@ function resolveThreadState(
   if (activity === "connecting" || environment?.connectionState === "connecting") {
     return "connecting";
   }
+  // A running resumed turn wins above; a usage limit outranks the error it ended in.
+  if (deriveUsageLimitStatus(thread, nowMs) !== null) return "limited";
   if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
   return "idle";
@@ -266,8 +277,11 @@ function resolveRunningSince(thread: SidebarThreadSummary): string | null {
 function statusLabel(
   state: InboxSidebarThreadState,
   environment: InboxSidebarEnvironment | undefined,
+  usageLimit: UsageLimitStatus | null,
 ): string {
   switch (state) {
+    case "limited":
+      return usageLimit?.label ?? "Limited";
     case "needs-input":
       return "Needs input";
     case "delivery-unknown":
@@ -294,10 +308,15 @@ function statusLabel(
 export function resolveInboxThreadStatus(
   thread: SidebarThreadSummary,
 ): Pick<InboxSidebarRow, "state" | "statusLabel" | "attention"> {
-  const state = resolveThreadState(thread, undefined, new Set());
+  const nowMs = Date.now();
+  const state = resolveThreadState(thread, undefined, new Set(), nowMs);
   return {
     state,
-    statusLabel: statusLabel(state, undefined),
+    statusLabel: statusLabel(
+      state,
+      undefined,
+      state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null,
+    ),
     attention: state === "needs-input" ? resolveAttention(thread) : null,
   };
 }
@@ -395,6 +414,7 @@ function modelDisplayName(
 }
 
 export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSidebarModel {
+  const nowMs = input.nowMs ?? Date.now();
   const environmentById = new Map(
     input.environments.map((environment) => [environment.environmentId, environment] as const),
   );
@@ -422,7 +442,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     currentThreadKey: input.activeThreadKey,
     aiFocusEnabled: input.aiFocusEnabled,
     autoSettleAfterDays: input.autoSettleAfterDays,
-    nowMs: input.nowMs ?? Date.now(),
+    nowMs,
   });
 
   const threadEnvironmentIds = new Set(input.threads.map((thread) => thread.environmentId));
@@ -448,7 +468,8 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     const workspaceLabel =
       worktree?.title ?? worktree?.branch ?? thread.branch ?? "Local workspace";
     const contextLabel = `${machineLabel} · ${projectLabel} · ${workspaceLabel}`;
-    const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys);
+    const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys, nowMs);
+    const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
     const rowSection = entry.pinned
@@ -495,9 +516,10 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       workspaceLabel,
       contextLabel,
       state,
-      statusLabel: statusLabel(state, environment),
+      statusLabel: statusLabel(state, environment, usageLimit),
       attention: state === "needs-input" ? resolveAttention(thread) : null,
       errorDetail: state === "error" ? thread.session?.lastError?.trim() || null : null,
+      usageLimit: usageLimit ? { phase: usageLimit.phase, resetAt: usageLimit.resetAt } : null,
       runningSince: state === "working" ? resolveRunningSince(thread) : null,
       latestTurnCompletedAt: thread.latestTurn?.completedAt ?? null,
       showProject: !singleProject,

@@ -9,7 +9,10 @@ import {
 } from "../lib/threadSort";
 import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
-import { deriveThreadActivityStatus } from "@ryco/client-runtime/state/threads";
+import {
+  applicableUsageLimit,
+  deriveThreadActivityStatus,
+} from "@ryco/client-runtime/state/threads";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
@@ -58,7 +61,8 @@ export interface ThreadStatusPill {
     | "Completed"
     | "Pending Approval"
     | "Awaiting Input"
-    | "Plan Ready";
+    | "Plan Ready"
+    | "Limited";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -183,6 +187,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   Working: 4,
   Connecting: 4,
   "Plan Ready": 3,
+  Limited: 3,
   Monitoring: 2,
   Completed: 1,
 };
@@ -196,6 +201,8 @@ type ThreadStatusInput = Pick<
   | "latestTurn"
   | "session"
   | "backgroundLiveness"
+  | "usageLimit"
+  | "modelSelection"
 > & {
   lastVisitedAt?: string | undefined;
 };
@@ -604,6 +611,16 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
       pulse: true,
+    };
+  }
+
+  // Working and connecting returned above, so a running resumed turn wins.
+  if (applicableUsageLimit(thread) !== null) {
+    return {
+      label: "Limited",
+      colorClass: "text-amber-600 dark:text-amber-300/90",
+      dotClass: "bg-amber-500 dark:bg-amber-300/90",
+      pulse: false,
     };
   }
 

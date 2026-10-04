@@ -45,6 +45,18 @@ export function deriveUsageLimitStatus(
   };
 }
 
+const RESET_TIME_FORMAT: Intl.DateTimeFormatOptions = {
+  weekday: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+};
+
+/** "Thu 15:40" in the viewer's timezone; the day keeps multi-day weekly resets unambiguous. */
+export function formatUsageLimitReset(resetAt: string, locale?: string): string {
+  return new Intl.DateTimeFormat(locale, RESET_TIME_FORMAT).format(new Date(resetAt));
+}
+
 export type UsageLimitBannerDescription =
   | "resets-at"
   | "resuming-at-reset"

@@ -835,3 +835,105 @@ describe("glyph row facts", () => {
     expect(sections.flatMap((section) => section.rows).every((row) => row.showProject)).toBe(true);
   });
 });
+
+describe("usage-limited rows", () => {
+  const rows = (input: Parameters<typeof build>[0]) =>
+    build(input).flatMap((section) => section.rows);
+  const BEFORE_RESET = Date.parse("2026-08-23T12:00:00.000Z");
+  const AFTER_RESET = Date.parse("2026-08-23T16:00:00.000Z");
+  const limitedThread = (id: string, overrides: Partial<SidebarThreadSummary> = {}) =>
+    thread(id, {
+      modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "sonnet" },
+      session: {
+        provider: ProviderDriverKind.make("claudeAgent"),
+        status: "error",
+        orchestrationStatus: "error",
+        lastError: "Claude usage limit reached.",
+        createdAt: "2026-08-23T10:00:00.000Z",
+        updatedAt: "2026-08-23T10:00:00.000Z",
+      },
+      usageLimit: {
+        limitId: `usage-limit:${id}:turn-1`,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        turnId: TurnId.make("turn-1"),
+        message: "Claude usage limit reached.",
+        limitedAt: "2026-08-23T10:00:00.000Z",
+        resetAt: "2026-08-23T15:00:00.000Z",
+        autoResume: null,
+        updatedAt: "2026-08-23T10:00:00.000Z",
+      },
+      ...overrides,
+    });
+
+  it("shows a limited thread as Limited in Active, ranked with errors and before working", () => {
+    const sections = build({
+      threads: [
+        thread("working", {
+          latestTurn: {
+            turnId: TurnId.make("turn-working"),
+            state: "running",
+            requestedAt: "2026-08-23T09:00:00.000Z",
+            startedAt: "2026-08-23T09:00:00.000Z",
+            completedAt: null,
+            assistantMessageId: null,
+          },
+        }),
+        limitedThread("limited"),
+      ],
+      nowMs: BEFORE_RESET,
+    });
+    const active = sections.find((section) => section.key === "active");
+    expect(active?.rows.map((row) => [row.title, row.state])).toEqual([
+      ["limited", "limited"],
+      ["working", "working"],
+    ]);
+    expect(active?.rows[0]).toMatchObject({
+      statusLabel: "Limited",
+      errorDetail: null,
+      usageLimit: { phase: "limited", resetAt: "2026-08-23T15:00:00.000Z" },
+    });
+  });
+
+  it("falls back to Error when the thread targets another instance", () => {
+    const [row] = rows({
+      threads: [
+        limitedThread("switched", {
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        }),
+      ],
+      nowMs: BEFORE_RESET,
+    });
+    expect(row).toMatchObject({ state: "error", statusLabel: "Error" });
+  });
+
+  it("labels the row Limit reset after the reset", () => {
+    const [row] = rows({ threads: [limitedThread("reset")], nowMs: AFTER_RESET });
+    expect(row).toMatchObject({
+      state: "limited",
+      statusLabel: "Limit reset",
+      usageLimit: { phase: "reset" },
+    });
+  });
+
+  it("gives the sidebar a Limited pill unless the thread is working", () => {
+    expect(resolveThreadStatusPill({ thread: limitedThread("pill") })).toMatchObject({
+      label: "Limited",
+      pulse: false,
+    });
+    expect(
+      resolveThreadStatusPill({
+        thread: limitedThread("pill-working", {
+          latestTurn: {
+            turnId: TurnId.make("turn-2"),
+            state: "running",
+            requestedAt: "2026-08-23T11:00:00.000Z",
+            startedAt: "2026-08-23T11:00:00.000Z",
+            completedAt: null,
+            assistantMessageId: null,
+          },
+        }),
+      })?.label,
+    ).toBe("Working");
+  });
+});

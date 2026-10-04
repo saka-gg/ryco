@@ -226,6 +226,11 @@ import {
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { AgentControlApprovals } from "./agent-control/AgentControlApprovals";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
+import {
+  applicableUsageLimit,
+  deriveThreadSnoozeEligibility,
+} from "@ryco/client-runtime/state/threads";
 import {
   ChatOverviewPanel,
   FloatingOverviewMotionFrame,
@@ -2077,13 +2082,41 @@ export default function ChatView(props: ChatViewProps) {
       : null;
   // Provider status joins the composer banner stack (lowest priority) instead
   // of floating over the transcript, so it stays opaque and dismissible.
+  // Usage limits: snooze eligibility matches the inbox (a local queue blocks it).
+  const usageLimitSnoozeEligibility = useMemo(
+    () =>
+      activeThreadSummary
+        ? deriveThreadSnoozeEligibility({
+            thread: activeThreadSummary,
+            worktree: activeWorktreeSummary,
+            environment: {
+              threadSettlementSupported:
+                serverConfig?.environment.capabilities.threadSettlement === true,
+            },
+            hasLocalQueuedMessage: queuedMessages.length > 0,
+            nowMs: Date.now(),
+          })
+        : { canSnooze: false },
+    [activeThreadSummary, activeWorktreeSummary, queuedMessages.length, serverConfig],
+  );
+  const usageLimitBannerItem = useUsageLimitBannerItem({
+    // The web phone tier is frozen: no new banners there.
+    thread: isServerThread && presentationTier !== "phone" ? (activeThread ?? null) : null,
+    environmentId: activeThread?.environmentId ?? null,
+    serverConfig,
+    dispatchAllowed: dispatchCapability.allowed,
+    snoozeEligibility: usageLimitSnoozeEligibility,
+  });
   const composerBannerStackItems = useMemo<ComposerBannerStackItem[]>(() => {
+    const baseItems = usageLimitBannerItem
+      ? [usageLimitBannerItem, ...composerBannerItems]
+      : composerBannerItems;
     if (!visibleProviderStatusNotice) {
-      return composerBannerItems;
+      return baseItems;
     }
     const { key, variant, title, description } = visibleProviderStatusNotice;
     return [
-      ...composerBannerItems,
+      ...baseItems,
       {
         id: `provider-status:${key}`,
         variant,
@@ -2101,7 +2134,7 @@ export default function ChatView(props: ChatViewProps) {
         },
       },
     ];
-  }, [composerBannerItems, visibleProviderStatusNotice]);
+  }, [composerBannerItems, usageLimitBannerItem, visibleProviderStatusNotice]);
 
   useEffect(() => {
     if (routeKind !== "server" || !gitCwd) return;
@@ -4645,7 +4678,7 @@ export default function ChatView(props: ChatViewProps) {
           the global notification surface instead of obscuring the
           transcript with a full-width inline strip. */}
       <ThreadErrorBanner
-        error={activeThread.error}
+        error={applicableUsageLimit(activeThread) ? null : activeThread.error}
         threadRef={activeThreadRef}
         onDismiss={() => setThreadError(activeThread.id, null)}
       />

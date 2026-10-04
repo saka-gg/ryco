@@ -13,6 +13,8 @@ const THREAD_STATUS_TEXT_CLASSNAMES: Record<ThreadStatusPill["label"], string> =
   "Awaiting Input": "sidebar-status-text sidebar-status-text--awaiting-input",
   Completed: "sidebar-status-text sidebar-status-text--done",
   Connecting: "sidebar-status-text sidebar-status-text--in-progress sidebar-status-text--flow",
+  // Amber like a pending approval, without the flowing shimmer: nothing runs.
+  Limited: "sidebar-status-text sidebar-status-text--pending-approval",
   Monitoring: "sidebar-status-text sidebar-status-text--in-progress sidebar-status-text--flow",
   "Pending Approval": "sidebar-status-text sidebar-status-text--pending-approval",
   "Plan Ready": "sidebar-status-text sidebar-status-text--plan-ready",
