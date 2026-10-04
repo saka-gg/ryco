@@ -9,6 +9,7 @@ import {
   claudeResultBelongsToTurn,
   classifyClaudeResultKind,
   decideClaudeStop,
+  decideClaudeTurnClose,
   decideClaudeTurnResult,
   isClaudeApiErrorReply,
   isClaudeRootTurnFrame,
@@ -17,6 +18,7 @@ import {
   rememberDiscardedSteer,
   type ClaudeResultKind,
   type ClaudeStopDecisionInput,
+  type ClaudeTurnCloseInput,
 } from "./claudeSteering.ts";
 
 const P = "prompt-uuid";
@@ -27,6 +29,14 @@ const frame = (value: Record<string, unknown>) =>
   ({ uuid: "frame", session_id: "sdk-session", ...value }) as unknown as SDKMessage;
 const result = (value: Record<string, unknown>) =>
   frame({ type: "result", ...value }) as unknown as SDKResultMessage;
+
+const API_ERROR_SUCCESS = result({
+  subtype: "success",
+  is_error: true,
+  result: "API Error: 529 Overloaded",
+  terminal_reason: "api_error",
+  api_error_status: 529,
+});
 
 describe("decideClaudeTurnResult", () => {
   const decide = (input: {
@@ -102,6 +112,17 @@ describe("decideClaudeTurnResult", () => {
     },
   );
 
+  it("row 8 with the SDK's API-error shape: the steer is dropped, the turn completes", () => {
+    const decision = decide({
+      steers: [S],
+      kind: classifyClaudeResultKind(API_ERROR_SUCCESS),
+      count: 1,
+    });
+    expect(decision.decision).toBe("complete");
+    expect(decision.discardUnsettled).toBe(true);
+    expect(decision.abortedBySteer).toBe(false);
+  });
+
   it("row 6: a folded steer settles and the turn completes", () => {
     expect(decide({ steers: [S], kind: "success", echoed: [P, S] })).toEqual({
       decision: "complete",
@@ -158,6 +179,11 @@ describe("classifyClaudeResultKind", () => {
     );
   });
 
+  it("classifies an API error the SDK reports as a flagged success as a failure", () => {
+    // How a request that failed at the API after its retries ends (sdk.d.ts SDKResultMessage).
+    expect(classifyClaudeResultKind(API_ERROR_SUCCESS)).toBe("failure");
+  });
+
   it("classifies an api_error as a failure", () => {
     expect(
       classifyClaudeResultKind(
@@ -169,6 +195,92 @@ describe("classifyClaudeResultKind", () => {
         }),
       ),
     ).toBe("failure");
+  });
+});
+
+describe("decideClaudeTurnClose", () => {
+  const close = (input: Partial<ClaudeTurnCloseInput>) =>
+    decideClaudeTurnClose({
+      resultStatus: "completed",
+      decision: { discardUnsettled: false, abortedBySteer: false },
+      interruptRequested: false,
+      echoedPromptUuids: [P],
+      promptUuid: P,
+      steerPromptUuids: new Set([S]),
+      foldedIntoDiscardedCliTurn: false,
+      ...input,
+    });
+
+  it("follows the result by default", () => {
+    expect(close({})).toEqual({ status: "completed", cause: "result" });
+    expect(close({ resultStatus: "failed" })).toEqual({ status: "failed", cause: "result" });
+    expect(close({ resultStatus: "interrupted", interruptRequested: true })).toEqual({
+      status: "interrupted",
+      cause: "result",
+    });
+  });
+
+  it("never reports a steer's abort as a Stop", () => {
+    expect(
+      close({
+        resultStatus: "interrupted",
+        decision: { discardUnsettled: false, abortedBySteer: true },
+      }),
+    ).toEqual({ status: "completed", cause: "aborted-by-steer" });
+  });
+
+  it("reports a failure that dropped a steer as a failure, even when flagged as success", () => {
+    const decision = { discardUnsettled: true, abortedBySteer: false };
+    expect(close({ decision })).toEqual({
+      status: "failed",
+      cause: "failed-segment-dropped-steers",
+    });
+    expect(close({ decision, resultStatus: "failed" })).toEqual({
+      status: "failed",
+      cause: "result",
+    });
+    // Stop dropped the steer, and the prompt's own result raced it: unchanged.
+    expect(close({ decision, interruptRequested: true })).toEqual({
+      status: "completed",
+      cause: "result",
+    });
+  });
+
+  it("ends a stopped turn as interrupted when a steer's CLI turn closes it", () => {
+    expect(close({ interruptRequested: true, echoedPromptUuids: [S] })).toEqual({
+      status: "interrupted",
+      cause: "stopped",
+    });
+    // A steerable provider turn has no prompt uuid.
+    expect(
+      close({ interruptRequested: true, echoedPromptUuids: [S], promptUuid: undefined }),
+    ).toEqual({ status: "interrupted", cause: "stopped" });
+    // The prompt's own result, or a steer folded into it, keeps its status.
+    expect(close({ interruptRequested: true, echoedPromptUuids: [P, S] })).toEqual({
+      status: "completed",
+      cause: "result",
+    });
+    expect(close({ echoedPromptUuids: [S] })).toEqual({ status: "completed", cause: "result" });
+  });
+
+  it("fails a turn folded into a dropped CLI turn unless it was stopped", () => {
+    for (const resultStatus of ["completed", "interrupted"] as const) {
+      expect(
+        close({
+          resultStatus,
+          echoedPromptUuids: ["discarded", P],
+          foldedIntoDiscardedCliTurn: true,
+        }),
+      ).toEqual({ status: "failed", cause: "folded-into-discarded-cli-turn" });
+      expect(
+        close({
+          resultStatus,
+          echoedPromptUuids: ["discarded", P],
+          foldedIntoDiscardedCliTurn: true,
+          interruptRequested: true,
+        }),
+      ).toEqual({ status: "interrupted", cause: "stopped" });
+    }
   });
 });
 

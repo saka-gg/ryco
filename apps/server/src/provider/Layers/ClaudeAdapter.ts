@@ -9,6 +9,7 @@ import {
   claudeResultBelongsToTurn,
   classifyClaudeResultKind,
   decideClaudeStop,
+  decideClaudeTurnClose,
   decideClaudeTurnResult,
   isClaudeAbortTerminalReason,
   isClaudeApiErrorReply,
@@ -18,6 +19,8 @@ import {
   readClaudeInterruptReceipt,
   rememberDiscardedSteer,
   resultErrorsText,
+  type ClaudeTurnClose,
+  type ClaudeTurnCloseCause,
 } from "../claudeSteering.ts";
 import {
   CLAUDE_PROVIDER_TURN_STOP_GRACE_MS,
@@ -165,6 +168,8 @@ const PROVIDER = ProviderDriverKind.make("claudeAgent");
 const WAKE_NO_OUTPUT_REASON = "Claude started a background turn but produced no output.";
 const PROVIDER_TURN_STOP_REASON = "Claude did not end the background turn after Stop.";
 const DISCARDED_STEER_TURN_REASON = "Claude started a turn for a message Stop cancelled.";
+const FOLDED_INTO_DISCARDED_STEER_REASON =
+  "Claude Code merged this message into a cancelled steer's request, so no reply is shown. Send it again.";
 const STEER_TURN_ENDED_DETAIL =
   "The turn finished before this message could be steered. It stays queued and is sent next.";
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -1410,6 +1415,28 @@ function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStat
     return "cancelled";
   }
   return "failed";
+}
+
+/** The error a completing turn reports, by why it reports its status (`decideClaudeTurnClose`). */
+function claudeTurnCloseErrorMessage(
+  cause: ClaudeTurnCloseCause,
+  result: SDKResultMessage,
+): string | undefined {
+  switch (cause) {
+    case "result":
+      return result.subtype === "success" ? undefined : result.errors[0];
+    case "aborted-by-steer":
+      return undefined;
+    case "stopped":
+      return "Interrupted by user.";
+    case "failed-segment-dropped-steers": {
+      // A success flagged as an error carries the error text as its result.
+      const text = result.subtype === "success" ? result.result.trim() : result.errors[0];
+      return text !== undefined && text.length > 0 ? text : "Claude turn failed.";
+    }
+    case "folded-into-discarded-cli-turn":
+      return FOLDED_INTO_DISCARDED_STEER_REASON;
+  }
 }
 
 function streamKindFromDeltaType(deltaType: string): ClaudeTextStreamKind {
@@ -3414,6 +3441,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const handleResultMessage = Effect.fn("handleResultMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
+    options?: {
+      /** The result ends a discarded steer's CLI turn the CLI folded the open turn into. */
+      readonly foldedIntoDiscardedCliTurn?: boolean;
+    },
   ) {
     if (message.type !== "result") {
       return;
@@ -3441,6 +3472,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    const resultStatus = turnStatusFromResult(message);
+    let close: ClaudeTurnClose = { status: resultStatus, cause: "result" };
     if (turnState) {
       const decision = decideClaudeTurnResult({
         kind: classifyClaudeResultKind(message),
@@ -3457,15 +3490,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (decision.decision === "await-steer") {
         // The CLI promised another result: this segment ended (a "now" steer aborted it, or the
         // prompt finished first) and the steer runs next. Keep the Ryco turn open for it.
-        const segmentStatus = turnStatusFromResult(message);
-        yield* sealTurnSegment(context, turnState, segmentStatus, message);
+        yield* sealTurnSegment(context, turnState, resultStatus, message);
         yield* emitTokenUsageSnapshot(
           context,
           yield* resolveResultUsageSnapshot(context, message),
           turnState.turnId,
         );
         turnState.sealedSegmentCount += 1;
-        turnState.awaitingSteerContinuation = { since: yield* nowIso, segmentStatus };
+        turnState.awaitingSteerContinuation = {
+          since: yield* nowIso,
+          segmentStatus: resultStatus,
+        };
         yield* Effect.logInfo("claude.turn.awaiting-steer-continuation", {
           threadId: context.session.threadId,
           turnId: turnState.turnId,
@@ -3482,31 +3517,43 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           rememberDiscardedSteer(context.discardedSteerPromptUuids, uuid);
         }
       }
-      if (decision.abortedBySteer) {
-        // The steer aborted this segment but the CLI promised no further result. Never report a
-        // steer as an interrupt (that would hold the client queue); the steer runs next on its
-        // own and its reply lands in a background turn.
-        yield* sealTurnSegment(context, turnState, turnStatusFromResult(message), message);
-        yield* Effect.logInfo("claude.turn.completed-by-steer-abort", {
+      // The result's status unless it misstates the turn: a steer's abort or Ryco's own discard
+      // re-interrupt is never a Stop, a Stop always ends as one, and a failure that dropped a
+      // steer is always reported as a failure.
+      close = decideClaudeTurnClose({
+        resultStatus,
+        decision,
+        interruptRequested: turnState.interruptRequested,
+        echoedPromptUuids,
+        promptUuid: turnState.promptUuid,
+        steerPromptUuids: turnState.steerPromptUuids,
+        foldedIntoDiscardedCliTurn: options?.foldedIntoDiscardedCliTurn === true,
+      });
+      if (close.cause !== "result") {
+        // Seal the segment on its own outcome (a tool the abort cut off fails, a finished one
+        // completes), unless the turn reports a failure, which fails whatever is still open.
+        if (close.status !== "failed") {
+          yield* sealTurnSegment(context, turnState, resultStatus, message);
+        }
+        yield* Effect.logInfo("claude.turn.closed-as", {
           threadId: context.session.threadId,
           turnId: turnState.turnId,
+          cause: close.cause,
+          resultStatus,
+          status: close.status,
           queuedTurnCount: message.queued_turn_count,
           unsettled: decision.unsettled.length,
           terminalReason: message.terminal_reason,
         });
-        yield* completeTurn(context, "completed", undefined, message);
-        return;
       }
     }
 
-    const status = turnStatusFromResult(message);
-    const errorMessage = message.subtype === "success" ? undefined : message.errors[0];
-
-    if (status === "failed") {
+    const errorMessage = claudeTurnCloseErrorMessage(close.cause, message);
+    if (close.status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
     }
 
-    yield* completeTurn(context, status, errorMessage, message);
+    yield* completeTurn(context, close.status, errorMessage, message);
   });
 
   /**
@@ -4387,12 +4434,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   /**
    * The discarded CLI turn's result: forget its uuids, then drop it (keeping its usage). Returns
-   * whether it was dropped. It is not when only this result can end the open turn, so it is
-   * routed on and completes it:
-   * - the result echoes the open turn's prompt or steer, which the CLI folded into the discarded
-   *   CLI turn;
+   * whether it was consumed. Only this result can end the open turn when:
+   * - it echoes the open turn's prompt or steer, which the CLI folded into the discarded CLI turn
+   *   (a fold shows only on the result). That turn's reply went with the dropped frames, and the
+   *   discard's re-interrupt usually aborted it, so the result closes it here as failed (never as
+   *   a Stop the user did not press);
    * - the CLI turn's output already reached an open provider turn (its frames carried no echo,
-   *   or beat Stop's bookkeeping).
+   *   or beat Stop's bookkeeping). The result is routed on and completes that turn.
    */
   const endDiscardedSteerCliTurn = Effect.fn("endDiscardedSteerCliTurn")(function* (
     context: ClaudeSessionContext,
@@ -4408,23 +4456,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.wakeSignalDeferred = false;
     const open = context.turnState;
     if (open !== undefined) {
+      const logContext = {
+        threadId: context.session.threadId,
+        turnId: open.turnId,
+        openedBy: open.openedBy,
+        uuids: count,
+      };
       const folded = claudeEchoNamesTurn({
         echoed: claudeEchoedPromptUuids(message),
         promptUuid: open.promptUuid,
         steerPromptUuids: open.steerPromptUuids,
       });
-      if (folded || (open.promptUuid === undefined && open.rootContentObserved)) {
-        yield* Effect.logInfo(
-          folded
-            ? "claude.turn.discarded-steer-folded-open-turn"
-            : "claude.turn.discarded-steer-output-leaked",
-          {
-            threadId: context.session.threadId,
-            turnId: open.turnId,
-            openedBy: open.openedBy,
-            uuids: count,
-          },
-        );
+      if (folded) {
+        yield* Effect.logInfo("claude.turn.discarded-steer-folded-open-turn", logContext);
+        yield* handleResultMessage(context, message, { foldedIntoDiscardedCliTurn: true });
+        return true;
+      }
+      if (open.promptUuid === undefined && open.rootContentObserved) {
+        yield* Effect.logInfo("claude.turn.discarded-steer-output-leaked", logContext);
         return false;
       }
     }
@@ -4443,13 +4492,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   /**
    * Routes frames of CLI segments started by steers. Returns true when the frame was consumed
-   * (dropped). The echo is read on a CLI turn's first reply frame (its first stream event, or its
-   * first root assistant message when it streamed nothing) and on its result. A CLI turn whose
-   * echo holds only steers Stop (or a failed segment) discarded is interrupted again (unless its
-   * reply is an API error, which ends it anyway) and dropped up to and including its result; a
-   * result with such an echo and no reply before it is dropped alone. Either result is routed on
-   * when only it can end the open turn (see `endDiscardedSteerCliTurn`). The open turn owns its
-   * own steers' segments.
+   * (dropped, or a result that already closed the open turn). The echo is read on a CLI turn's
+   * first reply frame (its first stream event, or its first root assistant message when it
+   * streamed nothing) and on its result. A CLI turn whose echo holds only steers Stop (or a failed
+   * segment) discarded is interrupted again (unless its reply is an API error, which ends it
+   * anyway) and dropped up to and including its result; a result with such an echo and no reply
+   * before it is dropped alone. Either result still ends the open turn when only it can (see
+   * `endDiscardedSteerCliTurn`). The open turn owns its own steers' segments; after Stop, one that
+   * starts is interrupted again too, with the same API-error exception.
    */
   const routeSteerFrame = Effect.fn("routeSteerFrame")(function* (
     context: ClaudeSessionContext,

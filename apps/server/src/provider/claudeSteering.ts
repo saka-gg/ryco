@@ -1,4 +1,5 @@
 import type { SDKMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { ProviderRuntimeTurnStatus } from "@ryco/contracts";
 
 /**
  * Claude active-turn steering rules. A steer is an SDK user message offered with
@@ -173,6 +174,71 @@ export function decideClaudeTurnResult(
       completingWithSteers && (input.interruptRequested || input.kind === "failure"),
     abortedBySteer: completingWithSteers && !input.interruptRequested && input.kind === "abort",
   };
+}
+
+/** Why a completing turn reports the status it does. */
+export type ClaudeTurnCloseCause =
+  /** The result's own status. */
+  | "result"
+  /** A steer aborted the segment and no further result was promised; a steer is never a Stop. */
+  | "aborted-by-steer"
+  /**
+   * Stop was requested, and the result ends one of the turn's steers' CLI turns (whose own
+   * outcome, such as an API-error reply, is not the turn's), or a dropped CLI turn the CLI folded
+   * the turn into.
+   */
+  | "stopped"
+  /**
+   * The segment failed and its pending steers were dropped, but the result is a success flagged
+   * as an error (how the SDK reports a request that failed at the API).
+   */
+  | "failed-segment-dropped-steers"
+  /** The CLI folded the turn's prompt or steer into a discarded steer's dropped CLI turn. */
+  | "folded-into-discarded-cli-turn";
+
+export interface ClaudeTurnCloseInput {
+  /** What the result reports on its own. */
+  readonly resultStatus: ProviderRuntimeTurnStatus;
+  readonly decision: Pick<ClaudeTurnResultDecision, "discardUnsettled" | "abortedBySteer">;
+  readonly interruptRequested: boolean;
+  readonly echoedPromptUuids: ReadonlyArray<string>;
+  readonly promptUuid: string | undefined;
+  readonly steerPromptUuids: ReadonlySet<string>;
+  /** The result ends a discarded steer's CLI turn, whose frames were all dropped. */
+  readonly foldedIntoDiscardedCliTurn: boolean;
+}
+
+export interface ClaudeTurnClose {
+  readonly status: ProviderRuntimeTurnStatus;
+  readonly cause: ClaudeTurnCloseCause;
+}
+
+/**
+ * The status a completing turn reports. It follows the result except where the result's status
+ * would misstate what happened to the turn: Ryco's own discard re-interrupt or a steer's abort is
+ * never a Stop (which would hold the client queue), a Stop always ends as interrupted, and a
+ * failure that drops a pending steer is always reported as one (so the queue holds and the user
+ * sees why the steer got no reply).
+ */
+export function decideClaudeTurnClose(input: ClaudeTurnCloseInput): ClaudeTurnClose {
+  if (input.foldedIntoDiscardedCliTurn) {
+    return input.interruptRequested
+      ? { status: "interrupted", cause: "stopped" }
+      : { status: "failed", cause: "folded-into-discarded-cli-turn" };
+  }
+  if (input.resultStatus === "completed") {
+    const endsSteerSegment =
+      input.echoedPromptUuids.some((uuid) => input.steerPromptUuids.has(uuid)) &&
+      (input.promptUuid === undefined || !input.echoedPromptUuids.includes(input.promptUuid));
+    if (input.interruptRequested && endsSteerSegment) {
+      return { status: "interrupted", cause: "stopped" };
+    }
+    if (!input.interruptRequested && input.decision.discardUnsettled) {
+      return { status: "failed", cause: "failed-segment-dropped-steers" };
+    }
+  }
+  if (input.decision.abortedBySteer) return { status: "completed", cause: "aborted-by-steer" };
+  return { status: input.resultStatus, cause: "result" };
 }
 
 export interface ClaudeInterruptReceipt {
