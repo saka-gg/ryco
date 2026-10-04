@@ -1,15 +1,26 @@
 import {
   CommandId,
+  OrchestrationDispatchCommandError,
   ThreadId,
+  type ClientOrchestrationCommand,
   type OrchestrationCommand,
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
 import { assert, it, vi } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Deferred, Effect, Fiber, Option } from "effect";
 
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import type {
+  OrchestrationCommandReceipt,
+  OrchestrationCommandReceiptRepositoryShape,
+} from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
 import type { ProjectionSnapshotQueryShape } from "../Services/ProjectionSnapshotQuery.ts";
-import { applyOrchestrationNormalizedCommand } from "./OrchestrationCommandApplication.ts";
+import {
+  applyOrchestrationCommand,
+  applyOrchestrationNormalizedCommand,
+  makeOrchestrationCommandFlights,
+} from "./OrchestrationCommandApplication.ts";
 
 const threadId = ThreadId.make("thread-archive");
 
@@ -80,5 +91,236 @@ it.effect("does not add archive cleanup to unrelated commands", () =>
 
     assert.deepStrictEqual(dispatched, [command]);
     assert.strictEqual(close.mock.calls.length, 0);
+  }),
+);
+
+const receiptsWith = (
+  receipt: OrchestrationCommandReceipt | null,
+): Pick<OrchestrationCommandReceiptRepositoryShape, "getByCommandId"> => ({
+  getByCommandId: () => Effect.succeed(Option.fromNullishOr(receipt)),
+});
+
+const replayedCommand: ClientOrchestrationCommand = {
+  type: "thread.meta.update",
+  commandId: CommandId.make("replayed-command"),
+  threadId,
+  title: "Renamed",
+};
+
+const receipt = (
+  status: OrchestrationCommandReceipt["status"],
+  error: string | null = null,
+): OrchestrationCommandReceipt => ({
+  commandId: replayedCommand.commandId,
+  aggregateKind: "thread",
+  aggregateId: threadId,
+  acceptedAt: "2026-01-01T00:00:00.000Z",
+  resultSequence: 42,
+  status,
+  error,
+});
+
+/** A replay whose first attempt consumed what normalization needs (an adopted upload). */
+const normalizeAfterFirstAttempt = () =>
+  Effect.fail(new OrchestrationDispatchCommandError({ message: "unknown or already-used upload" }));
+
+it.effect("answers a replayed command from its accepted receipt before normalizing it", () =>
+  Effect.gen(function* () {
+    const dispatch = vi.fn(() => Effect.succeed({ sequence: 1 }));
+    const result = yield* applyOrchestrationCommand({
+      command: replayedCommand,
+      normalize: normalizeAfterFirstAttempt,
+      dispatch,
+      projections: {} as ProjectionSnapshotQueryShape,
+      terminals: {} as TerminalManagerShape,
+      receipts: receiptsWith(receipt("accepted")),
+    });
+
+    assert.strictEqual(result.sequence, 42);
+    assert.strictEqual(dispatch.mock.calls.length, 0);
+  }),
+);
+
+it.effect("answers a replayed command from its rejected receipt with the prior rejection", () =>
+  Effect.gen(function* () {
+    const dispatch = vi.fn(() => Effect.succeed({ sequence: 1 }));
+    const error = yield* applyOrchestrationCommand({
+      command: replayedCommand,
+      normalize: normalizeAfterFirstAttempt,
+      dispatch,
+      projections: {} as ProjectionSnapshotQueryShape,
+      terminals: {} as TerminalManagerShape,
+      receipts: receiptsWith(receipt("rejected", "thread was busy")),
+    }).pipe(Effect.flip);
+
+    assert.strictEqual(error._tag, "OrchestrationDispatchCommandError");
+    assert.include(error.message, "Command previously rejected (replayed-command)");
+    assert.include(error.message, "thread was busy");
+    assert.strictEqual(dispatch.mock.calls.length, 0);
+  }),
+);
+
+it.effect("normalizes and dispatches a command the node has not seen", () =>
+  Effect.gen(function* () {
+    const normalize = vi.fn((command: ClientOrchestrationCommand) =>
+      Effect.succeed(command as OrchestrationCommand),
+    );
+    const result = yield* applyOrchestrationCommand({
+      command: replayedCommand,
+      normalize,
+      dispatch: () => Effect.succeed({ sequence: 7 }),
+      projections: {} as ProjectionSnapshotQueryShape,
+      terminals: {} as TerminalManagerShape,
+      receipts: receiptsWith(null),
+    });
+
+    assert.strictEqual(result.sequence, 7);
+    assert.strictEqual(normalize.mock.calls.length, 1);
+  }),
+);
+
+it.effect("falls through to the engine's own receipt check when the receipt read fails", () =>
+  Effect.gen(function* () {
+    const result = yield* applyOrchestrationCommand({
+      command: replayedCommand,
+      normalize: (command) => Effect.succeed(command as OrchestrationCommand),
+      dispatch: () => Effect.succeed({ sequence: 8 }),
+      projections: {} as ProjectionSnapshotQueryShape,
+      terminals: {} as TerminalManagerShape,
+      receipts: {
+        getByCommandId: () =>
+          Effect.fail(
+            new PersistenceSqlError({ operation: "receipt lookup", detail: "database busy" }),
+          ),
+      },
+    });
+
+    assert.strictEqual(result.sequence, 8);
+  }),
+);
+
+it.effect("keeps an archive replay on the full path so its cleanup still runs", () =>
+  Effect.gen(function* () {
+    const close = vi.fn((_input: { readonly threadId: ThreadId }) => Effect.void);
+    const dispatched: OrchestrationCommand[] = [];
+    const archive: ClientOrchestrationCommand = {
+      type: "thread.archive",
+      commandId: CommandId.make("replayed-archive"),
+      threadId,
+    };
+    const result = yield* applyOrchestrationCommand({
+      command: archive,
+      normalize: (command) => Effect.succeed(command as OrchestrationCommand),
+      dispatch: (next) => {
+        dispatched.push(next);
+        // The engine answers the replay from its receipt.
+        return Effect.succeed({ sequence: 42 });
+      },
+      projections: {
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      } as unknown as ProjectionSnapshotQueryShape,
+      terminals: { close } as unknown as TerminalManagerShape,
+      receipts: receiptsWith({ ...receipt("accepted"), commandId: archive.commandId }),
+    });
+
+    assert.strictEqual(result.sequence, 42);
+    assert.deepStrictEqual(
+      dispatched.map((entry) => entry.type),
+      ["thread.archive"],
+    );
+    assert.strictEqual(close.mock.calls.length, 1);
+  }),
+);
+
+it.effect("answers an overlapping replay from the attempt that is still running", () =>
+  Effect.gen(function* () {
+    const flights = makeOrchestrationCommandFlights();
+    const release = yield* Deferred.make<void>();
+    let runs = 0;
+    const apply = () =>
+      applyOrchestrationCommand({
+        command: replayedCommand,
+        normalize: (command) => Effect.succeed(command as OrchestrationCommand),
+        dispatch: () =>
+          Effect.suspend(() => {
+            runs += 1;
+            // A bootstrap turn start: its receipt exists only once it finishes.
+            return Deferred.await(release).pipe(Effect.as({ sequence: 11 }));
+          }),
+        projections: {} as ProjectionSnapshotQueryShape,
+        terminals: {} as TerminalManagerShape,
+        receipts: receiptsWith(null),
+        flights,
+      });
+
+    const first = yield* apply().pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    const replay = yield* apply().pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* Deferred.succeed(release, undefined);
+
+    assert.deepStrictEqual(yield* Fiber.join(first), { sequence: 11 });
+    assert.deepStrictEqual(yield* Fiber.join(replay), { sequence: 11 });
+    assert.strictEqual(runs, 1);
+  }),
+);
+
+it.effect("keeps running a command whose requester disconnected", () =>
+  Effect.gen(function* () {
+    const flights = makeOrchestrationCommandFlights();
+    const release = yield* Deferred.make<void>();
+    let runs = 0;
+    let completed = 0;
+    const apply = () =>
+      applyOrchestrationCommand({
+        command: replayedCommand,
+        normalize: (command) => Effect.succeed(command as OrchestrationCommand),
+        dispatch: () =>
+          Effect.suspend(() => {
+            runs += 1;
+            return Deferred.await(release).pipe(
+              Effect.tap(() => Effect.sync(() => (completed += 1))),
+              Effect.as({ sequence: 12 }),
+            );
+          }),
+        projections: {} as ProjectionSnapshotQueryShape,
+        terminals: {} as TerminalManagerShape,
+        receipts: receiptsWith(null),
+        flights,
+      });
+
+    const first = yield* apply().pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    // The relay channel closes: the server interrupts the request's handler.
+    yield* Fiber.interrupt(first);
+    const replay = yield* apply().pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* Deferred.succeed(release, undefined);
+
+    assert.deepStrictEqual(yield* Fiber.join(replay), { sequence: 12 });
+    // The first attempt ran to completion, once; the replay only waited for it.
+    assert.strictEqual(runs, 1);
+    assert.strictEqual(completed, 1);
+  }),
+);
+
+it.effect("runs a later attempt of the same id again once the first has settled", () =>
+  Effect.gen(function* () {
+    const flights = makeOrchestrationCommandFlights();
+    const dispatch = vi.fn(() => Effect.succeed({ sequence: 13 }));
+    const apply = () =>
+      applyOrchestrationCommand({
+        command: replayedCommand,
+        normalize: (command) => Effect.succeed(command as OrchestrationCommand),
+        dispatch,
+        projections: {} as ProjectionSnapshotQueryShape,
+        terminals: {} as TerminalManagerShape,
+        flights,
+      });
+
+    yield* apply();
+    yield* apply();
+    // Settled attempts leave the registry; the receipt answers from here on.
+    assert.strictEqual(dispatch.mock.calls.length, 2);
   }),
 );
