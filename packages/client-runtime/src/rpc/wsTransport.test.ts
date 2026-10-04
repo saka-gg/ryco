@@ -48,27 +48,30 @@ afterEach(async () => {
 });
 
 describe("WsTransport subscriptions refused before sending", () => {
-  it("keep waiting while the session synchronizes and start once it is current", async () => {
-    let admission: RpcRequestAdmission = "awaiting-session";
-    const admit = vi.fn(() => admission);
-    const transport = connect(admit);
-    await vi.waitFor(() => expect(sockets).toHaveLength(1));
-    sockets[0]!.open();
-    const onError = vi.fn();
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it.each(["awaiting-session", "awaiting-acknowledgement"] as const)(
+    "keep waiting while refused for now (%s) and start once admitted",
+    async (refusal) => {
+      let admission: RpcRequestAdmission = refusal;
+      const admit = vi.fn(() => admission);
+      const transport = connect(admit);
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0]!.open();
+      const onError = vi.fn();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    const stop = subscribeProposals(transport, onError);
-    // Refused locally, then retried without ending the subscription.
-    await vi.waitFor(() => expect(admit.mock.calls.length).toBeGreaterThanOrEqual(3));
-    expect(proposalRequests(sockets[0]!)).toHaveLength(0);
-    expect(onError).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
+      const stop = subscribeProposals(transport, onError);
+      // Refused locally, then retried without ending the subscription.
+      await vi.waitFor(() => expect(admit.mock.calls.length).toBeGreaterThanOrEqual(3));
+      expect(proposalRequests(sockets[0]!)).toHaveLength(0);
+      expect(onError).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
 
-    admission = "allowed";
-    await vi.waitFor(() => expect(proposalRequests(sockets[0]!)).toHaveLength(1));
-    expect(onError).not.toHaveBeenCalled();
-    stop();
-  });
+      admission = "allowed";
+      await vi.waitFor(() => expect(proposalRequests(sockets[0]!)).toHaveLength(1));
+      expect(onError).not.toHaveBeenCalled();
+      stop();
+    },
+  );
 
   it("end at once when the request is refused for good", async () => {
     const admit = vi.fn((): RpcRequestAdmission => "forbidden");

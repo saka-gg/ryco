@@ -5,7 +5,7 @@ import {
   type HostedRuntimeTimers,
 } from "../authorization/runtime.ts";
 import type { HostedHubState } from "../authorization/state.ts";
-import { RpcRequestRefusedError } from "../rpc/protocol.ts";
+import { isAwaitingAdmission, RpcRequestRefusedError } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
 import { RpcTransportDisposedError } from "../rpc/wsTransport.ts";
 import type { HostedReceiptedRequestOwner } from "./transport.ts";
@@ -92,8 +92,8 @@ function isDeliveryUnknown(error: unknown, lostSinceSend: boolean): boolean {
  * receipt exists, so a first attempt cut off halfway by a node restart makes
  * the replay fail on what that attempt already created. A replay refused by
  * the node's role check, refused locally, or lost to a second drop says
- * nothing about the first attempt. (A replay refused only until the session
- * is current again was never sent, and waits for the next readiness instead.)
+ * nothing about the first attempt. (A replay refused only for now was never
+ * sent, and waits for the next readiness instead.)
  */
 function isReplayAnswer(command: ClientOrchestrationCommand, error: unknown): boolean {
   if (!hasTag(error, "OrchestrationDispatchCommandError")) return false;
@@ -299,11 +299,10 @@ export class HostedDispatchReplay {
       try {
         return await replacement.attempt.dispatch(command);
       } catch (error) {
-        // Refused before sending because the session stopped being current
-        // again: nothing was sent, so wait for its next readiness.
-        if (error instanceof RpcRequestRefusedError && error.admission === "awaiting-session") {
-          continue;
-        }
+        // Refused before sending only for now — the session stopped being
+        // current again, or holds mutations for the user's acknowledgement:
+        // nothing was sent, so wait for its next readiness.
+        if (isAwaitingAdmission(error)) continue;
         // One replay only: anything but the command's own answer leaves the
         // first attempt's outcome unknown.
         if (isReplayAnswer(command, error)) throw error;

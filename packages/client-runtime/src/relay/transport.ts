@@ -57,11 +57,13 @@ type HostedRequestAuthorizationState = Pick<
  *
  * A method no hosted role may call, a role this session already knows that
  * does not reach the method's tier, or a terminally failed transport refuses
- * for good. Everything else that is refused is only waiting for the session —
- * a role still being validated, a transport reconnecting, a replacement
- * session that has not accepted its snapshot — and a subscription retries it
- * rather than giving up: the client is rebuilt while its session synchronizes,
- * and a long-lived read stream started then must survive that.
+ * for good. Everything else that is refused is only waiting — for the session
+ * (a role still being validated, a transport reconnecting, a replacement
+ * session that has not accepted its snapshot) or, on a current session that
+ * could not confirm an earlier action, for the user's acknowledgement — and a
+ * subscription retries it rather than giving up: the client is rebuilt while
+ * its session synchronizes, and a long-lived read stream started then must
+ * survive that.
  */
 export function admitHostedRequestForState(
   state: HostedRequestAuthorizationState,
@@ -69,13 +71,8 @@ export function admitHostedRequestForState(
 ): RpcRequestAdmission {
   const roleFresh = state.directoryStatus === "ready";
   if (hostedRoleAllows(state.effectiveRole, info.tag, roleFresh)) {
-    if (
-      state.transportStatus === "online" &&
-      state.browserStatus === "current" &&
-      hostedSessionAdmits(state, info.tag)
-    ) {
-      return "allowed";
-    }
+    const live = state.transportStatus === "online" && state.browserStatus === "current";
+    if (live && hostedSessionAdmits(state, info.tag)) return "allowed";
     if (
       info.stream &&
       (state.browserStatus === "current" || state.browserStatus === "synchronizing") &&
@@ -87,6 +84,11 @@ export function admitHostedRequestForState(
       HOSTED_SESSION_SYNC_SUBSCRIPTIONS.has(info.tag)
     ) {
       return "allowed";
+    }
+    // Current, but holding mutations until the user has continued past an
+    // unconfirmed action: waiting will not help, the inline notice will.
+    if (live && state.sessionStatus === "delivery-unknown" && state.sessionRecoveredAfterUnknown) {
+      return "awaiting-acknowledgement";
     }
   } else if (!hostedRoleAllows("owner", info.tag) || (roleFresh && state.effectiveRole !== null)) {
     return "forbidden";

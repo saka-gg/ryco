@@ -168,19 +168,16 @@ describe("HostedDispatchReplay", () => {
   it.each([
     ["a defect for a payload it cannot decode", () => "Expected a known command type"],
     ["a protocol defect", () => new Error("Unknown request tag: orchestration.next")],
-  ])(
-    "reports what the node answered on a live connection at once: %s",
-    async (_, fail) => {
-      const error = fail();
-      const raw = vi.fn<Dispatch>(() => Promise.reject(error));
-      const { dispatch } = attach(raw);
+  ])("reports what the node answered on a live connection at once: %s", async (_, fail) => {
+    const error = fail();
+    const raw = vi.fn<Dispatch>(() => Promise.reject(error));
+    const { dispatch } = attach(raw);
 
-      await expect(dispatch(command)).rejects.toBe(error);
-      replay.markReady(environmentId);
-      expect(raw).toHaveBeenCalledOnce();
-      expect(markUncertain).not.toHaveBeenCalled();
-    },
-  );
+    await expect(dispatch(command)).rejects.toBe(error);
+    replay.markReady(environmentId);
+    expect(raw).toHaveBeenCalledOnce();
+    expect(markUncertain).not.toHaveBeenCalled();
+  });
 
   it("holds any failure once the attempt's connection was lost after the send", async () => {
     const pending = deferred<{ readonly sequence: number }>();
@@ -360,24 +357,27 @@ describe("HostedDispatchReplay", () => {
     expect(markUncertain).toHaveBeenCalledOnce();
   });
 
-  it("waits for the next readiness when the replay finds the session not current again", async () => {
-    const { dispatch } = attach(() => Promise.reject(relayDrop()));
-    const result = dispatch(command);
-    expect(await settled(result)).toBe("pending");
-    const second = vi
-      .fn<Dispatch>()
-      .mockRejectedValueOnce(new RpcRequestRefusedError("awaiting-session"))
-      .mockResolvedValue({ sequence: 14 });
-    attach(second);
-    replay.markReady(environmentId);
-    expect(await settled(result)).toBe("pending");
-    expect(second).toHaveBeenCalledOnce();
+  it.each(["awaiting-session", "awaiting-acknowledgement"] as const)(
+    "waits for the next readiness when the replay is refused for now (%s)",
+    async (admission) => {
+      const { dispatch } = attach(() => Promise.reject(relayDrop()));
+      const result = dispatch(command);
+      expect(await settled(result)).toBe("pending");
+      const second = vi
+        .fn<Dispatch>()
+        .mockRejectedValueOnce(new RpcRequestRefusedError(admission))
+        .mockResolvedValue({ sequence: 14 });
+      attach(second);
+      replay.markReady(environmentId);
+      expect(await settled(result)).toBe("pending");
+      expect(second).toHaveBeenCalledOnce();
 
-    replay.markReady(environmentId);
-    await expect(result).resolves.toEqual({ sequence: 14 });
-    expect(second).toHaveBeenCalledTimes(2);
-    expect(markUncertain).not.toHaveBeenCalled();
-  });
+      replay.markReady(environmentId);
+      await expect(result).resolves.toEqual({ sequence: 14 });
+      expect(second).toHaveBeenCalledTimes(2);
+      expect(markUncertain).not.toHaveBeenCalled();
+    },
+  );
 
   it("reports a replayed command's own rejection as it is", async () => {
     const rejection = new OrchestrationDispatchCommandError({

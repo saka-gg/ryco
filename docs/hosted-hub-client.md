@@ -549,7 +549,9 @@ classified counts as a mutation.
   made its delivery known, the environment's session becomes `delivery unknown`; the UI does not
   claim that the action was accepted. Once the replacement session has accepted a snapshot, reads
   work normally again, while new mutations to that environment wait until the user has seen the
-  notice shown inline on the environment's threads and continued.
+  notice shown inline on the environment's threads and continued. A mutation tried meanwhile is
+  refused with its own answer pointing at that notice, not the "still synchronizing" one, since
+  waiting alone will not admit it.
 
 ## Browser capability adaptation
 

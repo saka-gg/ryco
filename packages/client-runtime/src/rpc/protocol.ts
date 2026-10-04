@@ -122,12 +122,26 @@ class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError")<{
 class WsUrlProviderInactiveError extends Data.TaggedError("WsUrlProviderInactiveError") {}
 
 /**
- * Whether a connection admits a request right now. `awaiting-session` means
- * only "not yet": the connection's session is still being established or
- * recovered, and the same request will be admitted once it is current. A
- * `forbidden` request will not be admitted on this connection at all.
+ * Whether a connection admits a request right now. Both `awaiting-` answers
+ * mean only "not yet", and the same request will be admitted on this
+ * connection later: `awaiting-session` while its session is still being
+ * established or recovered, `awaiting-acknowledgement` while a current session
+ * holds mutations until the user has seen that an earlier action could not be
+ * confirmed. A `forbidden` request will not be admitted on this connection at
+ * all.
  */
-export type RpcRequestAdmission = "allowed" | "awaiting-session" | "forbidden";
+export type RpcRequestAdmission =
+  | "allowed"
+  | "awaiting-session"
+  | "awaiting-acknowledgement"
+  | "forbidden";
+
+const REFUSAL_MESSAGES: Record<Exclude<RpcRequestAdmission, "allowed">, string> = {
+  "awaiting-session": "Ryco is still synchronizing with this machine. Try again in a moment.",
+  "awaiting-acknowledgement":
+    "Ryco couldn't confirm an earlier action on this machine. Check its result, then choose Continue in the thread's notice.",
+  forbidden: "This action is unavailable for the current hosted role.",
+};
 
 /**
  * A request this client refused before sending it (`authorizeRequest`).
@@ -137,14 +151,15 @@ export class RpcRequestRefusedError extends Error {
   readonly admission: Exclude<RpcRequestAdmission, "allowed">;
 
   constructor(admission: Exclude<RpcRequestAdmission, "allowed">) {
-    super(
-      admission === "awaiting-session"
-        ? "Ryco is still synchronizing with this machine. Try again in a moment."
-        : "This action is unavailable for the current hosted role.",
-    );
+    super(REFUSAL_MESSAGES[admission]);
     this.name = "RpcRequestRefusedError";
     this.admission = admission;
   }
+}
+
+/** A refusal only for now: the same request will be admitted on its connection later. */
+export function isAwaitingAdmission(error: unknown): error is RpcRequestRefusedError {
+  return error instanceof RpcRequestRefusedError && error.admission !== "forbidden";
 }
 
 function resolveWsRpcSocketUrl(rawUrl: string, preservePath = false): string {

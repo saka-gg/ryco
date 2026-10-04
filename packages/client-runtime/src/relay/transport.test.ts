@@ -24,6 +24,7 @@ import {
 } from "../authorization/runtime";
 import { hostedHubController, hostedHubStore } from "../authorization/state";
 import type { HostedHubNode, HostedRelayFailure } from "../authorization/types";
+import { RpcRequestRefusedError } from "../rpc/protocol";
 import type { WsRpcClient } from "../rpc/wsRpcClient";
 import { encodeBase64Url } from "./base64url";
 import {
@@ -842,8 +843,10 @@ describe("HostedRelayAttemptFactory", () => {
     hostedHubStore.setState({ sessionRecoveredAfterUnknown: true });
     expect(lifecycle.authorizeRequest?.(readFile)).toBe("allowed");
     expect(lifecycle.authorizeRequest?.(proposals)).toBe("allowed");
-    expect(lifecycle.authorizeRequest?.(terminalWrite)).not.toBe("allowed");
-    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    // Not "synchronizing": only the user's Continue on the inline notice helps.
+    expect(lifecycle.authorizeRequest?.(terminalWrite)).toBe("awaiting-acknowledgement");
+    expect(lifecycle.authorizeRequest?.(dispatch)).toBe("awaiting-acknowledgement");
+    expect(new RpcRequestRefusedError("awaiting-acknowledgement").message).toMatch(/Continue/);
 
     hostedHubController.acknowledgeDeliveryUnknown();
     expect(hostedHubStore.getState().sessionStatus).toBe("ready");

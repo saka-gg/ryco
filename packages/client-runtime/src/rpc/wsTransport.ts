@@ -15,7 +15,7 @@ import type { ObservabilityService, SocketService } from "../platform/index.ts";
 import { clearAllTrackedRpcRequests } from "./requestLatencyState.ts";
 import {
   createWsRpcProtocolLayer,
-  RpcRequestRefusedError,
+  isAwaitingAdmission,
   makeHostedRpcProtocolClient,
   makeDeviceRpcProtocolClient,
   makeWsRpcProtocolClient,
@@ -40,10 +40,10 @@ interface RequestOptions {
 
 const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
 /**
- * Ceiling for re-checking a subscription its connection refused only because
- * the session is not current yet. Nothing is sent while it waits, so the cost
- * is a local check; the cap bounds how late the stream starts after the
- * session becomes ready.
+ * Ceiling for re-checking a subscription its connection refused only for now
+ * (`isAwaitingAdmission`). Nothing is sent while it waits, so the cost is a
+ * local check; the cap bounds how late the stream starts after the connection
+ * admits it.
  */
 export const AWAITING_SESSION_SUBSCRIPTION_MAX_DELAY_MS = 4_000;
 const NOOP: () => void = () => undefined;
@@ -75,11 +75,6 @@ function formatErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
-}
-
-/** The connection refused the stream locally until its session is current. */
-function isAwaitingSessionRefusal(error: unknown): boolean {
-  return error instanceof RpcRequestRefusedError && error.admission === "awaiting-session";
 }
 
 function isRetryableSubscriptionError(message: string): boolean {
@@ -228,9 +223,9 @@ class RpcTransport<Client> {
             continue;
           }
 
-          if (isAwaitingSessionRefusal(error)) {
+          if (isAwaitingAdmission(error)) {
             // Expected while a rebuilt hosted client's session synchronizes;
-            // the stream starts once the session is current.
+            // the stream starts once the connection admits it.
             await sleep(
               Math.min(
                 Math.max(retryDelayMs, 1) * 2 ** Math.min(awaitingSessionRetries, 16),
