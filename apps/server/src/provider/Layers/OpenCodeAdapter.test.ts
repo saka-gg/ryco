@@ -27,6 +27,7 @@ import {
   ProviderInstanceId,
   RuntimeSessionId,
   ThreadId,
+  TurnId,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import { attachmentRelativePath } from "../../attachmentStore.ts";
@@ -1565,6 +1566,139 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       assert.match(error.message, /did not preserve the requested rewind boundary/);
       const session = (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId);
       assert.deepEqual(session?.resumeCursor, { schemaVersion: 1, sessionId: ROOT_SESSION_ID });
+    }),
+  );
+
+  const turnOne = TurnId.make("turn-rollback-1");
+  const turnTwo = TurnId.make("turn-rollback-2");
+
+  it.effect("does not drop a kept turn when a revert whose fork landed is retried", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-retry");
+      const adapter = yield* startRollbackSession(threadId);
+      const revert = { numTurns: 1, targetTurnId: turnOne, droppedTurnIds: [turnTwo] };
+
+      yield* adapter.rollbackThread(threadId, revert);
+      const forkId = `${ROOT_SESSION_ID}/fork-1`;
+      const cursor = (yield* adapter.listSessions()).find(
+        (entry) => entry.threadId === threadId,
+      )?.resumeCursor;
+      assert.deepEqual(cursor, {
+        schemaVersion: 1,
+        sessionId: forkId,
+        forgottenTurnIds: [turnTwo],
+      });
+
+      // Ryco restarts before it projects the revert, then the user retries it.
+      yield* adapter.stopSession(threadId);
+      runtimeMock.state.resumableSession = { id: forkId };
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make(`runtime-${threadId}-resumed`),
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: cursor,
+      });
+      yield* adapter.rollbackThread(threadId, revert);
+
+      // The fork already holds exactly the kept turn: no second fork drops it.
+      assert.deepEqual(runtimeMock.state.forkCalls, [
+        { sessionID: ROOT_SESSION_ID, messageID: "u2" },
+      ]);
+      const session = (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId);
+      assert.deepEqual(session?.resumeCursor, cursor);
+    }),
+  );
+
+  it.effect("drops only the rest when a retried revert reaches further back", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-retry-further");
+      const adapter = yield* startRollbackSession(threadId);
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 1,
+        targetTurnId: turnOne,
+        droppedTurnIds: [turnTwo],
+      });
+      const forkId = `${ROOT_SESSION_ID}/fork-1`;
+
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 2,
+        targetTurnId: null,
+        droppedTurnIds: [turnOne, turnTwo],
+      });
+
+      assert.deepEqual(runtimeMock.state.forkCalls, [
+        { sessionID: ROOT_SESSION_ID, messageID: "u2" },
+        { sessionID: forkId, messageID: "u1" },
+      ]);
+    }),
+  );
+
+  it.effect("refuses a revert that would keep turns an unfinished revert removed", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-retry-partial");
+      const adapter = yield* startRollbackSession(threadId);
+      const turnThree = TurnId.make("turn-rollback-3");
+      runtimeMock.state.messages = [
+        ...rollbackMessages(),
+        { info: { id: "u3", role: "user" as const }, parts: [] },
+      ];
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 2,
+        targetTurnId: turnOne,
+        droppedTurnIds: [turnTwo, turnThree],
+      });
+
+      const error = yield* Effect.flip(
+        adapter.rollbackThread(threadId, {
+          numTurns: 1,
+          targetTurnId: turnTwo,
+          droppedTurnIds: [turnThree],
+        }),
+      );
+
+      assert.match(error.message, /already removed turns this revert would keep/);
+      assert.equal(runtimeMock.state.forkCalls.length, 1);
+    }),
+  );
+
+  it.effect("re-sends the Ryco host context after a fork drops the first prompt", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-host-context");
+      const adapter = yield* startRollbackSession(threadId);
+      const hostContext = `<ryco_host_context>${agentControlHostContext(false)}</ryco_host_context>`;
+      const promptText = () =>
+        (runtimeMock.state.promptCalls.at(-1) as { parts: Array<{ text?: string }> }).parts[0]
+          ?.text;
+      const send = (input: string) =>
+        adapter.sendTurn({
+          threadId,
+          input,
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+      // A failed prompt still delivered the host context and leaves no turn running.
+      runtimeMock.state.promptAsyncError = new Error("prompt rejected");
+      yield* Effect.flip(send("first"));
+      assert.equal(promptText(), `${hostContext}\n\nfirst`);
+      yield* Effect.flip(send("second"));
+      assert.equal(promptText(), "second");
+
+      // Keeping the first prompt keeps the host context with it.
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 1,
+        targetTurnId: turnOne,
+        droppedTurnIds: [turnTwo],
+      });
+      yield* Effect.flip(send("kept"));
+      assert.equal(promptText(), "kept");
+
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 1,
+        targetTurnId: null,
+        droppedTurnIds: [turnOne],
+      });
+      yield* Effect.flip(send("fresh"));
+      assert.equal(promptText(), `${hostContext}\n\nfresh`);
     }),
   );
 

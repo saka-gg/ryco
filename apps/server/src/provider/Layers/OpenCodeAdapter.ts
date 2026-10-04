@@ -102,6 +102,12 @@ interface OpenCodeSessionContext {
   readonly directory: string;
   /** Root OpenCode session. A checkpoint revert rebinds it to a fork. */
   openCodeSessionId: string;
+  /**
+   * Ryco turns the latest fork dropped, persisted in the resume cursor. A revert
+   * whose projection never landed is retried with the same turns, which OpenCode
+   * must not drop a second time.
+   */
+  forgottenTurnIds: ReadonlyArray<string>;
   /** Set while a revert forks the session, so the fork is not adopted as a child. */
   rewinding: boolean;
   readonly pendingPermissions: Map<string, PermissionRequest>;
@@ -169,16 +175,36 @@ function nonEmptyString(value: string | undefined): string | undefined {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
-function parseOpenCodeResume(value: unknown): { readonly sessionId: string } | undefined {
+function parseOpenCodeResume(
+  value: unknown,
+): { readonly sessionId: string; readonly forgottenTurnIds: ReadonlyArray<string> } | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
   }
-  const cursor = value as { readonly schemaVersion?: unknown; readonly sessionId?: unknown };
-  return cursor.schemaVersion === OPENCODE_RESUME_VERSION &&
-    typeof cursor.sessionId === "string" &&
-    cursor.sessionId.trim().length > 0
-    ? { sessionId: cursor.sessionId }
-    : undefined;
+  const cursor = value as {
+    readonly schemaVersion?: unknown;
+    readonly sessionId?: unknown;
+    readonly forgottenTurnIds?: unknown;
+  };
+  if (
+    cursor.schemaVersion !== OPENCODE_RESUME_VERSION ||
+    typeof cursor.sessionId !== "string" ||
+    cursor.sessionId.trim().length === 0
+  ) {
+    return undefined;
+  }
+  const forgottenTurnIds = Array.isArray(cursor.forgottenTurnIds)
+    ? cursor.forgottenTurnIds.filter((id): id is string => typeof id === "string")
+    : [];
+  return { sessionId: cursor.sessionId, forgottenTurnIds };
+}
+
+function openCodeResumeCursor(sessionId: string, forgottenTurnIds: ReadonlyArray<string>) {
+  return {
+    schemaVersion: OPENCODE_RESUME_VERSION,
+    sessionId,
+    ...(forgottenTurnIds.length > 0 ? { forgottenTurnIds: [...forgottenTurnIds] } : {}),
+  };
 }
 
 function isOpenCodeNotFound(error: OpenCodeRuntimeError): boolean {
@@ -2096,10 +2122,9 @@ export function makeOpenCodeAdapter(
               "Computer Use needs a managed, isolated OpenCode server. External OpenCode servers cannot receive local desktop authority.",
           });
         const directory = input.cwd ?? serverConfig.cwd;
-        const resumeSessionId =
-          input.resumePolicy === "fresh"
-            ? undefined
-            : parseOpenCodeResume(input.resumeCursor)?.sessionId;
+        const resume =
+          input.resumePolicy === "fresh" ? undefined : parseOpenCodeResume(input.resumeCursor);
+        const resumeSessionId = resume?.sessionId;
         const existing = sessions.get(input.threadId);
         if (existing) {
           if (existing.session.runtimeSessionId === runtimeSessionId) {
@@ -2247,6 +2272,11 @@ export function makeOpenCodeAdapter(
 
         const createdAt = nowIso();
         const tokenMode = input.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
+        // Only the resumed session carries the forks recorded against it.
+        const forgottenTurnIds =
+          resume !== undefined && resume.sessionId === started.openCodeSession.id
+            ? resume.forgottenTurnIds
+            : [];
         const session: ProviderSession = {
           provider: PROVIDER,
           providerInstanceId: boundInstanceId,
@@ -2257,10 +2287,7 @@ export function makeOpenCodeAdapter(
           cwd: directory,
           ...(input.modelSelection ? { model: input.modelSelection.model } : {}),
           threadId: input.threadId,
-          resumeCursor: {
-            schemaVersion: OPENCODE_RESUME_VERSION,
-            sessionId: started.openCodeSession.id,
-          },
+          resumeCursor: openCodeResumeCursor(started.openCodeSession.id, forgottenTurnIds),
           createdAt,
           updatedAt: createdAt,
         };
@@ -2272,6 +2299,7 @@ export function makeOpenCodeAdapter(
           server: started.server,
           directory,
           openCodeSessionId: started.openCodeSession.id,
+          forgottenTurnIds,
           rewinding: false,
           pendingPermissions: new Map(),
           pendingQuestions: new Map(),
@@ -2774,7 +2802,7 @@ export function makeOpenCodeAdapter(
      * a fork never touches files. The old session is kept for audit.
      */
     const rollbackThread: OpenCodeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
-      function* (threadId, { numTurns }) {
+      function* (threadId, { numTurns, droppedTurnIds }) {
         const context = ensureSessionContext(sessions, threadId);
         const refuse = (detail: string) =>
           new ProviderAdapterRequestError({ provider: PROVIDER, method: "session.fork", detail });
@@ -2787,6 +2815,24 @@ export function makeOpenCodeAdapter(
         if (!Number.isInteger(numTurns) || numTurns < 1) {
           return yield* refuse("numTurns must be an integer >= 1.");
         }
+        // A retried revert whose earlier fork landed: OpenCode already lacks
+        // those turns, so counting them again would drop kept turns.
+        const dropped = new Set<string>(droppedTurnIds);
+        const forgotten = new Set(context.forgottenTurnIds);
+        const alreadyForgotten = droppedTurnIds.filter((turnId) => forgotten.has(turnId)).length;
+        if (
+          alreadyForgotten > 0 &&
+          (context.forgottenTurnIds.some((turnId) => !dropped.has(turnId)) ||
+            alreadyForgotten > numTurns)
+        ) {
+          return yield* refuse(
+            "An earlier revert that did not finish already removed turns this revert would keep. Revert to that checkpoint or an earlier one, or start a new thread.",
+          );
+        }
+        const remainingTurns = numTurns - alreadyForgotten;
+        if (remainingTurns === 0) {
+          return yield* readThread(threadId);
+        }
         const rootSessionId = context.openCodeSessionId;
         const messages =
           (yield* runOpenCodeSdk("session.messages", () =>
@@ -2794,12 +2840,12 @@ export function makeOpenCodeAdapter(
           ).pipe(Effect.mapError(toRequestError))).data ?? [];
         // One root user message per Ryco turn.
         const users = messages.filter((entry) => entry.info.role === "user");
-        if (numTurns > users.length) {
+        if (remainingTurns > users.length) {
           return yield* refuse(
             "OpenCode's conversation is shorter than this thread's history; it may already be reverted.",
           );
         }
-        const boundary = users[users.length - numTurns]!;
+        const boundary = users[users.length - remainingTurns]!;
         const boundaryIndex = messages.indexOf(boundary);
 
         context.rewinding = true;
@@ -2825,11 +2871,14 @@ export function makeOpenCodeAdapter(
           ).pipe(Effect.mapError(toRequestError));
 
           context.openCodeSessionId = fork.id;
+          context.forgottenTurnIds = [...droppedTurnIds];
           context.childSessionIds.clear();
-          context.turns.splice(Math.max(0, context.turns.length - numTurns));
+          context.turns.splice(Math.max(0, context.turns.length - remainingTurns));
+          // The host context rides on the first prompt; a fork before it loses it.
+          if (boundaryIndex === 0) context.agentControlHostContextDelivered = false;
           context.session = {
             ...context.session,
-            resumeCursor: { schemaVersion: OPENCODE_RESUME_VERSION, sessionId: fork.id },
+            resumeCursor: openCodeResumeCursor(fork.id, context.forgottenTurnIds),
             updatedAt: nowIso(),
           };
           return yield* readThread(threadId);
