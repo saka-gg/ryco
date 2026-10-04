@@ -289,7 +289,16 @@ export function createMobileEnvironmentDriver(
 
   function createSavedEnvironmentClient(
     environmentId: EnvironmentId,
-    onCredentialRejected: () => void,
+    owner: {
+      /**
+       * Whether this client's attempt, or the connection it registered, still
+       * owns the environment's state. A socket an attempt left behind once
+       * cancelled or replaced keeps reporting until it stops, and must not
+       * overwrite the state of the connection that replaced it.
+       */
+      readonly speaksForEnvironment: () => boolean;
+      readonly onCredentialRejected: () => void;
+    },
   ): WsRpcClient {
     catalog.runtimeStore.getState().ensure(environmentId);
     return createWsRpcClient(
@@ -309,12 +318,20 @@ export function createMobileEnvironmentDriver(
           persistentReconnect: true,
           // A rejected bearer is not an outage the backoff can wait out.
           isTerminalUrlError: isSavedEnvironmentCredentialRejection,
-          onTerminalUrlError: onCredentialRejected,
-          onAttempt: () => setRuntimeConnecting(environmentId),
-          onOpen: () => setRuntimeConnected(environmentId),
-          onError: (message) => setRuntimeError(environmentId, new Error(message)),
+          onTerminalUrlError: owner.onCredentialRejected,
+          onAttempt: () => {
+            if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
+          },
+          onOpen: () => {
+            if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
+          },
+          onError: (message) => {
+            if (owner.speaksForEnvironment()) setRuntimeError(environmentId, new Error(message));
+          },
           onClose: (details, context) => {
-            if (!context.intentional) setRuntimeDisconnected(environmentId, details.reason);
+            if (!context.intentional && owner.speaksForEnvironment()) {
+              setRuntimeDisconnected(environmentId, details.reason);
+            }
           },
         },
       ),
@@ -381,19 +398,22 @@ export function createMobileEnvironmentDriver(
       ...renewalCalls(record),
     });
 
-    const client = createSavedEnvironmentClient(record.environmentId, () => {
-      if (!speaksForEnvironment()) return;
-      setRuntimeRequiresAuth(record.environmentId);
-      // Its transport has stopped; the dead connection leaves the supervisor so
-      // a reconnect starts over with a session check. Deferred out of the
-      // transport callback that reported it.
-      globalThis.setTimeout(() => {
-        if (registered !== null && getSupervisor().read(record.environmentId) === registered) {
-          void getSupervisor()
-            .remove(record.environmentId)
-            .catch(() => false);
-        }
-      }, 0);
+    const client = createSavedEnvironmentClient(record.environmentId, {
+      speaksForEnvironment,
+      onCredentialRejected: () => {
+        if (!speaksForEnvironment()) return;
+        setRuntimeRequiresAuth(record.environmentId);
+        // Its transport has stopped; the dead connection leaves the supervisor
+        // so a reconnect starts over with a session check. Deferred out of the
+        // transport callback that reported it.
+        globalThis.setTimeout(() => {
+          if (registered !== null && getSupervisor().read(record.environmentId) === registered) {
+            void getSupervisor()
+              .remove(record.environmentId)
+              .catch(() => false);
+          }
+        }, 0);
+      },
     });
     const knownEnvironment = createKnownEnvironment({
       id: record.environmentId,

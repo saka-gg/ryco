@@ -998,7 +998,16 @@ function keepSavedEnvironmentSessionRenewed(
 
 function createSavedEnvironmentClient(
   environmentId: EnvironmentId,
-  onCredentialRejected: () => void = NOOP,
+  owner: {
+    /**
+     * Whether this client's attempt, or the connection it registered, still
+     * owns the environment's state. A socket an attempt left behind once
+     * cancelled or replaced keeps reporting until it stops, and must not
+     * overwrite the state of the connection that replaced it.
+     */
+    readonly speaksForEnvironment: () => boolean;
+    readonly onCredentialRejected: () => void;
+  },
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
   const socketUrl = async (pathname: "/ws" | "/ws/device" | "/ws/device-frames") =>
@@ -1018,19 +1027,20 @@ function createSavedEnvironmentClient(
       // An expired or revoked bearer is not one of those outages: no retry can
       // bring it back, so the socket stops and its pending requests fail.
       isTerminalUrlError: isSavedEnvironmentCredentialRejection,
-      onTerminalUrlError: onCredentialRejected,
+      onTerminalUrlError: owner.onCredentialRejected,
       recordGlobalConnectionState: false,
       getVersionMismatchHint: () =>
         resolveServerConfigVersionMismatch(
           useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
         )?.hint ?? null,
       onAttempt: () => {
-        setRuntimeConnecting(environmentId);
+        if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
       },
       onOpen: () => {
-        setRuntimeConnected(environmentId);
+        if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
       },
       onError: (message: string) => {
+        if (!owner.speaksForEnvironment()) return;
         const mismatch = resolveServerConfigVersionMismatch(
           useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
         );
@@ -1044,7 +1054,7 @@ function createSavedEnvironmentClient(
         details: { readonly code: number; readonly reason: string },
         context: WsProtocolCloseContext,
       ) => {
-        if (context.intentional) {
+        if (context.intentional || !owner.speaksForEnvironment()) {
           return;
         }
         setRuntimeDisconnected(
@@ -1384,11 +1394,14 @@ async function connectSavedEnvironment(
     };
     const client =
       clientOverride ??
-      createSavedEnvironmentClient(activeRecord.environmentId, () => {
-        credentialRejected = true;
-        if (!activeRecord.desktopSsh && speaksForEnvironment()) {
-          markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
-        }
+      createSavedEnvironmentClient(activeRecord.environmentId, {
+        speaksForEnvironment,
+        onCredentialRejected: () => {
+          credentialRejected = true;
+          if (!activeRecord.desktopSsh && speaksForEnvironment()) {
+            markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
+          }
+        },
       });
     // The pairing's renewal, kept while this connection is registered, stops
     // with it.

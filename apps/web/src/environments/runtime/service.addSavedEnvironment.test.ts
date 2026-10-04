@@ -904,6 +904,49 @@ describe("addSavedEnvironment", () => {
     await resetEnvironmentServiceForTests();
   });
 
+  it("keeps a cancelled attempt's socket from reporting over the environment's state", async () => {
+    vi.useFakeTimers();
+    const environmentId = EnvironmentId.make("environment-1");
+    mockSavedRecords = [
+      {
+        environmentId,
+        label: "Remote environment",
+        httpBaseUrl: "https://remote.example.com/",
+        wsBaseUrl: "wss://remote.example.com/",
+        createdAt: "2026-04-14T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ];
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("bearer-token");
+    // The attempt's socket is up, but its first server config never arrives.
+    mockClientGetConfig.mockReturnValue(new Promise(() => undefined));
+
+    const {
+      reconnectSavedEnvironment,
+      disconnectSavedEnvironment,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const connecting = reconnectSavedEnvironment(environmentId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const socketOptions = mockWsTransport.mock.calls.at(-1)?.[1] as WsProtocolLifecycleHandlers;
+    expect(socketOptions).toBeDefined();
+
+    // The user disconnects (or pairs again) while the attempt still waits.
+    await disconnectSavedEnvironment(environmentId);
+    mockPatchRuntime.mockClear();
+    // Its socket keeps reporting until the attempt notices it was cancelled.
+    socketOptions.onAttempt?.("wss://remote.example.com/ws");
+    socketOptions.onOpen?.();
+    socketOptions.onError?.("Unable to connect to the Ryco server WebSocket.");
+    socketOptions.onClose?.({ code: 1006, reason: "Socket dropped." }, { intentional: false });
+    expect(mockPatchRuntime).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await connecting;
+    await resetEnvironmentServiceForTests();
+  });
+
   it("fails a connect whose socket never delivers the server config", async () => {
     vi.useFakeTimers();
     mockSavedRecords = [

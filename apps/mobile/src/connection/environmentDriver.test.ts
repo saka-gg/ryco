@@ -484,6 +484,35 @@ describe("mobile environment driver", () => {
     }
   });
 
+  it("keeps a replaced connection's socket from reporting over its replacement", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: noopRemoteApi,
+      subscribeResume: () => () => {},
+    });
+    await driver.connectSavedEnvironment(record());
+    const socketOptions = socketHolder.options.at(-1)!;
+
+    // Paired again: a new connection replaced this one and is connected.
+    await driver.supervisor.remove(ENV_ID);
+    driver.supervisor.register(fakeConnection(ENV_ID));
+    fake.catalog.runtimeStore.getState().patch(ENV_ID, {
+      connectionState: "connected",
+      lastError: null,
+    });
+
+    // The old socket reports until it has fully stopped.
+    socketOptions.onAttempt?.("ws://node.local/ws");
+    socketOptions.onError?.("Unable to connect to the Ryco server WebSocket.");
+    socketOptions.onClose?.({ code: 1006, reason: "Socket dropped." }, { intentional: false });
+
+    expect(fake.runtime(ENV_ID)).toMatchObject({ connectionState: "connected", lastError: null });
+    await driver.supervisor.remove(ENV_ID);
+  });
+
   it("lets a cancelled connect fail without touching the connection that replaced it", async () => {
     const fake = createFakeCatalog();
     fake.setBearerToken(ENV_ID, "old-bearer-token");
