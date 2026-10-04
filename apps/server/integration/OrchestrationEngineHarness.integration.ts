@@ -238,6 +238,8 @@ interface MakeOrchestrationIntegrationHarnessOptions {
   readonly provider?: ProviderDriverKind;
   readonly providers?: ReadonlyArray<ProviderDriverKind>;
   readonly realCodex?: boolean;
+  /** Reopen an existing database file (a restart), instead of a fresh one. */
+  readonly databasePath?: string;
 }
 
 export const makeOrchestrationIntegrationHarness = (
@@ -271,9 +273,11 @@ export const makeOrchestrationIntegrationHarness = (
       prefix: "ryco-orchestration-integration-",
     });
     const workspaceDir = path.join(rootDir, "workspace");
-    const { stateDir, dbPath } = yield* deriveServerPaths(rootDir, undefined).pipe(
+    const derivedPaths = yield* deriveServerPaths(rootDir, undefined).pipe(
       Effect.provideService(Path.Path, path),
     );
+    const stateDir = derivedPaths.stateDir;
+    const dbPath = options?.databasePath ?? derivedPaths.dbPath;
     yield* fileSystem.makeDirectory(workspaceDir, { recursive: true });
     yield* fileSystem.makeDirectory(stateDir, { recursive: true });
     yield* initializeGitWorkspace(workspaceDir);
