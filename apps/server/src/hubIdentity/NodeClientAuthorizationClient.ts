@@ -157,6 +157,11 @@ export interface NodeClientAuthorizationRecord {
    * by a Local Trusted Introduction. Display metadata only — see the stored
    * field. It is the one ceiling an approval can name that both admits the
    * device and does not exceed what the Hub assigned it.
+   *
+   * On a PENDING record it is the role of the device's latest attempt this
+   * process saw, which may be newer than the one on disk: a peer's hello writes
+   * the role durably at most once per record, and any later move is held in
+   * memory (see `PendingObservedRoleRefresh`).
    */
   readonly observedRole: string | undefined;
 }
@@ -216,9 +221,25 @@ export interface NodeClientAuthorizationListing {
  */
 export type SpentPairingWindow = string | undefined;
 
-/** Which pending record's observed role the post-close commit rewrites, and to what. */
+/**
+ * A pending record's observed role, moved by a later attempt under its key.
+ *
+ * DURABLE AT MOST ONCE PER RECORD. Every attempt under a key already on file is
+ * a peer's hello, and a malicious Hub can open those at the relay's rate while
+ * alternating the role it assigns — so a durable rewrite per move would let the
+ * party opening channels drive full, fsync'd rewrites of the record file, and
+ * contend its lock with the owner's own commands, without bound. That is the
+ * rate §12.5 coalesces its fallback writes against, and this path is bounded
+ * harder still: a BACKFILL — the record on disk carries no role at all, because
+ * it predates the field or arrived under one this node cannot rank — is the
+ * only move written to disk, and a backfilled record has a role, so it is never
+ * written from here again. Every other move lives in memory, where the owner
+ * surfaces read it, and is gone at restart until the device's next attempt.
+ */
 export interface PendingObservedRoleRefresh {
   readonly indexKey: string;
+  /** Which record under the key: one re-created after a purge or expiry is another. */
+  readonly createdAt: number;
   readonly observedRole: string;
 }
 
@@ -231,7 +252,8 @@ export type NodeClientPendingAdmission =
    * when this attempt arrived under a different one — so a request recorded
    * before the field existed, or before the Hub changed the account's role, is
    * offered to the owner at the role the device now connects with. Display
-   * metadata on the pending class only: `approved` and `revoked` records are
+   * metadata on the pending class only, and on disk at most once per record
+   * (see `PendingObservedRoleRefresh`): `approved` and `revoked` records are
    * never touched from a peer's hello.
    */
   | {
@@ -663,7 +685,11 @@ function fingerprintDisplayOf(stored: string): string {
   return formatE2eeKeyFingerprint(storedFingerprintBytes(stored));
 }
 
-function toRecord(classified: ClassifiedEntry, now: number): NodeClientAuthorizationRecord {
+function toRecord(
+  classified: ClassifiedEntry,
+  now: number,
+  observedRole: string | undefined,
+): NodeClientAuthorizationRecord {
   const { entry } = classified;
   return {
     status: classified.status,
@@ -679,7 +705,7 @@ function toRecord(classified: ClassifiedEntry, now: number): NodeClientAuthoriza
     safetyNumber: entry.safetyNumber,
     displayLabel: entry.displayLabel,
     pairingReserved: classified.status === "pending" && holdsReservation(entry, now),
-    observedRole: entry.observedRole,
+    observedRole,
   };
 }
 
@@ -707,24 +733,30 @@ function withExpiredPendingRemoved(
 }
 
 /**
- * A pending record's observed role rewritten, or `file` itself when there is
- * nothing to rewrite.
+ * A pending record that carries no observed role given one, or `file` itself
+ * when there is nothing to fill in.
+ *
+ * ONLY EVER A BACKFILL. A record that already carries a role is left alone
+ * whatever this refresh says — including one another attempt backfilled between
+ * this decision and its commit — so a peer's hello writes a record's role to
+ * disk at most once (see `PendingObservedRoleRefresh`).
  *
  * Reaches `file.pending` and nothing else, for the reason
  * `selectPendingEviction` takes only pending entries: this runs from a peer's
  * hello, and the structural guarantee that peer action cannot name an
  * `approved` or `revoked` record is worth more than a status check. A record
  * the owner approved or revoked between the decision and this commit is simply
- * not found here.
+ * not found here, and nor is one re-created under the same key since.
  */
-function withPendingObservedRole(
+function withPendingObservedRoleBackfilled(
   file: NodeClientAuthorizationRecordFile,
   refresh: PendingObservedRoleRefresh,
 ): NodeClientAuthorizationRecordFile {
   let changed = false;
   const pending = file.pending.map((entry) => {
     if (
-      entry.observedRole === refresh.observedRole ||
+      entry.observedRole !== undefined ||
+      entry.createdAt !== refresh.createdAt ||
       clientAuthorizationIndexKey(entry) !== refresh.indexKey
     ) {
       return entry;
@@ -798,6 +830,29 @@ export async function makeNodeClientAuthorizationClient(options: {
    * collections is how a channel crossing row N3 ends up in neither sweep.
    */
   const registrations = new Set<Registration>();
+  /**
+   * The role a pending record's latest attempt arrived under, where it moved
+   * after the role on disk was written — see `PendingObservedRoleRefresh` for
+   * why it is not written there.
+   *
+   * Bound to one RECORD, not one key, by its `createdAt`: a key purged or
+   * expired and introduced again is a new request, and must not inherit a role
+   * an earlier one was seen under. Pruned on every publish to the records still
+   * pending, so it never outgrows the pending caps.
+   */
+  const movedObservedRoles = new Map<
+    string,
+    { readonly createdAt: number; readonly observedRole: string }
+  >();
+
+  /** The observed role an owner surface shows, and an owner action settles. */
+  const observedRoleFor = (classified: ClassifiedEntry): string | undefined => {
+    if (classified.status !== "pending") return classified.entry.observedRole;
+    const moved = movedObservedRoles.get(clientAuthorizationIndexKey(classified.entry));
+    return moved !== undefined && moved.createdAt === classified.entry.createdAt
+      ? moved.observedRole
+      : classified.entry.observedRole;
+  };
 
   const currentWindowState = (
     source: NodeClientAuthorizationRecordFile,
@@ -820,6 +875,16 @@ export async function makeNodeClientAuthorizationClient(options: {
       rebuilt.set(clientAuthorizationIndexKey(classified.entry), classified);
     }
     index = rebuilt;
+    for (const [indexKey, moved] of movedObservedRoles) {
+      const classified = rebuilt.get(indexKey);
+      if (
+        classified?.status !== "pending" ||
+        classified.entry.createdAt !== moved.createdAt ||
+        classified.entry.observedRole === moved.observedRole
+      ) {
+        movedObservedRoles.delete(indexKey);
+      }
+    }
   };
 
   const asStateFailure = <A>(operation: () => Promise<A>): Promise<A> =>
@@ -1125,11 +1190,11 @@ export async function makeNodeClientAuthorizationClient(options: {
       // Only a PENDING record's display metadata may follow the device, and
       // only when it actually moved: the request an owner approves has to name
       // the role the device connects with NOW, or the approval refuses it.
-      const observedRoleRefresh =
+      const observedRoleRefresh: PendingObservedRoleRefresh | undefined =
         existing.status === "pending" &&
         observedRole !== undefined &&
-        existing.entry.observedRole !== observedRole
-          ? { indexKey, observedRole }
+        observedRoleFor(existing) !== observedRole
+          ? { indexKey, createdAt: existing.entry.createdAt, observedRole }
           : undefined;
       return {
         kind: "existing",
@@ -1190,19 +1255,50 @@ export async function makeNodeClientAuthorizationClient(options: {
     };
   };
 
+  /**
+   * Follow a pending record's moved role in memory, and say whether its one
+   * durable backfill is still owed.
+   *
+   * Runs here rather than in the decision because §13.2 step 3 keeps every
+   * pending-class mutation behind the reject and the close, and against the
+   * record as it stands NOW: one the owner approved or revoked in between, or
+   * re-created under the same key, is not the record this attempt was decided
+   * against, and nothing about it moves.
+   */
+  const followObservedRole = (refresh: PendingObservedRoleRefresh): boolean => {
+    const classified = lookupClassified(refresh.indexKey, now());
+    if (classified?.status !== "pending" || classified.entry.createdAt !== refresh.createdAt) {
+      return false;
+    }
+    if (classified.entry.observedRole === refresh.observedRole) {
+      movedObservedRoles.delete(refresh.indexKey);
+    } else {
+      movedObservedRoles.set(refresh.indexKey, {
+        createdAt: refresh.createdAt,
+        observedRole: refresh.observedRole,
+      });
+    }
+    return classified.entry.observedRole === undefined;
+  };
+
   const commitPairingAdmission: NodeClientAuthorizationClient["commitPairingAdmission"] = async (
     admission,
   ) => {
-    // Only the durable spend — and, for an existing pending record, a moved
-    // observed role — is owed for an outcome that creates nothing, and an
-    // attempt that owes neither and was not admitted writes nothing at all —
-    // §13.2 step 3's refusal path must stay free of durable writes.
+    // Only the durable spend — and, for an existing pending record that carries
+    // no observed role, its one backfill — is owed for an outcome that creates
+    // nothing, and an attempt that owes neither and was not admitted writes
+    // nothing at all: §13.2 step 3's refusal path must stay free of durable
+    // writes, and so must the role of a request already on file moving again.
     const observedRoleRefresh =
       admission.kind === "existing" ? admission.observedRoleRefresh : undefined;
+    const backfill =
+      observedRoleRefresh !== undefined && followObservedRole(observedRoleRefresh)
+        ? observedRoleRefresh
+        : undefined;
     if (
       admission.kind !== "admit" &&
       admission.spentPairingWindow === undefined &&
-      observedRoleRefresh === undefined
+      backfill === undefined
     ) {
       return;
     }
@@ -1229,9 +1325,7 @@ export async function makeNodeClientAuthorizationClient(options: {
             next = { ...next, pairingWindow: { ...window, spentAt: at } };
           }
         }
-        if (observedRoleRefresh !== undefined) {
-          next = withPendingObservedRole(next, observedRoleRefresh);
-        }
+        if (backfill !== undefined) next = withPendingObservedRoleBackfilled(next, backfill);
         if (admission.kind !== "admit") return next === current ? null : next;
         const indexKey = clientAuthorizationIndexKey(admission.entry);
         // Re-evaluated against the state actually on disk, which another writer
@@ -1287,7 +1381,7 @@ export async function makeNodeClientAuthorizationClient(options: {
     await reload();
     const at = now();
     const records = classify(file, at)
-      .map((classified) => toRecord(classified, at))
+      .map((classified) => toRecord(classified, at, observedRoleFor(classified)))
       .toSorted((left, right) => {
         const byTime = left.createdAt - right.createdAt;
         if (byTime !== 0) return byTime;
@@ -1320,7 +1414,9 @@ export async function makeNodeClientAuthorizationClient(options: {
     await reload();
     const at = now();
     const classified = findEntry(file, requireKey(key), at);
-    return classified === undefined ? undefined : toRecord(classified, at);
+    return classified === undefined
+      ? undefined
+      : toRecord(classified, at, observedRoleFor(classified));
   };
 
   const approve: NodeClientAuthorizationClient["approve"] = async (input) => {
@@ -1340,6 +1436,7 @@ export async function makeNodeClientAuthorizationClient(options: {
           return authorizationError("client_authorization_approved_cap");
         }
         const label = requested ?? found.entry.displayLabel;
+        const observedRole = observedRoleFor(found);
         const approved: StoredClientAuthorizationEntry = {
           hubOrigin: found.entry.hubOrigin,
           accountId: found.entry.accountId,
@@ -1351,11 +1448,11 @@ export async function makeNodeClientAuthorizationClient(options: {
           ...(found.entry.lastSeenAt === undefined ? {} : { lastSeenAt: found.entry.lastSeenAt }),
           safetyNumber: found.entry.safetyNumber,
           ...(label === undefined ? {} : { displayLabel: label }),
-          // Carried, so an owner surface can still tell later whether a
-          // narrowing would limit this device or refuse it outright.
-          ...(found.entry.observedRole === undefined
-            ? {}
-            : { observedRole: found.entry.observedRole }),
+          // Carried — the role the owner was shown, which for a pending record
+          // may be newer than the one on disk — so an owner surface can still
+          // tell later whether a narrowing would limit this device or refuse it
+          // outright.
+          ...(observedRole === undefined ? {} : { observedRole }),
           // The reservation is dropped rather than carried: once a record is
           // `approved` no eviction rule reaches it, so the field would only be
           // dead state on a record that no longer occupies the reserved class.
@@ -1416,6 +1513,7 @@ export async function makeNodeClientAuthorizationClient(options: {
           return authorizationError("client_authorization_approved_cap");
         }
         disposition = found === undefined ? "created" : "promoted";
+        const observedRole = found === undefined ? undefined : observedRoleFor(found);
         const approved: StoredClientAuthorizationEntry = {
           hubOrigin,
           accountId,
@@ -1427,9 +1525,7 @@ export async function makeNodeClientAuthorizationClient(options: {
           ...(found?.entry.lastSeenAt === undefined ? {} : { lastSeenAt: found.entry.lastSeenAt }),
           safetyNumber,
           ...(displayLabel === undefined ? {} : { displayLabel }),
-          ...(found?.entry.observedRole === undefined
-            ? {}
-            : { observedRole: found.entry.observedRole }),
+          ...(observedRole === undefined ? {} : { observedRole }),
           ...(found?.entry.forwardFields === undefined
             ? {}
             : { forwardFields: found.entry.forwardFields }),
@@ -1510,6 +1606,7 @@ export async function makeNodeClientAuthorizationClient(options: {
         // oldest-first retention order. The sweep is still owed — this is the
         // retry path after a close that failed.
         if (found.status === "revoked") return null;
+        const observedRole = observedRoleFor(found);
         const revoked: StoredClientAuthorizationEntry = {
           hubOrigin: found.entry.hubOrigin,
           accountId: found.entry.accountId,
@@ -1524,9 +1621,7 @@ export async function makeNodeClientAuthorizationClient(options: {
           ...(found.entry.displayLabel === undefined
             ? {}
             : { displayLabel: found.entry.displayLabel }),
-          ...(found.entry.observedRole === undefined
-            ? {}
-            : { observedRole: found.entry.observedRole }),
+          ...(observedRole === undefined ? {} : { observedRole }),
           ...(found.entry.forwardFields === undefined
             ? {}
             : { forwardFields: found.entry.forwardFields }),

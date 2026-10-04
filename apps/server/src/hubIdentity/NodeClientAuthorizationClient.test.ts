@@ -326,7 +326,7 @@ describe("node client authorization observed role", () => {
     });
   });
 
-  it("follows the device while the record is pending, and writes only when it moved", async () => {
+  it("follows the device while the record is pending, and writes only a missing role", async () => {
     // A request recorded before this field existed carries none; the device's
     // next attempt fills it in, so the owner is not stuck approving blind.
     const test = await harness({ pending: [pendingEntry(31)] });
@@ -338,20 +338,92 @@ describe("node client authorization observed role", () => {
       observedRoleRefresh: { observedRole: "owner" },
     });
     expect((await test.client.list()).records[0]?.observedRole).toBe("owner");
+    expect((await test.stored()).pending[0]?.observedRole).toBe("owner");
 
-    // The same role again owes nothing, so the attempt writes nothing.
+    // The same role again owes nothing.
     const revision = (await test.stored()).revision;
     expect(await test.pair(key(31), "owner")).toMatchObject({
       kind: "existing",
       observedRoleRefresh: undefined,
     });
-    expect((await test.stored()).revision).toBe(revision);
 
-    // …and a role the Hub changed since is followed, still pending.
+    // …and a role the Hub changed since is followed, still pending — in
+    // memory, because the record on disk already carries one.
     await test.pair(key(31), "viewer");
+    expect((await test.client.list()).records[0]).toMatchObject({
+      status: "pending",
+      maxRole: "viewer",
+      observedRole: "viewer",
+    });
     const stored = await test.stored();
-    expect(stored.pending[0]).toMatchObject({ observedRole: "viewer", maxRole: "viewer" });
+    expect(stored.revision).toBe(revision);
+    expect(stored.pending[0]).toMatchObject({ observedRole: "owner", maxRole: "viewer" });
     expect(stored.approved).toEqual([]);
+  });
+
+  it("bounds a peer's role churn on a pending record to at most one durable write", async () => {
+    // A Hub can open channels for a key it introduced at the relay's rate,
+    // alternating the role it assigns. Were every move a full, fsync'd rewrite
+    // of the record file, the party opening channels would set the node's
+    // durable write rate — and contend the lock with the owner's commands.
+    const roles = ["viewer", "owner"] as const;
+    const churn = async (test: Harness, seed: number) => {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        expect((await test.pair(key(seed), roles[attempt % 2])).kind).toBe("existing");
+      }
+    };
+
+    // Recorded with a role at creation: never written from a hello again.
+    const recorded = await harness();
+    await recorded.pair(key(38), "operator");
+    const created = (await recorded.stored()).revision;
+    await churn(recorded, 38);
+    expect((await recorded.stored()).revision).toBe(created);
+    expect((await recorded.client.get(key(38)))?.observedRole).toBe("owner");
+
+    // Recorded without one: the first attempt fills it in, and that is all.
+    const legacy = await harness({ pending: [pendingEntry(39)] });
+    const seeded = (await legacy.stored()).revision;
+    await churn(legacy, 39);
+    const stored = await legacy.stored();
+    expect(stored.revision).toBe(seeded + 1);
+    expect(stored.pending[0]?.observedRole).toBe("viewer");
+    expect((await legacy.client.get(key(39)))?.observedRole).toBe("owner");
+  });
+
+  it("settles the role the owner was shown, and binds a moved role to its own record", async () => {
+    const test = await harness();
+    await test.pair(key(40), "viewer");
+    await test.pair(key(40), "owner");
+    expect((await test.stored()).pending[0]?.observedRole).toBe("viewer");
+
+    // The owner approved at the role the panel offered; the settled record has
+    // to say that role, or a later narrowing is judged against one the device
+    // no longer connects with.
+    await test.client.approve({ key: key(40), maxRole: "owner", capabilitySet: [CAPABILITY] });
+    expect((await test.stored()).approved[0]?.observedRole).toBe("owner");
+    expect(await test.client.get(key(40))).toMatchObject({
+      status: "approved",
+      observedRole: "owner",
+    });
+
+    // A key that expired and introduced itself again is a new request: it
+    // starts from the role its own first attempt arrived under, not one an
+    // earlier record under the same key moved to.
+    await test.pair(key(41), "viewer");
+    await test.pair(key(41), "owner");
+    test.advance(E2EE_PENDING_CLIENT_RETENTION + 1);
+    expect((await test.pair(key(41), "operator")).kind).toBe("admit");
+    expect((await test.client.get(key(41)))?.observedRole).toBe("operator");
+
+    // A restart keeps only what is on disk, until the device's next attempt.
+    await test.pair(key(41), "owner");
+    expect((await test.client.get(key(41)))?.observedRole).toBe("owner");
+    const restarted = await makeNodeClientAuthorizationClient({
+      store: test.store,
+      now: () => START + E2EE_PENDING_CLIENT_RETENTION + 1,
+    });
+    expect((await restarted.get(key(41)))?.observedRole).toBe("operator");
   });
 
   it("never rewrites an approved or revoked record from a peer's hello", async () => {

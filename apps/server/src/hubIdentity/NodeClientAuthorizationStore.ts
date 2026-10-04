@@ -118,8 +118,10 @@ export interface StoredClientAuthorizationEntry {
   readonly pairingReservedAt?: number;
   /**
    * The `channel.open.effectiveRole` (§8.3 element 14) the node received on the
-   * pairing attempt that created this record — or, while it is still
-   * `pending`, on the latest attempt that changed it.
+   * pairing attempt that created this record — or, for a `pending` record that
+   * carried none, on the first later attempt that did. A peer's hello writes it
+   * at most once per record; a later move is the client's in-memory state until
+   * an owner action settles the record at the role it showed.
    *
    * DISPLAY METADATA, NEVER AUTHORITY. §8.6 step 6 and the §13.6 withdrawal test
    * read `maxRole` alone, and nothing copies this into `maxRole`: the Hub
