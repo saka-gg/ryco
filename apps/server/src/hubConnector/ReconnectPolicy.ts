@@ -108,9 +108,14 @@ export const AUTHENTICATION_FAILED_RETRY: SlowRetryPolicy = {
 };
 
 /**
- * Exponential from `baseDelayMs` to `maxDelayMs` with symmetric jitter, never
- * below the base: the base is the promise ("at least five minutes"), the
- * jitter keeps a fleet that failed together from retrying together.
+ * Exponential from `baseDelayMs` to `maxDelayMs`, jittered uniformly within
+ * both: the base is the promise ("at least five minutes"), the jitter keeps a
+ * fleet that failed together from retrying together.
+ *
+ * The jitter window is clamped before it is sampled, not the jittered value
+ * after: clamping afterwards would put half of every first retry exactly on the
+ * base and half of every capped one exactly on the cap — the synchronized burst
+ * the jitter exists to prevent, aimed at a Hub that is recovering.
  */
 export function slowRetryDelay(
   policy: SlowRetryPolicy,
@@ -120,12 +125,7 @@ export function slowRetryDelay(
   assertDeterministicInput(attempt, randomValue);
   const exponent = Math.min(attempt, 52);
   const exponential = Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** exponent);
-  const multiplier = 1 - policy.jitterRatio + 2 * policy.jitterRatio * randomValue;
-  return {
-    attempt,
-    delayMs: Math.max(
-      policy.baseDelayMs,
-      Math.min(policy.maxDelayMs, Math.round(exponential * multiplier)),
-    ),
-  };
+  const low = Math.max(policy.baseDelayMs, exponential * (1 - policy.jitterRatio));
+  const high = Math.min(policy.maxDelayMs, exponential * (1 + policy.jitterRatio));
+  return { attempt, delayMs: Math.round(low + (high - low) * randomValue) };
 }

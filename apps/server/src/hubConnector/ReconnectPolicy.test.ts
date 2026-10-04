@@ -56,17 +56,30 @@ describe("slowRetryDelay", () => {
   it("is not clamped to the relay's five-minute retry-after ceiling", () => {
     // A refused proof costs the Hub a challenge and a signature check, so its
     // retries are a quarter of an hour apart from the first.
-    expect(slowRetryDelay(AUTHENTICATION_FAILED_RETRY, 0, 0.5).delayMs).toBe(900_000);
-    expect(slowRetryDelay(AUTHENTICATION_FAILED_RETRY, 5, 0.5).delayMs).toBe(3_600_000);
+    expect(slowRetryDelay(AUTHENTICATION_FAILED_RETRY, 0, 0).delayMs).toBe(900_000);
+    expect(slowRetryDelay(AUTHENTICATION_FAILED_RETRY, 5, 1).delayMs).toBe(3_600_000);
     // A locked keychain: half a minute, growing to ten.
-    expect(slowRetryDelay(IDENTITY_UNAVAILABLE_RETRY, 0, 0.5).delayMs).toBe(30_000);
-    expect(slowRetryDelay(IDENTITY_UNAVAILABLE_RETRY, 10, 0.5).delayMs).toBe(600_000);
+    expect(slowRetryDelay(IDENTITY_UNAVAILABLE_RETRY, 0, 0).delayMs).toBe(30_000);
+    expect(slowRetryDelay(IDENTITY_UNAVAILABLE_RETRY, 1, 0.5).delayMs).toBe(60_000);
+    expect(slowRetryDelay(IDENTITY_UNAVAILABLE_RETRY, 10, 1).delayMs).toBe(600_000);
   });
 
-  it("spreads a fleet that failed together", () => {
-    expect(slowRetryDelay(CONNECTION_REPLACED_RETRY, 0, 1).delayMs).toBeGreaterThan(
-      slowRetryDelay(CONNECTION_REPLACED_RETRY, 0, 0.5).delayMs,
-    );
+  it("spreads a fleet that failed together, including at the base and the cap", () => {
+    for (const policy of [
+      IDENTITY_UNAVAILABLE_RETRY,
+      CONNECTION_REPLACED_RETRY,
+      AUTHENTICATION_FAILED_RETRY,
+    ]) {
+      // A first retry and a capped one are where clamping a jittered value
+      // would collapse half the fleet onto one instant.
+      for (const attempt of [0, 40]) {
+        const delays = [0, 0.25, 0.5, 0.75, 1].map(
+          (random) => slowRetryDelay(policy, attempt, random).delayMs,
+        );
+        expect(new Set(delays).size, `${policy.baseDelayMs}@${attempt}`).toBe(delays.length);
+        expect(delays).toEqual(delays.toSorted((left, right) => left - right));
+      }
+    }
     expect(() => slowRetryDelay(CONNECTION_REPLACED_RETRY, 0, 2)).toThrow(
       "Reconnect policy input is invalid.",
     );

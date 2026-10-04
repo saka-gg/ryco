@@ -1347,7 +1347,7 @@ describe("HubConnector", () => {
       degradedMode: "backing_off",
       failure: "authentication_failed",
       reconnectAttempt: 0,
-      nextRetryAt: new Date(clock.value.now() + 900_000).toISOString(),
+      nextRetryAt: new Date(clock.value.now() + 1_012_500).toISOString(),
     });
     expect(clock.timers.size).toBe(1);
 
@@ -1357,7 +1357,7 @@ describe("HubConnector", () => {
     await settle();
     expect(proofs).toBe(1);
 
-    await clock.advance(900_000);
+    await clock.advance(1_012_500);
     await settle();
     // A fresh challenge and a fresh proof, through the full handshake.
     expect(proofs).toBe(2);
@@ -1397,10 +1397,10 @@ describe("HubConnector", () => {
       state: "degraded",
       degradedMode: "backing_off",
       failure: "identity_unavailable",
-      nextRetryAt: new Date(clock.value.now() + 30_000).toISOString(),
+      nextRetryAt: new Date(clock.value.now() + 33_000).toISOString(),
     });
 
-    await clock.advance(30_000);
+    await clock.advance(33_000);
     await settle();
     expect(connector.status()).toMatchObject({
       failure: "identity_unavailable",
@@ -1491,14 +1491,14 @@ describe("HubConnector", () => {
       state: "degraded",
       degradedMode: "backing_off",
       failure: "connection_replaced",
-      nextRetryAt: new Date(clock.value.now() + 30_000).toISOString(),
+      nextRetryAt: new Date(clock.value.now() + 33_000).toISOString(),
     });
     expect(identityReads).toBe(0);
     expect(sockets).toHaveLength(0);
     await expect(connector.leave()).rejects.toThrow("in use by another Ryco process");
 
     otherCopyRunning = false;
-    await clock.advance(30_000);
+    await clock.advance(33_000);
     await settle();
     expect(identityReads).toBe(1);
     expect(sockets).toHaveLength(1);
@@ -1544,7 +1544,7 @@ describe("HubConnector", () => {
       state: "degraded",
       degradedMode: "backing_off",
       failure: "connection_replaced",
-      nextRetryAt: new Date(clock.value.now() + 300_000).toISOString(),
+      nextRetryAt: new Date(clock.value.now() + 337_500).toISOString(),
     });
     await clock.advance(60_000);
     await settle();
@@ -1600,9 +1600,9 @@ describe("HubConnector", () => {
     await starting;
     // Three displacements an hour, each at least five minutes apart...
     for (const [delayMs, attempt] of [
-      [300_000, 0],
+      [337_500, 0],
       [600_000, 1],
-      [900_000, 2],
+      [787_500, 2],
     ] as const) {
       expect(connector.status()).toMatchObject({
         state: "degraded",
@@ -1702,7 +1702,7 @@ describe("HubConnector", () => {
       state: "degraded",
       degradedMode: "backing_off",
       failure: "authentication_failed",
-      nextRetryAt: new Date(clock.value.now() + 900_000).toISOString(),
+      nextRetryAt: new Date(clock.value.now() + 1_012_500).toISOString(),
     });
     await connector.stop();
   });
