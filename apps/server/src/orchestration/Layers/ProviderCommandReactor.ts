@@ -53,22 +53,28 @@ import {
 import {
   Cache,
   Cause,
+  Clock,
+  Deferred,
   Duration,
   Effect,
   Equal,
+  Exit,
   Layer,
   Option,
   Schedule,
   Schema,
   Stream,
 } from "effect";
-import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
+import * as Semaphore from "effect/Semaphore";
+import { makeKeyedSerialExecutor } from "@ryco/shared/KeyedSerialExecutor";
+import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
+import { resolveProviderOperationTimeouts } from "../../provider/providerOperationPolicy.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -86,25 +92,93 @@ import { withProviderGoalPrompt } from "../../provider/goalMode.ts";
 import {
   type ProviderFailureActivityInput,
   providerFailureActivityCommand,
+  providerNoticeActivityCommand,
 } from "../providerFailureActivity.ts";
-import { failureTag, userFacingFailureDetail } from "../userFacingErrors.ts";
+import {
+  classifyTurnLiveness,
+  TURN_LOST_DETAIL,
+  type TurnLivenessVerdict,
+  unresponsiveTurnDetail,
+} from "../providerTurnLiveness.ts";
+import {
+  isProviderSessionStartCancelled,
+  makeThreadLaneControl,
+  type OutOfBandOutcome,
+  type ProviderIntentEvent,
+  START_CANCELLED_DETAIL,
+  type StartKind,
+} from "../threadLaneControl.ts";
+import {
+  failureTag,
+  userFacingFailureDetail,
+  UNEXPECTED_FAILURE_DETAIL,
+} from "../userFacingErrors.ts";
 
-type ProviderIntentEvent = Extract<
-  OrchestrationEvent,
-  {
-    type:
-      | "thread.runtime-mode-set"
-      | "thread.token-mode-set"
-      | "thread.goal-updated"
-      | "thread.goal-cleared"
-      | "thread.turn-start-requested"
-      | "thread.turn-steer-requested"
-      | "thread.turn-interrupt-requested"
-      | "thread.approval-response-requested"
-      | "thread.user-input-response-requested"
-      | "thread.session-stop-requested";
-  }
+type CallbackResponseEvent = Extract<
+  ProviderIntentEvent,
+  { type: "thread.approval-response-requested" | "thread.user-input-response-requested" }
 >;
+
+type LifecycleIntentEvent = Exclude<ProviderIntentEvent, CallbackResponseEvent>;
+
+type StopIntentEvent = Extract<
+  ProviderIntentEvent,
+  { type: "thread.turn-interrupt-requested" | "thread.session-stop-requested" }
+>;
+
+type LivenessVerdict = Extract<TurnLivenessVerdict, { kind: "lost" | "unresponsive" }>;
+
+/** One item of a thread's lifecycle lane. */
+type LaneItem =
+  | {
+      readonly kind: "event";
+      readonly event: LifecycleIntentEvent;
+      /** Sequence a stop must exceed to cancel this item; 0 for synthetic recovery. */
+      readonly fenceSequence: number;
+      readonly recovery?: true;
+    }
+  | {
+      readonly kind: "liveness";
+      readonly threadId: ThreadId;
+      readonly verdict: LivenessVerdict;
+    };
+
+interface OutOfBandJob {
+  readonly event: StopIntentEvent;
+  readonly outcome: Deferred.Deferred<OutOfBandOutcome>;
+}
+
+const isCallbackResponseEvent = (event: ProviderIntentEvent): event is CallbackResponseEvent =>
+  event.type === "thread.approval-response-requested" ||
+  event.type === "thread.user-input-response-requested";
+
+const isProviderIntentEvent = (event: OrchestrationEvent): event is ProviderIntentEvent =>
+  event.type === "thread.runtime-mode-set" ||
+  event.type === "thread.token-mode-set" ||
+  event.type === "thread.goal-updated" ||
+  event.type === "thread.goal-cleared" ||
+  event.type === "thread.turn-start-requested" ||
+  event.type === "thread.turn-steer-requested" ||
+  event.type === "thread.turn-interrupt-requested" ||
+  event.type === "thread.approval-response-requested" ||
+  event.type === "thread.user-input-response-requested" ||
+  event.type === "thread.session-stop-requested";
+
+export interface ProviderCommandReactorOptions {
+  /** How often running turns are checked for liveness. Default 60 s. */
+  readonly livenessSweepIntervalMs?: number;
+  /** Silence on a live turn before one "unresponsive" notice. Default from the operator env, else 15 min. */
+  readonly unresponsiveAfterMs?: number;
+  /** Synthetic startup recoveries allowed to start sessions at once. Default 4. */
+  readonly maxConcurrentRecoveries?: number;
+  /** Total outstanding lifecycle items across all threads. Default 1024. */
+  readonly lifecycleCapacity?: number;
+}
+
+const DEFAULT_LIVENESS_SWEEP_INTERVAL_MS = 60_000;
+const DEFAULT_MAX_CONCURRENT_RECOVERIES = 4;
+/** setTimeout's ceiling; larger sweep intervals only ever matter to the classifier. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 type TurnStartRequestedEvent = Extract<
   ProviderIntentEvent,
@@ -237,7 +311,9 @@ function stalePendingRequestDetail(
   return `Stale pending ${requestKind} request: ${requestId}. Provider callback state does not survive app restarts or recovered sessions. Restart the turn to continue.`;
 }
 
-const make = Effect.gen(function* () {
+const makeProviderCommandReactor = Effect.fnUntraced(function* (
+  options?: ProviderCommandReactorOptions,
+) {
   const storageSql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const leaseThreadPath = (
     thread: OrchestrationThreadShell,
@@ -283,6 +359,21 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+
+  const livenessSweepIntervalMs = Math.max(
+    1,
+    options?.livenessSweepIntervalMs ?? DEFAULT_LIVENESS_SWEEP_INTERVAL_MS,
+  );
+  const unresponsiveAfterMs =
+    options?.unresponsiveAfterMs ??
+    resolveProviderOperationTimeouts({ env: process.env }).unresponsiveAfterMs;
+  const laneControl = yield* makeThreadLaneControl;
+  // Serializes recreating one missing worktree across threads that record it.
+  const worktreeLocks = yield* makeKeyedSerialExecutor<string>();
+  // Startup goal recovery would otherwise burst into provider startup admission.
+  const recoveryPermits = yield* Semaphore.make(
+    Math.max(1, options?.maxConcurrentRecoveries ?? DEFAULT_MAX_CONCURRENT_RECOVERIES),
+  );
 
   const appendProviderFailureActivity = (input: ProviderFailureActivityInput) =>
     orchestrationEngine.dispatch(providerFailureActivityCommand(input));
@@ -433,77 +524,87 @@ const make = Effect.gen(function* () {
         detail,
       });
 
-    if (pathEntryExists(worktreePath)) {
-      const registeredPaths = yield* registeredWorktreePaths();
-      if (!registeredPaths.includes(worktreeIdentity(worktreePath))) {
-        return yield* failRecovery(
-          `Refusing to use '${worktreePath}' because it exists but is not a registered worktree for '${repositoryRoot}'.`,
-        );
-      }
-      return;
-    }
+    // Threads that record the same missing worktree recreate it once: the
+    // re-checks run under the path's lock, so the second thread sees the
+    // recreated, registered worktree and returns.
+    const recreated = yield* worktreeLocks.withLock(
+      worktreeIdentity(worktreePath),
+      Effect.gen(function* () {
+        if (pathEntryExists(worktreePath)) {
+          const registeredPaths = yield* registeredWorktreePaths();
+          if (!registeredPaths.includes(worktreeIdentity(worktreePath))) {
+            return yield* failRecovery(
+              `Refusing to use '${worktreePath}' because it exists but is not a registered worktree for '${repositoryRoot}'.`,
+            );
+          }
+          return false;
+        }
 
-    const branch = thread.branch;
-    if (branch === null) {
-      return yield* failRecovery(
-        `Cannot recreate missing worktree '${worktreePath}' because the thread has no recorded branch.`,
-      );
-    }
+        const branch = thread.branch;
+        if (branch === null) {
+          return yield* failRecovery(
+            `Cannot recreate missing worktree '${worktreePath}' because the thread has no recorded branch.`,
+          );
+        }
 
-    const localBranches = yield* gitWorkflow.listLocalBranchNames(repositoryRoot);
-    if (!localBranches.includes(branch)) {
-      return yield* failRecovery(
-        `Cannot recreate missing worktree '${worktreePath}' because branch '${branch}' no longer exists.`,
-      );
-    }
+        const localBranches = yield* gitWorkflow.listLocalBranchNames(repositoryRoot);
+        if (!localBranches.includes(branch)) {
+          return yield* failRecovery(
+            `Cannot recreate missing worktree '${worktreePath}' because branch '${branch}' no longer exists.`,
+          );
+        }
 
-    yield* gitWorkflow.pruneWorktrees(repositoryRoot);
+        yield* gitWorkflow.pruneWorktrees(repositoryRoot);
 
-    // Another process may have recreated the path while the stale metadata was pruned.
-    if (pathEntryExists(worktreePath)) {
-      const registeredPaths = yield* registeredWorktreePaths();
-      if (registeredPaths.includes(worktreeIdentity(worktreePath))) {
-        yield* gitWorkflow.assertWorktreeSetupComplete(worktreePath);
-        return;
-      }
-      return yield* failRecovery(
-        `Refusing to recreate worktree '${worktreePath}' because another filesystem entry now occupies that path.`,
-      );
-    }
+        // Another process may have recreated the path while the stale metadata was pruned.
+        if (pathEntryExists(worktreePath)) {
+          const registeredPaths = yield* registeredWorktreePaths();
+          if (registeredPaths.includes(worktreeIdentity(worktreePath))) {
+            yield* gitWorkflow.assertWorktreeSetupComplete(worktreePath);
+            return false;
+          }
+          return yield* failRecovery(
+            `Refusing to recreate worktree '${worktreePath}' because another filesystem entry now occupies that path.`,
+          );
+        }
 
-    const recreated = yield* gitWorkflow.createWorktree({
-      projectId: project.id,
-      cwd: repositoryRoot,
-      path: worktreePath,
-      refName: branch,
-      dependencyHydration: "none",
-    });
-    if (
-      worktreeIdentity(recreated.worktree.path) !== worktreeIdentity(worktreePath) ||
-      recreated.worktree.refName !== branch
-    ) {
-      return yield* failRecovery(
-        `Worktree recovery returned unexpected metadata for '${worktreePath}' and branch '${branch}'.`,
-      );
-    }
+        const created = yield* gitWorkflow.createWorktree({
+          projectId: project.id,
+          cwd: repositoryRoot,
+          path: worktreePath,
+          refName: branch,
+          dependencyHydration: "none",
+        });
+        if (
+          worktreeIdentity(created.worktree.path) !== worktreeIdentity(worktreePath) ||
+          created.worktree.refName !== branch
+        ) {
+          return yield* failRecovery(
+            `Worktree recovery returned unexpected metadata for '${worktreePath}' and branch '${branch}'.`,
+          );
+        }
 
-    const changedAt = new Date().toISOString();
-    yield* orchestrationEngine.dispatch({
-      type: "thread.meta.update",
-      commandId: serverCommandId("worktree-recovered"),
-      threadId: thread.id,
-      branch,
-      worktreePath,
-    });
-    if (thread.worktreeId !== undefined && thread.worktreeId !== null) {
-      yield* orchestrationEngine.dispatch({
-        type: "worktree.meta.update",
-        commandId: serverCommandId("worktree-recovered-meta"),
-        worktreeId: thread.worktreeId,
-        branch,
-        changedAt,
-      });
-    }
+        const changedAt = new Date().toISOString();
+        yield* orchestrationEngine.dispatch({
+          type: "thread.meta.update",
+          commandId: serverCommandId("worktree-recovered"),
+          threadId: thread.id,
+          branch,
+          worktreePath,
+        });
+        if (thread.worktreeId !== undefined && thread.worktreeId !== null) {
+          yield* orchestrationEngine.dispatch({
+            type: "worktree.meta.update",
+            commandId: serverCommandId("worktree-recovered-meta"),
+            worktreeId: thread.worktreeId,
+            branch,
+            changedAt,
+          });
+        }
+        return true;
+      }),
+    );
+    if (!recreated) return;
     yield* gitWorkflow.invalidateStatus(worktreePath);
     yield* vcsStatusBroadcaster.refreshStatus(worktreePath).pipe(Effect.ignoreCause({ log: true }));
   }, Effect.scoped);
@@ -511,11 +612,16 @@ const make = Effect.gen(function* () {
   const ensureSessionForThread = Effect.fn("ensureSessionForThread")(function* (
     threadId: ThreadId,
     createdAt: string,
-    options?: {
+    options: {
+      /** The lane item's fence: a later Stop cancels this start. */
+      readonly fenceSequence: number;
+      readonly kind: StartKind;
       readonly modelSelection?: ModelSelection;
       readonly computerCatalogChanged?: boolean;
     },
   ) {
+    const startFence = { threadId, fenceSequence: options.fenceSequence, kind: options.kind };
+    yield* laneControl.failIfCancelled(startFence);
     const thread = yield* resolveThread(threadId);
     if (!thread) {
       return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
@@ -527,7 +633,7 @@ const make = Effect.gen(function* () {
 
     const desiredRuntimeMode = thread.runtimeMode;
     const desiredTokenMode = thread.tokenMode ?? DEFAULT_TOKEN_MODE;
-    const requestedModelSelection = options?.modelSelection;
+    const requestedModelSelection = options.modelSelection;
     const resolveActiveSession = (threadId: ThreadId) =>
       providerService
         .listSessions()
@@ -622,21 +728,26 @@ const make = Effect.gen(function* () {
     });
     const customSystemPrompt = project?.customSystemPrompt?.trim() || undefined;
 
+    // Fenced: a Stop cancels the start (pending or in flight). The start is
+    // detached inside ProviderService, so cancelling it returns at once.
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
     }) =>
-      providerService.startSession(threadId, {
-        threadId,
-        ...(preferredProvider ? { provider: preferredProvider } : {}),
-        providerInstanceId: desiredInstanceId,
-        ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-        modelSelection: desiredModelSelection,
-        ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-        runtimeMode: desiredRuntimeMode,
-        tokenMode: desiredTokenMode,
-        ...(customSystemPrompt !== undefined ? { customSystemPrompt } : {}),
-      });
+      laneControl.guardStart(
+        startFence,
+        providerService.startSession(threadId, {
+          threadId,
+          ...(preferredProvider ? { provider: preferredProvider } : {}),
+          providerInstanceId: desiredInstanceId,
+          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+          modelSelection: desiredModelSelection,
+          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+          runtimeMode: desiredRuntimeMode,
+          tokenMode: desiredTokenMode,
+          ...(customSystemPrompt !== undefined ? { customSystemPrompt } : {}),
+        }),
+      );
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -713,7 +824,7 @@ const make = Effect.gen(function* () {
         !Equal.equals(previousModelSelection, requestedModelSelection);
 
       if (
-        !options?.computerCatalogChanged &&
+        !options.computerCatalogChanged &&
         !runtimeModeChanged &&
         !tokenModeChanged &&
         !cwdChanged &&
@@ -817,7 +928,10 @@ const make = Effect.gen(function* () {
                 commandId: serverCommandId("goal-failed"),
                 threadId,
                 expectedRequestId: request.requestId,
-                goal: { ...goal, synchronization: { ...request, state: "failed", error: detail } },
+                goal: {
+                  ...goal,
+                  synchronization: { ...request, state: "failed", error: detail },
+                },
                 createdAt: now,
               })
               .pipe(Effect.catchCause(() => Effect.void));
@@ -879,6 +993,7 @@ const make = Effect.gen(function* () {
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly fenceSequence: number;
     readonly messageText: string;
     readonly computerUse?: ComputerTurnIntent;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
@@ -930,6 +1045,8 @@ const make = Effect.gen(function* () {
         : undefined,
     );
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
+      fenceSequence: input.fenceSequence,
+      kind: "turn",
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       computerCatalogChanged,
     });
@@ -1120,23 +1237,125 @@ const make = Effect.gen(function* () {
   );
 
   /**
+   * Settles the projection after a Stop cancelled a session start. Status follows
+   * liveness: if the exact projected runtime is still live, keep it (a starting
+   * or running status becomes `ready`); otherwise `stopped`. `lastError` is kept.
+   * With `force`, always dispatches (it acknowledges a local dispatch, even when
+   * no session was projected yet); without it, only an inconsistent projection
+   * is corrected.
+   */
+  const settleSessionAfterCancelledStart = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    input: { readonly force: boolean },
+  ) {
+    const thread = yield* resolveThread(threadId);
+    if (!thread) return;
+    const session = thread.session;
+    const live = yield* providerService.getSession(threadId).pipe(
+      Effect.map(Option.getOrUndefined),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(undefined),
+      ),
+    );
+    const liveMatches =
+      live !== undefined &&
+      session !== null &&
+      session.runtimeSessionId !== undefined &&
+      live.runtimeSessionId === session.runtimeSessionId;
+    if (!input.force) {
+      const inconsistent =
+        session !== null &&
+        (session.status === "starting" ||
+          session.status === "running" ||
+          (!liveMatches && session.status !== "stopped"));
+      if (!inconsistent) return;
+    }
+    const status: OrchestrationSession["status"] =
+      liveMatches && session !== null
+        ? session.status === "starting" || session.status === "running"
+          ? "ready"
+          : session.status
+        : "stopped";
+    const now = new Date().toISOString();
+    yield* setThreadSession({
+      threadId,
+      session: {
+        ...(session ?? {
+          threadId,
+          providerName: null,
+          runtimeMode: thread.runtimeMode,
+          tokenMode: thread.tokenMode ?? DEFAULT_TOKEN_MODE,
+          lastError: null,
+        }),
+        threadId,
+        status,
+        activeTurnId: null,
+        updatedAt: now,
+      },
+      turnOutcome: {
+        state: "interrupted",
+        reason: TURN_FINALIZATION_REASON.turnStartCancelled,
+        completedAt: now,
+      },
+      createdAt: now,
+    });
+  });
+
+  /** A Stop cancelled this turn start: settle the session and say so, as info. */
+  const settleCancelledTurnStart = Effect.fnUntraced(function* (event: TurnStartRequestedEvent) {
+    yield* settleSessionAfterCancelledStart(event.payload.threadId, { force: true });
+    yield* orchestrationEngine.dispatch(
+      providerNoticeActivityCommand({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.start.cancelled",
+        summary: "Turn start cancelled",
+        payload: {
+          detail: START_CANCELLED_DETAIL,
+          messageId: event.payload.messageId,
+          reason: "stopped-before-start",
+        },
+        turnId: null,
+        createdAt: new Date().toISOString(),
+      }),
+    );
+  });
+
+  /**
    * Reports a turn start that did not reach the provider: logs the full cause,
    * records the short text on the session and appends the visible failure
-   * activity. Never fails.
+   * activity. A start that a Stop cancelled (the cancel error itself, or any
+   * failure after a session stop or turn-less interrupt noted past this start's
+   * fence) is settled as cancelled instead. Never fails.
    */
   const reportTurnStartFailure = (input: {
     readonly event: TurnStartRequestedEvent;
+    readonly fenceSequence: number;
     readonly cause: Cause.Cause<unknown>;
     readonly preserveActiveTurn: boolean;
   }): Effect.Effect<void> => {
     const { event, cause } = input;
-    // Interrupt-only: no activity. Do not re-raise. A propagated interrupt ends the
-    // DrainableWorker loop (packages/shared/src/DrainableWorker.ts) and stops the reactor.
+    // Interrupt-only: no activity, and not re-raised (the lane logs and continues).
     if (Cause.hasInterruptsOnly(cause)) return Effect.void;
     const threadId = event.payload.threadId;
     const detail = userFacingFailureDetail(cause);
     const tag = failureTag(cause);
     return Effect.gen(function* () {
+      // Before any other classification: a user's Stop is never a failure.
+      const cancelled =
+        isProviderSessionStartCancelled(cause) ||
+        (yield* laneControl.cancelsStart({
+          threadId,
+          fenceSequence: input.fenceSequence,
+          kind: "turn",
+        }));
+      if (cancelled) {
+        yield* Effect.logInfo("provider command reactor cancelled a turn start after a stop", {
+          threadId,
+          messageId: event.payload.messageId,
+          failureTag: tag,
+        });
+        return yield* settleCancelledTurnStart(event);
+      }
       yield* Effect.annotateCurrentSpan({ "orchestration.failure_tag": tag });
       yield* Effect.logWarning("provider command reactor failed to start turn", {
         threadId,
@@ -1184,7 +1403,10 @@ const make = Effect.gen(function* () {
 
   const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (
     event: TurnStartRequestedEvent,
+    fenceSequence: number,
   ) {
+    const threadId = event.payload.threadId;
+    const turnFence = { threadId, fenceSequence, kind: "turn" as const };
     // Essential reads fail the turn visibly through the boundary in
     // processTurnStartRequested. A deleted thread stays silent.
     const thread = yield* resolveThread(event.payload.threadId);
@@ -1266,16 +1488,26 @@ const make = Effect.gen(function* () {
         });
       const project = yield* resolveProject(thread.projectId);
       yield* ensureRecordedWorktreeAvailable(thread, project);
+      // The lane item stays busy for the whole handoff, which keeps the thread's
+      // later items in order. Stop and interrupt reach the provider out of band
+      // while it owns the running turn, and settle in order afterwards.
       yield* Effect.scoped(
         leaseThreadPath(thread, project).pipe(
-          Effect.andThen(contextHandoffCoordinator.processTurnStart(event)),
+          Effect.andThen(
+            contextHandoffCoordinator.processTurnStart(event, {
+              guardStart: (effect) => laneControl.guardStart(turnFence, effect),
+              onDispatchStarted: laneControl.beginTurnOwnership(threadId, fenceSequence),
+              stopRequested: laneControl.stopRequestedSince(threadId, fenceSequence),
+            }),
+          ),
         ),
-      );
+      ).pipe(Effect.ensuring(laneControl.endTurnOwnership(threadId)));
       return;
     }
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      fenceSequence,
       messageText: message.text,
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
@@ -1341,19 +1573,28 @@ const make = Effect.gen(function* () {
           })
         : Effect.void;
 
+    // A Stop that arrived while the session was prepared ends the turn here,
+    // before anything is submitted.
+    yield* laneControl.failIfCancelled(turnFence);
+
     // Submission failures may follow this request's own turn.started, so they
-    // reset a running session (preserveActiveTurn: false), as before.
+    // reset a running session (preserveActiveTurn: false), as before. The
+    // thread's fence state is retained until the send settles, so a failure
+    // after a Stop is still recognised as a cancel.
+    const releaseFenceState = yield* laneControl.retain(threadId);
     yield* providerService.sendTurn(sendTurnRequest).pipe(
       Effect.tap(() => commitAcceptedModelSelection),
       Effect.catchCause((cause) =>
-        reportTurnStartFailure({ event, cause, preserveActiveTurn: false }),
+        reportTurnStartFailure({ event, fenceSequence, cause, preserveActiveTurn: false }),
       ),
+      Effect.ensuring(releaseFenceState),
       Effect.forkScoped,
     );
   });
 
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     event: TurnStartRequestedEvent,
+    fenceSequence: number,
   ) {
     const key = turnStartKeyForEvent(event);
     if (yield* hasHandledTurnStartRecently(key)) {
@@ -1361,28 +1602,136 @@ const make = Effect.gen(function* () {
     }
     // One visible failure boundary for every preparation step. Nothing was
     // submitted yet, so a turn that is running belongs to someone else.
-    yield* prepareAndSubmitTurnStart(event).pipe(
+    yield* prepareAndSubmitTurnStart(event, fenceSequence).pipe(
       Effect.catchCause((cause) =>
-        reportTurnStartFailure({ event, cause, preserveActiveTurn: true }),
+        reportTurnStartFailure({ event, fenceSequence, cause, preserveActiveTurn: true }),
       ),
     );
   });
 
+  type InterruptEvent = Extract<ProviderIntentEvent, { type: "thread.turn-interrupt-requested" }>;
+
+  /**
+   * The projection write after an interrupt failed and the session was stopped:
+   * session `stopped` with the failure text, and the interrupt failure activity.
+   * Skips sessions that settled on their own meanwhile.
+   */
+  const projectInterruptFailure = Effect.fnUntraced(function* (
+    event: InterruptEvent,
+    detail: string,
+  ) {
+    const stoppedThread = yield* resolveThread(event.payload.threadId);
+    const stoppedSession = stoppedThread?.session;
+    if (
+      !stoppedSession ||
+      stoppedSession.status === "stopped" ||
+      stoppedSession.status === "ready" ||
+      stoppedSession.activeTurnId === null ||
+      (event.payload.turnId !== undefined && stoppedSession.activeTurnId !== event.payload.turnId)
+    ) {
+      return;
+    }
+
+    yield* setThreadSession({
+      threadId: event.payload.threadId,
+      session: {
+        ...stoppedSession,
+        status: "stopped",
+        activeTurnId: null,
+        lastError: detail,
+        updatedAt: event.payload.createdAt,
+      },
+      turnOutcome: {
+        turnId: stoppedSession.activeTurnId,
+        state: "interrupted",
+        reason: TURN_FINALIZATION_REASON.interruptFailed,
+        completedAt: event.payload.createdAt,
+      },
+      createdAt: event.payload.createdAt,
+    });
+    yield* appendProviderFailureActivity({
+      threadId: event.payload.threadId,
+      kind: "provider.turn.interrupt.failed",
+      summary: "Provider turn interrupt failed",
+      detail,
+      turnId: event.payload.turnId ?? null,
+      createdAt: event.payload.createdAt,
+    });
+  });
+
+  /**
+   * No runtime was live to interrupt: release the projected turn as interrupted.
+   * Not a failure; nothing to report.
+   */
+  const settleAfterInterruptWithoutRuntime = Effect.fnUntraced(function* (event: InterruptEvent) {
+    const thread = yield* resolveThread(event.payload.threadId);
+    const session = thread?.session;
+    if (!session || session.status === "stopped") return;
+    yield* setThreadSession({
+      threadId: event.payload.threadId,
+      session: {
+        ...session,
+        status: "stopped",
+        activeTurnId: null,
+        updatedAt: event.payload.createdAt,
+      },
+      turnOutcome: {
+        ...(event.payload.turnId !== undefined ? { turnId: event.payload.turnId } : {}),
+        state: "interrupted",
+        reason: TURN_FINALIZATION_REASON.interruptWithoutRuntime,
+        completedAt: event.payload.createdAt,
+      },
+      createdAt: event.payload.createdAt,
+    });
+  });
+
+  const isSessionNotFound = (cause: Cause.Cause<unknown>): boolean =>
+    cause.reasons.some(
+      (reason) =>
+        Cause.isFailReason(reason) && Schema.is(ProviderSessionNotFoundError)(reason.error),
+    );
+
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
-    event: Extract<ProviderIntentEvent, { type: "thread.turn-interrupt-requested" }>,
+    event: InterruptEvent,
   ) {
     if (isProviderOriginatedCommandId(event.commandId)) {
       return;
     }
+    const threadId = event.payload.threadId;
 
-    const thread = yield* resolveThread(event.payload.threadId);
+    // The provider side already ran out of band (the lane was busy with a
+    // handoff turn); this in-order item only settles the projection.
+    const outOfBand = yield* laneControl.takeOutOfBand(threadId, event.eventId);
+    if (Option.isSome(outOfBand)) {
+      const outcome = yield* Deferred.await(outOfBand.value);
+      switch (outcome.kind) {
+        case "interrupted":
+          // Ingestion or the handoff's own success path settles the turn.
+          return;
+        case "nothing-live":
+          return yield* settleAfterInterruptWithoutRuntime(event);
+        case "stopped-after-interrupt-failure":
+          return yield* projectInterruptFailure(event, outcome.detail);
+        case "stopped":
+        case "stop-failed":
+          return;
+      }
+    }
+
+    // This interrupt cancelled a start; that item settled the projection and no
+    // provider call is needed (and no dead runtime is resurrected).
+    if (yield* laneControl.cancelledAStart(threadId, event.eventId)) {
+      return;
+    }
+
+    const thread = yield* resolveThread(threadId);
     if (!thread) {
       return;
     }
     const session = thread.session;
     if (!session || session.status === "stopped") {
       return yield* appendProviderFailureActivity({
-        threadId: event.payload.threadId,
+        threadId,
         kind: "provider.turn.interrupt.failed",
         summary: "Provider turn interrupt failed",
         detail: "No active provider session is bound to this thread.",
@@ -1395,15 +1744,18 @@ const make = Effect.gen(function* () {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.interrupt;
       }
+      if (isSessionNotFound(cause)) {
+        return settleAfterInterruptWithoutRuntime(event);
+      }
 
       const detail = userFacingFailureDetail(cause);
       return Effect.gen(function* () {
         yield* Effect.logWarning("provider command reactor failed to interrupt turn", {
-          threadId: event.payload.threadId,
+          threadId,
           failureTag: failureTag(cause),
           cause: Cause.pretty(cause),
         });
-        const latestThread = yield* resolveThread(event.payload.threadId);
+        const latestThread = yield* resolveThread(threadId);
         const latestSession = latestThread?.session;
         if (
           !latestSession ||
@@ -1416,14 +1768,15 @@ const make = Effect.gen(function* () {
           return;
         }
 
-        yield* providerService.stopSession({ threadId: event.payload.threadId }).pipe(
+        // Bounded inside ProviderService.
+        yield* providerService.stopSession({ threadId }).pipe(
           Effect.catchCause((stopCause) =>
             Cause.hasInterruptsOnly(stopCause)
               ? Effect.interrupt
               : Effect.logWarning(
                   "provider command reactor failed to stop session after interrupt failure",
                   {
-                    threadId: event.payload.threadId,
+                    threadId,
                     cause: Cause.pretty(stopCause),
                     originalCause: Cause.pretty(cause),
                   },
@@ -1431,55 +1784,20 @@ const make = Effect.gen(function* () {
           ),
         );
 
-        const stoppedThread = yield* resolveThread(event.payload.threadId);
-        const stoppedSession = stoppedThread?.session;
-        if (
-          !stoppedSession ||
-          stoppedSession.status === "stopped" ||
-          stoppedSession.status === "ready" ||
-          stoppedSession.activeTurnId === null ||
-          (event.payload.turnId !== undefined &&
-            stoppedSession.activeTurnId !== event.payload.turnId)
-        ) {
-          return;
-        }
-
-        yield* setThreadSession({
-          threadId: event.payload.threadId,
-          session: {
-            ...stoppedSession,
-            status: "stopped",
-            activeTurnId: null,
-            lastError: detail,
-            updatedAt: event.payload.createdAt,
-          },
-          turnOutcome: {
-            turnId: stoppedSession.activeTurnId,
-            state: "interrupted",
-            reason: TURN_FINALIZATION_REASON.interruptFailed,
-            completedAt: event.payload.createdAt,
-          },
-          createdAt: event.payload.createdAt,
-        });
-        yield* appendProviderFailureActivity({
-          threadId: event.payload.threadId,
-          kind: "provider.turn.interrupt.failed",
-          summary: "Provider turn interrupt failed",
-          detail,
-          turnId: event.payload.turnId ?? null,
-          createdAt: event.payload.createdAt,
-        });
+        yield* projectInterruptFailure(event, detail);
       });
     };
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
+    // ProviderService never recovers a runtime to interrupt it.
     yield* providerService
-      .interruptTurn({ threadId: event.payload.threadId })
+      .interruptTurn({ threadId })
       .pipe(Effect.catchCause(recoverInterruptFailure));
   });
 
   const processGoalUpdated = Effect.fn("processGoalUpdated")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.goal-updated" }>,
+    fenceSequence: number,
   ) {
     if (event.payload.origin !== "client" || event.payload.goal.synchronization?.deferUntilTurn)
       return;
@@ -1487,9 +1805,19 @@ const make = Effect.gen(function* () {
     if (thread?.goal?.synchronization?.requestId !== event.payload.goal.synchronization?.requestId)
       return;
     const threadId = event.payload.threadId;
-    yield* ensureSessionForThread(threadId, event.occurredAt).pipe(
+    const session = yield* ensureSessionForThread(threadId, event.occurredAt, {
+      fenceSequence,
+      kind: "restart",
+    }).pipe(
+      Effect.map(() => "ready" as const),
       Effect.catchCause((cause) =>
         Effect.gen(function* () {
+          // A Stop cancelled the start: the goal stays pending, and the next
+          // session start reconciles it.
+          if (isProviderSessionStartCancelled(cause)) {
+            yield* settleSessionAfterCancelledStart(threadId, { force: false });
+            return "cancelled" as const;
+          }
           const goal = thread?.goal;
           if (goal?.synchronization) {
             yield* orchestrationEngine.dispatch({
@@ -1512,6 +1840,7 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+    if (session === "cancelled") return;
     const result = yield* reconcileThreadGoal(threadId);
     if (event.payload.goal.synchronization?.startTurn && result.goal?.status === "active") {
       const sessions = yield* providerService.listSessions();
@@ -1624,12 +1953,7 @@ const make = Effect.gen(function* () {
   });
 
   const processCallbackResponseRequested = Effect.fn("processCallbackResponseRequested")(function* (
-    event: Extract<
-      ProviderIntentEvent,
-      {
-        type: "thread.approval-response-requested" | "thread.user-input-response-requested";
-      }
-    >,
+    event: CallbackResponseEvent,
   ) {
     const isApproval = event.type === "thread.approval-response-requested";
     const kind = isApproval ? "approval" : "user-input";
@@ -1679,7 +2003,11 @@ const make = Effect.gen(function* () {
       : {};
     const respond =
       event.type === "thread.approval-response-requested"
-        ? providerService.respondToRequest({ ...key, ...runtime, decision: event.payload.decision })
+        ? providerService.respondToRequest({
+            ...key,
+            ...runtime,
+            decision: event.payload.decision,
+          })
         : providerService.respondToUserInput({
             ...key,
             ...runtime,
@@ -1753,16 +2081,47 @@ const make = Effect.gen(function* () {
   const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
   ) {
-    const thread = yield* resolveThread(event.payload.threadId);
+    const threadId = event.payload.threadId;
+    let stopFailure: string | undefined;
+    // The provider stop already ran out of band (the lane was busy with a
+    // handoff turn); this in-order item only settles the projection.
+    const outOfBand = yield* laneControl.takeOutOfBand(threadId, event.eventId);
+    if (Option.isSome(outOfBand)) {
+      const outcome = yield* Deferred.await(outOfBand.value);
+      if (outcome.kind === "stop-failed") stopFailure = outcome.detail;
+    }
+
+    const thread = yield* resolveThread(threadId);
     if (!thread) {
       return;
     }
 
     const now = event.payload.createdAt;
-    if (thread.session && thread.session.status !== "stopped") {
-      yield* providerService.stopSession({ threadId: thread.id });
+    if (Option.isNone(outOfBand) && thread.session && thread.session.status !== "stopped") {
+      // Bounded inside ProviderService; a timed-out stop is retried by the reaper.
+      const stopExit = yield* Effect.exit(providerService.stopSession({ threadId: thread.id }));
+      if (Exit.isFailure(stopExit)) {
+        if (Cause.hasInterruptsOnly(stopExit.cause)) return yield* stopExit;
+        yield* Effect.logWarning("provider command reactor failed to stop session", {
+          threadId,
+          failureTag: failureTag(stopExit.cause),
+          cause: Cause.pretty(stopExit.cause),
+        });
+        stopFailure = userFacingFailureDetail(stopExit.cause);
+      }
+    }
+    if (stopFailure !== undefined) {
+      yield* appendProviderFailureActivity({
+        threadId,
+        kind: "provider.session.stop.failed",
+        summary: "Provider session stop failed",
+        detail: stopFailure,
+        turnId: null,
+        createdAt: now,
+      });
     }
 
+    // Always settled: the user asked for the stop, so the thread never stays busy.
     yield* setThreadSession({
       threadId: thread.id,
       session: {
@@ -1775,7 +2134,7 @@ const make = Effect.gen(function* () {
         runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
         tokenMode: thread.session?.tokenMode ?? DEFAULT_TOKEN_MODE,
         activeTurnId: null,
-        lastError: thread.session?.lastError ?? null,
+        lastError: stopFailure ?? thread.session?.lastError ?? null,
         updatedAt: now,
       },
       // The user stopped the session; a carried-over lastError must not label the turn.
@@ -1788,52 +2147,132 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const processDomainEvent = Effect.fn("processDomainEvent")(function* (
-    event: ProviderIntentEvent,
+  /**
+   * A runtime-mode or token-mode restart that did not complete. A Stop cancel
+   * only settles the projection. Any other failure is reported visibly, and the
+   * session is projected stopped when no live runtime matches it any more.
+   */
+  const reportRestartFailure = (
+    event: Extract<
+      ProviderIntentEvent,
+      { type: "thread.runtime-mode-set" | "thread.token-mode-set" }
+    >,
+    cause: Cause.Cause<unknown>,
+  ): Effect.Effect<void, never> => {
+    const threadId = event.payload.threadId;
+    if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
+    if (isProviderSessionStartCancelled(cause)) {
+      return settleSessionAfterCancelledStart(threadId, { force: false }).pipe(
+        Effect.catchCause((settleCause) =>
+          Effect.logWarning("provider command reactor failed to settle a cancelled restart", {
+            threadId,
+            cause: Cause.pretty(settleCause),
+          }),
+        ),
+      );
+    }
+    const detail = userFacingFailureDetail(cause);
+    return Effect.gen(function* () {
+      yield* Effect.logWarning("provider command reactor failed to restart provider session", {
+        threadId,
+        eventType: event.type,
+        failureTag: failureTag(cause),
+        cause: Cause.pretty(cause),
+      });
+      const now = new Date().toISOString();
+      yield* appendProviderFailureActivity({
+        threadId,
+        kind: "provider.session.restart.failed",
+        summary: "Provider session restart failed",
+        detail,
+        turnId: null,
+        createdAt: now,
+      });
+      const thread = yield* resolveThread(threadId);
+      const session = thread?.session;
+      if (!session || session.status === "stopped") return;
+      const live = Option.getOrUndefined(
+        yield* providerService
+          .getSession(threadId)
+          .pipe(Effect.orElseSucceed(() => Option.none<ProviderSession>())),
+      );
+      if (live !== undefined && live.runtimeSessionId === session.runtimeSessionId) return;
+      yield* setThreadSession({
+        threadId,
+        session: {
+          ...session,
+          status: "stopped",
+          activeTurnId: null,
+          lastError: detail,
+          updatedAt: now,
+        },
+        turnOutcome: {
+          state: "interrupted",
+          reason: TURN_FINALIZATION_REASON.sessionReplaced,
+          completedAt: now,
+        },
+        createdAt: now,
+      });
+    }).pipe(
+      Effect.catchCause((reportCause) =>
+        Effect.logWarning("provider command reactor failed to report a restart failure", {
+          threadId,
+          cause: Cause.pretty(reportCause),
+          originalCause: Cause.pretty(cause),
+        }),
+      ),
+    );
+  };
+
+  const processModeChange = Effect.fn("processModeChange")(function* (
+    event: Extract<
+      ProviderIntentEvent,
+      { type: "thread.runtime-mode-set" | "thread.token-mode-set" }
+    >,
+    fenceSequence: number,
   ) {
-    yield* Effect.annotateCurrentSpan({
-      "orchestration.event_type": event.type,
-      "orchestration.thread_id": event.payload.threadId,
-      ...(event.commandId ? { "orchestration.command_id": event.commandId } : {}),
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread?.session || thread.session.status === "stopped") {
+      return;
+    }
+    const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
+    yield* ensureSessionForThread(event.payload.threadId, event.occurredAt, {
+      fenceSequence,
+      kind: "restart",
+      ...(cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {}),
+    }).pipe(Effect.catchCause((cause) => reportRestartFailure(event, cause)));
+  });
+
+  const annotateIntentEvent = (event: ProviderIntentEvent) =>
+    Effect.gen(function* () {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration.event_type": event.type,
+        "orchestration.thread_id": event.payload.threadId,
+        ...(event.commandId ? { "orchestration.command_id": event.commandId } : {}),
+      });
+      yield* increment(orchestrationEventsProcessedTotal, {
+        eventType: event.type,
+      });
     });
-    yield* increment(orchestrationEventsProcessedTotal, {
-      eventType: event.type,
-    });
+
+  const processLifecycleEvent = Effect.fn("processLifecycleEvent")(function* (
+    event: LifecycleIntentEvent,
+    fenceSequence: number,
+  ) {
+    yield* annotateIntentEvent(event);
     switch (event.type) {
-      case "thread.runtime-mode-set": {
-        const thread = yield* resolveThread(event.payload.threadId);
-        if (!thread?.session || thread.session.status === "stopped") {
-          return;
-        }
-        const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
-        yield* ensureSessionForThread(
-          event.payload.threadId,
-          event.occurredAt,
-          cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {},
-        );
+      case "thread.runtime-mode-set":
+      case "thread.token-mode-set":
+        yield* processModeChange(event, fenceSequence);
         return;
-      }
-      case "thread.token-mode-set": {
-        const thread = yield* resolveThread(event.payload.threadId);
-        if (!thread?.session || thread.session.status === "stopped") {
-          return;
-        }
-        const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
-        yield* ensureSessionForThread(
-          event.payload.threadId,
-          event.occurredAt,
-          cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {},
-        );
-        return;
-      }
       case "thread.goal-updated":
-        yield* processGoalUpdated(event);
+        yield* processGoalUpdated(event, fenceSequence);
         return;
       case "thread.goal-cleared":
         yield* processGoalCleared(event);
         return;
       case "thread.turn-start-requested":
-        yield* processTurnStartRequested(event);
+        yield* processTurnStartRequested(event, fenceSequence);
         return;
       case "thread.turn-steer-requested":
         yield* processTurnSteerRequested(event);
@@ -1841,59 +2280,317 @@ const make = Effect.gen(function* () {
       case "thread.turn-interrupt-requested":
         yield* processTurnInterruptRequested(event);
         return;
-      case "thread.approval-response-requested":
-        yield* processCallbackResponseRequested(event);
-        return;
-      case "thread.user-input-response-requested":
-        yield* processCallbackResponseRequested(event);
-        return;
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
         return;
     }
   });
 
-  const processDomainEventSafely = (event: ProviderIntentEvent) =>
-    processDomainEvent(event).pipe(
-      Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
-        }
-        return Effect.logWarning("provider command reactor failed to process event", {
-          eventType: event.type,
-          cause: Cause.pretty(cause),
-        });
-      }),
-    );
+  // Turn liveness bookkeeping, owned by the sweep: the previous suspicion per
+  // thread, and the turn already reported unresponsive.
+  const livenessSuspects = new Map<ThreadId, TurnLivenessVerdict>();
+  const livenessWarned = new Map<ThreadId, TurnId>();
 
-  const worker = yield* makeDrainableWorker({
-    policy: losslessBackpressureQueuePolicy({
-      component: "ProviderCommandReactor",
-      capacity: 512,
-    }),
-    process: processDomainEventSafely,
+  const classifyThreadLiveness = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly previous: TurnLivenessVerdict | null;
+  }) {
+    const nowMs = yield* Clock.currentTimeMillis;
+    const thread = yield* resolveThread(input.threadId);
+    const session = thread?.session ?? null;
+    const activities = yield* providerService.listRuntimeActivity?.() ?? Effect.succeed([]);
+    const activity = activities.find((entry) => entry.threadId === input.threadId) ?? null;
+    const live = Option.getOrUndefined(
+      yield* providerService
+        .getSession(input.threadId)
+        .pipe(Effect.orElseSucceed(() => Option.none<ProviderSession>())),
+    );
+    const verdict = classifyTurnLiveness({
+      session,
+      hasPendingRequest: Boolean(thread?.hasPendingApprovals || thread?.hasPendingUserInput),
+      backgroundLiveness: thread?.backgroundLiveness,
+      liveRuntimeSessionId: live?.runtimeSessionId ?? null,
+      activity,
+      previous: input.previous,
+      alreadyWarned:
+        session?.activeTurnId != null &&
+        livenessWarned.get(input.threadId) === session.activeTurnId,
+      nowMs,
+      sweepIntervalMs: livenessSweepIntervalMs,
+      unresponsiveAfterMs,
+    });
+    return { verdict, session };
   });
 
-  const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
-    const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
-      if (
-        event.type === "thread.runtime-mode-set" ||
-        event.type === "thread.token-mode-set" ||
-        event.type === "thread.goal-updated" ||
-        event.type === "thread.goal-cleared" ||
-        event.type === "thread.turn-start-requested" ||
-        event.type === "thread.turn-steer-requested" ||
-        event.type === "thread.turn-interrupt-requested" ||
-        event.type === "thread.approval-response-requested" ||
-        event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
-      ) {
-        return yield* worker.enqueue(event);
-      }
+  /** Runs in the thread's lifecycle lane: acts only if the verdict still holds. */
+  const applyLivenessVerdict = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    verdict: LivenessVerdict,
+  ) {
+    const { verdict: current, session } = yield* classifyThreadLiveness({
+      threadId,
+      previous: verdict,
     });
+    if (
+      session === null ||
+      current.kind !== verdict.kind ||
+      current.runtimeSessionId !== verdict.runtimeSessionId ||
+      current.turnId !== verdict.turnId
+    ) {
+      return;
+    }
+    const now = new Date().toISOString();
+    if (current.kind === "lost") {
+      livenessSuspects.delete(threadId);
+      yield* setThreadSession({
+        threadId,
+        session: {
+          ...session,
+          status: "error",
+          activeTurnId: null,
+          lastError: TURN_LOST_DETAIL,
+          updatedAt: now,
+        },
+        turnOutcome: {
+          turnId: current.turnId,
+          state: "error",
+          reason: TURN_FINALIZATION_REASON.providerRuntimeLost,
+          completedAt: now,
+        },
+        createdAt: now,
+      });
+      yield* appendProviderFailureActivity({
+        threadId,
+        kind: "provider.turn.lost",
+        summary: "Provider turn lost",
+        detail: TURN_LOST_DETAIL,
+        turnId: current.turnId,
+        createdAt: now,
+      });
+      return;
+    }
+    if (current.kind === "unresponsive") {
+      livenessWarned.set(threadId, current.turnId);
+      yield* orchestrationEngine.dispatch(
+        providerNoticeActivityCommand({
+          threadId,
+          kind: "provider.turn.unresponsive",
+          summary: "Provider is quiet",
+          payload: {
+            detail: unresponsiveTurnDetail(current.silentForMs),
+            turnId: current.turnId,
+            runtimeSessionId: current.runtimeSessionId,
+            lastActivityAt: new Date(current.lastActivityAtMs).toISOString(),
+            thresholdMs: unresponsiveAfterMs,
+          },
+          turnId: current.turnId,
+          createdAt: now,
+        }),
+      );
+    }
+  });
+
+  /**
+   * The one per-item failure wrapper of the lifecycle lanes. Interrupt-only
+   * causes (from inner fibers) are logged and not re-raised.
+   */
+  const processLaneItemSafely = (item: LaneItem) => {
+    const run =
+      item.kind === "event"
+        ? processLifecycleEvent(item.event, item.fenceSequence)
+        : applyLivenessVerdict(item.threadId, item.verdict);
+    const threadId = item.kind === "event" ? item.event.payload.threadId : item.threadId;
+    const guarded =
+      item.kind === "event" && item.recovery ? recoveryPermits.withPermits(1)(run) : run;
+    return guarded.pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.logDebug("provider command reactor lane item was interrupted", {
+              itemKind: item.kind,
+              threadId,
+            })
+          : Effect.logWarning("provider command reactor failed to process event", {
+              eventType: item.kind === "event" ? item.event.type : "liveness-check",
+              threadId,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+      Effect.andThen(
+        item.kind === "event" ? laneControl.prune(threadId, item.fenceSequence) : Effect.void,
+      ),
+    );
+  };
+
+  const processCallbackSafely = (event: CallbackResponseEvent): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      yield* annotateIntentEvent(event);
+      yield* processCallbackResponseRequested(event);
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.logDebug("provider command reactor callback item was interrupted", {
+              threadId: event.payload.threadId,
+            })
+          : Effect.logWarning("provider command reactor failed to process event", {
+              eventType: event.type,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+
+  /**
+   * A user stop or interrupt for a thread whose lane owns a running handoff turn.
+   * Performs only the provider side (bounded) and records the outcome; the
+   * in-order lane item settles the projection afterwards.
+   */
+  const runOutOfBandControl = (job: OutOfBandJob): Effect.Effect<void> => {
+    const threadId = job.event.payload.threadId;
+    const stop = providerService.stopSession({ threadId }).pipe(Effect.exit);
+    const resolveOutcome: Effect.Effect<OutOfBandOutcome> = Effect.gen(function* () {
+      if (job.event.type === "thread.turn-interrupt-requested") {
+        const interruptExit = yield* Effect.exit(providerService.interruptTurn({ threadId }));
+        if (Exit.isSuccess(interruptExit)) return { kind: "interrupted" } as const;
+        if (isSessionNotFound(interruptExit.cause)) return { kind: "nothing-live" } as const;
+        const detail = userFacingFailureDetail(interruptExit.cause);
+        const stopExit = yield* stop;
+        return {
+          kind: "stopped-after-interrupt-failure",
+          detail,
+          ...(Exit.isFailure(stopExit)
+            ? { stopFailed: userFacingFailureDetail(stopExit.cause) }
+            : {}),
+        } as const;
+      }
+      const stopExit = yield* stop;
+      return Exit.isSuccess(stopExit)
+        ? ({ kind: "stopped" } as const)
+        : ({ kind: "stop-failed", detail: userFacingFailureDetail(stopExit.cause) } as const);
+    });
+    return resolveOutcome.pipe(
+      Effect.flatMap((outcome) => Deferred.succeed(job.outcome, outcome)),
+      // Completes the outcome exactly once, even on a defect or interrupt.
+      Effect.onExit(() =>
+        Deferred.succeed(job.outcome, { kind: "stop-failed", detail: UNEXPECTED_FAILURE_DETAIL }),
+      ),
+      Effect.asVoid,
+    );
+  };
+
+  const lifecycleLanes = yield* makeKeyedSerialWorker({
+    policy: losslessBackpressureQueuePolicy({
+      component: "ProviderCommandReactor.lifecycle",
+      capacity: Math.max(1, options?.lifecycleCapacity ?? 1024),
+    }),
+    process: (_threadId: ThreadId, item: LaneItem) => processLaneItemSafely(item),
+  });
+  const callbackLanes = yield* makeKeyedSerialWorker({
+    policy: losslessBackpressureQueuePolicy({
+      component: "ProviderCommandReactor.callback",
+      capacity: 512,
+    }),
+    process: (_threadId: ThreadId, event: CallbackResponseEvent) => processCallbackSafely(event),
+  });
+  const outOfBandLanes = yield* makeKeyedSerialWorker({
+    policy: losslessBackpressureQueuePolicy({
+      component: "ProviderCommandReactor.out-of-band",
+      capacity: 256,
+    }),
+    process: (_threadId: ThreadId, job: OutOfBandJob) => runOutOfBandControl(job),
+  });
+
+  /**
+   * The single per-thread entry point for live and synthetic provider-intent
+   * events. Stop intent is recorded before enqueueing, so it never waits behind
+   * a busy lane.
+   */
+  const routeProviderIntentEvent = (
+    event: ProviderIntentEvent,
+    route: { readonly fenceSequence?: number; readonly recovery?: true } = {},
+  ): Effect.Effect<void> => {
+    const threadId = event.payload.threadId;
+    // Pure deliveries to one exact runtime: they cannot overtake into the wrong
+    // runtime (identity is checked), and must not queue behind a turn waiting on them.
+    if (isCallbackResponseEvent(event)) {
+      return callbackLanes.enqueue(threadId, event);
+    }
+    return Effect.gen(function* () {
+      const { outOfBand } = yield* laneControl.noteEvent(event);
+      if (
+        outOfBand &&
+        (event.type === "thread.turn-interrupt-requested" ||
+          event.type === "thread.session-stop-requested")
+      ) {
+        const outcome = yield* laneControl.registerOutOfBand(threadId, event.eventId);
+        yield* outOfBandLanes.enqueue(threadId, { event, outcome });
+      }
+      yield* lifecycleLanes.enqueue(threadId, {
+        kind: "event",
+        event,
+        fenceSequence: route.fenceSequence ?? event.sequence,
+        ...(route.recovery ? { recovery: true as const } : {}),
+      });
+    });
+  };
+
+  const sweepLiveness: ProviderCommandReactorShape["sweepLiveness"] = Effect.gen(function* () {
+    const activities = yield* providerService.listRuntimeActivity?.() ?? Effect.succeed([]);
+    const seen = new Set<ThreadId>();
+    for (const activity of activities) {
+      const threadId = activity.threadId;
+      seen.add(threadId);
+      // A busy lane may be restarting or stopping the runtime right now.
+      if (!(yield* lifecycleLanes.isIdle(threadId))) continue;
+      const { verdict } = yield* classifyThreadLiveness({
+        threadId,
+        previous: livenessSuspects.get(threadId) ?? null,
+      });
+      switch (verdict.kind) {
+        case "suspect-lost":
+          livenessSuspects.set(threadId, verdict);
+          break;
+        case "lost":
+        case "unresponsive":
+          livenessSuspects.set(threadId, verdict);
+          yield* lifecycleLanes.enqueue(threadId, { kind: "liveness", threadId, verdict });
+          break;
+        default:
+          livenessSuspects.delete(threadId);
+      }
+    }
+    // Forget threads whose runtime is gone from the activity map, and warnings
+    // for turns that are no longer active.
+    for (const threadId of livenessSuspects.keys()) {
+      if (!seen.has(threadId)) livenessSuspects.delete(threadId);
+    }
+    for (const [threadId, turnId] of livenessWarned) {
+      const thread = yield* resolveThread(threadId);
+      if (thread?.session?.activeTurnId !== turnId) livenessWarned.delete(threadId);
+    }
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logWarning("provider command reactor liveness sweep failed", {
+            cause: Cause.pretty(cause),
+          }),
+    ),
+    Effect.withSpan("ProviderCommandReactor.sweepLiveness"),
+  );
+
+  const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
+    const processEvent = (event: OrchestrationEvent) =>
+      isProviderIntentEvent(event) ? routeProviderIntentEvent(event) : Effect.void;
 
     yield* Effect.forkScoped(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent),
+    );
+    yield* Effect.forkScoped(
+      sweepLiveness.pipe(
+        Effect.repeat(
+          Schedule.spaced(Duration.millis(Math.min(livenessSweepIntervalMs, MAX_TIMER_MS))),
+        ),
+        Effect.delay(Duration.millis(Math.min(livenessSweepIntervalMs, MAX_TIMER_MS))),
+      ),
     );
     const snapshot = yield* projectionSnapshotQuery.getShellSnapshot().pipe(Effect.orDie);
     for (const thread of snapshot.threads) {
@@ -1901,29 +2598,40 @@ const make = Effect.gen(function* () {
       // Deferred first-turn work is recovered by the normal turn lifecycle. It
       // must not bind to the previous provider ahead of a context handoff.
       if (thread.goal.synchronization.deferUntilTurn) continue;
-      yield* worker.enqueue({
-        sequence: snapshot.snapshotSequence,
-        eventId: EventId.make(crypto.randomUUID()),
-        type: "thread.goal-updated",
-        aggregateKind: "thread",
-        aggregateId: thread.id,
-        occurredAt: thread.goal.updatedAt,
-        commandId: CommandId.make(thread.goal.synchronization.requestId),
-        causationEventId: null,
-        correlationId: null,
-        metadata: {},
-        payload: { threadId: thread.id, goal: thread.goal, origin: "client" },
-      });
+      // Fence 0: any stop or interrupt this process observes cancels it before it runs.
+      yield* routeProviderIntentEvent(
+        {
+          sequence: snapshot.snapshotSequence,
+          eventId: EventId.make(crypto.randomUUID()),
+          type: "thread.goal-updated",
+          aggregateKind: "thread",
+          aggregateId: thread.id,
+          occurredAt: thread.goal.updatedAt,
+          commandId: CommandId.make(thread.goal.synchronization.requestId),
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: { threadId: thread.id, goal: thread.goal, origin: "client" },
+        },
+        { fenceSequence: 0, recovery: true },
+      );
     }
   });
 
   return {
     start,
-    drain: worker.drain,
+    // Forked sendTurn and steer stay untracked, as before.
+    drain: Effect.all([lifecycleLanes.drain, callbackLanes.drain, outOfBandLanes.drain], {
+      discard: true,
+    }),
+    sweepLiveness,
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
-  Layer.provide(ProjectionPendingApprovalRepositoryLive),
-  Layer.provide(ProjectionThreadUserInputRequestRepositoryLive),
-);
+export const makeProviderCommandReactorLive = (options?: ProviderCommandReactorOptions) =>
+  Layer.effect(ProviderCommandReactor, makeProviderCommandReactor(options)).pipe(
+    Layer.provide(ProjectionPendingApprovalRepositoryLive),
+    Layer.provide(ProjectionThreadUserInputRequestRepositoryLive),
+  );
+
+export const ProviderCommandReactorLive = makeProviderCommandReactorLive();

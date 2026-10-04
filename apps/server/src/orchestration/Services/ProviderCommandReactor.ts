@@ -29,6 +29,13 @@ export interface ProviderCommandReactorShape {
    * Intended for test use to replace timing-sensitive sleeps.
    */
   readonly drain: Effect.Effect<void>;
+
+  /**
+   * One turn-liveness pass: settles running turns whose runtime is gone (seen on
+   * two consecutive sweeps) and reports once when a live provider goes quiet.
+   * Runs periodically after `start`; exposed for tests.
+   */
+  readonly sweepLiveness: Effect.Effect<void>;
 }
 
 /**

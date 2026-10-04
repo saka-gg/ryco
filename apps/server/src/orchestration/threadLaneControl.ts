@@ -108,6 +108,8 @@ interface LaneState {
   readonly owner?: { readonly fenceSequence: number; readonly stopRequested: boolean };
   readonly outOfBand: ReadonlyMap<EventId, Deferred.Deferred<OutOfBandOutcome>>;
   readonly cancelled: ReadonlySet<EventId>;
+  /** Work outside the lane (a forked turn submission) that still consults this state. */
+  readonly retained: number;
 }
 
 const EMPTY_LANE: LaneState = {
@@ -119,6 +121,7 @@ const EMPTY_LANE: LaneState = {
   userStopEventId: null,
   outOfBand: new Map(),
   cancelled: new Set(),
+  retained: 0,
 };
 
 export interface ThreadLaneControl {
@@ -162,6 +165,12 @@ export interface ThreadLaneControl {
     threadId: ThreadId,
     eventId: EventId,
   ) => Effect.Effect<Option.Option<Deferred.Deferred<OutOfBandOutcome>>>;
+  /**
+   * Keeps the thread's fence state until the returned release runs, for work
+   * that outlives its lane item (a forked turn submission asks `cancelsStart`
+   * when it fails).
+   */
+  readonly retain: (threadId: ThreadId) => Effect.Effect<Effect.Effect<void>>;
   /**
    * Drops the thread's state once nothing is in flight and every noted stop is at
    * or below `processedSequence`. A queued stop always has a higher sequence than
@@ -359,6 +368,19 @@ export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl> = Effect.ge
       return [Option.some(outcome), { ...lane, outOfBand }] as const;
     });
 
+  const retain: ThreadLaneControl["retain"] = (threadId) =>
+    modifyLane(
+      threadId,
+      (lane) => [undefined, { ...lane, retained: lane.retained + 1 }] as const,
+    ).pipe(
+      Effect.as(
+        modifyLane(
+          threadId,
+          (lane) => [undefined, { ...lane, retained: Math.max(0, lane.retained - 1) }] as const,
+        ),
+      ),
+    );
+
   const prune: ThreadLaneControl["prune"] = (threadId, processedSequence) =>
     Ref.update(lanes, (current) => {
       const lane = current.get(threadId);
@@ -367,6 +389,7 @@ export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl> = Effect.ge
         lane.owner !== undefined ||
         lane.currentStart !== undefined ||
         lane.outOfBand.size > 0 ||
+        lane.retained > 0 ||
         Math.max(lane.stopAllSeq, lane.stopRestartsSeq, lane.userStopSeq) > processedSequence
       ) {
         return current;
@@ -387,6 +410,7 @@ export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl> = Effect.ge
     stopRequestedSince,
     registerOutOfBand,
     takeOutOfBand,
+    retain,
     prune,
   } satisfies ThreadLaneControl;
 });
