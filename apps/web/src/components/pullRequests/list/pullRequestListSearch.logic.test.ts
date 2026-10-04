@@ -16,6 +16,7 @@ function option(
     cwd: `/code/${key}`,
     name: key,
     environmentLabel: null,
+    customAvatarContentHash: null,
     repositoryKey,
     isRepresentative,
   };

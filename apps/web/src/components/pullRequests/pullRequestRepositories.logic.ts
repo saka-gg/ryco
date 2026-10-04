@@ -13,6 +13,8 @@ export interface PullRequestRepositoryOption {
   /** Logical repository label (shared by every checkout of the same repository). */
   readonly name: string;
   readonly environmentLabel: string | null;
+  /** The project's uploaded avatar revision; null falls back to its detected favicon. */
+  readonly customAvatarContentHash: string | null;
   /** Logical repository key; checkouts of one repository share it. */
   readonly repositoryKey: string;
   /** True for the representative checkout of its logical repository. */
@@ -48,6 +50,7 @@ export function buildPullRequestRepositoryOptions(
         cwd: member.cwd,
         name: snapshot.displayName,
         environmentLabel: member.environmentLabel,
+        customAvatarContentHash: member.customAvatarContentHash ?? null,
         repositoryKey: snapshot.projectKey,
         isRepresentative:
           member.environmentId === snapshot.environmentId && member.id === snapshot.id,
