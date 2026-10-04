@@ -147,6 +147,35 @@ describe("environment snapshot codec", () => {
     expect(shared.threads[0]).not.toHaveProperty("session");
   });
 
+  it("keeps a valid shell lineage in shared metadata and drops a malformed one", () => {
+    const lineage = {
+      parentThreadId: "thread-parent" as never,
+      rootThreadId: "thread-parent" as never,
+      relationship: "delegated",
+    };
+    const state = environmentState(["thread-valid", "thread-malformed", "thread-root"]);
+    const record = captureEnvironmentSnapshotRecord(
+      {
+        ...state,
+        threadShellById: {
+          ...state.threadShellById,
+          ["thread-valid" as never]: shell("thread-valid", { lineage }),
+          ["thread-malformed" as never]: shell("thread-malformed", {
+            lineage: { parentThreadId: "", relationship: 7 } as never,
+          }),
+        },
+      },
+      ENV,
+      123,
+    );
+    const threads = new Map(
+      toWorkspaceMetadataSnapshot(record).threads.map((thread) => [thread.id, thread]),
+    );
+    expect(threads.get("thread-valid" as never)?.lineage).toEqual(lineage);
+    expect(threads.get("thread-malformed" as never)).not.toHaveProperty("lineage");
+    expect(threads.get("thread-root" as never)).not.toHaveProperty("lineage");
+  });
+
   it("discards a record whose schemaVersion literal does not match — a bump in either direction", () => {
     const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
     const { payload } = boundStoredEnvironmentSnapshot(record);

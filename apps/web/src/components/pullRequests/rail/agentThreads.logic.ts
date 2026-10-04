@@ -3,6 +3,8 @@ import type {
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
 
+import { threadLinkActivityAt } from "../../threads/threadLinkActivity";
+
 /**
  * Which agent threads belong to a pull request, and where a new hand-off
  * thread should run. Both read the sidebar's thread and worktree summaries
@@ -66,10 +68,6 @@ export function findPullRequestWorktree<T extends WorktreeLike>(
   );
 }
 
-function threadRecency(thread: ThreadLike): string {
-  return thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt;
-}
-
 /**
  * Agent threads working on this pull request: threads in a worktree linked to
  * it, or (same-repository heads only) on its head branch. Archived threads are
@@ -98,13 +96,10 @@ export function linkedAgentThreads<T extends ThreadLike>(input: {
           (thread.worktreePath !== null && worktreePaths.has(thread.worktreePath)) ||
           (branch !== null && thread.branch === branch)),
     )
-    .toSorted((left, right) => threadRecency(right).localeCompare(threadRecency(left)))
+    .toSorted((left, right) =>
+      threadLinkActivityAt(right).localeCompare(threadLinkActivityAt(left)),
+    )
     .slice(0, input.limit ?? 4);
-}
-
-/** When the thread last moved, for its row's relative time. */
-export function agentThreadActivityAt(thread: ThreadLike): string {
-  return threadRecency(thread);
 }
 
 // ── Hand-off prompt ──────────────────────────────────────────────────
