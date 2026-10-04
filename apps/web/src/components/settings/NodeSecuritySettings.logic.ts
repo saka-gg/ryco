@@ -1135,7 +1135,10 @@ const ACTION_CONFIRMATIONS = {
   },
   revoke: {
     title: "Revoke this client key?",
-    body: "The device loses access now: every channel it has open closes before this is confirmed, and it cannot reconnect until you approve it again. The record stays, so you can see it was revoked.",
+    // No "until you approve it again": this panel does not re-approve a revoked
+    // key (`NODE_APPROVAL_REVOKED_NOTICE`), so the promise of a one-click way
+    // back was one the same panel then refused. The two ways back are named.
+    body: "The device loses access now: every channel it has open closes before this is confirmed. It cannot reconnect unless the key is approved again on the node itself (`ryco e2ee client approve`), or its record is deleted and the device introduces itself again — this panel does not re-approve a revoked key. The record stays, so you can see it was revoked.",
     confirmLabel: "Revoke key",
     destructive: true,
   },
@@ -1208,7 +1211,23 @@ export interface NodeE2eeRecordSubject {
   readonly fingerprint: string;
   readonly accountId: string;
   readonly hubOrigin: string;
+  /** The row's status, where the consequence depends on it. Never echoed as a fact. */
+  readonly status?: NodeE2eeClientRecord["status"] | undefined;
 }
+
+/**
+ * Revoke on a request nothing has approved yet.
+ *
+ * Revoke is offered on pending rows because it is how an owner blocks a key —
+ * the approve dialog sends them here for an account that should not hold the
+ * role. But an owner who only means to set a request aside would be left with a
+ * row this panel can never approve, so the dialog names the action that does
+ * that instead.
+ */
+export const NODE_REVOKE_PENDING_NOTE =
+  "This is a request nothing has approved yet. Revoking it blocks this key here; to turn the " +
+  "request away without blocking the device, delete it instead — it can then introduce itself " +
+  "again.";
 
 /**
  * Why a per-record confirmation carries the record and not only the verb.
@@ -1237,9 +1256,11 @@ export function nodeE2eeRecordConfirmation(
   subject: NodeE2eeRecordSubject,
 ): NodeE2eeActionConfirmation {
   const base = ACTION_CONFIRMATIONS[action];
+  const pendingNote =
+    action === "revoke" && subject.status === "pending" ? [NODE_REVOKE_PENDING_NOTE] : [];
   return {
     ...base,
-    body: `${base.body} ${NODE_E2EE_RECORD_SUBJECT_PROMPT}`,
+    body: [base.body, ...pendingNote, NODE_E2EE_RECORD_SUBJECT_PROMPT].join(" "),
     facts: nodeE2eeRecordSubjectFacts(subject),
   };
 }
@@ -1613,6 +1634,10 @@ export function everyNodeSecurityString(): ReadonlyArray<{
   for (const action of NODE_E2EE_RECORD_ACTION_IDS) {
     pushConfirmation(`record(${action})`, nodeE2eeRecordConfirmation(action, subject));
   }
+  pushConfirmation(
+    "record(revoke, pending)",
+    nodeE2eeRecordConfirmation("revoke", { ...subject, status: "pending" }),
+  );
   pushConfirmation("pairingWindow", nodeE2eePairingWindowConfirmation("SHA256:example"));
   const exampleSafetyNumber = Array.from({ length: E2EE_SAFETY_NUMBER_DIGITS.groups }, () =>
     "1".repeat(E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup),

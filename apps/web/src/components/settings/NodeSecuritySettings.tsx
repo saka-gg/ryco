@@ -675,11 +675,17 @@ function PrimaryNodeSecuritySettings() {
    * named in the dialog and the key in the body cannot disagree.
    */
   const authorize = useCallback(
-    (request: NodeE2eeAuthorizationRequest, action: NodeE2eeRecordActionId, message: string) => {
+    (
+      request: NodeE2eeAuthorizationRequest,
+      action: NodeE2eeRecordActionId,
+      message: string,
+      status: NodeE2eeClientRecord["status"],
+    ) => {
       const subject: NodeE2eeRecordSubject = {
         fingerprint: request.fingerprint,
         accountId: request.accountId,
         hubOrigin: request.hubOrigin,
+        status,
       };
       confirmCopyThen(
         nodeE2eeRecordConfirmation(action, subject),
@@ -1428,6 +1434,7 @@ function ClientRecordRow({
     request: NodeE2eeAuthorizationRequest,
     action: NodeE2eeRecordActionId,
     message: string,
+    status: NodeE2eeClientRecord["status"],
   ) => void;
   readonly onApprove: (
     request: NodeE2eeAuthorizationRequest,
@@ -1525,6 +1532,7 @@ function ClientRecordRow({
                   { ...key, action: "narrow", maxRole: "viewer" },
                   "narrow",
                   "Authority reduced.",
+                  record.status,
                 )
               }
             >
@@ -1547,7 +1555,14 @@ function ClientRecordRow({
               size="xs"
               variant="destructive-outline"
               disabled={busy}
-              onClick={() => onAuthorize({ ...key, action: "revoke" }, "revoke", "Client revoked.")}
+              onClick={() =>
+                onAuthorize(
+                  { ...key, action: "revoke" },
+                  "revoke",
+                  "Client revoked.",
+                  record.status,
+                )
+              }
             >
               Revoke
             </Button>
@@ -1556,7 +1571,9 @@ function ClientRecordRow({
             size="xs"
             variant="destructive-outline"
             disabled={busy}
-            onClick={() => onAuthorize({ ...key, action: "purge" }, "purge", "Record deleted.")}
+            onClick={() =>
+              onAuthorize({ ...key, action: "purge" }, "purge", "Record deleted.", record.status)
+            }
           >
             Delete
           </Button>

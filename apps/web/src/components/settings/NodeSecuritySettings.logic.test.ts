@@ -48,6 +48,7 @@ import {
   NODE_E2EE_APPROVABLE_ROLES,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
   NODE_E2EE_RECORD_ACTION_IDS,
+  NODE_REVOKE_PENDING_NOTE,
   NODE_SAFETY_NUMBER_ADVISORY,
   NODE_SAFETY_NUMBER_MATCH_HINT,
   NODE_SESSION_WEB_SAS_ADVISORY,
@@ -391,6 +392,35 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
         /closes? (immediately|before)|loses access now|immediate disconnection/u,
       );
     }
+  });
+
+  it("does not promise a way back from revocation that this panel refuses", () => {
+    // The panel withholds re-approval of a revoked key (`NODE_APPROVAL_REVOKED_NOTICE`),
+    // so a dialog saying the device can reconnect "until you approve it again"
+    // sent owners into a revocation they expected to undo with one click.
+    const body = nodeE2eeActionConfirmation("revoke").body;
+    expect(body).not.toMatch(/until you approve it again/u);
+    expect(body).toContain("ryco e2ee client approve");
+    expect(body).toMatch(/deleted and the device introduces itself again/u);
+
+    // On a request nothing has approved yet, revoking leaves a row this panel
+    // can never approve — so the dialog names Delete as the way to set it aside.
+    const subject = {
+      fingerprint: "SHA256:AAAAphoneAAAA",
+      accountId: "acct_reader",
+      hubOrigin: "https://hub.example.test",
+    };
+    expect(nodeE2eeRecordConfirmation("revoke", { ...subject, status: "pending" }).body).toContain(
+      NODE_REVOKE_PENDING_NOTE,
+    );
+    for (const status of ["approved", undefined] as const) {
+      expect(nodeE2eeRecordConfirmation("revoke", { ...subject, status }).body).not.toContain(
+        NODE_REVOKE_PENDING_NOTE,
+      );
+    }
+    expect(
+      nodeE2eeRecordConfirmation("purge", { ...subject, status: "pending" }).body,
+    ).not.toContain(NODE_REVOKE_PENDING_NOTE);
   });
 
   it("names the role it grants back in the confirmation, with what a smaller one does", () => {

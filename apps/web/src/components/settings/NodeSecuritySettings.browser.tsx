@@ -166,6 +166,7 @@ import {
   NODE_APPROVAL_REVOKED_NOTICE,
   NODE_APPROVE_NUMBER_PROMPT,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
+  NODE_REVOKE_PENDING_NOTE,
   NODE_SAFETY_NUMBER_MATCH_LABEL,
   NODE_SESSION_WEB_SAS_ADVISORY,
 } from "./NodeSecuritySettings.logic";
@@ -614,6 +615,33 @@ describe("the confirmation stands between the click and the network", () => {
     });
     expect(second).toContain(SECOND_FINGERPRINT);
     expect(second).not.toContain(FINGERPRINT);
+  });
+
+  it("points a pending request's Revoke at Delete, and only a pending one's", async () => {
+    // Revoking a request leaves a row this panel never approves; an owner who
+    // only meant to set it aside has to hear that before confirming, not after.
+    await mountLocalPanel();
+
+    buttonsLabelled("Revoke")[0]!.click();
+    const pending = await vi.waitFor(() => {
+      const found = confirmDialog();
+      expect(found).not.toBeNull();
+      return found!.textContent ?? "";
+    });
+    expect(pending).toContain(NODE_REVOKE_PENDING_NOTE);
+    cancelButton()!.click();
+    await vi.waitFor(() => {
+      expect(confirmDialog()).toBeNull();
+    });
+
+    buttonsLabelled("Revoke")[1]!.click();
+    const approved = await vi.waitFor(() => {
+      const found = confirmDialog();
+      expect(found).not.toBeNull();
+      return found!.textContent ?? "";
+    });
+    expect(approved).toContain(SECOND_FINGERPRINT);
+    expect(approved).not.toContain(NODE_REVOKE_PENDING_NOTE);
   });
 
   it("echoes the fingerprint a pairing window would admit", async () => {
