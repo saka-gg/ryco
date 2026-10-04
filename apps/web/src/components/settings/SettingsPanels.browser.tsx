@@ -141,7 +141,7 @@ const authAccessHarness = vi.hoisted(() => {
 });
 
 const mockConnectDesktopSshEnvironment = vi.hoisted(() => vi.fn());
-const activeDesktopTurns = vi.hoisted(() => ({ count: 0 }));
+const activeDesktopTurns = vi.hoisted(() => ({ count: 0 as number | null }));
 
 vi.mock("../../desktopRelaunchGuard.logic", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../desktopRelaunchGuard.logic")>()),
@@ -2386,6 +2386,22 @@ describe("ConnectionsSettings Hub section", () => {
     await page.getByRole("button", { name: "Enable" }).click();
     await page.getByRole("button", { name: "Restart now" }).click();
     await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
+  });
+
+  it("asks before a relaunch while running turns cannot be counted yet", async () => {
+    // An unknown local environment used to count as no running turns.
+    activeDesktopTurns.count = null;
+    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await expect.element(page.getByText("Restart while agents are working?")).toBeVisible();
+    await expect.element(page.getByText(/Agent turns may still be running/)).toBeVisible();
+    expect(setHubLaunchConfig).not.toHaveBeenCalled();
   });
 
   it("saves a deferred change at once and relaunches once the running turns finish", async () => {

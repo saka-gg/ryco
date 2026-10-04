@@ -65,7 +65,12 @@ describe("countActiveDesktopTurns", () => {
         LOCAL,
       ),
     ).toBe(0);
-    expect(countActiveDesktopTurns([thread({ session: runningSession })], null)).toBe(0);
+  });
+
+  it("cannot count before the local environment is known", () => {
+    // Reading that as zero relaunched without asking while turns ran.
+    expect(countActiveDesktopTurns([thread({ session: runningSession })], null)).toBeNull();
+    expect(countActiveDesktopTurns([], null)).toBeNull();
   });
 });
 
@@ -73,5 +78,6 @@ describe("describeActiveDesktopTurns", () => {
   it("pluralises the running turns", () => {
     expect(describeActiveDesktopTurns(1)).toBe("1 agent turn is still running");
     expect(describeActiveDesktopTurns(3)).toBe("3 agent turns are still running");
+    expect(describeActiveDesktopTurns(null)).toBe("Agent turns may still be running");
   });
 });

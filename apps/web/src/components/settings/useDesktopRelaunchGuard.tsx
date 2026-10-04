@@ -23,8 +23,11 @@ import {
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
-/** Agent turns on this desktop's own backend; remote environments keep running. */
-function readActiveDesktopTurnCount(): number {
+/**
+ * Agent turns on this desktop's own backend; remote environments keep running.
+ * `null` until the local environment is known: ask rather than assume none.
+ */
+function readActiveDesktopTurnCount(): number | null {
   return countActiveDesktopTurns(
     selectSidebarThreadsAcrossEnvironments(useStore.getState()),
     readPrimaryEnvironmentDescriptor()?.environmentId ?? null,
@@ -77,7 +80,7 @@ export const desktopRelaunchScheduler = createDesktopRelaunchScheduler({
     const notice = stackedThreadToast({
       type: "info",
       title: "Ryco restarts when its agents finish",
-      description: `${describeActiveDesktopTurns(waiting.activeTurns ?? 0)}. Your change is saved and applies when Ryco restarts; dismiss this to restart later yourself.`,
+      description: `${describeActiveDesktopTurns(waiting.activeTurns)}. Your change is saved and applies when Ryco restarts; dismiss this to restart later yourself.`,
       timeout: 0,
       actionProps: {
         children: "Restart now",
@@ -142,7 +145,7 @@ export async function relaunchIfHubRestartRequired(input: {
 }
 
 interface PendingRelaunch {
-  readonly activeTurns: number;
+  readonly activeTurns: number | null;
   readonly change: DesktopRelaunchChange;
   readonly resolve: (outcome: DesktopRelaunchOutcome) => void;
   readonly reject: (error: unknown) => void;
