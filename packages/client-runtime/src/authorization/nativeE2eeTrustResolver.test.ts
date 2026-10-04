@@ -414,6 +414,37 @@ describe("native E2EE trust resolver", () => {
     }
   });
 
+  it("accepts a keyset rotated after the ticket while it still holds the grant's key", async () => {
+    const { api, platform, resolve, request } = harness();
+    const rotated = keyset(ROTATED_SIGNER);
+    vi.mocked(api.getE2eeGrantVerificationKeys).mockResolvedValue({
+      ...rotated,
+      generation: 3,
+      keys: [...keyset().keys, ...rotated.keys],
+    });
+
+    const result = await resolve(request);
+
+    expect(result).toMatchObject({ kind: "authorized", trustSource: "account-enrolled" });
+    expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledOnce();
+    expect(platform.writeAccountTrustedNode).toHaveBeenCalledOnce();
+    if (result.kind === "authorized" && result.trustSource === "account-enrolled") {
+      result.dispose();
+    }
+  });
+
+  it("refuses a keyset older than the ticket's generation even after refreshing", async () => {
+    const { api, platform, resolve, request } = harness();
+    vi.mocked(api.getE2eeGrantVerificationKeys).mockResolvedValue({ ...keyset(), generation: 1 });
+
+    await expect(resolve(request)).resolves.toEqual({
+      kind: "blocked",
+      reason: "account-authorization-invalid",
+    });
+    expect(api.getE2eeGrantVerificationKeys).toHaveBeenCalledTimes(2);
+    expect(platform.writeAccountTrustedNode).not.toHaveBeenCalled();
+  });
+
   it("coalesces a concurrent unknown-key refresh and verifies both grants", async () => {
     const { api, resolve, request } = harness();
     const first = await resolve(request);

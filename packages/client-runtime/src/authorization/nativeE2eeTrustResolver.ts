@@ -163,6 +163,12 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
     cachedKeyset !== null && cachedKeyset !== previous
       ? Promise.resolve(cachedKeyset)
       : readKeyset(true);
+  // The Hub rotates its signing key in process and keeps a retired verifier
+  // published until it expires, so a keyset fetched after a rotation can be
+  // newer than the generation the ticket names and still hold the key that
+  // signed its grant. Only an older keyset is stale; the grant's key and every
+  // binding are still verified against whatever keyset is accepted.
+  const keysetCovers = (keyset: Keyset, generation: number) => keyset.generation >= generation;
   const resolveAttempt = async (
     request: ResolveNativeE2eeTrustInput,
     expiryRetried: boolean,
@@ -247,7 +253,7 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
         input.api.issueAccountGrantRelayTicket(ticketRequest),
         readKeyset(),
       ]);
-      if (response.keysetGeneration !== keyset.generation) {
+      if (!keysetCovers(keyset, response.keysetGeneration)) {
         keyset = await refreshKeyset(keyset);
         keysetRefreshed = true;
       }
@@ -324,7 +330,7 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
     let verificationKeys = decodeVerificationKeys(keyset.keys);
     if (
       verificationKeys === null ||
-      response.keysetGeneration !== keyset.generation ||
+      !keysetCovers(keyset, response.keysetGeneration) ||
       response.protocolMajor !== 1 ||
       response.protocolMinor !== 3 ||
       response.suiteId !== E2EE_SUITE_ACCOUNT_GRANT_25519_CHACHAPOLY_SHA256 ||
@@ -382,7 +388,7 @@ export function createNativeE2eeTrustResolver(input: NativeE2eeTrustResolverInpu
         return unavailable(cause);
       }
       verificationKeys = decodeVerificationKeys(keyset.keys);
-      if (verificationKeys === null || response.keysetGeneration !== keyset.generation) {
+      if (verificationKeys === null || !keysetCovers(keyset, response.keysetGeneration)) {
         zero(grantEnvelope);
         zero(statementBytes);
         return invalid();
