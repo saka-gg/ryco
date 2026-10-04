@@ -1,6 +1,13 @@
 import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
 import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
+import {
+  CLAUDE_PROVIDER_TURN_STOP_GRACE_MS,
+  CLAUDE_WAKE_TURN_FIRST_OUTPUT_TIMEOUT_MS,
+  claudeWakeSignal,
+  isClaudeRootTurnOutput,
+  shouldOpenClaudeWakeTurn,
+} from "../claudeWakeTurn.ts";
 import type { ClaudeCacheObservation, ModelSelection } from "@ryco/contracts";
 /**
  * ClaudeAdapterLive - Scoped live implementation for the Claude Agent provider adapter.
@@ -77,6 +84,7 @@ import {
   Cause,
   DateTime,
   Deferred,
+  Duration,
   Effect,
   Exit,
   FileSystem,
@@ -134,6 +142,8 @@ import {
 } from "../../agentControl/ProviderInjection.ts";
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+const WAKE_NO_OUTPUT_REASON = "Claude started a background turn but produced no output.";
+const PROVIDER_TURN_STOP_REASON = "Claude did not end the background turn after Stop.";
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -370,6 +380,8 @@ interface ClaudeSessionContext {
   promptSent: boolean;
   /** sendTurn calls between entry and install. A provider turn must not open under them. */
   turnInstallsInFlight: number;
+  /** The CLI emitted `status: requesting`; from then on `init` alone never opens a turn. */
+  requestingStatusObserved: boolean;
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
@@ -2343,11 +2355,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    // Real turns always receive local turnState when sent, and out-of-turn
-    // assistant messages create a provider turn. What remains is a resume
-    // handshake, an empty notification turn, a late duplicate result, or a
-    // no-turn stream failure. Keep usage, but never publish an untargeted
-    // lifecycle completion.
+    // Prompt turns always receive local turnState when sent, and provider
+    // turns open at Claude's wake signal (status: requesting/compacting, or
+    // init on legacy CLIs) or, failing that, at the first out-of-turn root
+    // assistant message. What remains is a resume handshake, an empty
+    // notification turn, a late result after Stop finished the turn locally,
+    // or a no-turn stream failure. Keep usage, but never publish an
+    // untargeted lifecycle completion.
     yield* Effect.logInfo("claude.turn.result-without-active-turn", {
       threadId: context.session.threadId,
       status,
@@ -3067,8 +3081,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   });
 
   /**
-   * Opens a provider turn: one Claude started without a prompt. Never bound to Agent Control
-   * authority; exact-turn binding stays prompt-only.
+   * Opens a provider turn: one Claude started without a prompt, either at its turn-start signal
+   * ("wake-signal") or, when no signal opened one, at its first root assistant output. Never
+   * bound to Agent Control authority; exact-turn binding stays prompt-only.
    */
   const startProviderTurn = Effect.fn("startProviderTurn")(function* (
     context: ClaudeSessionContext,
@@ -3108,6 +3123,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: { openedBy },
       },
     });
+    if (openedBy === "wake-signal") {
+      // First-output watchdog: a wake that never produces root output must not hold the
+      // thread running. turn.aborted settles it without a checkpoint capture.
+      yield* Effect.sleep(Duration.millis(CLAUDE_WAKE_TURN_FIRST_OUTPUT_TIMEOUT_MS)).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            context.turnState === turnState && !turnState.rootOutputObserved && !context.stopped
+              ? completeTurn(context, "interrupted", WAKE_NO_OUTPUT_REASON, undefined, {
+                  abortReason: WAKE_NO_OUTPUT_REASON,
+                })
+              : Effect.void,
+          ),
+        ),
+        Effect.ignoreCause({ log: true }),
+        Effect.forkDetach,
+      );
+    }
   });
 
   const handleAssistantMessage = Effect.fn("handleAssistantMessage")(function* (
@@ -3398,6 +3430,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     if (message.type !== "system") {
       return;
+    }
+
+    // Open a provider ("wake") turn at Claude's own turn-start signal, before
+    // the triggering frame's events are built, so they carry the new turn id.
+    if (message.subtype === "status" && message.status === "requesting") {
+      context.requestingStatusObserved = true;
+    }
+    const wakeSignal = claudeWakeSignal(message);
+    if (
+      wakeSignal !== undefined &&
+      shouldOpenClaudeWakeTurn({
+        signal: wakeSignal,
+        hasOpenTurn: context.turnState !== undefined,
+        sessionStopped: context.stopped,
+        promptSent: context.promptSent,
+        turnInstallsInFlight: context.turnInstallsInFlight,
+        requestingStatusObserved: context.requestingStatusObserved,
+      })
+    ) {
+      yield* startProviderTurn(context, "wake-signal");
     }
 
     const stamp = yield* makeEventStamp();
@@ -4124,7 +4176,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
+    yield* routeSdkMessage(context, message);
+    // After routing, so a turn opened by `status: compacting` is marked by its own trigger.
+    const open = context.turnState;
+    if (open && !open.rootOutputObserved && isClaudeRootTurnOutput(message)) {
+      open.rootOutputObserved = true;
+    }
+  });
 
+  const routeSdkMessage = Effect.fn("routeSdkMessage")(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ) {
     switch (message.type) {
       case "stream_event":
         yield* handleStreamEvent(context, message);
@@ -4944,6 +5007,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         stopped: false,
         promptSent: false,
         turnInstallsInFlight: 0,
+        requestingStatusObserved: false,
       };
       deviceToolContext = context;
       yield* Ref.set(contextRef, context);
@@ -5166,9 +5230,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   });
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
-    function* (threadId, _turnId) {
+    function* (threadId, turnId) {
       const context = yield* requireSession(threadId);
-      if (context.agentControl) yield* context.agentControl.retireTurn(_turnId);
+      const target = context.turnState;
+      if (context.agentControl) yield* context.agentControl.retireTurn(turnId);
       // Stop-everything semantics: users reach for Stop precisely when a
       // fleet ran away. interrupt() alone only ends the parent turn —
       // background subagents/shells keep running and keep burning tokens.
@@ -5225,6 +5290,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
       });
+      // The CLI may never report a result for a provider turn it was not asked to run. Give it
+      // a grace period, then finish the turn locally. Forked: Stop must never block the reactor.
+      if (
+        target !== undefined &&
+        target.openedBy !== "prompt" &&
+        (turnId === undefined || target.turnId === turnId)
+      ) {
+        yield* Effect.sleep(Duration.millis(CLAUDE_PROVIDER_TURN_STOP_GRACE_MS)).pipe(
+          Effect.andThen(
+            Effect.suspend(() => {
+              // A result (or another close) already ended or is ending the turn.
+              if (
+                context.turnState !== target ||
+                target.completion !== undefined ||
+                context.stopped
+              ) {
+                return Effect.void;
+              }
+              return Effect.logInfo("claude.turn.provider-turn-finalized-after-stop", {
+                threadId: context.session.threadId,
+                turnId: target.turnId,
+                openedBy: target.openedBy,
+              }).pipe(
+                Effect.andThen(completeTurn(context, "interrupted", PROVIDER_TURN_STOP_REASON)),
+              );
+            }),
+          ),
+          Effect.ignoreCause({ log: true }),
+          Effect.forkDetach,
+        );
+      }
     },
   );
 
