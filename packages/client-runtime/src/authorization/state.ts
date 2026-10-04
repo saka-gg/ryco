@@ -434,6 +434,12 @@ function createFence(): {
 const DIRECTORY_REFRESH_MS = 20_000;
 /** Directory cadence while a surface waits for an offline node to come back. */
 export const DIRECTORY_PRESENCE_REFRESH_MS = 5_000;
+/**
+ * How long one presence watch keeps the faster cadence. A node that is back
+ * within minutes is seen within seconds; one shut down for the weekend is
+ * polled at the normal cadence after this rather than at 4x for days.
+ */
+export const DIRECTORY_PRESENCE_WINDOW_MS = 5 * 60_000;
 const DIRECTORY_RETRY_MAX_MS = 60_000;
 const HOSTED_SESSION_SYNC_DEADLINE_MS = 30_000;
 export const HOSTED_SESSION_SYNC_FAILURE_MESSAGE = "Ryco state could not be synchronized.";
@@ -468,8 +474,11 @@ class HostedHubController {
   #operation: AbortController | null = null;
   #directoryTimer: ReturnType<typeof setTimeout> | null = null;
   #directoryRetry = 0;
-  /** One token per surface waiting on node presence; see `watchDirectoryPresence`. */
-  #directoryPresenceWatches = new Set<symbol>();
+  /**
+   * One token per surface waiting on node presence, mapped to when it started;
+   * see `watchDirectoryPresence`.
+   */
+  #directoryPresenceWatches = new Map<symbol, number>();
   #directoryOperation: AbortController | null = null;
   #directoryPromise: Promise<void> | null = null;
   #bootstrapPromise: Promise<void> | null = null;
@@ -1876,20 +1885,31 @@ class HostedHubController {
    * For a surface holding connection demand for a node the directory reports
    * offline: presence is only learned from this poll, so at the normal cadence
    * a node that came back could wait 20s to be seen. Watches are tokens, one
-   * per caller, and the release is idempotent. The poll stays foreground-only
+   * per caller, and the release is idempotent. Each watch keeps the faster
+   * cadence for {@link DIRECTORY_PRESENCE_WINDOW_MS} only, after which the poll
+   * falls back to 20s even while it is held. The poll stays foreground-only
    * and a failure backoff is never shortened; a pending normal-cadence refresh
-   * is pulled in when the first watch starts.
+   * is pulled in when a watch starts the faster cadence.
    */
   watchDirectoryPresence(): () => void {
     const watch = Symbol("hosted-directory-presence-watch");
-    const first = this.#directoryPresenceWatches.size === 0;
-    this.#directoryPresenceWatches.add(watch);
-    if (first && this.#directoryTimer !== null && this.#directoryRetry === 0) {
+    const wasFast = this.#directoryPresenceCadenceActive();
+    this.#directoryPresenceWatches.set(watch, getHostedRuntimeConfiguration().timers.now());
+    if (!wasFast && this.#directoryTimer !== null && this.#directoryRetry === 0) {
       this.#scheduleDirectory(DIRECTORY_PRESENCE_REFRESH_MS);
     }
     return () => {
       this.#directoryPresenceWatches.delete(watch);
     };
+  }
+
+  #directoryPresenceCadenceActive(): boolean {
+    if (this.#directoryPresenceWatches.size === 0) return false;
+    const now = getHostedRuntimeConfiguration().timers.now();
+    for (const startedAt of this.#directoryPresenceWatches.values()) {
+      if (now - startedAt < DIRECTORY_PRESENCE_WINDOW_MS) return true;
+    }
+    return false;
   }
 
   async #refreshDirectory(operation: AbortController): Promise<void> {
@@ -1944,7 +1964,7 @@ class HostedHubController {
         });
       }
       this.#scheduleDirectory(
-        this.#directoryPresenceWatches.size > 0
+        this.#directoryPresenceCadenceActive()
           ? DIRECTORY_PRESENCE_REFRESH_MS
           : DIRECTORY_REFRESH_MS,
       );

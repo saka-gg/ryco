@@ -138,8 +138,11 @@ built, before any channel exists, and stands until the node is torn down or the 
 signed native tier's two states are not in this client's state type at all, so the browser cannot
 report them even by mistake.
 
-Directory refresh runs on a bounded 20-second visible-page cadence. Failures retain the last bounded
-directory as stale, clear role authority, disable selection/actions, and retry with a capped delay.
+Directory refresh runs on a bounded 20-second visible-page cadence. While connection demand waits
+on a node the directory reports offline, the poll runs every 5 seconds instead, for at most five
+minutes per wait before it falls back to 20 seconds; the faster cadence never shortens a failure
+backoff and stops with the page. Failures retain the last bounded directory as stale, clear role
+authority, disable selection/actions, and retry with a capped delay.
 Machine-detail focus is preserved only while both node ID and environment ID match. Authorization
 removal or an identity change closes that exact environment's live demand.
 
@@ -477,6 +480,23 @@ authorization removal, unsupported protocol, invalid protocol, and authenticatio
 are terminal. Browser WebSocket APIs intentionally do not reveal whether a pre-handshake network
 failure was DNS or TLS, so the hosted UI reports those cases as a bounded network failure; direct
 and node-side diagnostics retain their more specific classification.
+
+Held demand is re-planned as soon as the directory reports its node online again, or the directory
+and browser become current while its node is online. A terminal relay failure is never re-planned
+from those edges — the browser turning current is then the failure itself — so a node that failed
+its handshake waits for the 25-second demand renewal or for its presence to come back, and is never
+hot-retried.
+
+Access recovery is separate from relay reconnect. When the page returns to the foreground or comes
+back online, the client revalidates the Hub session and directory, opens a fresh relay attempt, and
+accepts a current snapshot before mutation. When that session check cannot reach the Hub — no
+answer, the request deadline, a 408, 429, or 5xx response, or a body that is not the Hub's (a
+captive portal or proxy page) — session material is kept, the account stays unavailable or the
+browser stale (neither grants mutation), and the same full check retries on its own with
+exponential backoff from one second to 60 seconds, bounded ±20% jitter, and bounded Hub
+`retryAfterMs`, in the foreground only. A definite Hub answer is not retried on a timer; the next
+foreground or online signal, or Refresh, re-checks it. Only the Hub's own `401` or
+`session_invalid` answer ends the session.
 
 On reconnect, the existing shell and thread subscriptions resubscribe. Ryco marks the session
 `replaying`, accepts the authoritative shell snapshot, discards duplicate/older projection versions,

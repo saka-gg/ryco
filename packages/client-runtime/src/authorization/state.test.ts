@@ -46,6 +46,7 @@ import {
 } from "./runtime";
 import {
   DIRECTORY_PRESENCE_REFRESH_MS,
+  DIRECTORY_PRESENCE_WINDOW_MS,
   HOSTED_ACCOUNT_BUSY_MESSAGE,
   HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE,
   HOSTED_PASSKEY_UNCONFIRMED_MESSAGE,
@@ -1060,6 +1061,35 @@ describe("hosted registration and directory state", () => {
     expect(listNodes).toHaveBeenCalledTimes(5);
     await vi.advanceTimersByTimeAsync(1);
     expect(listNodes).toHaveBeenCalledTimes(6);
+  });
+
+  it("falls back to the normal cadence once a presence watch outlives its window", async () => {
+    vi.useFakeTimers();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+    });
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.refreshDirectory();
+    hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_WINDOW_MS);
+    expect(listNodes).toHaveBeenCalledTimes(1 + DIRECTORY_PRESENCE_WINDOW_MS / 5_000);
+
+    // A node that stays offline for days is not polled at 4x for days.
+    const atWindowEnd = listNodes.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(listNodes).toHaveBeenCalledTimes(atWindowEnd);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listNodes).toHaveBeenCalledTimes(atWindowEnd + 1);
+
+    // A fresh watch (the demand changed) gets its own window.
+    const release = hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(atWindowEnd + 2);
+    release();
   });
 
   it("never shortens a directory failure backoff for a presence watch", async () => {
