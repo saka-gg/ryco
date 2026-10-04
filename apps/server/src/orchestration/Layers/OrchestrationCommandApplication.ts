@@ -154,22 +154,28 @@ export const makeOrchestrationCommandFlights = (): OrchestrationCommandFlights =
   >();
   return {
     join: (commandId, attempt) =>
-      Effect.suspend(() => {
-        const existing = running.get(commandId);
-        if (existing) return Deferred.await(existing);
-        const outcome = Deferred.makeUnsafe<CommandResult, OrchestrationDispatchCommandError>();
-        running.set(commandId, outcome);
-        return attempt.pipe(
-          Effect.onExit((exit) =>
-            Effect.suspend(() => {
-              if (running.get(commandId) === outcome) running.delete(commandId);
-              return Deferred.done(outcome, exit);
-            }),
-          ),
-          Effect.forkDetach,
-          Effect.andThen(Deferred.await(outcome)),
-        );
-      }),
+      // A flight is registered together with the attempt that completes it, or
+      // not at all: an interruption between the two would leave every later
+      // replay of the id waiting on an outcome nothing ever completes. Only the
+      // wait is interruptible; the forked attempt is interruptible on its own.
+      Effect.uninterruptibleMask((restore) =>
+        Effect.suspend(() => {
+          const existing = running.get(commandId);
+          if (existing) return restore(Deferred.await(existing));
+          const outcome = Deferred.makeUnsafe<CommandResult, OrchestrationDispatchCommandError>();
+          running.set(commandId, outcome);
+          return attempt.pipe(
+            Effect.onExit((exit) =>
+              Effect.suspend(() => {
+                if (running.get(commandId) === outcome) running.delete(commandId);
+                return Deferred.done(outcome, exit);
+              }),
+            ),
+            Effect.forkDetach,
+            Effect.andThen(restore(Deferred.await(outcome))),
+          );
+        }),
+      ),
   };
 };
 

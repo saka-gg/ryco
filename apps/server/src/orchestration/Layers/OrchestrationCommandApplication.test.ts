@@ -7,7 +7,8 @@ import {
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
 import { assert, it, vi } from "@effect/vitest";
-import { Deferred, Effect, Fiber, Option } from "effect";
+import { Deferred, Effect, Exit, Fiber, Option } from "effect";
+import { pipeArguments } from "effect/Pipeable";
 
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import type {
@@ -302,6 +303,41 @@ it.effect("keeps running a command whose requester disconnected", () =>
     assert.strictEqual(runs, 1);
     assert.strictEqual(completed, 1);
   }),
+);
+
+it.effect(
+  "never strands a replay behind a requester interrupted while registering its flight",
+  () =>
+    Effect.gen(function* () {
+      const flights = makeOrchestrationCommandFlights();
+      const commandId = CommandId.make("cmd-registering");
+      const release = yield* Deferred.make<void>();
+      let runs = 0;
+      const attempt = Effect.suspend(() => {
+        runs += 1;
+        return Deferred.await(release).pipe(Effect.as({ sequence: 14 }));
+      });
+      // The client disconnects in the instant between the flight being
+      // registered and its attempt being forked: `join` builds that attempt
+      // right after registering it.
+      const disconnectingAttempt = Object.assign(Object.create(attempt) as typeof attempt, {
+        pipe() {
+          Fiber.getCurrent()?.interruptUnsafe();
+          return pipeArguments(attempt, arguments);
+        },
+      });
+
+      const first = yield* flights.join(commandId, disconnectingAttempt).pipe(Effect.forkChild);
+      assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(first)));
+      const replay = yield* flights.join(commandId, attempt).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(release, undefined);
+      for (let step = 0; step < 5; step += 1) yield* Effect.yieldNow;
+
+      assert.deepStrictEqual(replay.pollUnsafe(), Exit.succeed({ sequence: 14 }));
+      // The first attempt ran on its own; the replay waited for it.
+      assert.strictEqual(runs, 1);
+    }),
 );
 
 it.effect("runs a later attempt of the same id again once the first has settled", () =>
