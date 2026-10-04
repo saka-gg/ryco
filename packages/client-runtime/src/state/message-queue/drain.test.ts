@@ -1,3 +1,4 @@
+import { TurnId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -17,6 +18,10 @@ import {
 import { readQueueThreadView } from "./threadView.ts";
 
 const NOW = "2026-10-01T12:00:00.000Z";
+
+function steerAttempt(commandId: string) {
+  return { commandId, expectedTurnId: TurnId.make("turn-1"), startedAt: NOW, explicit: false };
+}
 const IDLE_THREAD: Omit<ThreadFixture, "id"> = {
   session: { status: "ready" },
   latestTurn: { turnId: "turn-1", state: "completed" },
@@ -36,7 +41,7 @@ function input(overrides: Partial<QueueDrainInput> = {}): QueueDrainInput {
   return {
     nowIso: NOW,
     queue: [{ id: "q-1" }, { id: "q-2" }],
-    steeringIds: [],
+    steerAttempts: {},
     hold: null,
     acknowledgedCauseKeys: [],
     headProviderInstanceId: "codex",
@@ -196,7 +201,7 @@ describe("resolveQueueDrainStep", () => {
     expect(resolveQueueDrainStep(input({ view: projected }))).toEqual({
       kind: "reconcile",
       removeIds: ["q-1"],
-      endSteerIds: [],
+      endSteers: [],
     });
   });
 
@@ -250,15 +255,41 @@ describe("resolveQueueDrainStep", () => {
       resolveQueueDrainStep(
         input({
           queue: [{ id: "q-1", deliveryStatus: "sending" }, { id: "q-2" }],
-          steeringIds: ["q-2"],
+          steerAttempts: { "q-2": steerAttempt("cmd-2") },
           view: viewOf({
             ...IDLE_THREAD,
             messageIds: ["q-1"],
-            activities: [steerFailed("a", "q-2")],
+            activities: [steerFailed("turn-steer-rejected:cmd-2", "q-2", "deferred")],
           }),
         }),
       ),
-    ).toEqual({ kind: "reconcile", removeIds: ["q-1"], endSteerIds: ["q-2"] });
+    ).toEqual({
+      kind: "reconcile",
+      removeIds: ["q-1"],
+      endSteers: [
+        {
+          messageId: "q-2",
+          attempt: steerAttempt("cmd-2"),
+          reason: "deferred",
+          error: "Steer rejected.",
+        },
+      ],
+    });
+  });
+
+  it("never ends a re-steer on a stale rejection of an earlier attempt", () => {
+    expect(
+      resolveQueueDrainStep(
+        input({
+          queue: [{ id: "q-1" }],
+          steerAttempts: { "q-1": steerAttempt("cmd-new") },
+          view: viewOf({
+            ...RUNNING_THREAD,
+            activities: [steerFailed("turn-steer-rejected:cmd-old", "q-1", "deferred")],
+          }),
+        }),
+      ),
+    ).toEqual({ kind: "wait", reason: "busy" });
   });
 
   it("sends a local draft with no thread view through the foreground sender", () => {
@@ -312,7 +343,7 @@ describe("resolveQueueDrainStep", () => {
       { queue: [{ id: "q-1", deliveryStatus: "sending" as const }] },
       "wait:in-flight",
     ],
-    ["a steering head", { steeringIds: ["q-1"] }, "wait:steering"],
+    ["a steering head", { steerAttempts: { "q-1": steerAttempt("cmd-1") } }, "wait:steering"],
     ["an idle thread", {}, "send"],
   ] as const)("resolves %s", (_label, overrides, expected) => {
     expect(kinds([resolveQueueDrainStep(input(overrides as Partial<QueueDrainInput>))])).toEqual([

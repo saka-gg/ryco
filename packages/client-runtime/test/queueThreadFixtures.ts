@@ -280,6 +280,15 @@ export function turnStartFailed(id: string, messageId: string, detail?: string):
   };
 }
 
-export function steerFailed(id: string, messageId: string): ActivityFixture {
-  return { id, kind: "provider.turn.steer.failed", payload: { messageId } };
+/** A steer rejection row; `id` is the activity id, `turn-steer-rejected:<commandId>` in production. */
+export function steerFailed(
+  id: string,
+  messageId: string,
+  reason?: "deferred" | "failed",
+): ActivityFixture {
+  return {
+    id,
+    kind: "provider.turn.steer.failed",
+    payload: { messageId, error: "Steer rejected.", ...(reason ? { reason } : {}) },
+  };
 }

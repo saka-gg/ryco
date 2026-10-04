@@ -6,6 +6,11 @@ import {
   partitionNewQueueFailureCauses,
   type QueueHold,
 } from "./hold.ts";
+import {
+  collectQueuedMessageSteerOutcomes,
+  type QueuedMessageSteerAttempt,
+  type QueuedMessageSteerRejection,
+} from "./logic.ts";
 import type { QueueThreadView } from "./threadView.ts";
 
 export type QueueDrainWaitReason =
@@ -26,7 +31,8 @@ export interface QueueDrainInput {
     readonly id: string;
     readonly deliveryStatus?: "sending" | "failed";
   }>;
-  readonly steeringIds: ReadonlyArray<string>;
+  /** Live steer attempts by message id. An entry with one is never sent as a turn. */
+  readonly steerAttempts: Readonly<Record<string, QueuedMessageSteerAttempt>>;
   readonly hold: QueueHold | null;
   /** undefined → the baseline step runs first. */
   readonly acknowledgedCauseKeys: readonly string[] | undefined;
@@ -44,7 +50,11 @@ export type QueueDrainStep =
   | { readonly kind: "idle" }
   | { readonly kind: "baseline"; readonly causeKeys: string[] }
   | { readonly kind: "thread-gone" }
-  | { readonly kind: "reconcile"; readonly removeIds: string[]; readonly endSteerIds: string[] }
+  | {
+      readonly kind: "reconcile";
+      readonly removeIds: string[];
+      readonly endSteers: QueueDrainSteerRejection[];
+    }
   | { readonly kind: "dispatch-started"; readonly messageId: string }
   | { readonly kind: "dispatch-failed"; readonly hold: QueueHold }
   | { readonly kind: "acknowledge"; readonly causeKeys: string[] }
@@ -56,6 +66,8 @@ export type QueueDrainStep =
       readonly sender: "foreground" | "background";
     };
 
+export type QueueDrainSteerRejection = QueuedMessageSteerRejection;
+
 const IDLE: QueueDrainStep = { kind: "idle" };
 const THREAD_GONE: QueueDrainStep = { kind: "thread-gone" };
 const WAIT_STEPS = {} as Record<QueueDrainWaitReason, QueueDrainStep>;
@@ -65,11 +77,11 @@ function wait(reason: QueueDrainWaitReason): QueueDrainStep {
 
 function headWaitReason(
   head: QueueDrainInput["queue"][number],
-  steeringIds: ReadonlyArray<string>,
+  steerAttempts: QueueDrainInput["steerAttempts"],
 ): QueueDrainWaitReason | null {
   if (head.deliveryStatus === "failed") return "failed-head";
   if (head.deliveryStatus === "sending") return "in-flight";
-  if (steeringIds.includes(head.id)) return "steering";
+  if (steerAttempts[head.id] !== undefined) return "steering";
   return null;
 }
 
@@ -90,7 +102,7 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
     if (input.hold !== null) return wait("held");
     if (input.pendingDispatch !== null) return wait("awaiting-ack");
     if (!environment.mutationReady) return wait("environment");
-    const headWait = headWaitReason(head, input.steeringIds);
+    const headWait = headWaitReason(head, input.steerAttempts);
     if (headWait !== null) return wait(headWait);
     return { kind: "send", messageId: head.id, sender: "foreground" };
   }
@@ -112,15 +124,20 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
     };
   }
 
-  // 6. Projected queued messages were delivered (including a lost reply);
-  // a rejected steer returns its message to the queue.
+  // 6. Projected queued messages were delivered (including a lost reply or an
+  // accepted steer); a steer rejected by its own request returns its message to
+  // the queue. Runs before any eligibility check.
   if (view.detailLoaded) {
     const removeIds = queue
       .filter((entry) => view.projectedMessageIds.has(entry.id))
       .map((entry) => entry.id);
-    const endSteerIds = input.steeringIds.filter((id) => view.steerFailedMessageIds.has(id));
-    if (removeIds.length > 0 || endSteerIds.length > 0) {
-      return { kind: "reconcile", removeIds, endSteerIds };
+    const endSteers = collectQueuedMessageSteerOutcomes({
+      attempts: Object.entries(input.steerAttempts),
+      projectedMessageIds: view.projectedMessageIds,
+      rejectionsByActivityId: view.steerRejectionsByActivityId,
+    }).rejected;
+    if (removeIds.length > 0 || endSteers.length > 0) {
+      return { kind: "reconcile", removeIds, endSteers };
     }
   }
 
@@ -165,7 +182,7 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
   if (!environment.mutationReady) return wait("environment");
   if (input.sender === null) return wait("no-sender");
   if (!view.detailLoaded) return wait("detail");
-  const headWait = headWaitReason(head, input.steeringIds);
+  const headWait = headWaitReason(head, input.steerAttempts);
   if (headWait !== null) return wait(headWait);
 
   // 17.

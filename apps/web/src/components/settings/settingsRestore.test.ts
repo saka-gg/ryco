@@ -25,6 +25,25 @@ describe("settings reset ownership", () => {
       patch: { enableProviderUpdateChecks: true, addProjectBaseDirectory: "" },
     });
   });
+  it("restores the follow-up behaviour as a local preference", () => {
+    const plan = settingsRestorePlan(
+      { ...DEFAULT_UNIFIED_SETTINGS, followUpBehavior: "steer" },
+      "system",
+      "client",
+    );
+    expect(plan).toEqual({
+      labels: ["Follow-up while working"],
+      resetTheme: false,
+      patch: { followUpBehavior: "queue" },
+    });
+    expect(
+      settingsRestorePlan(
+        { ...DEFAULT_UNIFIED_SETTINGS, followUpBehavior: "steer" },
+        "system",
+        "node",
+      ).patch,
+    ).toEqual({});
+  });
   it("does not write defaults for unchanged settings", () => {
     expect(settingsRestorePlan(DEFAULT_UNIFIED_SETTINGS, "system", "node").patch).toEqual({});
   });

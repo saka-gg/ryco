@@ -6,7 +6,10 @@ import type {
   TurnId,
 } from "@ryco/contracts";
 
+import type { TurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
+
 import { derivePendingApprovals, derivePendingUserInputs } from "../session/session-logic.ts";
+import { indexTurnSteerRejections } from "./logic.ts";
 import { selectEnvironmentState, type AppState } from "../threads/store.ts";
 import { selectThreadDetailLoaded } from "../threads/storeSelectors.ts";
 
@@ -48,7 +51,8 @@ export interface QueueThreadView {
   readonly latestTurnPlaceholderCheckpoint: boolean;
   readonly projectedMessageIds: ReadonlySet<string>;
   readonly turnStartFailures: ReadonlyArray<QueueTurnStartFailure>;
-  readonly steerFailedMessageIds: ReadonlySet<string>;
+  /** Steer rejection rows keyed by activity id: one per steer request (`commandId`). */
+  readonly steerRejectionsByActivityId: ReadonlyMap<string, TurnSteerRejectionActivity>;
 }
 
 export interface QueueTurnStartFailure {
@@ -59,7 +63,7 @@ export interface QueueTurnStartFailure {
 
 interface ActivityDerivedView {
   readonly turnStartFailures: ReadonlyArray<QueueTurnStartFailure>;
-  readonly steerFailedMessageIds: ReadonlySet<string>;
+  readonly steerRejectionsByActivityId: ReadonlyMap<string, TurnSteerRejectionActivity>;
   readonly pendingApproval: boolean;
   readonly pendingUserInput: boolean;
 }
@@ -74,7 +78,7 @@ const PLACEHOLDER_CHECKPOINT_REF_PREFIX = "provider-diff:";
 const EMPTY_MESSAGE_ID_SET: ReadonlySet<string> = new Set();
 const EMPTY_ACTIVITY_VIEW: ActivityDerivedView = {
   turnStartFailures: [],
-  steerFailedMessageIds: EMPTY_MESSAGE_ID_SET,
+  steerRejectionsByActivityId: indexTurnSteerRejections([]),
   pendingApproval: false,
   pendingUserInput: false,
 };
@@ -113,7 +117,6 @@ function readActivityView(
   if (cached) return cached;
   const activities: OrchestrationThreadActivity[] = [];
   const turnStartFailures: QueueTurnStartFailure[] = [];
-  const steerFailedMessageIds = new Set<string>();
   for (const id of ids) {
     const activity = byId[id];
     if (!activity) continue;
@@ -127,15 +130,11 @@ function readActivityView(
           detail: readPayloadString(activity.payload, "detail"),
         });
       }
-    } else if (activity.kind === "provider.turn.steer.failed") {
-      const messageId = readPayloadString(activity.payload, "messageId");
-      if (messageId !== null) steerFailedMessageIds.add(messageId);
     }
   }
   const next: ActivityDerivedView = {
     turnStartFailures,
-    steerFailedMessageIds:
-      steerFailedMessageIds.size > 0 ? steerFailedMessageIds : EMPTY_MESSAGE_ID_SET,
+    steerRejectionsByActivityId: indexTurnSteerRejections(activities),
     pendingApproval: derivePendingApprovals(activities).length > 0,
     pendingUserInput: derivePendingUserInputs(activities).length > 0,
   };
@@ -226,7 +225,7 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
     ),
     projectedMessageIds: readProjectedMessageIds(messageIds),
     turnStartFailures: activityView.turnStartFailures,
-    steerFailedMessageIds: activityView.steerFailedMessageIds,
+    steerRejectionsByActivityId: activityView.steerRejectionsByActivityId,
   };
 }
 

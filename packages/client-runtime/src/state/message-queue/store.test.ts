@@ -1,7 +1,15 @@
+import { TurnId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { createInterruptQueueHold, type QueueHold } from "./hold.ts";
-import { createMessageQueueStore } from "./store.ts";
+import { createMessageQueueStore, steeringIdsOf } from "./store.ts";
+
+const attempt = (commandId: string) => ({
+  commandId,
+  expectedTurnId: TurnId.make("turn-1"),
+  startedAt: "2026-10-01T12:00:00.000Z",
+  explicit: true,
+});
 
 function setup() {
   const store = createMessageQueueStore();
@@ -60,8 +68,44 @@ describe("queued send ownership", () => {
 
   it("does not send a message already being steered", () => {
     const store = setup();
-    store.getState().beginSteer("env:thread", "first");
+    store.getState().beginSteer("env:thread", "first", attempt("cmd-1"));
     expect(store.getState().beginSend("env:thread", "first")).toBe(false);
+  });
+});
+
+describe("steer attempts", () => {
+  it("stores one attempt per message and ends it only by its own command id", () => {
+    const store = setup();
+    store.getState().beginSteer("env:thread", "first", attempt("cmd-1"));
+    store.getState().beginSteer("env:thread", "first", attempt("cmd-2"));
+    expect(store.getState().steerAttemptsByThreadKey["env:thread"]).toEqual({
+      first: attempt("cmd-1"),
+    });
+    expect(steeringIdsOf(store.getState().steerAttemptsByThreadKey["env:thread"])).toEqual([
+      "first",
+    ]);
+
+    store.getState().endSteer("env:thread", "first", "cmd-stale");
+    expect(store.getState().steerAttemptsByThreadKey["env:thread"]?.first).toEqual(
+      attempt("cmd-1"),
+    );
+    expect(store.getState().beginSend("env:thread", "first")).toBe(false);
+
+    store.getState().endSteer("env:thread", "first", "cmd-1");
+    expect(store.getState().steerAttemptsByThreadKey).toEqual({});
+    expect(store.getState().beginSend("env:thread", "first")).toBe(true);
+  });
+
+  it("drops attempts with their message and with the thread's queue", () => {
+    const store = setup();
+    store.getState().beginSteer("env:thread", "first", attempt("cmd-1"));
+    store.getState().beginSteer("env:thread", "second", attempt("cmd-2"));
+    store.getState().remove("env:thread", "first");
+    expect(steeringIdsOf(store.getState().steerAttemptsByThreadKey["env:thread"])).toEqual([
+      "second",
+    ]);
+    store.getState().clear("env:thread");
+    expect(store.getState().steerAttemptsByThreadKey).toEqual({});
   });
 });
 
@@ -199,14 +243,14 @@ describe("queue holds", () => {
 
   it("resets everything and bumps the epoch", () => {
     const store = setup();
-    store.getState().beginSteer("env:thread", "second");
+    store.getState().beginSteer("env:thread", "second", attempt("cmd-2"));
     store.getState().acknowledgeCauses("env:thread", ["seen"]);
     store.getState().hold("env:thread", errorHold);
     const epoch = store.getState().epoch;
     store.getState().reset();
     const state = store.getState();
     expect(state.queuesByThreadKey).toEqual({});
-    expect(state.steeringIdsByThreadKey).toEqual({});
+    expect(state.steerAttemptsByThreadKey).toEqual({});
     expect(state.holdsByThreadKey).toEqual({});
     expect(state.acknowledgedCauseKeysByThreadKey).toEqual({});
     expect(state.epoch).toBe(epoch + 1);

@@ -345,7 +345,7 @@ describe("ChatView Conversation (full app)", () => {
         .element(page.getByRole("button", { name: /Retry queued message/ }))
         .toBeVisible();
     } finally {
-      useMessageQueueStore.setState({ queuesByThreadKey: {}, steeringIdsByThreadKey: {} });
+      useMessageQueueStore.setState({ queuesByThreadKey: {}, steerAttemptsByThreadKey: {} });
       await mounted.cleanup();
     }
   });

@@ -1,14 +1,21 @@
 import type {
   AgentTokenMode,
   CommandId,
+  FollowUpBehavior,
   MessageId,
   ModelSelection,
   ProviderInteractionMode,
   RuntimeMode,
   ThreadId,
   TurnId,
+  TurnSteerRejectionReason,
   UploadChatAttachment,
 } from "@ryco/contracts";
+import {
+  readTurnSteerRejectionActivity,
+  turnSteerRejectionActivityId,
+  type TurnSteerRejectionActivity,
+} from "@ryco/shared/turnSteer";
 
 /**
  * The queue is deliberately independent of the UI send pipeline. The caller
@@ -118,6 +125,122 @@ export function resolveQueuedMessageSteerEligibility(
     };
   }
   return { allowed: true, expectedTurnId: input.activeTurnId };
+}
+
+/** What sending a composer message does: start a turn, queue it, or steer the running turn. */
+export type ComposerFollowUpAction = "send" | "queue" | "steer";
+
+export function alternateFollowUpBehavior(behavior: FollowUpBehavior): FollowUpBehavior {
+  return behavior === "queue" ? "steer" : "queue";
+}
+
+/**
+ * Not running → "send". Otherwise the preferred behaviour (inverted by Mod+Enter); "steer"
+ * degrades to "queue" when the surface cannot steer or the input is a slash command.
+ */
+export function resolveComposerFollowUpAction(input: {
+  readonly turnRunning: boolean;
+  readonly followUpBehavior: FollowUpBehavior;
+  readonly invert: boolean;
+  readonly surfaceAllowsSteer: boolean;
+  readonly isSlashCommand: boolean;
+}): ComposerFollowUpAction {
+  if (!input.turnRunning) return "send";
+  const preferred = input.invert
+    ? alternateFollowUpBehavior(input.followUpBehavior)
+    : input.followUpBehavior;
+  if (preferred === "steer" && input.surfaceAllowsSteer && !input.isSlashCommand) return "steer";
+  return "queue";
+}
+
+/**
+ * One steer of one queued message. Keyed by the steer request's `commandId`: only that request's
+ * own outcome may end it, so a stale rejection of an earlier attempt never ends a re-steer.
+ */
+export interface QueuedMessageSteerAttempt {
+  readonly commandId: string;
+  readonly expectedTurnId: TurnId;
+  readonly startedAt: string;
+  /** The user asked for this steer (Steer button, Mod+Enter); outcomes are surfaced. */
+  readonly explicit: boolean;
+}
+
+export type QueuedMessageSteerOutcome =
+  | { readonly status: "pending" }
+  | { readonly status: "accepted" }
+  | {
+      readonly status: "rejected";
+      readonly reason: TurnSteerRejectionReason;
+      readonly error: string;
+    };
+
+const EMPTY_STEER_REJECTIONS: ReadonlyMap<string, TurnSteerRejectionActivity> = new Map();
+
+/** Steer rejection rows keyed by activity id (one row per steer request). */
+export function indexTurnSteerRejections(
+  activities: ReadonlyArray<{
+    readonly id: string;
+    readonly kind: string;
+    readonly payload: unknown;
+  }>,
+): ReadonlyMap<string, TurnSteerRejectionActivity> {
+  let index: Map<string, TurnSteerRejectionActivity> | undefined;
+  for (const activity of activities) {
+    const rejection = readTurnSteerRejectionActivity(activity);
+    if (rejection === null) continue;
+    index ??= new Map();
+    index.set(activity.id, rejection);
+  }
+  return index ?? EMPTY_STEER_REJECTIONS;
+}
+
+/** Accepted if projected; rejected only by the activity of THIS attempt's request; else pending. */
+export function resolveQueuedMessageSteerOutcome(input: {
+  readonly messageId: string;
+  readonly attempt: QueuedMessageSteerAttempt;
+  readonly projectedMessageIds: ReadonlySet<string>;
+  readonly rejectionsByActivityId: ReadonlyMap<string, TurnSteerRejectionActivity>;
+}): QueuedMessageSteerOutcome {
+  if (input.projectedMessageIds.has(input.messageId)) return { status: "accepted" };
+  const rejection = input.rejectionsByActivityId.get(
+    turnSteerRejectionActivityId(input.attempt.commandId),
+  );
+  if (rejection === undefined) return { status: "pending" };
+  if (rejection.messageId !== null && rejection.messageId !== input.messageId) {
+    return { status: "pending" };
+  }
+  return { status: "rejected", reason: rejection.reason, error: rejection.error };
+}
+
+/** A steer attempt its own request rejected: the message stays queued for the next turn. */
+export interface QueuedMessageSteerRejection {
+  readonly messageId: string;
+  readonly attempt: QueuedMessageSteerAttempt;
+  readonly reason: TurnSteerRejectionReason;
+  readonly error: string;
+}
+
+/** Settled steer attempts: accepted (projected) message ids and rejections, in attempt order. */
+export function collectQueuedMessageSteerOutcomes(input: {
+  readonly attempts: Iterable<readonly [string, QueuedMessageSteerAttempt]>;
+  readonly projectedMessageIds: ReadonlySet<string>;
+  readonly rejectionsByActivityId: ReadonlyMap<string, TurnSteerRejectionActivity>;
+}): { readonly accepted: string[]; readonly rejected: QueuedMessageSteerRejection[] } {
+  const accepted: string[] = [];
+  const rejected: QueuedMessageSteerRejection[] = [];
+  for (const [messageId, attempt] of input.attempts) {
+    const outcome = resolveQueuedMessageSteerOutcome({
+      messageId,
+      attempt,
+      projectedMessageIds: input.projectedMessageIds,
+      rejectionsByActivityId: input.rejectionsByActivityId,
+    });
+    if (outcome.status === "accepted") accepted.push(messageId);
+    else if (outcome.status === "rejected") {
+      rejected.push({ messageId, attempt, reason: outcome.reason, error: outcome.error });
+    }
+  }
+  return { accepted, rejected };
 }
 
 export function removeQueuedMessage<Composer, Settings>(

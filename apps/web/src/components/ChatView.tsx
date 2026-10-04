@@ -59,7 +59,9 @@ import {
 } from "@ryco/client-runtime/scoped";
 import {
   buildQueuedMessageSteerCommand,
+  resolveComposerFollowUpAction,
   resolveQueuedMessageSteerEligibility,
+  type QueuedMessageSteerAttempts,
 } from "@ryco/client-runtime/state/message-queue";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import { truncate } from "@ryco/shared/String";
@@ -332,7 +334,7 @@ const PROVIDER_STATUS_KEY_SEPARATOR = "\0";
 
 // Stable identity so the message-queue selector doesn't churn on empty threads.
 const EMPTY_QUEUED_MESSAGES: readonly QueuedMessage[] = Object.freeze([]);
-const EMPTY_STEERING_MESSAGE_IDS: readonly string[] = Object.freeze([]);
+const EMPTY_STEER_ATTEMPTS: QueuedMessageSteerAttempts = Object.freeze({});
 
 function providerStatusesContentKey(providers: ReadonlyArray<ServerProvider>): string {
   const parts: string[] = [`${providers.length}`];
@@ -870,10 +872,14 @@ export default function ChatView(props: ChatViewProps) {
       ? (store.queuesByThreadKey[activeThreadKey] ?? EMPTY_QUEUED_MESSAGES)
       : EMPTY_QUEUED_MESSAGES,
   );
-  const steeringQueuedMessageIds = useMessageQueueStore((store) =>
+  const queuedMessageSteerAttempts = useMessageQueueStore((store) =>
     activeThreadKey
-      ? (store.steeringIdsByThreadKey[activeThreadKey] ?? EMPTY_STEERING_MESSAGE_IDS)
-      : EMPTY_STEERING_MESSAGE_IDS,
+      ? (store.steerAttemptsByThreadKey[activeThreadKey] ?? EMPTY_STEER_ATTEMPTS)
+      : EMPTY_STEER_ATTEMPTS,
+  );
+  const steeringQueuedMessageIds = useMemo(
+    () => Object.keys(queuedMessageSteerAttempts),
+    [queuedMessageSteerAttempts],
   );
   const queueHold = useMessageQueueStore((store) =>
     activeThreadKey ? (store.holdsByThreadKey[activeThreadKey] ?? null) : null,
@@ -3142,10 +3148,14 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [drainEditorsBeforeSend]);
 
-  const getQueuedSteerEligibility = useCallback(
-    (message: QueuedMessage) => {
-      if (hasRetiredProjectMemory(message.composer))
-        return { allowed: false as const, reason: REMOVED_PROJECT_MEMORY_MESSAGE };
+  /** Whether a message with these turn settings could steer the running turn right now. */
+  const getSteerEligibility = useCallback(
+    (snapshot: {
+      readonly modelSelection: ModelSelection;
+      readonly runtimeMode: RuntimeMode;
+      readonly interactionMode: ProviderInteractionMode;
+      readonly tokenMode: AgentTokenMode | undefined;
+    }) => {
       const providerInstanceId = activeThread?.session?.providerInstanceId;
       const provider = providerInstanceId
         ? composerProviderStatuses.find((entry) => entry.instanceId === providerInstanceId)
@@ -3157,13 +3167,13 @@ export default function ChatView(props: ChatViewProps) {
         turnRunning: phase === "running",
         activeTurnId: activeThread?.session?.activeTurnId,
         supportsTurnSteering: provider?.supportsTurnSteering === true,
-        queuedModelSelection: message.composer.selectedModelSelection,
+        queuedModelSelection: snapshot.modelSelection,
         activeModelSelection: activeThread?.modelSelection,
-        queuedRuntimeMode: message.settings.runtimeMode,
+        queuedRuntimeMode: snapshot.runtimeMode,
         activeRuntimeMode: activeThread?.runtimeMode,
-        queuedInteractionMode: message.settings.interactionMode,
+        queuedInteractionMode: snapshot.interactionMode,
         activeInteractionMode,
-        queuedTokenMode: message.settings.tokenMode,
+        queuedTokenMode: snapshot.tokenMode,
         activeTokenMode,
       });
     },
@@ -3176,6 +3186,20 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
+  const getQueuedSteerEligibility = useCallback(
+    (message: QueuedMessage) => {
+      if (hasRetiredProjectMemory(message.composer))
+        return { allowed: false as const, reason: REMOVED_PROJECT_MEMORY_MESSAGE };
+      return getSteerEligibility({
+        modelSelection: message.composer.selectedModelSelection,
+        runtimeMode: message.settings.runtimeMode,
+        interactionMode: message.settings.interactionMode,
+        tokenMode: message.settings.tokenMode,
+      });
+    },
+    [getSteerEligibility],
+  );
+
   const getQueuedSteerUnavailableReason = useCallback(
     (message: QueuedMessage): string | null => {
       const eligibility = getQueuedSteerEligibility(message);
@@ -3184,26 +3208,56 @@ export default function ChatView(props: ChatViewProps) {
     [getQueuedSteerEligibility],
   );
 
-  const handleSteerQueuedMessage = useCallback(
-    async (message: QueuedMessage) => {
+  /**
+   * Starts a steer attempt for a queued entry. The entry stays queued throughout: an accepted
+   * steer is reconciled away by its projection, any rejection returns it to the queue, which
+   * sends it as the next turn. `explicit` attempts (Steer button, Mod+Enter) report problems.
+   */
+  const steerQueuedEntry = useCallback(
+    async (
+      message: QueuedMessage,
+      options: { readonly explicit: boolean; readonly prepareEditors: boolean },
+    ) => {
       if (!activeThreadKey || !activeThread) return;
       const eligibility = getQueuedSteerEligibility(message);
       if (!eligibility.allowed) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Cannot steer this message",
-            description: eligibility.reason,
-          }),
-        );
+        if (options.explicit) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Cannot steer this message",
+              description: eligibility.reason,
+            }),
+          );
+        }
         return;
       }
       const api = readEnvironmentApi(environmentId);
       if (!api) return;
+      const queued = useMessageQueueStore
+        .getState()
+        .queuesByThreadKey[activeThreadKey]?.find((entry) => entry.id === message.id);
+      if (!queued || queued.deliveryStatus !== undefined) return;
 
-      if (!(await prepareEditorSend())) return;
-      beginQueuedMessageSteer(activeThreadKey, message.id);
+      // Claimed synchronously, before any await, so the drain never sends it as a turn.
+      const commandId = newCommandId();
+      beginQueuedMessageSteer(activeThreadKey, message.id, {
+        commandId,
+        expectedTurnId: eligibility.expectedTurnId,
+        startedAt: new Date().toISOString(),
+        explicit: options.explicit,
+      });
+      if (
+        useMessageQueueStore.getState().steerAttemptsByThreadKey[activeThreadKey]?.[message.id]
+          ?.commandId !== commandId
+      ) {
+        return;
+      }
       try {
+        if (options.prepareEditors && !(await prepareEditorSend())) {
+          endQueuedMessageSteer(activeThreadKey, message.id, commandId);
+          return;
+        }
         const baseText = buildOutgoingMessageText({
           composer: message.composer,
           formatOutgoingPrompt,
@@ -3216,7 +3270,7 @@ export default function ChatView(props: ChatViewProps) {
         const requestedAt = new Date().toISOString();
         await api.orchestration.dispatchCommand(
           buildQueuedMessageSteerCommand({
-            commandId: newCommandId(),
+            commandId,
             threadId: activeThread.id,
             expectedTurnId: eligibility.expectedTurnId,
             messageId: MessageId.make(message.id),
@@ -3227,7 +3281,7 @@ export default function ChatView(props: ChatViewProps) {
           }),
         );
       } catch (error) {
-        endQueuedMessageSteer(activeThreadKey, message.id);
+        endQueuedMessageSteer(activeThreadKey, message.id, commandId);
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -3246,6 +3300,25 @@ export default function ChatView(props: ChatViewProps) {
       environmentId,
       getQueuedSteerEligibility,
     ],
+  );
+
+  const handleSteerQueuedMessage = useCallback(
+    (message: QueuedMessage) => steerQueuedEntry(message, { explicit: true, prepareEditors: true }),
+    [steerQueuedEntry],
+  );
+
+  /** The composer's running-state hint: why its current selection could not steer. */
+  const getFollowUpSteerUnavailableReason = useCallback(
+    (snapshot: {
+      readonly modelSelection: ModelSelection;
+      readonly runtimeMode: RuntimeMode;
+      readonly interactionMode: ProviderInteractionMode;
+      readonly tokenMode: AgentTokenMode;
+    }): string | null => {
+      const eligibility = getSteerEligibility(snapshot);
+      return eligibility.allowed ? null : eligibility.reason;
+    },
+    [getSteerEligibility],
   );
 
   // Build the executeChatSendTurn input from a composer snapshot and dispatch it.
@@ -3497,7 +3570,10 @@ export default function ChatView(props: ChatViewProps) {
     );
   };
 
-  const runSend = async (e?: { preventDefault: () => void }) => {
+  const runSend = async (
+    e?: { preventDefault: () => void },
+    options?: { readonly invertFollowUp?: boolean },
+  ) => {
     e?.preventDefault();
     if (!dispatchCapability.allowed || hostedDraftTarget.pending !== null) return;
     const api = readEnvironmentApi(environmentId);
@@ -3799,7 +3875,7 @@ export default function ChatView(props: ChatViewProps) {
         editorSendPreparationRef.current = false;
       }
       const queuedMessageId = newMessageId();
-      enqueueMessage(activeThreadKey, {
+      const queuedEntry: QueuedMessage = {
         id: queuedMessageId,
         createdAt: new Date().toISOString(),
         composer: {
@@ -3809,7 +3885,32 @@ export default function ChatView(props: ChatViewProps) {
           images: composerSnapshot.images.map(cloneComposerImageForRetry),
         },
         settings: settingsSnapshot,
+      };
+      enqueueMessage(activeThreadKey, queuedEntry);
+      // Steer = enqueue, then start a steer attempt at once: every failure falls back to the
+      // queue. The phone tier is frozen and always queues; slash input never steers.
+      const invertFollowUp = options?.invertFollowUp === true;
+      const followUpAction = resolveComposerFollowUpAction({
+        turnRunning: phase === "running",
+        followUpBehavior: settings.followUpBehavior,
+        invert: invertFollowUp,
+        surfaceAllowsSteer: presentationTier !== "phone",
+        isSlashCommand: trimmed.startsWith("/"),
       });
+      if (followUpAction === "steer") {
+        const eligibility = getQueuedSteerEligibility(queuedEntry);
+        if (eligibility.allowed) {
+          void steerQueuedEntry(queuedEntry, { explicit: invertFollowUp, prepareEditors: false });
+        } else if (invertFollowUp) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Queued instead",
+              description: eligibility.reason,
+            }),
+          );
+        }
+      }
       if (!composerChangedDuringPreparation()) {
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
@@ -3824,13 +3925,16 @@ export default function ChatView(props: ChatViewProps) {
   const composerSubmitPendingRef = useRef(false);
   const runSendRef = useRef(runSend);
   runSendRef.current = runSend;
-  const onSend = useCallback((e?: { preventDefault: () => void }) => {
-    if (composerSubmitPendingRef.current) return;
-    composerSubmitPendingRef.current = true;
-    void runSendRef.current(e).finally(() => {
-      composerSubmitPendingRef.current = false;
-    });
-  }, []);
+  const onSend = useCallback(
+    (e?: { preventDefault: () => void }, options?: { readonly invertFollowUp?: boolean }) => {
+      if (composerSubmitPendingRef.current) return;
+      composerSubmitPendingRef.current = true;
+      void runSendRef.current(e, options).finally(() => {
+        composerSubmitPendingRef.current = false;
+      });
+    },
+    [],
+  );
 
   // Queued messages drain through the shared coordinator (`messageQueueDrain`),
   // for every thread with a queue. While this ChatView is mounted it is its
@@ -5011,6 +5115,8 @@ export default function ChatView(props: ChatViewProps) {
                   composerTerminalContextsRef={composerTerminalContextsRef}
                   shouldAutoScrollRef={isAtEndRef}
                   scheduleStickToBottom={scrollToEnd}
+                  followUpSurfaceAllowsSteer={presentationTier !== "phone"}
+                  getFollowUpSteerUnavailableReason={getFollowUpSteerUnavailableReason}
                   onSend={onSend}
                   onInterrupt={onInterrupt}
                   onImplementPlanInNewThread={onImplementPlanInNewThread}

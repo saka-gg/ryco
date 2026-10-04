@@ -1,9 +1,14 @@
 import {
   ORCHESTRATION_WS_METHODS,
+  type EnvironmentApi,
+  type EventId,
   type MessageId,
+  type OrchestrationReadModel,
   ProviderInstanceId,
   type ServerConfig,
+  type TurnId,
 } from "@ryco/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import {
   PROMPT_STASH_STORAGE_KEY,
   stripInlineTerminalContextPlaceholders,
@@ -18,6 +23,13 @@ import {
   removeInlineTerminalContextPlaceholder,
 } from "../lib/terminalContext";
 import { isMacPlatform } from "../lib/utils";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+  readEnvironmentApi,
+} from "../environmentApi";
+import { useMessageQueueStore } from "../messageQueueStore";
+import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import {
   setupChatViewBrowserSuite,
@@ -53,9 +65,11 @@ import {
   pressComposerKey,
   pressComposerUndo,
   releaseModShortcut,
+  rpcHarness,
   selectAllComposerContent,
   setComposerSelectionByTextOffsets,
   setDraftThreadWithoutWorktree,
+  toThreadWindowSnapshot,
   waitForButtonByText,
   waitForButtonContainingText,
   waitForComposerEditor,
@@ -1918,5 +1932,215 @@ describe("ChatView Composer (full app)", () => {
     } finally {
       await mounted.cleanup();
     }
+  });
+  describe("follow-up while a turn runs", () => {
+    type RecordedCommand = { readonly type: string; readonly commandId?: string } & Record<
+      string,
+      unknown
+    >;
+
+    async function mountSteerableRunningThread(followUpBehavior: "queue" | "steer") {
+      localStorage.setItem(
+        "ryco:client-settings:v1",
+        JSON.stringify({ ...DEFAULT_CLIENT_SETTINGS, followUpBehavior }),
+      );
+      const base = createSnapshotForTargetUser({
+        targetMessageId: "msg-follow-up-existing" as MessageId,
+        targetText: "Existing turn",
+        sessionStatus: "running",
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          session: {
+            ...thread.session!,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            activeTurnId: "follow-up-turn" as TurnId,
+          },
+        })),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (value) => {
+          value.serverConfig = {
+            ...value.serverConfig,
+            providers: value.serverConfig.providers.map((provider) => ({
+              ...provider,
+              supportsTurnSteering: true,
+            })),
+          };
+        },
+      });
+      await waitForComposerEditor();
+      const commands: RecordedCommand[] = [];
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const dispatchCommand: EnvironmentApi["orchestration"]["dispatchCommand"] = async (
+        command,
+      ) => {
+        commands.push(command as unknown as RecordedCommand);
+        return { sequence: snapshot.snapshotSequence + 1 };
+      };
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+        ...api,
+        orchestration: { ...api.orchestration, dispatchCommand },
+      });
+      return {
+        snapshot,
+        commands,
+        steers: () => commands.filter((command) => command.type === "thread.turn.steer"),
+        cleanup: async () => {
+          useMessageQueueStore.getState().clear(THREAD_KEY);
+          __resetEnvironmentApiOverridesForTests();
+          localStorage.removeItem("ryco:client-settings:v1");
+          await mounted.cleanup();
+        },
+      };
+    }
+
+    async function submitFollowUp(text: string, options: { readonly invert: boolean }) {
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, text);
+      await waitForComposerText(text);
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      const mac = isMacPlatform(navigator.platform);
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          metaKey: options.invert && mac,
+          ctrlKey: options.invert && !mac,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await vi.waitFor(
+        () => expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1),
+        { timeout: 8_000, interval: 16 },
+      );
+      await waitForLayout();
+    }
+
+    const queuedEntry = () => useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]![0]!;
+    const steerAttempt = () =>
+      useMessageQueueStore.getState().steerAttemptsByThreadKey[THREAD_KEY]?.[queuedEntry().id];
+
+    it("steers with Enter in steer mode and shows the row as steering", async () => {
+      const harness = await mountSteerableRunningThread("steer");
+      try {
+        const editor = await waitForComposerEditor();
+        await vi.waitFor(() =>
+          expect(editor.getAttribute("aria-placeholder") ?? editor.textContent).toContain(
+            "Steer this turn",
+          ),
+        );
+        await submitFollowUp("Steer right now", { invert: false });
+        await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
+          timeout: 8_000,
+          interval: 16,
+        });
+        expect(harness.steers()[0]).toMatchObject({
+          expectedTurnId: "follow-up-turn",
+          message: { messageId: queuedEntry().id, text: "Steer right now" },
+        });
+        expect(steerAttempt()).toMatchObject({
+          commandId: harness.steers()[0]!.commandId,
+          explicit: false,
+        });
+        await expect
+          .element(page.getByRole("button", { name: /Steer queued message.*into the active turn/ }))
+          .toBeDisabled();
+      } finally {
+        await harness.cleanup();
+      }
+    });
+
+    it("queues with Mod+Enter in steer mode", async () => {
+      const harness = await mountSteerableRunningThread("steer");
+      try {
+        await submitFollowUp("Wait for the turn", { invert: true });
+        await waitForLayout();
+        expect(harness.steers()).toEqual([]);
+        expect(steerAttempt()).toBeUndefined();
+      } finally {
+        await harness.cleanup();
+      }
+    });
+
+    it("queues with Enter and steers explicitly with Mod+Enter in queue mode", async () => {
+      const harness = await mountSteerableRunningThread("queue");
+      try {
+        await submitFollowUp("Queue this one", { invert: false });
+        await waitForLayout();
+        expect(harness.steers()).toEqual([]);
+        useMessageQueueStore.getState().clear(THREAD_KEY);
+
+        await submitFollowUp("Steer this one", { invert: true });
+        await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
+          timeout: 8_000,
+          interval: 16,
+        });
+        expect(steerAttempt()).toMatchObject({ explicit: true });
+      } finally {
+        await harness.cleanup();
+      }
+    });
+
+    it("does not end a re-steer on a stale deferred rejection of an earlier attempt", async () => {
+      const harness = await mountSteerableRunningThread("steer");
+      try {
+        await submitFollowUp("Steer twice", { invert: false });
+        await vi.waitFor(() => expect(harness.steers()).toHaveLength(1));
+        const first = harness.steers()[0]!;
+        const messageId = queuedEntry().id;
+        // The first attempt ended without an outcome reaching this client; steer again.
+        useMessageQueueStore.getState().endSteer(THREAD_KEY, messageId, String(first.commandId));
+        await page
+          .getByRole("button", { name: /Steer queued message.*into the active turn/ })
+          .click();
+        await vi.waitFor(() => expect(harness.steers()).toHaveLength(2));
+        const second = harness.steers()[1]!;
+        expect(second.commandId).not.toBe(first.commandId);
+
+        // Now the first attempt's deferred rejection arrives: it must not end the re-steer.
+        const thread = harness.snapshot.threads.find((candidate) => candidate.id === THREAD_ID)!;
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThreadWindow, {
+          kind: "snapshot",
+          snapshot: toThreadWindowSnapshot(harness.snapshot.snapshotSequence + 50, {
+            ...thread,
+            activities: [
+              ...thread.activities,
+              {
+                id: `turn-steer-rejected:${String(first.commandId)}` as EventId,
+                tone: "info",
+                kind: "provider.turn.steer.failed",
+                summary: "Steer deferred",
+                payload: {
+                  messageId,
+                  expectedTurnId: "follow-up-turn",
+                  error: "The turn finished before this message could be steered.",
+                  reason: "deferred",
+                },
+                turnId: "follow-up-turn" as TurnId,
+                createdAt: NOW_ISO,
+              },
+            ],
+          }),
+        });
+        await vi.waitFor(() => {
+          const activities = selectThreadByRef(useStore.getState(), THREAD_REF)?.activities ?? [];
+          expect(
+            activities.some(
+              (activity) => activity.id === `turn-steer-rejected:${String(first.commandId)}`,
+            ),
+          ).toBe(true);
+        });
+        await waitForLayout();
+        await waitForLayout();
+        expect(steerAttempt()).toMatchObject({ commandId: second.commandId });
+      } finally {
+        await harness.cleanup();
+      }
+    });
   });
 });

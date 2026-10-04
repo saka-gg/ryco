@@ -204,7 +204,7 @@ describe("outbox drain gate (two environments)", () => {
       resolveQueueDrainStep({
         nowIso: "2026-08-19T10:00:00.000Z",
         queue: [{ id: queuedFor(ENV_A).messageId }],
-        steeringIds: [],
+        steerAttempts: {},
         hold: null,
         acknowledgedCauseKeys: [],
         headProviderInstanceId: null,
