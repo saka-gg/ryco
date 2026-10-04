@@ -7,7 +7,7 @@ import {
 } from "../../desktopRelaunchGuard.logic";
 import {
   createDesktopRelaunchScheduler,
-  type DesktopRelaunch,
+  type DesktopRelaunchChange,
 } from "../../desktopRelaunchScheduler";
 import { readPrimaryEnvironmentDescriptor } from "../../environments/primary";
 import { selectSidebarThreadsAcrossEnvironments, useStore } from "../../store";
@@ -36,17 +36,27 @@ function reportRelaunchFailure(error: unknown): void {
     stackedThreadToast({
       type: "error",
       title: "Ryco could not restart",
-      description: error instanceof Error ? error.message : "The change was not applied.",
+      description:
+        error instanceof Error
+          ? error.message
+          : "Your saved change applies the next time Ryco starts.",
     }),
   );
 }
 
 let waitingToastId: ReturnType<typeof toastManager.add> | null = null;
 
-/** One app-wide queue, so a change deferred from one settings page survives leaving it. */
+async function restartDesktop(): Promise<void> {
+  const restartApp = window.desktopBridge?.restartApp;
+  if (!restartApp) throw new Error("Desktop restart is unavailable.");
+  await restartApp();
+}
+
+/** One app-wide relaunch, so a change deferred from one settings page survives leaving it. */
 export const desktopRelaunchScheduler = createDesktopRelaunchScheduler({
   readActiveTurns: readActiveDesktopTurnCount,
   subscribe: (listener) => useStore.subscribe(listener),
+  restart: restartDesktop,
   present: (waiting) => {
     if (waiting === null) {
       if (waitingToastId !== null) toastManager.close(waitingToastId);
@@ -56,7 +66,7 @@ export const desktopRelaunchScheduler = createDesktopRelaunchScheduler({
     const options = stackedThreadToast({
       type: "info",
       title: "Ryco restarts when its agents finish",
-      description: `${describeActiveDesktopTurns(waiting.activeTurns)}. Your change applies with the restart; dismiss this to cancel it.`,
+      description: `${describeActiveDesktopTurns(waiting.activeTurns ?? 0)}. Your change is saved and applies when Ryco restarts; dismiss this to restart later yourself.`,
       timeout: 0,
       actionProps: {
         children: "Restart now",
@@ -72,8 +82,24 @@ export const desktopRelaunchScheduler = createDesktopRelaunchScheduler({
 
 export type DesktopRelaunchOutcome = "relaunched" | "scheduled" | "cancelled";
 
+/** The relaunch for changes Desktop has already saved: nothing is left to save. */
+export function savedChangeRelaunch(restartApp: () => Promise<void>): DesktopRelaunchChange {
+  return async (timing) => {
+    if (timing === "now") await restartApp();
+  };
+}
+
+/** Save a Hub launch change; Desktop relaunches now, or waits when deferred. */
+export function hubLaunchChange(
+  bridge: Pick<DesktopBridge, "setHubLaunchConfig">,
+  input: Omit<Parameters<DesktopBridge["setHubLaunchConfig"]>[0], "deferRelaunch">,
+): DesktopRelaunchChange {
+  return (timing) =>
+    bridge.setHubLaunchConfig(timing === "deferred" ? { ...input, deferRelaunch: true } : input);
+}
+
 type GuardRelaunch = (
-  relaunch: DesktopRelaunch,
+  change: DesktopRelaunchChange,
   options?: { readonly beforePrompt?: () => void },
 ) => Promise<DesktopRelaunchOutcome>;
 
@@ -95,13 +121,16 @@ export async function relaunchIfHubRestartRequired(input: {
     return null;
   }
   const restartApp = input.bridge.restartApp;
-  if (config.restartRequired === true && restartApp) await input.guardRelaunch(restartApp);
+  // Main already saved the change; only the relaunch is left to time.
+  if (config.restartRequired === true && restartApp) {
+    await input.guardRelaunch(savedChangeRelaunch(restartApp));
+  }
   return config;
 }
 
 interface PendingRelaunch {
   readonly activeTurns: number;
-  readonly relaunch: DesktopRelaunch;
+  readonly change: DesktopRelaunchChange;
   readonly resolve: (outcome: DesktopRelaunchOutcome) => void;
   readonly reject: (error: unknown) => void;
 }
@@ -109,10 +138,12 @@ interface PendingRelaunch {
 /**
  * Ask before a desktop relaunch would stop running agent turns.
  *
- * `guardRelaunch` runs the relaunch at once when nothing is running. Otherwise
- * it asks whether to restart now, restart once the turns finish, or keep the
- * current configuration. It resolves with what happened and rejects only when
- * a relaunch that ran now failed, so callers keep their own error handling.
+ * `guardRelaunch` applies the change and relaunches at once when nothing is
+ * running. Otherwise it asks whether to restart now, save the change and
+ * restart once the turns finish, or keep the current configuration. It
+ * resolves with what happened and rejects only when the change could not be
+ * saved or a relaunch that ran now failed, so callers keep their own error
+ * handling.
  * Render `dialog` once in the calling component.
  */
 export function useDesktopRelaunchGuard(): {
@@ -120,7 +151,7 @@ export function useDesktopRelaunchGuard(): {
   readonly dialog: ReactNode;
 } {
   const [pending, setPendingState] = useState<PendingRelaunch | null>(null);
-  const [restarting, setRestarting] = useState(false);
+  const [answering, setAnswering] = useState<"now" | "deferred" | null>(null);
   // Event handlers and the unmount cleanup read the question they answer here.
   const pendingRef = useRef<PendingRelaunch | null>(null);
   const setPending = useCallback((next: PendingRelaunch | null) => {
@@ -133,17 +164,17 @@ export function useDesktopRelaunchGuard(): {
 
   const guardRelaunch = useCallback(
     async (
-      relaunch: DesktopRelaunch,
+      change: DesktopRelaunchChange,
       options?: { readonly beforePrompt?: () => void },
     ): Promise<DesktopRelaunchOutcome> => {
       const activeTurns = readActiveDesktopTurnCount();
       if (activeTurns === 0) {
-        await desktopRelaunchScheduler.relaunchNow(relaunch);
+        await desktopRelaunchScheduler.relaunchNow(change);
         return "relaunched";
       }
       options?.beforePrompt?.();
       return new Promise<DesktopRelaunchOutcome>((resolve, reject) => {
-        setPending({ activeTurns, relaunch, resolve, reject });
+        setPending({ activeTurns, change, resolve, reject });
       });
     },
     [setPending],
@@ -157,17 +188,23 @@ export function useDesktopRelaunchGuard(): {
     [setPending],
   );
 
-  const restartNow = async () => {
+  const answer = async (timing: "now" | "deferred") => {
     const current = pendingRef.current;
     if (current === null) return;
-    setRestarting(true);
+    setAnswering(timing);
     try {
-      await desktopRelaunchScheduler.relaunchNow(current.relaunch);
-      current.resolve("relaunched");
+      if (timing === "now") {
+        await desktopRelaunchScheduler.relaunchNow(current.change);
+        current.resolve("relaunched");
+      } else {
+        // Saved before waiting, so quitting or crashing first cannot drop it.
+        await desktopRelaunchScheduler.scheduleAfterActiveTurns(current.change);
+        current.resolve("scheduled");
+      }
     } catch (error) {
       current.reject(error);
     } finally {
-      setRestarting(false);
+      setAnswering(null);
       setPending(null);
     }
   };
@@ -176,7 +213,7 @@ export function useDesktopRelaunchGuard(): {
     <AlertDialog
       open={pending !== null}
       onOpenChange={(open) => {
-        if (!open && !restarting) settle("cancelled");
+        if (!open && answering === null) settle("cancelled");
       }}
     >
       <AlertDialogPopup>
@@ -190,25 +227,24 @@ export function useDesktopRelaunchGuard(): {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogClose
-            disabled={restarting}
-            render={<Button variant="outline" disabled={restarting} />}
+            disabled={answering !== null}
+            render={<Button variant="outline" disabled={answering !== null} />}
           >
             Cancel
           </AlertDialogClose>
           <Button
             variant="outline"
-            disabled={restarting}
-            onClick={() => {
-              const current = pendingRef.current;
-              if (current === null) return;
-              desktopRelaunchScheduler.scheduleAfterActiveTurns(current.relaunch);
-              settle("scheduled");
-            }}
+            disabled={answering !== null}
+            onClick={() => void answer("deferred")}
           >
             Restart after they finish
           </Button>
-          <Button variant="destructive" disabled={restarting} onClick={() => void restartNow()}>
-            {restarting ? "Restarting…" : "Restart now"}
+          <Button
+            variant="destructive"
+            disabled={answering !== null}
+            onClick={() => void answer("now")}
+          >
+            {answering === "now" ? "Restarting…" : "Restart now"}
           </Button>
         </AlertDialogFooter>
       </AlertDialogPopup>

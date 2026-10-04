@@ -1624,11 +1624,12 @@ export function ConnectionsSettings() {
       setIsUpdatingDesktopServerExposure(true);
       setDesktopServerExposureError(null);
       try {
+        const mode = checked ? "network-accessible" : "local-only";
         await guardRelaunch(
-          async () => {
-            const nextState = await desktopBridge.setServerExposureMode(
-              checked ? "network-accessible" : "local-only",
-            );
+          async (timing) => {
+            const nextState = await (timing === "deferred"
+              ? desktopBridge.setServerExposureMode(mode, { deferRelaunch: true })
+              : desktopBridge.setServerExposureMode(mode));
             setDesktopServerExposureState(nextState);
           },
           { beforePrompt: () => setIsDesktopServerExposureDialogOpen(false) },
@@ -1666,10 +1667,11 @@ export function ConnectionsSettings() {
     setDesktopServerExposureError(null);
     try {
       await guardRelaunch(
-        async () => {
+        async (timing) => {
           const nextState = await desktopBridge.setTailscaleServeEnabled({
             enabled: true,
             port: parsedTailscaleServePort,
+            ...(timing === "deferred" ? { deferRelaunch: true } : {}),
           });
           setDesktopServerExposureState(nextState);
         },
@@ -1708,10 +1710,11 @@ export function ConnectionsSettings() {
     setDesktopServerExposureError(null);
     try {
       await guardRelaunch(
-        async () => {
+        async (timing) => {
           const nextState = await desktopBridge.setTailscaleServeEnabled({
             enabled: false,
             port: desktopServerExposureState?.tailscaleServePort ?? DEFAULT_TAILSCALE_SERVE_PORT,
+            ...(timing === "deferred" ? { deferRelaunch: true } : {}),
           });
           setDesktopServerExposureState(nextState);
         },

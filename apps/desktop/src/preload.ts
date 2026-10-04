@@ -227,7 +227,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   resolveSshPasswordPrompt: (requestId, password) =>
     ipcRenderer.invoke(RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL, requestId, password),
   getServerExposureState: () => ipcRenderer.invoke(GET_SERVER_EXPOSURE_STATE_CHANNEL),
-  setServerExposureMode: (mode) => ipcRenderer.invoke(SET_SERVER_EXPOSURE_MODE_CHANNEL, mode),
+  setServerExposureMode: (mode, options) =>
+    ipcRenderer.invoke(SET_SERVER_EXPOSURE_MODE_CHANNEL, mode, options),
   setTailscaleServeEnabled: (input) =>
     ipcRenderer.invoke(SET_TAILSCALE_SERVE_ENABLED_CHANNEL, input),
   getHubLaunchConfig: () => ipcRenderer.invoke(GET_HUB_LAUNCH_CONFIG_CHANNEL),
@@ -297,12 +298,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.on(DESKTOP_WORKSPACE_IPC.transportEvent, wrappedListener);
     return () => ipcRenderer.removeListener(DESKTOP_WORKSPACE_IPC.transportEvent, wrappedListener);
   },
-  setHubLaunchConfig: (input: {
-    readonly enabled?: boolean;
-    readonly origin?: string | null;
-    readonly nodeName?: string | null;
-    readonly allowFileSecretStore?: boolean;
-  }) => ipcRenderer.invoke(SET_HUB_LAUNCH_CONFIG_CHANNEL, input),
+  setHubLaunchConfig: (input) => ipcRenderer.invoke(SET_HUB_LAUNCH_CONFIG_CHANNEL, input),
   validateHubOrigin: (raw: string) => ipcRenderer.invoke(VALIDATE_HUB_ORIGIN_CHANNEL, raw),
   getAdvertisedEndpoints: () => ipcRenderer.invoke(GET_ADVERTISED_ENDPOINTS_CHANNEL),
   getPathForFile: (file) => webUtils.getPathForFile(file),

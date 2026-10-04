@@ -185,7 +185,9 @@ passes the values over the private bootstrap channel. This keeps the visible des
 authoritative. The Hub card keeps the address and pre-enrollment node name visible and puts key
 fallback, startup ownership, CLI equivalents, and bounded relay counters behind **Show advanced
 options**. Changing a desktop launch value restarts Ryco; when agent turns are running on the
-desktop's own backend, Ryco first asks whether to restart now, after they finish, or not at all.
+desktop's own backend, Ryco first asks whether to restart now, after they finish, or not at all. A
+change deferred until they finish is saved at once and only the restart waits, so it still applies
+on the next launch if Ryco quits, crashes, or updates first.
 
 Until the operator turns the desktop connector on or off, a configured Hub launches it in
 **standby**: the backend runs the connector only when its own state files show no Hub identity

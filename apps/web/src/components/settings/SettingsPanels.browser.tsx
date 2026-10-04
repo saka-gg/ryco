@@ -608,6 +608,8 @@ describe("GeneralSettingsPanel observability", () => {
     await __resetLocalApiForTests();
     authAccessHarness.reset();
     useTierOverrideStore.setState({ override: null });
+    activeDesktopTurns.count = 0;
+    desktopRelaunchScheduler.cancel();
   });
 
   function WorktreeSettingsHarness({
@@ -1736,6 +1738,29 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(page.getByText("http://192.168.1.44:3773")).toBeInTheDocument();
   });
 
+  it("saves deferred network access before waiting for running turns", async () => {
+    activeDesktopTurns.count = 1;
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByLabelText("Enable network access").click();
+    await page.getByRole("button", { name: "Restart and enable", exact: true }).click();
+    await page.getByRole("button", { name: "Restart after they finish" }).click();
+    await vi.waitFor(() => {
+      expect(desktopBridge.setServerExposureMode).toHaveBeenCalledWith("network-accessible", {
+        deferRelaunch: true,
+      });
+    });
+    expect(desktopRelaunchScheduler.pending()).toBe(true);
+  });
+
   it("adds desktop ssh environments from the add-environment dialog", async () => {
     const discoverSshHosts = vi.fn().mockResolvedValue([
       {
@@ -2363,24 +2388,31 @@ describe("ConnectionsSettings Hub section", () => {
     await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
   });
 
-  it("applies a deferred change once the running turns finish", async () => {
+  it("saves a deferred change at once and relaunches once the running turns finish", async () => {
+    // A deferred change used to live only in renderer memory, so quitting or
+    // crashing before the turns finished silently dropped it.
     activeDesktopTurns.count = 1;
     const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const restartApp = vi.fn().mockResolvedValue(undefined);
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
     });
-    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig, restartApp });
 
     await page.getByRole("button", { name: "Enable" }).click();
     await page.getByRole("button", { name: "Restart after they finish" }).click();
+    await vi.waitFor(() =>
+      expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true, deferRelaunch: true }),
+    );
     // The waiting notice is an app toast; this harness renders no toast viewport.
-    await vi.waitFor(() => expect(desktopRelaunchScheduler.pendingCount()).toBe(1));
-    expect(setHubLaunchConfig).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(desktopRelaunchScheduler.pending()).toBe(true));
+    expect(restartApp).not.toHaveBeenCalled();
 
     activeDesktopTurns.count = 0;
     useStore.setState({});
-    await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
+    await vi.waitFor(() => expect(restartApp).toHaveBeenCalledOnce());
+    expect(setHubLaunchConfig).toHaveBeenCalledOnce();
   });
 
   it("finishes account setup in place when the backend runs a standby connector", async () => {

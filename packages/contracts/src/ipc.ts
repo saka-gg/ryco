@@ -717,10 +717,20 @@ export interface DesktopBridge {
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
-  setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
+  /**
+   * Network access and Tailscale Serve apply by relaunching Desktop. With
+   * `deferRelaunch`, the change is only saved: the running backend keeps what
+   * it serves, the returned state still describes it, and the change applies on
+   * the next launch, which the caller schedules.
+   */
+  setServerExposureMode: (
+    mode: DesktopServerExposureMode,
+    options?: { readonly deferRelaunch?: boolean },
+  ) => Promise<DesktopServerExposureState>;
   setTailscaleServeEnabled: (input: {
     readonly enabled: boolean;
     readonly port?: number;
+    readonly deferRelaunch?: boolean;
   }) => Promise<DesktopServerExposureState>;
   getHubLaunchConfig: () => Promise<DesktopHubLaunchConfig>;
   /** Keep a reachable desktop node awake while it is plugged in. Applies live. */
@@ -804,6 +814,10 @@ export interface DesktopBridge {
    * and only while the running backend runs its connector in standby: it
    * records that enrollment started here without restarting a backend that
    * already serves it.
+   *
+   * `deferRelaunch` saves any other change without relaunching; it applies on
+   * the next launch, which the caller schedules. `restartRequired` reports it
+   * meanwhile.
    */
   setHubLaunchConfig: (input: {
     readonly enabled?: boolean;
@@ -811,6 +825,7 @@ export interface DesktopBridge {
     readonly nodeName?: string | null;
     readonly allowFileSecretStore?: boolean;
     readonly applyOnNextLaunch?: boolean;
+    readonly deferRelaunch?: boolean;
   }) => Promise<void>;
   /** Validate a typed Hub address without persisting it. */
   validateHubOrigin: (raw: string) => Promise<DesktopHubOriginValidation>;

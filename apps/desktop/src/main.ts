@@ -397,6 +397,9 @@ let disposeDesktopWorkspaceSubscription: (() => void) | null = null;
 let desktopKeepAwake: DesktopKeepAwakeController | null = null;
 // The Hub connector configuration the running backend was launched with.
 let backendHubLaunch: DesktopHubConnectorLaunch | null = null;
+// The Tailscale Serve configuration the running backend was launched with. A
+// change saved for a deferred relaunch must not read as already served.
+let backendTailscaleServe: { readonly enabled: boolean; readonly port: number } | null = null;
 // Retain live turn-complete notifications: Electron GCs Notification objects once
 // the creating scope returns, which would drop their `click`/`close` handlers.
 const activeTurnCompleteNotifications = new Set<Notification>();
@@ -653,13 +656,23 @@ async function prepareDesktopShellEnvironmentForBackend(): Promise<void> {
   await synchronizeDesktopShellEnvironment("cache-miss");
 }
 
+function runningTailscaleServe(): { readonly enabled: boolean; readonly port: number } {
+  return (
+    backendTailscaleServe ?? {
+      enabled: desktopSettings.tailscaleServeEnabled,
+      port: desktopSettings.tailscaleServePort,
+    }
+  );
+}
+
 function getDesktopServerExposureState(): DesktopServerExposureState {
+  const tailscaleServe = runningTailscaleServe();
   return {
     mode: desktopServerExposureMode,
     endpointUrl: backendEndpointUrl,
     advertisedHost: backendAdvertisedHost,
-    tailscaleServeEnabled: desktopSettings.tailscaleServeEnabled,
-    tailscaleServePort: desktopSettings.tailscaleServePort,
+    tailscaleServeEnabled: tailscaleServe.enabled,
+    tailscaleServePort: tailscaleServe.port,
   };
 }
 
@@ -676,17 +689,15 @@ async function getDesktopAdvertisedEndpoints() {
     exposure,
     customHttpsEndpointUrls: resolveCustomHttpsEndpointUrls(),
   });
-  if (
-    desktopServerExposureMode !== "network-accessible" &&
-    !desktopSettings.tailscaleServeEnabled
-  ) {
+  const tailscaleServe = runningTailscaleServe();
+  if (desktopServerExposureMode !== "network-accessible" && !tailscaleServe.enabled) {
     return coreEndpoints;
   }
 
   const tailscaleEndpoints = await resolveTailscaleAdvertisedEndpoints({
     port: backendPort,
-    serveEnabled: desktopSettings.tailscaleServeEnabled,
-    servePort: desktopSettings.tailscaleServePort,
+    serveEnabled: tailscaleServe.enabled,
+    servePort: tailscaleServe.port,
     networkInterfaces,
   });
   return [...coreEndpoints, ...tailscaleEndpoints];
@@ -1088,6 +1099,39 @@ async function applyDesktopServerExposureMode(
   return getDesktopServerExposureState();
 }
 
+/**
+ * Save a network access change for the next launch without touching what the
+ * running backend serves. A request that cannot be served right now is refused
+ * exactly as an immediate change would be.
+ */
+function saveDesktopServerExposurePreference(mode: DesktopServerExposureMode): void {
+  if (mode === "network-accessible") {
+    const advertisedHostOverride = resolveAdvertisedHostOverride();
+    const exposure = resolveDesktopServerExposure({
+      mode,
+      port: backendPort,
+      networkInterfaces: OS.networkInterfaces(),
+      ...(advertisedHostOverride ? { advertisedHostOverride } : {}),
+    });
+    if (exposure.endpointUrl === null) {
+      throw new Error("No reachable network address is available for this desktop right now.");
+    }
+  }
+  const nextSettings = setDesktopServerExposurePreference(desktopSettings, mode);
+  if (nextSettings === desktopSettings) return;
+  writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+  desktopSettings = nextSettings;
+}
+
+/** `{ deferRelaunch }` from a renderer: save the change, the caller relaunches later. */
+function readDeferRelaunch(raw: unknown, invalid: string): boolean {
+  if (raw === undefined || raw === null) return false;
+  if (typeof raw !== "object") throw new Error(invalid);
+  const value = (raw as { readonly deferRelaunch?: unknown }).deferRelaunch;
+  if (value !== undefined && typeof value !== "boolean") throw new Error(invalid);
+  return value === true;
+}
+
 async function applyDesktopTailscaleServeEnabled(
   nextSettings: DesktopSettings,
 ): Promise<DesktopServerExposureState> {
@@ -1146,8 +1190,8 @@ let desktopRelaunchRequested = false;
 
 function relaunchDesktopApp(reason: string): void {
   writeDesktopLogHeader(`desktop relaunch requested reason=${reason}`);
-  // The renderer can apply several deferred changes back to back once agent
-  // turns finish. Each persists before it asks to relaunch, so the first
+  // A change applied now can follow the renderer's restart for changes saved
+  // earlier. Every change persists before it asks to relaunch, so the first
   // request already restarts with all of them; a second must not start
   // another shutdown or spawn a second app instance.
   if (desktopRelaunchRequested) return;
@@ -2555,6 +2599,11 @@ function startBackend(): void {
   backendControlToken = childControlToken;
   const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings);
   backendHubLaunch = hubLaunch;
+  const tailscaleServe = {
+    enabled: desktopSettings.tailscaleServeEnabled,
+    port: desktopSettings.tailscaleServePort,
+  };
+  backendTailscaleServe = tailscaleServe;
   const backendExecutable = isDevelopment ? resolveDevelopmentBunExecutable() : process.execPath;
   const childEnvironment = backendChildEnv();
   if (isDevelopment) {
@@ -2591,8 +2640,8 @@ function startBackend(): void {
         desktopTelemetryFd: 4,
         desktopControlToken: childControlToken,
         ...(computerUseRuntime ? { computerUseBridge: computerUseRuntime.backendBinding() } : {}),
-        tailscaleServeEnabled: desktopSettings.tailscaleServeEnabled,
-        tailscaleServePort: desktopSettings.tailscaleServePort,
+        tailscaleServeEnabled: tailscaleServe.enabled,
+        tailscaleServePort: tailscaleServe.port,
         hubConnectorEnabled: hubLaunch.enabled,
         ...(hubLaunch.standby ? { hubConnectorStandby: true } : {}),
         ...(hubLaunch.origin === null ? {} : { hubOrigin: hubLaunch.origin }),
@@ -2901,23 +2950,33 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GET_SERVER_EXPOSURE_STATE_CHANNEL, async () => getDesktopServerExposureState());
 
   ipcMain.removeHandler(SET_SERVER_EXPOSURE_MODE_CHANNEL);
-  ipcMain.handle(SET_SERVER_EXPOSURE_MODE_CHANNEL, async (_event, rawMode: unknown) => {
-    if (rawMode !== "local-only" && rawMode !== "network-accessible") {
-      throw new Error("Invalid desktop server exposure input.");
-    }
+  ipcMain.handle(
+    SET_SERVER_EXPOSURE_MODE_CHANNEL,
+    async (_event, rawMode: unknown, rawOptions: unknown) => {
+      if (rawMode !== "local-only" && rawMode !== "network-accessible") {
+        throw new Error("Invalid desktop server exposure input.");
+      }
+      const deferRelaunch = readDeferRelaunch(rawOptions, "Invalid desktop server exposure input.");
 
-    const nextMode = rawMode as DesktopServerExposureMode;
-    if (nextMode === desktopServerExposureMode) {
-      return getDesktopServerExposureState();
-    }
+      const nextMode = rawMode as DesktopServerExposureMode;
+      if (deferRelaunch) {
+        // Saved now so quitting or crashing before the relaunch cannot drop it;
+        // the running backend keeps its listener until then.
+        saveDesktopServerExposurePreference(nextMode);
+        return getDesktopServerExposureState();
+      }
+      if (nextMode === desktopServerExposureMode) {
+        return getDesktopServerExposureState();
+      }
 
-    const nextState = await applyDesktopServerExposureMode(nextMode, {
-      persist: true,
-      rejectIfUnavailable: true,
-    });
-    relaunchDesktopApp(`serverExposureMode=${nextMode}`);
-    return nextState;
-  });
+      const nextState = await applyDesktopServerExposureMode(nextMode, {
+        persist: true,
+        rejectIfUnavailable: true,
+      });
+      relaunchDesktopApp(`serverExposureMode=${nextMode}`);
+      return nextState;
+    },
+  );
 
   ipcMain.removeHandler(GET_KEEP_AWAKE_STATE_CHANNEL);
   ipcMain.handle(GET_KEEP_AWAKE_STATE_CHANNEL, () => desktopKeepAwakeState());
@@ -3188,10 +3247,12 @@ function registerIpcHandlers(): void {
       readonly nodeName?: unknown;
       readonly allowFileSecretStore?: unknown;
       readonly applyOnNextLaunch?: unknown;
+      readonly deferRelaunch?: unknown;
     };
     if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
       throw new Error("Invalid Hub launch configuration input.");
     }
+    const deferRelaunch = readDeferRelaunch(input, "Invalid Hub launch configuration input.");
     if (input.applyOnNextLaunch !== undefined && typeof input.applyOnNextLaunch !== "boolean") {
       throw new Error("Invalid Hub launch configuration input.");
     }
@@ -3204,6 +3265,7 @@ function registerIpcHandlers(): void {
         input.origin !== undefined ||
         input.nodeName !== undefined ||
         input.allowFileSecretStore !== undefined ||
+        deferRelaunch ||
         backendHubLaunch?.standby !== true
       ) {
         throw new Error("Invalid Hub launch configuration input.");
@@ -3280,7 +3342,9 @@ function registerIpcHandlers(): void {
       desktopSettings = nextSettings;
     }
     // Never log the origin or node name: together they identify this machine.
-    if (restart) relaunchDesktopApp("hub-launch-config-changed");
+    // A deferred change is saved now and applies with the relaunch the
+    // renderer schedules once running turns finish, or on the next launch.
+    if (restart && !deferRelaunch) relaunchDesktopApp("hub-launch-config-changed");
   });
 
   ipcMain.removeHandler(RESTART_APP_CHANNEL);
@@ -3296,15 +3360,23 @@ function registerIpcHandlers(): void {
     const input = rawInput as {
       readonly enabled?: unknown;
       readonly port?: unknown;
+      readonly deferRelaunch?: unknown;
     };
     if (typeof input.enabled !== "boolean") {
       throw new Error("Invalid Tailscale Serve input.");
     }
+    const deferRelaunch = readDeferRelaunch(input, "Invalid Tailscale Serve input.");
     const nextSettings = setDesktopTailscaleServePreference(desktopSettings, {
       enabled: input.enabled,
       ...(typeof input.port === "number" ? { port: input.port } : {}),
     });
     if (nextSettings === desktopSettings) {
+      return getDesktopServerExposureState();
+    }
+    if (deferRelaunch) {
+      // Saved now; the running backend keeps serving what it launched with.
+      writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+      desktopSettings = nextSettings;
       return getDesktopServerExposureState();
     }
     return applyDesktopTailscaleServeEnabled(nextSettings);
