@@ -9,6 +9,7 @@ import {
   savedBackendConnectionActionLabel,
   savedBackendNeedsRepair,
   savedBackendRepairHost,
+  savedPairingLifetimeNote,
 } from "./ConnectionsSettings.logic";
 
 const record: SavedEnvironmentRecord = {
@@ -84,5 +85,18 @@ describe("savedBackendConnectionActionLabel", () => {
         needsRepair: false,
       }),
     ).toBe("Disconnecting…");
+  });
+});
+
+describe("savedPairingLifetimeNote", () => {
+  it("states the lifetime of the store the credential lives in", () => {
+    // The desktop app keeps the token in the OS store: the node's own limits.
+    expect(savedPairingLifetimeNote("desktop")).toContain(
+      "Pair again after 30 days without use, or one year after pairing.",
+    );
+    // A browser's local storage drops it a week after it was last written.
+    expect(savedPairingLifetimeNote("browser")).toContain(
+      "Pair again after 7 days without use, or one year after pairing.",
+    );
   });
 });
