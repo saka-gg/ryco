@@ -56,6 +56,7 @@ describe("pre-auth server environment descriptor", () => {
       "threadSettlement",
       "threadSidebarUndo",
       "threadSnooze",
+      "usageLimitRecovery",
       "worktreeSubmoduleSettings",
     ]);
   });

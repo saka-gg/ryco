@@ -138,6 +138,7 @@ import { AgentControlDiagnosticsServiceLive } from "./agentControl/Layers/AgentC
 import { AgentControlExternalInstallationServiceLive } from "./agentControl/Layers/AgentControlExternalInstallation.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { OrchestrationCommandApplicationLive } from "./orchestration/Layers/OrchestrationCommandApplication.ts";
+import { UsageLimitRecoveryLive } from "./orchestration/Layers/UsageLimitRecovery.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -493,6 +494,10 @@ const RuntimeServicesLive = Layer.mergeAll(
     ),
   ),
   CompletionReturnDeliveryLive.pipe(
+    Layer.provideMerge(ServerRuntimeStartupLive),
+    Layer.provideMerge(OrchestrationCommandApplicationLive),
+  ),
+  UsageLimitRecoveryLive.pipe(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),

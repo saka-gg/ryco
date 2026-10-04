@@ -2249,7 +2249,7 @@ const make = Effect.gen(function* () {
       Effect.asVoid,
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
-          ? Effect.failCause(cause)
+          ? Effect.interrupt
           : Effect.logDebug("provider runtime ingestion skipped usage-limit record", {
               threadId: command.threadId,
               limitId: command.limitId,
