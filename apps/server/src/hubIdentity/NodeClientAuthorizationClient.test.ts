@@ -371,6 +371,48 @@ describe("node client authorization observed role", () => {
     expect(await test.stored()).toEqual(before);
   });
 
+  it("drops a refresh decided while pending once the owner approved or revoked the record", async () => {
+    // The decision is taken before the reject and committed after the close,
+    // so the owner can act in between. The commit must find only the pending
+    // class: a hello may never rewrite what an owner action just settled.
+    const test = await harness();
+    await test.pair(key(36), "owner");
+    await test.pair(key(37), "owner");
+    const decide = (seed: number) =>
+      test.client.evaluatePairingAdmission({
+        hubOrigin: HUB_ORIGIN,
+        accountId: ACCOUNT_ID,
+        clientIdentityFingerprint: fingerprintBytes(seed),
+        safetyNumber: SAFETY_NUMBER,
+        observedRole: "viewer",
+      });
+    const toApproved = decide(36);
+    const toRevoked = decide(37);
+    for (const decision of [toApproved, toRevoked]) {
+      expect(decision).toMatchObject({
+        kind: "existing",
+        status: "pending",
+        observedRoleRefresh: { observedRole: "viewer" },
+      });
+    }
+
+    await test.client.approve({ key: key(36), maxRole: "owner", capabilitySet: [CAPABILITY] });
+    await test.client.revoke(key(37));
+    const before = await test.stored();
+
+    await test.client.commitPairingAdmission(toApproved);
+    await test.client.commitPairingAdmission(toRevoked);
+    expect(await test.stored()).toEqual(before);
+    expect(await test.client.get(key(36))).toMatchObject({
+      status: "approved",
+      observedRole: "owner",
+    });
+    expect(await test.client.get(key(37))).toMatchObject({
+      status: "revoked",
+      observedRole: "owner",
+    });
+  });
+
   it("is carried through approve, relabel and revoke", async () => {
     const test = await harness();
     await test.pair(key(34), "owner");
