@@ -1,16 +1,16 @@
 # 14 · reactor-concurrency: per-thread lanes, bounded provider operations, Stop that always gets through, and turn liveness (bug 13)
 
-| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| id               | `reactor-concurrency`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| title            | Replace the provider command reactor's single global worker with per-thread lanes. Add a fence so Stop cancels pending and in-flight session starts. Deliver approvals and Stop to a thread whose lane is busy with a context-handoff turn. Put a real deadline on every provider operation, one that holds even when the loser cannot be interrupted, and show a readable error when it fires. Add a liveness check for active turns: it settles turns whose runtime is gone, and only warns when a live provider goes quiet                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| wave             | 3 (sequential, same branch). Order: **`reactor-concurrency`** → `provider-effect-outbox` → `restart-continuation`. This package runs first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| verdict          | **confirmed, and worse than the brief says.** (1) There is one global serial worker (`ProviderCommandReactor.ts:1803-1809`, `DrainableWorker.ts:56-65`). (2) Session start, recovery start, interrupt, stop, approval responses and goal sync are all unbounded (`ProviderService.ts:1020-1025`, `:750-766`, `:1336`, `:1500-1502`, `:1421`, `:1213`). (3) The reaper never looks at active turns (`ProviderSessionReaper.ts:79-88`), and `lastSeenAt` does not move on runtime events (`ProviderService.ts:320-346`). (4) **New: today an ACP-target context handoff deadlocks the whole reactor.** The worker awaits the handoff (`:1262-1266`). The handoff awaits `sendTurn` (`ContextHandoffCoordinator.ts:734-748`). ACP `sendTurn` awaits the entire `prompt` (`AcpAdapter.ts:916-924`, `CursorAdapter.ts:1134`). A permission request inside that turn waits for a decision Deferred (`AcpAdapter.ts:532-571`) that can only be resolved by a reactor event queued behind the handoff. (5) **New:** `Effect.timeoutOption` and `race` await the loser's interruption (`effect/src/internal/effect.ts:1548`, `:3729-3747`). So even the one existing bound, the stale stop (`ProviderService.ts:635`), does not hold for an adapter that cannot be interrupted                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| size             | **L**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| touched files    | **shared (new):** `packages/shared/src/KeyedSerialWorker.ts` (+`.test.ts`), `packages/shared/src/KeyedSerialExecutor.ts` (+`.test.ts`), `packages/shared/package.json` (2 exports). **server, provider:** `apps/server/src/provider/detachedDeadline.ts` (new, +test), `apps/server/src/provider/providerOperationPolicy.ts` (new, +test), `apps/server/src/provider/Errors.ts`, `apps/server/src/provider/Services/ProviderAdapter.ts`, `apps/server/src/provider/Services/ProviderService.ts`, `apps/server/src/provider/Layers/ProviderService.ts` (+test), `apps/server/src/provider/Layers/AcpAdapter.ts` (capabilities literal only), `apps/server/src/provider/Layers/CursorAdapter.ts` (capabilities literal only). **server, orchestration:** `apps/server/src/orchestration/threadLaneControl.ts` (new, +test), `apps/server/src/orchestration/providerTurnLiveness.ts` (new, +test), `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` (+test), `apps/server/src/orchestration/Services/ProviderCommandReactor.ts`, `apps/server/src/orchestration/Services/ContextHandoffCoordinator.ts`, `apps/server/src/orchestration/Layers/ContextHandoffCoordinator.ts` (+test), `apps/server/src/orchestration/Layers/OrchestrationReactor.test.ts` (test double only), `apps/server/src/orchestration/providerFailureActivity.ts` (from W1 `reactor-errors-switch`: kinds plus one info builder), `apps/server/src/orchestration/turnFinalization.ts` (from W1 `turn-finalization`: 3 reason keys), `apps/server/src/orchestration/userFacingErrors.test.ts` (2 cases). **agent control:** `apps/server/src/agentControl/Layers/CompletionReturnDelivery.ts` (raise `MAX_COLD_WAKES_IN_FLIGHT`, one constant plus comment), with its test expectation. **client-runtime:** `packages/client-runtime/src/state/message-queue/threadView.ts` and `packages/client-runtime/src/state/session/dispatchAck.ts` (from W1 `queue-hold-drain`: read one more activity kind), plus their tests |
-| migrations       | **none.** No number used. 071–075 belong to other packages                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| contract changes | **None in `packages/contracts`.** Activity `kind` is an open `TrimmedNonEmptyString` (`orchestration.ts:774`, `:805`). New kinds: `provider.turn.start.cancelled` (info), `provider.turn.unresponsive` (info), `provider.turn.lost` (error), `provider.session.restart.failed` (error). **Internal server shapes:** `ProviderAdapterCapabilities.turnSubmission?` (new); `ProviderServiceShape.interruptTurn` never recovers and fails `ProviderSessionNotFoundError` when no runtime is live; `ProviderServiceShape.listRuntimeActivity?` (new, optional); `ProviderServiceShape.sendTurn` drops the unused `expectedRuntime` parameter (W2 cleanup, §3.6); `ProviderServiceError` gains `ProviderOperationTimeoutError`; `ContextHandoffCoordinatorShape.processTurnStart(event, control?)` (optional second argument); `ProviderCommandReactorShape.sweepLiveness` (new, required); `ProviderServiceLiveOptions.operationTimeouts?`; `makeProviderCommandReactorLive(options?)`. **Operator env (optional):** `RYCO_PROVIDER_SESSION_START_TIMEOUT_MS`, `RYCO_PROVIDER_TURN_ACCEPT_TIMEOUT_MS`, `RYCO_PROVIDER_CONTROL_TIMEOUT_MS`, `RYCO_PROVIDER_UNRESPONSIVE_AFTER_MS`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| overlaps         | **W3 `provider-effect-outbox` (next):** `ProviderCommandReactor.start`, the lane entry point, `processLaneItemSafely` (its R1–R4, §8), `processTurnStartRequested`, `ContextHandoffCoordinatorShape`. **W3 `restart-continuation`:** synthetic events and the fence rule, plus handoff `recover()` at startup (§7). **W1 `reactor-errors-switch`:** `reportTurnStartFailure`, `setThreadSessionErrorOnTurnStartFailure`, `processDomainEventSafely` (its follow-ups 5 and 7 are taken here), `providerFailureActivity.ts`, `userFacingErrors.ts`, the coordinator's `processTurnStart` catch, and the `AcpAdapter.ts` capabilities literal. **W1 `turn-finalization`:** `setThreadSession` `turnOutcome`, `TURN_FINALIZATION_REASON`, `bindSessionToThread`, `processSessionStopRequested`, `recoverInterruptFailure`. **W1 `queue-hold-drain`:** `threadView.ts` / `dispatchAck.ts` kind list. **W1 `settlement-signals`:** semantic only (new activity kinds). **W1 `acp-message-ids`, `provider-compat`:** test-harness neighbours only. **W2 `delegation-returns`:** removes the guarded `sendTurn` caller and leaves the parameter for this package to delete; this package lifts its cold-wake cap. **W2 `claude-steering`:** `Errors.ts` (adjacent class), `ProviderService.steerTurn` (one added line), `ProviderAdapterCapabilities` (adjacent field). **W2 `rollback-correctness`:** `resolveRoutableSession` recovery bound (`rollbackConversation` uses it), and a possible adjacent capability field. **W2 `usage-limits`:** `reportTurnStartFailure` (cancel branch inserted before its limit branch). **W1 `claude-meter-wake`:** semantic: Claude `sendTurn` can now be interrupted by the acceptance deadline. Details in §8                                                                                                                                                                                                                                                            |
+| Field | Value |
+| --- | --- |
+| id | `reactor-concurrency` |
+| title | Replace the provider command reactor's single global worker with per-thread lanes. Add a fence so Stop cancels pending and in-flight session starts. Deliver approvals and Stop to a thread whose lane is busy with a context-handoff turn. Put a real deadline on every provider operation, one that holds even when the loser cannot be interrupted, and show a readable error when it fires. Add a liveness check for active turns: it settles turns whose runtime is gone, and only warns when a live provider goes quiet |
+| wave | 3 (sequential, same branch). Order: **`reactor-concurrency`** → `provider-effect-outbox` → `restart-continuation`. This package runs first |
+| verdict | **confirmed, and worse than the brief says.** (1) There is one global serial worker (`ProviderCommandReactor.ts:1803-1809`, `DrainableWorker.ts:56-65`). (2) Session start, recovery start, interrupt, stop, approval responses and goal sync are all unbounded (`ProviderService.ts:1020-1025`, `:750-766`, `:1336`, `:1500-1502`, `:1421`, `:1213`). (3) The reaper never looks at active turns (`ProviderSessionReaper.ts:79-88`), and `lastSeenAt` does not move on runtime events (`ProviderService.ts:320-346`). (4) **New: today an ACP-target context handoff deadlocks the whole reactor.** The worker awaits the handoff (`:1262-1266`). The handoff awaits `sendTurn` (`ContextHandoffCoordinator.ts:734-748`). ACP `sendTurn` awaits the entire `prompt` (`AcpAdapter.ts:916-924`, `CursorAdapter.ts:1134`). A permission request inside that turn waits for a decision Deferred (`AcpAdapter.ts:532-571`) that can only be resolved by a reactor event queued behind the handoff. (5) **New:** `Effect.timeoutOption` and `race` await the loser's interruption (`effect/src/internal/effect.ts:1548`, `:3729-3747`). So even the one existing bound, the stale stop (`ProviderService.ts:635`), does not hold for an adapter that cannot be interrupted |
+| size | **L** |
+| touched files | **shared (new):** `packages/shared/src/KeyedSerialWorker.ts` (+`.test.ts`), `packages/shared/src/KeyedSerialExecutor.ts` (+`.test.ts`), `packages/shared/package.json` (2 exports). **server, provider:** `apps/server/src/provider/detachedDeadline.ts` (new, +test), `apps/server/src/provider/providerOperationPolicy.ts` (new, +test), `apps/server/src/provider/Errors.ts`, `apps/server/src/provider/Services/ProviderAdapter.ts`, `apps/server/src/provider/Services/ProviderService.ts`, `apps/server/src/provider/Layers/ProviderService.ts` (+test), `apps/server/src/provider/Layers/AcpAdapter.ts` (capabilities literal only), `apps/server/src/provider/Layers/CursorAdapter.ts` (capabilities literal only). **server, orchestration:** `apps/server/src/orchestration/threadLaneControl.ts` (new, +test), `apps/server/src/orchestration/providerTurnLiveness.ts` (new, +test), `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` (+test), `apps/server/src/orchestration/Services/ProviderCommandReactor.ts`, `apps/server/src/orchestration/Services/ContextHandoffCoordinator.ts`, `apps/server/src/orchestration/Layers/ContextHandoffCoordinator.ts` (+test), `apps/server/src/orchestration/Layers/OrchestrationReactor.test.ts` (test double only), `apps/server/src/orchestration/providerFailureActivity.ts` (from W1 `reactor-errors-switch`: kinds plus one info builder), `apps/server/src/orchestration/turnFinalization.ts` (from W1 `turn-finalization`: 3 reason keys), `apps/server/src/orchestration/userFacingErrors.test.ts` (2 cases). **agent control:** `apps/server/src/agentControl/Layers/CompletionReturnDelivery.ts` (raise `MAX_COLD_WAKES_IN_FLIGHT`, one constant plus comment), with its test expectation. **client-runtime:** `packages/client-runtime/src/state/message-queue/threadView.ts` and `packages/client-runtime/src/state/session/dispatchAck.ts` (from W1 `queue-hold-drain`: read one more activity kind), plus their tests |
+| migrations | **none.** No number used. 071–075 belong to other packages |
+| contract changes | **None in `packages/contracts`.** Activity `kind` is an open `TrimmedNonEmptyString` (`orchestration.ts:774`, `:805`). New kinds: `provider.turn.start.cancelled` (info), `provider.turn.unresponsive` (info), `provider.turn.lost` (error), `provider.session.restart.failed` (error). **Internal server shapes:** `ProviderAdapterCapabilities.turnSubmission?` (new); `ProviderServiceShape.interruptTurn` never recovers and fails `ProviderSessionNotFoundError` when no runtime is live; `ProviderServiceShape.listRuntimeActivity?` (new, optional); `ProviderServiceShape.sendTurn` drops the unused `expectedRuntime` parameter (W2 cleanup, §3.6); `ProviderServiceError` gains `ProviderOperationTimeoutError`; `ContextHandoffCoordinatorShape.processTurnStart(event, control?)` (optional second argument); `ProviderCommandReactorShape.sweepLiveness` (new, required); `ProviderServiceLiveOptions.operationTimeouts?`; `makeProviderCommandReactorLive(options?)`. **Operator env (optional):** `RYCO_PROVIDER_SESSION_START_TIMEOUT_MS`, `RYCO_PROVIDER_TURN_ACCEPT_TIMEOUT_MS`, `RYCO_PROVIDER_CONTROL_TIMEOUT_MS`, `RYCO_PROVIDER_UNRESPONSIVE_AFTER_MS` |
+| overlaps | **W3 `provider-effect-outbox` (next):** `ProviderCommandReactor.start`, the lane entry point, `processLaneItemSafely` (its R1–R4, §8), `processTurnStartRequested`, `ContextHandoffCoordinatorShape`. **W3 `restart-continuation`:** synthetic events and the fence rule, plus handoff `recover()` at startup (§7). **W1 `reactor-errors-switch`:** `reportTurnStartFailure`, `setThreadSessionErrorOnTurnStartFailure`, `processDomainEventSafely` (its follow-ups 5 and 7 are taken here), `providerFailureActivity.ts`, `userFacingErrors.ts`, the coordinator's `processTurnStart` catch, and the `AcpAdapter.ts` capabilities literal. **W1 `turn-finalization`:** `setThreadSession` `turnOutcome`, `TURN_FINALIZATION_REASON`, `bindSessionToThread`, `processSessionStopRequested`, `recoverInterruptFailure`. **W1 `queue-hold-drain`:** `threadView.ts` / `dispatchAck.ts` kind list. **W1 `settlement-signals`:** semantic only (new activity kinds). **W1 `acp-message-ids`, `provider-compat`:** test-harness neighbours only. **W2 `delegation-returns`:** removes the guarded `sendTurn` caller and leaves the parameter for this package to delete; this package lifts its cold-wake cap. **W2 `claude-steering`:** `Errors.ts` (adjacent class), `ProviderService.steerTurn` (one added line), `ProviderAdapterCapabilities` (adjacent field). **W2 `rollback-correctness`:** `resolveRoutableSession` recovery bound (`rollbackConversation` uses it), and a possible adjacent capability field. **W2 `usage-limits`:** `reportTurnStartFailure` (cancel branch inserted before its limit branch). **W1 `claude-meter-wake`:** semantic: Claude `sendTurn` can now be interrupted by the acceptance deadline. Details in §8 |
 
 ---
 
@@ -27,21 +27,20 @@
   - token-mode change (`:1756`)
 
   It ends in `ProviderService.startSession`, which has no deadline (`ProviderService.ts:930-1080`; adapter start at `:1020-1025`).
-
 - So one cold or hung start blocks every thread's Stop (`thread.turn.interrupt`; the composer sends no `turnId`, `apps/web/src/hooks/chatSessionActions.ts:15-22`). It also blocks approvals, user-input answers and turn starts.
 
 ### 1.2 Every provider control call is unbounded
 
-| Call                                                  | Where                                                                                                                                                                                                                                                                                                                                                      | Bound today                                                                                                                     |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| adapter `startSession` (fresh, restart, handoff)      | `ProviderService.ts:1020-1025`                                                                                                                                                                                                                                                                                                                             | none; also waits unbounded on the per-thread start lock (`:300-318`) and admission (`:491-507`)                                 |
-| recovery `startSession`                               | `:750-766` (reached through `resolveRoutableSession(allowRecovery: true)`, `:854-857`)                                                                                                                                                                                                                                                                     | none                                                                                                                            |
-| `interruptTurn`                                       | `:1315-1350`; uses `allowRecovery: true` (`:1324-1328`), so it takes the start lock and can **resurrect** a dead runtime just to interrupt it                                                                                                                                                                                                              | none                                                                                                                            |
-| `stopSession`                                         | `:1500-1502`                                                                                                                                                                                                                                                                                                                                               | none; the reactor's caller has no catch (`ProviderCommandReactor.ts:1702-1704`), so a failed Stop is only logged (`:1790-1801`) |
-| `respondToRequest` / `respondToUserInput`             | `:1421`, `:1468`                                                                                                                                                                                                                                                                                                                                           | none                                                                                                                            |
-| `setThreadGoal` / `getThreadGoal` / `clearThreadGoal` | `:1201-1243` (awaited in the turn-start path via `reconcileThreadGoal`, `:764-871`)                                                                                                                                                                                                                                                                        | none                                                                                                                            |
-| stale-runtime stop                                    | `stopExactBinding`, `:634-637`                                                                                                                                                                                                                                                                                                                             | `timeoutOption(2s)`, but see 1.4                                                                                                |
-| `sendTurn` acceptance                                 | Claude awaits `query.setModel` / `setPermissionMode` (`ClaudeAdapter.ts:4870`, `:4896-4905`). OpenCode `promptAsync` (`OpenCodeAdapter.ts:2504`). Copilot `sendAndWaitForTurnStart` (`CopilotAdapter.session.ts:500`). ACP and Cursor await the **whole** prompt after emitting `turn.started` (`AcpAdapter.ts:897-924`, `CursorAdapter.ts:1050`, `:1134`) | none (Codex RPC has its own 20 s)                                                                                               |
+| Call | Where | Bound today |
+| --- | --- | --- |
+| adapter `startSession` (fresh, restart, handoff) | `ProviderService.ts:1020-1025` | none; also waits unbounded on the per-thread start lock (`:300-318`) and admission (`:491-507`) |
+| recovery `startSession` | `:750-766` (reached through `resolveRoutableSession(allowRecovery: true)`, `:854-857`) | none |
+| `interruptTurn` | `:1315-1350`; uses `allowRecovery: true` (`:1324-1328`), so it takes the start lock and can **resurrect** a dead runtime just to interrupt it | none |
+| `stopSession` | `:1500-1502` | none; the reactor's caller has no catch (`ProviderCommandReactor.ts:1702-1704`), so a failed Stop is only logged (`:1790-1801`) |
+| `respondToRequest` / `respondToUserInput` | `:1421`, `:1468` | none |
+| `setThreadGoal` / `getThreadGoal` / `clearThreadGoal` | `:1201-1243` (awaited in the turn-start path via `reconcileThreadGoal`, `:764-871`) | none |
+| stale-runtime stop | `stopExactBinding`, `:634-637` | `timeoutOption(2s)`, but see 1.4 |
+| `sendTurn` acceptance | Claude awaits `query.setModel` / `setPermissionMode` (`ClaudeAdapter.ts:4870`, `:4896-4905`). OpenCode `promptAsync` (`OpenCodeAdapter.ts:2504`). Copilot `sendAndWaitForTurnStart` (`CopilotAdapter.session.ts:500`). ACP and Cursor await the **whole** prompt after emitting `turn.started` (`AcpAdapter.ts:897-924`, `CursorAdapter.ts:1050`, `:1134`) | none (Codex RPC has its own 20 s) |
 
 ### 1.3 Context handoff turns block the reactor; with ACP targets this is a deadlock
 
@@ -66,14 +65,14 @@
 
 ### 1.6 Cross-thread invariants (audit for removing global serialization)
 
-| Shared state                                                                                               | Cross-thread?                                                                                                                                                                                                                               | Action                                                                                               |
-| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `ensureRecordedWorktreeAvailable` recreating a missing worktree (`:413-520`)                               | **Yes.** Two threads with the same recorded `worktreePath` can both get past the re-check (`:474-483`) and race `createWorktree` (`:485`). The git driver's per-destination lock turns the loser into "Worktree destination already exists" | Keyed lock on the resolved path (§3.9.4)                                                             |
-| Provider startup admission (per instance: 4 running, 64 pending, `ProviderService.ts:103-104`, `:377-508`) | Yes, but already concurrency-safe. The serial worker used to hide it; lanes make bursts possible                                                                                                                                            | Throttle synthetic goal recovery (§3.9.10). Raise, but keep, the Agent Control cold-wake cap (§3.13) |
-| `handledTurnStartKeys` cache (`:260-271`)                                                                  | Keys are per command/event, and each event belongs to one thread, so its lane sees it                                                                                                                                                       | none                                                                                                 |
-| `threadModelSelections` (`:273`), `stageComputerTurn` (`computerTurnLifecycle.ts:21-24`)                   | Keyed by thread id                                                                                                                                                                                                                          | none                                                                                                 |
-| `ContextHandoffCoordinator.inFlight` (keyed by handoff id), handoff source and target (same thread)        | No                                                                                                                                                                                                                                          | none                                                                                                 |
-| Delegated returns (parent thread turn start)                                                               | No: the guard is decided in the decider, and the reactor sees only the parent's lane                                                                                                                                                        | none                                                                                                 |
+| Shared state | Cross-thread? | Action |
+| --- | --- | --- |
+| `ensureRecordedWorktreeAvailable` recreating a missing worktree (`:413-520`) | **Yes.** Two threads with the same recorded `worktreePath` can both get past the re-check (`:474-483`) and race `createWorktree` (`:485`). The git driver's per-destination lock turns the loser into "Worktree destination already exists" | Keyed lock on the resolved path (§3.9.4) |
+| Provider startup admission (per instance: 4 running, 64 pending, `ProviderService.ts:103-104`, `:377-508`) | Yes, but already concurrency-safe. The serial worker used to hide it; lanes make bursts possible | Throttle synthetic goal recovery (§3.9.10). Raise, but keep, the Agent Control cold-wake cap (§3.13) |
+| `handledTurnStartKeys` cache (`:260-271`) | Keys are per command/event, and each event belongs to one thread, so its lane sees it | none |
+| `threadModelSelections` (`:273`), `stageComputerTurn` (`computerTurnLifecycle.ts:21-24`) | Keyed by thread id | none |
+| `ContextHandoffCoordinator.inFlight` (keyed by handoff id), handoff source and target (same thread) | No | none |
+| Delegated returns (parent thread turn start) | No: the guard is decided in the decider, and the reactor sees only the parent's lane | none |
 
 ### 1.7 Related findings, owned elsewhere
 
@@ -108,7 +107,6 @@ engine.streamDomainEvents ──► consumer fiber (one) ──► routeProvider
   - no recovery, no session start, and activity appends as the only projection writes.
 
   Running them outside the lifecycle lane cannot hand a decision to the wrong runtime: a replaced runtime fails the identity check, so the response ends as `invalidated`. It removes the deadlock in 1.3, because an approval no longer queues behind a turn that is waiting for it. Approval authority is unchanged: only user commands reach this path, and agents still cannot approve.
-
 - **Start fence** (`threadLaneControl.ts`). The consumer records stop intent **before** enqueueing, so it never waits behind a busy lane.
   - A **session stop**, or a **user interrupt without `turnId`**, cancels every start-capable lane item of the thread with a lower fence sequence. This covers the item running now (through its registered cancel Deferred) and any queued item (checked when it begins).
   - **Any user interrupt**, with or without `turnId`, also cancels in-flight **restarts**: runtime-mode, token-mode and goal items. Such a restart would kill the turn anyway.
@@ -122,15 +120,15 @@ engine.streamDomainEvents ──► consumer fiber (one) ──► routeProvider
 
 ### 2.2 Ordering guarantees
 
-| Guarantee                                            | Before                             | After                                                                                   |
-| ---------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------- |
-| Lifecycle items of one thread run in commit order    | yes (global FIFO)                  | yes (per-thread FIFO)                                                                   |
-| Items of different threads wait for each other       | yes                                | **no**; only the global capacity (1024 outstanding) is shared, §3.1                     |
-| Approval/user-input responses of one thread in order | yes                                | yes (callback lane FIFO)                                                                |
-| Approval vs. lifecycle item of the same thread       | serialized                         | may overtake; safe because of exact-runtime checks (§2.1)                               |
-| Stop reaches a hung start                            | after the start returns, unbounded | immediately: the cancel fence (start calls are detached, §2.3)                          |
-| Stop reaches a handoff ACP turn                      | never while the turn runs          | immediately: out-of-band provider action, then in-order settle                          |
-| Final projection after Stop during handoff           | n/a                                | `stopped`: the coordinator does not restore-as-ready, and the in-order settle runs last |
+| Guarantee | Before | After |
+| --- | --- | --- |
+| Lifecycle items of one thread run in commit order | yes (global FIFO) | yes (per-thread FIFO) |
+| Items of different threads wait for each other | yes | **no**; only the global capacity (1024 outstanding) is shared, §3.1 |
+| Approval/user-input responses of one thread in order | yes | yes (callback lane FIFO) |
+| Approval vs. lifecycle item of the same thread | serialized | may overtake; safe because of exact-runtime checks (§2.1) |
+| Stop reaches a hung start | after the start returns, unbounded | immediately: the cancel fence (start calls are detached, §2.3) |
+| Stop reaches a handoff ACP turn | never while the turn runs | immediately: out-of-band provider action, then in-order settle |
+| Final projection after Stop during handoff | n/a | `stopped`: the coordinator does not restore-as-ready, and the in-order settle runs last |
 
 ### 2.3 Bounded provider operations: `runDetachedWithDeadline`
 
@@ -154,7 +152,7 @@ Per-thread locks and admission permits are acquired **inside** the detached fibe
 A turn start cancelled by the fence:
 
 1. **Dispatches `thread.session.set`.** It always does this, even with no projected session. The session has `activeTurnId: null`, a fresh `updatedAt` and `lastError` unchanged. Status is decided by liveness: if `providerService.getSession` finds an exact live runtime equal to the projected one, keep the status (`starting` and `running` become `ready`); otherwise use `stopped`. It also carries `turnOutcome: { state: "interrupted", reason: "turn-start-cancelled" }`. This acknowledges the local dispatch (`ChatView.logic.ts:421-466`, `hasServerAcknowledgedLocalDispatch`; `queue-hold-drain` moves it to `dispatchAck.ts`). Critique major 4.
-2. **Appends `provider.turn.start.cancelled`.** Tone `info`, summary "Turn start cancelled", payload `{ detail, messageId, reason: "stopped-before-start" }`. It is a **distinct kind**, so nothing treats a user cancel as an error (critique minor 7). `queue-hold-drain`'s dispatch-ack reader treats it as _settled_, not _failed_ (§3.14).
+2. **Appends `provider.turn.start.cancelled`.** Tone `info`, summary "Turn start cancelled", payload `{ detail, messageId, reason: "stopped-before-start" }`. It is a **distinct kind**, so nothing treats a user cancel as an error (critique minor 7). `queue-hold-drain`'s dispatch-ack reader treats it as *settled*, not *failed* (§3.14).
 3. **Leaves goal synchronization pending** for goal items. The next session start reconciles it, so the goal is never marked `failed` by a cancel.
 
 ### 2.6 Turn liveness (replaces a wall-time reaper rule)
@@ -175,32 +173,30 @@ A turn start cancelled by the fence:
 export interface KeyedSerialWorker<K, A> {
   /** Never waits behind another key; waits only when `capacity` items are outstanding in total. */
   readonly enqueue: (key: K, item: A) => Effect.Effect<void>;
-  readonly drain: Effect.Effect<void>; // every key idle and empty
+  readonly drain: Effect.Effect<void>;            // every key idle and empty
   readonly drainKey: (key: K) => Effect.Effect<void>;
   readonly isIdle: (key: K) => Effect.Effect<boolean>;
   readonly metrics: Effect.Effect<QueuePolicyMetricsSnapshot>;
 }
 export const makeKeyedSerialWorker: <K, A, E, R>(options: {
-  readonly policy: LosslessBackpressureQueuePolicy; // capacity = total outstanding items across keys
+  readonly policy: LosslessBackpressureQueuePolicy;     // capacity = total outstanding items across keys
   readonly process: (key: K, item: A) => Effect.Effect<void, E, R>;
-  readonly laneDepthWarning?: number; // default 64
+  readonly laneDepthWarning?: number;                   // default 64
 }) => Effect.Effect<KeyedSerialWorker<K, A>, never, Scope.Scope | R>;
 ```
 
 - **State.** One `TxRef<{ pending: Map<K, ReadonlyArray<A>>; active: Set<K>; outstanding; highWater; blockedMs }>`. Capture the construction `Scope` once.
 - **`enqueue`**:
-  1. _Interruptible_ wait until `outstanding < capacity` (`Effect.txRetry` inside `Effect.tx`).
+  1. *Interruptible* wait until `outstanding < capacity` (`Effect.txRetry` inside `Effect.tx`).
   2. Then, inside `Effect.uninterruptibleMask`, one transaction re-checks capacity (loop if it is full again), appends, increments `outstanding`, and marks the key active if it was idle. Still uninterruptible, it then `forkIn(runLane(key), scope, { uninterruptible: false })` when the key went from idle to active.
 
   Commit and fork cannot be separated by an interrupt (critique minor 9b). Log a warning and record a metric when one key's pending depth crosses `laneDepthWarning`.
-
 - **`runLane(key)` loop.** A transaction takes the head of `pending[key]`. If there is none, it deletes `active[key]` and `pending[key]` and the loop ends. Otherwise it runs `process(key, item)` wrapped as follows:
   - Every cause is caught, logged and continued. That includes interrupt-only causes, which can only come from inner fibers: a lane fiber that is itself interrupted never reaches the handler. This closes `reactor-errors-switch` follow-up 5.
   - `Effect.ensuring(decrement outstanding)`.
   - `Effect.withSpan(\`${policy.component}.item\`, { root: true })`, so items are not children of the enqueuing span (critique minor 9d).
 
   An enqueue racing the lane's exit is safe: STM orders the two transactions, so either the lane sees the item or the enqueue forks a fresh lane.
-
 - **Capacity.** The global head-of-line case is documented in the module header: it can only happen if a single blocked thread accumulates `capacity` items, and the bounded operations (§2.3) make that transient (critique minor 9a).
 - **No `FiberMap`.** `forkIn` already removes its finalizer when the fiber exits (§1.4). Critique 9c is rejected for that reason.
 
@@ -212,38 +208,24 @@ Port `t3:apps/server/src/orchestration-v2/KeyedSerialExecutor.ts` (55 lines) unc
 
 ```ts
 export interface DetachedDeadlineOptions<A, E, E2> {
-  readonly scope: Scope.Scope; // outlives callers (ProviderService layer scope)
+  readonly scope: Scope.Scope;                       // outlives callers (ProviderService layer scope)
   readonly timeoutMs: number;
-  readonly onTimeout: () => E2; // evaluated at the deadline
-  readonly onAbandon?: (exit: Exit.Exit<A, E>) => Effect.Effect<void>; // background, after the fiber really exits
+  readonly onTimeout: () => E2;                      // evaluated at the deadline
+  readonly onAbandon?: (exit: Exit.Exit<A, E>) => Effect.Effect<void>;  // background, after the fiber really exits
 }
-export const runDetachedWithDeadline = <A, E, R, E2>(
-  effect: Effect.Effect<A, E, R>,
-  o: DetachedDeadlineOptions<A, E, E2>,
-) =>
-  Effect.uninterruptibleMask((restore) =>
-    Effect.gen(function* () {
-      const fiber = yield* Effect.forkIn(effect, o.scope, { startImmediately: true });
-      const abandon = Effect.forkIn(
-        Fiber.interrupt(fiber).pipe(
-          Effect.andThen(Fiber.await(fiber)),
-          Effect.flatMap((exit) => o.onAbandon?.(exit) ?? Effect.void),
-          Effect.catchCause((c) =>
-            Effect.logWarning("provider.detached-abandon-failed", { cause: Cause.pretty(c) }),
-          ),
-        ),
-        o.scope,
-      ).pipe(Effect.asVoid);
-      const waited = yield* restore(
-        Fiber.await(fiber).pipe(Effect.timeoutOption(Duration.millis(o.timeoutMs))),
-      ).pipe(Effect.onInterrupt(() => abandon));
-      if (Option.isNone(waited)) {
-        yield* abandon;
-        return yield* Effect.fail(o.onTimeout());
-      }
-      return yield* waited.value; // Exit is an Effect
-    }),
-  );
+export const runDetachedWithDeadline = <A, E, R, E2>(effect: Effect.Effect<A, E, R>, o: DetachedDeadlineOptions<A, E, E2>) =>
+  Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+    const fiber = yield* Effect.forkIn(effect, o.scope, { startImmediately: true });
+    const abandon = Effect.forkIn(
+      Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)),
+        Effect.flatMap((exit) => o.onAbandon?.(exit) ?? Effect.void),
+        Effect.catchCause((c) => Effect.logWarning("provider.detached-abandon-failed", { cause: Cause.pretty(c) }))),
+      o.scope).pipe(Effect.asVoid);
+    const waited = yield* restore(Fiber.await(fiber).pipe(Effect.timeoutOption(Duration.millis(o.timeoutMs))))
+      .pipe(Effect.onInterrupt(() => abandon));
+    if (Option.isNone(waited)) { yield* abandon; return yield* Effect.fail(o.onTimeout()); }
+    return yield* waited.value;  // Exit is an Effect
+  }));
 ```
 
 - `timeoutOption` here only races a `Fiber.await` **observer**. Interrupting an observer is instant, and the operation fiber is never awaited on the caller's path.
@@ -255,7 +237,7 @@ export const runDetachedWithDeadline = <A, E, R, E2>(
 export interface ProviderOperationTimeouts {
   readonly sessionStartMs: (driver: ProviderDriverKind | string) => number;
   readonly turnAcceptanceMs: number;
-  readonly controlRequestMs: number; // interrupt, stop, respond, goal sync
+  readonly controlRequestMs: number;   // interrupt, stop, respond, goal sync
   readonly unresponsiveAfterMs: number;
 }
 export const DEFAULT_SESSION_START_TIMEOUT_MS = 120_000;
@@ -265,12 +247,7 @@ export const DEFAULT_CONTROL_REQUEST_TIMEOUT_MS = 30_000;
 export const DEFAULT_UNRESPONSIVE_AFTER_MS = 15 * 60_000;
 export function resolveProviderOperationTimeouts(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
-  readonly overrides?: Partial<{
-    sessionStartMs: number;
-    turnAcceptanceMs: number;
-    controlRequestMs: number;
-    unresponsiveAfterMs: number;
-  }>;
+  readonly overrides?: Partial<{ sessionStartMs: number; turnAcceptanceMs: number; controlRequestMs: number; unresponsiveAfterMs: number }>;
 }): ProviderOperationTimeouts & { readonly invalidEnv: ReadonlyArray<string> };
 ```
 
@@ -285,24 +262,12 @@ export class ProviderOperationTimeoutError extends Schema.TaggedError<ProviderOp
   "ProviderOperationTimeoutError",
   {
     provider: Schema.String,
-    operation: Schema.Literals([
-      "session.start",
-      "session.recover",
-      "turn.start",
-      "turn.interrupt",
-      "session.stop",
-      "request.respond",
-      "user-input.respond",
-      "goal.sync",
-    ]),
+    operation: Schema.Literals(["session.start", "session.recover", "turn.start", "turn.interrupt",
+      "session.stop", "request.respond", "user-input.respond", "goal.sync"]),
     timeoutMs: Schema.Number,
-    detail: Schema.String, // one user-facing sentence (below)
+    detail: Schema.String,     // one user-facing sentence (below)
   },
-) {
-  override get message() {
-    return this.detail;
-  }
-}
+) { override get message() { return this.detail; } }
 ```
 
 - Add it to `ProviderServiceError`.
@@ -337,7 +302,7 @@ export class ProviderOperationTimeoutError extends Schema.TaggedError<ProviderOp
     readonly listRuntimeActivity?: () => Effect.Effect<ReadonlyArray<ProviderRuntimeActivity>>;
     ```
 
-  - **`sendTurn`: drop the `expectedRuntime` parameter.** `delegation-returns` (W2, §4.14) removed its only caller and left the deletion to this package to avoid a W3 conflict. Before deleting, verify that `rg -n "sendTurn\([^)]*,"` in `apps/server/src` finds no caller. _Fallback, only if W2 did not land:_ keep the parameter and route the guarded path through §3.7.6's lock-until-acceptance helper.
+  - **`sendTurn`: drop the `expectedRuntime` parameter.** `delegation-returns` (W2, §4.14) removed its only caller and left the deletion to this package to avoid a W3 conflict. Before deleting, verify that `rg -n "sendTurn\([^)]*,"` in `apps/server/src` finds no caller. *Fallback, only if W2 did not land:* keep the parameter and route the guarded path through §3.7.6's lock-until-acceptance helper.
 
 ### 3.7 `apps/server/src/provider/Layers/ProviderService.ts`
 
@@ -392,8 +357,7 @@ export class ProviderOperationTimeoutError extends Schema.TaggedError<ProviderOp
    - Both racers are observers, so the race never awaits the adapter call.
    - Interrupting the caller (the reactor's layer scope closing, as today) interrupts the adapter call, in the background.
    - Set `runtimeActivity` on acceptance.
-   - _Fallback helper (only if the §3.6 deletion is not possible):_ `lockedUntilAcceptance`. It takes the start-lock permit inside a detached fiber bounded by `turnAcceptanceMs`. It releases the permit when acceptance is observed or when the adapter fiber exits, never from the caller, which keeps the "retain the permit until the adapter finalizes" rule at `:1195-1196`.
-
+   - *Fallback helper (only if the §3.6 deletion is not possible):* `lockedUntilAcceptance`. It takes the start-lock permit inside a detached fiber bounded by `turnAcceptanceMs`. It releases the permit when acceptance is observed or when the adapter fiber exits, never from the caller, which keeps the "retain the permit until the adapter finalizes" rule at `:1195-1196`.
 7. **`interruptTurn`** (`:1315-1350`):
    - A missing binding fails `ProviderSessionNotFoundError`.
    - Call `resolveRoutableSession({ allowRecovery: false })`. If `!routed.isActive`, fail `ProviderSessionNotFoundError`. There is no start lock and no recovery (critique majors 2 and 3), the same rule as `stopBackgroundTask` (`:1360-1362`).
@@ -412,65 +376,35 @@ export class ProviderOperationTimeoutError extends Schema.TaggedError<ProviderOp
 ```ts
 export class ProviderSessionStartCancelledError extends Schema.TaggedError<ProviderSessionStartCancelledError>()(
   "ProviderSessionStartCancelledError",
-  { threadId: Schema.String, stopSequence: Schema.Number, detail: Schema.String }, // detail: "Stopped before the provider session started."
-) {
-  override get message() {
-    return this.detail;
-  }
-}
+  { threadId: Schema.String, stopSequence: Schema.Number, detail: Schema.String },  // detail: "Stopped before the provider session started."
+) { override get message() { return this.detail; } }
 
 export type StartKind = "turn" | "restart";
 export type OutOfBandOutcome =
   | { readonly kind: "interrupted" }
   | { readonly kind: "nothing-live" }
-  | {
-      readonly kind: "stopped-after-interrupt-failure";
-      readonly detail: string;
-      readonly stopFailed?: string;
-    }
+  | { readonly kind: "stopped-after-interrupt-failure"; readonly detail: string; readonly stopFailed?: string }
   | { readonly kind: "stopped" }
   | { readonly kind: "stop-failed"; readonly detail: string };
 
 export interface ThreadLaneControl {
   /** Consumer-only, before enqueue. Returns whether a provider-side out-of-band action is needed. */
-  readonly noteEvent: (
-    event: ProviderIntentEvent,
-  ) => Effect.Effect<{ readonly outOfBand: boolean }>;
-  readonly guardStart: <A, E, R>(
-    at: { threadId: ThreadId; fenceSequence: number; kind: StartKind },
-    effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E | ProviderSessionStartCancelledError, R>;
-  readonly failIfCancelled: (at: {
-    threadId: ThreadId;
-    fenceSequence: number;
-    kind: StartKind;
-  }) => Effect.Effect<void, ProviderSessionStartCancelledError>;
-  readonly cancelsStart: (at: {
-    threadId: ThreadId;
-    fenceSequence: number;
-    kind: StartKind;
-  }) => Effect.Effect<boolean>;
+  readonly noteEvent: (event: ProviderIntentEvent) => Effect.Effect<{ readonly outOfBand: boolean }>;
+  readonly guardStart: <A, E, R>(at: { threadId: ThreadId; fenceSequence: number; kind: StartKind },
+    effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E | ProviderSessionStartCancelledError, R>;
+  readonly failIfCancelled: (at: { threadId: ThreadId; fenceSequence: number; kind: StartKind }) => Effect.Effect<void, ProviderSessionStartCancelledError>;
+  readonly cancelsStart: (at: { threadId: ThreadId; fenceSequence: number; kind: StartKind }) => Effect.Effect<boolean>;
   readonly cancelledAStart: (eventId: EventId) => Effect.Effect<boolean>;
   /** Handoff: fails Cancelled if a user stop/interrupt was noted after fenceSequence; else records ownership. */
-  readonly beginTurnOwnership: (
-    threadId: ThreadId,
-    fenceSequence: number,
-  ) => Effect.Effect<void, ProviderSessionStartCancelledError>;
+  readonly beginTurnOwnership: (threadId: ThreadId, fenceSequence: number) => Effect.Effect<void, ProviderSessionStartCancelledError>;
   readonly endTurnOwnership: (threadId: ThreadId) => Effect.Effect<void>;
-  readonly stopRequestedSince: (
-    threadId: ThreadId,
-    fenceSequence: number,
-  ) => Effect.Effect<boolean>;
-  readonly registerOutOfBand: (
-    eventId: EventId,
-  ) => Effect.Effect<Deferred.Deferred<OutOfBandOutcome>>;
-  readonly takeOutOfBand: (
-    eventId: EventId,
-  ) => Effect.Effect<Option.Option<Deferred.Deferred<OutOfBandOutcome>>>;
+  readonly stopRequestedSince: (threadId: ThreadId, fenceSequence: number) => Effect.Effect<boolean>;
+  readonly registerOutOfBand: (eventId: EventId) => Effect.Effect<Deferred.Deferred<OutOfBandOutcome>>;
+  readonly takeOutOfBand: (eventId: EventId) => Effect.Effect<Option.Option<Deferred.Deferred<OutOfBandOutcome>>>;
   readonly prune: (threadId: ThreadId, processedSequence: number) => Effect.Effect<void>;
 }
 export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl>;
-export const isUserStopIntent: (event: ProviderIntentEvent) => boolean; // session-stop, or interrupt w/o provider: commandId
+export const isUserStopIntent: (event: ProviderIntentEvent) => boolean;   // session-stop, or interrupt w/o provider: commandId
 ```
 
 - **Per-thread state** in one `Ref<Map<ThreadId, LaneState>>`. Every operation is **one** `Ref.modify`, so check-and-register in `guardStart` is atomic with `noteEvent`. `LaneState`:
@@ -493,7 +427,6 @@ export const isUserStopIntent: (event: ProviderIntentEvent) => boolean; // sessi
   ```
 
   `ensuring` clears `currentStart` only if it is still ours. Contract, documented in the module: `guardStart` may wrap **only promptly interruptible** effects, meaning `ProviderService.startSession` / `startFreshSession`, which are detached (§2.3).
-
 - **`cancelsStart`.** `kind === "turn"`: `stopAllSeq > fenceSequence`. `kind === "restart"`: `stopRestartsSeq > fenceSequence`.
 - **`prune`.** Drop the thread's entry when there is no `owner`, no `currentStart`, no `outOfBand`, and `max(stopAllSeq, stopRestartsSeq, userStopSeq) <= processedSequence`. The reactor calls it after each lifecycle item when the lane is idle (critique minor 11b).
 
@@ -514,17 +447,8 @@ These steps are written against the code **after** W1 and W2 have landed. Those 
 
    ```ts
    type LaneItem =
-     | {
-         readonly kind: "event";
-         readonly event: LifecycleIntentEvent;
-         readonly fenceSequence: number;
-         readonly recovery?: true;
-       }
-     | {
-         readonly kind: "liveness";
-         readonly threadId: ThreadId;
-         readonly verdict: TurnLivenessVerdict;
-       };
+     | { readonly kind: "event"; readonly event: LifecycleIntentEvent; readonly fenceSequence: number; readonly recovery?: true }
+     | { readonly kind: "liveness"; readonly threadId: ThreadId; readonly verdict: TurnLivenessVerdict };
    ```
 
 2. **`routeProviderIntentEvent(event, { fenceSequence = event.sequence, recovery })`.** This is the **single per-thread entry point** for live, synthetic and (later) replayed events (`provider-effect-outbox` R1):
@@ -535,14 +459,12 @@ These steps are written against the code **after** W1 and W2 have landed. Those 
       - then `lifecycleLanes.enqueue(threadId, { kind: "event", event, fenceSequence, ...(recovery ? { recovery } : {}) })`.
 
    `processEvent` in `start` (`:1812-1827`) calls it.
-
 3. **`processLaneItemSafely(item)`** replaces `processDomainEventSafely` for lifecycle items. It is the one per-item failure wrapper and the `provider-effect-outbox` R2 hook point:
    - Run the item: the event switch (today's `processDomainEvent` minus the callback cases), or `applyLivenessVerdict`.
    - In the `catchCause`: interrupt-only causes are logged at debug and **not** re-raised (W1 follow-up 5). Other causes log a warning, as today.
    - Then call `laneControl.prune(threadId, fenceSequence)` when `lifecycleLanes.isIdle(threadId)`.
 
    Synthetic recovery items run inside `recoveryPermits.withPermits(1)`. **There is no whole-item lane timeout.** Every provider operation is bounded at its own call site (§2.3). That means a lane timeout can never cut a `sendTurn` that may have reached the provider (`provider-effect-outbox` R3).
-
 4. **`ensureRecordedWorktreeAvailable`** (`:413-520`). Wrap the part from the first `pathEntryExists(worktreePath)` (`:447`) through the `worktree.meta.update` dispatch (`:509-517`) in `worktreeLocks.withLock(worktreeIdentity(worktreePath), …)`. The re-checks then run under the lock, so the second thread sees the recreated, registered worktree and returns at `:447-455`.
 5. **`ensureSessionForThread(threadId, createdAt, options: { fenceSequence: number; kind: StartKind; modelSelection?; computerCatalogChanged? })`.** `fenceSequence` and `kind` are required, and all four callers pass them.
    - The first statement is `yield* laneControl.failIfCancelled({ threadId, fenceSequence, kind })`.
@@ -558,20 +480,15 @@ These steps are written against the code **after** W1 and W2 have landed. Those 
      - return.
 
      This goes before `usage-limits`' limit branch and before the error path.
-
    - **Before forking `sendTurn`** (`:1332`): `if (yield* laneControl.cancelsStart(...)) return yield* settleCancelledTurnStart(event)`. The forked send keeps today's shape and catch (`provider-effect-outbox` R3).
    - **Handoff branch** (`:1242-1268`). Pass a control object, and keep `ensureRecordedWorktreeAvailable` / `leaseThreadPath` as W1 left them:
 
      ```ts
-     yield *
-       contextHandoffCoordinator
-         .processTurnStart(event, {
-           guardStart: (eff) =>
-             laneControl.guardStart({ threadId, fenceSequence, kind: "turn" }, eff),
-           onDispatchStarted: laneControl.beginTurnOwnership(threadId, fenceSequence),
-           stopRequested: laneControl.stopRequestedSince(threadId, fenceSequence),
-         })
-         .pipe(Effect.ensuring(laneControl.endTurnOwnership(threadId)));
+     yield* contextHandoffCoordinator.processTurnStart(event, {
+       guardStart: (eff) => laneControl.guardStart({ threadId, fenceSequence, kind: "turn" }, eff),
+       onDispatchStarted: laneControl.beginTurnOwnership(threadId, fenceSequence),
+       stopRequested: laneControl.stopRequestedSince(threadId, fenceSequence),
+     }).pipe(Effect.ensuring(laneControl.endTurnOwnership(threadId)));
      ```
 
      The lane item stays busy for the whole handoff, which keeps it fenced.
@@ -612,13 +529,11 @@ These steps are written against the code **after** W1 and W2 have landed. Those 
       5. on `lost` / `unresponsive`, enqueues `{ kind: "liveness", threadId, verdict }`.
 
       Prune `suspects` and `warned` entries whose thread no longer has the same active turn.
-
     - **`applyLivenessVerdict`**, in the lane: re-read the shell and `getSession`, and re-classify with the item's verdict as `previous`. Act only if the verdict still holds:
       - `lost` → session-set plus `provider.turn.lost` (§2.6);
       - `unresponsive` → `provider.turn.unresponsive` once, recorded in `warned`.
 
       Its payload is `{ detail, turnId, runtimeSessionId, lastActivityAt (ISO), thresholdMs }`. The detail reads: "No provider activity for N minutes. It may be running a long silent command, or it may be stuck. Stop the turn if it does not recover."
-
     - **In `start`:** after the stream fork, run `Effect.forkScoped(sweepLiveness.pipe(Effect.catchCause(log), Effect.repeat(Schedule.spaced(Duration.millis(livenessSweepIntervalMs))), Effect.delay(...)))`.
 14. **`drain`** = `Effect.all([lifecycleLanes.drain, callbackLanes.drain, outOfBandLanes.drain], { discard: true })`. Forked `sendTurn`/steer stay untracked, as today.
 
@@ -643,7 +558,6 @@ These steps are written against the code **after** W1 and W2 have landed. Those 
    ```
 
    Export `NO_LANE_CONTROL` (identity, `Effect.void`, `Effect.succeed(false)`). `recover()` uses it and is otherwise unchanged (§7).
-
 2. **Thread `control`** through `processTurnStart` → `runPreparing` → `prepareAndDispatch` / `finalizeFailure`.
 3. **`prepareAndDispatch`:**
    - `providerService.startFreshSession(...)` (`:696-706`) → `control.guardStart(providerService.startFreshSession(...))`.
@@ -660,7 +574,6 @@ These steps are written against the code **after** W1 and W2 have landed. Those 
    - project the source endpoint with `status: "stopped"`, `lastError: null`. Never `ready`.
 
    This fixes the clobber in the critique blocker. The reactor's in-order stop or interrupt settle then runs after it.
-
 6. **`markDeliveryUncertain` / `reconcileDispatching`:** unchanged (recovery only).
 7. **`reactor-errors-switch`'s `reportPreDispatchFailure`:** a `Cancelled` cause before `dispatching` reaches it only through `runPreparing`'s catch → `finalizeFailure`. Keep its record-state rules.
 
@@ -668,32 +581,19 @@ These steps are written against the code **after** W1 and W2 have landed. Those 
 
 ```ts
 export type TurnLivenessVerdict =
-  | { readonly kind: "not-applicable" }
-  | { readonly kind: "healthy" }
-  | {
-      readonly kind: "suspect-lost";
-      readonly runtimeSessionId: RuntimeSessionId;
-      readonly turnId: TurnId;
-    }
+  | { readonly kind: "not-applicable" } | { readonly kind: "healthy" }
+  | { readonly kind: "suspect-lost"; readonly runtimeSessionId: RuntimeSessionId; readonly turnId: TurnId }
   | { readonly kind: "lost"; readonly runtimeSessionId: RuntimeSessionId; readonly turnId: TurnId }
-  | {
-      readonly kind: "unresponsive";
-      readonly runtimeSessionId: RuntimeSessionId;
-      readonly turnId: TurnId;
-      readonly silentForMs: number;
-      readonly lastActivityAtMs: number;
-    };
+  | { readonly kind: "unresponsive"; readonly runtimeSessionId: RuntimeSessionId; readonly turnId: TurnId; readonly silentForMs: number; readonly lastActivityAtMs: number };
 export function classifyTurnLiveness(input: {
   readonly session: OrchestrationSession | null;
   readonly hasPendingRequest: boolean;
   readonly backgroundLiveness: "working" | "monitoring" | null | undefined;
-  readonly liveRuntimeSessionId: RuntimeSessionId | null; // exact live adapter session for the bound runtime
+  readonly liveRuntimeSessionId: RuntimeSessionId | null;     // exact live adapter session for the bound runtime
   readonly activity: ProviderRuntimeActivity | null;
   readonly previous: TurnLivenessVerdict | null;
   readonly alreadyWarned: boolean;
-  readonly nowMs: number;
-  readonly sweepIntervalMs: number;
-  readonly unresponsiveAfterMs: number;
+  readonly nowMs: number; readonly sweepIntervalMs: number; readonly unresponsiveAfterMs: number;
 }): TurnLivenessVerdict;
 ```
 
@@ -741,7 +641,6 @@ Raise `MAX_COLD_WAKES_IN_FLIGHT` (added by `delegation-returns` §3.4) from 1 to
   - `provider.session.restart.failed` (error)
 
   Existing `provider.session.stop.failed` is now actually emitted.
-
 - **Internal server API** (no external consumers): as listed in the header. `ProviderServiceShape` additions are optional, and `ContextHandoffCoordinatorShape.processTurnStart`'s new argument is optional, so existing test doubles keep compiling. `ProviderCommandReactorShape.sweepLiveness` is required (one double to update).
 - **`@ryco/shared` gains two subpath exports.** Insert them next to `./DrainableWorker` / `./KeyedCoalescingWorker` (`packages/shared/package.json:126-133`). That is away from the export lines that `turn-finalization`, `provider-compat`, `settlement-signals` and `claude-steering` touch.
 
@@ -927,21 +826,21 @@ Extend `createHarness` with:
 
 ## 9. Review resolution
 
-| #   | Severity | Issue                                                                                           | Resolution                                                                                                                                                                                                                                                                                                                                                                                       |
-| --- | -------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | blocker  | Releasing the lane at handoff dispatch lets Stop race `restoreSource` and bring the source back | **Accepted, both remedies.** The handoff stays the running lane item, never released. Stop and interrupt get through as out-of-band provider actions and settle in order afterwards (a). `finalizeFailure` checks `stopRequested`, restores the binding only for its cursor, stops the source and projects `stopped` (b). `onDispatchStarted` fails if a stop came first. Tests 5.8-7/8, 5.9-2/3 |
-| 2   | major    | A Stop that cancelled a restart then revives the old runtime via interrupt recovery             | **Accepted.** `interruptTurn` never recovers (`ProviderSessionNotFoundError`). An interrupt that cancelled a start makes no provider call. Any user interrupt cancels in-flight restarts. Test 5.8-4 (FAIL-FIRST), 5.5-4                                                                                                                                                                         |
-| 3   | major    | The interrupt timeout omits the start-lock wait; FIFO lanes make it a per-thread deadlock       | **Accepted.** Interrupt takes no lock now. Every deadline wraps lock plus admission plus adapter inside the detached fiber. The guarded path that held the lock across ACP turns is gone (W2), and the parameter is deleted. Tests 5.5-2/5                                                                                                                                                       |
-| 4   | major    | A cancel by interrupt leaves the composer busy                                                  | **Accepted.** The cancel always dispatches a session-set (fresh `updatedAt`, `activeTurnId: null`, liveness-based status) with a `turnOutcome`. The queue ack reader handles the new kind. Test 5.8-3 asserts the session-set                                                                                                                                                                    |
-| 5   | major    | timeout/race await the loser's interruption                                                     | **Accepted, verified** (`internal/effect.ts:1548`, `:3729-3747`). All provider deadlines use `runDetachedWithDeadline`, which forks into the service scope, abandons in the background, and undoes late successes. `stopExactBinding` is converted too. Tests 5.3-2, 5.5-2/11                                                                                                                    |
-| 6   | major    | The turn-start timeout was dropped                                                              | **Accepted.** `turnSubmission` capability, plus an acceptance deadline for every adapter. ACP and Cursor count until `turn.started` is observed. Late acceptance is interrupted. Tests 5.5-7/8/9                                                                                                                                                                                                 |
-| 7   | minor    | Reusing `provider.turn.start.failed` for a cancel; goal sync on cancel                          | **Accepted.** A distinct `provider.turn.start.cancelled` with `payload.reason`. Goal sync stays pending (test 5.8-9)                                                                                                                                                                                                                                                                             |
-| 8   | minor    | Overlap ownership placed on W1 packages                                                         | **Accepted.** This spec owns the cancel branch in `reportTurnStartFailure`, error rendering (via `detail`, with tests), `turnOutcome` reasons, and the queue ack-reader change (§3.10, §3.14)                                                                                                                                                                                                    |
-| 9   | minor    | KeyedSerialWorker hazards                                                                       | **Partly accepted.** (a) Documented, with a per-lane depth warning. (b) Commit and fork are uninterruptible. (d) Items get root spans. **(c) Rejected:** `forkIn` removes its scope finalizer when the fiber exits (`internal/effect.ts:5320-5331`), so finalizers do not accumulate and `FiberMap` is not needed                                                                                |
-| 10  | minor    | Cancellation key too coarse; synthetic events not cancellable                                   | **Accepted.** Only session stops and `turnId`-less user interrupts cancel turn starts. Synthetic recovery uses fence 0 (test 5.8-10)                                                                                                                                                                                                                                                             |
-| 11  | minor    | Reaper design gaps                                                                              | **Accepted.** `Clock`-based, with a pure classifier and `TestClock`/threshold-0 tests. Maps are pruned. The logic lives in the orchestration layer and settles through the thread lane (no provider-layer dispatch). Codex false positives are documented. The lost verdict uses the exact-live-session signal. `settlement-signals` is listed                                                   |
-| 12  | minor    | Test gaps and mislabels                                                                         | **Accepted.** The worktree test is relabelled as a regression guard (5.8-13). Added tests: `dispatchStarted` (5.9-1), Stop during handoff (5.8-7/8), Stop after a cancelled restart (5.8-4), an interrupt that does not wait on a lock (5.5-4/5), and end-to-end timeout text (5.8-11). All are in §10's run list                                                                                |
-| 13  | minor    | Operational defaults                                                                            | **Accepted.** Per-driver start default (`acpRegistry` 300 s), env overrides (`providerOperationPolicy.ts`), recovery throttled to 4 instead of bursting into admission-busy, and the cold-wake cap raised to 4 rather than removed. Retry-from-scratch is documented (§6)                                                                                                                        |
+| # | Severity | Issue | Resolution |
+| --- | --- | --- | --- |
+| 1 | blocker | Releasing the lane at handoff dispatch lets Stop race `restoreSource` and bring the source back | **Accepted, both remedies.** The handoff stays the running lane item, never released. Stop and interrupt get through as out-of-band provider actions and settle in order afterwards (a). `finalizeFailure` checks `stopRequested`, restores the binding only for its cursor, stops the source and projects `stopped` (b). `onDispatchStarted` fails if a stop came first. Tests 5.8-7/8, 5.9-2/3 |
+| 2 | major | A Stop that cancelled a restart then revives the old runtime via interrupt recovery | **Accepted.** `interruptTurn` never recovers (`ProviderSessionNotFoundError`). An interrupt that cancelled a start makes no provider call. Any user interrupt cancels in-flight restarts. Test 5.8-4 (FAIL-FIRST), 5.5-4 |
+| 3 | major | The interrupt timeout omits the start-lock wait; FIFO lanes make it a per-thread deadlock | **Accepted.** Interrupt takes no lock now. Every deadline wraps lock plus admission plus adapter inside the detached fiber. The guarded path that held the lock across ACP turns is gone (W2), and the parameter is deleted. Tests 5.5-2/5 |
+| 4 | major | A cancel by interrupt leaves the composer busy | **Accepted.** The cancel always dispatches a session-set (fresh `updatedAt`, `activeTurnId: null`, liveness-based status) with a `turnOutcome`. The queue ack reader handles the new kind. Test 5.8-3 asserts the session-set |
+| 5 | major | timeout/race await the loser's interruption | **Accepted, verified** (`internal/effect.ts:1548`, `:3729-3747`). All provider deadlines use `runDetachedWithDeadline`, which forks into the service scope, abandons in the background, and undoes late successes. `stopExactBinding` is converted too. Tests 5.3-2, 5.5-2/11 |
+| 6 | major | The turn-start timeout was dropped | **Accepted.** `turnSubmission` capability, plus an acceptance deadline for every adapter. ACP and Cursor count until `turn.started` is observed. Late acceptance is interrupted. Tests 5.5-7/8/9 |
+| 7 | minor | Reusing `provider.turn.start.failed` for a cancel; goal sync on cancel | **Accepted.** A distinct `provider.turn.start.cancelled` with `payload.reason`. Goal sync stays pending (test 5.8-9) |
+| 8 | minor | Overlap ownership placed on W1 packages | **Accepted.** This spec owns the cancel branch in `reportTurnStartFailure`, error rendering (via `detail`, with tests), `turnOutcome` reasons, and the queue ack-reader change (§3.10, §3.14) |
+| 9 | minor | KeyedSerialWorker hazards | **Partly accepted.** (a) Documented, with a per-lane depth warning. (b) Commit and fork are uninterruptible. (d) Items get root spans. **(c) Rejected:** `forkIn` removes its scope finalizer when the fiber exits (`internal/effect.ts:5320-5331`), so finalizers do not accumulate and `FiberMap` is not needed |
+| 10 | minor | Cancellation key too coarse; synthetic events not cancellable | **Accepted.** Only session stops and `turnId`-less user interrupts cancel turn starts. Synthetic recovery uses fence 0 (test 5.8-10) |
+| 11 | minor | Reaper design gaps | **Accepted.** `Clock`-based, with a pure classifier and `TestClock`/threshold-0 tests. Maps are pruned. The logic lives in the orchestration layer and settles through the thread lane (no provider-layer dispatch). Codex false positives are documented. The lost verdict uses the exact-live-session signal. `settlement-signals` is listed |
+| 12 | minor | Test gaps and mislabels | **Accepted.** The worktree test is relabelled as a regression guard (5.8-13). Added tests: `dispatchStarted` (5.9-1), Stop during handoff (5.8-7/8), Stop after a cancelled restart (5.8-4), an interrupt that does not wait on a lock (5.5-4/5), and end-to-end timeout text (5.8-11). All are in §10's run list |
+| 13 | minor | Operational defaults | **Accepted.** Per-driver start default (`acpRegistry` 300 s), env overrides (`providerOperationPolicy.ts`), recovery throttled to 4 instead of bursting into admission-busy, and the cold-wake cap raised to 4 rather than removed. Retry-from-scratch is documented (§6) |
 
 Verdict agreement: the critique's verification holds. Two further instances were confirmed here:
 

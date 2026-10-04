@@ -1,16 +1,16 @@
 # 01 · queue-hold-drain: hold the follow-up queue on Stop, error and limit, and drain off-screen threads (bugs 3–4)
 
-| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| id               | `queue-hold-drain`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| title            | A per-thread, edge-triggered queue **hold** (Stop, a turn that ends in error, a failed queued start, a stalled start, a Claude resume review; usage limits plug in later). One **drain coordinator** in client-runtime that drains every thread with a queue, not only the visible ChatView. A message-scoped **dispatch-ack gate**. Mobile shares the same pure policy                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| wave             | 1 (parallel, isolated worktree). Three commits that can be reviewed separately: **A** client-runtime policy, store and coordinator · **B** web adapter, background sender, UI, Stop · **C** mobile outbox on the shared policy                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| verdict          | **confirmed**. Bug 3 is web-only: mobile already drains globally. Bug 4 affects web and mobile, and the cascade is worse than the brief says: a second `thread.turn.start` sent before the first turn's `session-set(running)` is accepted by the decider and then silently orphaned by the reactor (§1.3)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| size             | **L** (A: M, B: M–L, C: M)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| touched files    | **client-runtime:** `packages/client-runtime/src/state/message-queue/{hold.ts (new), threadView.ts (new), drain.ts (new), coordinator.ts (new), store.ts, index.ts}` · `packages/client-runtime/src/state/session/{dispatchAck.ts (new), index.ts}` · `packages/client-runtime/src/state/composer/sendEngine.ts` · `packages/client-runtime/src/state/threads/storeSelectors.ts` · tests: `message-queue/{hold,threadView,drain,coordinator,store}.test.ts`, `session/dispatchAck.test.ts`, `composer/sendEngine.test.ts`, `threads/storeSelectors.test.ts`. **web:** `apps/web/src/messageQueueDrain.ts (new)` · `apps/web/src/components/MessageQueueDrainBridge.tsx (new)` · `apps/web/src/hooks/chatSendShared.ts (new)` · `apps/web/src/hooks/sendQueuedMessageInBackground.ts (new)` · `apps/web/src/hooks/executeChatSendTurn.ts` · `apps/web/src/hooks/useChatSessionActions.ts` · `apps/web/src/hostedHub/capabilities.ts` · `apps/web/src/hostedHub/environment.ts` · `apps/web/src/components/RootAppShell.tsx` · `apps/web/src/components/ChatView.tsx` · `apps/web/src/components/ChatView.logic.ts` · `apps/web/src/components/chat/ComposerQueuedMessages.tsx` · tests: `apps/web/src/messageQueueDrain.test.ts (new)`, `apps/web/src/hooks/chatSendShared.test.ts (new)`, `apps/web/src/hooks/sendQueuedMessageInBackground.test.ts (new)`, `apps/web/src/hooks/executeChatSendTurn.test.ts`, `apps/web/src/components/ChatView.browser.helpers.tsx`, `apps/web/src/components/ChatView.Conversation.browser.tsx`. **mobile:** `apps/mobile/src/state/{threadOutbox.ts, threadOutboxModel.ts, use-thread-outbox-drain.ts}` · `apps/mobile/src/features/threads/{ThreadDetailScreen.tsx, ThreadQueuedMessages.tsx}` · tests: `apps/mobile/src/state/{threadOutbox,threadOutboxModel,use-thread-outbox-drain,outboxSettleDrain}.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| migrations       | **none.** No server or SQLite change. Mobile adds one client KV key, `ryco.threadOutboxHolds.v1` (§3.C1)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| contract changes | **none in `packages/contracts`.** Client-runtime API additions: `QueueHold*` types and helpers, `readQueueThreadView`, `resolveQueueDrainStep`, `createMessageQueueDrainCoordinator`, store fields and actions `holdsByThreadKey`, `acknowledgedCauseKeysByThreadKey`, `epoch`, `hold`, `release`, `removeHoldCauses`, `acknowledgeCauses`, `releaseSend`, `reset`, `selectThreadDetailLoaded`, `CommitSendTurnDispatchInput.onBeforeTurnStart`, and `state/session/dispatchAck.ts`. The local-dispatch ack helpers move there from `apps/web/src/components/ChatView.logic.ts`, which re-exports them. Web-internal: new `ExecuteChatSendTurnInput` options `claudeCacheReview`, `suppressToasts`, `onBeforeTurnStart` and `onSendError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| overlaps         | **usage-limits (W2):** consumer of the hold API. It adds the `limit` cause in `hold.ts` `deriveQueueFailureCauses` and copy in `describeQueueHold`. Merge after this package. **claude-steering (W2):** `message-queue/*`, `ChatView.tsx` `handleSteerQueuedMessage` (untouched here), and the steer reconcile effects this package moves into the coordinator (`drain.ts` reconcile step). Claude steer must not emit `thread.turn-interrupt-requested`, or the derived interrupt cause will hold the queue. **claude-meter-wake (W1):** semantic dependency. Until it lands, a Claude wake turn has no projected turn before its first assistant frame, so the drain can still send into that gap (§6). **reactor-errors-switch (W1):** semantic dependency. The ack gate depends on `provider.turn.start.failed` activities that carry `payload.messageId` (`ProviderCommandReactor.ts:275-305`, `1126-1180`). Keep that field. **settlement-signals (W1):** semantic. A held queue still counts as `local-queue` in `canSettleThread`. Whether "held" should surface as needs-attention is deferred to them. No textual overlap: this package does not edit `threadInbox.ts` or `threadSettlement.ts`. **turn-finalization (W1):** semantic. If it changes `latestTurn.state` settling in `threads/store.ts`, the derived interrupt cause (§3.A1) still works, because it only reads `interrupted`. Textual overlap is limited to the append-only selector in `storeSelectors.ts`, not `store.ts`. **rollback-correctness (W2):** semantic. `thread.reverted` can set `latestTurn.state` to `interrupted` from a `missing` checkpoint (`threads/store.ts:2568-2580`), which can raise a spurious interrupt hold if the queue is non-empty (§6). **delegation-returns (W2) / restart-continuation (W3):** semantic. Server-initiated turns and the restart-orphan `error` status feed the hold and ack logic (§1.4, §6). **delegation-lineage (W2):** neighbouring ChatView composer-stack JSX (`AgentControlApprovals` sits next to `ComposerQueuedMessages`). **acp-message-ids (W1):** none. This package is client-only and does not touch `ProjectionThreadMessages.ts`. **delegation-guard-restart (W1):** none. It satisfies their constraint that queued or held entries are never stored as `role='user'` rows. Holds are client-only. **provider-compat, turn-finalization server parts, reactor-concurrency, provider-effect-outbox (W3):** no textual overlap |
+| Field | Value |
+| --- | --- |
+| id | `queue-hold-drain` |
+| title | A per-thread, edge-triggered queue **hold** (Stop, a turn that ends in error, a failed queued start, a stalled start, a Claude resume review; usage limits plug in later). One **drain coordinator** in client-runtime that drains every thread with a queue, not only the visible ChatView. A message-scoped **dispatch-ack gate**. Mobile shares the same pure policy |
+| wave | 1 (parallel, isolated worktree). Three commits that can be reviewed separately: **A** client-runtime policy, store and coordinator · **B** web adapter, background sender, UI, Stop · **C** mobile outbox on the shared policy |
+| verdict | **confirmed**. Bug 3 is web-only: mobile already drains globally. Bug 4 affects web and mobile, and the cascade is worse than the brief says: a second `thread.turn.start` sent before the first turn's `session-set(running)` is accepted by the decider and then silently orphaned by the reactor (§1.3) |
+| size | **L** (A: M, B: M–L, C: M) |
+| touched files | **client-runtime:** `packages/client-runtime/src/state/message-queue/{hold.ts (new), threadView.ts (new), drain.ts (new), coordinator.ts (new), store.ts, index.ts}` · `packages/client-runtime/src/state/session/{dispatchAck.ts (new), index.ts}` · `packages/client-runtime/src/state/composer/sendEngine.ts` · `packages/client-runtime/src/state/threads/storeSelectors.ts` · tests: `message-queue/{hold,threadView,drain,coordinator,store}.test.ts`, `session/dispatchAck.test.ts`, `composer/sendEngine.test.ts`, `threads/storeSelectors.test.ts`. **web:** `apps/web/src/messageQueueDrain.ts (new)` · `apps/web/src/components/MessageQueueDrainBridge.tsx (new)` · `apps/web/src/hooks/chatSendShared.ts (new)` · `apps/web/src/hooks/sendQueuedMessageInBackground.ts (new)` · `apps/web/src/hooks/executeChatSendTurn.ts` · `apps/web/src/hooks/useChatSessionActions.ts` · `apps/web/src/hostedHub/capabilities.ts` · `apps/web/src/hostedHub/environment.ts` · `apps/web/src/components/RootAppShell.tsx` · `apps/web/src/components/ChatView.tsx` · `apps/web/src/components/ChatView.logic.ts` · `apps/web/src/components/chat/ComposerQueuedMessages.tsx` · tests: `apps/web/src/messageQueueDrain.test.ts (new)`, `apps/web/src/hooks/chatSendShared.test.ts (new)`, `apps/web/src/hooks/sendQueuedMessageInBackground.test.ts (new)`, `apps/web/src/hooks/executeChatSendTurn.test.ts`, `apps/web/src/components/ChatView.browser.helpers.tsx`, `apps/web/src/components/ChatView.Conversation.browser.tsx`. **mobile:** `apps/mobile/src/state/{threadOutbox.ts, threadOutboxModel.ts, use-thread-outbox-drain.ts}` · `apps/mobile/src/features/threads/{ThreadDetailScreen.tsx, ThreadQueuedMessages.tsx}` · tests: `apps/mobile/src/state/{threadOutbox,threadOutboxModel,use-thread-outbox-drain,outboxSettleDrain}.test.ts` |
+| migrations | **none.** No server or SQLite change. Mobile adds one client KV key, `ryco.threadOutboxHolds.v1` (§3.C1) |
+| contract changes | **none in `packages/contracts`.** Client-runtime API additions: `QueueHold*` types and helpers, `readQueueThreadView`, `resolveQueueDrainStep`, `createMessageQueueDrainCoordinator`, store fields and actions `holdsByThreadKey`, `acknowledgedCauseKeysByThreadKey`, `epoch`, `hold`, `release`, `removeHoldCauses`, `acknowledgeCauses`, `releaseSend`, `reset`, `selectThreadDetailLoaded`, `CommitSendTurnDispatchInput.onBeforeTurnStart`, and `state/session/dispatchAck.ts`. The local-dispatch ack helpers move there from `apps/web/src/components/ChatView.logic.ts`, which re-exports them. Web-internal: new `ExecuteChatSendTurnInput` options `claudeCacheReview`, `suppressToasts`, `onBeforeTurnStart` and `onSendError` |
+| overlaps | **usage-limits (W2):** consumer of the hold API. It adds the `limit` cause in `hold.ts` `deriveQueueFailureCauses` and copy in `describeQueueHold`. Merge after this package. **claude-steering (W2):** `message-queue/*`, `ChatView.tsx` `handleSteerQueuedMessage` (untouched here), and the steer reconcile effects this package moves into the coordinator (`drain.ts` reconcile step). Claude steer must not emit `thread.turn-interrupt-requested`, or the derived interrupt cause will hold the queue. **claude-meter-wake (W1):** semantic dependency. Until it lands, a Claude wake turn has no projected turn before its first assistant frame, so the drain can still send into that gap (§6). **reactor-errors-switch (W1):** semantic dependency. The ack gate depends on `provider.turn.start.failed` activities that carry `payload.messageId` (`ProviderCommandReactor.ts:275-305`, `1126-1180`). Keep that field. **settlement-signals (W1):** semantic. A held queue still counts as `local-queue` in `canSettleThread`. Whether "held" should surface as needs-attention is deferred to them. No textual overlap: this package does not edit `threadInbox.ts` or `threadSettlement.ts`. **turn-finalization (W1):** semantic. If it changes `latestTurn.state` settling in `threads/store.ts`, the derived interrupt cause (§3.A1) still works, because it only reads `interrupted`. Textual overlap is limited to the append-only selector in `storeSelectors.ts`, not `store.ts`. **rollback-correctness (W2):** semantic. `thread.reverted` can set `latestTurn.state` to `interrupted` from a `missing` checkpoint (`threads/store.ts:2568-2580`), which can raise a spurious interrupt hold if the queue is non-empty (§6). **delegation-returns (W2) / restart-continuation (W3):** semantic. Server-initiated turns and the restart-orphan `error` status feed the hold and ack logic (§1.4, §6). **delegation-lineage (W2):** neighbouring ChatView composer-stack JSX (`AgentControlApprovals` sits next to `ComposerQueuedMessages`). **acp-message-ids (W1):** none. This package is client-only and does not touch `ProjectionThreadMessages.ts`. **delegation-guard-restart (W1):** none. It satisfies their constraint that queued or held entries are never stored as `role='user'` rows. Holds are client-only. **provider-compat, turn-finalization server parts, reactor-concurrency, provider-effect-outbox (W3):** no textual overlap |
 
 ---
 
@@ -21,12 +21,12 @@
 - The only web drain is the `useEffect` at `apps/web/src/components/ChatView.tsx:3937-3988`. It is keyed on `activeThreadKey` and reads `queuedMessages` for that key only (`:875-879`).
 - `beginQueuedSend` and `finishQueuedSend` are used only there (`:870-871`).
 - When the user switches threads, the queue survives (`apps/web/src/messageQueueStore.ts`, module-level and "intentionally NOT persisted"). Nothing sends it until that thread's ChatView is mounted again.
-- `apps/web/src/lib/selectionChat.ts:62-83` enqueues into a _local draft_ key. Only that draft's own ChatView can send it, because the first send creates the thread through the bootstrap.
+- `apps/web/src/lib/selectionChat.ts:62-83` enqueues into a *local draft* key. Only that draft's own ChatView can send it, because the first send creates the thread through the bootstrap.
 - Mobile is not affected. `apps/mobile/src/state/use-thread-outbox-drain.ts:162-178` drains from `Stack.tsx` on socket open and on every threads-store change.
 
 ### 1.2 Bug 4: Stop, errors and limits do not pause the queue
 
-- The drain guards (`ChatView.tsx:3941-3959`) check capability, dedupe, `deliveryStatus`, `isWorking`, environment, pending approval or input, `sendInFlightRef` and steering. Nothing looks at _how the last turn ended_.
+- The drain guards (`ChatView.tsx:3941-3959`) check capability, dedupe, `deliveryStatus`, `isWorking`, environment, pending approval or input, `sendInFlightRef` and steering. Nothing looks at *how the last turn ended*.
 - `derivePhase` maps every non-running status, including `error`, to `"ready"` (`packages/client-runtime/src/state/session/session-logic.ts:2306-2311`).
 - After **Stop**: the interrupt aborts the turn, the session goes `ready` (`ProviderRuntimeIngestion.ts:2440-2449`, `turn.aborted → ready`), and the next queued message dispatches at once.
 - After a **turn error**: `turn.completed(failed)` sets `status: "error"` with `lastError` (`ProviderRuntimeIngestion.ts:2443-2467`). The phase reads `ready`, so the next queued message is sent into the same failure (usage limit, auth, crash).
@@ -40,16 +40,16 @@
 ### 1.3 The cascade orphans messages
 
 - The decider rejects `thread.turn.start` only while the session is `running` **with** an `activeTurnId` (`apps/server/src/orchestration/decider.ts:999-1007`).
-- `startSession`'s bind emits `session-set` with the provider's status and `activeTurnId: null` _before_ `turn.started` (`ProviderCommandReactor.ts:652-676`).
+- `startSession`'s bind emits `session-set` with the provider's status and `activeTurnId: null` *before* `turn.started` (`ProviderCommandReactor.ts:652-676`).
 - A second queued `turn.start` sent in that window is therefore accepted, and its user message is persisted.
 - The reactor then rejects it as overlapping with only a `provider.turn.start.failed` activity (`ProviderCommandReactor.ts:1126-1138`). The message sits in the transcript with no turn, and nothing re-queues it.
-- The existing web gate (`isSendBusy` from `hasServerAcknowledgedLocalDispatch`, `ChatView.logic.ts:418-460`) treats _any_ `session.updatedAt` or status change while not running as acknowledgement. The bind's `session-set(ready)` opens exactly this window.
+- The existing web gate (`isSendBusy` from `hasServerAcknowledgedLocalDispatch`, `ChatView.logic.ts:418-460`) treats *any* `session.updatedAt` or status change while not running as acknowledgement. The bind's `session-set(ready)` opens exactly this window.
 - **Mobile** has the same cascade. `drainThreadOutbox` sends m2 as soon as m1's RPC resolves (`apps/mobile/src/state/threadOutbox.ts:172-208`), and `threadOutbox.test.ts:55-64` asserts two sends in one pass.
-- Correction to the draft: concurrent sends of the _same_ message id are already de-duplicated by `commitSendTurnDispatch`'s `pendingSends` (`packages/client-runtime/src/state/composer/sendEngine.ts:262-274`). The real mobile window is the next message, not a duplicate.
+- Correction to the draft: concurrent sends of the *same* message id are already de-duplicated by `commitSendTurnDispatch`'s `pendingSends` (`packages/client-runtime/src/state/composer/sendEngine.ts:262-274`). The real mobile window is the next message, not a duplicate.
 
 ### 1.4 Constraints that shape the fix
 
-- **Hold edge-triggering.** `lastError` survives `running` and `stopped` (`ProviderRuntimeIngestion.ts:2462-2466`: `status === "ready" ? null : previous`). Startup reconciliation sets `status: "error"` with `"Provider session did not survive a server restart. Send a new message to continue."` (`apps/server/src/serverRuntimeStartup.ts:529-530`, applied at `:686-694`). Mobile queues offline (`sendThreadTurn.ts:20-25`). A hold re-derived from _current_ state would therefore also hold a message the user wrote _in response to_ an error they already saw. t3 holds only at the moment of failure (`t3:apps/server/src/orchestration-v2/Orchestrator.ts:1213-1239`).
+- **Hold edge-triggering.** `lastError` survives `running` and `stopped` (`ProviderRuntimeIngestion.ts:2462-2466`: `status === "ready" ? null : previous`). Startup reconciliation sets `status: "error"` with `"Provider session did not survive a server restart. Send a new message to continue."` (`apps/server/src/serverRuntimeStartup.ts:529-530`, applied at `:686-694`). Mobile queues offline (`sendThreadTurn.ts:20-25`). A hold re-derived from *current* state would therefore also hold a message the user wrote *in response to* an error they already saw. t3 holds only at the moment of failure (`t3:apps/server/src/orchestration-v2/Orchestrator.ts:1213-1239`).
 - **Server-initiated turns** (Claude wake, delegation returns, Agent Control) can change `latestTurn` while a queued send is in flight. The Claude resume path dispatches a `/compact` turn inside the same send, before the queued message (`claudeCacheReview.ts:162-205`). An ack gate that compares against a pre-send snapshot can acknowledge the wrong turn.
 - **Commands are idempotent per `commandId`.** Queued sends use the deterministic `composer-send:${threadId}:${messageId}` (`sendEngine.ts:310`), and the engine returns the stored receipt for a duplicate (`OrchestrationEngine.ts:215-223`). A retry after a lost reply never creates a second turn. It still re-runs the settings writes and the Claude review, so dedupe is still required.
 - **Hosted web has one connection** (`hostedConnectionCoordinator.ts:57`). Any non-discovery scope counts as foreground demand (`:512-523`), and `connect()` selects the node (`:393-395`). Background work must never create hosted connection demand.
@@ -84,7 +84,7 @@ mobile
 
 - **D1. The hold is explicit, recorded and edge-triggered.**
   - A hold is a recorded per-thread state, `QueueHold { reason, detail, causeKeys, heldAt }`.
-  - A _failure cause_ is something like `interrupt:<turnId>` or `error:<turnId>:<lastError>`. It holds the queue only if its key is new, meaning it is not in the thread's **acknowledged causes**.
+  - A *failure cause* is something like `interrupt:<turnId>` or `error:<turnId>:<lastError>`. It holds the queue only if its key is new, meaning it is not in the thread's **acknowledged causes**.
   - The acknowledged set gets its **baseline** when a queue goes from empty to non-empty, or at the first evaluation of a key that has no baseline.
   - **Release (Resume)** acknowledges every key in the hold **plus** every cause that is current at release time.
   - Explicit holds come from Stop (web and mobile), from a failed or stalled queued start, and from a resume review. Derived holds come from a new `session.status === "error"`, a new `latestTurn.state === "interrupted"` (or `session.status === "interrupted"`), and a `provider.turn.start.failed` for a message this client dispatched from the queue.
@@ -93,13 +93,12 @@ mobile
   - a `provider.turn.start.failed` activity whose `payload.messageId` is the dispatched id appears → **failed**, which becomes an error hold.
 
   `session-set(ready)` and `lastError` changes are **not** acks. If nothing arrives within 90 s, a `stalled` hold is set. It is auto-released if the turn starts later.
-
 - **D3. One sender per thread.**
   - A mounted ChatView registers a **foreground** sender for its key. It sends with optimistic UI, the Claude review dialog, worktree and draft promotion, and selection-chat drafts.
   - Otherwise a **started server thread** uses the **background** sender. It is headless, never shows a dialog or toast, and a Claude resume review becomes a `review` hold.
   - Drafts and unstarted threads without a mounted ChatView wait.
 - **D4. Hosted mode never creates demand.**
-  - The coordinator only _reads_ readiness. It never calls `retainHostedWorkspaceThreadScope`.
+  - The coordinator only *reads* readiness. It never calls `retainHostedWorkspaceThreadScope`.
   - It retains a thread-detail subscription only when the environment is already mutation-ready. In hosted mode that means it is the selected node, the capability is allowed, and the shell is live.
   - A queue on a non-selected hosted node waits until that node is the selected connection.
 - **D5. Resume is shown on every presentation tier**, including the frozen web phone tier, through the shared `ComposerQueuedMessages` prop. This is a deliberate, minimal exception. Without it the new hold would strand phone-tier queues, which would be a regression this package introduces. No phone-specific code is added. Retry stays hidden on the phone tier as it is today.
@@ -118,19 +117,14 @@ mobile
 
 ```ts
 export type QueueHoldReason = "interrupted" | "review" | "stalled" | "error" | "limit";
-export const QUEUE_HOLD_RANK: Record<QueueHoldReason, number> = {
-  interrupted: 0,
-  review: 1,
-  stalled: 2,
-  error: 3,
-  limit: 4,
-};
+export const QUEUE_HOLD_RANK: Record<QueueHoldReason, number> =
+  { interrupted: 0, review: 1, stalled: 2, error: 3, limit: 4 };
 
 export interface QueueHold {
   readonly reason: QueueHoldReason;
   readonly detail: string | null;
-  readonly causeKeys: readonly string[]; // every cause this hold covers
-  readonly heldAt: string; // ISO
+  readonly causeKeys: readonly string[];   // every cause this hold covers
+  readonly heldAt: string;                 // ISO
 }
 
 export interface QueueFailureCause {
@@ -167,20 +161,16 @@ export function partitionNewQueueFailureCauses(input: {
 - **exempt:** an `error` or `limit` cause where both `cause.providerInstanceId` and `headProviderInstanceId` are non-null and differ. This matches t3, where a message queued for another provider is the recovery path (`t3 Orchestrator.ts:1213-1224`). Exempt causes are acknowledged, never held.
 
 ```ts
-export function mergeQueueHold(
-  existing: QueueHold | null,
+export function mergeQueueHold(existing: QueueHold | null,
   incoming: { reason: QueueHoldReason; causeKeys: readonly string[]; detail: string | null },
-  nowIso: string,
-): QueueHold;
+  nowIso: string): QueueHold;
 ```
 
 - `merge`: `causeKeys` is the union. Reason and detail come from the higher-ranked side; ties keep the existing one. `heldAt` is kept.
 
 ```ts
-export function releaseQueueHoldKeys(
-  hold: QueueHold | null,
-  currentCauses: readonly QueueFailureCause[],
-): string[]; // hold.causeKeys ∪ current
+export function releaseQueueHoldKeys(hold: QueueHold | null,
+  currentCauses: readonly QueueFailureCause[]): string[];       // hold.causeKeys ∪ current
 export function createInterruptQueueHold(activeTurnId: string | null, nowIso: string): QueueHold;
 // causeKeys: [activeTurnId ? `interrupt:${activeTurnId}` : `interrupt:user:${nowIso}`]
 export function describeQueueHold(hold: QueueHold): { title: string; detail: string | null };
@@ -188,13 +178,13 @@ export function describeQueueHold(hold: QueueHold): { title: string; detail: str
 
 Shared copy for web and mobile:
 
-| reason      | title                                             |
-| ----------- | ------------------------------------------------- |
-| interrupted | "Paused after Stop"                               |
-| error       | "Paused after an error" (plus detail)             |
-| limit       | "Paused at a usage limit" (plus detail)           |
-| review      | "Paused for Claude resume review"                 |
-| stalled     | "Paused: the last queued message has not started" |
+| reason | title |
+| --- | --- |
+| interrupted | "Paused after Stop" |
+| error | "Paused after an error" (plus detail) |
+| limit | "Paused at a usage limit" (plus detail) |
+| review | "Paused for Claude resume review" |
+| stalled | "Paused: the last queued message has not started" |
 
 `MAX_ACKNOWLEDGED_CAUSE_KEYS = 32`. Keep the newest keys.
 
@@ -222,7 +212,7 @@ readonly reset: () => void;                                       // clears ever
 #### A3. `packages/client-runtime/src/state/session/dispatchAck.ts` (new, pure)
 
 1. **Move** `LocalDispatchSnapshot`, `createLocalDispatchSnapshot` and `hasServerAcknowledgedLocalDispatch` verbatim from `apps/web/src/components/ChatView.logic.ts:391-460`. They use `Thread`, `ThreadSession` and `SessionPhase` from `../threads/types.ts`.
-   - Header comment: _this is the UI-busy gate. It is intentionally loose: any server reaction, including errors and `session-set(ready)`, must release the composer spinner. It must not be used to sequence sends. Queued sends use `resolveQueuedDispatchAck`._
+   - Header comment: *this is the UI-busy gate. It is intentionally loose: any server reaction, including errors and `session-set(ready)`, must release the composer spinner. It must not be used to sequence sends. Queued sends use `resolveQueuedDispatchAck`.*
 2. Add the strict, message-scoped gate:
 
 ```ts
@@ -233,13 +223,8 @@ export interface QueuedDispatchSnapshot {
   readonly capturedAt: string;
 }
 export function captureQueuedDispatchSnapshot(
-  view: {
-    latestTurn: { turnId: TurnId } | null;
-    session: { activeTurnId: TurnId | null } | null;
-  } | null,
-  messageId: string,
-  nowIso: string,
-): QueuedDispatchSnapshot;
+  view: { latestTurn: { turnId: TurnId } | null; session: { activeTurnId: TurnId | null } | null } | null,
+  messageId: string, nowIso: string): QueuedDispatchSnapshot;
 
 export type QueuedDispatchAck =
   | { readonly kind: "pending" }
@@ -280,25 +265,17 @@ Both detail paths write one of these maps: `syncServerThreadWindow` (`store.ts:2
 ```ts
 export interface QueueThreadView {
   readonly ref: ScopedThreadRef;
-  readonly started: boolean; // latestTurn !== null || messages.length > 0 || summary.latestUserMessageAt !== null
-  readonly archived: boolean; // shell.archivedAt !== null || worktreeById[shell.worktreeId]?.archivedAt != null
-  readonly detailLoaded: boolean; // selectThreadDetailLoaded
-  readonly running: boolean; // orchestrationStatus ∈ {running, starting} || activeTurnId || latestTurn.state === "running"
-  readonly hasPendingApproval: boolean; // summary flag || (detailLoaded && derivePendingApprovals(activities).length > 0)
-  readonly hasPendingUserInput: boolean; // summary flag || (detailLoaded && derivePendingUserInputs(activities).length > 0)
-  readonly session: {
-    status: OrchestrationSessionStatus;
-    lastError: string | null;
-    providerInstanceId: string | null;
-    activeTurnId: TurnId | null;
-  } | null;
+  readonly started: boolean;          // latestTurn !== null || messages.length > 0 || summary.latestUserMessageAt !== null
+  readonly archived: boolean;         // shell.archivedAt !== null || worktreeById[shell.worktreeId]?.archivedAt != null
+  readonly detailLoaded: boolean;     // selectThreadDetailLoaded
+  readonly running: boolean;          // orchestrationStatus ∈ {running, starting} || activeTurnId || latestTurn.state === "running"
+  readonly hasPendingApproval: boolean;   // summary flag || (detailLoaded && derivePendingApprovals(activities).length > 0)
+  readonly hasPendingUserInput: boolean;  // summary flag || (detailLoaded && derivePendingUserInputs(activities).length > 0)
+  readonly session: { status: OrchestrationSessionStatus; lastError: string | null;
+                      providerInstanceId: string | null; activeTurnId: TurnId | null } | null;
   readonly latestTurn: { turnId: TurnId; state: OrchestrationLatestTurnState } | null;
   readonly projectedMessageIds: ReadonlySet<string>;
-  readonly turnStartFailures: ReadonlyArray<{
-    activityId: string;
-    messageId: string;
-    detail: string | null;
-  }>;
+  readonly turnStartFailures: ReadonlyArray<{ activityId: string; messageId: string; detail: string | null }>;
   readonly steerFailedMessageIds: ReadonlySet<string>;
 }
 /** null when the environment has no shell for the thread. */
@@ -317,29 +294,18 @@ export function queueThreadViewInputs(state: AppState, ref: ScopedThreadRef): re
 
 ```ts
 export type QueueDrainWaitReason =
-  | "environment"
-  | "held"
-  | "awaiting-ack"
-  | "archived"
-  | "busy"
-  | "no-sender"
-  | "detail"
-  | "failed-head"
-  | "in-flight"
-  | "steering";
+  | "environment" | "held" | "awaiting-ack" | "archived" | "busy" | "no-sender"
+  | "detail" | "failed-head" | "in-flight" | "steering";
 
 export interface QueueDrainInput {
   readonly nowIso: string;
-  readonly queue: ReadonlyArray<{
-    readonly id: string;
-    readonly deliveryStatus?: "sending" | "failed";
-  }>;
+  readonly queue: ReadonlyArray<{ readonly id: string; readonly deliveryStatus?: "sending" | "failed" }>;
   readonly steeringIds: ReadonlyArray<string>;
   readonly hold: QueueHold | null;
-  readonly acknowledgedCauseKeys: readonly string[] | undefined; // undefined → baseline step
+  readonly acknowledgedCauseKeys: readonly string[] | undefined;   // undefined → baseline step
   readonly headProviderInstanceId: string | null;
   readonly view: QueueThreadView | null;
-  readonly draft: boolean; // local draft key with a mounted foreground sender (web only)
+  readonly draft: boolean;          // local draft key with a mounted foreground sender (web only)
   readonly environment: { readonly shellLive: boolean; readonly mutationReady: boolean };
   readonly pendingDispatch: QueuedDispatchSnapshot | null;
   readonly dispatchedMessageIds: ReadonlySet<string>;
@@ -384,7 +350,6 @@ The steps are tried in this **fixed order**, and the first one that applies is r
    - else held-causes non-empty → `hold` with the merged hold, highest rank first.
 
    This runs **before** step 9, so a cause that appears while already held merges into the hold and is covered by a single Resume.
-
 9. `hold !== null` → `wait held`.
 10. `pendingDispatch` (still pending) → `wait awaiting-ack`.
 11. `view.archived` → `wait archived`. Never send into an archived thread or worktree (t3 `Orchestrator.ts:1187-1189`).
@@ -398,13 +363,9 @@ The steps are tried in this **fixed order**, and the first one that applies is r
 #### A6. `message-queue/coordinator.ts` (new; zustand plus plain TS, no DOM or RN imports)
 
 ```ts
-export interface QueueSendHooks {
-  readonly onBeforeTurnStart: () => void;
-}
+export interface QueueSendHooks { readonly onBeforeTurnStart: () => void }
 export type QueueSendResult =
-  | { kind: "accepted" }
-  | { kind: "failed" }
-  | { kind: "deferred" }
+  | { kind: "accepted" } | { kind: "failed" } | { kind: "deferred" }
   | { kind: "needs-review"; detail: string };
 export interface MessageQueueSender<C, S> {
   send(entry: QueuedMessage<C, S>, hooks: QueueSendHooks): Promise<QueueSendResult>;
@@ -412,44 +373,33 @@ export interface MessageQueueSender<C, S> {
 
 export interface MessageQueueDrainPlatform<C, S> {
   readonly threads: { getState(): AppState; subscribe(listener: () => void): () => void };
-  readonly readEnvironment: (
-    environmentId: EnvironmentId,
-    state: AppState,
-  ) => { shellLive: boolean; mutationReady: boolean };
+  readonly readEnvironment: (environmentId: EnvironmentId, state: AppState) =>
+    { shellLive: boolean; mutationReady: boolean };
   readonly subscribeEnvironmentReadiness?: (listener: () => void) => () => void;
-  readonly resolveSender: (
-    threadKey: string,
-    view: QueueThreadView | null,
-  ) => { kind: "foreground" | "background"; sender: MessageQueueSender<C, S> } | null;
+  readonly resolveSender: (threadKey: string, view: QueueThreadView | null) =>
+    { kind: "foreground" | "background"; sender: MessageQueueSender<C, S> } | null;
   readonly isLocalDraftKey?: (threadKey: string) => boolean;
   readonly headProviderInstanceId: (entry: QueuedMessage<C, S>) => string | null;
   readonly retainThreadDetail?: (ref: ScopedThreadRef) => () => void;
-  readonly onEntryRemoved?: (
-    threadKey: string,
-    entry: QueuedMessage<C, S>,
-    cause: "accepted" | "projected",
-  ) => void;
+  readonly onEntryRemoved?: (threadKey: string, entry: QueuedMessage<C, S>,
+                             cause: "accepted" | "projected") => void;
   readonly now?: () => number;
   readonly timers?: { setTimeout: typeof setTimeout; clearTimeout: typeof clearTimeout };
-  readonly ackTimeoutMs?: number; // default 90_000
-  readonly deferRetryMs?: number; // default 250
-  readonly environmentRecheckMs?: number; // default 5_000
+  readonly ackTimeoutMs?: number;          // default 90_000
+  readonly deferRetryMs?: number;          // default 250
+  readonly environmentRecheckMs?: number;  // default 5_000
 }
 
 export interface MessageQueueDrainCoordinator {
-  retain(): () => void; // ref-counted start; last release stops and clears bookkeeping
+  retain(): () => void;               // ref-counted start; last release stops and clears bookkeeping
   evaluate(threadKey?: string): void; // schedules (microtask-coalesced)
   resume(threadKey: string): void;
   retry(threadKey: string, messageId: string): void;
-  inspect(threadKey: string): {
-    pendingDispatch: QueuedDispatchSnapshot | null;
-    inFlightMessageId: string | null;
-    lastStep: QueueDrainStep | null;
-  };
+  inspect(threadKey: string): { pendingDispatch: QueuedDispatchSnapshot | null;
+                                inFlightMessageId: string | null; lastStep: QueueDrainStep | null };
 }
 export function createMessageQueueDrainCoordinator<C, S>(
-  queueStore: StoreApi<MessageQueueState<C, S>>,
-  platform: MessageQueueDrainPlatform<C, S>,
+  queueStore: StoreApi<MessageQueueState<C, S>>, platform: MessageQueueDrainPlatform<C, S>,
 ): MessageQueueDrainCoordinator;
 ```
 
@@ -469,7 +419,7 @@ export function createMessageQueueDrainCoordinator<C, S>(
 
 **Subscriptions**, active only while retained:
 
-- **Queue store.** For each key whose queue went from empty or absent to non-empty, compute the baseline _synchronously_: `acknowledgeCauses(key, deriveQueueFailureCauses(view, dispatched).map(k))`. The thread state at that instant is the state the user saw while composing. Then mark the key dirty. On an `epoch` change, drop `pending`, `inFlight`, the snapshots, `dispatched`, the retains and the timers.
+- **Queue store.** For each key whose queue went from empty or absent to non-empty, compute the baseline *synchronously*: `acknowledgeCauses(key, deriveQueueFailureCauses(view, dispatched).map(k))`. The thread state at that instant is the state the user saw while composing. Then mark the key dirty. On an `epoch` change, drop `pending`, `inFlight`, the snapshots, `dispatched`, the retains and the timers.
 - **Threads store.** For each key with a non-empty queue or a pending dispatch, compare `queueThreadViewInputs` with `lastInputs`. Mark the key dirty only if they differ. Unrelated threads cost one tuple compare per active key.
 - **`subscribeEnvironmentReadiness`**, plus a 5 s re-check while any key waits on `environment`. This covers WS status changes that do not touch the threads store. Mark all active keys dirty.
 - Dirty keys are evaluated in one `queueMicrotask` pass, which avoids re-entrant `set` inside zustand listeners.
@@ -482,16 +432,16 @@ export function createMessageQueueDrainCoordinator<C, S>(
 - **Retain policy.** If the key is active and `environment.mutationReady`, ensure `retainThreadDetail(ref)`. Otherwise release it.
 - Apply the step:
 
-| step                       | action                                                                                                                                                                                                                                                                 |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `baseline` / `acknowledge` | `acknowledgeCauses`, then re-evaluate                                                                                                                                                                                                                                  |
-| `reconcile`                | For each id: read the entry, call `remove`, then `onEntryRemoved(…, "projected")`. If `failedSnapshots` has the id and the queue is still non-empty, set `pending` from that snapshot and start the ack timer (lost-reply case). `endSteer` each steer id. Re-evaluate |
-| `dispatch-started`         | Delete `pending` and clear the timer. If the hold contains `stalled:<id>`, call `removeHoldCauses([that])`. Re-evaluate                                                                                                                                                |
-| `dispatch-failed`          | Delete `pending`, then `hold(…)`                                                                                                                                                                                                                                       |
-| `hold`                     | `hold(…)`                                                                                                                                                                                                                                                              |
-| `wait`                     | Nothing. `environment` arms the re-check timer                                                                                                                                                                                                                         |
-| `thread-gone`              | Web: nothing. Mobile does not use the coordinator                                                                                                                                                                                                                      |
-| `send`                     | See below                                                                                                                                                                                                                                                              |
+| step | action |
+| --- | --- |
+| `baseline` / `acknowledge` | `acknowledgeCauses`, then re-evaluate |
+| `reconcile` | For each id: read the entry, call `remove`, then `onEntryRemoved(…, "projected")`. If `failedSnapshots` has the id and the queue is still non-empty, set `pending` from that snapshot and start the ack timer (lost-reply case). `endSteer` each steer id. Re-evaluate |
+| `dispatch-started` | Delete `pending` and clear the timer. If the hold contains `stalled:<id>`, call `removeHoldCauses([that])`. Re-evaluate |
+| `dispatch-failed` | Delete `pending`, then `hold(…)` |
+| `hold` | `hold(…)` |
+| `wait` | Nothing. `environment` arms the re-check timer |
+| `thread-gone` | Web: nothing. Mobile does not use the coordinator |
+| `send` | See below |
 
 **`send`:**
 
@@ -569,9 +519,7 @@ onSendError?: (error: unknown) => void;
 
 ```ts
 export async function sendQueuedMessageInBackground(
-  threadKey: string,
-  entry: WebQueuedMessage,
-  hooks: QueueSendHooks,
+  threadKey: string, entry: WebQueuedMessage, hooks: QueueSendHooks,
 ): Promise<QueueSendResult>;
 ```
 
@@ -651,7 +599,6 @@ Steps:
 
    - The refs are read at call time. `sendInFlightRef` and `editorSendPreparationRef` are live; the render-derived flags are as fresh as the last render, and the `deferred` result plus the 250 ms retry covers that lag.
    - Editor-drain failures still return `false` → `failed`. The browser test at `ChatView.Conversation.browser.tsx:590-680` relies on this.
-
 5. **Retry:** `onRetry` → `retryQueuedMessage(activeThreadKey, id)`, still only on non-phone tiers.
 6. **Hold and Resume:** select `useMessageQueueStore(s => key ? s.holdsByThreadKey[key] ?? null : null)`. Pass `hold` and `onResume={() => resumeMessageQueue(activeThreadKey)}` to `ComposerQueuedMessages` on **all tiers** (D5).
 7. Remove `beginQueuedSend`, `finishQueuedSend` and `retryQueuedSend` if they become unused. `handleRemoveQueuedMessage` stays for user removal.
@@ -694,7 +641,6 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
   - `releaseThreadOutboxHold(threadKey)`: acknowledges `releaseQueueHoldKeys(hold, current causes)` and clears the pending dispatch.
 
   All of them notify listeners.
-
 - **`drainThreadOutbox(deps)`** is rewritten. New deps:
 
   ```ts
@@ -714,13 +660,13 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
      - `headProviderInstanceId`: `head.modelSelection?.instanceId ?? null`
   2. Apply the step:
 
-     | step                                               | action                                                                                             |
-     | -------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-     | `baseline` / `acknowledge` / `hold` / `dispatch-*` | Mutate the persisted hold state, then continue the loop                                            |
-     | `reconcile`                                        | Remove the ids. If a removed id is in `failedSnapshots` and messages remain, arm pending. Continue |
-     | `thread-gone`                                      | Remove the group (existing behaviour)                                                              |
-     | `wait`                                             | Break                                                                                              |
-     | `send`                                             | Send the head, then **break**. This is the one-send-per-pass fix                                   |
+     | step | action |
+     | --- | --- |
+     | `baseline` / `acknowledge` / `hold` / `dispatch-*` | Mutate the persisted hold state, then continue the loop |
+     | `reconcile` | Remove the ids. If a removed id is in `failedSnapshots` and messages remain, arm pending. Continue |
+     | `thread-gone` | Remove the group (existing behaviour) |
+     | `wait` | Break |
+     | `send` | Send the head, then **break**. This is the one-send-per-pass fix |
 
   3. Send handling:
      - Success: remove the message, add it to `dispatched`, and set pending to the hook snapshot or the start snapshot.
@@ -772,7 +718,6 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 ### client-runtime (`bun run --cwd packages/client-runtime test src/state/message-queue src/state/session/dispatchAck.test.ts src/state/composer/sendEngine.test.ts src/state/threads/storeSelectors.test.ts`)
 
 **`hold.test.ts`**
-
 - `status:error` yields one cause. The same error after a `stopped`, or after repeated `session-set(error)` with a new `updatedAt`, yields the **same** key.
 - `running` or `stopped` with a stale `lastError` yields no cause.
 - `start-failed` is raised only for dispatched ids.
@@ -781,7 +726,6 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 - `releaseQueueHoldKeys` covers the hold keys plus the current keys.
 
 **`store.test.ts`**
-
 - `hold` on an empty queue is a no-op.
 - An identical merge does not notify.
 - `release` and `removeHoldCauses` semantics.
@@ -791,7 +735,6 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 - The existing claim tests stay green.
 
 **`dispatchAck.test.ts`**
-
 - **(failing-first)** The startSession bind sequence `session-set(ready, activeTurnId:null)` then `turn.started` stays `pending` until `turn.started`. Today's `hasServerAcknowledgedLocalDispatch` returns `true` on the first event; assert that difference explicitly in the same file.
 - A `/compact` turn that started and settled **before** the snapshot does not acknowledge.
 - A `provider.turn.start.failed` with a matching `messageId` → `failed`; a non-matching one → `pending`.
@@ -800,14 +743,12 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 - The moved local-dispatch tests are added as one smoke case. The full suite stays in `ChatView.logic.test.ts` via the re-export.
 
 **`threadView.test.ts`**
-
 - `running` covers `starting`, `activeTurnId` and `latestTurn` `running`.
 - `archived` comes from the thread or from its worktree.
 - Pending flags are the OR of summary and activities.
 - `projectedMessageIds` is cached by ids-array identity: the same `Set` instance across a message-content-only update.
 
 **`drain.test.ts`** (table-driven over the step order)
-
 - **(failing-first behaviour)** A thread that went from running to `error` after enqueue → `hold`.
 - An offline-composed message on an already-errored thread: baseline, then `send`.
 - The restart-orphan error present at enqueue → `send`. The same error arriving after enqueue → `hold`.
@@ -821,7 +762,6 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 - Provider mismatch → `acknowledge`, then `send`.
 
 **`coordinator.test.ts`** (`vi.useFakeTimers()`; real zustand queue store; threads store via `useStore.setState`)
-
 1. **(failing-first for bug 3)** An off-screen started thread with no foreground sender drains through the background sender once the turn settles.
 2. One send per thread. The next head waits until the session goes `running` on a new turn id, then sends.
 3. A `provider.turn.start.failed` for the dispatched id → error hold, and the next head is not sent.
@@ -837,21 +777,18 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 13. `retainThreadDetail` is called only while `mutationReady` and released when the queue empties.
 
 **`sendEngine.test.ts`**
-
 - `onBeforeTurnStart` is called exactly once, after `beginLocalDispatch`, immediately before `thread.turn.start`, and after the `/compact` dispatch in a compaction review.
 - It is not called when review throws.
 
 ### web (`bun run --cwd apps/web test src/messageQueueDrain.test.ts src/hooks/chatSendShared.test.ts src/hooks/sendQueuedMessageInBackground.test.ts src/hooks/executeChatSendTurn.test.ts src/components/ChatView.logic.test.ts`)
 
 **`messageQueueDrain.test.ts`**
-
 - **Hosted:** a non-selected environment is not `mutationReady`, and `retainHostedWorkspaceThreadScope` is never called. Spy, or assert `hostedWebConnectionScopes.list()` has no entry added by the drain.
 - **Direct:** a disconnected WS or a saved environment whose runtime is not connected → not ready (wait, not failed).
 - The foreground stack wins over background. Unregistering falls back to background only for started server threads.
 - A draft key without a foreground sender → `no-sender`.
 
 **`sendQueuedMessageInBackground.test.ts`**
-
 - Passes `claudeCacheReview: null` and `suppressToasts`.
 - `ClaudeResumeReviewError` → `needs-review`.
 - Build mode is applied.
@@ -860,18 +797,15 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 - No `toastManager.add` calls.
 
 **`executeChatSendTurn.test.ts`**
-
 - `claudeCacheReview: null` reaches `commitSendTurnDispatch` as `undefined`.
 - `suppressToasts` skips the expired-terminal toast.
 - `onSendError` sees the error.
 
 **`chatSendShared.test.ts`**
-
 - `persistThreadSettingsForNextTurn` dispatches only changed modes.
 - `applyBuildModeToSend` matches today's ChatView behaviour.
 
 **Browser** (`bun run --cwd apps/web test:browser src/components/ChatView.Conversation.browser.tsx`)
-
 - `ChatView.browser.helpers.tsx`: add `useMessageQueueStore.getState().reset()` to the shared `afterEach`. The bridge's final release clears coordinator bookkeeping on unmount.
 - The existing queued tests (`:230-277`, `:519-588`, `:590-680`, `:741-855`) keep their assertions. Two things may change: cleanup uses `reset()`, and where a test enqueues two items in sequence on the same `THREAD_KEY` it must emit a `turn.started` session upsert or rely on the reset. **They are no longer guaranteed unchanged.**
 - **New:** "Stop holds the queue and Resume sends it". Running thread, enqueue, Stop, then the session goes `ready`: no `thread.turn.start` call; the **Resume** button is visible; clicking it sends.
@@ -881,7 +815,6 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 ### mobile (`bun run --cwd apps/mobile test src/state`)
 
 **`threadOutbox.test.ts`**
-
 - Replace "sends deliverable messages" with **(failing-first)** "sends one message per thread per pass; the second waits for the turn-start ack".
 - A hold persists across `hydrateThreadOutbox`.
 - Release sends.
@@ -890,16 +823,13 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 - The existing remove, retry, discard, review and vanished-thread cases are re-expressed through `readThreadDrainState`.
 
 **`use-thread-outbox-drain.test.ts`**
-
 - The existing two-environment, cache-provenance and no-socket cases target `readThreadDrainState().environment`.
 - Detail retention is only for connected, queued threads.
 
 **`outboxSettleDrain.test.ts`**
-
 - Updated to the new deps; settle still triggers a drain.
 
 **`threadOutboxModel.test.ts`**
-
 - Delete the delivery-action case; its cases move to `drain.test.ts`.
 
 ---
@@ -953,25 +883,25 @@ This covers the composer Stop and the background-work Stop banner (`ChatView.tsx
 
 ## 9. Review resolution
 
-| #       | Severity | Issue                                                                                                 | Resolution                                                                                                                                                                                                                                                                                                                                   |
-| ------- | -------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| verdict | —        | Mobile "no in-flight guard" overstated                                                                | **Accepted.** `commitSendTurnDispatch` de-duplicates same-id sends (`sendEngine.ts:262-274`). §1.3 now names the real window: the next message.                                                                                                                                                                                              |
-| 1       | major    | The error hold is re-derived from current state, so it also holds messages composed after the failure | **Accepted.** Holds are edge-triggered: a baseline is recorded when a queue becomes non-empty (or at first evaluation), and the error key omits `updatedAt` so `stopped` and repeated `session-set` cannot re-trigger it. Tests cover the offline-composed and restart-orphan cases; the t3 `validation_error` difference is recorded in §7. |
-| 2       | major    | Coordinator state leaks between browser tests                                                         | **Accepted.** The final `retain()` release clears all bookkeeping. `store.reset()` is added to the browser `afterEach`, the existing tests are no longer claimed unchanged, and a stop/start test is added (coordinator #10).                                                                                                                |
-| 3       | major    | Hosted retention competes for the single connection                                                   | **Accepted.** The drain never calls `retainHostedWorkspaceThreadScope`. It retains thread detail only when the environment is mutation-ready (the selected node in hosted mode), and has a test for that.                                                                                                                                    |
-| 4       | major    | The background sender pops the Claude review modal and toasts                                         | **Accepted.** The background sender passes `claudeCacheReview: null` and `suppressToasts`. `ClaudeResumeReviewError` → `needs-review` → a `review` hold, resolved through the foreground Resume.                                                                                                                                             |
-| 5       | major    | The ack gate is not tied to the message                                                               | **Accepted.** The snapshot is taken in `onBeforeTurnStart`, after compaction. A `provider.turn.start.failed` with a matching `messageId` is an immediate failure. A start failure for any dispatched id is a hold cause, which covers false acks. Tests cover both.                                                                          |
-| 6       | major    | Off-screen drain sends into archived threads                                                          | **Accepted.** `view.archived` (thread or worktree) → `wait archived`, with resolver and view tests.                                                                                                                                                                                                                                          |
-| 7       | major    | A second ack definition duplicates the existing one                                                   | **Accepted.** Both gates now live in one client-runtime module (`session/dispatchAck.ts`) and ChatView re-exports them. The UI gate's intentional looseness is documented. The direct-send overlap is a named follow-up (§7), and the same event sequence is tested against both gates.                                                      |
-| 8       | minor    | Resolver order needs Resume twice                                                                     | **Accepted.** New causes are evaluated before `held`, the hold accumulates `causeKeys`, and release acknowledges hold keys plus current keys. Tested (Stop → error → one Resume).                                                                                                                                                            |
-| 9       | minor    | Mobile re-implements the drain sequence                                                               | **Accepted.** Mobile calls `readQueueThreadView` and `resolveQueueDrainStep`. It keeps only persistence and the loop.                                                                                                                                                                                                                        |
-| 10      | minor    | Web has no environment-connected input                                                                | **Accepted.** `mutationReady` includes per-environment WS status and the saved-environment runtime state. A disconnect means wait, not a failed head.                                                                                                                                                                                        |
-| 11      | minor    | Foreground busy state is stale; "not now" becomes "failed"                                            | **Accepted.** Busy reads are live refs, the sender returns `deferred`, and the claim is released with a 250 ms retry.                                                                                                                                                                                                                        |
-| 12      | minor    | A lost reply leaves the ack gate disarmed                                                             | **Accepted.** `failedSnapshots` are kept by message id. Reconciling a projected failed id arms the ack gate. Tested (coordinator #8).                                                                                                                                                                                                        |
-| 13      | minor    | Hold UX gaps (phone tier, Retry while held)                                                           | **Accepted.** Resume is shown on all tiers as an explicit decision (D5). `retry` releases the hold.                                                                                                                                                                                                                                          |
-| 14      | minor    | Import cycle; reset with in-flight sends                                                              | **Accepted.** `store.reset()` bumps `epoch` and the coordinator observes it, so `environment.ts` imports nothing new. Completions from an older epoch are dropped.                                                                                                                                                                           |
-| 15      | minor    | Missing overlap notes                                                                                 | **Accepted.** claude-meter-wake and settlement-signals are named in the header and in §8.                                                                                                                                                                                                                                                    |
-| 16      | minor    | Reconcile scan is O(queue × messages) per streaming delta                                             | **Accepted.** A per-key identity tuple skips unchanged threads, and the projected-id `Set` is cached by ids-array identity. Tested (coordinator #12, threadView cache test).                                                                                                                                                                 |
+| # | Severity | Issue | Resolution |
+| --- | --- | --- | --- |
+| verdict | — | Mobile "no in-flight guard" overstated | **Accepted.** `commitSendTurnDispatch` de-duplicates same-id sends (`sendEngine.ts:262-274`). §1.3 now names the real window: the next message. |
+| 1 | major | The error hold is re-derived from current state, so it also holds messages composed after the failure | **Accepted.** Holds are edge-triggered: a baseline is recorded when a queue becomes non-empty (or at first evaluation), and the error key omits `updatedAt` so `stopped` and repeated `session-set` cannot re-trigger it. Tests cover the offline-composed and restart-orphan cases; the t3 `validation_error` difference is recorded in §7. |
+| 2 | major | Coordinator state leaks between browser tests | **Accepted.** The final `retain()` release clears all bookkeeping. `store.reset()` is added to the browser `afterEach`, the existing tests are no longer claimed unchanged, and a stop/start test is added (coordinator #10). |
+| 3 | major | Hosted retention competes for the single connection | **Accepted.** The drain never calls `retainHostedWorkspaceThreadScope`. It retains thread detail only when the environment is mutation-ready (the selected node in hosted mode), and has a test for that. |
+| 4 | major | The background sender pops the Claude review modal and toasts | **Accepted.** The background sender passes `claudeCacheReview: null` and `suppressToasts`. `ClaudeResumeReviewError` → `needs-review` → a `review` hold, resolved through the foreground Resume. |
+| 5 | major | The ack gate is not tied to the message | **Accepted.** The snapshot is taken in `onBeforeTurnStart`, after compaction. A `provider.turn.start.failed` with a matching `messageId` is an immediate failure. A start failure for any dispatched id is a hold cause, which covers false acks. Tests cover both. |
+| 6 | major | Off-screen drain sends into archived threads | **Accepted.** `view.archived` (thread or worktree) → `wait archived`, with resolver and view tests. |
+| 7 | major | A second ack definition duplicates the existing one | **Accepted.** Both gates now live in one client-runtime module (`session/dispatchAck.ts`) and ChatView re-exports them. The UI gate's intentional looseness is documented. The direct-send overlap is a named follow-up (§7), and the same event sequence is tested against both gates. |
+| 8 | minor | Resolver order needs Resume twice | **Accepted.** New causes are evaluated before `held`, the hold accumulates `causeKeys`, and release acknowledges hold keys plus current keys. Tested (Stop → error → one Resume). |
+| 9 | minor | Mobile re-implements the drain sequence | **Accepted.** Mobile calls `readQueueThreadView` and `resolveQueueDrainStep`. It keeps only persistence and the loop. |
+| 10 | minor | Web has no environment-connected input | **Accepted.** `mutationReady` includes per-environment WS status and the saved-environment runtime state. A disconnect means wait, not a failed head. |
+| 11 | minor | Foreground busy state is stale; "not now" becomes "failed" | **Accepted.** Busy reads are live refs, the sender returns `deferred`, and the claim is released with a 250 ms retry. |
+| 12 | minor | A lost reply leaves the ack gate disarmed | **Accepted.** `failedSnapshots` are kept by message id. Reconciling a projected failed id arms the ack gate. Tested (coordinator #8). |
+| 13 | minor | Hold UX gaps (phone tier, Retry while held) | **Accepted.** Resume is shown on all tiers as an explicit decision (D5). `retry` releases the hold. |
+| 14 | minor | Import cycle; reset with in-flight sends | **Accepted.** `store.reset()` bumps `epoch` and the coordinator observes it, so `environment.ts` imports nothing new. Completions from an older epoch are dropped. |
+| 15 | minor | Missing overlap notes | **Accepted.** claude-meter-wake and settlement-signals are named in the header and in §8. |
+| 16 | minor | Reconcile scan is O(queue × messages) per streaming delta | **Accepted.** A per-key identity tuple skips unchanged threads, and the projected-id `Set` is cached by ids-array identity. Tested (coordinator #12, threadView cache test). |
 
 ---
 

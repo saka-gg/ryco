@@ -1,16 +1,16 @@
 # 16 · restart-continuation: opt-in continue-after-restart + background-work-died note
 
-| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| id               | `restart-continuation`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| title            | Opt-in continue-after-restart + background-work-died note                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| wave             | 3 (sequential, same branch). Runs **last**, after `reactor-concurrency` → `provider-effect-outbox`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| verdict          | **feature**. Every premise was re-checked against the code. Two real defects found along the way are fixed here: the background-work fold hole, and dead background tasks still shown as live after a restart                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| size             | L                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| touched files    | **contracts:** `packages/contracts/src/settings.ts`, `packages/contracts/src/orchestration.ts` · **shared:** `packages/shared/src/model.ts` (+test), `packages/shared/src/backgroundWork.ts` (+test), `packages/shared/src/claudeCacheReview.ts` (new, +test), `packages/shared/package.json` · **client-runtime:** `packages/client-runtime/src/state/composer/claudeCacheReview.ts` (re-export only); the restart test case goes into queue-hold-drain's shared hold-predicate test · **server, new:** `apps/server/src/orchestration/restartReconciliation.ts`, `apps/server/src/orchestration/restartContinuationPolicy.ts` (+test), `apps/server/src/orchestration/Services/RestartContinuation.ts`, `apps/server/src/orchestration/Layers/RestartContinuation.ts` (+test), `apps/server/src/persistence/Migrations/073_RestartContinuations.ts` (+test), `apps/server/src/persistence/Layers/RestartContinuations.ts` (+test), `apps/server/src/orchestration/decider.restartContinuation.test.ts`, `apps/server/integration/restartContinuation.integration.test.ts` · **server, edited:** `apps/server/src/persistence/Migrations.ts`, `apps/server/src/persistence/Layers/AgentControlCompletionReturns.ts` (export one predicate), `apps/server/src/orchestration/ThreadBackgroundLiveness.ts` (+test), `apps/server/src/orchestration/decider.ts`, `apps/server/src/serverRuntimeStartup.ts` (+test), `apps/server/src/server.ts` · **web:** `apps/web/src/components/settings/SettingsPanels.tsx`, `apps/web/src/components/settings/settingsRestore.ts` (+test) |
-| migrations       | `073_RestartContinuations`, which adds two tables: `restart_continuations` and `restart_shutdown_hints`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| contract changes | (1) `ServerSettings.continueThreadsAfterRestart: boolean`, default `false`, plus the matching `ServerSettingsPatch` key. (2) New `RestartContinuationGuard` schema and `ThreadTurnStartCommand.restartContinuationGuard?`. This field is **server-only**: it is **not** added to `ClientThreadTurnStartCommand` and **not** to `ThreadTurnStartRequestedPayload`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| overlaps         | `turn-finalization` (W1: `reconcileOrphanedProviderSessions` orphan loop) · `queue-hold-drain` (W1: shared hold predicate, web `ChatView` drain effect, mobile `use-thread-outbox-drain.ts` `readThreadDeliveryState` / `threadOutbox.ts` `drainThreadOutbox`) · `delegation-guard-restart` (W1: `ProjectionSnapshotQuery.getCommandReadModel` latest-user-message hydration, semantic) · `settlement-signals` (W1: `latestUserMessageAt`, semantic only, no edit) · `delegation-returns` + `delegation-lineage` (W2: `AgentControlCompletionReturns.ts` statuses / `listDue`; decider `thread.turn.start` guard block) · `claude-steering` (W2: steer event types read by `sourceTurnSignals`) · `usage-limits` (W2: limit state → `usage-limited` skip; `ServerSettings` struct) · `reactor-concurrency` (W3: `ProviderCommandReactor.processTurnStartRequested` consumes our turn starts) · `provider-effect-outbox` (W3: turn-start effect lookup API, startup recovery ordering, `makeServerRuntimeStartup` phases, `server.ts` wiring) · everyone: `Migrations.ts` registration list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Field | Value |
+| --- | --- |
+| id | `restart-continuation` |
+| title | Opt-in continue-after-restart + background-work-died note |
+| wave | 3 (sequential, same branch). Runs **last**, after `reactor-concurrency` → `provider-effect-outbox` |
+| verdict | **feature**. Every premise was re-checked against the code. Two real defects found along the way are fixed here: the background-work fold hole, and dead background tasks still shown as live after a restart |
+| size | L |
+| touched files | **contracts:** `packages/contracts/src/settings.ts`, `packages/contracts/src/orchestration.ts` · **shared:** `packages/shared/src/model.ts` (+test), `packages/shared/src/backgroundWork.ts` (+test), `packages/shared/src/claudeCacheReview.ts` (new, +test), `packages/shared/package.json` · **client-runtime:** `packages/client-runtime/src/state/composer/claudeCacheReview.ts` (re-export only); the restart test case goes into queue-hold-drain's shared hold-predicate test · **server, new:** `apps/server/src/orchestration/restartReconciliation.ts`, `apps/server/src/orchestration/restartContinuationPolicy.ts` (+test), `apps/server/src/orchestration/Services/RestartContinuation.ts`, `apps/server/src/orchestration/Layers/RestartContinuation.ts` (+test), `apps/server/src/persistence/Migrations/073_RestartContinuations.ts` (+test), `apps/server/src/persistence/Layers/RestartContinuations.ts` (+test), `apps/server/src/orchestration/decider.restartContinuation.test.ts`, `apps/server/integration/restartContinuation.integration.test.ts` · **server, edited:** `apps/server/src/persistence/Migrations.ts`, `apps/server/src/persistence/Layers/AgentControlCompletionReturns.ts` (export one predicate), `apps/server/src/orchestration/ThreadBackgroundLiveness.ts` (+test), `apps/server/src/orchestration/decider.ts`, `apps/server/src/serverRuntimeStartup.ts` (+test), `apps/server/src/server.ts` · **web:** `apps/web/src/components/settings/SettingsPanels.tsx`, `apps/web/src/components/settings/settingsRestore.ts` (+test) |
+| migrations | `073_RestartContinuations`, which adds two tables: `restart_continuations` and `restart_shutdown_hints` |
+| contract changes | (1) `ServerSettings.continueThreadsAfterRestart: boolean`, default `false`, plus the matching `ServerSettingsPatch` key. (2) New `RestartContinuationGuard` schema and `ThreadTurnStartCommand.restartContinuationGuard?`. This field is **server-only**: it is **not** added to `ClientThreadTurnStartCommand` and **not** to `ThreadTurnStartRequestedPayload` |
+| overlaps | `turn-finalization` (W1: `reconcileOrphanedProviderSessions` orphan loop) · `queue-hold-drain` (W1: shared hold predicate, web `ChatView` drain effect, mobile `use-thread-outbox-drain.ts` `readThreadDeliveryState` / `threadOutbox.ts` `drainThreadOutbox`) · `delegation-guard-restart` (W1: `ProjectionSnapshotQuery.getCommandReadModel` latest-user-message hydration, semantic) · `settlement-signals` (W1: `latestUserMessageAt`, semantic only, no edit) · `delegation-returns` + `delegation-lineage` (W2: `AgentControlCompletionReturns.ts` statuses / `listDue`; decider `thread.turn.start` guard block) · `claude-steering` (W2: steer event types read by `sourceTurnSignals`) · `usage-limits` (W2: limit state → `usage-limited` skip; `ServerSettings` struct) · `reactor-concurrency` (W3: `ProviderCommandReactor.processTurnStartRequested` consumes our turn starts) · `provider-effect-outbox` (W3: turn-start effect lookup API, startup recovery ordering, `makeServerRuntimeStartup` phases, `server.ts` wiring) · everyone: `Migrations.ts` registration list |
 
 ---
 
@@ -104,10 +104,10 @@ startup ── reactors.start
 
 Both shapes require a non-deleted, non-archived thread whose session is not live in this process.
 
-| kind              | shape                                                                                                                                                                                                                                          | `sourceTurnId`         |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| `in-flight`       | `isOrphanedProviderSession(thread, live)` (the shared reconcile predicate) **and** `session.activeTurnId !== null` **and** `latestTurn?.turnId === session.activeTurnId` **and** `latestTurn.state ∈ {running, completed, interrupted, error}` | `session.activeTurnId` |
-| `background-only` | a shutdown hint with `has_background_work = 1` **and** `session.status ∈ {ready, idle}` **and** `activeTurnId === null` **and** `latestTurn?.state === "completed"` **and**, after IO, the background fold is non-empty                        | `latestTurn.turnId`    |
+| kind | shape | `sourceTurnId` |
+| --- | --- | --- |
+| `in-flight` | `isOrphanedProviderSession(thread, live)` (the shared reconcile predicate) **and** `session.activeTurnId !== null` **and** `latestTurn?.turnId === session.activeTurnId` **and** `latestTurn.state ∈ {running, completed, interrupted, error}` | `session.activeTurnId` |
+| `background-only` | a shutdown hint with `has_background_work = 1` **and** `session.status ∈ {ready, idle}` **and** `activeTurnId === null` **and** `latestTurn?.state === "completed"` **and**, after IO, the background fold is non-empty | `latestTurn.turnId` |
 
 - `in-flight` deliberately accepts `latestTurn.state === "completed"`, because of §1.3. The `interrupted`/`error` states are accepted only so they can be classified as skips.
 - An orphan with `activeTurnId === null` is not a candidate. That is a pending turn start, which is `provider-effect-outbox`'s domain.
@@ -117,38 +117,38 @@ Both shapes require a non-deleted, non-archived thread whose session is not live
 
 The decision is computed from the pre-reconcile command model plus the IO inputs listed in §3.4.
 
-| #   | condition                                                                                                                    | outcome                                        | visible notice (setting on)                                                                                 |
-| --- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| 1   | setting off at capture                                                                                                       | `skipped: disabled`                            | none                                                                                                        |
-| 2   | `signals.interruptRequested` **or** `latestTurn.state === "interrupted"`                                                     | `skipped: user-interrupted`                    | none                                                                                                        |
-| 3   | `latestTurn.state === "error"`                                                                                               | `skipped: turn-failed`                         | none (the error is already visible)                                                                         |
-| 4   | `isRestartContinuationMessageId(latestTurn.userMessageId)`                                                                   | `skipped: repeated-restart` (crash-loop guard) | "Not continued automatically again: the previous automatic continuation was also interrupted by a restart." |
-| 5   | `derivePendingThreadRequests(thread.activities).length > 0`                                                                  | `skipped: pending-request`                     | "Not continued automatically: it was waiting for your approval or input when Ryco restarted."               |
-| 6   | `signals.unresolvedSteer`                                                                                                    | `skipped: pending-steer`                       | "Not continued automatically: a steering message had not reached the agent yet. Send it again to continue." |
-| 7   | `signals.computerUse`                                                                                                        | `skipped: computer-use`                        | "Not continued automatically: this turn used computer control, which needs you present."                    |
-| 8   | `pendingDelegatedReturn`                                                                                                     | `skipped: delegated-child`                     | "Not continued automatically: this is a delegated task; its parent decides what happens next."              |
-| 9   | `usageLimited` (from usage-limits; `false` until that lands)                                                                 | `skipped: usage-limited`                       | "Not continued automatically: the provider usage limit is still active."                                    |
-| 10  | `!resumable` (binding missing, `resumeCursor == null`, or `binding.providerInstanceId !== thread.modelSelection.instanceId`) | `skipped: not-resumable`                       | "Not continued automatically: the provider conversation cannot be resumed."                                 |
-| 11  | otherwise                                                                                                                    | `pending`                                      | n/a                                                                                                         |
+| # | condition | outcome | visible notice (setting on) |
+| --- | --- | --- | --- |
+| 1 | setting off at capture | `skipped: disabled` | none |
+| 2 | `signals.interruptRequested` **or** `latestTurn.state === "interrupted"` | `skipped: user-interrupted` | none |
+| 3 | `latestTurn.state === "error"` | `skipped: turn-failed` | none (the error is already visible) |
+| 4 | `isRestartContinuationMessageId(latestTurn.userMessageId)` | `skipped: repeated-restart` (crash-loop guard) | "Not continued automatically again: the previous automatic continuation was also interrupted by a restart." |
+| 5 | `derivePendingThreadRequests(thread.activities).length > 0` | `skipped: pending-request` | "Not continued automatically: it was waiting for your approval or input when Ryco restarted." |
+| 6 | `signals.unresolvedSteer` | `skipped: pending-steer` | "Not continued automatically: a steering message had not reached the agent yet. Send it again to continue." |
+| 7 | `signals.computerUse` | `skipped: computer-use` | "Not continued automatically: this turn used computer control, which needs you present." |
+| 8 | `pendingDelegatedReturn` | `skipped: delegated-child` | "Not continued automatically: this is a delegated task; its parent decides what happens next." |
+| 9 | `usageLimited` (from usage-limits; `false` until that lands) | `skipped: usage-limited` | "Not continued automatically: the provider usage limit is still active." |
+| 10 | `!resumable` (binding missing, `resumeCursor == null`, or `binding.providerInstanceId !== thread.modelSelection.instanceId`) | `skipped: not-resumable` | "Not continued automatically: the provider conversation cannot be resumed." |
+| 11 | otherwise | `pending` | n/a |
 
 Dispatch-time outcomes, from §3.5:
 
-| condition                                                         | outcome               | visible notice (setting on)                                                                                                          |
-| ----------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| setting off                                                       | `disabled`            | none                                                                                                                                 |
-| thread deleted or archived                                        | `thread-closed`       | none                                                                                                                                 |
-| user acted first                                                  | `thread-changed`      | none                                                                                                                                 |
-| `now - lastObservedAt > RESTART_CONTINUATION_MAX_AGE_MS` (30 min) | `expired`             | "Not continued automatically: Ryco was down for more than 30 minutes."                                                               |
-| per-instance cap (8) exceeded                                     | `capacity`            | "Not continued automatically: too many threads were interrupted at once. Send a message to continue."                                |
-| Claude review heuristic says the cache is cold                    | `claude-cache-review` | "Not continued automatically: continuing this large Claude conversation would re-send its full context. Send a message to continue." |
+| condition | outcome | visible notice (setting on) |
+| --- | --- | --- |
+| setting off | `disabled` | none |
+| thread deleted or archived | `thread-closed` | none |
+| user acted first | `thread-changed` | none |
+| `now - lastObservedAt > RESTART_CONTINUATION_MAX_AGE_MS` (30 min) | `expired` | "Not continued automatically: Ryco was down for more than 30 minutes." |
+| per-instance cap (8) exceeded | `capacity` | "Not continued automatically: too many threads were interrupted at once. Send a message to continue." |
+| Claude review heuristic says the cache is cold | `claude-cache-review` | "Not continued automatically: continuing this large Claude conversation would re-send its full context. Send a message to continue." |
 
 Failure outcomes (status `failed`, notice tone `error`):
 
-| reason            | notice                                                                                                |
-| ----------------- | ----------------------------------------------------------------------------------------------------- |
-| `dispatch-failed` | "Automatic continuation failed. Send a message to continue."                                          |
-| `delivery-lost`   | "The automatic continuation was recorded but never reached the provider. Send a message to continue." |
-| `invalid-record`  | none (logged)                                                                                         |
+| reason | notice |
+| --- | --- |
+| `dispatch-failed` | "Automatic continuation failed. Send a message to continue." |
+| `delivery-lost` | "The automatic continuation was recorded but never reached the provider. Send a message to continue." |
+| `invalid-record` | none (logged) |
 
 Every notice is a `thread.activity.append` with:
 
@@ -253,12 +253,12 @@ The continuation command (`OrchestrationCommand`, internal; it is never routed t
 
 ### 3.6 Exactly-once and delivery
 
-| Crash point                                        | Next startup sees                                   | Result                                                                                 |
-| -------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Before insert                                      | no row; thread still an orphan (reconcile not done) | normal capture                                                                         |
-| After insert, before reconcile finished            | existing row; thread still an orphan                | `insertIfAbsent` keeps the original classification; effects re-dispatched idempotently |
-| After `engine.dispatch` committed, before `settle` | `pending` row, **accepted** receipt                 | `handOffAccepted`                                                                      |
-| After decider rejection, before `settle`           | `pending` row, **rejected** receipt                 | `skipped: thread-changed`                                                              |
+| Crash point | Next startup sees | Result |
+| --- | --- | --- |
+| Before insert | no row; thread still an orphan (reconcile not done) | normal capture |
+| After insert, before reconcile finished | existing row; thread still an orphan | `insertIfAbsent` keeps the original classification; effects re-dispatched idempotently |
+| After `engine.dispatch` committed, before `settle` | `pending` row, **accepted** receipt | `handOffAccepted` |
+| After decider rejection, before `settle` | `pending` row, **rejected** receipt | `skipped: thread-changed` |
 
 `handOffAccepted(record)` handles the "accepted but never delivered" case:
 
@@ -356,13 +356,8 @@ It is used by the decider guard and by the dispatcher pre-check. Do not migrate 
 In `fold()`, change the `started` early-continue (`:121-125`) to skip only while the epoch is open:
 
 ```ts
-if (
-  payload.state === "started" &&
-  incomingSession !== null &&
-  incomingSession === runtimeSessionId &&
-  !ended
-)
-  continue;
+if (payload.state === "started" && incomingSession !== null &&
+    incomingSession === runtimeSessionId && !ended) continue;
 ```
 
 A `started` boundary after an `ended` epoch for the same id now reopens it: tasks and tombstones are cleared and `ended = false`.
@@ -381,10 +376,7 @@ export const ORPHANED_PROVIDER_SESSION_ERROR =
   "Provider session did not survive a server restart. Send a new message to continue.";
 /** Latest-turn state that startup reconciliation leaves on an orphaned in-flight turn. */
 export const ORPHANED_TURN_TERMINAL_STATE = "interrupted" as const;
-export function isOrphanedProviderSession(
-  thread: OrchestrationThread,
-  liveThreadIds: ReadonlySet<ThreadId>,
-): boolean;
+export function isOrphanedProviderSession(thread: OrchestrationThread, liveThreadIds: ReadonlySet<ThreadId>): boolean
 // = the exact predicate at serverRuntimeStartup.ts:616-623
 ```
 
@@ -497,12 +489,10 @@ export interface RestartContinuationShape {
   readonly capture: (input: {
     readonly snapshot: OrchestrationReadModel;
     readonly liveThreadIds: ReadonlySet<ThreadId>;
-  }) => Effect.Effect<ReadonlyArray<CapturedRestartThread>>; // never fails; logs
-  readonly publishCaptureEffects: (
-    captured: ReadonlyArray<CapturedRestartThread>,
-  ) => Effect.Effect<void>;
-  readonly recordShutdownHints: Effect.Effect<void>; // never fails; logs
-  readonly dispatchPending: Effect.Effect<void>; // never fails except interrupt
+  }) => Effect.Effect<ReadonlyArray<CapturedRestartThread>>;              // never fails; logs
+  readonly publishCaptureEffects: (captured: ReadonlyArray<CapturedRestartThread>) => Effect.Effect<void>;
+  readonly recordShutdownHints: Effect.Effect<void>;                       // never fails; logs
+  readonly dispatchPending: Effect.Effect<void>;                           // never fails except interrupt
 }
 ```
 
@@ -523,13 +513,10 @@ const restartGuard = command.restartContinuationGuard;
 if (restartGuard) {
   const blocker = restartContinuationTargetBlocker(targetThread, restartGuard);
   if (blocker !== null) {
-    return (
-      yield *
-      new OrchestrationCommandInvariantError({
-        commandType: command.type,
-        detail: `Restart continuation target changed (${blocker}).`,
-      })
-    );
+    return yield* new OrchestrationCommandInvariantError({
+      commandType: command.type,
+      detail: `Restart continuation target changed (${blocker}).`,
+    });
   }
 }
 ```
@@ -543,27 +530,25 @@ if (restartGuard) {
 1. Import `ORPHANED_PROVIDER_SESSION_ERROR` and `isOrphanedProviderSession` from `restartReconciliation.ts`. Delete the local constant and the inline filter.
 2. In `reconcileOrphanedProviderSessions`, after `snapshot` (`:572`) and **before** the request-clearing loop:
    ```ts
-   const restartContinuation = yield * RestartContinuation;
-   const captured = yield * restartContinuation.capture({ snapshot, liveThreadIds });
+   const restartContinuation = yield* RestartContinuation;
+   const captured = yield* restartContinuation.capture({ snapshot, liveThreadIds });
    ```
    After the orphan loop, add `yield* restartContinuation.publishCaptureEffects(captured);`.
 3. In `makeServerRuntimeStartup`, add `const restartContinuation = yield* RestartContinuation;`. **After** `yield* Effect.addFinalizer(() => Scope.close(reactorScope, Exit.void));` (`:734`), register:
    ```ts
    // Registered after the reactor-scope finalizer, so it runs BEFORE it (finalizers run in reverse).
-   yield *
-     Effect.addFinalizer(() =>
-       restartContinuation.recordShutdownHints.pipe(
-         Effect.timeout(Duration.seconds(2)),
-         Effect.ignoreCause({ log: true }),
-       ),
-     );
+   yield* Effect.addFinalizer(() =>
+     restartContinuation.recordShutdownHints.pipe(
+       Effect.timeout(Duration.seconds(2)),
+       Effect.ignoreCause({ log: true }),
+     ),
+   );
    ```
 4. After `ready.publish` (`:880-890`):
    ```ts
-   yield *
-     Effect.forkScoped(
-       runStartupPhase("restart-continuations.dispatch", restartContinuation.dispatchPending),
-     );
+   yield* Effect.forkScoped(
+     runStartupPhase("restart-continuations.dispatch", restartContinuation.dispatchPending),
+   );
    ```
 
 ### 4.15 `apps/server/src/server.ts`
@@ -783,7 +768,6 @@ Pins the graceful-shutdown invariant using `OrchestrationEngineHarness` and `Tes
   - usage-limits' limit flag.
 
   The semantic contracts in §9 are fixed. Adapt the call sites, not the semantics.
-
 - **Visible but unexplained message.** The continuation shows as a user bubble whose text says it was automatic. A dedicated "automatic" caption is a follow-up.
 - **A direct composer send during the pending-start window** can still create back-to-back turn starts. This race is pre-existing for every server-originated turn, delegation returns included. Queued sends are covered by the hold, and `reactor-concurrency` serializes per thread.
 
@@ -813,24 +797,24 @@ Pins the graceful-shutdown invariant using `OrchestrationEngineHarness` and `Tes
 
 The reviewer's verdict was **feature**. I agree, and I re-checked the disputed premise myself: `ProjectionPipeline.ts:1797-1822` and `:1732-1735` confirm the blocker. I also found that an `interrupted` turn can flip back to `running` in SQL, so the stop signal had to move to the event log.
 
-| #   | Severity | Issue                                                                       | Decision                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --- | -------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | blocker  | Capture misclassified real in-flight turns that read `completed` mid-turn   | **Accept.** The `in-flight` shape accepts `running \| completed` with `activeTurnId === latestTurn.turnId`. The stop signal is `latestTurn.state === "interrupted"` **or** a non-provider `thread.turn-interrupt-requested` event for the turn. This is stronger than suggested, because SQL can flip `interrupted` → `running`. Tests §6.3a/c/d and §6.6.1/3 use the real `ProjectionPipeline` SQL shape |
-| 2   | major    | Delegated children continued with nobody collecting the result              | **Accept option (a).** Skip `delegated-child` while a completion-return record is pending. No `CompletionReturnDelivery` change, so there is no conflict with `delegation-returns`                                                                                                                                                                                                                        |
-| 3   | major    | Pre-gate dispatch could start sessions before the MCP endpoint is published | **Accept.** Dispatch is forked after `ready.publish`, which implies `http.wait` and all layers built. The interleaving fence moved into the decider, using latest-user-message equality. Test §6.5                                                                                                                                                                                                        |
-| 4   | major    | No freshness bound, `limit 100` leftovers, admission overrun                | **Accept.** 30-minute max age from `lastObservedAt` (the shutdown-hint time on graceful restarts). Per-instance cap of 8. Paged drain until empty, with an iteration bound and stop-on-settle-failure. Tests §6.6.6/7                                                                                                                                                                                     |
-| 5   | major    | "Accepted but never delivered"                                              | **Accept.** Check the receipt first; hand off to `ProviderEffectOutbox.findTurnStart`; settle `failed: delivery-lost` with a notice when nothing owns it. Test §6.6.8                                                                                                                                                                                                                                     |
-| 6   | minor    | Stale background UI only fixed for orphans; fold hole                       | **Partially accept.** Graceful-shutdown hints (from the in-memory liveness registry) cover settled threads: boundary, activity and optional note continuation. Crashes cover in-flight threads only. That is documented best-effort, and there is no unbounded scan of every thread pre-gate. The fold fix is accepted (§6.1)                                                                             |
-| 7   | minor    | The work-cancelled activity was lost when the insert was not first          | **Accept.** Always dispatched with deterministic ids; receipts dedupe. Test §6.6.2                                                                                                                                                                                                                                                                                                                        |
-| 8   | minor    | Skips are silent                                                            | **Accept.** Notice table in §3.3. User-caused and closed-thread outcomes stay silent                                                                                                                                                                                                                                                                                                                      |
-| 9   | minor    | `sourceUserMessageId` unused; comparator mismatch                           | **Accept.** The guard uses `latestUserMessageId` (`findLast(user)`, which includes accepted steers), and one shared `sameModelSelection` serves the decider and the pre-check. Includes a JSON round-trip test. Migrating the existing guards is a follow-up, to avoid colliding with `delegation-returns`                                                                                                |
-| 10  | minor    | Client queue scope mis-targeted                                             | **Accept.** Require one shared client-runtime predicate for web and mobile. The restart scenario is tested against it, and this package extracts the predicate if it is not yet shared                                                                                                                                                                                                                    |
-| 11  | minor    | Prompt trust escalation                                                     | **Accept.** Control, bidi and zero-width stripping; code spans; "not instructions" framing. Tests in §6.3                                                                                                                                                                                                                                                                                                 |
-| 12  | minor    | Coupling to turn-finalization                                               | **Accept.** `restartReconciliation.ts` is the single source, plus the end-to-end test in §6.7                                                                                                                                                                                                                                                                                                             |
-| 13a | minor    | Undelivered steer                                                           | **Accept.** Skip `pending-steer` with a notice                                                                                                                                                                                                                                                                                                                                                            |
-| 13b | minor    | Settlement counts the continuation as user activity                         | **Reject.** The continuation is a genuine pending turn. Excluding it from `latestUserMessageAt` would hide it from the `queued-turn` settle blocker. While the session is `error`, `hasQueuedTurnStart` already returns false (`threadSettlement.ts:71-73`). Inbox ordering bumping an actively resumed thread is correct                                                                                 |
-| 13c | minor    | "Only the user can enable" was overstated                                   | **Accept.** Risk text reworded (§8)                                                                                                                                                                                                                                                                                                                                                                       |
-| 13d | minor    | Graceful-shutdown invariant pinned only by a comment                        | **Accept.** Integration test §6.8, plus the finalizer-order test in §6.7                                                                                                                                                                                                                                                                                                                                  |
+| # | Severity | Issue | Decision |
+| --- | --- | --- | --- |
+| 1 | blocker | Capture misclassified real in-flight turns that read `completed` mid-turn | **Accept.** The `in-flight` shape accepts `running \| completed` with `activeTurnId === latestTurn.turnId`. The stop signal is `latestTurn.state === "interrupted"` **or** a non-provider `thread.turn-interrupt-requested` event for the turn. This is stronger than suggested, because SQL can flip `interrupted` → `running`. Tests §6.3a/c/d and §6.6.1/3 use the real `ProjectionPipeline` SQL shape |
+| 2 | major | Delegated children continued with nobody collecting the result | **Accept option (a).** Skip `delegated-child` while a completion-return record is pending. No `CompletionReturnDelivery` change, so there is no conflict with `delegation-returns` |
+| 3 | major | Pre-gate dispatch could start sessions before the MCP endpoint is published | **Accept.** Dispatch is forked after `ready.publish`, which implies `http.wait` and all layers built. The interleaving fence moved into the decider, using latest-user-message equality. Test §6.5 |
+| 4 | major | No freshness bound, `limit 100` leftovers, admission overrun | **Accept.** 30-minute max age from `lastObservedAt` (the shutdown-hint time on graceful restarts). Per-instance cap of 8. Paged drain until empty, with an iteration bound and stop-on-settle-failure. Tests §6.6.6/7 |
+| 5 | major | "Accepted but never delivered" | **Accept.** Check the receipt first; hand off to `ProviderEffectOutbox.findTurnStart`; settle `failed: delivery-lost` with a notice when nothing owns it. Test §6.6.8 |
+| 6 | minor | Stale background UI only fixed for orphans; fold hole | **Partially accept.** Graceful-shutdown hints (from the in-memory liveness registry) cover settled threads: boundary, activity and optional note continuation. Crashes cover in-flight threads only. That is documented best-effort, and there is no unbounded scan of every thread pre-gate. The fold fix is accepted (§6.1) |
+| 7 | minor | The work-cancelled activity was lost when the insert was not first | **Accept.** Always dispatched with deterministic ids; receipts dedupe. Test §6.6.2 |
+| 8 | minor | Skips are silent | **Accept.** Notice table in §3.3. User-caused and closed-thread outcomes stay silent |
+| 9 | minor | `sourceUserMessageId` unused; comparator mismatch | **Accept.** The guard uses `latestUserMessageId` (`findLast(user)`, which includes accepted steers), and one shared `sameModelSelection` serves the decider and the pre-check. Includes a JSON round-trip test. Migrating the existing guards is a follow-up, to avoid colliding with `delegation-returns` |
+| 10 | minor | Client queue scope mis-targeted | **Accept.** Require one shared client-runtime predicate for web and mobile. The restart scenario is tested against it, and this package extracts the predicate if it is not yet shared |
+| 11 | minor | Prompt trust escalation | **Accept.** Control, bidi and zero-width stripping; code spans; "not instructions" framing. Tests in §6.3 |
+| 12 | minor | Coupling to turn-finalization | **Accept.** `restartReconciliation.ts` is the single source, plus the end-to-end test in §6.7 |
+| 13a | minor | Undelivered steer | **Accept.** Skip `pending-steer` with a notice |
+| 13b | minor | Settlement counts the continuation as user activity | **Reject.** The continuation is a genuine pending turn. Excluding it from `latestUserMessageAt` would hide it from the `queued-turn` settle blocker. While the session is `error`, `hasQueuedTurnStart` already returns false (`threadSettlement.ts:71-73`). Inbox ordering bumping an actively resumed thread is correct |
+| 13c | minor | "Only the user can enable" was overstated | **Accept.** Risk text reworded (§8) |
+| 13d | minor | Graceful-shutdown invariant pinned only by a comment | **Accept.** Integration test §6.8, plus the finalizer-order test in §6.7 |
 
 Additions beyond the critique:
 

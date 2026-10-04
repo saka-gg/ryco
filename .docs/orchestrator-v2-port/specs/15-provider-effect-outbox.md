@@ -1,16 +1,16 @@
 # 15 · provider-effect-outbox: durable provider side effects
 
-| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| id               | `provider-effect-outbox`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| title            | Durable provider-bound intents: record them in the commit transaction, settle them from their outcome events, and resolve leftovers visibly after a restart                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| wave             | 3 (sequential, same branch). Order: `reactor-concurrency` → **`provider-effect-outbox`** → `restart-continuation`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| verdict          | **partially-confirmed**. Turn start, steer and session stop are silently lost if the process dies between commit and provider call. Approval and user-input responses, interrupts, goal sync and runtime/token mode changes are already recovered by existing startup code, so they are not tracked here                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| size             | L                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| touched files    | new: `apps/server/src/persistence/Migrations/072_ProviderEffectIntents.ts`, `apps/server/src/orchestration/providerEffectIntents.ts`, `apps/server/src/persistence/Services/ProviderEffectIntents.ts`, `apps/server/src/persistence/Layers/ProviderEffectIntents.ts` · changed: `apps/server/src/persistence/Migrations.ts`, `apps/server/src/orchestration/Services/OrchestrationEngine.ts`, `apps/server/src/orchestration/Layers/OrchestrationEngine.ts`, `apps/server/src/orchestration/Services/ProviderCommandReactor.ts`, `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts`, `apps/server/src/orchestration/Services/OrchestrationReactor.ts`, `apps/server/src/orchestration/Layers/OrchestrationReactor.ts`, `apps/server/src/orchestration/Services/ContextHandoffCoordinator.ts`, `apps/server/src/orchestration/Layers/ContextHandoffCoordinator.ts`, `apps/server/src/orchestration/Layers/ProjectionPipeline.ts`, `apps/server/src/persistence/Services/ProjectionTurns.ts`, `apps/server/src/persistence/Layers/ProjectionTurns.ts`, `apps/server/src/serverRuntimeStartup.ts` · tests: `apps/server/src/orchestration/providerEffectIntents.test.ts` (new), `apps/server/src/persistence/Layers/ProviderEffectIntents.test.ts` (new), `apps/server/src/persistence/Migrations/072_ProviderEffectIntents.test.ts` (new), `OrchestrationEngine.test.ts`, `ProviderCommandReactor.test.ts`, `ProjectionPipeline.test.ts`, `ContextHandoffCoordinator.test.ts`, `OrchestrationReactor.test.ts`, `serverRuntimeStartup.test.ts`, `agentControl/Layers/CompletionReturnDelivery.test.ts`, and every `OrchestrationEngineShape` test double (new required `bootSequence` field) |
-| migrations       | **072** `ProviderEffectIntents`: `CREATE TABLE provider_effect_intents` plus one index. No backfill                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| contract changes | None in `packages/contracts`. Internal server shapes: `OrchestrationEngineShape.bootSequence` (new, required), `ProviderCommandReactorShape.recoverIntents`, `OrchestrationReactorShape.recoverProviderIntents`, `ContextHandoffCoordinatorShape.abandonUnstartedTurnStart`, `ProjectionTurnRepositoryShape.deletePendingTurnStartByMessage`, new `ProviderEffectIntentRepository` service. Activity payloads gain an informational `deliveryState` key (`payload` is `Schema.Unknown`). Behaviour changes: session-stop failures become visible, and a `provider.turn.start.failed` activity now removes the matching pending `projection_turns` row                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| overlaps         | `reactor-concurrency` (W3, lands first: `ProviderCommandReactor.start`, the worker/lane, `processDomainEventSafely`, `processTurnStartRequested`) · `restart-continuation` (W3, lands after: `serverRuntimeStartup` phase list, consumes the recovery summary) · `reactor-errors-switch` (W1: `formatFailureDetail`, `appendProviderFailureActivity`, `processDomainEventSafely`) · `turn-finalization` (W1: `reconcileOrphanedProviderSessions` and the phase list in `serverRuntimeStartup.ts`, `ProjectionPipeline.applyThreadTurnsProjection`) · `delegation-returns` (W2: `processTurnStartRequested` delegation-return-guard branch; semantic overlap with `CompletionReturnDelivery` `pendingTurnExists` / `isReturnContinuation` through the pending-row deletion) · `usage-limits` (W2: `handleTurnStartFailure` / `recoverTurnStartFailure`) · `claude-steering` (W2: `processTurnSteerRequested`) · `delegation-guard-restart` (W1: `makeOrchestrationEngine` around `getCommandReadModel`, `:539-540`, next to the new `bootSequence` capture) · `delegation-lineage`, `restart-continuation`, `usage-limits`, `settlement-signals` (one-line `Migrations.ts` registry appends only) · `rollback-correctness` (W2: no code overlap; it owns neither the lost-revert gap nor this fix, see §8)                                                                                                                                                                                                                                                                                                                                                                                               |
+| Field | Value |
+| --- | --- |
+| id | `provider-effect-outbox` |
+| title | Durable provider-bound intents: record them in the commit transaction, settle them from their outcome events, and resolve leftovers visibly after a restart |
+| wave | 3 (sequential, same branch). Order: `reactor-concurrency` → **`provider-effect-outbox`** → `restart-continuation` |
+| verdict | **partially-confirmed**. Turn start, steer and session stop are silently lost if the process dies between commit and provider call. Approval and user-input responses, interrupts, goal sync and runtime/token mode changes are already recovered by existing startup code, so they are not tracked here |
+| size | L |
+| touched files | new: `apps/server/src/persistence/Migrations/072_ProviderEffectIntents.ts`, `apps/server/src/orchestration/providerEffectIntents.ts`, `apps/server/src/persistence/Services/ProviderEffectIntents.ts`, `apps/server/src/persistence/Layers/ProviderEffectIntents.ts` · changed: `apps/server/src/persistence/Migrations.ts`, `apps/server/src/orchestration/Services/OrchestrationEngine.ts`, `apps/server/src/orchestration/Layers/OrchestrationEngine.ts`, `apps/server/src/orchestration/Services/ProviderCommandReactor.ts`, `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts`, `apps/server/src/orchestration/Services/OrchestrationReactor.ts`, `apps/server/src/orchestration/Layers/OrchestrationReactor.ts`, `apps/server/src/orchestration/Services/ContextHandoffCoordinator.ts`, `apps/server/src/orchestration/Layers/ContextHandoffCoordinator.ts`, `apps/server/src/orchestration/Layers/ProjectionPipeline.ts`, `apps/server/src/persistence/Services/ProjectionTurns.ts`, `apps/server/src/persistence/Layers/ProjectionTurns.ts`, `apps/server/src/serverRuntimeStartup.ts` · tests: `apps/server/src/orchestration/providerEffectIntents.test.ts` (new), `apps/server/src/persistence/Layers/ProviderEffectIntents.test.ts` (new), `apps/server/src/persistence/Migrations/072_ProviderEffectIntents.test.ts` (new), `OrchestrationEngine.test.ts`, `ProviderCommandReactor.test.ts`, `ProjectionPipeline.test.ts`, `ContextHandoffCoordinator.test.ts`, `OrchestrationReactor.test.ts`, `serverRuntimeStartup.test.ts`, `agentControl/Layers/CompletionReturnDelivery.test.ts`, and every `OrchestrationEngineShape` test double (new required `bootSequence` field) |
+| migrations | **072** `ProviderEffectIntents`: `CREATE TABLE provider_effect_intents` plus one index. No backfill |
+| contract changes | None in `packages/contracts`. Internal server shapes: `OrchestrationEngineShape.bootSequence` (new, required), `ProviderCommandReactorShape.recoverIntents`, `OrchestrationReactorShape.recoverProviderIntents`, `ContextHandoffCoordinatorShape.abandonUnstartedTurnStart`, `ProjectionTurnRepositoryShape.deletePendingTurnStartByMessage`, new `ProviderEffectIntentRepository` service. Activity payloads gain an informational `deliveryState` key (`payload` is `Schema.Unknown`). Behaviour changes: session-stop failures become visible, and a `provider.turn.start.failed` activity now removes the matching pending `projection_turns` row |
+| overlaps | `reactor-concurrency` (W3, lands first: `ProviderCommandReactor.start`, the worker/lane, `processDomainEventSafely`, `processTurnStartRequested`) · `restart-continuation` (W3, lands after: `serverRuntimeStartup` phase list, consumes the recovery summary) · `reactor-errors-switch` (W1: `formatFailureDetail`, `appendProviderFailureActivity`, `processDomainEventSafely`) · `turn-finalization` (W1: `reconcileOrphanedProviderSessions` and the phase list in `serverRuntimeStartup.ts`, `ProjectionPipeline.applyThreadTurnsProjection`) · `delegation-returns` (W2: `processTurnStartRequested` delegation-return-guard branch; semantic overlap with `CompletionReturnDelivery` `pendingTurnExists` / `isReturnContinuation` through the pending-row deletion) · `usage-limits` (W2: `handleTurnStartFailure` / `recoverTurnStartFailure`) · `claude-steering` (W2: `processTurnSteerRequested`) · `delegation-guard-restart` (W1: `makeOrchestrationEngine` around `getCommandReadModel`, `:539-540`, next to the new `bootSequence` capture) · `delegation-lineage`, `restart-continuation`, `usage-limits`, `settlement-signals` (one-line `Migrations.ts` registry appends only) · `rollback-correctness` (W2: no code overlap; it owns neither the lost-revert gap nor this fix, see §8) |
 
 ---
 
@@ -37,7 +37,7 @@
    - `processSessionStopRequested` (`:1693-1721`) is the only executor.
    - After a crash, a `ready` session is not "orphaned" (`serverRuntimeStartup.ts:616-623`), so the user's Stop never takes effect.
 6. **Two pre-existing defects on the same path** (the fix depends on them):
-   - **`commitAcceptedModelSelection` failure is reported as a start failure.** It runs inside `Effect.tap` after a _successful_ `sendTurn` (`:1321-1336`). If it fails, `recoverTurnStartFailure` runs and emits `provider.turn.start.failed` for a turn that started.
+   - **`commitAcceptedModelSelection` failure is reported as a start failure.** It runs inside `Effect.tap` after a *successful* `sendTurn` (`:1321-1336`). If it fails, `recoverTurnStartFailure` runs and emits `provider.turn.start.failed` for a turn that started.
    - **Reactor-level failures are only logged.** `processDomainEventSafely` (`:1790-1801`) logs failures that escape a handler, for example a SQL error in `resolveThread`. The same applies when `recoverTurnStartFailure` (`:1186-1196`) cannot append the failure activity.
 
 ### 1.2 Already recovered today (refuted, so not tracked)
@@ -102,23 +102,23 @@ Rejected alternatives:
 
 ### 2.2 Tracked kinds
 
-| kind           | request event                   | policy after process loss                                | message_id                  | handoff_id                                  |
-| -------------- | ------------------------------- | -------------------------------------------------------- | --------------------------- | ------------------------------------------- |
-| `turn-start`   | `thread.turn-start-requested`   | process-bound: cancel visibly, never resend              | `payload.messageId`         | `payload.contextHandoff?.handoffId ?? null` |
-| `turn-steer`   | `thread.turn-steer-requested`   | process-bound: resolve as rejected visibly, never resend | `payload.message.messageId` | null                                        |
-| `session-stop` | `thread.session-stop-requested` | replay-safe: retry once per boot                         | null                        | null                                        |
+| kind | request event | policy after process loss | message_id | handoff_id |
+| --- | --- | --- | --- | --- |
+| `turn-start` | `thread.turn-start-requested` | process-bound: cancel visibly, never resend | `payload.messageId` | `payload.contextHandoff?.handoffId ?? null` |
+| `turn-steer` | `thread.turn-steer-requested` | process-bound: resolve as rejected visibly, never resend | `payload.message.messageId` | null |
+| `session-stop` | `thread.session-stop-requested` | replay-safe: retry once per boot | null | null |
 
 ### 2.3 Settlement table (applied in the engine transaction, only to rows with `sequence < event.sequence`)
 
-| committed event                                                                                                                                                        | rows deleted                                                                                                        |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `thread.activity-appended`, kind `provider.turn.start.failed`, payload `messageId` M                                                                                   | `turn-start` rows for (thread, M)                                                                                   |
-| `thread.activity-appended`, kind `context-handoff` (`CONTEXT_HANDOFF_ACTIVITY_KIND`), decoded payload `status ∈ {consumed, failed, delivery-uncertain}`, `handoffId` H | `turn-start` rows for (thread, handoff H)                                                                           |
-| `thread.activity-appended`, kind `provider.session.stop.failed`                                                                                                        | `session-stop` rows for the thread                                                                                  |
-| `thread.turn-steer-accepted` / `thread.turn-steer-rejected`, payload `messageId` M                                                                                     | `turn-steer` rows for (thread, M)                                                                                   |
-| `thread.session-set` with `status === "running"` and `activeTurnId !== null`                                                                                           | `turn-start` rows for the thread **with `dispatched_at IS NOT NULL`** (the turn the provider accepted is now bound) |
-| `thread.session-set` with `status === "stopped"`                                                                                                                       | `session-stop` rows for the thread                                                                                  |
-| `thread.deleted`                                                                                                                                                       | every row of the thread                                                                                             |
+| committed event | rows deleted |
+| --- | --- |
+| `thread.activity-appended`, kind `provider.turn.start.failed`, payload `messageId` M | `turn-start` rows for (thread, M) |
+| `thread.activity-appended`, kind `context-handoff` (`CONTEXT_HANDOFF_ACTIVITY_KIND`), decoded payload `status ∈ {consumed, failed, delivery-uncertain}`, `handoffId` H | `turn-start` rows for (thread, handoff H) |
+| `thread.activity-appended`, kind `provider.session.stop.failed` | `session-stop` rows for the thread |
+| `thread.turn-steer-accepted` / `thread.turn-steer-rejected`, payload `messageId` M | `turn-steer` rows for (thread, M) |
+| `thread.session-set` with `status === "running"` and `activeTurnId !== null` | `turn-start` rows for the thread **with `dispatched_at IS NOT NULL`** (the turn the provider accepted is now bound) |
+| `thread.session-set` with `status === "stopped"` | `session-stop` rows for the thread |
+| `thread.deleted` | every row of the thread |
 
 Why the "running" rule is safe:
 
@@ -141,7 +141,6 @@ This matches Ryco's existing honest-uncertainty precedents: `ContextHandoffCoord
 The engine captures `bootSequence = eventStore.latestSequence` during construction, after `projectionPipeline.bootstrap` and before it forks its command worker (`OrchestrationEngine.ts:539-556`). That value is the highest sequence any earlier process committed, and it is exposed as `OrchestrationEngineShape.bootSequence`.
 
 `ProviderCommandReactor.recoverIntents()` runs in a new startup phase `provider-intents.recover`:
-
 - after `reactors.start` (so the live subscription exists)
 - after `provider-sessions.reconcile` (orphan reconciliation owns session/turn state and runs first)
 - before the command gate opens
@@ -153,18 +152,17 @@ It lists all open rows in sequence order and handles each one:
   - This needs no cutoff read. A row committed after the list is published after the subscription was taken (subscription → list → commit → publish), so it is delivered live.
 - **`sequence <= bootSequence`: an earlier process committed it.** Apply the policy below. Each attempt first increments `recovery_attempts`. A row past `MAX_PROVIDER_INTENT_RECOVERY_ATTEMPTS = 5` is settled explicitly with `Effect.logError` (poison-row guard).
 
-| kind                               | state                                                 | recovery action (all dispatches use deterministic ids `server:provider-intent-recovery:<sequence>` / activity id `provider-intent-recovery:<sequence>`)                                                                                      |
-| ---------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| any                                | thread missing                                        | explicit settle (`thread.deleted` normally already settled it)                                                                                                                                                                               |
-| `turn-start`, no `contextHandoff`  | `dispatched_at IS NULL`                               | append `provider.turn.start.failed` (tone `error`, `messageId`, `deliveryState: "not-sent"`). Summary/detail from §3.2 `recoveryCopy`. The delegated-return guard variant uses the delegated wording                                         |
-| `turn-start`, no `contextHandoff`  | `dispatched_at` set                                   | the same, with `deliveryState: "uncertain"` and the uncertain wording                                                                                                                                                                        |
-| `turn-start` with `contextHandoff` | any                                                   | `contextHandoffCoordinator.abandonUnstartedTurnStart(event, detail)`: `"owned"` → explicit settle. `"abandoned"` → nothing further (its terminal activity settled the row). `"unrecognized"` → generic `provider.turn.start.failed` as above |
-| `turn-steer`                       | NULL / set                                            | dispatch `thread.turn.steer.resolve` with `resolution.status: "rejected"` and not-sent / uncertain wording. The decider emits `thread.turn-steer-rejected` plus `provider.turn.steer.failed`, which settles the row                          |
-| `session-stop`                     | any                                                   | the shared `stopThreadSession({ threadId, at: now })` routine (§3.6). It settles via the stopped set or via `provider.session.stop.failed`                                                                                                   |
-| any                                | event unreadable (missing sequence or decode failure) | `turn-start`: generic `provider.turn.start.failed` built from the row's `message_id`, uncertain wording. Other kinds: `logWarning` plus explicit settle                                                                                      |
+| kind | state | recovery action (all dispatches use deterministic ids `server:provider-intent-recovery:<sequence>` / activity id `provider-intent-recovery:<sequence>`) |
+| --- | --- | --- |
+| any | thread missing | explicit settle (`thread.deleted` normally already settled it) |
+| `turn-start`, no `contextHandoff` | `dispatched_at IS NULL` | append `provider.turn.start.failed` (tone `error`, `messageId`, `deliveryState: "not-sent"`). Summary/detail from §3.2 `recoveryCopy`. The delegated-return guard variant uses the delegated wording |
+| `turn-start`, no `contextHandoff` | `dispatched_at` set | the same, with `deliveryState: "uncertain"` and the uncertain wording |
+| `turn-start` with `contextHandoff` | any | `contextHandoffCoordinator.abandonUnstartedTurnStart(event, detail)`: `"owned"` → explicit settle. `"abandoned"` → nothing further (its terminal activity settled the row). `"unrecognized"` → generic `provider.turn.start.failed` as above |
+| `turn-steer` | NULL / set | dispatch `thread.turn.steer.resolve` with `resolution.status: "rejected"` and not-sent / uncertain wording. The decider emits `thread.turn-steer-rejected` plus `provider.turn.steer.failed`, which settles the row |
+| `session-stop` | any | the shared `stopThreadSession({ threadId, at: now })` routine (§3.6). It settles via the stopped set or via `provider.session.stop.failed` |
+| any | event unreadable (missing sequence or decode failure) | `turn-start`: generic `provider.turn.start.failed` built from the row's `message_id`, uncertain wording. Other kinds: `logWarning` plus explicit settle |
 
 Rules that hold during recovery:
-
 - Recovery **never** calls `sendTurn`, `steerTurn` or `interruptTurn`.
 - Recovery never touches session status for turn-start or steer rows. Orphan reconciliation owns that.
 - Recovery never approves, answers or re-dispatches anything for Agent Control.
@@ -226,21 +224,12 @@ export const REPLAY_SAFE_INTENT_KINDS = ["session-stop"] as const;
 export const MAX_PROVIDER_INTENT_RECOVERY_ATTEMPTS = 5;
 
 export interface ProviderEffectIntentRecord {
-  readonly sequence: number;
-  readonly eventId: EventId;
-  readonly threadId: ThreadId;
-  readonly kind: ProviderEffectIntentKind;
-  readonly messageId: MessageId | null;
-  readonly handoffId: string | null;
-  readonly recordedAt: string;
+  readonly sequence: number; readonly eventId: EventId; readonly threadId: ThreadId;
+  readonly kind: ProviderEffectIntentKind; readonly messageId: MessageId | null;
+  readonly handoffId: string | null; readonly recordedAt: string;
 }
 export type ProviderEffectIntentSettlement =
-  | {
-      readonly _tag: "ByMessage";
-      readonly threadId: ThreadId;
-      readonly kind: "turn-start" | "turn-steer";
-      readonly messageId: MessageId;
-    }
+  | { readonly _tag: "ByMessage"; readonly threadId: ThreadId; readonly kind: "turn-start" | "turn-steer"; readonly messageId: MessageId }
   | { readonly _tag: "ByHandoff"; readonly threadId: ThreadId; readonly handoffId: string }
   | { readonly _tag: "DispatchedTurnStarts"; readonly threadId: ThreadId }
   | { readonly _tag: "SessionStops"; readonly threadId: ThreadId }
@@ -263,7 +252,6 @@ export const recoveryCopy: (input: {
 ```
 
 Rules:
-
 - The planner implements §2.2 and §2.3 exactly.
 - Unknown and untracked events return `{ record: null, settlements: [] }` without allocating.
 - Handoff activities are decoded with `Schema.decodeUnknownOption(ContextHandoffActivityPayload)`. A non-decodable payload settles nothing.
@@ -293,37 +281,20 @@ The repository is stateless and needs only `SqlClient`. It follows the existing 
 
 ```ts
 export interface ProviderEffectIntentRow extends ProviderEffectIntentRecord {
-  readonly dispatchedAt: string | null;
-  readonly recoveryAttempts: number;
+  readonly dispatchedAt: string | null; readonly recoveryAttempts: number;
 }
 export interface ProviderEffectIntentRepositoryShape {
   /** Must run inside the caller's transaction. No SQL for untracked, non-settling events. */
   readonly applyEvent: (event: OrchestrationEvent) => Effect.Effect<void, PersistenceSqlError>;
-  readonly markDispatched: (input: {
-    readonly sequence: number;
-    readonly dispatchedAt: string;
-  }) => Effect.Effect<void, PersistenceSqlError>;
-  readonly settle: (input: {
-    readonly sequence: number;
-  }) => Effect.Effect<void, PersistenceSqlError>;
-  readonly get: (input: {
-    readonly sequence: number;
-  }) => Effect.Effect<
-    Option.Option<ProviderEffectIntentRow>,
-    PersistenceSqlError | PersistenceDecodeError
-  >;
-  readonly listOpen: () => Effect.Effect<
-    ReadonlyArray<ProviderEffectIntentRow>,
-    PersistenceSqlError | PersistenceDecodeError
-  >;
-  readonly noteRecoveryAttempt: (input: {
-    readonly sequence: number;
-  }) => Effect.Effect<number, PersistenceSqlError>;
+  readonly markDispatched: (input: { readonly sequence: number; readonly dispatchedAt: string }) => Effect.Effect<void, PersistenceSqlError>;
+  readonly settle: (input: { readonly sequence: number }) => Effect.Effect<void, PersistenceSqlError>;
+  readonly get: (input: { readonly sequence: number }) => Effect.Effect<Option.Option<ProviderEffectIntentRow>, PersistenceSqlError | PersistenceDecodeError>;
+  readonly listOpen: () => Effect.Effect<ReadonlyArray<ProviderEffectIntentRow>, PersistenceSqlError | PersistenceDecodeError>;
+  readonly noteRecoveryAttempt: (input: { readonly sequence: number }) => Effect.Effect<number, PersistenceSqlError>;
 }
 ```
 
 SQL:
-
 - **record:** `INSERT … ON CONFLICT(sequence) DO NOTHING`.
 - **ByMessage:** `DELETE … WHERE thread_id=? AND kind=? AND message_id=? AND sequence < ?`.
 - **ByHandoff:** `… AND kind='turn-start' AND handoff_id=? AND sequence < ?`.
@@ -335,7 +306,6 @@ SQL:
 - **listOpen:** `ORDER BY sequence ASC`.
 
 The repository does **not** read `orchestration_events` and does **not** probe outcomes.
-
 - The head sequence comes from `OrchestrationEventStore.latestSequence`.
 - Events are read through the existing `OrchestrationEngineShape.readEventsPage`.
 - No duplicate of `hasEventAfter` or of the `LocalTaskService` probes is introduced.
@@ -373,9 +343,8 @@ These changes are rebased on `reactor-concurrency`'s merged shape. §4 states th
 1. **Dependencies.** Yield `ProviderEffectIntentRepository`. `ProviderCommandReactorLive` provides `ProviderEffectIntentRepositoryLive`.
 2. **Synchronous subscription** (`start`, `:1811-1831`). Replace the lazy stream with the `ThreadDeletionReactor` pattern (`ThreadDeletionReactor.ts:94-104`):
    ```ts
-   const subscription = yield * orchestrationEngine.subscribeDomainEvents;
-   yield *
-     Effect.forkScoped(Stream.runForEach(Stream.fromSubscription(subscription), processEvent));
+   const subscription = yield* orchestrationEngine.subscribeDomainEvents;
+   yield* Effect.forkScoped(Stream.runForEach(Stream.fromSubscription(subscription), processEvent));
    ```
    Goal-sync recovery stays where it is.
 3. **`appendProviderFailureActivity`** (`:275-317`). Add optional `activityId?: EventId`, `commandId?: CommandId` and `deliveryState?: IntentDeliveryState` inputs. The defaults stay random ids, and `deliveryState` is copied into `payload` when present. Add `kind: "provider.turn.steer.failed"` only if `surfaceIntentFailure` needs it. It does not: steer outcomes go through `thread.turn.steer.resolve`.
@@ -383,30 +352,26 @@ These changes are rebased on `reactor-concurrency`'s merged shape. §4 states th
    - `!thread` → `yield* providerEffectIntents.settle({ sequence: event.sequence })` and return.
    - Replace `:1332-1336` with:
      ```ts
-     yield *
-       providerEffectIntents
-         .markDispatched({ sequence: event.sequence, dispatchedAt: new Date().toISOString() })
-         .pipe(
-           Effect.andThen(providerService.sendTurn(sendTurnRequest.value, expectedReturnRuntime)),
-           Effect.matchCauseEffect({
-             onFailure: recoverTurnStartFailure,
-             onSuccess: () =>
-               commitAcceptedModelSelection.pipe(
-                 Effect.catchCause((cause) =>
-                   Cause.hasInterruptsOnly(cause)
-                     ? Effect.interrupt
-                     : Effect.logWarning(
-                         "provider command reactor failed to commit accepted model selection",
-                         {
-                           threadId: event.payload.threadId,
-                           cause: Cause.pretty(cause),
-                         },
-                       ),
-                 ),
+     yield* providerEffectIntents
+       .markDispatched({ sequence: event.sequence, dispatchedAt: new Date().toISOString() })
+       .pipe(
+         Effect.andThen(providerService.sendTurn(sendTurnRequest.value, expectedReturnRuntime)),
+         Effect.matchCauseEffect({
+           onFailure: recoverTurnStartFailure,
+           onSuccess: () =>
+             commitAcceptedModelSelection.pipe(
+               Effect.catchCause((cause) =>
+                 Cause.hasInterruptsOnly(cause)
+                   ? Effect.interrupt
+                   : Effect.logWarning("provider command reactor failed to commit accepted model selection", {
+                       threadId: event.payload.threadId,
+                       cause: Cause.pretty(cause),
+                     }),
                ),
-           }),
-           Effect.forkScoped,
-         );
+             ),
+         }),
+         Effect.forkScoped,
+       );
      ```
    - A `markDispatched` failure becomes a visible start failure, and `sendTurn` is not called.
    - `recoverTurnStartFailure` keeps logging when the failure append fails. Add `Effect.retry(Schedule.recurs(1))` around the append. Under I1 the row stays open, and the next boot reports it.
@@ -506,7 +471,6 @@ These requirements hold for any lane or executor shape:
 - **R4.** `recoverIntents` runs after `start()`: both live in the reactor scope, and startup orders them through separate phases.
 
 `restart-continuation` (next on the branch):
-
 - It must run after `provider-intents.recover`.
 - It must skip threads listed in `summary.cancelledTurnStarts`.
 - Its own startup turn starts are this-process rows (`sequence > bootSequence`), so recovery never cancels them.
@@ -534,20 +498,26 @@ These requirements hold for any lane or executor shape:
 Run them focused, for example `bun run --cwd apps/server test src/orchestration/Layers/ProviderCommandReactor.test.ts`. Never use `bun test`. These are `it.effect` (TestClock) unless the test needs real fibers or sockets; use `it.live` where a test waits on a real `Deferred` across runtimes.
 
 **`orchestration/providerEffectIntents.test.ts` (new, table-driven)**
-
 1. Each tracked request event yields a record with the right `kind`, `messageId` and `handoffId`.
 2. Each settling event yields exactly the settlements in §2.3, with `beforeSequence = event.sequence`.
 3. A non-terminal handoff status (`requested`, `preparing`, `dispatching`), an undecodable handoff payload, a `provider.turn.start.failed` without `messageId`, and a non-running or non-stopped session-set all yield nothing.
 4. `recoveryCopy` covers all 6 variants.
 
-**`persistence/Layers/ProviderEffectIntents.test.ts` (new)** 5. Each settlement deletes only matching rows with `sequence < beforeSequence`. `DispatchedTurnStarts` ignores rows that were never dispatched and handoff rows. 6. `markDispatched` is idempotent and does not overwrite the first timestamp. 7. `listOpen` is ordered by sequence. 8. `noteRecoveryAttempt` increments and returns the new count.
+**`persistence/Layers/ProviderEffectIntents.test.ts` (new)**
+5. Each settlement deletes only matching rows with `sequence < beforeSequence`. `DispatchedTurnStarts` ignores rows that were never dispatched and handoff rows.
+6. `markDispatched` is idempotent and does not overwrite the first timestamp.
+7. `listOpen` is ordered by sequence.
+8. `noteRecoveryAttempt` increments and returns the new count.
 
-**`persistence/Migrations/072_ProviderEffectIntents.test.ts` (new)** 9. The table exists after migrating through 72, and the `kind` CHECK rejects an unknown kind.
+**`persistence/Migrations/072_ProviderEffectIntents.test.ts` (new)**
+9. The table exists after migrating through 72, and the `kind` CHECK rejects an unknown kind.
 
-**`OrchestrationEngine.test.ts`** 10. `thread.turn.start` commits the message, the request event and an intent row together. A later `thread.activity.append` of `provider.turn.start.failed` with that `messageId` removes the row in the same commit. 11. A multi-event command that fails mid-transaction leaves no intent row. 12. `bootSequence` equals the event-store head at construction and does not move after later dispatches.
+**`OrchestrationEngine.test.ts`**
+10. `thread.turn.start` commits the message, the request event and an intent row together. A later `thread.activity.append` of `provider.turn.start.failed` with that `messageId` removes the row in the same commit.
+11. A multi-event command that fails mid-transaction leaves no intent row.
+12. `bootSequence` equals the event-store head at construction and does not move after later dispatches.
 
 **`ProviderCommandReactor.test.ts`**
-
 - Add a `dbPath?: string` harness option. It uses `makeSqlitePersistenceLive(dbPath)` instead of `SqlitePersistenceMemory`, so two sequential runtimes can share one database and simulate a restart.
 - Add optional decorators for `OrchestrationEngineService.dispatch` and `ProviderEffectIntentRepository`, provided only to the reactor, for fault injection.
 
@@ -577,7 +547,7 @@ Run them focused, for example `bun run --cwd apps/server test src/orchestration/
 20. **Escaping failure** (critique test e).
     - Wrap the projection query so that `getThreadMessageById` fails, or use `reactor-concurrency`'s lane timeout under TestClock.
     - Expect a visible `provider.turn.start.failed` with the formatted detail, and the row is gone.
-    - The same injection _after_ `markDispatched` (lane timeout while `sendTurn` hangs) adds no failure activity, and the row stays.
+    - The same injection *after* `markDispatched` (lane timeout while `sendTurn` hangs) adds no failure activity, and the row stays.
 21. **Failure append fails.** `sendTurn` fails and the decorated `dispatch` rejects `thread.activity.append` (both attempts). The row stays open, and a later recovery in runtime 2 surfaces it.
 22. **Model-selection commit failure.** `sendTurn` succeeds with a changed `modelSelection` and the decorated `dispatch` rejects `thread.meta.update`. Expect no `provider.turn.start.failed`, no session error, and a warning logged.
 23. **`markDispatched` fails** (decorated repository). Expect a visible start failure, and `sendTurn` is not called.
@@ -585,18 +555,30 @@ Run them focused, for example `bun run --cwd apps/server test src/orchestration/
     - Running recovery twice, by restarting a third runtime before settle commits (simulated by the decorated repository's `settle` being a no-op), yields exactly one activity, because the ids are deterministic and the command receipt dedups.
     - A row whose recovery dispatch always fails is settled with `logError` after 5 boots.
 
-**`ContextHandoffCoordinator.test.ts`** 25. No record → a `failed` record is created and a terminal `failed` activity is appended. Expect no `setThreadSession` dispatch, no `restoreSessionBinding` / `stopSessionBinding` / `retireSessionBinding` calls, and an idle `ready` source session that stays `ready`. 26. A `requested` record → the same, through CAS. 27. A `preparing` record → `"owned"` and nothing is changed. 28. An undecodable requested activity → `"unrecognized"`, and the record (if any) stays `requested`. 29. A failing terminal append propagates, and the record stays `requested`.
+**`ContextHandoffCoordinator.test.ts`**
+25. No record → a `failed` record is created and a terminal `failed` activity is appended. Expect no `setThreadSession` dispatch, no `restoreSessionBinding` / `stopSessionBinding` / `retireSessionBinding` calls, and an idle `ready` source session that stays `ready`.
+26. A `requested` record → the same, through CAS.
+27. A `preparing` record → `"owned"` and nothing is changed.
+28. An undecodable requested activity → `"unrecognized"`, and the record (if any) stays `requested`.
+29. A failing terminal append propagates, and the record stays `requested`.
 
-**`ProjectionPipeline.test.ts`** 30. Routing assertion: `ORCHESTRATION_EVENT_PROJECTORS["thread.activity-appended"]` includes `threadTurns`, and the key count stays 44. 31. A `provider.turn.start.failed` activity for M deletes only M's pending row. Another message's pending row stays, and a bound turn row whose `pending_message_id = M` stays.
+**`ProjectionPipeline.test.ts`**
+30. Routing assertion: `ORCHESTRATION_EVENT_PROJECTORS["thread.activity-appended"]` includes `threadTurns`, and the key count stays 44.
+31. A `provider.turn.start.failed` activity for M deletes only M's pending row. Another message's pending row stays, and a bound turn row whose `pending_message_id = M` stays.
 
-**`CompletionReturnDelivery.test.ts`** (written against the merged `delegation-returns` shape) 32. A sibling return after a cancelled delegated-return start (pending row removed by the recovery activity) reaches a terminal non-delivered state (`blocked` or `cancelled`), and `thread.turn.start` is never dispatched.
+**`CompletionReturnDelivery.test.ts`** (written against the merged `delegation-returns` shape)
+32. A sibling return after a cancelled delegated-return start (pending row removed by the recovery activity) reaches a terminal non-delivered state (`blocked` or `cancelled`), and `thread.turn.start` is never dispatched.
 
-**`serverRuntimeStartup.test.ts`** (critique test c) 33. `startOrchestrationRuntime` with spy doubles: - for `OrchestrationReactor` (`start`, `recoverProviderIntents`) and `ProviderSessionReaper` - for the reconcile dependencies: `ProviderService.listSessions`, which records "reconcile", plus an empty `ProjectionSnapshotQuery` / `ProviderSessionDirectory` / engine - Assert the call order `start` → `reconcile` → `recover`, and that the runner returns the summary.
+**`serverRuntimeStartup.test.ts`** (critique test c)
+33. `startOrchestrationRuntime` with spy doubles:
+    - for `OrchestrationReactor` (`start`, `recoverProviderIntents`) and `ProviderSessionReaper`
+    - for the reconcile dependencies: `ProviderService.listSessions`, which records "reconcile", plus an empty `ProjectionSnapshotQuery` / `ProviderSessionDirectory` / engine
+    - Assert the call order `start` → `reconcile` → `recover`, and that the runner returns the summary.
 
-**`OrchestrationReactor.test.ts`** 34. `recoverProviderIntents` delegates to the provider command reactor.
+**`OrchestrationReactor.test.ts`**
+34. `recoverProviderIntents` delegates to the provider command reactor.
 
 Validation is proportional but cross-cutting, because shape changes ripple into test doubles:
-
 - the focused files above
 - `bun typecheck` (the TS7 gate, where `warning TS*` also fails)
 - `bun lint`
@@ -644,20 +626,20 @@ Validation is proportional but cross-cutting, because shape changes ripple into 
 
 ## 9. Review resolution
 
-| #   | sev           | critique issue                                                                                                                              | resolution                                                                                                                                                                                                                                                                                                                                                      |
-| --- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | major         | Recovery conflates "never reached the provider" with "delivery not proven"                                                                  | **Accepted.** `dispatched_at` column, set immediately before `sendTurn`/`steerTurn`. Two wordings for turn start, delegated return and steer. Tests 13–16, including one with a provider session that is live in `listSessions`                                                                                                                                 |
-| 2   | major         | Settling on any non-interrupt exit can delete rows while the outcome is invisible; the model-selection commit failure fakes a start failure | **Accepted, made structural.** Rows are deleted only inside the transaction that commits the outcome event (I1). Explicit settles exist only where no outcome can exist. `commitAcceptedModelSelection` failure only logs. Reactor-level failures and lane timeouts surface visibly through `surfaceIntentFailure`, and dispatched rows are exempt. Tests 20–23 |
-| 3   | minor         | The cutoff split misclassifies this-process events                                                                                          | **Accepted, simplified.** The engine captures `bootSequence` before forking its worker. Rows above it replay through the live entry with the existing dedup, so no cutoff read is needed. The subscription is now acquired synchronously. Test 19                                                                                                               |
-| 4   | minor         | `abandonUnstarted` → `finalizeFailure` → `restoreSource` without a binding errors the source session; "ignored" settles silently            | **Accepted.** `abandonUnstartedTurnStart` never calls `restoreSource` or the binding stop/retire calls, appends the terminal activity before the CAS, and falls back to a generic failure when the result is `"unrecognized"`. Tests 18, 25–29                                                                                                                  |
-| 5   | minor         | The repository duplicates `latestSequence`, `hasEventAfter` and the LocalTask probes                                                        | **Accepted in effect.** Event-derived settlement removes outcome probes entirely. The repository only records, marks, settles, lists and gets. The head sequence comes from `OrchestrationEventStore.latestSequence` and events are read via `readEventsPage`. Extracting the LocalTask probes is rejected here: no new caller needs them                       |
-| 6   | minor         | The pending-row deletion changes delegation-return semantics untested                                                                       | **Accepted.** `delegation-returns` is named as an overlap, and tests 30–32 are added                                                                                                                                                                                                                                                                            |
-| 7   | minor         | Problem statement and scope are inconsistent                                                                                                | **Accepted.** "Forever" corrected (§1.3), the CompletionReturn status moved to out of scope, and checkpoint-revert crash loss listed as a known unowned gap (§8)                                                                                                                                                                                                |
-| 8   | minor         | Session-stop retry is fragile                                                                                                               | **Accepted.** The shared `stopThreadSession` treats not-found and no-binding as already stopped, stamps the recovery time, and surfaces other failures visibly (live path too). Test 17                                                                                                                                                                         |
-| 9   | minor         | Test gaps (a)–(e)                                                                                                                           | **Accepted.** (a) and (d) → test 14, (b) → test 19, (c) → test 33, (e) → test 20                                                                                                                                                                                                                                                                                |
-| 10  | minor         | Wave-3 integration written as conditionals                                                                                                  | **Accepted.** Replaced by the shape-independent requirements R1–R4 (§4), which must be re-checked against the merged `reactor-concurrency` before coding                                                                                                                                                                                                        |
-| 11  | minor         | No backfill for already-stuck intents                                                                                                       | **Rejected.** Whether historical rows were dispatched is unknowable, and a backfill would append fresh errors to arbitrarily old threads on upgrade (resurfacing them in priority and inbox). Today's stuck pending rows already clear on the thread's next turn start                                                                                          |
-| —   | verdict notes | three overstated claims                                                                                                                     | **Accepted.** They are corrected in §1.3 and drive the wording in §2.4                                                                                                                                                                                                                                                                                          |
+| # | sev | critique issue | resolution |
+| --- | --- | --- | --- |
+| 1 | major | Recovery conflates "never reached the provider" with "delivery not proven" | **Accepted.** `dispatched_at` column, set immediately before `sendTurn`/`steerTurn`. Two wordings for turn start, delegated return and steer. Tests 13–16, including one with a provider session that is live in `listSessions` |
+| 2 | major | Settling on any non-interrupt exit can delete rows while the outcome is invisible; the model-selection commit failure fakes a start failure | **Accepted, made structural.** Rows are deleted only inside the transaction that commits the outcome event (I1). Explicit settles exist only where no outcome can exist. `commitAcceptedModelSelection` failure only logs. Reactor-level failures and lane timeouts surface visibly through `surfaceIntentFailure`, and dispatched rows are exempt. Tests 20–23 |
+| 3 | minor | The cutoff split misclassifies this-process events | **Accepted, simplified.** The engine captures `bootSequence` before forking its worker. Rows above it replay through the live entry with the existing dedup, so no cutoff read is needed. The subscription is now acquired synchronously. Test 19 |
+| 4 | minor | `abandonUnstarted` → `finalizeFailure` → `restoreSource` without a binding errors the source session; "ignored" settles silently | **Accepted.** `abandonUnstartedTurnStart` never calls `restoreSource` or the binding stop/retire calls, appends the terminal activity before the CAS, and falls back to a generic failure when the result is `"unrecognized"`. Tests 18, 25–29 |
+| 5 | minor | The repository duplicates `latestSequence`, `hasEventAfter` and the LocalTask probes | **Accepted in effect.** Event-derived settlement removes outcome probes entirely. The repository only records, marks, settles, lists and gets. The head sequence comes from `OrchestrationEventStore.latestSequence` and events are read via `readEventsPage`. Extracting the LocalTask probes is rejected here: no new caller needs them |
+| 6 | minor | The pending-row deletion changes delegation-return semantics untested | **Accepted.** `delegation-returns` is named as an overlap, and tests 30–32 are added |
+| 7 | minor | Problem statement and scope are inconsistent | **Accepted.** "Forever" corrected (§1.3), the CompletionReturn status moved to out of scope, and checkpoint-revert crash loss listed as a known unowned gap (§8) |
+| 8 | minor | Session-stop retry is fragile | **Accepted.** The shared `stopThreadSession` treats not-found and no-binding as already stopped, stamps the recovery time, and surfaces other failures visibly (live path too). Test 17 |
+| 9 | minor | Test gaps (a)–(e) | **Accepted.** (a) and (d) → test 14, (b) → test 19, (c) → test 33, (e) → test 20 |
+| 10 | minor | Wave-3 integration written as conditionals | **Accepted.** Replaced by the shape-independent requirements R1–R4 (§4), which must be re-checked against the merged `reactor-concurrency` before coding |
+| 11 | minor | No backfill for already-stuck intents | **Rejected.** Whether historical rows were dispatched is unknowable, and a backfill would append fresh errors to arbitrarily old threads on upgrade (resurfacing them in priority and inbox). Today's stuck pending rows already clear on the thread's next turn start |
+| — | verdict notes | three overstated claims | **Accepted.** They are corrected in §1.3 and drive the wording in §2.4 |
 
 ---
 

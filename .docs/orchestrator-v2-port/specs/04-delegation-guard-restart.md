@@ -1,16 +1,16 @@
 # 04 · delegation-guard-restart: delegated returns rejected after restart (bug 7)
 
-| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| id               | `delegation-guard-restart`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| title            | Hydrate the first and latest user message into the command read model so the delegated-return fence holds after a restart                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| wave             | 1 (parallel, isolated worktree)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| verdict          | **partially-confirmed**. The mechanism is real and reproducible with the real engine. User-visible impact today is narrow, because two live-runtime checks block most post-restart returns first. It becomes the main failure path once `delegation-returns` (Wave 2) relaxes those checks                                                                                                                                                                                                                                                                                                                                                                 |
-| size             | S                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| touched files    | `apps/server/src/persistence/userMessageAnchors.ts` (new) · `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts` · `apps/server/src/persistence/Layers/AgentControlCompletionReturns.ts` (one function, same SQL semantics) · `apps/server/src/orchestration/projector.ts` (one line plus one helper) · tests: `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts`, `apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts`, `apps/server/src/orchestration/projector.test.ts`                                                                                                                                  |
-| migrations       | none (no number used)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| contract changes | none. `OrchestrationThread.messages` keeps its schema. The command read model now holds up to 2 user messages per thread instead of 1. The same model is the payload of the owner-only legacy `GET /api/orchestration/snapshot` (`http.ts:42-53`) and of the offline CLI (`cli.ts:1152-1155`); neither reads `messages`                                                                                                                                                                                                                                                                                                                                    |
-| overlaps         | `delegation-returns` (W2): semantic dependency, plus `AgentControlCompletionReturns.ts` `latestUserMessageId`. `delegation-lineage` (W2): `AgentControlCompletionReturns.ts`. `rollback-correctness` (W2): projector revert on the hydrated model. `settlement-signals` (W1): semantic, needs a correct `latestUserMessageAt`. `queue-hold-drain` (W1): constraint on role=`user` rows, possible `getCommandReadModel` tuple edit. `acp-message-ids` (W1): `projector.ts` `thread.message-sent` case. `claude-steering` (W2): semantic, steer rows. `turn-finalization` (W1) / `restart-continuation` (W3): possible `getCommandReadModel` hydration edits |
+| Field | Value |
+| --- | --- |
+| id | `delegation-guard-restart` |
+| title | Hydrate the first and latest user message into the command read model so the delegated-return fence holds after a restart |
+| wave | 1 (parallel, isolated worktree) |
+| verdict | **partially-confirmed**. The mechanism is real and reproducible with the real engine. User-visible impact today is narrow, because two live-runtime checks block most post-restart returns first. It becomes the main failure path once `delegation-returns` (Wave 2) relaxes those checks |
+| size | S |
+| touched files | `apps/server/src/persistence/userMessageAnchors.ts` (new) · `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts` · `apps/server/src/persistence/Layers/AgentControlCompletionReturns.ts` (one function, same SQL semantics) · `apps/server/src/orchestration/projector.ts` (one line plus one helper) · tests: `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts`, `apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts`, `apps/server/src/orchestration/projector.test.ts` |
+| migrations | none (no number used) |
+| contract changes | none. `OrchestrationThread.messages` keeps its schema. The command read model now holds up to 2 user messages per thread instead of 1. The same model is the payload of the owner-only legacy `GET /api/orchestration/snapshot` (`http.ts:42-53`) and of the offline CLI (`cli.ts:1152-1155`); neither reads `messages` |
+| overlaps | `delegation-returns` (W2): semantic dependency, plus `AgentControlCompletionReturns.ts` `latestUserMessageId`. `delegation-lineage` (W2): `AgentControlCompletionReturns.ts`. `rollback-correctness` (W2): projector revert on the hydrated model. `settlement-signals` (W1): semantic, needs a correct `latestUserMessageAt`. `queue-hold-drain` (W1): constraint on role=`user` rows, possible `getCommandReadModel` tuple edit. `acp-message-ids` (W1): `projector.ts` `thread.message-sent` case. `claude-steering` (W2): semantic, steer rows. `turn-finalization` (W1) / `restart-continuation` (W3): possible `getCommandReadModel` hydration edits |
 
 ---
 
@@ -23,7 +23,6 @@
    - by replaying persisted events after a failed dispatch, at `:197`
 
    It is never rebuilt from SQL while the process runs.
-
 2. **The lightweight snapshot holds only the first user message.** `ProjectionSnapshotQuery.ts:726-760` defines
    `listFirstUserMessageRows`, a `NOT EXISTS` anti-join that picks the earliest user message per thread
    (`created_at ASC, message_id ASC`). Then:
@@ -36,7 +35,7 @@
    dispatch) fill `guard.latestUserMessageId` from `AgentControlCompletionReturns.ts:133-139`:
    `role = 'user' ORDER BY created_at DESC, rowid DESC LIMIT 1`, the true latest user message.
 5. **Result.** After a restart, take a parent whose latest user message predates the restart and that has 2 or more
-   user messages. In memory, `findLast(user)` returns the _first_ message, while the guard holds the _latest_. The decider
+   user messages. In memory, `findLast(user)` returns the *first* message, while the guard holds the *latest*. The decider
    rejects the return with "Delegated result origin changed…".
 
    Without a restart the projector appends every message (`projector.ts:672-696`), so `findLast` is correct. A user
@@ -64,38 +63,38 @@
     message being appended.
 - **The planned Wave 2 change exposes the bug fully.** `delegation-returns` plans to relax the exact-turn and
   same-session checks to "queue on the parent thread" (comparison doc §2 row 3). The decider fence then becomes the
-  authoritative post-restart check, and this bug would block _every_ return to a parent with 2 or more pre-restart user
+  authoritative post-restart check, and this bug would block *every* return to a parent with 2 or more pre-restart user
   messages. **This package is a prerequisite for `delegation-returns`.**
 - **The fence is weaker after a restart than before it, but this is not exploitable.**
-  - Before a restart, a guard pinned to the _first_ user message (`latestUserMessageId = turnMessageId = first`) is
+  - Before a restart, a guard pinned to the *first* user message (`latestUserMessageId = turnMessageId = first`) is
     rejected. After a restart it is accepted, because `findLast` = first.
   - `CompletionReturnDelivery` cannot produce such a guard: `:402-411` always re-reads the latest id from SQL just before
     dispatch.
   - A user start that lands after the restart is appended in memory, so a concurrent start still rejects.
   - `ClientThreadTurnStartCommand` accepts a client-supplied guard (`packages/contracts/src/orchestration.ts:1437`). But a
-    guard only _adds_ rejection conditions. Its only other effect is to skip session-error marking on a failed start
+    guard only *adds* rejection conditions. Its only other effect is to skip session-error marking on a failed start
     (`ProviderCommandReactor.ts:1162-1167`). It grants no capability, so this is not an Agent Control escalation.
   - Test B2 pins the fence strength as a regression test.
 - **Settlement reads the stale value today, and this is the live exposure.** `threadSettlementInput.ts:38-46` derives
   `latestUserMessageAt` from the in-memory `messages`. That value feeds `decider.ts:588` (snooze), `decider.ts:654`
   (settle) and `sidebarUndo.ts:145`.
-  - After a restart it reports the _first_ message's `createdAt`.
+  - After a restart it reports the *first* message's `createdAt`.
   - So the `queued-turn` blocker (`packages/shared/src/threadSettlement.ts:71-90`) can be missed for up to 2 minutes
     after a pre-restart user message whose turn was never requested.
   - It would also undermine `settlement-signals`' planned "the user kept working after the PR merged" comparison.
 
 ### Audit: every reader of the command model's `thread.messages`
 
-| Reader                                  | Location                                                                                                                                                                                                                 | Needs                                       | Before the fix                                                                                                                                                                                                                                                                                                                                                             | After the fix                                                       |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Delegated-return fence                  | `decider.ts:1008-1033`                                                                                                                                                                                                   | `findLast(user).id` equal to the SQL latest | after a restart: rejects valid returns and accepts a first-pinned guard                                                                                                                                                                                                                                                                                                    | **fixed**                                                           |
-| `isStartedThread` → context handoff     | `decider.ts:1036`                                                                                                                                                                                                        | `some(user)`                                | OK after a restart (first anchor). Broken by the message cap (row below)                                                                                                                                                                                                                                                                                                   | OK                                                                  |
-| `requireThreadHasUserMessage` (archive) | `decider.ts:541` → `commandInvariants.ts:313-330`                                                                                                                                                                        | `some(user)`                                | OK after a restart. Broken by the message cap                                                                                                                                                                                                                                                                                                                              | OK                                                                  |
-| Settle / snooze / undo eligibility      | `threadSettlementInput.ts:38-46` → `decider.ts:588`, `:654`, `sidebarUndo.ts:145`                                                                                                                                        | max user `createdAt`                        | under-reported after a restart                                                                                                                                                                                                                                                                                                                                             | **fixed**                                                           |
-| Message cap                             | `projector.ts:696` (`slice(-2000)`)                                                                                                                                                                                      | —                                           | evicts both anchors in any thread with more than 2,000 messages since its latest user message, **even without a restart**. Then `findLast` is `undefined` (the fence fails closed), `isStartedThread` is false (a model switch skips the atomic context handoff), and archive is rejected with "cannot be archived before a message has been sent", until the next restart | **fixed** (Step 4)                                                  |
-| Existing-message merge                  | `projector.ts:672`                                                                                                                                                                                                       | —                                           | a `message-sent` for an id that was not hydrated appends a new entry                                                                                                                                                                                                                                                                                                       | unchanged (see Edge cases)                                          |
-| Revert fallback                         | `projector.ts:100-140`, `:890-937`                                                                                                                                                                                       | checkpoints                                 | after a restart `checkpoints: []`, so `latestTurn` becomes null; user anchors are retained by count                                                                                                                                                                                                                                                                        | unchanged. New side effect: see Edge cases → `rollback-correctness` |
-| SQL readers                             | `ProviderCommandReactor.ts:380-411` (message lookup, user count), `ContextHandoffCoordinator.ts:275`, `CheckpointReactor.ts:209`, `ProviderRuntimeIngestion.ts:3130` (all via `getThreadDetailById` or targeted queries) | —                                           | unaffected                                                                                                                                                                                                                                                                                                                                                                 | unaffected                                                          |
+| Reader | Location | Needs | Before the fix | After the fix |
+| --- | --- | --- | --- | --- |
+| Delegated-return fence | `decider.ts:1008-1033` | `findLast(user).id` equal to the SQL latest | after a restart: rejects valid returns and accepts a first-pinned guard | **fixed** |
+| `isStartedThread` → context handoff | `decider.ts:1036` | `some(user)` | OK after a restart (first anchor). Broken by the message cap (row below) | OK |
+| `requireThreadHasUserMessage` (archive) | `decider.ts:541` → `commandInvariants.ts:313-330` | `some(user)` | OK after a restart. Broken by the message cap | OK |
+| Settle / snooze / undo eligibility | `threadSettlementInput.ts:38-46` → `decider.ts:588`, `:654`, `sidebarUndo.ts:145` | max user `createdAt` | under-reported after a restart | **fixed** |
+| Message cap | `projector.ts:696` (`slice(-2000)`) | — | evicts both anchors in any thread with more than 2,000 messages since its latest user message, **even without a restart**. Then `findLast` is `undefined` (the fence fails closed), `isStartedThread` is false (a model switch skips the atomic context handoff), and archive is rejected with "cannot be archived before a message has been sent", until the next restart | **fixed** (Step 4) |
+| Existing-message merge | `projector.ts:672` | — | a `message-sent` for an id that was not hydrated appends a new entry | unchanged (see Edge cases) |
+| Revert fallback | `projector.ts:100-140`, `:890-937` | checkpoints | after a restart `checkpoints: []`, so `latestTurn` becomes null; user anchors are retained by count | unchanged. New side effect: see Edge cases → `rollback-correctness` |
+| SQL readers | `ProviderCommandReactor.ts:380-411` (message lookup, user count), `ContextHandoffCoordinator.ts:275`, `CheckpointReactor.ts:209`, `ProviderRuntimeIngestion.ts:3130` (all via `getThreadDetailById` or targeted queries) | — | unaffected | unaffected |
 
 No other `getCommandReadModel` consumer (`serverRuntimeStartup.ts:570`, `:741`, `http.ts:45`, `cli.ts:1154`) reads
 `messages`.
@@ -114,7 +113,6 @@ This package does **not** change the decider, `CompletionReturnDelivery`, contra
 belong to `delegation-returns` (Wave 2).
 
 Why keep the first anchor when the latest alone satisfies `some(user)`?
-
 - It keeps the existing documented hydration exactly. The first-anchor ordering is unchanged.
 - After a restart, the common "revert to 1 turn" then falls back to the first message, which is correct, rather than to
   a reverted latest message.
@@ -137,10 +135,10 @@ Why keep the first anchor when the latest alone satisfies `some(user)`?
   Measured in scratch sqlite3 3.54 with the real schema and indexes
   (`idx_projection_thread_messages_thread_created(thread_id, created_at)` and `…_created_id(thread_id, created_at, message_id)`):
 
-  | Dataset                                                                                               | current `NOT EXISTS` | window | correlated (chosen) |
-  | ----------------------------------------------------------------------------------------------------- | -------------------- | ------ | ------------------- |
-  | 600k messages, 3k threads, 300k user rows, interleaved                                                | 0.28 s               | 0.46 s | **0.014 s**         |
-  | worst case: 600k messages, 3k threads, one user message per thread followed by 199 assistant messages | 0.18 s               | 0.18 s | 0.18 s              |
+  | Dataset | current `NOT EXISTS` | window | correlated (chosen) |
+  | --- | --- | --- | --- |
+  | 600k messages, 3k threads, 300k user rows, interleaved | 0.28 s | 0.46 s | **0.014 s** |
+  | worst case: 600k messages, 3k threads, one user message per thread followed by 199 assistant messages | 0.18 s | 0.18 s | 0.18 s |
 
   In the worst case, each `latest_user` probe walks back over the assistant rows that follow the latest user message.
   The total work is bounded by the message count, so the chosen query is never slower than today's.
@@ -149,7 +147,6 @@ Why keep the first anchor when the latest alone satisfies `some(user)`?
   → 2 × correlated `SEARCH … (thread_id=?)`. The implicit `rowid` suffix of `idx_projection_thread_messages_thread_created`
   satisfies `created_at DESC, rowid DESC` without a sort.
   (A role-partial index would make every probe O(1), but it needs a migration; that is a follow-up.)
-
 - **(d) Hydrate full history.** Rejected because of startup cost and memory; the lightweight model exists to avoid it.
 
 ## 3. Step-by-step changes
@@ -346,22 +343,21 @@ same `DELETE FROM …` block as the `:1619` test.
 Seed `projection_threads` rows with the column list used at `:116-124`, and `projection_thread_messages` rows, with direct SQL.
 Insert order matters, because it sets `rowid`:
 
-| Thread       | Messages, in insert order                                                      | Expected `messages` ids                                     |
-| ------------ | ------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| `t-many`     | user `m1`@t1, assistant `a1`@t2, user `m2`@t3, user `m3`@t5, assistant `a3`@t6 | `[m1, m3]`                                                  |
-| `t-single`   | user `s1`@t1, assistant `sa`@t2                                                | `[s1]`                                                      |
-| `t-none`     | assistant `na`@t2 only                                                         | `[]`                                                        |
-| `t-tie`      | user `tie-c`, `tie-a`, `tie-b`, all at the same `created_at`                   | `[tie-a, tie-b]` (first by `message_id`, latest by `rowid`) |
-| `t-tie-same` | user `tie2-b`, `tie2-c`, `tie2-a`, all at the same `created_at`                | `[tie2-a]` (first and latest are the same row)              |
+| Thread | Messages, in insert order | Expected `messages` ids |
+| --- | --- | --- |
+| `t-many` | user `m1`@t1, assistant `a1`@t2, user `m2`@t3, user `m3`@t5, assistant `a3`@t6 | `[m1, m3]` |
+| `t-single` | user `s1`@t1, assistant `sa`@t2 | `[s1]` |
+| `t-none` | assistant `na`@t2 only | `[]` |
+| `t-tie` | user `tie-c`, `tie-a`, `tie-b`, all at the same `created_at` | `[tie-a, tie-b]` (first by `message_id`, latest by `rowid`) |
+| `t-tie-same` | user `tie2-b`, `tie2-c`, `tie2-a`, all at the same `created_at` | `[tie2-a]` (first and latest are the same row) |
 
 Assertions:
-
 - **A1.** `getCommandReadModel()` returns exactly the ids above.
-  _Pre-fix: fails_ (`t-many` → `[m1]`, `t-tie` → `[tie-a]`).
+  *Pre-fix: fails* (`t-many` → `[m1]`, `t-tie` → `[tie-a]`).
 - **A2 (lockstep oracle).** `const repo = yield* makeCompletionReturnRepository`, from
   `persistence/Layers/AgentControlCompletionReturns.ts`. It needs only `SqlClient`, which the layer provides. For **every**
   thread, assert `(thread.messages.findLast((m) => m.role === "user")?.id ?? null) === (yield* repo.latestUserMessageId(thread.id))`.
-  _Pre-fix: fails_ for `t-many` and `t-tie`. After the fix, this is the drift guard between the two consumers of the shared builder.
+  *Pre-fix: fails* for `t-many` and `t-tie`. After the fix, this is the drift guard between the two consumers of the shared builder.
 - **A3 (plan guard).** Capture the anchor statement with `SqlStatement.CurrentTransformer`, the same pattern as `:131-142`,
   matching on `compiled[0].includes("latest_user")`. Provide the transformer only around `getCommandReadModel()`. Run
   `EXPLAIN QUERY PLAN ${statement}` with the captured params and assert:
@@ -371,7 +367,7 @@ Assertions:
   - a detail matches `/SEARCH latest_user .*\(thread_id=\?\)/`
 
   The chunk subquery's `SCAN parts` and `SCAN CONSTANT ROW` do not match.
-  _Pre-fix: fails_ (no such statement is captured).
+  *Pre-fix: fails* (no such statement is captured).
 
 Also update the existing assertion at `ProjectionSnapshotQuery.test.ts:1853-1856` from `[message-user-first]` to
 `[message-user-first, message-user-second]`, with a one-line comment that this behaviour change is intended. The capture test at
@@ -391,16 +387,14 @@ Get the repository with
 
 **Seed helper `seedDelegationParent(databasePath?)`.** Like `seedSidebarUndoSystem` (`:1870`), it uses only engine
 commands and no reactors. Use `at(s) = new Date(Date.parse("2026-01-01T00:00:00.000Z") + s * 1000).toISOString()`.
-
 - `projectId = "delegation-project"`, `threadId = "delegation-parent"`
 - `modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "fixture" }`
 
 Steps:
-
 1. `project.create` (`workspaceRoot: "/tmp/ryco-delegation-fixture"`, `defaultModelSelection: modelSelection`, `createdAt: at(0)`).
 2. `thread.create` (`modelSelection`, `interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE`, `runtimeMode: "full-access"`,
    `branch: null`, `worktreePath: null`, `createdAt: at(0)`).
-3. For each turn _n_ ∈ {1, 2}, with `t = n === 1 ? 1 : 10`:
+3. For each turn *n* ∈ {1, 2}, with `t = n === 1 ? 1 : 10`:
    - `thread.turn.start`:
      `{ commandId: "start-n", threadId, message: { messageId: "msg-n", role: "user", text: "Fixture n", attachments: [] }, runtimeMode: "full-access", interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE, createdAt: at(t) }`
    - `thread.session.set` running:
@@ -416,7 +410,6 @@ Steps:
    `projection_turns.pending_message_id` (`ProjectionPipeline.ts:1717-1788`).
 
 **`buildReturn(system, overrides?)`** mirrors `CompletionReturnDelivery.ts:336-370` and `:392-412`:
-
 - Read `shell` (the parent thread) from `system.readShell()`.
 - Derive the guard's SQL fields from the **repository functions**:
   - `turnId = shell.latestTurn!.turnId`
@@ -430,14 +423,13 @@ Steps:
 - Spread `overrides` last into the guard.
 - Message: `{ messageId: "delegation-result:child-1", role: "user", text: "Fixture delegated result", attachments: [] }`,
   `commandId: "delegation-return:child-1"`, `createdAt: at(30)`.
-- Add a comment: _"Mirrors CompletionReturnDelivery's guard construction. If delegation-returns extracts a shared guard
-  builder, call it here instead."_
+- Add a comment: *"Mirrors CompletionReturnDelivery's guard construction. If delegation-returns extracts a shared guard
+  builder, call it here instead."*
 
 **Cases** (temp-dir DB via `fs.mkdtemp`, cleaned up in `finally`, like the `:2076` restart test):
-
 - **B0 (control, no restart).** Seed, `buildReturn`, dispatch → resolves. Then
   `repo.latestUserMessageId(parent)` is `delegation-result:child-1`.
-  _Pre-fix: passes._ It proves the fixture is valid: session payload, key order, turn binding.
+  *Pre-fix: passes.* It proves the fixture is valid: session payload, key order, turn binding.
 - **B1 (restart).** Seed into a file DB, `dispose()`, then `createOrchestrationSystem(sameDb)`.
   - Oracle: the parent in `commandReadModel()` has `messages` ids `[msg-1, msg-2]`.
   - Oracle: `findLast(user).id === repo.latestUserMessageId(parent)`, which is `msg-2`.
@@ -447,13 +439,12 @@ Steps:
     settlement field. The oracle lives here rather than in A, because A's hand-inserted fixture would make it tautological.
   - Then `buildReturn` and dispatch → **resolves**.
 
-  _Pre-fix: fails._ The dispatch is rejected with "Delegated result origin changed", and the oracles fail.
-
+  *Pre-fix: fails.* The dispatch is rejected with "Delegated result origin changed", and the oracles fail.
 - **B2 (fence strength after restart).** Same restart, but call `buildReturn` with overrides
   `{ latestUserMessageId: "msg-1", turnMessageId: "msg-1" }`; `turnId` stays `turn-2`. Dispatch →
   `rejects.toThrow("Delegated result origin changed")`.
-  _Pre-fix: resolves_, so the test fails. Comment: _"After a restart the fence was weaker than before it. This is not
-  reachable through CompletionReturnDelivery, which re-reads the latest id from SQL, and a guard only adds rejections."_
+  *Pre-fix: resolves*, so the test fails. Comment: *"After a restart the fence was weaker than before it. This is not
+  reachable through CompletionReturnDelivery, which re-reads the latest id from SQL, and a guard only adds rejections."*
 
 New imports: `makeCompletionReturnRepository` (`../../persistence/Layers/AgentControlCompletionReturns.ts`) and
 `threadSettlementInput` (`../threadSettlementInput.ts`).
@@ -463,24 +454,22 @@ New imports: `makeCompletionReturnRepository` (`../../persistence/Layers/AgentCo
 **C1. `"keeps the first and latest user messages when the message cap evicts history"`**
 
 Reuse the `makeEvent` and reduce pattern of the `:954` test:
-
 1. `thread.created`.
 2. User `thread.message-sent` `u-first`, then user `u-latest`, each with `turnId: null` and `streaming: false`.
 3. 2,100 assistant `thread.message-sent` events, `msg-0` … `msg-2099`.
 
 Expect:
-
 - length is `2_000`
 - `[0].id === "u-first"` and `[1].id === "u-latest"`
 - `[2].id === "msg-102"` and `.at(-1).id === "msg-2099"`
 - `findLast(user).id === "u-latest"`
 
-_Pre-fix: fails_ (both user messages are evicted).
+*Pre-fix: fails* (both user messages are evicted).
 
 **C2. `"caps exactly like slice when the only user message is in the newest window"`**
 
 2,100 assistant messages, then user `u-only`. Expect the ids to equal
-`[msg-101 … msg-2099, u-only]`, which is `slice(-2000)` of the full sequence. _Pre-fix: passes_ (equivalence guard).
+`[msg-101 … msg-2099, u-only]`, which is `slice(-2000)` of the full sequence. *Pre-fix: passes* (equivalence guard).
 
 ### Focused validation (no full suite)
 
@@ -504,23 +493,21 @@ Baseline: `ProjectionSnapshotQuery.test.ts` passes 14/14 today, re-run while fin
   - a steer resolved after a later start: `decider.ts:2034-2052` stamps the request time
   - provider history restore (`providerHistoryRecovery.ts`)
 
-  The fence then fails _closed_. This divergence already exists without a restart and is unchanged here.
+  The fence then fails *closed*. This divergence already exists without a restart and is unchanged here.
   `delegation-returns` may adopt a rowid-only definition, which is now a one-line change in `userMessageAnchors.ts`.
-
 - **Steer messages.** Steer rows are `role = 'user'` with `turnId` set to the steered turn (`decider.ts:2045-2050`). The
   hydrated latest anchor carries `turn_id`, so the fence's `latestUserMessage.turnId === guard.turnId` branch keeps
   working after a restart.
 - **Revert after a restart (handoff to `rollback-correctness`).** The command model has `checkpoints: []`, so
   `thread.reverted` sets `latestTurn = null` (`projector.ts:913-923`). `retainThreadMessagesAfterRevert`
   (`projector.ts:100-140`) keeps the `turnId === null` user anchors, oldest first, up to `turnCount`. With
-  `turnCount >= 2`, _both_ anchors are kept even if the latest was reverted. Consequences:
+  `turnCount >= 2`, *both* anchors are kept even if the latest was reverted. Consequences:
   - The fence then mismatches SQL and fails closed.
   - With `latestTurnRequestedAt = null`, `hasQueuedTurnStart` returns true, so settle and snooze report a phantom
     `queued-turn` blocker until 2 minutes after the reverted message's `createdAt`. This fails safe and heals itself.
 
   Before this fix only the first anchor survived, so neither happened. `rollback-correctness` must prune user anchors by
   retained turn count or by SQL-retained ids when it fixes revert on the hydrated model.
-
 - **Existing-message merge of a non-hydrated id** (`projector.ts:672`). A `message-sent` for an old message id appends a
   new entry. For a user row with an old `createdAt`, this is the non-monotonic case above (fails closed). It is unchanged.
 - **`VACUUM` and `rowid`.** `projection_thread_messages` has an implicit `rowid` (TEXT primary key), which `VACUUM` may
@@ -586,15 +573,15 @@ Baseline: `ProjectionSnapshotQuery.test.ts` passes 14/14 today, re-run while fin
 I re-verified every disputed point against the code. I agree with the "partially-confirmed" verdict. The "fail-open"
 sub-claim is not reachable in practice and is reworded (item 3).
 
-| #   | Severity | Issue                                                                   | Resolution                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --- | -------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | major    | Window query can be slower; startup callers undercounted                | **Accepted.** Uses correlated per-thread `LIMIT 1` subqueries. I re-measured: typical 0.014 s vs 0.28 s today vs 0.46 s window; worst case at parity at 0.18 s. The plan was verified, all 5 call sites are listed, and the A3 `EXPLAIN QUERY PLAN` guard is added. The redundant `thread_id` predicate is shown to flip the plan to a full scan and is forbidden in a code comment.                                                                                                                |
-| 2   | major    | "Latest user message" ordering duplicated across two SQL sites          | **Accepted.** New `persistence/userMessageAnchors.ts` is used by the anchor query and by `CompletionReturnRepository.latestUserMessageId` (one function, same SQL). The builder returns a typed `Statement`, which is both a fragment and an `Effect`, so no wrapper or fallback is needed. A2 still cross-checks the real repository. The comment-only approach was dropped.                                                                                                                       |
-| 3   | minor    | "Fail-open" overstated                                                  | **Accepted.** Reworded: the fence is weaker after a restart, it is not reachable through `CompletionReturnDelivery`, and a client guard only adds rejections, so there is no escalation. B2 is kept as a fence-strength regression test with that comment.                                                                                                                                                                                                                                          |
-| 4   | minor    | Second live-runtime gate (`ProviderCommandReactor.ts:1204-1228`) missed | **Accepted.** Added as Mask 2 in §1, to Out of scope, and to the `delegation-returns` overlap note.                                                                                                                                                                                                                                                                                                                                                                                                 |
-| 5   | minor    | Existing `latest_user_message_at` column ignored; no oracle             | **Accepted.** Rationale (a) now rejects on "unassigned migration + backfill + contract or side channel". The B1 oracle ties the anchor `createdAt` to `threadSettlementInput(...).latestUserMessageAt` and to the pipeline-maintained column.                                                                                                                                                                                                                                                       |
-| 6   | minor    | Message cap evicts anchors without a restart; archive invariant missing | **Accepted (folded in).** Step 4 `capThreadMessagesPreservingUserAnchors`, tests C1 and C2, the archive invariant added to the audit table, and the `acp-message-ids` overlap named.                                                                                                                                                                                                                                                                                                                |
-| 7   | minor    | Revert after a restart yields a phantom `queued-turn`                   | **Accepted.** Documented as fail-safe and self-healing within 2 minutes, with an explicit pruning handoff to `rollback-correctness`.                                                                                                                                                                                                                                                                                                                                                                |
-| 8   | minor    | `queue-hold-drain` overlap missing                                      | **Accepted.** Added the role=`user` constraint, exclusion inside the shared builder if ever needed, and the possible tuple conflict.                                                                                                                                                                                                                                                                                                                                                                |
-| 9   | minor    | Test B fixture under-specified; guard partly hand-built                 | **Accepted.** Full `OrchestrationSession` payloads. `thread.turn.diff.complete` now has every required field, including `checkpointRef`, which the earlier draft omitted (`contracts/orchestration.ts:1763-1775`). `thread.message.assistant.complete` added per turn. Guard SQL fields come from the repository functions and the rest from `readShell()`. Shared-builder comment added; B0 kept as the no-restart control.                                                                        |
-| 10  | minor    | Conflicts with the already-reviewed spec at this path                   | **Accepted.** Reconciled into this file, which supersedes it. The correlated query, shared builder, Step 4 cap helper, B1 oracles and earlier resolutions are retained. Corrected on re-verification: the missing `checkpointRef`; inconsistent performance figures (replaced with one measured set); an unnecessary Step 2 fallback; the C2 wording (equivalence only when both anchors are in the window); added steer and history-restore edge cases and the `claude-steering` semantic overlap. |
+| # | Severity | Issue | Resolution |
+| --- | --- | --- | --- |
+| 1 | major | Window query can be slower; startup callers undercounted | **Accepted.** Uses correlated per-thread `LIMIT 1` subqueries. I re-measured: typical 0.014 s vs 0.28 s today vs 0.46 s window; worst case at parity at 0.18 s. The plan was verified, all 5 call sites are listed, and the A3 `EXPLAIN QUERY PLAN` guard is added. The redundant `thread_id` predicate is shown to flip the plan to a full scan and is forbidden in a code comment. |
+| 2 | major | "Latest user message" ordering duplicated across two SQL sites | **Accepted.** New `persistence/userMessageAnchors.ts` is used by the anchor query and by `CompletionReturnRepository.latestUserMessageId` (one function, same SQL). The builder returns a typed `Statement`, which is both a fragment and an `Effect`, so no wrapper or fallback is needed. A2 still cross-checks the real repository. The comment-only approach was dropped. |
+| 3 | minor | "Fail-open" overstated | **Accepted.** Reworded: the fence is weaker after a restart, it is not reachable through `CompletionReturnDelivery`, and a client guard only adds rejections, so there is no escalation. B2 is kept as a fence-strength regression test with that comment. |
+| 4 | minor | Second live-runtime gate (`ProviderCommandReactor.ts:1204-1228`) missed | **Accepted.** Added as Mask 2 in §1, to Out of scope, and to the `delegation-returns` overlap note. |
+| 5 | minor | Existing `latest_user_message_at` column ignored; no oracle | **Accepted.** Rationale (a) now rejects on "unassigned migration + backfill + contract or side channel". The B1 oracle ties the anchor `createdAt` to `threadSettlementInput(...).latestUserMessageAt` and to the pipeline-maintained column. |
+| 6 | minor | Message cap evicts anchors without a restart; archive invariant missing | **Accepted (folded in).** Step 4 `capThreadMessagesPreservingUserAnchors`, tests C1 and C2, the archive invariant added to the audit table, and the `acp-message-ids` overlap named. |
+| 7 | minor | Revert after a restart yields a phantom `queued-turn` | **Accepted.** Documented as fail-safe and self-healing within 2 minutes, with an explicit pruning handoff to `rollback-correctness`. |
+| 8 | minor | `queue-hold-drain` overlap missing | **Accepted.** Added the role=`user` constraint, exclusion inside the shared builder if ever needed, and the possible tuple conflict. |
+| 9 | minor | Test B fixture under-specified; guard partly hand-built | **Accepted.** Full `OrchestrationSession` payloads. `thread.turn.diff.complete` now has every required field, including `checkpointRef`, which the earlier draft omitted (`contracts/orchestration.ts:1763-1775`). `thread.message.assistant.complete` added per turn. Guard SQL fields come from the repository functions and the rest from `readShell()`. Shared-builder comment added; B0 kept as the no-restart control. |
+| 10 | minor | Conflicts with the already-reviewed spec at this path | **Accepted.** Reconciled into this file, which supersedes it. The correlated query, shared builder, Step 4 cap helper, B1 oracles and earlier resolutions are retained. Corrected on re-verification: the missing `checkpointRef`; inconsistent performance figures (replaced with one measured set); an unnecessary Step 2 fallback; the C2 wording (equivalence only when both anchors are in the window); added steer and history-restore edge cases and the `claude-steering` semantic overlap. |

@@ -1,16 +1,16 @@
 # 08 · settlement-signals: PR close vs later activity, unknown PR state, pins and background work (bug 11)
 
-| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| id               | `settlement-signals`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| title            | A merged or closed PR settles a thread only if it closed at or after the user's last activity. An unknown PR state, a local pin, and live background agent work block automatic settlement. PR state changes stream to connected clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| wave             | 1 (parallel, isolated worktree). Two commits: **Phase A** (client-side classifier and the stream fix) is safe to ship on its own. **Phase B** adds the PR close time end to end                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| verdict          | **confirmed**. All five claims hold. One more defect was found: `worktree.sourceControlStateUpdated` never reaches connected clients (§1.6). Claims (3) and (5) are real, but the fix stays client-side by design (§3.4)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| size             | **L**. Phase A is M. Phase B is M; most of it is plumbing through 4 forges and the persistence layer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| touched files    | **Phase A:** `packages/shared/src/threadSettlement.ts` · `packages/contracts/src/worktree.ts` · `packages/client-runtime/src/state/threads/types.ts` · `packages/client-runtime/src/state/threads/store.ts` · `packages/client-runtime/src/state/threads/threadInbox.ts` · `apps/server/src/orchestration/threadSettlementInput.ts` · `apps/server/src/ws/context/orchestrationStreams.ts` · tests: `packages/shared/src/threadSettlement.test.ts`, `packages/client-runtime/src/state/threads/threadInbox.test.ts`, `packages/client-runtime/src/state/threads/store.test.ts`, `apps/server/src/ws/context/orchestrationStreams.test.ts`. **Phase B:** `packages/contracts/src/orchestration.ts` · `apps/server/src/orchestration/pullRequestTerminalAt.ts` (new) · `apps/server/src/orchestration/decider.ts` · `apps/server/src/orchestration/projector.ts` · `apps/server/src/orchestration/Layers/ProjectionPipeline.ts` · `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts` · `apps/server/src/persistence/Layers/ProjectionWorktrees.ts` · `apps/server/src/persistence/Migrations.ts` · `apps/server/src/sourceControl/SourceControlProvider.ts` · `apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts` · GitHub: `apps/server/src/sourceControl/GitHubCli.ts`, `gitHubPullRequests.ts`, `GitHubSourceControlProvider.ts` · Forgejo: `ForgejoSourceControlProvider.ts` · GitLab: `gitLabMergeRequests.ts`, `GitLabCli.ts`, `GitLabSourceControlProvider.ts` · Azure: `azureDevOpsPullRequests.ts`, `AzureDevOpsSourceControlProvider.ts` · tests: `apps/server/src/orchestration/pullRequestTerminalAt.test.ts` (new), `apps/server/src/persistence/Migrations/WorktreePrTerminalAtRepair.test.ts` (new), `refreshWorktreeSourceControlState.test.ts`, `ProjectionWorktrees.test.ts`, `ProjectionPipeline.worktrees.test.ts`, `projector.test.ts`, `ProjectionSnapshotQuery.test.ts`, `decider.settlement.test.ts`, and the provider tests for GitHub, Forgejo, GitLab, Azure and Bitbucket |
-| migrations       | **No numbered migration.** A new startup repair, `repairProjectionWorktreePrTerminalAtColumn` in `Migrations.ts`, is guarded by PRAGMA and runs once. It adds `projection_worktrees.pr_terminal_at TEXT` and backfills merged and closed rows from `updated_at` in the same transaction. The pre-assigned **075 is not used** (§2, row 2)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| contract changes | `Worktree.prTerminalAt` (`Schema.optional(Schema.NullOr(IsoDateTime))`, no decoding default; an absent field means the server predates it). `WorktreeSourceControlStateUpdatedPayload.prTerminalAt` and `WorktreeSourceControlStateUpdateCommand.prTerminalAt` are optional and use the same schema. Non-contract shared types: `ThreadSettlementInput` gains `pinned`, `backgroundLiveness`, `prNumber` and `prTerminalAt`; new `ThreadAutoSettlementBlocker` and `getThreadAutoSettlementBlocker`. `SidebarWorktreeSummary.prTerminalAt?` and `ThreadInboxLifecycle.autoSettlementBlocker`. Server-internal: `SourceControlProviderShape.getPullRequestState` gains an optional `terminalAt` in its result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| overlaps         | `delegation-guard-restart` (W1): `projector.ts`, different cases (`thread.message-sent` vs `worktree.*`), and `ProjectionSnapshotQuery.ts`, where `getCommandReadModel` is next to `listWorktreeRows`. `acp-message-ids` (W1): `projector.ts` `thread.message-sent`, a different case. `queue-hold-drain` (W1): possibly `threadInbox.ts` `settlementInput`/`buildThreadInbox` and `threadSettlement.ts` `canSettleThread`. `turn-finalization` (W1): semantic only. `usage-limits` (W2): `threadSettlement.ts` blockers. `delegation-lineage` (W2): `threadInbox.ts` `buildThreadInbox`. `rollback-correctness` (W2): `projector.ts`, a different case. `restart-continuation` (W3): semantic, `ThreadBackgroundLiveness`. Details in §10                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Field | Value |
+| --- | --- |
+| id | `settlement-signals` |
+| title | A merged or closed PR settles a thread only if it closed at or after the user's last activity. An unknown PR state, a local pin, and live background agent work block automatic settlement. PR state changes stream to connected clients |
+| wave | 1 (parallel, isolated worktree). Two commits: **Phase A** (client-side classifier and the stream fix) is safe to ship on its own. **Phase B** adds the PR close time end to end |
+| verdict | **confirmed**. All five claims hold. One more defect was found: `worktree.sourceControlStateUpdated` never reaches connected clients (§1.6). Claims (3) and (5) are real, but the fix stays client-side by design (§3.4) |
+| size | **L**. Phase A is M. Phase B is M; most of it is plumbing through 4 forges and the persistence layer |
+| touched files | **Phase A:** `packages/shared/src/threadSettlement.ts` · `packages/contracts/src/worktree.ts` · `packages/client-runtime/src/state/threads/types.ts` · `packages/client-runtime/src/state/threads/store.ts` · `packages/client-runtime/src/state/threads/threadInbox.ts` · `apps/server/src/orchestration/threadSettlementInput.ts` · `apps/server/src/ws/context/orchestrationStreams.ts` · tests: `packages/shared/src/threadSettlement.test.ts`, `packages/client-runtime/src/state/threads/threadInbox.test.ts`, `packages/client-runtime/src/state/threads/store.test.ts`, `apps/server/src/ws/context/orchestrationStreams.test.ts`. **Phase B:** `packages/contracts/src/orchestration.ts` · `apps/server/src/orchestration/pullRequestTerminalAt.ts` (new) · `apps/server/src/orchestration/decider.ts` · `apps/server/src/orchestration/projector.ts` · `apps/server/src/orchestration/Layers/ProjectionPipeline.ts` · `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts` · `apps/server/src/persistence/Layers/ProjectionWorktrees.ts` · `apps/server/src/persistence/Migrations.ts` · `apps/server/src/sourceControl/SourceControlProvider.ts` · `apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts` · GitHub: `apps/server/src/sourceControl/GitHubCli.ts`, `gitHubPullRequests.ts`, `GitHubSourceControlProvider.ts` · Forgejo: `ForgejoSourceControlProvider.ts` · GitLab: `gitLabMergeRequests.ts`, `GitLabCli.ts`, `GitLabSourceControlProvider.ts` · Azure: `azureDevOpsPullRequests.ts`, `AzureDevOpsSourceControlProvider.ts` · tests: `apps/server/src/orchestration/pullRequestTerminalAt.test.ts` (new), `apps/server/src/persistence/Migrations/WorktreePrTerminalAtRepair.test.ts` (new), `refreshWorktreeSourceControlState.test.ts`, `ProjectionWorktrees.test.ts`, `ProjectionPipeline.worktrees.test.ts`, `projector.test.ts`, `ProjectionSnapshotQuery.test.ts`, `decider.settlement.test.ts`, and the provider tests for GitHub, Forgejo, GitLab, Azure and Bitbucket |
+| migrations | **No numbered migration.** A new startup repair, `repairProjectionWorktreePrTerminalAtColumn` in `Migrations.ts`, is guarded by PRAGMA and runs once. It adds `projection_worktrees.pr_terminal_at TEXT` and backfills merged and closed rows from `updated_at` in the same transaction. The pre-assigned **075 is not used** (§2, row 2) |
+| contract changes | `Worktree.prTerminalAt` (`Schema.optional(Schema.NullOr(IsoDateTime))`, no decoding default; an absent field means the server predates it). `WorktreeSourceControlStateUpdatedPayload.prTerminalAt` and `WorktreeSourceControlStateUpdateCommand.prTerminalAt` are optional and use the same schema. Non-contract shared types: `ThreadSettlementInput` gains `pinned`, `backgroundLiveness`, `prNumber` and `prTerminalAt`; new `ThreadAutoSettlementBlocker` and `getThreadAutoSettlementBlocker`. `SidebarWorktreeSummary.prTerminalAt?` and `ThreadInboxLifecycle.autoSettlementBlocker`. Server-internal: `SourceControlProviderShape.getPullRequestState` gains an optional `terminalAt` in its result |
+| overlaps | `delegation-guard-restart` (W1): `projector.ts`, different cases (`thread.message-sent` vs `worktree.*`), and `ProjectionSnapshotQuery.ts`, where `getCommandReadModel` is next to `listWorktreeRows`. `acp-message-ids` (W1): `projector.ts` `thread.message-sent`, a different case. `queue-hold-drain` (W1): possibly `threadInbox.ts` `settlementInput`/`buildThreadInbox` and `threadSettlement.ts` `canSettleThread`. `turn-finalization` (W1): semantic only. `usage-limits` (W2): `threadSettlement.ts` blockers. `delegation-lineage` (W2): `threadInbox.ts` `buildThreadInbox`. `rollback-correctness` (W2): `projector.ts`, a different case. `restart-continuation` (W3): semantic, `ThreadBackgroundLiveness`. Details in §10 |
 
 ---
 
@@ -26,7 +26,6 @@
    **The "Move to Active" bounce.** Moving the thread to Active sets `settledOverride: "active"`. The next user turn emits
    `thread.unsettled` with reason `activity` (`decider.ts:127-152`, used at `:1199`). The projector maps that to
    `settledOverride: null` (`projector.ts:553-560`). The merged-PR rule then settles the thread again immediately.
-
 2. **An unknown PR state does not block.** `canUseInactivitySettlement` (`threadSettlement.ts:148-150`) treats
    `prState === null` as "no PR". A worktree is created with `prState: null` even when `prNumber` is set (`projector.ts:388`,
    `ProjectionPipeline.ts:1226`). That covers a `pr`-origin worktree before its first refresh, and any worktree whose refresh
@@ -37,7 +36,7 @@
    (`inboxSidebarModel.ts:452-455`). Mobile has no pins: no caller passes `pinnedThreadKeys` to `apps/mobile/src/features/inbox/inboxModel.ts:214`.
 4. **Background work doesn't block.** `ThreadSettlementInput` has no liveness field, and `settlementInput()` ignores
    `thread.backgroundLiveness` (`types.ts:251`). A thread whose turn ended while its subagents or workflows still run is auto-settled.
-5. **The threshold is per device.** `sidebarAutoSettleAfterDays` is a _client_ setting (`packages/contracts/src/settings.ts:116`).
+5. **The threshold is per device.** `sidebarAutoSettleAfterDays` is a *client* setting (`packages/contracts/src/settings.ts:116`).
    It is stored in local storage on web (`hostedInboxPreferences.ts` for hosted) and in `apps/mobile/src/state/preferencesStore.ts:38`.
    The server's input passes `autoSettleAfterDays: null` (`apps/server/src/orchestration/threadSettlementInput.ts:33`).
    The server never auto-settles: AI Focus filters only the explicit `settled_override` (`ThreadPriorityCandidateQuery.ts:79`).
@@ -58,17 +57,17 @@ Baselines: `threadSettlement.test.ts` is 28/28 green and `threadInbox.test.ts` i
 
 ## 2. Review resolution
 
-| #   | Severity | Critique                                                                                                                                                                                                                     | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| --- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | blocker  | `worktree.sourceControlStateUpdated` is dropped by `toShellStreamEvent`, so the client reducer is dead code and fix (2) would regress                                                                                        | **Accepted.** Verified at `orchestrationStreams.ts:254-257,281-283,577-580`. Phase A step A6 adds the case to the `worktree-upserted` group. The SQL row stays the source of truth through `getWorktreeShellById`. The mapper is extracted to a top-level export so it can be tested. Server and client tests are added (§6)                                                                                                                                                                                                                                                                          |
-| 2   | major    | Pre-assigned 075 would land before 071–074. The Effect migrator skips ids at or below the latest applied one (`effect/dist/unstable/sql/Migrator.js:118-124`, verified), so 071–074 would be silently skipped on dogfood DBs | **Accepted, option (b).** No numbered migration. A PRAGMA-guarded startup repair follows `repairProjectionWorktreeTitleColumn` (`Migrations.ts:188-209`). It adds the column and backfills **only when it just added the column**, in one transaction. 075 is not consumed. **Program note for the integrator:** 071–074 still have the same hazard among themselves. They must land in ascending order, or use repairs as well                                                                                                                                                                       |
-| 3   | major    | A background-work blocker can block forever. The reaper skips sessions with liveness (`ProviderSessionReaper.ts:91-100`). `MONITOR_TASK_TYPES` includes background shells                                                    | **Accepted.** Only `"working"` (live agent work) blocks. `"monitoring"` (watch loops and background shells such as dev servers, log tails and PR babysitters) never blocks. The edge case is corrected: `"working"` blocks for exactly as long as the row shows the _Working_ pill. That ends at task completion, `session.exited` (`ProviderRuntimeIngestion.ts:3052-3053`) or a server restart. A lost `task.completed` is a liveness bug and out of scope. No staleness cap: a cap at the inactivity boundary would cancel the blocker for exactly the case it exists for. Tests cover both values |
-| 4   | minor    | The bounce is fixed only on the user-message path. `thread.session.set` (`decider.ts:1751-1776`) and request paths (`:2012`) also clear an `active` override without advancing the anchor                                    | **Accepted as documented residual behaviour (§8).** Clearing `active` on activity is deliberate. It lets a moved-to-Active thread auto-settle later. t3 behaves the same. No projector change                                                                                                                                                                                                                                                                                                                                                                                                         |
-| 5   | minor    | Bitbucket rule contradicts the backfill                                                                                                                                                                                      | **Accepted, one rule.** `prTerminalAt` is the forge-reported close time when one is available. Otherwise it is the time Ryco first recorded that terminal state, which is an upper bound. The live fallback uses the refresh's `updatedAt` and the backfill uses `updated_at`; both are upper bounds. Bitbucket reports no time, so it uses the fallback. A Bitbucket provider test pins this down. `updated_on` is rejected because it moves on every later comment                                                                                                                                  |
-| 6   | minor    | Test plan misses the read-model paths, the inbox timer, and the risk that binding `undefined` writes NULL                                                                                                                    | **Accepted.** Adds `ProjectionSnapshotQuery.test.ts` coverage (command read model, shell snapshot, `getWorktreeShellById`), a threadInbox timer test, `${row.prTerminalAt ?? null}` binding, and an `upsert({...existing})` round-trip test                                                                                                                                                                                                                                                                                                                                                           |
-| 7   | minor    | Overlap list incomplete                                                                                                                                                                                                      | **Accepted.** §10 lists the `projector.ts` cases, the `getCommandReadModel`/`listWorktreeRows` adjacency and `orchestrationStreams.ts`. No other W1 brief names `toShellStreamEvent`; check again at merge                                                                                                                                                                                                                                                                                                                                                                                            |
-| 8   | minor    | Upgrade effects: a one-time dispatch burst, invalidated undo receipts, and legacy threads moving back to Active                                                                                                              | **Accepted into Risks (§9).** The burst is accepted. Dispatch happens only when the resolved value differs, so it happens once per legacy terminal row and only on the forges that report a time                                                                                                                                                                                                                                                                                                                                                                                                      |
-| 9   | minor    | Main worktree (`worktreePath: null`) PRs are never refreshed (`refreshWorktreeSourceControlState.ts:19`)                                                                                                                     | **Accepted as out of scope (§11).** This is pre-existing: an `open` link on main already blocks auto-settlement today. The follow-up is to fall back to the project `workspaceRoot`                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| # | Severity | Critique | Decision |
+| --- | --- | --- | --- |
+| 1 | blocker | `worktree.sourceControlStateUpdated` is dropped by `toShellStreamEvent`, so the client reducer is dead code and fix (2) would regress | **Accepted.** Verified at `orchestrationStreams.ts:254-257,281-283,577-580`. Phase A step A6 adds the case to the `worktree-upserted` group. The SQL row stays the source of truth through `getWorktreeShellById`. The mapper is extracted to a top-level export so it can be tested. Server and client tests are added (§6) |
+| 2 | major | Pre-assigned 075 would land before 071–074. The Effect migrator skips ids at or below the latest applied one (`effect/dist/unstable/sql/Migrator.js:118-124`, verified), so 071–074 would be silently skipped on dogfood DBs | **Accepted, option (b).** No numbered migration. A PRAGMA-guarded startup repair follows `repairProjectionWorktreeTitleColumn` (`Migrations.ts:188-209`). It adds the column and backfills **only when it just added the column**, in one transaction. 075 is not consumed. **Program note for the integrator:** 071–074 still have the same hazard among themselves. They must land in ascending order, or use repairs as well |
+| 3 | major | A background-work blocker can block forever. The reaper skips sessions with liveness (`ProviderSessionReaper.ts:91-100`). `MONITOR_TASK_TYPES` includes background shells | **Accepted.** Only `"working"` (live agent work) blocks. `"monitoring"` (watch loops and background shells such as dev servers, log tails and PR babysitters) never blocks. The edge case is corrected: `"working"` blocks for exactly as long as the row shows the *Working* pill. That ends at task completion, `session.exited` (`ProviderRuntimeIngestion.ts:3052-3053`) or a server restart. A lost `task.completed` is a liveness bug and out of scope. No staleness cap: a cap at the inactivity boundary would cancel the blocker for exactly the case it exists for. Tests cover both values |
+| 4 | minor | The bounce is fixed only on the user-message path. `thread.session.set` (`decider.ts:1751-1776`) and request paths (`:2012`) also clear an `active` override without advancing the anchor | **Accepted as documented residual behaviour (§8).** Clearing `active` on activity is deliberate. It lets a moved-to-Active thread auto-settle later. t3 behaves the same. No projector change |
+| 5 | minor | Bitbucket rule contradicts the backfill | **Accepted, one rule.** `prTerminalAt` is the forge-reported close time when one is available. Otherwise it is the time Ryco first recorded that terminal state, which is an upper bound. The live fallback uses the refresh's `updatedAt` and the backfill uses `updated_at`; both are upper bounds. Bitbucket reports no time, so it uses the fallback. A Bitbucket provider test pins this down. `updated_on` is rejected because it moves on every later comment |
+| 6 | minor | Test plan misses the read-model paths, the inbox timer, and the risk that binding `undefined` writes NULL | **Accepted.** Adds `ProjectionSnapshotQuery.test.ts` coverage (command read model, shell snapshot, `getWorktreeShellById`), a threadInbox timer test, `${row.prTerminalAt ?? null}` binding, and an `upsert({...existing})` round-trip test |
+| 7 | minor | Overlap list incomplete | **Accepted.** §10 lists the `projector.ts` cases, the `getCommandReadModel`/`listWorktreeRows` adjacency and `orchestrationStreams.ts`. No other W1 brief names `toShellStreamEvent`; check again at merge |
+| 8 | minor | Upgrade effects: a one-time dispatch burst, invalidated undo receipts, and legacy threads moving back to Active | **Accepted into Risks (§9).** The burst is accepted. Dispatch happens only when the resolved value differs, so it happens once per legacy terminal row and only on the forges that report a time |
+| 9 | minor | Main worktree (`worktreePath: null`) PRs are never refreshed (`refreshWorktreeSourceControlState.ts:19`) | **Accepted as out of scope (§11).** This is pre-existing: an `open` link on main already blocks auto-settlement today. The follow-up is to fall back to the project `workspaceRoot` |
 
 ---
 
@@ -76,20 +75,20 @@ Baselines: `threadSettlement.test.ts` is 28/28 green and `threadInbox.test.ts` i
 
 ### 3.1 The automatic-settlement rule (mirrors t3 `ThreadSettlementService.ts:84-200`)
 
-_Manual_ settle eligibility (`canSettleThread`, `ThreadSettlementBlocker`) is **unchanged**. That keeps the decider
+*Manual* settle eligibility (`canSettleThread`, `ThreadSettlementBlocker`) is **unchanged**. That keeps the decider
 (`decider.ts:77`, `:654`), `sidebarUndo`, snooze and the two UI `switch`es on `settlementBlocker` untouched. The new signals
 gate only **automatic** settlement, through a separate `ThreadAutoSettlementBlocker`:
 
-| Order | Condition                                                                                                                                 | Result                                                        |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| 0     | excluded / `canSettleThread` blocked / explicit `settled` / explicit `active`                                                             | as today                                                      |
-| 1     | `pinned`                                                                                                                                  | blocked: `"pinned"`                                           |
-| 2     | `backgroundLiveness === "working"`                                                                                                        | blocked: `"background-work"`                                  |
-| 3     | `prState === "open"`                                                                                                                      | blocked: `"pull-request-open"` (today's behaviour, now named) |
-| 4     | `prState === null && prNumber !== null`                                                                                                   | blocked: `"pull-request-unknown"` (new, claim 2)              |
-| 5     | `prState` merged/closed **and** `prTerminalAt === undefined` (server predates the field)                                                  | **legacy rule, unchanged**: settles with today's timestamp    |
-| 6     | `prState` merged/closed **and** `prTerminalAt` valid **and** `prTerminalAt >= max(createdAt, latestUserMessageAt, latestTurnRequestedAt)` | settles at `newest(prTerminalAt, lastActivity)`               |
-| 7     | otherwise (no PR, an issue-only worktree, or a terminal PR that closed before the user's last activity or has an unknown close time)      | inactivity rule (existing boundary)                           |
+| Order | Condition | Result |
+| --- | --- | --- |
+| 0 | excluded / `canSettleThread` blocked / explicit `settled` / explicit `active` | as today |
+| 1 | `pinned` | blocked: `"pinned"` |
+| 2 | `backgroundLiveness === "working"` | blocked: `"background-work"` |
+| 3 | `prState === "open"` | blocked: `"pull-request-open"` (today's behaviour, now named) |
+| 4 | `prState === null && prNumber !== null` | blocked: `"pull-request-unknown"` (new, claim 2) |
+| 5 | `prState` merged/closed **and** `prTerminalAt === undefined` (server predates the field) | **legacy rule, unchanged**: settles with today's timestamp |
+| 6 | `prState` merged/closed **and** `prTerminalAt` valid **and** `prTerminalAt >= max(createdAt, latestUserMessageAt, latestTurnRequestedAt)` | settles at `newest(prTerminalAt, lastActivity)` |
+| 7 | otherwise (no PR, an issue-only worktree, or a terminal PR that closed before the user's last activity or has an unknown close time) | inactivity rule (existing boundary) |
 
 Row 6 is t3's `pullRequestSettles`. Row 7 is t3's fall-through to `autoSettleAfterDays`. After a "Move to Active"
 followed by a new message, row 6 is false and row 7 applies, so the bounce is gone on the user-message path.
@@ -120,7 +119,7 @@ in-memory projector and the SQL pipeline all use it; the pipeline also uses it f
   commands and events, decider/projector/pipeline work, a column, shell mapping, a migration of existing web pins across devices
   with conflict resolution, new mobile pin UI, and moving pin undo from the web `sidebarUndo` to server receipts. That is size L,
   for a feature only web has. **Defer.**
-- **Threshold (claim 5).** Client-side settlement is a derived _view_, and nothing persists it. Devices disagree only on
+- **Threshold (claim 5).** Client-side settlement is a derived *view*, and nothing persists it. Devices disagree only on
   presentation, and AI Focus already ignores derived settlement. Making the threshold authoritative means a t3-style server
   sweep that writes `settled_override`, with settings, per-project overrides and undo semantics. **Defer** together with server pins as
   "server-authoritative settlement".
@@ -151,7 +150,7 @@ manual settle and snooze eligibility, the read model has no liveness, and manual
 - Add the exported type and function:
   ```ts
   export type ThreadAutoSettlementBlocker =
-    "pinned" | "background-work" | "pull-request-open" | "pull-request-unknown";
+    | "pinned" | "background-work" | "pull-request-open" | "pull-request-unknown";
 
   export function getThreadAutoSettlementBlocker(
     input: ThreadSettlementInput,
@@ -167,11 +166,7 @@ manual settle and snooze eligibility, the read model has no liveness, and manual
   ```ts
   function pullRequestUserAnchorMs(input: ThreadSettlementInput): number | null {
     return timestampMs(
-      newestValidTimestamp([
-        input.createdAt,
-        input.latestUserMessageAt,
-        input.latestTurnRequestedAt,
-      ]),
+      newestValidTimestamp([input.createdAt, input.latestUserMessageAt, input.latestTurnRequestedAt]),
     );
   }
 
@@ -181,11 +176,8 @@ manual settle and snooze eligibility, the read model has no liveness, and manual
     if (input.prTerminalAt === undefined) {
       // Server predates prTerminalAt: keep the pre-existing rule byte-for-byte.
       return newestValidTimestamp([
-        input.worktreeUpdatedAt,
-        input.latestTurnCompletedAt,
-        input.latestUserMessageAt,
-        input.updatedAt,
-        input.createdAt,
+        input.worktreeUpdatedAt, input.latestTurnCompletedAt, input.latestUserMessageAt,
+        input.updatedAt, input.createdAt,
       ]);
     }
     const terminalMs = timestampMs(input.prTerminalAt);
@@ -197,11 +189,9 @@ manual settle and snooze eligibility, the read model has no liveness, and manual
 - **Delete** `canUseInactivitySettlement`.
 - Rewrite `getEffectiveSettlementTimestamp`:
   ```ts
-  if (input.settledOverride === "settled")
-    return timestampMs(input.settledAt) === null ? null : input.settledAt;
+  if (input.settledOverride === "settled") return timestampMs(input.settledAt) === null ? null : input.settledAt;
   if (input.settledOverride !== null) return null;
-  if (!canSettleThread(input).canSettle || getThreadAutoSettlementBlocker(input) !== null)
-    return null;
+  if (!canSettleThread(input).canSettle || getThreadAutoSettlementBlocker(input) !== null) return null;
   const pullRequestAt = pullRequestSettlementTimestamp(input);
   if (pullRequestAt !== null) return pullRequestAt;
   const boundaryMs = autoSettleBoundaryMs(input);
@@ -227,12 +217,10 @@ manual settle and snooze eligibility, the read model has no liveness, and manual
   non-null `prState`.
 
 **A2. `packages/contracts/src/worktree.ts`**: add to `Worktree`, after `issueState`:
-
 ```ts
 /** When the PR reached its current merged/closed state (forge time, else first observation). Absent on older servers. */
 prTerminalAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 ```
-
 Do **not** add a decoding default; absence is meaningful (§3.3). It is schema-only and has no runtime logic.
 
 **A3. `packages/client-runtime/src/state/threads/types.ts`**: add `prTerminalAt?: string | null | undefined;` to
@@ -266,14 +254,9 @@ Do **not** add a decoding default; absence is meaningful (§3.3). It is schema-o
 - Move the `toShellStreamEvent` closure (`:222-292`) to a top-level export:
   ```ts
   export const toShellStreamEvent = (
-    query: Pick<
-      ProjectionSnapshotQueryShape,
-      "getProjectShellById" | "getThreadShellById" | "getWorktreeShellById"
-    >,
+    query: Pick<ProjectionSnapshotQueryShape, "getProjectShellById" | "getThreadShellById" | "getWorktreeShellById">,
     event: OrchestrationEvent,
-  ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>> => {
-    /* same switch */
-  };
+  ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>> => { /* same switch */ };
   ```
   Then, inside `makeOrchestrationStreamHelpers`, use `Stream.mapEffect((event) => toShellStreamEvent(projectionSnapshotQuery, event))` (`:398`).
 - Add `case "worktree.sourceControlStateUpdated":` to the `worktree-upserted` group (`:254-257`). The upsert reads
@@ -293,14 +276,13 @@ The command is in the client-dispatchable union too (`:1675`, `:1716`), so it ha
 owner-only and adds no new authority.
 
 **B2. New `apps/server/src/orchestration/pullRequestTerminalAt.ts`** (pure, no Effect):
-
 ```ts
 export function resolvePullRequestTerminalAt(input: {
   readonly previousState: PullRequestState | null;
   readonly previousTerminalAt: string | null;
   readonly nextState: PullRequestState | null;
   readonly reportedTerminalAt: string | null; // forge mergedAt/closedAt, ISO
-  readonly observedAt: string; // when this state is being recorded
+  readonly observedAt: string;               // when this state is being recorded
 }): string | null {
   if (input.nextState !== "merged" && input.nextState !== "closed") return null;
   if (isValidIso(input.reportedTerminalAt)) return input.reportedTerminalAt; // forge truth; corrects fallback/backfill
@@ -310,7 +292,6 @@ export function resolvePullRequestTerminalAt(input: {
   return input.observedAt; // upper bound: first time Ryco recorded this terminal state
 }
 ```
-
 `isValidIso` means non-empty and `Number.isFinite(Date.parse(value))`.
 
 **B3. `apps/server/src/orchestration/decider.ts`** (`:1528-1547`, case `worktree.source-control-state.update`): add
@@ -350,31 +331,24 @@ through these two queries and this mapper. Do not edit the `getCommandReadModel`
 `if (toMigrationInclusive === undefined || toMigrationInclusive >= 37)`. 037 introduced `pr_state`, and
 `ProjectionWorktrees.test.ts` runs migrations through 39 before using the repository, so it needs the column. Place the call
 after the `>= 35` repair.
-
 ```ts
 export const repairProjectionWorktreePrTerminalAtColumn = Effect.fn(
   "repairProjectionWorktreePrTerminalAtColumn",
 )(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const tables =
-    yield* sql`SELECT name FROM sqlite_master WHERE type='table' AND name='projection_worktrees'`;
+  const tables = yield* sql`SELECT name FROM sqlite_master WHERE type='table' AND name='projection_worktrees'`;
   if (tables.length === 0) return;
-  yield* sql.withTransaction(
-    Effect.gen(function* () {
-      const columns = yield* sql<{
-        readonly name: string;
-      }>`PRAGMA table_info(projection_worktrees)`;
-      if (columns.some((column) => column.name === "pr_terminal_at")) return;
-      yield* sql`ALTER TABLE projection_worktrees ADD COLUMN pr_terminal_at TEXT`;
-      // One-time: updated_at is the last time Ryco wrote the row, an upper bound on when it first
-      // recorded the terminal state (spec §3.2). Runs only in the transaction that adds the column.
-      yield* sql`UPDATE projection_worktrees SET pr_terminal_at = updated_at WHERE pr_state IN ('merged', 'closed')`;
-      yield* Effect.log("Repaired projection_worktrees.pr_terminal_at column");
-    }),
-  );
+  yield* sql.withTransaction(Effect.gen(function* () {
+    const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_worktrees)`;
+    if (columns.some((column) => column.name === "pr_terminal_at")) return;
+    yield* sql`ALTER TABLE projection_worktrees ADD COLUMN pr_terminal_at TEXT`;
+    // One-time: updated_at is the last time Ryco wrote the row, an upper bound on when it first
+    // recorded the terminal state (spec §3.2). Runs only in the transaction that adds the column.
+    yield* sql`UPDATE projection_worktrees SET pr_terminal_at = updated_at WHERE pr_state IN ('merged', 'closed')`;
+    yield* Effect.log("Repaired projection_worktrees.pr_terminal_at column");
+  }));
 });
 ```
-
 Later numbered migrations into `projection_worktrees` are additive (030, 031, 037–039), so nothing rebuilds the table and drops the column.
 
 **B9. `apps/server/src/sourceControl/SourceControlProvider.ts`** (`:332-339`): change the result type to
@@ -433,8 +407,7 @@ absent, the stored value is left alone. Live clients never reach this path; work
 ## 6. Tests (failing first where a bug)
 
 **`packages/shared/src/threadSettlement.test.ts`.** Extend `input()` with `pinned: false, backgroundLiveness: null, prNumber: null, prTerminalAt: null`.
-
-- _Rewrite_ `:159-163`, which asserts the bug, to "a merged/closed PR settles only when it closed at or after the user's last activity":
+- *Rewrite* `:159-163`, which asserts the bug, to "a merged/closed PR settles only when it closed at or after the user's last activity":
   - `prState: "merged"`, `prTerminalAt` = 11:00 (after the 10:00 message): `settled`, and the effective timestamp is 11:00.
   - `prTerminalAt` = 09:59:30 (before the 10:00 message): `active` with `autoSettleAfterDays: null`. With 7 days and `nowMs` past
     the boundary it is `settled` at the boundary timestamp.
@@ -494,7 +467,6 @@ writes `NULL`.
 key present.
 
 **`apps/server/src/persistence/Migrations/WorktreePrTerminalAtRepair.test.ts`** (new; pattern from `031_WorktreeTitles.test.ts`):
-
 1. Run migrations to 29. Create `projection_worktrees` by hand with `pr_state` and without `pr_terminal_at`. Insert
    merged, closed, open and null rows.
 2. Run the repair. Merged and closed rows get `updated_at`; the others stay `NULL`.
@@ -530,7 +502,6 @@ bun run --cwd apps/web test src/components/inboxSidebar/inboxSidebarModel.test.t
 bun run --cwd apps/mobile test src/features/inbox/inboxModel.test.ts src/features/threads/threadHeaderModel.test.ts
 bun typecheck && bun lint && bun run fmt:check
 ```
-
 Never run `bun test`. A full test, build or browser suite is not required: nothing changes in the UI layout or the PWA lifecycle.
 
 ---
@@ -543,7 +514,7 @@ Never run `bun test`. A full test, build or browser suite is not required: nothi
   merged-PR rule settle the thread again. This is deliberate and matches t3.
 - **Turns started by Agent Control or delegated returns** advance `latestTurnRequestedAt`, so they count as activity. After such a turn
   a merged PR stops being a signal and the inactivity rule applies. This is the same as t3's `latestRunRequestedAt`.
-- **Stuck `"working"` liveness** (a lost `task.completed`) keeps the thread Active for as long as the row shows _Working_. That ends
+- **Stuck `"working"` liveness** (a lost `task.completed`) keeps the thread Active for as long as the row shows *Working*. That ends
   at `session.exited` or a server restart (the registry is in memory). It is coherent with the visible status. Fixing liveness is out of scope.
 - **Persistent unknown PR** (broken forge auth, or no provider for the remote) blocks auto-settlement indefinitely. Manual settle
   works, and the blocker is exposed as `autoSettlementBlocker` for a later UI hint.
@@ -587,7 +558,7 @@ Never run `bun test`. A full test, build or browser suite is not required: nothi
 - **`queue-hold-drain` (W1):** possible textual overlap in `threadInbox.ts` (`settlementInput`, the `buildThreadInbox` inputs
   `localQueuedThreadKeys`) and `threadSettlement.ts` (`canSettleThread` or `hasQueuedTurnStart`), if they add a held-queue
   blocker. Merge order does not matter, but keep both fields.
-- **`turn-finalization` (W1):** semantic only. Threads stuck on _Working_ block through `session-running`; their fix unblocks settlement.
+- **`turn-finalization` (W1):** semantic only. Threads stuck on *Working* block through `session-running`; their fix unblocks settlement.
 - **`provider-compat`, `claude-meter-wake`, `reactor-errors-switch` (W1):** none. No `packages/shared/package.json` edit.
 - **`usage-limits` (W2):** likely adds a "limited" blocker. It should extend `ThreadAutoSettlementBlocker` /
   `getThreadAutoSettlementBlocker` (automatic) or `ThreadSettlementBlocker` (manual) in `threadSettlement.ts`. Rebase onto this package.

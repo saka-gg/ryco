@@ -1,16 +1,16 @@
 # 05 · claude-meter-wake: Claude compaction context meter and wake-turn start (bug 8, t3 #15055)
 
-| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| id               | `claude-meter-wake`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| title            | Publish Claude's post-compaction size at the compact boundary. Open Claude's provider-initiated ("wake") turns at the CLI's turn-start signal, give turn install and completion one owner, and make every provider turn recoverable by Stop and by a first-output watchdog                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| wave             | 1 (parallel, isolated worktree). If both are ready, merge after `turn-finalization`. This is a soft dependency (§8)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| verdict          | **partially-confirmed**.<br>**(a) Meter: confirmed.**<br>**(b) Wake gap: partially confirmed.** No turn exists until the wake's first root assistant snapshot. But the client queue does _not_ see the thread as idle: Ryco already maps the CLI's `status: requesting` frame to a turnless `running` session, and that frame arrives 1–4 ms after `init`. The real defects are the consequences of that turnless window (§1.2).<br>**Also confirmed:** three pre-existing races in `sendTurn` / `completeTurn` / `updateResumeCursor` (§1.3). They are fixed here because Part B depends on them                                                                                                                                                                                                    |
-| size             | M. Part A is S, Part B is M                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| touched files    | `apps/server/src/provider/Layers/ClaudeAdapter.ts`<br>`apps/server/src/provider/claudeContextUsage.ts` (new)<br>`apps/server/src/provider/claudeWakeTurn.ts` (new)<br>`docs/providers/claude.md` (one paragraph)<br>`docs/providers/claude-cache.md` (one sentence)<br>**Tests:** `apps/server/src/provider/Layers/ClaudeAdapter.test.ts`, `apps/server/src/provider/claudeContextUsage.test.ts` (new), `apps/server/src/provider/claudeWakeTurn.test.ts` (new)                                                                                                                                                                                                                                                                                                                                      |
-| migrations       | none                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| contract changes | None. The change reuses the existing runtime events `thread.token-usage.updated` and `turn.aborted`, which ingestion already handles for every provider. Internal only: `ClaudeAdapterLiveOptions` gains `runtimeEventQueueCapacity`, default 2 048, as a test seam                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| overlaps         | **Behavioural:**<br>• `turn-finalization` (W1): empty provider turns in non-git folders.<br>• `queue-hold-drain` (W1): the outcome of a send that races a wake changes.<br>• `delegation-returns` (W2): same race outcome.<br>• `usage-limits` (W2): limit failures on provider turns.<br>**Same code in `ClaudeAdapter.ts`:**<br>• `claude-steering` (W2): `sendTurn`, `ClaudeTurnState`, `completeTurn`, `handleResultMessage`.<br>• `usage-limits` (W2): `completeTurn`, `handleResultMessage`, `handleSdkTelemetryMessage`.<br>• `rollback-correctness` (W2): `updateResumeCursor`, `ClaudeSessionContext`.<br>• `reactor-concurrency` (W3): interruption of `sendTurn`; `interruptTurn` must stay non-blocking.<br>• `restart-continuation` (W3): `startSession` context init.<br>Details in §8 |
+| Field | Value |
+| --- | --- |
+| id | `claude-meter-wake` |
+| title | Publish Claude's post-compaction size at the compact boundary. Open Claude's provider-initiated ("wake") turns at the CLI's turn-start signal, give turn install and completion one owner, and make every provider turn recoverable by Stop and by a first-output watchdog |
+| wave | 1 (parallel, isolated worktree). If both are ready, merge after `turn-finalization`. This is a soft dependency (§8) |
+| verdict | **partially-confirmed**.<br>**(a) Meter: confirmed.**<br>**(b) Wake gap: partially confirmed.** No turn exists until the wake's first root assistant snapshot. But the client queue does *not* see the thread as idle: Ryco already maps the CLI's `status: requesting` frame to a turnless `running` session, and that frame arrives 1–4 ms after `init`. The real defects are the consequences of that turnless window (§1.2).<br>**Also confirmed:** three pre-existing races in `sendTurn` / `completeTurn` / `updateResumeCursor` (§1.3). They are fixed here because Part B depends on them |
+| size | M. Part A is S, Part B is M |
+| touched files | `apps/server/src/provider/Layers/ClaudeAdapter.ts`<br>`apps/server/src/provider/claudeContextUsage.ts` (new)<br>`apps/server/src/provider/claudeWakeTurn.ts` (new)<br>`docs/providers/claude.md` (one paragraph)<br>`docs/providers/claude-cache.md` (one sentence)<br>**Tests:** `apps/server/src/provider/Layers/ClaudeAdapter.test.ts`, `apps/server/src/provider/claudeContextUsage.test.ts` (new), `apps/server/src/provider/claudeWakeTurn.test.ts` (new) |
+| migrations | none |
+| contract changes | None. The change reuses the existing runtime events `thread.token-usage.updated` and `turn.aborted`, which ingestion already handles for every provider. Internal only: `ClaudeAdapterLiveOptions` gains `runtimeEventQueueCapacity`, default 2 048, as a test seam |
+| overlaps | **Behavioural:**<br>• `turn-finalization` (W1): empty provider turns in non-git folders.<br>• `queue-hold-drain` (W1): the outcome of a send that races a wake changes.<br>• `delegation-returns` (W2): same race outcome.<br>• `usage-limits` (W2): limit failures on provider turns.<br>**Same code in `ClaudeAdapter.ts`:**<br>• `claude-steering` (W2): `sendTurn`, `ClaudeTurnState`, `completeTurn`, `handleResultMessage`.<br>• `usage-limits` (W2): `completeTurn`, `handleResultMessage`, `handleSdkTelemetryMessage`.<br>• `rollback-correctness` (W2): `updateResumeCursor`, `ClaudeSessionContext`.<br>• `reactor-concurrency` (W3): interruption of `sendTurn`; `interruptTurn` must stay non-blocking.<br>• `restart-continuation` (W3): `startSession` context init.<br>Details in §8 |
 
 ---
 
@@ -27,7 +27,6 @@ Line numbers refer to the current worktree. `ClaudeAdapter.ts` is 5 219 lines. T
    - emits `thread.state.changed {state: "compacted"}`
 
    It never reads `compact_metadata.post_tokens`. The SDK declares that field as optional `number` (`sdk.d.ts:3430-3437`, SDK 0.3.263).
-
 2. **The result falls back to cumulative usage.** In `completeTurn` (`:2215-2410`), `lastGoodUsage = context.lastKnownTokenUsage` (`:2252`). When that value is undefined, `rawUsageSnapshot` becomes `accumulatedSnapshot` (`:2253-2267`). That snapshot is the cumulative `result.usage` (`:2246-2249`), clamped to the window by `normalizeClaudeTokenUsage` (`:538-543`).
 3. **Effect on `/compact`.** A `/compact` turn has no root assistant frame after the boundary. Its result therefore publishes the compaction call's cumulative input. That is roughly the pre-compaction size, clamped to the window, so the meter shows almost full right after compacting. The same bogus value also reaches `maybeEnableAutomaticCompaction` (`:2408-2409`).
 4. **A second path overwrites the gauge after a boundary.** Legacy task telemetry is gated on `!context.cacheObservation`:
@@ -35,7 +34,6 @@ Line numbers refer to the current worktree. `ClaudeAdapter.ts` is 5 219 lines. T
    - `task_notification` at `:3764-3790`
 
    The boundary clears `cacheObservation`, so this path is enabled again. A task frame with `usage` for a task that has no recorded `toolUseId` then overwrites the gauge with task totals. One example is a task first seen after a CLI restart.
-
 5. **How the meter reads the value.** Ingestion upserts one activity per thread, `claude-context-usage:<threadId>` (`ProviderRuntimeIngestion.ts:1018-1037`). `deriveLatestContextWindowSnapshot` (`apps/web/src/lib/contextWindow.ts:76`) renders its `usedTokens`.
 6. **Test gap.** The existing `/compact` attribution tests (`ClaudeAdapter.test.ts:5158-5231`) never assert usage.
 
@@ -47,17 +45,15 @@ t3 reference: `ClaudeAdapterV2.ts:5567-5600` publishes `round(post_tokens)` at t
 
 1. **Where turns are created.** Only two places create a turn:
    - `sendTurn` (`:4852-4990`)
-   - `handleAssistantMessage` (`:3047-3091`), on the first _root_ assistant snapshot, after the subagent early return (`:2945-3008`)
+   - `handleAssistantMessage` (`:3047-3091`), on the first *root* assistant snapshot, after the subagent early return (`:2945-3008`)
 
    `system/init` only emits `session.configured` (`:3428-3436`).
-
 2. **Stream handlers need a turn.** These all require `context.turnState`:
    - text and thinking deltas (`:2470-2474`)
    - thinking `content_block_start` (`:2638`)
    - `ensureAssistantTextBlock` (`:1849-1851`)
 
    So the first content block of a wake turn, usually the thinking block, is dropped. Text is backfilled from the snapshot but does not stream.
-
 3. **`system/status` already marks the session running.** Ryco maps `system/status` (`:3437-3464`) to `session.state.changed {state: "running", reason: "status:<status>"}`. While idle, this event carries no `turnId`. Ingestion then projects `status: running, activeTurnId: null` (`ProviderRuntimeIngestion.ts:2437-2441`, `orchestrationSessionStatusFromRuntimeState` `:425-443`).
 
 **Real CLI evidence.** Aggregated from local native and canonical provider logs, Claude Code 2.1.280–2.1.288:
@@ -69,12 +65,12 @@ t3 reference: `ClaudeAdapterV2.ts:5567-5600` publishes `round(post_tokens)` at t
 - **Time to the next root output is short, except during compaction.** "Next root output" means a root stream_event, assistant, user, result, `api_retry` or `compact_boundary`. After a `status: requesting` frame it came at p50 1.5 s, p99 6.9 s, and at most 34 s outside compaction. During compaction, `status: compacting` repeats every 30 s.
 - **Outcomes of the 53 `init` frames that arrived while Ryco had no turn:**
 
-  | Count | Sequence                                                                                               | Note                                                               |
-  | ----- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-  | 49    | `requesting` → assistant                                                                               | normal wake                                                        |
-  | 2     | `result success num_turns: 0`, no `requesting`                                                         | empty notification turns                                           |
-  | 1     | `requesting` → `result error_during_execution` (`origin.kind: "task-notification"`), no root assistant | Ryco emitted a turnless `runtime.error` and **no lifecycle event** |
-  | 1     | `requesting` → `message_start` → silence                                                               |                                                                    |
+  | Count | Sequence | Note |
+  | --- | --- | --- |
+  | 49 | `requesting` → assistant | normal wake |
+  | 2 | `result success num_turns: 0`, no `requesting` | empty notification turns |
+  | 1 | `requesting` → `result error_during_execution` (`origin.kind: "task-notification"`), no root assistant | Ryco emitted a turnless `runtime.error` and **no lifecycle event** |
+  | 1 | `requesting` → `message_start` → silence | |
 
 - **The canonical log of a wake.** `session.configured` and `session.state.changed {running, status:requesting}` appear at `init`+1 ms with no `turnId`. `turn.started` follows 2.9 s later, together with the first snapshot.
 
@@ -86,7 +82,6 @@ t3 reference: `ClaudeAdapterV2.ts:5567-5600` publishes `round(post_tokens)` at t
   - The sidebar shows working (`threadActivityStatus.ts:30`).
 
   The window in which a queued send can slip through is only init→status, 1–4 ms. The 20–60 ms between notification and `init` is a window no signal can close.
-
 - **But the session has no turn for 1.5–34 s.** Four defects follow from that:
   1. **Sends are accepted into the wake.** The decider invariant (`decider.ts:999-1006`) and the reactor guard (`ProviderCommandReactor.ts:1129-1140`) only block while `activeTurnId` is set. A turn start from the server side is therefore accepted. Examples are an Agent Control return, another client, or a send that races the projection. The CLI queues that prompt behind the wake, and the wake's output streams into the user's turn.
   2. **A wake that ends without a root snapshot leaves the session stuck.** There is no turn to complete: the turnless branch of `completeTurn` (`:2279-2306`) only logs and publishes usage. Nothing resets the turnless `running` state, so the session stays running until the next turn or until it is reaped, and the client queue stays blocked. This was observed once (table above).
@@ -104,12 +99,11 @@ t3 reference: `ClaudeAdapterV2.ts:5567-5600` publishes `round(post_tokens)` at t
    - S is then overwritten and never receives `turn.completed`. Ingestion rejects `turn.started(U)` as conflicting (`ProviderRuntimeIngestion.ts:2351`, `:2391-2396`), and also rejects U's completion. The thread stays running on S.
 
    This is reachable today through the assistant-frame path alone.
-
 2. **`completeTurn` can close the same turn twice.**
    - It reads `context.turnState` only after several yields (`:2219-2279`) and clears it unconditionally at the end (`:2397-2405`).
    - Every emit can suspend on `Queue.bounded(2_048)` (`:1595`, `:1647`).
    - So when a `sendTurn` close races the stream fiber's result close, S gets two `turn.completed` events, and the later finisher wipes U's `turnState` and session.
-3. **`updateResumeCursor` can write back a stale session.** At `:1834-1838` it spreads `context.session` and then yields (`nowIso`) _inside_ the object literal. A concurrent install's `status` / `activeTurnId` is then overwritten with the stale copy.
+3. **`updateResumeCursor` can write back a stale session.** At `:1834-1838` it spreads `context.session` and then yields (`nowIso`) *inside* the object literal. A concurrent install's `status` / `activeTurnId` is then overwritten with the stale copy.
 
 ---
 
@@ -126,13 +120,11 @@ t3 reference: `ClaudeAdapterV2.ts:5567-5600` publishes `round(post_tokens)` at t
 **1. Trigger.** A root `system/status` frame with `status` `requesting` or `compacting` opens a provider turn ("wake-signal") if no turn is open. Root `system/init` opens one only on CLIs that have never been seen to emit `status: requesting` in this session. That is the legacy fallback, and it matches t3.
 
 Why `status` rather than t3's `init`:
-
 - `status: requesting` arrives 1–4 ms after `init`, so it is effectively as early.
 - It is the exact frame that today makes the session turnlessly `running`, so the turnless window disappears instead of moving.
 - It is emitted only when the CLI is about to call the model. Empty notification turns (`init → result num_turns: 0`, 2 of 53 above) therefore never open a turn. Without this, each would trigger a desktop "finished responding" notification, a checkpoint capture and an empty work-log entry.
 
 **2. Gate (deny list, pure).** A wake signal opens nothing when any of these hold:
-
 - a turn is open
 - the session is stopped
 - no prompt turn was ever installed on this runtime (resume or startup handshake)
@@ -141,20 +133,17 @@ Why `status` rather than t3's `init`:
 There is no allow list and no requirement for a notification first. Cron, `ScheduleWakeup`, Monitor, rate-limit and lost-notification wakes are all covered, as in t3.
 
 **3. One owner for install and completion.**
-
 - `makeClaudeTurnState(...)` is the only turn-state constructor.
 - `completeTurn` claims the turn synchronously at entry. A concurrent close waits on the claim's `Deferred` instead of emitting a second lifecycle event. The claimer clears `context.turnState` / `session` only if it still owns them.
 - `sendTurn` counts itself in `turnInstallsInFlight` through `Effect.acquireUseRelease`. After its awaits it loops `while (context.turnState) completeTurn(...)` and then installs synchronously, with no yield between the last check and the install.
 - `updateResumeCursor` computes its timestamp before spreading `context.session`.
 
 **4. Recovery for every provider turn.** A provider turn is any turn with `openedBy !== "prompt"`.
-
 - **Stop grace.** `interruptTurn` forks a 5 s grace check, so the reactor is not blocked. If the same provider turn is still open after the grace and the CLI never reported a result, the adapter finishes it locally as `interrupted`.
 - **First-output watchdog.** A wake-signal turn that has produced no root output 120 s after opening is ended with `turn.aborted`. "Root output" means a stream_event, assistant, user, result, `api_retry`, `compact_boundary` or `status: compacting` frame. The watchdog uses `turn.aborted` rather than `turn.completed` so that ingestion settles `latestTurn` through `thread.turn.interrupt`, with no dependency on bug 5 and no checkpoint capture.
 - **Why 120 s.** The maximum observed time from `requesting` to the first root output outside compaction is 34 s, and compaction sends a heartbeat every 30 s.
 
 **5. Unchanged.**
-
 - The assistant-frame fallback (`openedBy: "assistant-output"`) still opens a turn when no signal did.
 - Result correlation by `promptUuid` (`:3138-3159`) is unchanged.
 - Provider turns are **never** bound to Agent Control authority: no `bindTurn`, exactly as today's synthetic turns. Exact-turn binding stays user-prompt-only.
@@ -184,7 +173,6 @@ export function selectClaudeResultUsageGauge(input: {
 ```
 
 **`claudePostCompactionUsage`:**
-
 - Reads `post_tokens` from the metadata object.
 - Returns `undefined` unless the value is a finite number and `Math.round(post) > 0`.
 - The window counts only when it is a safe integer > 0.
@@ -192,7 +180,6 @@ export function selectClaudeResultUsageGauge(input: {
 - Returns `{ usedTokens, ...(maxTokens ? { maxTokens } : {}) }`, with no `claudeCache`.
 
 **`selectClaudeResultUsageGauge`:**
-
 - With `lastGauge`, it returns exactly today's merge: the gauge, plus `maxTokens` when valid, plus `totalProcessedTokens` when the cumulative total is greater than `lastGauge.usedTokens`.
 - Without `lastGauge`, it returns `cumulativeIsGauge ? cumulative : undefined`.
 
@@ -225,7 +212,6 @@ export const CLAUDE_PROVIDER_TURN_STOP_GRACE_MS = 5_000;
 ```
 
 **`isClaudeRootTurnOutput`** returns true for:
-
 - `stream_event` / `assistant` / `user` with a null or absent `parent_tool_use_id`
 - `result`
 - system `compact_boundary`
@@ -315,15 +301,7 @@ const completeTurn = Effect.fn("completeTurn")(function* (
   }
   const completion = Deferred.makeUnsafe<void>();
   turnState.completion = completion;
-  yield* finishClaimedTurn(
-    context,
-    turnState,
-    completion,
-    status,
-    errorMessage,
-    result,
-    options,
-  ).pipe(
+  yield* finishClaimedTurn(context, turnState, completion, status, errorMessage, result, options).pipe(
     Effect.ensuring(
       Effect.sync(() => {
         // Failed or interrupted before the turn was detached: release the claim so a later close can retry.
@@ -336,22 +314,15 @@ const completeTurn = Effect.fn("completeTurn")(function* (
 ```
 
 `finishClaimedTurn` is today's body from `:2308` onward, with three changes:
-
 - It calls `resolveResultUsageSnapshot` first.
 - It emits `turn.aborted { reason: options.abortReason }` instead of `turn.completed` when `options?.abortReason` is set.
 - It ends like this:
 
 ```ts
-const updatedAt = yield * nowIso;
+const updatedAt = yield* nowIso;
 if (context.turnState === turnState) {
   context.turnState = undefined;
-  context.session = {
-    ...context.session,
-    status: "ready",
-    activeTurnId: undefined,
-    updatedAt,
-    ...lastError,
-  };
+  context.session = { ...context.session, status: "ready", activeTurnId: undefined, updatedAt, ...lastError };
 }
 Deferred.doneUnsafe(completion, Effect.void); // release waiters before the tail effects
 // unchanged tail: retireTurn, updateResumeCursor, maybeEnableAutomaticCompaction (completed only)
@@ -366,20 +337,14 @@ A waiter that brings its own `result` drops that result's usage. That is accepta
 const sendTurn = Effect.fn("sendTurn")(function* (input) {
   const context = yield* requireSession(input.threadId);
   return yield* Effect.acquireUseRelease(
-    Effect.sync(() => {
-      context.turnInstallsInFlight += 1;
-    }),
+    Effect.sync(() => { context.turnInstallsInFlight += 1; }),
     () => sendTurnOnContext(context, input),
-    () =>
-      Effect.sync(() => {
-        context.turnInstallsInFlight -= 1;
-      }),
+    () => Effect.sync(() => { context.turnInstallsInFlight -= 1; }),
   );
 });
 ```
 
 `sendTurnOnContext` is the current body with four changes:
-
 - **Delete the top-of-function close** (`:4859-4863`).
 - **Keep the model and permission handling unchanged.**
 - **Compute ids and time first.** Compute `promptUuid`, `turnId` and `startedAt` before the loop.
@@ -389,57 +354,46 @@ const sendTurn = Effect.fn("sendTurn")(function* (input) {
 // Closes a stale provider turn, one opened while the awaits above yielded, or waits for an
 // in-flight completion. Re-checks until no turn is open.
 while (context.turnState !== undefined) {
-  yield * completeTurn(context, "completed");
+  yield* completeTurn(context, "completed");
 }
 // No yield between the last check and the install.
 const turnState = makeClaudeTurnState({ turnId, promptUuid, startedAt, openedBy: "prompt" });
 context.turnState = turnState;
-context.session = {
-  ...context.session,
-  status: "running",
-  activeTurnId: turnId,
-  updatedAt: startedAt,
-};
+context.session = { ...context.session, status: "running", activeTurnId: turnId, updatedAt: startedAt };
 context.promptSent = true;
 ```
 
-The rest is unchanged: `turn.started`, host-context prefix, prompt offer, and `bindTurn` (prompt turns only).
+  The rest is unchanged: `turn.started`, host-context prefix, prompt offer, and `bindTurn` (prompt turns only).
 
 **Part B: opening provider turns.**
 
 13. **One opener: `startProviderTurn(context, openedBy: "wake-signal" | "assistant-output")`.** It replaces the inline block at `:3047-3091`:
 
 ```ts
-const turnId = TurnId.make(yield * Effect.sync(() => crypto.randomUUID()));
-const startedAt = yield * nowIso;
+const turnId = TurnId.make(yield* Effect.sync(() => crypto.randomUUID()));
+const startedAt = yield* nowIso;
 // Synchronous from here to the install: re-check after the yields above.
 if (context.turnState !== undefined || context.stopped) return;
 if (openedBy === "wake-signal" && (context.turnInstallsInFlight > 0 || !context.promptSent)) return;
 const turnState = makeClaudeTurnState({ turnId, startedAt, openedBy });
 context.turnState = turnState;
-context.session = {
-  ...context.session,
-  status: "running",
-  activeTurnId: turnId,
-  updatedAt: startedAt,
-};
+context.session = { ...context.session, status: "running", activeTurnId: turnId, updatedAt: startedAt };
 // offer turn.started exactly as today (:3071-3090);
 // raw.method stays "claude/synthetic-turn-start", raw.payload becomes { openedBy }.
 if (openedBy === "wake-signal") {
-  yield *
-    Effect.sleep(Duration.millis(CLAUDE_WAKE_TURN_FIRST_OUTPUT_TIMEOUT_MS)).pipe(
-      Effect.andThen(
-        Effect.suspend(() =>
-          context.turnState === turnState && !turnState.rootOutputObserved && !context.stopped
-            ? completeTurn(context, "interrupted", WAKE_NO_OUTPUT_REASON, undefined, {
-                abortReason: WAKE_NO_OUTPUT_REASON,
-              })
-            : Effect.void,
-        ),
+  yield* Effect.sleep(Duration.millis(CLAUDE_WAKE_TURN_FIRST_OUTPUT_TIMEOUT_MS)).pipe(
+    Effect.andThen(
+      Effect.suspend(() =>
+        context.turnState === turnState && !turnState.rootOutputObserved && !context.stopped
+          ? completeTurn(context, "interrupted", WAKE_NO_OUTPUT_REASON, undefined, {
+              abortReason: WAKE_NO_OUTPUT_REASON,
+            })
+          : Effect.void,
       ),
-      Effect.ignoreCause({ log: true }),
-      Effect.forkDetach,
-    );
+    ),
+    Effect.ignoreCause({ log: true }),
+    Effect.forkDetach,
+  );
 }
 ```
 
@@ -447,7 +401,7 @@ if (openedBy === "wake-signal") {
 - `handleAssistantMessage` becomes `if (!context.turnState) yield* startProviderTurn(context, "assistant-output");`. This fallback has no gate, because the dropped-delta problem must never come back. Update the comment at `:3047-3048`, and the comment in the turnless branch (`:2295-2298`), to mention wake signals.
 - Do **not** call `context.agentControl.bindTurn` here.
 
-14. **`handleSystemMessage`** (`:3235`). Insert this _before_ `const stamp` / `const base` (`:3243-3256`), so that the `session.state.changed` / `session.configured` of the triggering frame carry the new `turnId`:
+14. **`handleSystemMessage`** (`:3235`). Insert this *before* `const stamp` / `const base` (`:3243-3256`), so that the `session.state.changed` / `session.configured` of the triggering frame carry the new `turnId`:
 
 ```ts
 if (message.subtype === "status" && message.status === "requesting") {
@@ -465,7 +419,7 @@ if (
     requestingStatusObserved: context.requestingStatusObserved,
   })
 ) {
-  yield * startProviderTurn(context, "wake-signal");
+  yield* startProviderTurn(context, "wake-signal");
 }
 ```
 
@@ -488,22 +442,17 @@ Marking after routing means a turn opened by `status: compacting` is marked by i
     - `turnId === undefined || target.turnId === turnId`. The reactor passes no turn id (`ProviderCommandReactor.ts:1432-1435`).
 
 ```ts
-yield *
-  Effect.sleep(Duration.millis(CLAUDE_PROVIDER_TURN_STOP_GRACE_MS)).pipe(
-    Effect.andThen(
-      Effect.suspend(() =>
-        context.turnState === target && !context.stopped
-          ? completeTurn(
-              context,
-              "interrupted",
-              "Claude did not end the background turn after Stop.",
-            )
-          : Effect.void,
-      ),
+yield* Effect.sleep(Duration.millis(CLAUDE_PROVIDER_TURN_STOP_GRACE_MS)).pipe(
+  Effect.andThen(
+    Effect.suspend(() =>
+      context.turnState === target && !context.stopped
+        ? completeTurn(context, "interrupted", "Claude did not end the background turn after Stop.")
+        : Effect.void,
     ),
-    Effect.ignoreCause({ log: true }),
-    Effect.forkDetach,
-  );
+  ),
+  Effect.ignoreCause({ log: true }),
+  Effect.forkDetach,
+);
 ```
 
 `interruptTurn` must not wait for the grace (bug 13 / `reactor-concurrency`). Log `claude.turn.provider-turn-finalized-after-stop` when the grace actually completes the turn.
@@ -528,7 +477,6 @@ yield *
   - it sends a `completionReturns` terminal of `interrupted` (`:3084-3110`)
 
   `CheckpointReactor` ignores it, which is correct because the turn produced no output.
-
 - **Internal only:** `ClaudeAdapterLiveOptions.runtimeEventQueueCapacity`.
 
 ---
@@ -536,7 +484,6 @@ yield *
 ## 5. Tests
 
 Conventions:
-
 - Use `@effect/vitest` `it.effect`. Use TestClock (`import { TestClock } from "effect/testing"`) for the watchdog and the grace.
 - Stream fixtures must carry `parent_tool_use_id: null`. Otherwise they are dropped as subagent narration (`:2430-2468`).
 - Status fixture: `{ type: "system", subtype: "status", status: "requesting", uuid, session_id }`.
@@ -601,10 +548,10 @@ Fixtures: use one model id, for example `claude-sonnet-4-6`, in both the assista
   2. While idle, emit `task_notification` and then `init`. Assert there is no `turn.started` yet.
   3. Emit `status requesting`. Assert:
      - `turn.started(S)` with `raw.payload.openedBy === "wake-signal"`
-     - the `session.state.changed` with `reason "status:requesting"` carries `turnId S` and comes _after_ `turn.started(S)`
+     - the `session.state.changed` with `reason "status:requesting"` carries `turnId S` and comes *after* `turn.started(S)`
      - `listSessions()[0].activeTurnId === S`
   4. Emit root `stream_event` frames: `message_start`, `content_block_start` (thinking, index 0) and `thinking_delta`.
-  5. Assert `item.started` (reasoning) and `content.delta` with `turnId S` _before_ any assistant snapshot.
+  5. Assert `item.started` (reasoning) and `content.delta` with `turnId S` *before* any assistant snapshot.
   6. Emit the root assistant snapshot and then `result {origin: {kind: "task-notification"}}`.
   7. Assert exactly one `turn.started` and one `turn.completed` for S, and `activeTurnId` undefined afterwards.
 - **B2 (guards):**
@@ -652,12 +599,11 @@ Fixtures: use one model id, for example `claude-sonnet-4-6`, in both the assista
   - `listSessions()[0].activeTurnId` is undefined at the end
 
   Today this deterministically emits two `turn.completed(S)`.
-
 - **B7 (guard, Agent Control).** Extend the bridge test at `:394`. After a wake turn opens and completes, `bindTurnAuthority` was called only for the prompt turn.
 - **Unchanged existing tests that must keep passing:**
   - `does not emit turn.completed for a result with no active turn` (`:4853`)
   - the `/compact` attribution loop (`:5158-5231`)
-  - the auto-compaction test (`:2504-2597`). Its unrealistic _idle_ `status: compacting` fixture now opens a provider turn; its assertions are unaffected.
+  - the auto-compaction test (`:2504-2597`). Its unrealistic *idle* `status: compacting` fixture now opens a provider turn; its assertions are unaffected.
 
 ### Validation (proportional)
 
@@ -668,7 +614,6 @@ bun run fmt:check && bun lint
 ```
 
 **Manual QA.** For desktop dev, rebuild the server bundle first (`bun run --filter ryco-cli build:bundle`). Then:
-
 1. **Background wake.** Ask Claude to run `sleep 20 && echo done` in the background and end its turn. In the canonical provider log, the wake shows:
    - `turn.started` (`openedBy: wake-signal`) right after `session.configured`
    - `session.state.changed status:requesting` with that turn id
@@ -707,7 +652,6 @@ bun run fmt:check && bun lint
    - in non-git folders, `latestTurn` stays `running` until `turn-finalization` (bug 5) lands
 
    Watchdog closures avoid all three by using `turn.aborted`.
-
 5. **Waiting on another fiber's completion.** `sendTurn` can now wait for the stream fiber's in-flight completion. That wait is bounded by runtime-event backpressure, which is the same dependency `sendTurn` already has when it emits `turn.started`. There is no new lock cycle, because waiters never hold anything the claimer needs.
 6. **Restructuring `completeTurn` is the riskiest edit.** It is covered by B5/B6 and by every existing completion test in the file (102 today).
 
@@ -728,8 +672,7 @@ bun run fmt:check && bun lint
   - the `handleResultMessage` correlation
 
   Steering must decide what happens when the open turn is a provider turn: `openedBy !== "prompt"`, no `promptUuid`, no Agent Control binding. It must create turn state only through `makeClaudeTurnState` and respect `turnInstallsInFlight`. Land this package first.
-
-- **`usage-limits` (W2), same file.** It touches `completeTurn`, `handleResultMessage`, and `handleSdkTelemetryMessage`, where `rate_limit_event` now carries the wake turn id. A wake that hits a limit is now a failed _provider_ turn opened at `requesting` (today it is a turnless error or a synthetic turn opened late). Classify it as Limited, but never auto-resume a provider turn as a user turn.
+- **`usage-limits` (W2), same file.** It touches `completeTurn`, `handleResultMessage`, and `handleSdkTelemetryMessage`, where `rate_limit_event` now carries the wake turn id. A wake that hits a limit is now a failed *provider* turn opened at `requesting` (today it is a turnless error or a synthetic turn opened late). Classify it as Limited, but never auto-resume a provider turn as a user turn.
 - **`rollback-correctness` (W2), same file.** It touches `updateResumeCursor` (reordered here), the `ClaudeSessionContext` fields, and `context.turns`, which also holds provider turns. Resume-at-target must treat provider turns like any other turn.
 - **`delegation-returns` (W2), behavioural.** `CompletionReturnDelivery` into a parent that has a wake turn open now meets the decider/reactor active-turn rejection during the wake's think time (1.5–34 s). Before, it was accepted into the turnless window. Delivery must wait or retry, not fail.
 - **`delegation-lineage` (W2).** No overlap.
@@ -738,7 +681,6 @@ bun run fmt:check && bun lint
   - `Effect.ensuring` releases a `completeTurn` claim
 
   The grace in `interruptTurn` is forked, so it must stay non-blocking.
-
 - **`provider-effect-outbox` (W3).** A replayed interrupt of a provider turn behaves exactly like a user Stop, grace included.
 - **`restart-continuation` (W3).** It may add context fields in the `startSession` literal. A continuation prompt goes through `sendTurn` and sets `promptSent`.
 - **No overlap:** `settlement-signals`, `acp-message-ids`, `delegation-guard-restart`, `provider-compat`.
@@ -757,16 +699,16 @@ bun run fmt:check && bun lint
 
 ## 10. Review resolution
 
-| #   | Critique item                                                                       | Decision                          | Reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --- | ----------------------------------------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| —   | Verdict "both confirmed"                                                            | **Disputed for (b), re-verified** | (b) is partially confirmed: `status: requesting` already projects a turnless `running` 1–4 ms after `init`, so the client queue does not see an idle thread. The defects are the turnless window's consequences (§1.2). (a) is confirmed                                                                                                                                                                                                                                                                                                                                      |
-| 1   | **Major:** phantom wake turn cannot be recovered                                    | **Accepted**                      | Two recovery paths: Stop grace (5 s, forked, any provider turn) and the first-output watchdog (120 s, `turn.aborted`). Risk text corrected. The `status` trigger also makes phantoms far less likely than `init` would                                                                                                                                                                                                                                                                                                                                                        |
-| 2   | **Major:** `completeTurn` is not safe to re-enter; the `sendTurn` fix is incomplete | **Accepted**                      | Synchronous claim with a per-turn `Deferred`. Concurrent closes wait. The claimer clears state only while it still owns it; the claim is released on failure. `sendTurn` loops `while (turnState) completeTurn` and then installs without yielding. Also fixed the stale spread in `updateResumeCursor`. Test B6 makes the race deterministic through `runtimeEventQueueCapacity`                                                                                                                                                                                             |
-| 3   | Empty synthetic turns opened by `init` have side effects                            | **Accepted, via a design change** | The primary trigger is root `status` (`requesting`/`compacting`), so empty notification turns (2 of 53 logged) never open a turn. `init` is used only on legacy CLIs. Watchdog closures use `turn.aborted` and capture no checkpoint. Remaining effects and the soft `turn-finalization` dependency are listed (§7.4, §8)                                                                                                                                                                                                                                                     |
-| 4   | Gate is narrower than t3; `session_state_changed` evidence was wrong                | **Accepted, one part rejected**   | The allow list is replaced by a deny list (open turn, stopped, no prompt yet, install in flight), so cron, Monitor, rate-limit and lost-notification wakes are covered. "Arm on `background_tasks_changed`" is moot because nothing is armed. The `session_state_changed` evidence is corrected (opt-in env var; §1.2, §9). **Rejected:** "ignore init after Stop until the next prompt". A post-Stop wake that reaches `requesting` is real model work (observed in logs). Suppressing it would recreate the turnless `running` window and leave Stop with nothing to target |
-| 5   | `turnInstallsInFlight` can leak; the re-check in `startSyntheticTurn` is incomplete | **Accepted**                      | `Effect.acquireUseRelease` is used. `startProviderTurn` re-checks `turnState`, `stopped`, `turnInstallsInFlight` and `promptSent` synchronously before installing                                                                                                                                                                                                                                                                                                                                                                                                             |
-| 6   | Part A: legacy telemetry overwrite and undershoot                                   | **Accepted**                      | The `mainLoopUsageObserved` gate replaces `!cacheObservation`. Test A4 is added. The undershoot is documented (§6 and docs)                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| 7   | Justification inaccuracies; B4 premise; reactor rejection not mentioned             | **Accepted**                      | The orphan is stated as pre-existing and reachable through the assistant-frame path (§1.3). The decider and reactor rejection outcome is in risks and overlaps. Line references were refreshed. The old "user send during an open wake" test is dropped: the normal path cannot reach it. B5/B6 now cover the actual adapter races                                                                                                                                                                                                                                            |
-| 8   | Test gaps                                                                           | **Accepted, adapted**             | Pure-module unit tests are added, plus A4, A5, B3 (watchdog), B4 (Stop grace), B5, B6, B7 (Agent Control binding), and the `parent_tool_use_id: null` fixture note. The suggested "prompt clears an armed gate" and "nested / `skip_transcript` notification does not arm" tests are moot because there is no arming. They are replaced by B2(i)–(iv) and the `claudeWakeSignal` subagent case                                                                                                                                                                                |
-| 9   | Turn-state literal is duplicated                                                    | **Accepted**                      | `makeClaudeTurnState` is the only constructor, used by `sendTurn` and `startProviderTurn`. `claude-steering` must use it too                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| 10  | Overlaps `usage-limits` and `delegation-returns` are missing                        | **Accepted**                      | Both are added with concrete obligations (§8)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| # | Critique item | Decision | Reason |
+| --- | --- | --- | --- |
+| — | Verdict "both confirmed" | **Disputed for (b), re-verified** | (b) is partially confirmed: `status: requesting` already projects a turnless `running` 1–4 ms after `init`, so the client queue does not see an idle thread. The defects are the turnless window's consequences (§1.2). (a) is confirmed |
+| 1 | **Major:** phantom wake turn cannot be recovered | **Accepted** | Two recovery paths: Stop grace (5 s, forked, any provider turn) and the first-output watchdog (120 s, `turn.aborted`). Risk text corrected. The `status` trigger also makes phantoms far less likely than `init` would |
+| 2 | **Major:** `completeTurn` is not safe to re-enter; the `sendTurn` fix is incomplete | **Accepted** | Synchronous claim with a per-turn `Deferred`. Concurrent closes wait. The claimer clears state only while it still owns it; the claim is released on failure. `sendTurn` loops `while (turnState) completeTurn` and then installs without yielding. Also fixed the stale spread in `updateResumeCursor`. Test B6 makes the race deterministic through `runtimeEventQueueCapacity` |
+| 3 | Empty synthetic turns opened by `init` have side effects | **Accepted, via a design change** | The primary trigger is root `status` (`requesting`/`compacting`), so empty notification turns (2 of 53 logged) never open a turn. `init` is used only on legacy CLIs. Watchdog closures use `turn.aborted` and capture no checkpoint. Remaining effects and the soft `turn-finalization` dependency are listed (§7.4, §8) |
+| 4 | Gate is narrower than t3; `session_state_changed` evidence was wrong | **Accepted, one part rejected** | The allow list is replaced by a deny list (open turn, stopped, no prompt yet, install in flight), so cron, Monitor, rate-limit and lost-notification wakes are covered. "Arm on `background_tasks_changed`" is moot because nothing is armed. The `session_state_changed` evidence is corrected (opt-in env var; §1.2, §9). **Rejected:** "ignore init after Stop until the next prompt". A post-Stop wake that reaches `requesting` is real model work (observed in logs). Suppressing it would recreate the turnless `running` window and leave Stop with nothing to target |
+| 5 | `turnInstallsInFlight` can leak; the re-check in `startSyntheticTurn` is incomplete | **Accepted** | `Effect.acquireUseRelease` is used. `startProviderTurn` re-checks `turnState`, `stopped`, `turnInstallsInFlight` and `promptSent` synchronously before installing |
+| 6 | Part A: legacy telemetry overwrite and undershoot | **Accepted** | The `mainLoopUsageObserved` gate replaces `!cacheObservation`. Test A4 is added. The undershoot is documented (§6 and docs) |
+| 7 | Justification inaccuracies; B4 premise; reactor rejection not mentioned | **Accepted** | The orphan is stated as pre-existing and reachable through the assistant-frame path (§1.3). The decider and reactor rejection outcome is in risks and overlaps. Line references were refreshed. The old "user send during an open wake" test is dropped: the normal path cannot reach it. B5/B6 now cover the actual adapter races |
+| 8 | Test gaps | **Accepted, adapted** | Pure-module unit tests are added, plus A4, A5, B3 (watchdog), B4 (Stop grace), B5, B6, B7 (Agent Control binding), and the `parent_tool_use_id: null` fixture note. The suggested "prompt clears an armed gate" and "nested / `skip_transcript` notification does not arm" tests are moot because there is no arming. They are replaced by B2(i)–(iv) and the `claudeWakeSignal` subagent case |
+| 9 | Turn-state literal is duplicated | **Accepted** | `makeClaudeTurnState` is the only constructor, used by `sendTurn` and `startProviderTurn`. `claude-steering` must use it too |
+| 10 | Overlaps `usage-limits` and `delegation-returns` are missing | **Accepted** | Both are added with concrete obligations (§8) |
