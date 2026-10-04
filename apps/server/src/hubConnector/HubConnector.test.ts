@@ -490,6 +490,126 @@ describe("HubConnector", () => {
     expect(connector.e2eeSnapshot().accountGrantReady).toBe(false);
   });
 
+  describe("E2EE statement republication", () => {
+    async function minor3Connector(
+      readE2eeAdvertisement: HubIdentityRuntimeShape["readE2eeAdvertisement"],
+    ) {
+      const clock = scheduler();
+      const socket = new FakeSocket();
+      const activeIdentity = identity();
+      const connector = new HubConnector({
+        config: enabledConfig,
+        identity: identity({
+          createRelayAuthenticationFrame: async () => {
+            const frame = await activeIdentity.createRelayAuthenticationFrame(
+              "https://relay.example",
+              { protocolMajor: 1, protocolMinor: 3 },
+            );
+            return { ...frame, protocolMinor: 3 } as RelayNodeAuthHandshake;
+          },
+          readE2eeAdvertisement,
+        }),
+        transport: { open: () => socket },
+        channels: { open: async () => Promise.reject(new Error("unused")) },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+      });
+      const starting = connector.start();
+      await settle();
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "ready",
+          protocolMajor: 1,
+          protocolMinor: 3,
+          limits: RELAY_INITIAL_LIMITS,
+        }),
+      } as MessageEvent);
+      await starting;
+      await settle();
+      const statementsSent = () =>
+        socket.sent
+          .map((bytes) => decodeRelayFrame(bytes))
+          .filter((result) => result.ok && result.value.type === "node.e2ee.statement").length;
+      // The Hub's heartbeat, so a long wait is not mistaken for a dead socket.
+      const advance = async (milliseconds: number) => {
+        socket.emit("message", {
+          data: encoded({
+            type: "ping",
+            protocolMajor: 1,
+            protocolMinor: 3,
+            nonce: new Uint8Array(8).fill(9),
+          }),
+        } as MessageEvent);
+        await settle();
+        await clock.advance(milliseconds);
+        await settle();
+      };
+      return { clock, connector, statementsSent, advance };
+    }
+
+    it("retries an advertisement it could not build instead of waiting for a reconnect", async () => {
+      let unavailable = 2;
+      const { clock, connector, statementsSent, advance } = await minor3Connector(async () =>
+        unavailable-- > 0
+          ? { kind: "unavailable" as const, reason: "identity_unavailable" as const }
+          : { kind: "available" as const, advertisement: e2eeAdvertisement(1, 2_000_000) },
+      );
+      expect(connector.status().state).toBe("online");
+      expect(statementsSent()).toBe(0);
+
+      await advance(30_000);
+      expect(statementsSent()).toBe(0);
+      // Backing off: the second attempt is a minute after the first.
+      await advance(30_000);
+      expect(statementsSent()).toBe(0);
+      await advance(30_000);
+      expect(statementsSent()).toBe(1);
+      expect(connector.e2eeSnapshot().currentStatementDigest).toBeDefined();
+      expect(connector.status().state).toBe("online");
+      await connector.stop();
+      expect(clock.timers.size).toBe(0);
+    });
+
+    it("retries a republish that threw instead of closing every live channel", async () => {
+      let calls = 0;
+      let failing = 0;
+      const { clock, connector, statementsSent } = await minor3Connector(async () => {
+        calls += 1;
+        if (failing > 0) {
+          failing -= 1;
+          throw new Error("send queue full");
+        }
+        return { kind: "available" as const, advertisement: e2eeAdvertisement(calls, 2_000_000) };
+      });
+      expect(statementsSent()).toBe(1);
+
+      failing = 1;
+      await expect(connector.refreshE2eeState()).rejects.toThrow();
+      await settle();
+      // Withdrawn, but the connection — and every channel on it — stays up.
+      expect(connector.status().state).toBe("online");
+      expect(connector.e2eeSnapshot().currentStatementDigest).toBeUndefined();
+      await clock.advance(1_000);
+      await settle();
+      expect(statementsSent()).toBe(2);
+      expect(connector.status().state).toBe("online");
+
+      // A failure that persists is a wedged control path, and is rebuilt.
+      failing = 3;
+      await expect(connector.refreshE2eeState()).rejects.toThrow();
+      await settle();
+      await clock.advance(1_000);
+      await settle();
+      expect(connector.status().state).toBe("online");
+      await clock.advance(2_000);
+      await settle();
+      expect(connector.status()).toMatchObject({ state: "degraded", failure: "internal_error" });
+      await connector.stop();
+    });
+  });
+
   it("retries a transient proof preflight with fresh material and one timer", async () => {
     const clock = scheduler();
     const activeIdentity = identity();

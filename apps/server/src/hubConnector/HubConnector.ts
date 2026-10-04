@@ -44,7 +44,12 @@ import {
   type RelayChannelSessionFactory,
 } from "./RelayChannelRegistry.ts";
 import { resolveHubEnrollmentLabel } from "./HubEnrollmentLabel.ts";
-import { reconnectDelay, slowRetryDelay, type SlowRetryPolicy } from "./ReconnectPolicy.ts";
+import {
+  reconnectDelay,
+  type ReconnectPolicyConfig,
+  slowRetryDelay,
+  type SlowRetryPolicy,
+} from "./ReconnectPolicy.ts";
 import { RelaySendQueue } from "./RelaySendQueue.ts";
 import {
   makeNodeAccountGrantVerifier,
@@ -68,6 +73,23 @@ const LIVENESS_WATCH_WAKE_GAP_MS = 15_000;
 /** How long a node-initiated ping may wait for its pong before the socket is declared dead. */
 const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 const RELAY_HEARTBEAT_NONCE_BYTES = 8;
+/**
+ * Republishing a capability statement the node could not build: soon, because
+ * account-grant channels are refused until it is acknowledged, then less often.
+ */
+const E2EE_STATEMENT_UNAVAILABLE_RETRY: ReconnectPolicyConfig = {
+  baseDelayMs: 30_000,
+  maxDelayMs: 300_000,
+  jitterRatio: 0.2,
+};
+/** Republishing after a refresh threw — usually a send queue that drains in moments. */
+const E2EE_STATEMENT_FAILURE_RETRY: ReconnectPolicyConfig = {
+  baseDelayMs: 1_000,
+  maxDelayMs: 30_000,
+  jitterRatio: 0.2,
+};
+/** Consecutive republish failures after which the connection is rebuilt. */
+const E2EE_STATEMENT_REFRESH_FAILURE_LIMIT = 3;
 /** The rolling window a slow-retry policy's `maxPerHour` counts over. */
 const SLOW_RETRY_BUDGET_WINDOW_MS = 3_600_000;
 
@@ -175,6 +197,10 @@ export class HubConnector {
   #heartbeatTimer: unknown;
   #drainTimer: unknown;
   #e2eeStatementTimer: unknown;
+  /** Backoff position for republishing a statement this generation could not publish. */
+  #e2eeStatementAttempt = 0;
+  /** Consecutive republishes that threw, this generation; reset by a publish. */
+  #e2eeStatementFailures = 0;
   #frameChain: Promise<void> = Promise.resolve();
   #e2eeRefreshChain: Promise<void> = Promise.resolve();
 
@@ -346,8 +372,29 @@ export class HubConnector {
     // the replacement statement is still being built.
     this.#e2eeState.clearStatement(generation);
     const refresh = this.#e2eeRefreshChain.then(() => this.#publishE2eeState(generation));
-    this.#e2eeRefreshChain = refresh.catch(() => undefined);
+    this.#e2eeRefreshChain = refresh.catch(() => this.#e2eeRefreshFailed(generation));
     return refresh;
+  }
+
+  /**
+   * A republish threw, whoever asked for it — an operator command or the
+   * refresh timer.
+   *
+   * The statement was withdrawn before the attempt, so nothing is advertised
+   * that should not be. What usually throws is a full send queue — the same
+   * condition a channel burst produces and drains in moments — so it is retried
+   * shortly rather than taken as a dead connection: rebuilding the connection
+   * would close every live channel to republish one control frame. Only
+   * failures that persist past the limit rebuild it.
+   */
+  #e2eeRefreshFailed(generation: number): void {
+    if (!this.#state.isCurrent(generation) || this.#stopping) return;
+    this.#e2eeStatementFailures += 1;
+    if (this.#e2eeStatementFailures >= E2EE_STATEMENT_REFRESH_FAILURE_LIMIT) {
+      void this.#handleFailure(generation, "internal_error");
+      return;
+    }
+    this.#scheduleE2eeStatementRetry(generation, E2EE_STATEMENT_FAILURE_RETRY);
   }
 
   async start(): Promise<void> {
@@ -764,6 +811,8 @@ export class HubConnector {
       }
       const socket = session.socket;
       if (socket === undefined) throw new RelayConnectionError("internal_error");
+      this.#e2eeStatementAttempt = 0;
+      this.#e2eeStatementFailures = 0;
       this.#e2eeState.begin(generation, origin, {
         protocolMajor: ready.protocolMajor,
         protocolMinor: ready.protocolMinor,
@@ -937,8 +986,13 @@ export class HubConnector {
     }
     if (!this.#state.isCurrent(generation) || this.#stopping) return;
     if (result.kind === "unavailable") {
-      this.#clearTimer("e2eeStatement");
+      // Withdrawn at once, and retried rather than abandoned: the statement is
+      // rebuilt from identity, prekey, and continuity reads that a locked
+      // keychain fails for a while and then serves again, and without a retry
+      // account-grant channels stay refused until the next reconnect — the
+      // Hub drops a statement that is not renewed.
       this.#e2eeState.clearStatement(generation);
+      this.#scheduleE2eeStatementRetry(generation, E2EE_STATEMENT_UNAVAILABLE_RETRY);
       return;
     }
     if (this.#e2eeState.publish(generation, result.advertisement) !== "accepted") {
@@ -959,6 +1013,8 @@ export class HubConnector {
     ) {
       throw new RelayConnectionError("internal_error");
     }
+    this.#e2eeStatementAttempt = 0;
+    this.#e2eeStatementFailures = 0;
     this.#flushAndScheduleDrain(generation);
     this.#scheduleE2eeStatementRefresh(generation, result.advertisement.expiresAt);
   }
@@ -968,9 +1024,25 @@ export class HubConnector {
     const delay = Math.max(1, expiresAt - E2EE_MAX_CLOCK_SKEW - this.#scheduler.now());
     this.#e2eeStatementTimer = this.#scheduler.setTimeout(() => {
       this.#e2eeStatementTimer = undefined;
-      if (!this.#state.isCurrent(generation) || this.#stopping) return;
-      void this.refreshE2eeState().catch(() => this.#handleFailure(generation, "internal_error"));
+      this.#refreshE2eeStatementInBackground(generation);
     }, delay);
+  }
+
+  /** Try again later, in the same generation, on the given backoff; reset by a publish. */
+  #scheduleE2eeStatementRetry(generation: number, policy: ReconnectPolicyConfig): void {
+    this.#clearTimer("e2eeStatement");
+    const decision = reconnectDelay(policy, this.#e2eeStatementAttempt, this.#scheduler.random());
+    this.#e2eeStatementAttempt += 1;
+    this.#e2eeStatementTimer = this.#scheduler.setTimeout(() => {
+      this.#e2eeStatementTimer = undefined;
+      this.#refreshE2eeStatementInBackground(generation);
+    }, decision.delayMs);
+  }
+
+  /** A timer-driven republish; `refreshE2eeState` handles its failure. */
+  #refreshE2eeStatementInBackground(generation: number): void {
+    if (!this.#state.isCurrent(generation) || this.#stopping) return;
+    void this.refreshE2eeState().catch(() => undefined);
   }
 
   async #handleFrame(generation: number, frame: RelayFrame): Promise<void> {

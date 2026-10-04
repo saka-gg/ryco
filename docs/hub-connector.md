@@ -124,6 +124,13 @@ current connector generation. The node republishes after any identity, agreement
 continuity-chain, suite, policy, validity-window, or connector-generation change. Account-grant
 admission remains disabled until the Hub acknowledges the exact digest in the same generation.
 
+A statement the node cannot build — a credential store that is locked for a while, a prekey or
+continuity read that fails — is withdrawn at once and retried in the same generation, 30 seconds
+later and backing off to five minutes, instead of leaving account-grant channels refused until the
+next reconnect. A republish that throws, usually because the send queue is momentarily full, is
+also withdrawn and retried within seconds; only three consecutive failures rebuild the connection,
+because rebuilding it closes every live channel to resend one control frame.
+
 The authenticated connector also receives a bounded, generation-numbered Ed25519 Hub verification
 keyset and enrollment-revocation events. These values remain in memory. Reconnect clears the statement
 acknowledgement, keyset, ticket contexts, and subscriptions before a new generation may report ready.
