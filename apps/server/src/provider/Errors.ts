@@ -231,6 +231,38 @@ export class ProviderSessionDirectoryPersistenceError extends Schema.TaggedError
   }
 }
 
+/**
+ * ProviderOperationTimeoutError - Ryco stopped waiting for a provider
+ * operation at its deadline. The operation itself may still finish in the
+ * background (and is then undone). `detail` is one user-facing sentence.
+ */
+export class ProviderOperationTimeoutError extends Schema.TaggedError<ProviderOperationTimeoutError>()(
+  "ProviderOperationTimeoutError",
+  {
+    provider: Schema.String,
+    operation: Schema.Literals([
+      "session.start",
+      "session.recover",
+      "session.lock",
+      "turn.start",
+      "turn.interrupt",
+      "session.stop",
+      "request.respond",
+      "user-input.respond",
+      "goal.sync",
+      "conversation.rollback",
+    ]),
+    timeoutMs: Schema.Number,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+export type ProviderOperationTimeoutOperation = ProviderOperationTimeoutError["operation"];
+
 export type ProviderAdapterError =
   | ProviderAdapterValidationError
   | ProviderAdapterSessionNotFoundError
@@ -246,5 +278,6 @@ export type ProviderServiceError =
   | ProviderInstanceNotFoundError
   | ProviderSessionNotFoundError
   | ProviderSessionDirectoryPersistenceError
+  | ProviderOperationTimeoutError
   | ProviderAdapterError
   | CheckpointServiceError;

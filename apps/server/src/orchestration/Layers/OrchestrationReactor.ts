@@ -33,6 +33,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
 
   return {
     start,
+    recoverProviderIntents: () => providerCommandReactor.recoverIntents(),
   } satisfies OrchestrationReactorShape;
 });
 

@@ -50,7 +50,18 @@ export interface ProviderAdapterCapabilities {
    * the session or any files.
    */
   readonly conversationRollback?: ProviderConversationRollbackMode;
+  /**
+   * How long `sendTurn` runs. Missing is treated as `"acceptance"`.
+   *
+   * - `"acceptance"`: `sendTurn` resolves once the provider accepted the turn.
+   * - `"completion"`: `sendTurn` spans the whole turn; acceptance is the adapter's
+   *   `turn.started`, which MUST be emitted before the long-running call. Ryco's
+   *   turn-acceptance deadline then covers only the time until that event.
+   */
+  readonly turnSubmission?: ProviderTurnSubmissionMode;
 }
+
+export type ProviderTurnSubmissionMode = "acceptance" | "completion";
 
 /**
  * A precise rollback target. Turn ids are orchestration turn ids, which equal

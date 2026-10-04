@@ -4,6 +4,9 @@ import { StorageServiceLive } from "./storage/StorageService.ts";
 import { ProviderProtectedPathsLive } from "./storage/providerProtection.ts";
 import { SessionImportLive } from "./imports/SessionImport.ts";
 import { CompletionReturnRepositoryLive } from "./persistence/Layers/AgentControlCompletionReturns.ts";
+import { ProviderEffectIntentRepositoryLive } from "./persistence/Layers/ProviderEffectIntents.ts";
+import { RestartContinuationRepositoryLive } from "./persistence/Layers/RestartContinuations.ts";
+import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuation.ts";
 import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
@@ -450,13 +453,23 @@ const RuntimeCoreDependenciesLive = RuntimeCoreBaseWithSettingsLive.pipe(
   Layer.provideMerge(AtlassianLayerLive),
 );
 
-const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
+const RuntimeBaseDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
   Layer.provideMerge(AnalyticsServiceLayerLive),
   Layer.provideMerge(OpenLive),
   Layer.provideMerge(ServerLifecycleEventsLive),
   Layer.provideMerge(ChatAttachmentUploadsLive),
   Layer.provide(NetService.layer),
+);
+
+// Restart continuation reads settings, orchestration, the session directory,
+// delegated returns and the provider intent ledger from the runtime dependencies;
+// `ServerRuntimeStartupLive` resolves it to capture, note and continue restarted work.
+const RuntimeDependenciesLive = RestartContinuationLive.pipe(
+  Layer.provide(
+    Layer.mergeAll(RestartContinuationRepositoryLive, ProviderEffectIntentRepositoryLive),
+  ),
+  Layer.provideMerge(RuntimeBaseDependenciesLive),
 );
 
 // The private Agent Control MCP listener joins the runtime services here:

@@ -116,10 +116,13 @@ function fold(activities: readonly Activity[], expectedSession?: string): Checkp
     if (activity.kind === BACKGROUND_WORK_BOUNDARY) {
       const incomingSession = string(payload.runtimeSessionId);
       if (expectedSession !== undefined && incomingSession !== expectedSession) continue;
+      // A repeated start of the open epoch is a no-op. After an ended epoch the same
+      // runtime id can start again (a recovered session reuses it), which reopens it.
       if (
         payload.state === "started" &&
         incomingSession !== null &&
-        incomingSession === runtimeSessionId
+        incomingSession === runtimeSessionId &&
+        !ended
       )
         continue;
       tasks.clear();

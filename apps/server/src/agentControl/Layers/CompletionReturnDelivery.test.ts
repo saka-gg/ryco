@@ -449,11 +449,12 @@ for (const scenario of ["no-live-session", "replacement-runtime", "reaped", "res
   );
 }
 
-it.effect("T5 throttles cold wakes to one in flight; warm parents are not throttled", () =>
+it.effect("T5 throttles cold wakes to four in flight; warm parents are not throttled", () =>
   Effect.gen(function* () {
     const h = yield* setup();
-    // The fixture child stays waiting; ready rows for three cold parents and one warm one.
-    for (const parent of ["p1", "p2", "p3", "p4"]) {
+    // The fixture child stays waiting; ready rows for six cold parents and one warm one.
+    const parents = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
+    for (const parent of parents) {
       h.shells.set(parent, shell(parent, `${parent}-turn`, null));
       yield* h.repo.insert(
         completionFixture({
@@ -470,23 +471,24 @@ it.effect("T5 throttles cold wakes to one in flight; warm parents are not thrott
         }),
       );
     }
-    h.shells.set("p4", shell("p4", "p4-turn", "p4-runtime"));
+    h.shells.set("p7", shell("p7", "p7-turn", "p7-runtime"));
     yield* h.tick(0);
-    // p1 goes cold; p2/p3 wait; p4 is warm and was held back only by this scan's order.
+    // p1-p4 go cold and fill the budget; p5/p6 wait; p7 is warm and was held back
+    // only by this scan's order.
     const parentsOf = () => h.sent.map((command) => command.threadId as string);
-    assert.deepStrictEqual(parentsOf(), ["p1"]);
-    h.live.set("p4", "p4-runtime");
+    assert.deepStrictEqual(parentsOf(), ["p1", "p2", "p3", "p4"]);
+    h.live.set("p7", "p7-runtime");
     yield* h.tick(3);
-    assert.deepStrictEqual(parentsOf(), ["p1", "p4"]);
+    assert.deepStrictEqual(parentsOf(), ["p1", "p2", "p3", "p4", "p7"]);
     yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
       VALUES ('p1', 'p1-wake', ${h.sent[0]!.message.messageId}, 'running', ${at(4)}, '[]')`;
     yield* h.tick(6);
-    assert.deepStrictEqual(parentsOf(), ["p1", "p4", "p2"]);
+    assert.deepStrictEqual(parentsOf(), ["p1", "p2", "p3", "p4", "p7", "p5"]);
     yield* h.tick(9);
-    assert.deepStrictEqual(parentsOf(), ["p1", "p4", "p2"]);
-    assert.include((yield* h.read("p3-child")).detail, "another chat's session");
+    assert.deepStrictEqual(parentsOf(), ["p1", "p2", "p3", "p4", "p7", "p5"]);
+    assert.include((yield* h.read("p6-child")).detail, "another chat's session");
     yield* h.tick(6 + 121);
-    assert.deepStrictEqual(parentsOf(), ["p1", "p4", "p2", "p3"]);
+    assert.deepStrictEqual(parentsOf(), ["p1", "p2", "p3", "p4", "p7", "p5", "p6"]);
   }).pipe(Effect.provide(layer)),
 );
 
@@ -1132,7 +1134,9 @@ it.effect("T10 replays count against the cold budget and start the grace at the 
   Effect.gen(function* () {
     const h = yield* setup();
     const lost: Array<{ readonly commandId: CommandId }> = [];
-    for (const parent of ["p1", "p2"]) {
+    // One more cold batch than the budget (four) allows.
+    const parents = ["p1", "p2", "p3", "p4", "p5"];
+    for (const parent of parents) {
       h.shells.set(parent, shell(parent, `${parent}-turn`, null));
       const row = completionFixture({
         childThreadId: ThreadId.make(`${parent}-child`),
@@ -1141,23 +1145,23 @@ it.effect("T10 replays count against the cold budget and start the grace at the 
       });
       lost.push(yield* claimLost(h, h.shells.get(parent)!, [row], at(-300), true));
     }
-    // A restarted worker finds both cold batches without receipts.
+    // A restarted worker finds every cold batch without receipts.
     const restarted = yield* h.makeWorker;
     yield* restarted.scan(at(0));
     assert.deepStrictEqual(
       h.sent.map((command) => command.commandId),
-      [lost[0]!.commandId],
+      lost.slice(0, 4).map((entry) => entry.commandId),
     );
-    assert.include((yield* h.read("p2-child")).detail, "another chat's session");
-    // The slot's grace runs from the replay, not from the original claim 300 s earlier.
+    assert.include((yield* h.read("p5-child")).detail, "another chat's session");
+    // The slots' grace runs from the replay, not from the original claim 300 s earlier.
     yield* restarted.scan(at(3));
-    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent.length, 4);
     yield* restarted.scan(at(121));
     assert.deepStrictEqual(
       h.sent.map((command) => command.commandId),
-      [lost[0]!.commandId, lost[1]!.commandId],
+      lost.map((entry) => entry.commandId),
     );
-    assert.equal((yield* h.read("p2-child")).status, "delivered");
+    assert.equal((yield* h.read("p5-child")).status, "delivered");
   }).pipe(Effect.provide(layer)),
 );
 
@@ -1521,4 +1525,36 @@ it.effect("blocks a child whose project scope changed", () =>
     assert.equal((yield* h.read()).status, "blocked");
     assert.equal(h.sent.length, 0);
   }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "T14 never re-sends a wake whose start a restart cancelled; a held sibling gets its own",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.addChild("child-2");
+      h.modelPendingRow();
+      yield* h.ack();
+      yield* h.tick(0);
+      assert.equal(h.sent.length, 1);
+      yield* h.ack("completed", false, "p", "child-2");
+      yield* h.tick(3);
+      assert.equal((yield* h.read("child-2")).status, "ready");
+      // Restart recovery cancels the wake's start: its visible failure removes the
+      // pending row (provider-effect-outbox), exactly like a failed start.
+      const cancelled = h.sent[0]!;
+      yield* h.appendStartFailure("parent", cancelled.message.messageId);
+      yield* h.sql`DELETE FROM projection_turns
+      WHERE thread_id = 'parent' AND turn_id IS NULL AND pending_message_id = ${cancelled.message.messageId}`;
+      const restarted = yield* h.makeWorker;
+      yield* restarted.scan(at(6));
+      yield* restarted.scan(at(200));
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.equal((yield* h.read("child-2")).status, "delivered");
+      assert.deepStrictEqual(
+        h.sent.map((command) => command.commandId),
+        [cancelled.commandId, CommandId.make("delegation-return:child-2")],
+      );
+      assert.include(h.sent[1]!.message.text, "[1/1]");
+    }).pipe(Effect.provide(layer)),
 );

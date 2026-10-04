@@ -8,6 +8,11 @@ import {
   fallbackReleasedTurnState,
 } from "./orchestration/turnFinalization.ts";
 import {
+  ORPHANED_PROVIDER_SESSION_ERROR,
+  ORPHANED_TURN_TERMINAL_STATE,
+  isOrphanedProviderSession,
+} from "./orchestration/restartReconciliation.ts";
+import {
   CommandId,
   EventId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -43,6 +48,8 @@ import { Open } from "./open.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor.ts";
+import type { ProviderIntentRecoverySummary } from "./orchestration/Services/ProviderCommandReactor.ts";
+import { RestartContinuation } from "./orchestration/Services/RestartContinuation.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { ServerSettingsService } from "./serverSettings.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
@@ -69,6 +76,8 @@ import {
 
 export const DEFAULT_STARTUP_COMMAND_GATE_MAX_PENDING = 2_048;
 export const DEFAULT_STARTUP_COMMAND_GATE_READY_TIMEOUT_MS = 30_000;
+/** A hanging shutdown-hint write must never hold up shutdown. */
+export const RESTART_SHUTDOWN_HINT_TIMEOUT = Duration.seconds(2);
 
 export type ServerRuntimeStartupErrorReason = "startup" | "busy" | "timeout";
 
@@ -530,9 +539,6 @@ export const validateRestrictedWorkspaceSnapshot = (snapshot: OrchestrationReadM
     );
   }).pipe(Effect.mapError(incompatibleWorkspaceStateError));
 
-const ORPHANED_PROVIDER_SESSION_ERROR =
-  "Provider session did not survive a server restart. Send a new message to continue.";
-
 function clearRuntimePayloadActiveTurn(runtimePayload: unknown): unknown {
   if (
     typeof runtimePayload === "object" &&
@@ -634,6 +640,10 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   }
 
   const liveThreadIds = new Set(liveSessionsExit.value.map((session) => session.threadId));
+  // Capture what the restart cut off before anything below rewrites it: pending
+  // requests are cleared and orphaned turns are released next.
+  const restartContinuation = yield* RestartContinuation;
+  const captured = yield* restartContinuation.capture({ snapshot, liveThreadIds });
   // Provider callbacks are process-local. Even ready/error sessions can retain
   // requests from an earlier process; resolve them through normal events so the
   // inbox summary, conversation and settlement policy all recover together.
@@ -679,13 +689,8 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
       });
     }
   }
-  const orphanedThreads = snapshot.threads.filter(
-    (thread) =>
-      thread.session !== null &&
-      (thread.session.status === "starting" ||
-        thread.session.status === "running" ||
-        thread.session.activeTurnId !== null) &&
-      !liveThreadIds.has(thread.id),
+  const orphanedThreads = snapshot.threads.filter((thread) =>
+    isOrphanedProviderSession(thread, liveThreadIds),
   );
 
   for (const thread of orphanedThreads) {
@@ -738,7 +743,7 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
       },
       turnOutcome: {
         ...(session.activeTurnId !== null ? { turnId: session.activeTurnId } : {}),
-        state: "interrupted" as const,
+        state: ORPHANED_TURN_TERMINAL_STATE,
         reason: TURN_FINALIZATION_REASON.startupOrphanedSession,
         completedAt: reconciledAt,
       },
@@ -756,6 +761,8 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
       ),
     );
   }
+  // Background-work boundaries, the stopped-work note and capture-time notices.
+  yield* restartContinuation.publishCaptureEffects(captured);
 }).pipe(
   Effect.catchCause((cause) =>
     Cause.hasInterrupts(cause)
@@ -766,22 +773,75 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   ),
 );
 
+/**
+ * The orchestration startup phases, in order: reactors subscribe, orphaned
+ * provider sessions are reconciled (that owns session and turn state), then the
+ * provider intents left open by an earlier process are resolved. Returns the
+ * intent recovery summary for later phases.
+ */
+export const startOrchestrationRuntime = (reactorScope: Scope.Closeable) =>
+  Effect.gen(function* () {
+    const orchestrationReactor = yield* OrchestrationReactor;
+    const providerSessionReaper = yield* ProviderSessionReaper;
+
+    yield* Effect.logDebug("startup phase: starting orchestration reactors");
+    yield* runStartupPhase(
+      "reactors.start",
+      Effect.all(
+        [
+          orchestrationReactor.start().pipe(Scope.provide(reactorScope)),
+          providerSessionReaper.start().pipe(Scope.provide(reactorScope)),
+        ],
+        { concurrency: "unbounded", discard: true },
+      ),
+    );
+
+    yield* Effect.logDebug("startup phase: reconciling orphaned provider sessions");
+    yield* runStartupPhase("provider-sessions.reconcile", reconcileOrphanedProviderSessions);
+
+    yield* Effect.logDebug("startup phase: recovering provider intents");
+    return yield* runStartupPhase(
+      "provider-intents.recover",
+      orchestrationReactor.recoverProviderIntents(),
+    );
+  });
+
 export const makeServerRuntimeStartup = Effect.gen(function* () {
   const runtimeStartedAt = Date.now();
   const serverConfig = yield* ServerConfig;
   const keybindings = yield* Keybindings;
-  const orchestrationReactor = yield* OrchestrationReactor;
-  const providerSessionReaper = yield* ProviderSessionReaper;
   const lifecycleEvents = yield* ServerLifecycleEvents;
   const serverSettings = yield* ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const restartContinuation = yield* RestartContinuation;
+  const providerService = yield* ProviderService;
 
   const commandGate = yield* makeCommandGate();
   const httpListening = yield* Deferred.make<void>();
   const reactorScope = yield* Scope.make("sequential");
 
   yield* Effect.addFinalizer(() => Scope.close(reactorScope, Exit.void));
+  // Registered after the reactor-scope finalizer, so it runs BEFORE it (finalizers run in
+  // reverse): the in-memory background liveness is still populated, and the projection
+  // still names the running turns a graceful shutdown is about to cut off. Only threads
+  // with a live provider session are hinted as running: a projection this process never
+  // ran (an orphan it did not reconcile) must not look freshly cut off.
+  yield* Effect.addFinalizer(() =>
+    providerService.listSessions().pipe(
+      Effect.map((sessions) => new Set(sessions.map((session) => session.threadId))),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("shutdown provider session inventory failed", {
+              cause: Cause.pretty(cause),
+            }).pipe(Effect.as(new Set<ThreadId>())),
+      ),
+      Effect.flatMap((liveThreadIds) => restartContinuation.recordShutdownHints({ liveThreadIds })),
+      Effect.timeout(RESTART_SHUTDOWN_HINT_TIMEOUT),
+      Effect.ignoreCause({ log: true }),
+    ),
+  );
 
   const startup = Effect.gen(function* () {
     yield* Effect.logDebug("startup phase: validating restricted workspace state");
@@ -825,20 +885,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       ),
     );
 
-    yield* Effect.logDebug("startup phase: starting orchestration reactors");
-    yield* runStartupPhase(
-      "reactors.start",
-      Effect.all(
-        [
-          orchestrationReactor.start().pipe(Scope.provide(reactorScope)),
-          providerSessionReaper.start().pipe(Scope.provide(reactorScope)),
-        ],
-        { concurrency: "unbounded", discard: true },
-      ),
-    );
-
-    yield* Effect.logDebug("startup phase: reconciling orphaned provider sessions");
-    yield* runStartupPhase("provider-sessions.reconcile", reconcileOrphanedProviderSessions);
+    const intentRecovery = yield* startOrchestrationRuntime(reactorScope);
 
     const welcomeBase = yield* resolveWelcomeBase;
     const environment = yield* serverEnvironment.getDescriptor;
@@ -896,6 +943,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
         ),
       );
     }
+    return intentRecovery;
   }).pipe(
     Effect.annotateSpans({
       "server.mode": serverConfig.mode,
@@ -938,6 +986,18 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
             environment: yield* serverEnvironment.getDescriptor,
           },
         }),
+      );
+
+      // Every runtime layer is built (http.wait) and provider intent recovery finished
+      // before the gate opened, so continued sessions get the full tool surface.
+      const intentRecovery: ProviderIntentRecoverySummary = startupExit.value;
+      yield* Effect.forkScoped(
+        runStartupPhase(
+          "restart-continuations.dispatch",
+          restartContinuation.dispatchPending({
+            cancelledTurnStarts: intentRecovery.cancelledTurnStarts,
+          }),
+        ),
       );
 
       yield* Effect.logDebug("startup phase: recording startup heartbeat");

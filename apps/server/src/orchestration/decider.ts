@@ -52,6 +52,7 @@ import {
   requireThreadReadyForCheckpointRevert,
 } from "./checkpointRevertPolicy.ts";
 import { projectEvent } from "./projector.ts";
+import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
 import { resolveDelegatedChildLineage } from "./threadLineage.ts";
 import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
@@ -1278,6 +1279,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail:
             "Claude resume review is stale. The session, model, context settings, or latest turn changed. Review and send again.",
         });
+      }
+      // Server-only fence of an automatic restart continuation: the decider runs serially
+      // on the engine's model, so this is atomic against anything accepted after capture.
+      const restartGuard = command.restartContinuationGuard;
+      if (restartGuard) {
+        const blocker = restartContinuationTargetBlocker(targetThread, restartGuard);
+        if (blocker !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Restart continuation target changed (${blocker}).`,
+          });
+        }
       }
       if (
         targetThread.session?.status === "running" &&

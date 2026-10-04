@@ -10,6 +10,8 @@ import type {
   CommandId,
   MessageId,
   OrchestrationThreadShell,
+  RestartContinuationGuard,
+  ThreadTurnStartCommand,
 } from "@ryco/contracts";
 
 export type ClientThreadTurnStartCommand = Extract<
@@ -53,5 +55,28 @@ export function buildThreadContinuationTurnStart(
       ? { delegationReturnGuard: input.guards.delegationReturnGuard }
       : {}),
     createdAt: input.createdAt,
+  };
+}
+
+/**
+ * The automatic continuation after a server restart. Its guard is server-only, so it is
+ * an internal command dispatched straight to the engine, never through client command
+ * application.
+ */
+export function buildRestartContinuationTurnStart(
+  thread: Parameters<typeof buildThreadContinuationTurnStart>[0],
+  input: {
+    readonly commandId: CommandId;
+    readonly messageId: MessageId;
+    readonly text: string;
+    readonly createdAt: string;
+    readonly guard: RestartContinuationGuard;
+  },
+): typeof ThreadTurnStartCommand.Type {
+  const command = buildThreadContinuationTurnStart(thread, input);
+  return {
+    ...command,
+    message: { ...command.message, attachments: [] },
+    restartContinuationGuard: input.guard,
   };
 }

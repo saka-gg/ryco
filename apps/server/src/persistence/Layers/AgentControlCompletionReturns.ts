@@ -18,7 +18,7 @@ import { Context, Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { toPersistenceSqlError } from "../Errors.ts";
 import { latestUserMessageIdQuery } from "../userMessageAnchors.ts";
-import { hasTurnStartFailure } from "../delegatedRunStatus.ts";
+import { hasTurnStartEnded, hasTurnStartFailure } from "../delegatedRunStatus.ts";
 
 /** Wake message ids carry this prefix; the turn they start is a delegation-wake turn. */
 export const DELEGATION_WAKE_MESSAGE_PREFIX = "delegation-result:";
@@ -96,6 +96,18 @@ export const CompletionReturnRecord = Schema.Struct({
 });
 export type CompletionReturnRecord = typeof CompletionReturnRecord.Type;
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRecord));
+
+/**
+ * Statuses in which a child's result is still owed to its parent. The SQL `IN (...)`
+ * lists in `listDue`, `listProposalIds` and `hasOutstandingDelegations` must match.
+ */
+export const PENDING_COMPLETION_RETURN_STATUSES = ["waiting", "ready", "dispatching"] as const;
+const PENDING_COMPLETION_RETURN_STATUS_SET: ReadonlySet<string> = new Set(
+  PENDING_COMPLETION_RETURN_STATUSES,
+);
+export function isPendingCompletionReturn(record: { readonly status: string }): boolean {
+  return PENDING_COMPLETION_RETURN_STATUS_SET.has(record.status);
+}
 
 class CompletionReturnCasConflict {
   readonly _tag = "CompletionReturnCasConflict";
@@ -384,7 +396,10 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     WHERE thread_id = ${threadId} AND turn_id = ${turnId} LIMIT 1
   `.pipe(Effect.map((rows) => rows[0] ?? null)),
     );
-  /** Newest unbound turn start of the thread and whether its start already failed. */
+  /**
+   * Newest unbound turn start of the thread and whether its start already ended
+   * without a turn (`startFailed`: it failed, or a Stop cancelled it).
+   */
   const pendingTurnStart = (threadId: ThreadId) =>
     safe(
       Effect.gen(function* () {
@@ -399,10 +414,11 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
         return {
           messageId,
           startFailed:
-            messageId.length > 0 && (yield* hasTurnStartFailure(sql, { threadId, messageId })),
+            messageId.length > 0 && (yield* hasTurnStartEnded(sql, { threadId, messageId })),
         };
       }),
     );
+  /** `failed`: the wake's start ended without a turn (it failed, or a Stop cancelled it). */
   const wakeStartState = (threadId: ThreadId, messageId: MessageId) =>
     safe(
       Effect.gen(function* () {
@@ -412,7 +428,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     ORDER BY row_id DESC LIMIT 1
   `;
         if (rows[0]?.turnId) return "bound" as const;
-        if (yield* hasTurnStartFailure(sql, { threadId, messageId })) return "failed" as const;
+        if (yield* hasTurnStartEnded(sql, { threadId, messageId })) return "failed" as const;
         return rows[0] ? ("pending" as const) : ("absent" as const);
       }),
     );

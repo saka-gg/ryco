@@ -1,3 +1,4 @@
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { applicableUsageLimit, isUsageLimitQueueHeld } from "@ryco/shared/usageLimit";
 
 import type { QueueThreadView } from "./threadView.ts";
@@ -132,9 +133,15 @@ export function deriveQueueFailureCauses(
       reason: "error",
       causeKey: `error:${turnKey}:${session.lastError ?? ""}`,
       detail: session.lastError,
-      providerInstanceId: session.providerInstanceId,
+      // A restart is not a provider failure, so a message queued for another instance
+      // is no recovery from it: the restart cause holds until a later turn takes over.
+      providerInstanceId:
+        session.lastError === ORPHANED_PROVIDER_SESSION_ERROR ? null : session.providerInstanceId,
     });
   }
+  // A turn a server restart released also reads interrupted. Its `interrupt:` cause is
+  // still derived, so a baseline or Resume acknowledges it with the restart's `error:`
+  // cause; `partitionNewQueueFailureCauses` keeps it from holding as a Stop.
   const latestTurnInterrupted =
     view.latestTurn?.state === "interrupted" &&
     (options.includeUnsettled === true || isLatestTurnInterruptSettled(view));
@@ -181,7 +188,54 @@ export function releasableUsageLimitCauseKeys(input: {
   return uniqueKeys(keys);
 }
 
-/** Causes not yet acknowledged nor covered by the current hold, split by provider exemption. */
+const ERROR_CAUSE_PREFIX = "error:";
+const INTERRUPT_CAUSE_PREFIX = "interrupt:";
+const RESTART_ERROR_CAUSE_SUFFIX = `:${ORPHANED_PROVIDER_SESSION_ERROR}`;
+
+/** The `error:` cause a server restart mints for the turn an `interrupt:` cause names. */
+function restartErrorCauseKeyForInterrupt(causeKey: string): string | null {
+  if (!causeKey.startsWith(INTERRUPT_CAUSE_PREFIX)) return null;
+  const turnKey = causeKey.slice(INTERRUPT_CAUSE_PREFIX.length);
+  return `${ERROR_CAUSE_PREFIX}${turnKey}${RESTART_ERROR_CAUSE_SUFFIX}`;
+}
+
+/**
+ * Hold causes a server restart minted (the orphaned session's `error:` cause) once a
+ * later turn exists: an automatic continuation or the user's own message took over.
+ * That turn's own failure or Stop holds again under its own key; a Stop recorded on the
+ * restarted turn is a different key and keeps holding until Resume.
+ *
+ * Known limit: the projection records no Stop, so a Stop another client (or Agent Control)
+ * issued that the provider had not acknowledged before the restart reads exactly like the
+ * restart here. Only the client that pressed Stop holds until Resume.
+ */
+export function releasableRestartCauseKeys(input: {
+  readonly hold: QueueHold | null;
+  readonly view: QueueThreadView;
+}): string[] {
+  const latestTurnId = input.view.latestTurn?.turnId ?? null;
+  if (input.hold === null || latestTurnId === null) return [];
+  return input.hold.causeKeys.filter((key) => {
+    if (!key.startsWith(ERROR_CAUSE_PREFIX) || !key.endsWith(RESTART_ERROR_CAUSE_SUFFIX)) {
+      return false;
+    }
+    const turnKey = key.slice(
+      ERROR_CAUSE_PREFIX.length,
+      key.length - RESTART_ERROR_CAUSE_SUFFIX.length,
+    );
+    return turnKey !== latestTurnId;
+  });
+}
+
+/**
+ * Causes not yet acknowledged nor covered by the current hold, split by provider exemption.
+ *
+ * The derived `interrupt:` cause of a turn a server restart released never holds: nobody
+ * stopped it, and the restart's `error:` cause for the same turn is current, held or
+ * acknowledged. Keyed by the turn rather than the session's current status, so it stays
+ * quiet when the session later leaves `error` (a session stop) without a new turn. A Stop
+ * recorded locally already put the same `interrupt:` key in the hold, so it keeps holding.
+ */
 export function partitionNewQueueFailureCauses(input: {
   readonly causes: readonly QueueFailureCause[];
   readonly acknowledgedCauseKeys: readonly string[];
@@ -189,10 +243,16 @@ export function partitionNewQueueFailureCauses(input: {
   readonly headProviderInstanceId: string | null;
 }): { hold: QueueFailureCause[]; exempt: QueueFailureCause[] } {
   const known = new Set([...input.acknowledgedCauseKeys, ...(input.hold?.causeKeys ?? [])]);
+  const current = new Set(input.causes.map((cause) => cause.causeKey));
   const hold: QueueFailureCause[] = [];
   const exempt: QueueFailureCause[] = [];
   for (const cause of input.causes) {
     if (known.has(cause.causeKey)) continue;
+    const restartErrorKey =
+      cause.reason === "interrupted" ? restartErrorCauseKeyForInterrupt(cause.causeKey) : null;
+    if (restartErrorKey !== null && (known.has(restartErrorKey) || current.has(restartErrorKey))) {
+      continue;
+    }
     known.add(cause.causeKey);
     // A message queued for another provider is how users recover from a
     // provider failure, so that failure must not hold it.

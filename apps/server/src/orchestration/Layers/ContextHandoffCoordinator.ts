@@ -51,7 +51,9 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import {
   ContextHandoffCoordinator,
   type ContextHandoffCoordinatorShape,
+  type ContextHandoffLaneControl,
   type ContextHandoffTurnStartEvent,
+  NO_LANE_CONTROL,
 } from "../Services/ContextHandoffCoordinator.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -64,7 +66,11 @@ import {
   type PreparedContextHandoffArtifact,
 } from "../contextHandoff/ContextHandoffService.ts";
 import { providerFailureActivityCommand } from "../providerFailureActivity.ts";
+import { isProviderSessionStartCancelled } from "../threadLaneControl.ts";
 import { failureTag, userFacingFailureDetail } from "../userFacingErrors.ts";
+
+/** Terminal error when the user stopped the thread before the target accepted the turn. */
+export const HANDOFF_STOPPED_DETAIL = "Stopped before the handoff turn was accepted.";
 
 interface HandoffPresentation {
   readonly source: ContextHandoffEndpointSnapshot;
@@ -120,6 +126,11 @@ const nowIso = () => new Date().toISOString();
 type ContextHandoffReference = NonNullable<
   ContextHandoffTurnStartEvent["payload"]["contextHandoff"]
 >;
+
+const truncateHandoffError = (detail: string): string =>
+  detail.length <= CONTEXT_HANDOFF_ERROR_MAX_CHARS
+    ? detail
+    : detail.slice(0, CONTEXT_HANDOFF_ERROR_MAX_CHARS);
 
 function boundedFailureDetail(cause: Cause.Cause<unknown>): string {
   return userFacingFailureDetail(cause, {
@@ -434,12 +445,24 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
     readonly source: ContextHandoffEndpointSnapshot;
     readonly sourceBinding?: ProviderRuntimeBinding;
     readonly error: string;
+    /**
+     * The user stopped the thread. The binding is still restored, so the next start
+     * resumes the source conversation from its cursor, but the source runtime is
+     * stopped and projected `stopped`: a Stop must never bring the source back as
+     * `ready`.
+     */
+    readonly afterStop?: boolean;
   }) {
     const restored = input.sourceBinding
       ? yield* providerService
           .restoreSessionBinding(input.sourceBinding)
           .pipe(Effect.catch(() => Effect.succeed(false)))
       : false;
+    if (input.afterStop && restored) {
+      yield* providerService
+        .stopSession({ threadId: input.thread.id })
+        .pipe(Effect.catchCause(() => Effect.void));
+    }
     const runtimeSessionId =
       input.sourceBinding?.runtimeSessionId ?? input.record.sourceRuntimeSessionId ?? undefined;
     if (runtimeSessionId === undefined) {
@@ -451,8 +474,8 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         thread: input.thread,
         endpoint: input.source,
         runtimeSessionId,
-        status: restored ? "ready" : "error",
-        lastError: restored ? null : input.error,
+        status: input.afterStop ? "stopped" : restored ? "ready" : "error",
+        lastError: input.afterStop || restored ? null : input.error,
         createdAt: nowIso(),
       }),
       createdAt: nowIso(),
@@ -467,6 +490,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       readonly presentation: HandoffPresentation;
       readonly sourceBinding?: ProviderRuntimeBinding;
       readonly error: string;
+      readonly afterStop?: boolean;
     }) {
       const targetBinding = targetRuntimeBinding({
         record: input.record,
@@ -487,6 +511,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         source: input.presentation.source,
         ...(input.sourceBinding ? { sourceBinding: input.sourceBinding } : {}),
         error: input.error,
+        ...(input.afterStop ? { afterStop: true } : {}),
       });
     },
   );
@@ -540,11 +565,15 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
     readonly sourceBinding?: ProviderRuntimeBinding;
     readonly artifact?: PreparedContextHandoffArtifact;
     readonly cause: Cause.Cause<unknown>;
+    readonly control: ContextHandoffLaneControl;
   }) {
     if (Cause.hasInterruptsOnly(input.cause)) {
       return yield* Effect.interrupt;
     }
-    const error = boundedFailureDetail(input.cause);
+    // A Stop (noted before or during the turn) wins over whatever the target reported.
+    const stopRequested =
+      isProviderSessionStartCancelled(input.cause) || (yield* input.control.stopRequested);
+    const error = stopRequested ? HANDOFF_STOPPED_DETAIL : boundedFailureDetail(input.cause);
     const current = Option.getOrUndefined(
       yield* repository.getById({ handoffId: input.record.handoffId }),
     );
@@ -568,6 +597,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       presentation: input.presentation,
       ...(input.sourceBinding ? { sourceBinding: input.sourceBinding } : {}),
       error,
+      ...(stopRequested ? { afterStop: true } : {}),
     });
     yield* repository.compareAndSetStatus({
       handoffId: current.handoffId,
@@ -656,6 +686,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       readonly record: ContextHandoffRecord;
       readonly activityId: EventId;
       readonly rememberSourceBinding: (binding: ProviderRuntimeBinding | undefined) => void;
+      readonly control: ContextHandoffLaneControl;
     }) {
       if (hasRetiredProjectMemory(decodeRequestedActivity(input.thread, input.activityId))) {
         return yield* Effect.fail(new Error(REMOVED_PROJECT_MEMORY_MESSAGE));
@@ -748,17 +779,21 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         thread: input.thread,
         projects: project ? [project] : [],
       });
-      const fresh = yield* providerService.startFreshSession(record.threadId, {
-        threadId: record.threadId,
-        provider: presentation.target.driverKind,
-        providerInstanceId: record.targetSelection.instanceId,
-        runtimeSessionId: targetRuntimeSessionId,
-        ...(cwd ? { cwd } : {}),
-        modelSelection: record.targetSelection,
-        runtimeMode: input.thread.runtimeMode,
-        tokenMode: input.thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-        ...(project?.customSystemPrompt ? { customSystemPrompt: project.customSystemPrompt } : {}),
-      });
+      const fresh = yield* input.control.guardStart(
+        providerService.startFreshSession(record.threadId, {
+          threadId: record.threadId,
+          provider: presentation.target.driverKind,
+          providerInstanceId: record.targetSelection.instanceId,
+          runtimeSessionId: targetRuntimeSessionId,
+          ...(cwd ? { cwd } : {}),
+          modelSelection: record.targetSelection,
+          runtimeMode: input.thread.runtimeMode,
+          tokenMode: input.thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+          ...(project?.customSystemPrompt
+            ? { customSystemPrompt: project.customSystemPrompt }
+            : {}),
+        }),
+      );
       const replacementSourceBinding = fresh.previousBinding ?? sourceBinding;
       input.rememberSourceBinding(replacementSourceBinding);
       const readyAt = nowIso();
@@ -786,6 +821,9 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       if (!dispatching) {
         return yield* Effect.die("Context handoff dispatch reservation was lost.");
       }
+      // From here the lane owns a running turn; a Stop noted before this point
+      // cancels the turn before anything is sent.
+      yield* input.control.onDispatchStarted;
       const turn = yield* providerService
         .sendTurn({
           threadId: record.threadId,
@@ -835,6 +873,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
     readonly thread: OrchestrationThread;
     readonly record: ContextHandoffRecord;
     readonly activityId: EventId;
+    readonly control: ContextHandoffLaneControl;
   }) {
     let record = input.record;
     if (record.status === "requested") {
@@ -873,6 +912,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
           presentation,
           ...(rollbackBinding ? { sourceBinding: rollbackBinding } : {}),
           cause,
+          control: input.control,
         }),
       ),
     );
@@ -1171,7 +1211,47 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
     },
   );
 
-  const processTurnStart: ContextHandoffCoordinatorShape["processTurnStart"] = (event) => {
+  /** The validated requested activity of a turn start, or undefined. */
+  const requestedActivityFor = (
+    thread: OrchestrationThread,
+    reference: ContextHandoffReference,
+  ) => {
+    const requested = decodeRequestedActivity(thread, reference.activityId);
+    return requested &&
+      requested.handoffId === reference.handoffId &&
+      requested.targetMessageId === reference.targetMessageId
+      ? requested
+      : undefined;
+  };
+
+  /** Shared by processTurnStart and abandonUnstartedTurnStart, so the record cannot drift. */
+  const createRequestedRecord = Effect.fnUntraced(function* (input: {
+    readonly thread: OrchestrationThread;
+    readonly reference: ContextHandoffReference;
+    readonly requested: typeof ContextHandoffActivityPayload.Type;
+    readonly createdAt: string;
+  }) {
+    const created = yield* repository.create(
+      makeRequestedContextHandoffRecord({
+        handoffId: input.reference.handoffId,
+        threadId: input.thread.id,
+        sourceSelection: input.requested.sourceSelection,
+        targetSelection: input.requested.targetSelection,
+        sourceRuntimeSessionId: input.requested.sourceRuntimeSessionId ?? null,
+        firstMessageId: input.reference.targetMessageId,
+        createdAt: input.createdAt,
+        updatedAt: input.createdAt,
+      }),
+    );
+    if (created) {
+      yield* increment(contextHandoffsTotal, { status: "requested" });
+    }
+  });
+
+  const processTurnStart: ContextHandoffCoordinatorShape["processTurnStart"] = (
+    event,
+    control = NO_LANE_CONTROL,
+  ) => {
     const reference = event.payload.contextHandoff;
     if (!reference) return Effect.void;
     return Effect.gen(function* () {
@@ -1179,29 +1259,14 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       yield* Effect.gen(function* () {
         const thread = yield* resolveThread(event.payload.threadId);
         if (!thread) return;
-        const requested = decodeRequestedActivity(thread, reference.activityId);
-        if (
-          !requested ||
-          requested.handoffId !== reference.handoffId ||
-          requested.targetMessageId !== reference.targetMessageId
-        ) {
-          return;
-        }
-        const created = yield* repository.create(
-          makeRequestedContextHandoffRecord({
-            handoffId: reference.handoffId,
-            threadId: thread.id,
-            sourceSelection: requested.sourceSelection,
-            targetSelection: requested.targetSelection,
-            sourceRuntimeSessionId: requested.sourceRuntimeSessionId ?? null,
-            firstMessageId: reference.targetMessageId,
-            createdAt: event.payload.createdAt,
-            updatedAt: event.payload.createdAt,
-          }),
-        );
-        if (created) {
-          yield* increment(contextHandoffsTotal, { status: "requested" });
-        }
+        const requested = requestedActivityFor(thread, reference);
+        if (!requested) return;
+        yield* createRequestedRecord({
+          thread,
+          reference,
+          requested,
+          createdAt: event.payload.createdAt,
+        });
         const record = Option.getOrUndefined(
           yield* repository.getById({ handoffId: reference.handoffId }),
         );
@@ -1210,6 +1275,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
           thread,
           record,
           activityId: reference.activityId,
+          control,
         });
       }).pipe(
         // The reporter stays inside the guard so a concurrent run of the same
@@ -1236,7 +1302,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
           const activityId = findActivityId(thread, record.handoffId);
           if (!activityId) return;
           if (record.status === "preparing") {
-            yield* runPreparing({ thread, record, activityId });
+            yield* runPreparing({ thread, record, activityId, control: NO_LANE_CONTROL });
           } else if (record.status === "dispatching") {
             yield* reconcileDispatching({ thread, record, activityId });
           }
@@ -1254,7 +1320,77 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       ),
     );
 
-  return { processTurnStart, recover } satisfies ContextHandoffCoordinatorShape;
+  const abandonUnstartedTurnStart: ContextHandoffCoordinatorShape["abandonUnstartedTurnStart"] = (
+    event,
+    detail,
+  ) => {
+    const reference = event.payload.contextHandoff;
+    if (!reference) return Effect.succeed("unrecognized" as const);
+    const error = truncateHandoffError(detail);
+    return Effect.gen(function* () {
+      // In flight in this process: whoever runs it owns the outcome.
+      if (!(yield* acquire(reference.handoffId))) return "owned" as const;
+      return yield* Effect.gen(function* () {
+        const existing = Option.getOrUndefined(
+          yield* repository.getById({ handoffId: reference.handoffId }),
+        );
+        // recover() owns preparing/dispatching records; terminal ones have their activity.
+        if (existing && existing.status !== "requested") return "owned" as const;
+        const thread = yield* resolveThread(event.payload.threadId);
+        if (!thread) return "unrecognized" as const;
+        const requested = requestedActivityFor(thread, reference);
+        if (!requested) return "unrecognized" as const;
+        if (!existing) {
+          yield* createRequestedRecord({
+            thread,
+            reference,
+            requested,
+            createdAt: event.payload.createdAt,
+          });
+        }
+        const record = Option.getOrUndefined(
+          yield* repository.getById({ handoffId: reference.handoffId }),
+        );
+        if (!record) return "unrecognized" as const;
+        if (record.status !== "requested") return "owned" as const;
+        const presentation = Option.getOrUndefined(
+          yield* resolvePresentation(thread, record).pipe(Effect.option),
+        );
+        if (!presentation) return "unrecognized" as const;
+        // Nothing was swapped before `preparing`: no source restore, no binding
+        // stop or retire. The activity goes first (as in finalizeFailure), so a
+        // failed append leaves the record `requested` for the next boot.
+        yield* appendTerminalActivity({
+          record,
+          activityId: reference.activityId,
+          source: presentation.source,
+          target: presentation.target,
+          sources: [presentation.source],
+          error,
+          status: "failed",
+        });
+        const transitioned = yield* repository.compareAndSetStatus({
+          handoffId: record.handoffId,
+          expectedStatus: "requested",
+          nextStatus: "failed",
+          targetRuntimeSessionId: record.targetRuntimeSessionId,
+          acceptedProviderTurnId: record.acceptedProviderTurnId,
+          error,
+          updatedAt: nowIso(),
+        });
+        if (transitioned) {
+          yield* increment(contextHandoffsTotal, { status: "failed" });
+        }
+        return "abandoned" as const;
+      }).pipe(Effect.ensuring(release(reference.handoffId)));
+    });
+  };
+
+  return {
+    processTurnStart,
+    recover,
+    abandonUnstartedTurnStart,
+  } satisfies ContextHandoffCoordinatorShape;
 });
 
 export const ContextHandoffCoordinatorLive = Layer.effect(

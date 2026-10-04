@@ -8,8 +8,10 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
   ProviderInstanceNotFoundError,
+  ProviderOperationTimeoutError,
   ProviderSessionNotFoundError,
 } from "../provider/Errors.ts";
+import { ProviderSessionStartCancelledError } from "./threadLaneControl.ts";
 import {
   failureTag,
   STORAGE_FAILURE_DETAIL,
@@ -26,6 +28,31 @@ describe("userFacingFailureDetail", () => {
     assert.equal(
       userFacingFailureDetail(Cause.fail(requestError("Provider disconnected"))),
       "Provider disconnected",
+    );
+  });
+
+  it("renders a provider operation timeout as its detail sentence", () => {
+    const detail =
+      "Provider 'codex' did not finish starting within 120s. Ryco stopped waiting; send the message again to retry.";
+    const error = new ProviderOperationTimeoutError({
+      provider: "codex",
+      operation: "session.start",
+      timeoutMs: 120_000,
+      detail,
+    });
+    assert.equal(userFacingFailureDetail(Cause.fail(error)), detail);
+    assert.equal(failureTag(Cause.fail(error)), "ProviderOperationTimeoutError");
+  });
+
+  it("renders a cancelled session start as its detail sentence", () => {
+    const error = new ProviderSessionStartCancelledError({
+      threadId: "thread-1",
+      stopSequence: 7,
+      detail: "Stopped before the provider session started.",
+    });
+    assert.equal(
+      userFacingFailureDetail(Cause.fail(error)),
+      "Stopped before the provider session started.",
     );
   });
 

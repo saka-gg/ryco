@@ -166,6 +166,22 @@ describe("ServerSettings.enableProviderUpdateChecks", () => {
   });
 });
 
+describe("ServerSettings.continueThreadsAfterRestart", () => {
+  it("defaults off, so old settings files decode without auto-continuation", () => {
+    expect(DEFAULT_SERVER_SETTINGS.continueThreadsAfterRestart).toBe(false);
+    expect(decodeServerSettings({}).continueThreadsAfterRestart).toBe(false);
+  });
+
+  it("can be enabled and round-trips through the settings patch", () => {
+    expect(
+      decodeServerSettings({ continueThreadsAfterRestart: true }).continueThreadsAfterRestart,
+    ).toBe(true);
+    expect(
+      decodeServerSettingsPatch({ continueThreadsAfterRestart: true }).continueThreadsAfterRestart,
+    ).toBe(true);
+  });
+});
+
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults to an empty record so legacy configs without the key still decode", () => {
     expect(DEFAULT_SERVER_SETTINGS.providerInstances).toEqual({});

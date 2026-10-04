@@ -54,6 +54,12 @@ export interface QueueThreadView {
   readonly turnStartFailures: ReadonlyArray<QueueTurnStartFailure>;
   /** Steer rejection rows keyed by activity id: one per steer request (`commandId`). */
   readonly steerRejectionsByActivityId: ReadonlyMap<string, TurnSteerRejectionActivity>;
+  /**
+   * Messages whose turn start a Stop cancelled before the provider took it
+   * (`provider.turn.start.cancelled`). Settled, not failed: the Stop already
+   * placed its own hold.
+   */
+  readonly turnStartCancelledMessageIds: ReadonlySet<string>;
   /** The projected usage limit; it only holds while `modelSelection` targets its instance. */
   readonly usageLimit?: ThreadUsageLimit | null | undefined;
   readonly modelSelection?: { readonly instanceId: string } | null | undefined;
@@ -68,6 +74,7 @@ export interface QueueTurnStartFailure {
 interface ActivityDerivedView {
   readonly turnStartFailures: ReadonlyArray<QueueTurnStartFailure>;
   readonly steerRejectionsByActivityId: ReadonlyMap<string, TurnSteerRejectionActivity>;
+  readonly turnStartCancelledMessageIds: ReadonlySet<string>;
   readonly pendingApproval: boolean;
   readonly pendingUserInput: boolean;
 }
@@ -83,6 +90,7 @@ const EMPTY_MESSAGE_ID_SET: ReadonlySet<string> = new Set();
 const EMPTY_ACTIVITY_VIEW: ActivityDerivedView = {
   turnStartFailures: [],
   steerRejectionsByActivityId: indexTurnSteerRejections([]),
+  turnStartCancelledMessageIds: EMPTY_MESSAGE_ID_SET,
   pendingApproval: false,
   pendingUserInput: false,
 };
@@ -121,6 +129,7 @@ function readActivityView(
   if (cached) return cached;
   const activities: OrchestrationThreadActivity[] = [];
   const turnStartFailures: QueueTurnStartFailure[] = [];
+  const turnStartCancelledMessageIds = new Set<string>();
   for (const id of ids) {
     const activity = byId[id];
     if (!activity) continue;
@@ -134,11 +143,16 @@ function readActivityView(
           detail: readPayloadString(activity.payload, "detail"),
         });
       }
+    } else if (activity.kind === "provider.turn.start.cancelled") {
+      const messageId = readPayloadString(activity.payload, "messageId");
+      if (messageId !== null) turnStartCancelledMessageIds.add(messageId);
     }
   }
   const next: ActivityDerivedView = {
     turnStartFailures,
     steerRejectionsByActivityId: indexTurnSteerRejections(activities),
+    turnStartCancelledMessageIds:
+      turnStartCancelledMessageIds.size > 0 ? turnStartCancelledMessageIds : EMPTY_MESSAGE_ID_SET,
     pendingApproval: derivePendingApprovals(activities).length > 0,
     pendingUserInput: derivePendingUserInputs(activities).length > 0,
   };
@@ -230,6 +244,7 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
     projectedMessageIds: readProjectedMessageIds(messageIds),
     turnStartFailures: activityView.turnStartFailures,
     steerRejectionsByActivityId: activityView.steerRejectionsByActivityId,
+    turnStartCancelledMessageIds: activityView.turnStartCancelledMessageIds,
     usageLimit: shell.usageLimit ?? null,
     modelSelection: shell.modelSelection,
   };

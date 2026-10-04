@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   makeQueueAppState,
   queueRef,
+  turnStartCancelled,
   turnStartFailed,
   type ThreadFixture,
 } from "../../../test/queueThreadFixtures.ts";
@@ -107,6 +108,26 @@ describe("resolveQueuedDispatchAck", () => {
       causeKey: "start-failed:a-2",
       detail: "Thread already has active turn",
     });
+  });
+
+  it("settles, never fails, a start that a Stop cancelled for the dispatched message", () => {
+    const snapshot = captureQueuedDispatchSnapshot(viewOf(SETTLED), "queued-1", NOW);
+    expect(
+      resolveQueuedDispatchAck({
+        snapshot,
+        view: viewOf({ ...SETTLED, activities: [turnStartCancelled("c-1", "other")] }),
+      }).kind,
+    ).toBe("pending");
+    expect(
+      resolveQueuedDispatchAck({
+        snapshot,
+        view: viewOf({
+          session: { status: "stopped" },
+          latestTurn: SETTLED.latestTurn,
+          activities: [turnStartCancelled("c-2", "queued-1")],
+        }),
+      }),
+    ).toEqual({ kind: "settled" });
   });
 
   it("acknowledges a new running turn", () => {

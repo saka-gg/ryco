@@ -103,6 +103,7 @@ function makeEngine(
   dispatchRef: Ref.Ref<ReadonlyArray<OrchestrationCommand>>,
 ): OrchestrationEngineShape {
   return {
+    bootSequence: 0,
     readEvents: () => Stream.empty,
     readEventsPage: (fromSequenceExclusive) =>
       Effect.succeed({

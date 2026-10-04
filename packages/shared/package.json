@@ -11,6 +11,14 @@
       "types": "./src/backgroundWork.ts",
       "import": "./src/backgroundWork.ts"
     },
+    "./claudeCacheReview": {
+      "types": "./src/claudeCacheReview.ts",
+      "import": "./src/claudeCacheReview.ts"
+    },
+    "./restartContinuation": {
+      "types": "./src/restartContinuation.ts",
+      "import": "./src/restartContinuation.ts"
+    },
     "./lruCache": {
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"
@@ -130,6 +138,14 @@
     "./KeyedCoalescingWorker": {
       "types": "./src/KeyedCoalescingWorker.ts",
       "import": "./src/KeyedCoalescingWorker.ts"
+    },
+    "./KeyedSerialWorker": {
+      "types": "./src/KeyedSerialWorker.ts",
+      "import": "./src/KeyedSerialWorker.ts"
+    },
+    "./KeyedSerialExecutor": {
+      "types": "./src/KeyedSerialExecutor.ts",
+      "import": "./src/KeyedSerialExecutor.ts"
     },
     "./QueuePolicy": {
       "types": "./src/QueuePolicy.ts",

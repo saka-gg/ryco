@@ -76,6 +76,7 @@ import {
 } from "../threadShellSummaryProjection.ts";
 import { resolveEventPullRequestTerminalAt } from "../pullRequestTerminalAt.ts";
 import { projectionLineageColumns } from "../threadLineage.ts";
+import { turnStartEndedMessageId } from "../providerEffectIntents.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -174,6 +175,7 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.activity-appended": [
     ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
     ORCHESTRATION_PROJECTOR_NAMES.pendingApprovals,
+    ORCHESTRATION_PROJECTOR_NAMES.threadTurns,
     ORCHESTRATION_PROJECTOR_NAMES.threads,
   ],
   "worktree.created": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
@@ -1740,6 +1742,20 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
           });
           return;
+
+        case "thread.activity-appended": {
+          // A start that ended without a turn (failed, or cancelled by a Stop) never
+          // binds its pending row. Keyed by message, so an older outcome never removes
+          // a newer pending start, and bound rows are untouched.
+          const messageId = turnStartEndedMessageId(event.payload.activity);
+          if (messageId !== null) {
+            yield* projectionTurnRepository.deletePendingTurnStartByMessage({
+              threadId: event.payload.threadId,
+              messageId,
+            });
+          }
+          return;
+        }
 
         case "thread.turn-start-requested": {
           yield* projectionTurnRepository.replacePendingTurnStart({

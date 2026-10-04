@@ -288,6 +288,15 @@ export function turnStartFailed(id: string, messageId: string, detail?: string):
   };
 }
 
+/** A Stop cancelled the turn start before the provider took it (tone info on the server). */
+export function turnStartCancelled(id: string, messageId: string): ActivityFixture {
+  return {
+    id,
+    kind: "provider.turn.start.cancelled",
+    payload: { messageId, reason: "stopped-before-start" },
+  };
+}
+
 /** A steer rejection row; `id` is the activity id, `turn-steer-rejected:<commandId>` in production. */
 export function steerFailed(
   id: string,

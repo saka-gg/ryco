@@ -4,12 +4,14 @@ import {
   TurnId,
   type ThreadUsageLimit,
 } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   makeQueueAppState,
   queueRef,
   steerFailed,
+  turnStartCancelled,
   turnStartFailed,
   type ThreadFixture,
 } from "../../../test/queueThreadFixtures.ts";
@@ -256,6 +258,26 @@ describe("resolveQueueDrainStep", () => {
     });
   });
 
+  it("settles a send whose start a Stop cancelled without an error hold", () => {
+    const snapshot = captureQueuedDispatchSnapshot(viewOf(IDLE_THREAD), "q-0", NOW);
+    const steps = drive(
+      input({
+        pendingDispatch: snapshot,
+        dispatchedMessageIds: new Set(["q-0"]),
+        view: viewOf({
+          session: { status: "stopped" },
+          latestTurn: IDLE_THREAD.latestTurn,
+          messageIds: ["m-0"],
+          activities: [turnStartCancelled("c-1", "q-0")],
+        }),
+      }),
+    );
+    expect(steps[0]).toEqual({ kind: "dispatch-started", messageId: "q-0" });
+    expect(steps.some((step) => step.kind === "hold" || step.kind === "dispatch-failed")).toBe(
+      false,
+    );
+  });
+
   it("reconciles a projected sending head and ends a steer the provider rejected", () => {
     expect(
       resolveQueueDrainStep(
@@ -470,5 +492,187 @@ describe("usage-limit holds", () => {
     state.view = viewOf({ ...LIMITED, modelInstanceId: "claudeAgent" });
     state.headProviderInstanceId = "claudeAgent";
     expect(settle(state)).toBe("send");
+  });
+});
+
+describe("restart holds", () => {
+  type DrainState = { -readonly [K in keyof QueueDrainInput]: QueueDrainInput[K] };
+  /** Applies bookkeeping steps, including releases, until the drain waits or sends. */
+  function settle(state: DrainState): string {
+    for (let index = 0; index < 8; index += 1) {
+      const step = resolveQueueDrainStep(state);
+      if (step.kind === "baseline" || step.kind === "acknowledge") {
+        state.acknowledgedCauseKeys = (state.acknowledgedCauseKeys ?? []).concat(step.causeKeys);
+      } else if (step.kind === "hold") {
+        state.hold = step.hold;
+      } else if (step.kind === "release") {
+        state.acknowledgedCauseKeys = (state.acknowledgedCauseKeys ?? []).concat(step.causeKeys);
+        state.hold = state.hold ? removeQueueHoldCauses(state.hold, step.causeKeys) : null;
+      } else {
+        return step.kind === "wait" ? `wait:${step.reason}` : step.kind;
+      }
+    }
+    throw new Error("drain did not settle");
+  }
+
+  /** What startup reconciliation leaves on a turn the restart cut off. */
+  const RECONCILED: Omit<ThreadFixture, "id"> = {
+    session: { status: "error", lastError: ORPHANED_PROVIDER_SESSION_ERROR },
+    latestTurn: { turnId: "turn-1", state: "interrupted" },
+    messageIds: ["m-0"],
+  };
+
+  /** Queued while the turn ran, then the server restarted. */
+  function restartedQueue(overrides: Partial<QueueDrainInput> = {}): DrainState {
+    const state: DrainState = { ...input({ view: viewOf(RUNNING_THREAD), ...overrides }) };
+    expect(settle(state)).toBe("wait:busy");
+    state.view = viewOf(RECONCILED);
+    return state;
+  }
+
+  it("holds after a restart until the continuation takes over, then drains when it completes", () => {
+    const state = restartedQueue();
+    // (a) The released session holds, as an error rather than as a Stop.
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({
+      reason: "error",
+      detail: ORPHANED_PROVIDER_SESSION_ERROR,
+      causeKeys: [`error:turn-1:${ORPHANED_PROVIDER_SESSION_ERROR}`],
+    });
+    // (b) The continuation message is accepted; its turn has not started yet.
+    state.view = viewOf({ ...RECONCILED, messageIds: ["m-0", "restart-continuation"] });
+    expect(settle(state)).toBe("wait:held");
+    // (c) The continuation turn runs.
+    state.view = viewOf({
+      session: { status: "running", activeTurnId: "turn-2" },
+      latestTurn: { turnId: "turn-2", state: "running" },
+      messageIds: ["m-0", "restart-continuation"],
+    });
+    expect(settle(state)).toBe("wait:busy");
+    expect(state.hold).toBeNull();
+    // (d) It completed normally: the queue drains.
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "restart-continuation", "assistant-2"],
+    });
+    expect(settle(state)).toBe("send");
+  });
+
+  it("holds again when the continuation itself fails", () => {
+    const state = restartedQueue();
+    expect(settle(state)).toBe("wait:held");
+    state.view = viewOf({
+      session: { status: "error", lastError: "Crashed" },
+      latestTurn: { turnId: "turn-2", state: "error" },
+      messageIds: ["m-0", "restart-continuation"],
+    });
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({ causeKeys: ["error:turn-2:Crashed"] });
+  });
+
+  it("holds a message queued for another instance until the continuation takes over", () => {
+    // The restarted session ran on codex; the queued message targets another instance.
+    const state = restartedQueue({ headProviderInstanceId: "claudeAgent" });
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({
+      reason: "error",
+      causeKeys: [`error:turn-1:${ORPHANED_PROVIDER_SESSION_ERROR}`],
+    });
+    state.view = viewOf({ ...RECONCILED, messageIds: ["m-0", "restart-continuation"] });
+    expect(settle(state)).toBe("wait:held");
+    state.view = viewOf({
+      session: { status: "running", activeTurnId: "turn-2" },
+      latestTurn: { turnId: "turn-2", state: "running" },
+      messageIds: ["m-0", "restart-continuation"],
+    });
+    expect(settle(state)).toBe("wait:busy");
+    expect(state.hold).toBeNull();
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "restart-continuation", "assistant-2"],
+    });
+    expect(settle(state)).toBe("send");
+  });
+
+  /** The restarted turn's session left `error` without a new turn (e.g. a session stop). */
+  const STOPPED_AFTER_RESTART: Omit<ThreadFixture, "id"> = {
+    session: { status: "stopped", lastError: ORPHANED_PROVIDER_SESSION_ERROR },
+    latestTurn: { turnId: "turn-1", state: "interrupted" },
+    messageIds: ["m-0"],
+  };
+
+  it("does not read the restarted turn as a Stop after Resume once its session stops", () => {
+    const state = restartedQueue();
+    expect(settle(state)).toBe("wait:held");
+    // Resume acknowledges the hold and every current cause, the restarted turn's included.
+    state.acknowledgedCauseKeys = (state.acknowledgedCauseKeys ?? []).concat(
+      releaseQueueHoldKeys(
+        state.hold,
+        deriveQueueFailureCauses(state.view!, new Set(), { includeUnsettled: true }),
+      ),
+    );
+    state.hold = null;
+    state.view = viewOf(STOPPED_AFTER_RESTART);
+    expect(settle(state)).toBe("send");
+  });
+
+  it("keeps a restart hold an error hold when its session stops, and releases it later", () => {
+    const state = restartedQueue();
+    expect(settle(state)).toBe("wait:held");
+    state.view = viewOf(STOPPED_AFTER_RESTART);
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({
+      reason: "error",
+      causeKeys: [`error:turn-1:${ORPHANED_PROVIDER_SESSION_ERROR}`],
+    });
+    // The user's own message runs and completes: nothing is left that reads as a Stop.
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "direct-send", "assistant-2"],
+    });
+    expect(settle(state)).toBe("send");
+  });
+
+  it("baselines the restarted turn so a later session stop does not hold", () => {
+    const state: DrainState = {
+      ...input({ acknowledgedCauseKeys: undefined, view: viewOf(RECONCILED) }),
+    };
+    expect(resolveQueueDrainStep(state)).toEqual({
+      kind: "baseline",
+      causeKeys: [`error:turn-1:${ORPHANED_PROVIDER_SESSION_ERROR}`, "interrupt:turn-1"],
+    });
+    expect(settle(state)).toBe("send");
+    state.view = viewOf(STOPPED_AFTER_RESTART);
+    expect(settle(state)).toBe("send");
+  });
+
+  // Known limit: the projection records no Stop, so another client's Stop the provider had
+  // not acknowledged before the restart reads exactly like the restart on this client.
+  it("cannot tell another client's unacknowledged Stop from the restart", () => {
+    const state = restartedQueue();
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold?.reason).toBe("error");
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "direct-send", "assistant-2"],
+    });
+    expect(settle(state)).toBe("send");
+  });
+
+  it("keeps a Stop recorded before the restart held until Resume", () => {
+    const state = restartedQueue();
+    state.hold = createInterruptQueueHold("turn-1", NOW);
+    expect(settle(state)).toBe("wait:held");
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "direct-send", "assistant-2"],
+    });
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold?.causeKeys).toEqual(["interrupt:turn-1"]);
   });
 });

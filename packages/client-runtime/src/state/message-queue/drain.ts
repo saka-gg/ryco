@@ -4,6 +4,7 @@ import {
   holdQueueForCauses,
   mergeQueueHold,
   partitionNewQueueFailureCauses,
+  releasableRestartCauseKeys,
   releasableUsageLimitCauseKeys,
   type QueueHold,
 } from "./hold.ts";
@@ -149,7 +150,8 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
   // 7. The previous queued send is acknowledged by its own turn or failure.
   if (input.pendingDispatch !== null) {
     const ack = resolveQueuedDispatchAck({ snapshot: input.pendingDispatch, view });
-    if (ack.kind === "started") {
+    // A start a Stop cancelled is settled the same way: the Stop holds the queue.
+    if (ack.kind === "started" || ack.kind === "settled") {
       return { kind: "dispatch-started", messageId: input.pendingDispatch.messageId };
     }
     if (ack.kind === "failed") {
@@ -164,14 +166,18 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
     }
   }
 
-  // 8. A usage-limit hold ends by itself once the limit no longer holds the queue.
+  // 8. A usage-limit hold ends by itself once the limit no longer holds the queue, and
+  // a restart hold once a later turn took over.
   const causes = deriveQueueFailureCauses(view, input.dispatchedMessageIds, { nowMs });
-  const released = releasableUsageLimitCauseKeys({
-    hold: input.hold,
-    view,
-    currentCauses: causes,
-    nowMs,
-  });
+  const released = [
+    ...releasableUsageLimitCauseKeys({
+      hold: input.hold,
+      view,
+      currentCauses: causes,
+      nowMs,
+    }),
+    ...releasableRestartCauseKeys({ hold: input.hold, view }),
+  ];
   if (released.length > 0) return { kind: "release", causeKeys: released };
 
   // 9. New failure causes merge into the hold before the held check, so a

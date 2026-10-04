@@ -1557,8 +1557,25 @@ export const ClaudeResumeGuard = Schema.Struct({
 });
 export type ClaudeResumeGuard = typeof ClaudeResumeGuard.Type;
 
+/**
+ * Server-only optimistic fence for an automatic continuation after a restart. Never part
+ * of `ClientThreadTurnStartCommand`: client decode strips it, so it cannot be forged.
+ */
+export const RestartContinuationGuard = Schema.Struct({
+  sourceTurnId: TurnId,
+  expectedLatestTurnState: Schema.Literals(["interrupted", "completed"]),
+  latestUserMessageId: Schema.NullOr(MessageId),
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  worktreePath: Schema.NullOr(Schema.String),
+  providerInstanceId: ProviderInstanceId,
+});
+export type RestartContinuationGuard = typeof RestartContinuationGuard.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
+  restartContinuationGuard: Schema.optional(RestartContinuationGuard),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),

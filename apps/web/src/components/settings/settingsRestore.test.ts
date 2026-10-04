@@ -59,4 +59,13 @@ describe("settings reset ownership", () => {
       patch: { autoResumeLimitedThreads: false, snoozeLimitedThreads: false },
     });
   });
+  it("restores continue-after-restart to off on the node only", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, continueThreadsAfterRestart: true };
+    expect(settingsRestorePlan(settings, "system", "node")).toEqual({
+      labels: ["Continue after restart"],
+      resetTheme: false,
+      patch: { continueThreadsAfterRestart: false },
+    });
+    expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
+  });
 });

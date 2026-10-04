@@ -92,6 +92,13 @@ export const GetProjectionPendingTurnStartInput = Schema.Struct({
 });
 export type GetProjectionPendingTurnStartInput = typeof GetProjectionPendingTurnStartInput.Type;
 
+export const DeleteProjectionPendingTurnStartByMessageInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+export type DeleteProjectionPendingTurnStartByMessageInput =
+  typeof DeleteProjectionPendingTurnStartByMessageInput.Type;
+
 export const DeleteProjectionTurnsByThreadInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -131,6 +138,14 @@ export interface ProjectionTurnRepositoryShape {
    */
   readonly deletePendingTurnStartByThreadId: (
     input: GetProjectionPendingTurnStartInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Deletes the pending-start placeholder of exactly this message (a start that
+   * ended without a turn). A newer pending start and bound turn rows stay.
+   */
+  readonly deletePendingTurnStartByMessage: (
+    input: DeleteProjectionPendingTurnStartByMessageInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
