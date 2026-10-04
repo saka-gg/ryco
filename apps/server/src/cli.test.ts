@@ -615,6 +615,9 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
             assert.include(listHuman.output, "Status: approved");
             assert.include(listHuman.output, "Status: pending");
             assert.include(listHuman.output, "Max role: operator");
+            // The role the pending device connects with is the `--max-role` an owner
+            // must approve it at; a record that predates the field prints none.
+            assert.equal(listHuman.output.split("Connects as: owner").length - 1, 1);
             // §13.6's display duty names the safety number among the LISTING's
             // fields, and §13.4 makes it the value an owner compares before
             // trusting a record. Both records carry it, so an owner comparing a
@@ -680,6 +683,7 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
                   approvedAt: undefined,
                   displayLabel: undefined,
                   pairingReserved: true,
+                  observedRole: "owner",
                 }),
               ],
               pendingGlobalSaturated: true,

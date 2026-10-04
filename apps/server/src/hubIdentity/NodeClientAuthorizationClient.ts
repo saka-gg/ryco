@@ -151,6 +151,14 @@ export interface NodeClientAuthorizationRecord {
   readonly displayLabel: string | undefined;
   /** §13.6: whether this record still HOLDS its pairing reservation right now. */
   readonly pairingReserved: boolean;
+  /**
+   * The `channel.open` role the node received when this device introduced
+   * itself, or `undefined` for a record that predates the field or was created
+   * by a Local Trusted Introduction. Display metadata only — see the stored
+   * field. It is the one ceiling an approval can name that both admits the
+   * device and does not exceed what the Hub assigned it.
+   */
+  readonly observedRole: string | undefined;
 }
 
 /** §13.6: what the CLI must be able to say about an owner-opened window. */
@@ -208,13 +216,29 @@ export interface NodeClientAuthorizationListing {
  */
 export type SpentPairingWindow = string | undefined;
 
+/** Which pending record's observed role the post-close commit rewrites, and to what. */
+export interface PendingObservedRoleRefresh {
+  readonly indexKey: string;
+  readonly observedRole: string;
+}
+
 /** The §13.2 step 3 decision, taken entirely in memory before anything is emitted. */
 export type NodeClientPendingAdmission =
-  /** A record already exists under this key; §13.2 creates and refreshes nothing. */
+  /**
+   * A record already exists under this key; §13.2 creates nothing.
+   *
+   * The one thing it may refresh is a PENDING record's observed role, and only
+   * when this attempt arrived under a different one — so a request recorded
+   * before the field existed, or before the Hub changed the account's role, is
+   * offered to the owner at the role the device now connects with. Display
+   * metadata on the pending class only: `approved` and `revoked` records are
+   * never touched from a peer's hello.
+   */
   | {
       readonly kind: "existing";
       readonly status: E2eeClientAuthorizationStatus;
       readonly spentPairingWindow: SpentPairingWindow;
+      readonly observedRoleRefresh: PendingObservedRoleRefresh | undefined;
     }
   | {
       readonly kind: "refused";
@@ -325,6 +349,12 @@ export interface NodeClientAuthorizationClient {
     readonly clientIdentityFingerprint: Uint8Array;
     /** The derived §13.4 display string. Raw keys never enter this module. */
     readonly safetyNumber: string;
+    /**
+     * The `channel.open.effectiveRole` this attempt arrived under (§8.3 element
+     * 14), which §8.6 step 5 has already made equal to the client's intended
+     * role. Stored as display metadata on the pending record; never authority.
+     */
+    readonly observedRole: string;
   }) => NodeClientPendingAdmission;
   /** §13.2 step 3, after the reject and the close: the pending-class mutation. */
   readonly commitPairingAdmission: (admission: NodeClientPendingAdmission) => Promise<void>;
@@ -464,6 +494,23 @@ function requireRole(role: string): string {
     return validated;
   } catch {
     return authorizationError("client_authorization_invalid");
+  }
+}
+
+/**
+ * The observed role in its stored form, or `undefined` when it is not one.
+ *
+ * Soft rather than `requireRole`'s throw: this runs inside §13.2 step 3, where a
+ * throw costs the whole pending record, and a role the node cannot rank is a
+ * reason to record no role — never a reason to record no request.
+ */
+function observedRoleOf(role: string): string | undefined {
+  try {
+    const validated = assertRelayEffectiveRoleLiteral(role);
+    e2eeRoleRank(validated);
+    return validated;
+  } catch {
+    return undefined;
   }
 }
 
@@ -632,6 +679,7 @@ function toRecord(classified: ClassifiedEntry, now: number): NodeClientAuthoriza
     safetyNumber: entry.safetyNumber,
     displayLabel: entry.displayLabel,
     pairingReserved: classified.status === "pending" && holdsReservation(entry, now),
+    observedRole: entry.observedRole,
   };
 }
 
@@ -656,6 +704,35 @@ function withExpiredPendingRemoved(
 ): NodeClientAuthorizationRecordFile {
   const pending = file.pending.filter((entry) => !isExpiredPending(entry, now));
   return pending.length === file.pending.length ? file : { ...file, pending };
+}
+
+/**
+ * A pending record's observed role rewritten, or `file` itself when there is
+ * nothing to rewrite.
+ *
+ * Reaches `file.pending` and nothing else, for the reason
+ * `selectPendingEviction` takes only pending entries: this runs from a peer's
+ * hello, and the structural guarantee that peer action cannot name an
+ * `approved` or `revoked` record is worth more than a status check. A record
+ * the owner approved or revoked between the decision and this commit is simply
+ * not found here.
+ */
+function withPendingObservedRole(
+  file: NodeClientAuthorizationRecordFile,
+  refresh: PendingObservedRoleRefresh,
+): NodeClientAuthorizationRecordFile {
+  let changed = false;
+  const pending = file.pending.map((entry) => {
+    if (
+      entry.observedRole === refresh.observedRole ||
+      clientAuthorizationIndexKey(entry) !== refresh.indexKey
+    ) {
+      return entry;
+    }
+    changed = true;
+    return { ...entry, observedRole: refresh.observedRole };
+  });
+  return changed ? { ...file, pending } : file;
 }
 
 function withoutKey(
@@ -1039,12 +1116,27 @@ export async function makeNodeClientAuthorizationClient(options: {
     const spentPairingWindow: SpentPairingWindow = reserved ? latch : undefined;
     if (spentPairingWindow !== undefined) spentWindowLatch = spentPairingWindow;
 
+    const observedRole = observedRoleOf(input.observedRole);
     const existing = lookupClassified(indexKey, at);
     // §13.6: a first-seen key produces a pending record. A key that already has
     // one — in ANY class — is not first-seen, and re-creating it would both
     // reset its retention and resurrect a record the owner revoked.
     if (existing !== undefined) {
-      return { kind: "existing", status: existing.status, spentPairingWindow };
+      // Only a PENDING record's display metadata may follow the device, and
+      // only when it actually moved: the request an owner approves has to name
+      // the role the device connects with NOW, or the approval refuses it.
+      const observedRoleRefresh =
+        existing.status === "pending" &&
+        observedRole !== undefined &&
+        existing.entry.observedRole !== observedRole
+          ? { indexKey, observedRole }
+          : undefined;
+      return {
+        kind: "existing",
+        status: existing.status,
+        spentPairingWindow,
+        observedRoleRefresh,
+      };
     }
 
     const partition = clientAuthorizationPartitionKey({ hubOrigin, accountId });
@@ -1089,6 +1181,9 @@ export async function makeNodeClientAuthorizationClient(options: {
         createdAt: at,
         safetyNumber: input.safetyNumber,
         ...(reserved ? { pairingReservedAt: at } : {}),
+        // Display metadata for the owner's approval — never `maxRole` above. The
+        // Hub assigns this value; only an owner action may turn it into a grant.
+        ...(observedRole === undefined ? {} : { observedRole }),
       },
       evictIndexKey: evict === undefined ? undefined : clientAuthorizationIndexKey(evict),
       spentPairingWindow,
@@ -1098,10 +1193,19 @@ export async function makeNodeClientAuthorizationClient(options: {
   const commitPairingAdmission: NodeClientAuthorizationClient["commitPairingAdmission"] = async (
     admission,
   ) => {
-    // Only the durable spend is owed for an outcome that creates nothing, and
-    // an attempt that neither spent the window nor was admitted writes nothing
-    // at all — §13.2 step 3's refusal path must stay free of durable writes.
-    if (admission.kind !== "admit" && admission.spentPairingWindow === undefined) return;
+    // Only the durable spend — and, for an existing pending record, a moved
+    // observed role — is owed for an outcome that creates nothing, and an
+    // attempt that owes neither and was not admitted writes nothing at all —
+    // §13.2 step 3's refusal path must stay free of durable writes.
+    const observedRoleRefresh =
+      admission.kind === "existing" ? admission.observedRoleRefresh : undefined;
+    if (
+      admission.kind !== "admit" &&
+      admission.spentPairingWindow === undefined &&
+      observedRoleRefresh === undefined
+    ) {
+      return;
+    }
     const at = now();
     await commit(
       (current) => {
@@ -1124,6 +1228,9 @@ export async function makeNodeClientAuthorizationClient(options: {
           ) {
             next = { ...next, pairingWindow: { ...window, spentAt: at } };
           }
+        }
+        if (observedRoleRefresh !== undefined) {
+          next = withPendingObservedRole(next, observedRoleRefresh);
         }
         if (admission.kind !== "admit") return next === current ? null : next;
         const indexKey = clientAuthorizationIndexKey(admission.entry);
@@ -1244,6 +1351,11 @@ export async function makeNodeClientAuthorizationClient(options: {
           ...(found.entry.lastSeenAt === undefined ? {} : { lastSeenAt: found.entry.lastSeenAt }),
           safetyNumber: found.entry.safetyNumber,
           ...(label === undefined ? {} : { displayLabel: label }),
+          // Carried, so an owner surface can still tell later whether a
+          // narrowing would limit this device or refuse it outright.
+          ...(found.entry.observedRole === undefined
+            ? {}
+            : { observedRole: found.entry.observedRole }),
           // The reservation is dropped rather than carried: once a record is
           // `approved` no eviction rule reaches it, so the field would only be
           // dead state on a record that no longer occupies the reserved class.
@@ -1315,6 +1427,9 @@ export async function makeNodeClientAuthorizationClient(options: {
           ...(found?.entry.lastSeenAt === undefined ? {} : { lastSeenAt: found.entry.lastSeenAt }),
           safetyNumber,
           ...(displayLabel === undefined ? {} : { displayLabel }),
+          ...(found?.entry.observedRole === undefined
+            ? {}
+            : { observedRole: found.entry.observedRole }),
           ...(found?.entry.forwardFields === undefined
             ? {}
             : { forwardFields: found.entry.forwardFields }),
@@ -1409,6 +1524,9 @@ export async function makeNodeClientAuthorizationClient(options: {
           ...(found.entry.displayLabel === undefined
             ? {}
             : { displayLabel: found.entry.displayLabel }),
+          ...(found.entry.observedRole === undefined
+            ? {}
+            : { observedRole: found.entry.observedRole }),
           ...(found.entry.forwardFields === undefined
             ? {}
             : { forwardFields: found.entry.forwardFields }),
@@ -1464,6 +1582,9 @@ export async function makeNodeClientAuthorizationClient(options: {
         ...(found.entry.pairingReservedAt === undefined
           ? {}
           : { pairingReservedAt: found.entry.pairingReservedAt }),
+        ...(found.entry.observedRole === undefined
+          ? {}
+          : { observedRole: found.entry.observedRole }),
         ...(found.entry.forwardFields === undefined
           ? {}
           : { forwardFields: found.entry.forwardFields }),

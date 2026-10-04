@@ -144,6 +144,7 @@ function recordView(record: NodeClientAuthorizationRecord): E2eeClientRecordView
     safetyNumber: record.safetyNumber,
     ...(record.displayLabel === undefined ? {} : { displayLabel: record.displayLabel }),
     pairingReserved: record.pairingReserved,
+    ...(record.observedRole === undefined ? {} : { observedRole: record.observedRole }),
   };
 }
 

@@ -1,6 +1,8 @@
 import { E2EE_SAFETY_NUMBER_DIGITS, E2EE_WEB_SAS_CHARS } from "@ryco/shared/relayE2eeConstants";
 import { describe, expect, it } from "vite-plus/test";
 
+import type { NodeE2eeClientRecord } from "@ryco/client-runtime/connection";
+
 import {
   E2EE_WEB_SAS_ADVISORY,
   E2EE_WEB_SAS_DETAIL,
@@ -8,6 +10,8 @@ import {
 import {
   everyNodeSecurityString,
   formatNodeEpoch,
+  nodeApprovalRole,
+  nodeApprovalRoleUnknownNotice,
   nodeApproveConfirmation,
   nodeClientRowTitle,
   nodeConnectionStatement,
@@ -19,6 +23,7 @@ import {
   nodeE2eeStrictPolicyDisposition,
   nodeEnrollmentFingerprintView,
   nodeFallbackReport,
+  nodeNarrowOffered,
   nodeOperatorDataAvailability,
   nodePairingWindowRows,
   nodePolicyChangeDestructive,
@@ -33,6 +38,8 @@ import {
   nodeSecurityMode,
   nodeSessionRows,
   nodeSessionVerificationView,
+  NODE_APPROVAL_ROLE_UNKNOWN_PENDING,
+  NODE_APPROVAL_ROLE_UNKNOWN_REVOKED,
   NODE_E2EE_ACTION_IDS,
   NODE_E2EE_APPROVABLE_ROLES,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
@@ -324,6 +331,7 @@ describe("prohibited claims", () => {
       "nodeSessionSasAdvisory",
       "policyNoWithdrawal",
       "policyValueUnreadable",
+      "approvalRoleUnknown",
       // The claim-bearing `.tsx` copy, moved here so a unit scan can see it. The
       // browser suite runs the same list over the rendered DOM for the rest.
       "requireE2eeDescription",
@@ -377,11 +385,7 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
     }
   });
 
-  it("makes the owner name the role, and names it back in the confirmation", () => {
-    // §13.6: "`approved` requires explicit owner action naming the maximum role
-    // and capability set." A single Approve button with a default would be the
-    // PANEL naming the role — and the value it picked would become the ceiling
-    // every channel that key opens is admitted under (§8.6 step 6).
+  it("names the role it grants back in the confirmation, with what a smaller one does", () => {
     expect([...NODE_E2EE_APPROVABLE_ROLES]).toEqual(["viewer", "operator", "owner"]);
     for (const role of NODE_E2EE_APPROVABLE_ROLES) {
       const confirmation = nodeApproveConfirmation(role);
@@ -392,15 +396,95 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
       for (const capability of NODE_E2EE_APPROVAL_CAPABILITY_SET) {
         expect(confirmation.body, role).toContain(capability);
       }
+      // …and the owner who wants to grant less is told that a lower ceiling
+      // locks the device out, and pointed at the action that says so honestly.
+      expect(confirmation.body, role).toContain("would refuse the device rather than limit it");
+      expect(confirmation.body, role).toContain("revoke the key instead");
     }
-    // Least authority first, so the first thing under the cursor is the
-    // smallest grant.
-    expect(NODE_E2EE_APPROVABLE_ROLES[0]).toBe("viewer");
     // Three distinct confirmations, so no two roles read the same.
     const labels = NODE_E2EE_APPROVABLE_ROLES.map(
       (role) => nodeApproveConfirmation(role).confirmLabel,
     );
     expect(new Set(labels).size).toBe(labels.length);
+  });
+
+  it("approves at the role the device connects with, and at no other", () => {
+    // §8.3 makes a native client's intended role equal its `channel.open` role,
+    // and §8.6 step 6 admits it only under a `maxRole` at least that high. The
+    // three buttons this replaced led with `viewer`, which approved the owner's
+    // own phone into a green row that every handshake then refused.
+    const record = (
+      observedRole: string | undefined,
+      status: NodeE2eeClientRecord["status"] = "pending",
+    ): NodeE2eeClientRecord => ({
+      status,
+      hubOrigin: "https://hub.example.test",
+      accountId: "acct_reader",
+      fingerprint: "SHA256:AAAAphone0",
+      maxRole: "viewer",
+      capabilitySet: [],
+      createdAt: 0,
+      safetyNumber: SAFETY_NUMBER,
+      pairingReserved: false,
+      ...(observedRole === undefined ? {} : { observedRole }),
+    });
+    for (const role of NODE_E2EE_APPROVABLE_ROLES) {
+      expect(nodeApprovalRole(record(role)), role).toBe(role);
+      expect(nodeApprovalRole(record(role, "revoked")), role).toBe(role);
+      expect(nodeApprovalRoleUnknownNotice(record(role)), role).toBeNull();
+    }
+    // Nothing to approve on an approved record.
+    expect(nodeApprovalRole(record("owner", "approved"))).toBeNull();
+    expect(nodeApprovalRoleUnknownNotice(record(undefined, "approved"))).toBeNull();
+
+    // A record that does not say which role is offered NONE — never a guess,
+    // and in particular never `owner` because the account looks like the
+    // owner's — and the row says what to do instead.
+    for (const observedRole of [undefined, "superuser"]) {
+      expect(nodeApprovalRole(record(observedRole)), String(observedRole)).toBeNull();
+    }
+    expect(nodeApprovalRoleUnknownNotice(record(undefined))).toBe(
+      NODE_APPROVAL_ROLE_UNKNOWN_PENDING,
+    );
+    expect(nodeApprovalRoleUnknownNotice(record(undefined, "revoked"))).toBe(
+      NODE_APPROVAL_ROLE_UNKNOWN_REVOKED,
+    );
+  });
+
+  it("offers a narrowing only when the device would still get in", () => {
+    // A ceiling below the role the device connects with refuses it rather than
+    // narrowing it, on both suites. "Reduce to viewer" on an owner's phone was a
+    // revocation whose dialog promised a reconnect.
+    const approved = (maxRole: string, observedRole?: string): NodeE2eeClientRecord => ({
+      status: "approved",
+      hubOrigin: "https://hub.example.test",
+      accountId: "acct_reader",
+      fingerprint: "SHA256:AAAAphone0",
+      maxRole,
+      capabilitySet: ["ryco.rpc"],
+      createdAt: 0,
+      safetyNumber: SAFETY_NUMBER,
+      pairingReserved: false,
+      ...(observedRole === undefined ? {} : { observedRole }),
+    });
+    expect(nodeNarrowOffered(approved("owner", "owner"), "viewer")).toBe(false);
+    expect(nodeNarrowOffered(approved("operator", "operator"), "viewer")).toBe(false);
+    // A record that does not carry the role cannot be shown to survive it.
+    expect(nodeNarrowOffered(approved("owner"), "viewer")).toBe(false);
+    // The one case that genuinely narrows: approved above what it connects with.
+    expect(nodeNarrowOffered(approved("operator", "viewer"), "viewer")).toBe(true);
+    expect(nodeNarrowOffered(approved("owner", "operator"), "operator")).toBe(true);
+    // Never a no-op, and never on a record that is not approved.
+    expect(nodeNarrowOffered(approved("viewer", "viewer"), "viewer")).toBe(false);
+    expect(nodeNarrowOffered({ ...approved("owner", "viewer"), status: "revoked" }, "viewer")).toBe(
+      false,
+    );
+  });
+
+  it("does not promise a reconnect a narrowing cannot deliver", () => {
+    const lower = nodeE2eeActionConfirmation("narrow").body.toLowerCase();
+    expect(lower).not.toContain("the device reconnects with the smaller role ceiling");
+    expect(lower).toContain("refused, not limited");
   });
 
   it("says that approving takes effect only on a fresh connection", () => {

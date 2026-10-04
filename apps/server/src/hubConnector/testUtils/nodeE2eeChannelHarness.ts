@@ -340,7 +340,12 @@ export function authorizationFor(
     evaluatePairingAdmission: () =>
       record === undefined
         ? { kind: "refused", reason: "pending_cap_global", spentPairingWindow: undefined }
-        : { kind: "existing", status: record.status, spentPairingWindow: undefined },
+        : {
+            kind: "existing",
+            status: record.status,
+            spentPairingWindow: undefined,
+            observedRoleRefresh: undefined,
+          },
     commitPairingAdmission: async () => undefined,
   };
 }

@@ -61,6 +61,13 @@ export interface NodeE2eeClientRecord {
   readonly safetyNumber: string;
   readonly displayLabel?: string;
   readonly pairingReserved: boolean;
+  /**
+   * The `channel.open` role the device introduced itself under — display
+   * metadata the owner approves from, never authority. A native client's
+   * intended role must equal it (§8.3), so an approval below it refuses the
+   * device rather than limiting it. Absent on records that predate it.
+   */
+  readonly observedRole?: string;
 }
 
 /** §13.6: while a window is open a surface must show all three of these. */

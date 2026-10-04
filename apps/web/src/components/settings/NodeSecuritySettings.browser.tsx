@@ -72,7 +72,7 @@ vi.mock("~/environments/primary", async (importOriginal) => ({
   }),
   fetchNodeE2eeClients: vi.fn(async () => {
     calls.push("clients");
-    return CLIENTS;
+    return clients;
   }),
   fetchNodeE2eeSessions: vi.fn(async () => {
     calls.push("sessions");
@@ -203,6 +203,8 @@ const CLIENTS: NodeE2eeClientListing = {
       createdAt: 1_700_000_000_000,
       safetyNumber: SAFETY_NUMBER,
       pairingReserved: false,
+      // The owner's own phone: the Hub opens its channels as `owner`.
+      observedRole: "owner",
     },
     {
       status: "approved",
@@ -215,12 +217,31 @@ const CLIENTS: NodeE2eeClientListing = {
       approvedAt: 1_700_000_000_000,
       safetyNumber: SECOND_SAFETY_NUMBER,
       pairingReserved: false,
+      observedRole: "operator",
     },
   ],
   pendingGlobalSaturated: false,
   saturatedAccounts: [],
   refusedPairingAttempts: 2,
 };
+
+/** What the clients route answers with in the current test. */
+let clients: NodeE2eeClientListing = CLIENTS;
+
+/**
+ * `CLIENTS` with one record's observed role replaced — or removed, which is a
+ * record from before the node kept it.
+ */
+function withObservedRole(index: number, observedRole: string | undefined): NodeE2eeClientListing {
+  return {
+    ...CLIENTS,
+    records: CLIENTS.records.map((record, at) => {
+      if (at !== index) return record;
+      const { observedRole: _previous, ...rest } = record;
+      return observedRole === undefined ? rest : { ...rest, observedRole };
+    }),
+  };
+}
 
 const SESSIONS: NodeE2eeSessionList = {
   sessions: [
@@ -274,6 +295,7 @@ let mounted: Awaited<ReturnType<typeof render>> | null = null;
 beforeEach(() => {
   calls.length = 0;
   localSessionRole = "owner";
+  clients = CLIENTS;
   // Call history only — the factory's implementations stay in place. Without it
   // an assertion in one test would be satisfied by a click in an earlier one.
   vi.clearAllMocks();
@@ -590,19 +612,19 @@ describe("the confirmation stands between the click and the network", () => {
 });
 
 describe("§13.6 the request an approval builds is the one the owner was shown", () => {
-  it("sends the named role and a capability set the node can admit", async () => {
+  it("approves at the role the device connects with, with a capability set the node can admit", async () => {
     // The dialog and the wire could disagree silently: nothing asserted the
     // built request at all, so `maxRole: "owner", capabilitySet: ["*"]` behind a
-    // button labelled "Approve as viewer" left both suites green. And the
-    // shipped set was EMPTY, which §8.6 step 6 refuses on every native
-    // handshake — an `approved` record that cannot connect.
+    // differently labelled button left both suites green. And the shipped set
+    // was EMPTY, which §8.6 step 6 refuses on every native handshake — an
+    // `approved` record that cannot connect.
     await mountLocalPanel();
 
-    buttonsLabelled("Approve as viewer")[0]!.click();
+    buttonsLabelled("Approve as owner")[0]!.click();
     await vi.waitFor(() => {
       expect(confirmButton()).not.toBeNull();
     });
-    expect(confirmDialog()!.textContent).toContain("Approve this client key as viewer?");
+    expect(confirmDialog()!.textContent).toContain("Approve this client key as owner?");
     confirmButton()!.click();
 
     await vi.waitFor(() => {
@@ -613,7 +635,7 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
       accountId: "acct_reader",
       fingerprint: FINGERPRINT,
       action: "approve",
-      maxRole: "viewer",
+      maxRole: "owner",
       capabilitySet: NODE_E2EE_APPROVAL_CAPABILITY_SET,
     });
     await vi.waitFor(() => {
@@ -627,26 +649,44 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
     expect(NODE_E2EE_APPROVAL_CAPABILITY_SET.length).toBeGreaterThan(0);
   });
 
-  it("discriminates between sibling roles rather than sending a default", async () => {
+  it("offers no ceiling below the role the device connects with", async () => {
+    // §8.3 makes a native client's intended role equal its `channel.open` role,
+    // so a smaller ceiling refuses the device rather than limiting it. The
+    // buttons this replaced led with "Approve as viewer" — a green row whose
+    // every handshake was then refused.
     await mountLocalPanel();
-
-    buttonsLabelled("Approve as owner")[0]!.click();
-    await vi.waitFor(() => {
-      expect(confirmButton()).not.toBeNull();
-    });
-    confirmButton()!.click();
-    await vi.waitFor(() => {
-      expect(applyNodeE2eeAuthorization).toHaveBeenCalledTimes(1);
-    });
-    expect(applyNodeE2eeAuthorization).toHaveBeenCalledWith(
-      expect.objectContaining({ maxRole: "owner" }),
-    );
+    for (const role of ["viewer", "operator"]) {
+      expect(buttonsLabelled(`Approve as ${role}`), role).toHaveLength(0);
+    }
+    expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
+    expect(document.querySelector('[data-testid="node-approval-role-unknown"]')).toBeNull();
   });
 
-  it("offers no narrowing on a record already at the smallest ceiling", async () => {
-    // The node treats a narrow that changes nothing as a no-op, so the button
-    // would offer an action with no effect behind a dialog promising immediate
-    // channel closure. Only the `operator` record gets one.
+  it("offers no approval at all for a request that does not say its role", async () => {
+    // A record from before the node kept the role. Any button here would be a
+    // guess, and the wrong guess is the lockout — so the row says what to do.
+    clients = withObservedRole(0, undefined);
+    await mountLocalPanel();
+    expect(
+      [...document.querySelectorAll<HTMLElement>("button")].filter((element) =>
+        (element.textContent ?? "").trim().startsWith("Approve as"),
+      ),
+    ).toHaveLength(0);
+    expect(
+      document.querySelector('[data-testid="node-approval-role-unknown"]')?.textContent,
+    ).toContain("Have the device try again");
+  });
+
+  it("offers Reduce to viewer only where the device would still get in", async () => {
+    // The approved record connects as `operator`: a `viewer` ceiling would
+    // refuse it on its next handshake, not narrow it — Revoke says that honestly.
+    await mountLocalPanel();
+    expect(buttonsLabelled("Reduce to viewer")).toHaveLength(0);
+    expect(buttonsLabelled("Revoke").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("narrows a record approved above the role it connects with", async () => {
+    clients = withObservedRole(1, "viewer");
     await mountLocalPanel();
     expect(buttonsLabelled("Reduce to viewer")).toHaveLength(1);
 

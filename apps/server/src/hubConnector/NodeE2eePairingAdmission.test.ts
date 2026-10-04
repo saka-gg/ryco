@@ -531,6 +531,23 @@ describe("§13.2 pairing admission on the relay path", () => {
     );
   });
 
+  it("records the channel.open role the device introduced itself under, as display only", async () => {
+    // §8.3 makes a native client's intended role equal `channel.open`'s, so an
+    // approval below it refuses the device instead of limiting it. The owner can
+    // only approve the usable ceiling if the node kept the role it saw — taken
+    // from the node's OWN `channel.open`, which is what the step-6 check reads.
+    const run = await runPairing({});
+    const [record] = (await run.node.client.list()).records;
+    expect(record?.observedRole).toBe(clientChannel.channelOpenEffectiveRole);
+    // …and it is metadata, not a grant: the record is still pending at the
+    // least authority, and §8.6 step 6 still refuses it.
+    expect({ status: record?.status, maxRole: record?.maxRole }).toEqual({
+      status: "pending",
+      maxRole: "viewer",
+    });
+    expect(run.node.client.lookupClientAuthorization(CLIENT_KEY)?.status).toBe("pending");
+  });
+
   it("creates the record AFTER the reject and the close, and never before", async () => {
     const node = await pairingNode();
     await node.client.openPairingWindow(CLIENT_FINGERPRINT);

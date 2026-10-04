@@ -61,8 +61,14 @@ describe("node client authorization store", () => {
   it("round-trips a record in every class", async () => {
     const test = await harness();
     await test.write({
-      pending: [entry({ pairingReservedAt: 1_500 })],
-      approved: [entry({ clientIdentityFingerprint: fingerprint(2), approvedAt: 2_000 })],
+      pending: [entry({ pairingReservedAt: 1_500, observedRole: "operator" })],
+      approved: [
+        entry({
+          clientIdentityFingerprint: fingerprint(2),
+          approvedAt: 2_000,
+          observedRole: "owner",
+        }),
+      ],
       revoked: [
         entry({ clientIdentityFingerprint: fingerprint(3), approvedAt: 2_000, revokedAt: 3_000 }),
       ],
@@ -70,6 +76,9 @@ describe("node client authorization store", () => {
     const record = await test.store.read();
     expect(record.pending).toHaveLength(1);
     expect(record.pending[0]?.pairingReservedAt).toBe(1_500);
+    expect(record.pending[0]?.observedRole).toBe("operator");
+    expect(record.approved[0]?.observedRole).toBe("owner");
+    expect(record.revoked[0]?.observedRole).toBeUndefined();
     expect(record.approved[0]?.approvedAt).toBe(2_000);
     expect(record.revoked[0]?.revokedAt).toBe(3_000);
   });
@@ -257,6 +266,9 @@ describe("node client authorization store", () => {
       { safetyNumber: SAFETY_NUMBER.slice(0, -1) },
       { safetyNumber: SAFETY_NUMBER.replace(" ", "-") },
       { maxRole: "administrator" },
+      // The observed role is display metadata, but only ever a role `maxRole` could hold.
+      { observedRole: "administrator" },
+      { observedRole: 3 as unknown as string },
       { capabilitySet: ["ryco.rpc", "ryco.rpc"] },
       { capabilitySet: ["not.a.capability"] },
       { displayLabel: "x".repeat(101) },

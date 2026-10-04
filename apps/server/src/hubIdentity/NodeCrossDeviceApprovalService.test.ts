@@ -50,6 +50,7 @@ const record = (
   safetyNumber: "11111 22222 33333 44444 55555",
   displayLabel: "Laurin's iPhone",
   pairingReserved: false,
+  observedRole: "owner",
   ...overrides,
 });
 

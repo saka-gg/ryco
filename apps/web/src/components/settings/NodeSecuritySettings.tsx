@@ -87,6 +87,8 @@ import {
 } from "./settingsLayout";
 import { cn } from "../../lib/utils";
 import {
+  nodeApprovalRole,
+  nodeApprovalRoleUnknownNotice,
   nodeApproveConfirmation,
   nodeClientListingNotices,
   nodeClientRows,
@@ -102,6 +104,7 @@ import {
   nodeE2eeStrictPolicyDisposition,
   nodeEnrollmentFingerprintView,
   nodeFallbackReport,
+  nodeNarrowOffered,
   nodeOperatorDataAvailability,
   nodePairingWindowRows,
   nodePolicyChangeDestructive,
@@ -124,7 +127,6 @@ import {
   type NodeLocalOperatorAccess,
   type NodeFactRow,
   NODE_CONTINUITY_DESCRIPTION,
-  NODE_E2EE_APPROVABLE_ROLES,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
   NODE_FALLBACK_QUIET,
   NODE_NO_CLIENTS_DESCRIPTION,
@@ -1411,6 +1413,8 @@ function ClientRecordRow({
     fingerprint: record.fingerprint,
   };
   const tone = nodeClientStatusTone(record.status);
+  const approvalRole = nodeApprovalRole(record);
+  const approvalRoleUnknown = nodeApprovalRoleUnknownNotice(record);
 
   return (
     <SettingsRow
@@ -1425,43 +1429,43 @@ function ClientRecordRow({
       description={`${record.accountId} at ${record.hubOrigin}`}
       control={
         <>
-          {/* §13.6: an approval names the maximum role, and the OWNER names it.
-              One button per role rather than one button and a default, because a
-              default is the panel choosing the ceiling every channel this key
-              opens is admitted under. Least authority first.
+          {/* §13.6: an approval names the maximum role. It is the ONE role the
+              device connects with (`nodeApprovalRole`): §8.3 makes a native
+              client's intended role equal its `channel.open` role, so a smaller
+              ceiling refuses the device instead of limiting it. No button at all
+              when the record does not say which role that is — the row explains
+              why instead of guessing.
 
               The capability set is NOT the owner's to pick here and is not left
               empty: §8.6 step 6 admits a native handshake only if the record's
               set contains the intended capability, and `RelayCapability` has one
               member — so an empty set approves a key that is refused by every
               handshake it attempts. */}
-          {record.status === "approved"
-            ? null
-            : NODE_E2EE_APPROVABLE_ROLES.map((role) => (
-                <Button
-                  key={role}
-                  size="xs"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    onApprove(
-                      {
-                        ...key,
-                        action: "approve",
-                        maxRole: role,
-                        capabilitySet: NODE_E2EE_APPROVAL_CAPABILITY_SET,
-                      },
-                      role,
-                    )
-                  }
-                >
-                  Approve as {role}
-                </Button>
-              ))}
-          {/* Absent at `viewer`: the node treats a narrow that changes nothing as
-              a no-op, so the button would offer an action with no effect behind a
-              dialog promising immediate channel closure. */}
-          {record.status === "approved" && record.maxRole !== "viewer" ? (
+          {approvalRole === null ? null : (
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy}
+              onClick={() =>
+                onApprove(
+                  {
+                    ...key,
+                    action: "approve",
+                    maxRole: approvalRole,
+                    capabilitySet: NODE_E2EE_APPROVAL_CAPABILITY_SET,
+                  },
+                  approvalRole,
+                )
+              }
+            >
+              Approve as {approvalRole}
+            </Button>
+          )}
+          {/* Only when the device would still get in: a ceiling below the role it
+              connects with refuses it rather than narrowing it, and Revoke says
+              that honestly. Also absent at `viewer`, where the node treats the
+              narrow as a no-op. */}
+          {nodeNarrowOffered(record, "viewer") ? (
             <Button
               size="xs"
               variant="destructive-outline"
@@ -1511,6 +1515,14 @@ function ClientRecordRow({
     >
       <div className="space-y-3 pb-3.5">
         <FactRows rows={nodeClientRows(record)} />
+        {approvalRoleUnknown === null ? null : (
+          <p
+            data-testid="node-approval-role-unknown"
+            className="text-[11px] leading-relaxed text-muted-foreground"
+          >
+            {approvalRoleUnknown}
+          </p>
+        )}
         <SafetyNumber value={record.safetyNumber} />
       </div>
     </SettingsRow>

@@ -563,6 +563,9 @@ export function nodeClientRows(record: NodeE2eeClientRecord): ReadonlyArray<Node
     { label: "Hub origin", value: record.hubOrigin },
     { label: "Account", value: record.accountId },
     { label: "Maximum role", value: record.maxRole === "" ? "none granted" : record.maxRole },
+    // The role the device introduced itself under — what an approval has to
+    // name for it to connect at all (see `nodeApprovalRole`).
+    { label: "Connects as", value: record.observedRole ?? "not recorded" },
     {
       label: "Capabilities",
       value: record.capabilitySet.length === 0 ? "none" : record.capabilitySet.join(", "),
@@ -1088,9 +1091,15 @@ const ACTION_CONFIRMATIONS = {
     // (`capabilitySet ?? found.entry.capabilitySet`), so the role ceiling is the
     // only dimension that moves — while §13.6 treats the capability grant as a
     // separate authority the owner names, and this panel's own approve flow makes
-    // them name it. "The device reconnects with the smaller authority" without
-    // that clause reads as both.
-    body: "Anything this device has open under the wider authority closes immediately — the node will not confirm the change until those channels are shut. The device reconnects with the smaller role ceiling. Its capability grant is left exactly as it is; only the ceiling drops, and changing the capabilities is a separate command on the node.",
+    // them name it.
+    //
+    // The reconnect clause is CONDITIONAL because the outcome is. §8.3 makes the
+    // device's intended role equal its `channel.open` role, so a ceiling below
+    // that refuses it rather than limiting it. The old sentence — "The device
+    // reconnects with the smaller role ceiling" — promised a reconnect the node
+    // then refused on every handshake. The panel offers this action only when
+    // the role the device connects with already fits (`nodeNarrowOffered`).
+    body: "Anything this device has open under the wider authority closes immediately — the node will not confirm the change until those channels are shut. It can reconnect only while the role it connects with fits under the new ceiling; a device that connects with more is refused, not limited. Its capability grant is left exactly as it is; only the ceiling drops, and changing the capabilities is a separate command on the node.",
     confirmLabel: "Reduce authority",
     destructive: true,
   },
@@ -1224,20 +1233,89 @@ export function nodeE2eePairingWindowConfirmation(fingerprint: string): NodeE2ee
 }
 
 /**
- * §8.3's role ordering, as the roles an approval may name.
+ * §8.3's role vocabulary, in its ordering, least authority first.
  *
- * THE OWNER NAMES THE ROLE. §13.6: "`approved` requires explicit owner action
- * naming the maximum role and capability set." A single Approve button that
- * silently picked one would be the panel naming it, not the owner — and the
- * value it picked would become the ceiling every channel that key opens is
- * admitted under, which is the one decision here that cannot be taken back
- * without closing those channels.
- *
- * Ordered least-authority first, so the first thing under the cursor is the
- * smallest grant.
+ * It is the set an approval may name and the ranking a narrowing is judged by.
+ * It is NOT a menu: see `nodeApprovalRole` for why the panel offers one role.
  */
 export const NODE_E2EE_APPROVABLE_ROLES = ["viewer", "operator", "owner"] as const;
 export type NodeE2eeApprovableRole = (typeof NODE_E2EE_APPROVABLE_ROLES)[number];
+
+/** §8.3's rank, or -1 for anything outside the vocabulary. */
+function nodeRoleRank(role: string | undefined): number {
+  return (NODE_E2EE_APPROVABLE_ROLES as ReadonlyArray<string | undefined>).indexOf(role);
+}
+
+/**
+ * The one role an approval from this panel names: the role the node saw this
+ * device connect with.
+ *
+ * NOT A MENU, AND NOT A DEFAULT THE PANEL PICKED. §8.3 makes a native client's
+ * intended role equal the `channel.open` role the Hub assigns, and §8.6 step 6
+ * admits it only under a `maxRole` at least that high — the node's account-grant
+ * verifier applies the same ceiling, so this holds on both suites. A ceiling
+ * BELOW the observed role does not limit the device: the record commits as
+ * `approved`, the row goes green, and every handshake it attempts is refused.
+ * The three buttons this replaced listed `viewer` first, which put exactly that
+ * lockout under the cursor first, for every owner approving their own phone. A
+ * ceiling ABOVE it grants headroom the Hub never assigned, which is what the
+ * node-local ceiling exists to withhold. The observed role is the only value
+ * that is neither — and it is never inferred from whose account this is.
+ *
+ * The owner still names it (§13.6): the confirmation states the role, what it
+ * can do, and the account it is for, and approving is their action. `null` when
+ * the record carries no role it can rank — it predates the field, or came from a
+ * Local Trusted Introduction — because offering one then is a guess, and a wrong
+ * guess is the lockout. `nodeApprovalRoleUnknownNotice` says what to do instead.
+ */
+export function nodeApprovalRole(record: NodeE2eeClientRecord): NodeE2eeApprovableRole | null {
+  if (record.status === "approved") return null;
+  const rank = nodeRoleRank(record.observedRole);
+  return rank < 0 ? null : NODE_E2EE_APPROVABLE_ROLES[rank]!;
+}
+
+export const NODE_APPROVAL_ROLE_UNKNOWN_PENDING =
+  "This request does not say which role the device connects with, so no approval here could " +
+  "let it in. Have the device try again: its next attempt records the role, and the approve " +
+  "action appears on this row.";
+
+export const NODE_APPROVAL_ROLE_UNKNOWN_REVOKED =
+  "This record does not say which role the device connects with, so re-approving it here could " +
+  "leave it unable to connect. Delete the record and let the device introduce itself again.";
+
+/**
+ * Why a record that is not approved offers no approval, or `null` when it does.
+ *
+ * A pending record recovers on its own — the node refreshes its observed role on
+ * the device's next attempt. A revoked one does not, because a peer's hello never
+ * rewrites a record the owner revoked, so the way back is a fresh introduction.
+ */
+export function nodeApprovalRoleUnknownNotice(record: NodeE2eeClientRecord): string | null {
+  if (record.status === "approved" || nodeApprovalRole(record) !== null) return null;
+  return record.status === "pending"
+    ? NODE_APPROVAL_ROLE_UNKNOWN_PENDING
+    : NODE_APPROVAL_ROLE_UNKNOWN_REVOKED;
+}
+
+/**
+ * Whether lowering an approved record's ceiling to `ceiling` still lets the
+ * device in.
+ *
+ * Only when the role it connects with already fits under the new ceiling, and
+ * the ceiling actually drops. Anything else is a lockout presented as a limit —
+ * the device is refused on its next handshake, not narrowed — and Revoke already
+ * says that honestly. A record that does not carry the role offers nothing,
+ * for the same reason `nodeApprovalRole` does not guess one.
+ */
+export function nodeNarrowOffered(
+  record: NodeE2eeClientRecord,
+  ceiling: NodeE2eeApprovableRole,
+): boolean {
+  if (record.status !== "approved") return false;
+  const target = nodeRoleRank(ceiling);
+  const observed = nodeRoleRank(record.observedRole);
+  return nodeRoleRank(record.maxRole) > target && observed >= 0 && observed <= target;
+}
 
 const APPROVAL_ROLE_MEANINGS: Record<NodeE2eeApprovableRole, string> = {
   viewer: "read what is there",
@@ -1265,15 +1343,17 @@ const APPROVAL_ROLE_MEANINGS: Record<NodeE2eeApprovableRole, string> = {
 export const NODE_E2EE_APPROVAL_CAPABILITY_SET: ReadonlyArray<RelayCapability> = ["ryco.rpc"];
 
 /**
- * The approval confirmation, with the role the owner picked written into it and
- * the record it names.
+ * The approval confirmation, with the role it grants written into it and the
+ * record it names.
  *
  * §13.6 has the owner name the maximum role AND the capability set. The role is
- * theirs — one button each, least authority first. The capability set is not a
- * choice this surface can offer, because there is exactly one capability a relay
- * channel carries and any other value approves a key that cannot connect; so the
- * sentence states what is granted rather than implying an empty grant is a
- * smaller one.
+ * the one the device connects with (`nodeApprovalRole`), and the sentence says
+ * so — and says that a smaller one would refuse the device, so an owner who
+ * does not want this account holding that much here revokes instead of
+ * approving lower. The capability set is not a choice this surface can offer,
+ * because there is exactly one capability a relay channel carries and any other
+ * value approves a key that cannot connect; so the sentence states what is
+ * granted rather than implying an empty grant is a smaller one.
  */
 export function nodeApproveConfirmation(
   role: NodeE2eeApprovableRole,
@@ -1284,7 +1364,10 @@ export function nodeApproveConfirmation(
   return {
     title: `Approve this client key as ${role}?`,
     body:
-      `${base.body} At most it will be able to ${APPROVAL_ROLE_MEANINGS[role]}. ` +
+      `${base.body} ${role} is the role this device connects with, so it is the ceiling it is ` +
+      `approved at: at most it will be able to ${APPROVAL_ROLE_MEANINGS[role]}. A smaller ` +
+      `ceiling would refuse the device rather than limit it — if this account should not hold ` +
+      `that much on this node, revoke the key instead. ` +
       `It is granted the one capability a relay channel carries, ${capabilities} — a key ` +
       `approved with none is admitted by nothing and could not connect at all. ` +
       `${subject === undefined ? "" : NODE_E2EE_RECORD_SUBJECT_PROMPT}`.trimEnd(),
@@ -1404,6 +1487,22 @@ export function everyNodeSecurityString(): ReadonlyArray<{
     pushConfirmation(`approve(${role}, record)`, nodeApproveConfirmation(role, subject));
   }
   push("recordSubjectPrompt", NODE_E2EE_RECORD_SUBJECT_PROMPT);
+  for (const status of ["pending", "revoked"] as const) {
+    push(
+      `approvalRoleUnknown(${status})`,
+      nodeApprovalRoleUnknownNotice({
+        status,
+        hubOrigin: "https://hub.example",
+        accountId: "acct_example",
+        fingerprint: "SHA256:example",
+        maxRole: "viewer",
+        capabilitySet: [],
+        createdAt: 0,
+        safetyNumber: "",
+        pairingReserved: false,
+      }) ?? "",
+    );
+  }
 
   for (const fingerprint of [null, "SHA256:example"]) {
     push(
