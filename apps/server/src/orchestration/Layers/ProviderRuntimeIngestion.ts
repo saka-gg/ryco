@@ -29,6 +29,7 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationThread,
   type OrchestrationThreadActivity,
+  type OrchestrationTurnOutcome,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
 import { Cache, Cause, Deferred, Duration, Effect, Layer, Option, Semaphore, Stream } from "effect";
@@ -62,6 +63,7 @@ import {
   historyReasoningActivities,
   type ReasoningSegment,
 } from "../reasoningActivity.ts";
+import { TURN_FINALIZATION_REASON, runtimeTerminalTurnState } from "../turnFinalization.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
@@ -2411,6 +2413,35 @@ const make = Effect.gen(function* () {
             return true;
         }
       })();
+      // One mapping for both the release hint and the completion-return observation.
+      const runtimeTerminal =
+        (event.type === "turn.completed" || event.type === "turn.aborted") &&
+        eventTurnId !== undefined
+          ? { turnId: eventTurnId, state: runtimeTerminalTurnState(event) }
+          : undefined;
+      // What this event knows about how the released turn ended. The decider binds it
+      // to the turn the session-set actually releases and ignores it for other turns.
+      const turnOutcome: OrchestrationTurnOutcome | undefined =
+        runtimeTerminal !== undefined
+          ? {
+              ...runtimeTerminal,
+              reason:
+                event.type === "turn.aborted"
+                  ? TURN_FINALIZATION_REASON.providerTurnAborted
+                  : TURN_FINALIZATION_REASON.providerTurnCompleted,
+              completedAt: now,
+            }
+          : reconciledInterruptedTurnId !== undefined
+            ? {
+                turnId: reconciledInterruptedTurnId,
+                state: "interrupted",
+                reason:
+                  event.type === "session.exited"
+                    ? TURN_FINALIZATION_REASON.providerSessionExited
+                    : TURN_FINALIZATION_REASON.providerSessionIdle,
+                completedAt: now,
+              }
+            : undefined;
       const acceptedTurnStartedSourcePlan =
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
@@ -2509,24 +2540,11 @@ const make = Effect.gen(function* () {
               lastError,
               updatedAt: now,
             },
+            // The release carries the turn's terminal state atomically, so aborts and
+            // idle reconciles no longer need a follow-up provider interrupt.
+            ...(turnOutcome ? { turnOutcome } : {}),
             createdAt: now,
           });
-
-          const interruptedTurnId =
-            event.type === "turn.aborted" ? eventTurnId : reconciledInterruptedTurnId;
-          if (interruptedTurnId !== undefined) {
-            yield* orchestrationEngine.dispatch({
-              type: "thread.turn.interrupt",
-              commandId: providerCommandId(
-                event,
-                "thread-turn-interrupt",
-                String(interruptedTurnId),
-              ),
-              threadId: thread.id,
-              turnId: interruptedTurnId,
-              createdAt: now,
-            });
-          }
         }
       }
 
@@ -2925,6 +2943,12 @@ const make = Effect.gen(function* () {
               lastError: runtimeErrorMessage,
               updatedAt: now,
             },
+            // Turn-less: it only applies when this session-set actually releases a turn.
+            turnOutcome: {
+              state: "error",
+              reason: TURN_FINALIZATION_REASON.providerRuntimeError,
+              completedAt: now,
+            },
             createdAt: now,
           });
         }
@@ -3090,22 +3114,7 @@ const make = Effect.gen(function* () {
         event.runtimeSessionId
       ) {
         const terminal =
-          shouldApplyThreadLifecycle &&
-          !isSubagentProviderThread &&
-          eventTurnId &&
-          (event.type === "turn.completed" || event.type === "turn.aborted")
-            ? {
-                turnId: eventTurnId,
-                state:
-                  event.type === "turn.aborted" ||
-                  normalizeRuntimeTurnState(event.payload.state) === "interrupted" ||
-                  normalizeRuntimeTurnState(event.payload.state) === "cancelled"
-                    ? ("interrupted" as const)
-                    : normalizeRuntimeTurnState(event.payload.state) === "failed"
-                      ? ("error" as const)
-                      : ("completed" as const),
-              }
-            : undefined;
+          shouldApplyThreadLifecycle && !isSubagentProviderThread ? runtimeTerminal : undefined;
         yield* completionReturns.value.observe({
           childThreadId: thread.id,
           runtimeSessionId: event.runtimeSessionId,

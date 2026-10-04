@@ -37,6 +37,7 @@ import {
   type OrchestrationThreadShell,
   type ProjectId,
   type OrchestrationSession,
+  type OrchestrationTurnOutcome,
   ThreadId,
   type ProviderInteractionMode,
   type ProviderSession,
@@ -73,6 +74,7 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
+import { TURN_FINALIZATION_REASON } from "../turnFinalization.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -288,6 +290,8 @@ const make = Effect.gen(function* () {
   const setThreadSession = (input: {
     readonly threadId: ThreadId;
     readonly session: OrchestrationSession;
+    /** How the turn this session-set releases ended, when this caller knows. */
+    readonly turnOutcome?: OrchestrationTurnOutcome | undefined;
     readonly createdAt: string;
   }) =>
     orchestrationEngine.dispatch({
@@ -295,11 +299,13 @@ const make = Effect.gen(function* () {
       commandId: serverCommandId("provider-session-set"),
       threadId: input.threadId,
       session: input.session,
+      ...(input.turnOutcome ? { turnOutcome: input.turnOutcome } : {}),
       createdAt: input.createdAt,
     });
 
   const setThreadSessionErrorOnTurnStartFailure = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly messageId: MessageId;
     readonly detail: string;
     readonly createdAt: string;
     /**
@@ -317,15 +323,31 @@ const make = Effect.gen(function* () {
     if (input.preserveActiveTurn && session.status === "running" && session.activeTurnId !== null) {
       return;
     }
+    // Bind the error only to the turn this request started (its user message), never to
+    // whatever turn happens to be running, so a failed send cannot mislabel another turn.
+    const started =
+      thread.latestTurn?.state === "running" && thread.latestTurn.userMessageId === input.messageId
+        ? thread.latestTurn
+        : undefined;
     yield* setThreadSession({
       threadId: input.threadId,
       session: {
         ...session,
-        status: session.status === "stopped" ? "stopped" : "ready",
+        // Keep an error status that ingestion already set from the adapter's terminal.
+        status:
+          session.status === "stopped" ? "stopped" : session.status === "error" ? "error" : "ready",
         activeTurnId: null,
         lastError: input.detail,
         updatedAt: input.createdAt,
       },
+      turnOutcome: started
+        ? {
+            turnId: started.turnId,
+            state: "error",
+            reason: TURN_FINALIZATION_REASON.turnStartFailed,
+            completedAt: new Date().toISOString(),
+          }
+        : undefined,
       createdAt: input.createdAt,
     });
   });
@@ -639,6 +661,13 @@ const make = Effect.gen(function* () {
             activeTurnId: null,
             lastError: session.lastError ?? null,
             updatedAt: session.updatedAt,
+          },
+          // A no-op when nothing runs (first start, turn start). When a turn was running,
+          // the replacement killed it, whichever old-runtime terminal wins the race.
+          turnOutcome: {
+            state: "interrupted",
+            reason: TURN_FINALIZATION_REASON.sessionReplaced,
+            completedAt: createdAt,
           },
           createdAt,
         });
@@ -1121,6 +1150,7 @@ const make = Effect.gen(function* () {
       if (!event.payload.delegationReturnGuard) {
         yield* setThreadSessionErrorOnTurnStartFailure({
           threadId,
+          messageId: event.payload.messageId,
           detail,
           createdAt: event.payload.createdAt,
           preserveActiveTurn: input.preserveActiveTurn,
@@ -1449,6 +1479,12 @@ const make = Effect.gen(function* () {
             lastError: detail,
             updatedAt: event.payload.createdAt,
           },
+          turnOutcome: {
+            turnId: stoppedSession.activeTurnId,
+            state: "interrupted",
+            reason: TURN_FINALIZATION_REASON.interruptFailed,
+            completedAt: event.payload.createdAt,
+          },
           createdAt: event.payload.createdAt,
         });
         yield* appendProviderFailureActivity({
@@ -1767,6 +1803,12 @@ const make = Effect.gen(function* () {
         activeTurnId: null,
         lastError: thread.session?.lastError ?? null,
         updatedAt: now,
+      },
+      // The user stopped the session; a carried-over lastError must not label the turn.
+      turnOutcome: {
+        state: "interrupted",
+        reason: TURN_FINALIZATION_REASON.sessionStopped,
+        completedAt: now,
       },
       createdAt: now,
     });

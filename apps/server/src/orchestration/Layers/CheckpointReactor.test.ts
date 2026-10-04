@@ -509,6 +509,120 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
+  /** Simulates ProviderRuntimeIngestion projecting turn.started and turn.completed. */
+  const projectIngestedTurn = async (
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    turnId: TurnId,
+    phase: "started" | "completed",
+    at: string,
+  ) => {
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(`cmd-ingested-${phase}-${turnId}`),
+        threadId,
+        session: {
+          threadId,
+          status: phase === "started" ? "running" : "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: phase === "started" ? turnId : null,
+          lastError: null,
+          updatedAt: at,
+        },
+        ...(phase === "completed"
+          ? {
+              turnOutcome: {
+                turnId,
+                state: "completed" as const,
+                reason: "provider-turn-completed",
+                completedAt: at,
+              },
+            }
+          : {}),
+        createdAt: at,
+      }),
+    );
+  };
+
+  it("keeps the released turn state and completedAt when the checkpoint capture lands later", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const turnId = asTurnId("turn-release-then-capture");
+    await projectIngestedTurn(harness, turnId, "started", "2026-03-01T00:00:01.000Z");
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-release-then-capture"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-03-01T00:00:01.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId,
+    });
+    await waitForGitRefExists(
+      harness.cwd,
+      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+    );
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
+
+    // The release finalizes the turn before the capture runs.
+    const releasedAt = "2026-03-01T00:00:05.000Z";
+    await projectIngestedTurn(harness, turnId, "completed", releasedAt);
+    // Engine dispatch projects synchronously, so the release is already visible.
+    const readThread = async () =>
+      (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect((await readThread())?.latestTurn).toMatchObject({
+      turnId,
+      state: "completed",
+      completedAt: releasedAt,
+    });
+
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-release-then-capture"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-03-01T00:00:09.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId,
+      payload: { state: "completed" },
+    });
+    await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
+    const thread = await readThread();
+    expect(thread?.latestTurn).toMatchObject({
+      turnId,
+      state: "completed",
+      completedAt: releasedAt,
+    });
+    expect(thread?.checkpoints[0]).toMatchObject({ turnId, status: "ready" });
+  });
+
+  it("leaves a released turn completed when its checkpoint capture fails", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const turnId = asTurnId("turn-release-capture-fails");
+    // No turn.started reaches the reactor, so there is no baseline and capture fails.
+    await projectIngestedTurn(harness, turnId, "started", "2026-03-01T00:00:01.000Z");
+    const releasedAt = "2026-03-01T00:00:05.000Z";
+    await projectIngestedTurn(harness, turnId, "completed", releasedAt);
+
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-capture-fails"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-03-01T00:00:09.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId,
+      payload: { state: "completed" },
+    });
+    await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+    );
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread?.latestTurn).toMatchObject({
+      turnId,
+      state: "completed",
+      completedAt: releasedAt,
+    });
+  });
+
   it("refreshes local git status state on turn completion using the session cwd", async () => {
     const gitStatusRefreshCalls: string[] = [];
     const harness = await createHarness({

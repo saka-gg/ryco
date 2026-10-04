@@ -6,6 +6,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   OrchestrationThreadHistoryCursor,
   ThreadId,
@@ -36,6 +37,7 @@ import {
   type AppState,
   type EnvironmentState,
 } from "./store";
+import { deriveThreadActivityStatus } from "./threadActivityStatus";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
@@ -1183,6 +1185,165 @@ describe("incremental orchestration updates", () => {
 
     expect(threadsOf(next)[0]?.turnDiffSummaries).toHaveLength(1);
     expect(threadsOf(next)[0]?.latestTurn).toEqual(threadsOf(state)[0]?.latestTurn);
+  });
+
+  describe("turn finalization", () => {
+    const runningTurn = {
+      turnId: TurnId.make("turn-1"),
+      state: "running" as const,
+      requestedAt: "2026-02-27T00:00:01.000Z",
+      startedAt: "2026-02-27T00:00:02.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    };
+    const runningSession = {
+      provider: ProviderDriverKind.make("codex"),
+      status: "running" as const,
+      orchestrationStatus: "running" as const,
+      activeTurnId: TurnId.make("turn-1"),
+      createdAt: "2026-02-27T00:00:01.000Z",
+      updatedAt: "2026-02-27T00:00:02.000Z",
+    };
+    const releasingSessionSet = (releasedTurn: {
+      turnId: TurnId;
+      state: "completed" | "error" | "interrupted";
+      completedAt: string;
+      reason: string;
+    }) =>
+      makeEvent("thread.session-set", {
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: releasedTurn.completedAt,
+        },
+        releasedTurn,
+      });
+
+    it("settles the released latest turn in the same frame as the session", () => {
+      const state = makeState(makeThread({ latestTurn: runningTurn, session: runningSession }));
+      const next = applyOrchestrationEvent(
+        state,
+        releasingSessionSet({
+          turnId: TurnId.make("turn-1"),
+          state: "completed",
+          completedAt: "2026-02-27T00:00:09.000Z",
+          reason: "provider-turn-completed",
+        }),
+        localEnvironmentId,
+      );
+      const thread = threadsOf(next)[0]!;
+      expect(thread.latestTurn).toMatchObject({
+        turnId: "turn-1",
+        state: "completed",
+        startedAt: "2026-02-27T00:00:02.000Z",
+        completedAt: "2026-02-27T00:00:09.000Z",
+      });
+      expect(
+        deriveThreadActivityStatus({
+          session: thread.session,
+          latestTurn: thread.latestTurn,
+          interactionMode: thread.interactionMode,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+          backgroundLiveness: null,
+        }),
+      ).toBe("idle");
+    });
+
+    it("keeps an interrupted turn sticky across a completed release", () => {
+      const interrupted = {
+        ...runningTurn,
+        state: "interrupted" as const,
+        completedAt: "2026-02-27T00:00:05.000Z",
+      };
+      const state = makeState(makeThread({ latestTurn: interrupted, session: runningSession }));
+      const next = applyOrchestrationEvent(
+        state,
+        releasingSessionSet({
+          turnId: TurnId.make("turn-1"),
+          state: "completed",
+          completedAt: "2026-02-27T00:00:09.000Z",
+          reason: "provider-turn-completed",
+        }),
+        localEnvironmentId,
+      );
+      expect(threadsOf(next)[0]?.latestTurn).toMatchObject({
+        state: "interrupted",
+        completedAt: "2026-02-27T00:00:05.000Z",
+      });
+    });
+
+    it("ignores a release that names another turn", () => {
+      const state = makeState(makeThread({ latestTurn: runningTurn, session: runningSession }));
+      const next = applyOrchestrationEvent(
+        state,
+        releasingSessionSet({
+          turnId: TurnId.make("turn-other"),
+          state: "completed",
+          completedAt: "2026-02-27T00:00:09.000Z",
+          reason: "provider-turn-completed",
+        }),
+        localEnvironmentId,
+      );
+      expect(threadsOf(next)[0]?.latestTurn).toEqual(threadsOf(state)[0]?.latestTurn);
+    });
+
+    it("keeps the turn state when a diff for the same turn lands", () => {
+      const diff = (status: "ready" | "missing", completedAt: string, sequence: number) =>
+        makeEvent(
+          "thread.turn-diff-completed",
+          {
+            threadId: ThreadId.make("thread-1"),
+            turnId: TurnId.make("turn-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("checkpoint-1"),
+            status,
+            files: [],
+            assistantMessageId: MessageId.make("assistant-1"),
+            completedAt,
+          },
+          { sequence },
+        );
+      // Mid-turn placeholder: the running turn stays running.
+      const running = applyOrchestrationEvent(
+        makeState(makeThread({ latestTurn: runningTurn, session: runningSession })),
+        diff("missing", "2026-02-27T00:00:04.000Z", 1),
+        localEnvironmentId,
+      );
+      expect(threadsOf(running)[0]?.latestTurn).toMatchObject({
+        state: "running",
+        completedAt: null,
+      });
+
+      // Late capture after an error release keeps the error and its completedAt.
+      const released = applyOrchestrationEvent(
+        running,
+        releasingSessionSet({
+          turnId: TurnId.make("turn-1"),
+          state: "error",
+          completedAt: "2026-02-27T00:00:09.000Z",
+          reason: "provider-turn-completed",
+        }),
+        localEnvironmentId,
+      );
+      const late = applyOrchestrationEvent(
+        released,
+        diff("ready", "2026-02-27T00:00:20.000Z", 3),
+        localEnvironmentId,
+      );
+      expect(threadsOf(late)[0]?.latestTurn).toMatchObject({
+        state: "error",
+        completedAt: "2026-02-27T00:00:09.000Z",
+        assistantMessageId: "assistant-1",
+      });
+      expect(threadsOf(late)[0]?.turnDiffSummaries[0]?.status).toBe("ready");
+    });
   });
 
   it("filters placeholder modified zero-change files from completed turn diffs", () => {

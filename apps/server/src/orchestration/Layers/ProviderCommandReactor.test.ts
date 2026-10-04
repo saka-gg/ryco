@@ -647,6 +647,14 @@ describe("ProviderCommandReactor", () => {
             lastError: null,
             updatedAt: createdAt,
           },
+          // What ingestion sends for the provider's turn.completed; a release without
+          // a provider verdict fails closed and would block the delegated return.
+          turnOutcome: {
+            turnId: TurnId.make("turn-1"),
+            state: "completed",
+            reason: "provider-turn-completed",
+            completedAt: createdAt,
+          },
           createdAt,
         }),
       );
@@ -4387,5 +4395,226 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+  });
+
+  describe("turn finalization", () => {
+    const threadId = ThreadId.make("thread-1");
+
+    const readThread = async (harness: Awaited<ReturnType<typeof createHarness>>) =>
+      (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+
+    const readReleasedTurns = async (harness: Awaited<ReturnType<typeof createHarness>>) => {
+      const events = await Effect.runPromise(
+        Stream.runCollect(harness.engine.readEvents(0)).pipe(
+          Effect.map((chunk) => Array.from(chunk)),
+        ),
+      );
+      return events.flatMap((event) =>
+        event.type === "thread.session-set" && event.payload.releasedTurn
+          ? [event.payload.releasedTurn]
+          : [],
+      );
+    };
+
+    /** Simulates ingestion projecting the provider's turn.started for `turnId`. */
+    const projectRunningTurn = (
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      turnId: TurnId,
+      overrides: { readonly lastError?: string | null } = {},
+    ) =>
+      Effect.gen(function* () {
+        const thread = yield* Effect.promise(() => readThread(harness));
+        const session = thread?.session;
+        if (!session) {
+          return yield* Effect.die(new Error("expected a bound session"));
+        }
+        const now = new Date().toISOString();
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`ingested-turn-started-${turnId}`),
+          threadId,
+          session: {
+            ...session,
+            status: "running",
+            activeTurnId: turnId,
+            lastError: overrides.lastError ?? null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+      });
+
+    /** The harness's sendTurn mock is typed as infallible; failing sends are cast to it. */
+    const asFailingSend = <A, E>(effect: Effect.Effect<A, E>) => effect as never;
+
+    const startTurn = (harness: Awaited<ReturnType<typeof createHarness>>, messageId: string) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-turn-start-${messageId}`),
+          threadId,
+          message: {
+            messageId: asMessageId(messageId),
+            role: "user",
+            text: "finalize me",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+
+    it("labels a started turn error when the provider send fails afterwards", async () => {
+      const harness = await createHarness();
+      const turnId = asTurnId("turn-started-then-failed");
+      harness.sendTurn.mockImplementationOnce(() =>
+        asFailingSend(
+          projectRunningTurn(harness, turnId).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "cursor",
+                  method: "session/prompt",
+                  detail: "prompt failed after start",
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await startTurn(harness, "user-message-started-then-failed");
+      await waitFor(async () =>
+        Boolean(
+          (await readThread(harness))?.activities.some(
+            (activity) => activity.kind === "provider.turn.start.failed",
+          ),
+        ),
+      );
+      await harness.drain();
+
+      const thread = await readThread(harness);
+      expect(thread?.latestTurn).toMatchObject({ turnId, state: "error" });
+      expect(thread?.latestTurn?.completedAt).not.toBeNull();
+      expect(thread?.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError: "prompt failed after start",
+      });
+      expect(await readReleasedTurns(harness)).toEqual([
+        expect.objectContaining({ turnId, state: "error", reason: "turn-start-failed" }),
+      ]);
+    });
+
+    it("keeps an error session that ingestion already set from the adapter terminal", async () => {
+      const harness = await createHarness();
+      const turnId = asTurnId("turn-adapter-terminal-first");
+      harness.sendTurn.mockImplementationOnce(() =>
+        asFailingSend(
+          Effect.gen(function* () {
+            yield* projectRunningTurn(harness, turnId);
+            const session = (yield* Effect.promise(() => readThread(harness)))?.session;
+            const now = new Date().toISOString();
+            // Ingestion projected the adapter's turn.completed{failed} first.
+            yield* harness.engine.dispatch({
+              type: "thread.session.set",
+              commandId: CommandId.make("ingested-turn-failed"),
+              threadId,
+              session: {
+                ...session!,
+                status: "error",
+                activeTurnId: null,
+                lastError: "adapter reported failure",
+                updatedAt: now,
+              },
+              turnOutcome: {
+                turnId,
+                state: "error",
+                reason: "provider-turn-completed",
+                completedAt: now,
+              },
+              createdAt: now,
+            });
+            return yield* Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "cursor",
+                method: "session/prompt",
+                detail: "prompt failed after start",
+              }),
+            );
+          }),
+        ),
+      );
+
+      await startTurn(harness, "user-message-adapter-terminal-first");
+      await waitFor(async () =>
+        Boolean(
+          (await readThread(harness))?.activities.some(
+            (activity) => activity.kind === "provider.turn.start.failed",
+          ),
+        ),
+      );
+      await harness.drain();
+
+      const thread = await readThread(harness);
+      expect(thread?.session?.status).toBe("error");
+      expect(thread?.latestTurn).toMatchObject({ turnId, state: "error" });
+    });
+
+    it("labels a running turn interrupted when a runtime mode change replaces the session", async () => {
+      const harness = await createHarness();
+      const turnId = asTurnId("turn-replaced-session");
+      await startTurn(harness, "user-message-replaced-session");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await Effect.runPromise(projectRunningTurn(harness, turnId));
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("cmd-runtime-mode-mid-turn"),
+          threadId,
+          runtimeMode: "full-access",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await waitFor(() => harness.startSession.mock.calls.length === 2);
+      await harness.drain();
+
+      const thread = await readThread(harness);
+      expect(thread?.session).toMatchObject({ activeTurnId: null, runtimeMode: "full-access" });
+      expect(thread?.latestTurn).toMatchObject({ turnId, state: "interrupted" });
+      expect(await readReleasedTurns(harness)).toEqual([
+        expect.objectContaining({ turnId, state: "interrupted", reason: "session-replaced" }),
+      ]);
+    });
+
+    it("labels a running turn interrupted when the user stops a session with a stale error", async () => {
+      const harness = await createHarness();
+      const turnId = asTurnId("turn-user-stopped");
+      await startTurn(harness, "user-message-user-stopped");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await Effect.runPromise(
+        projectRunningTurn(harness, turnId, { lastError: "stale provider warning" }),
+      );
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-session-stop-mid-turn"),
+          threadId,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      await harness.drain();
+
+      const thread = await readThread(harness);
+      expect(thread?.session?.status).toBe("stopped");
+      expect(thread?.latestTurn).toMatchObject({ turnId, state: "interrupted" });
+      expect(await readReleasedTurns(harness)).toEqual([
+        expect.objectContaining({ turnId, state: "interrupted", reason: "session-stopped" }),
+      ]);
+    });
   });
 });

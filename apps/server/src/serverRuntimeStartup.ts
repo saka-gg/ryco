@@ -4,6 +4,10 @@ import {
 } from "./orchestration/approvalResponses.ts";
 import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
 import {
+  TURN_FINALIZATION_REASON,
+  fallbackReleasedTurnState,
+} from "./orchestration/turnFinalization.ts";
+import {
   CommandId,
   EventId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -544,6 +548,64 @@ function clearRuntimePayloadActiveTurn(runtimePayload: unknown): unknown {
 }
 
 /**
+ * Settle latest turns still projected as running behind a session that no longer
+ * runs one (legacy releases that never finalized the turn). Fails closed: a turn
+ * behind an `error` session becomes `error`, any other becomes `interrupted`, since
+ * nobody can know whether it completed. Disjoint from the orphan set, which only
+ * holds running/starting sessions or sessions that still name an active turn.
+ */
+const settleStaleProjectedTurns = Effect.fn("settleStaleProjectedTurns")(function* (
+  snapshot: OrchestrationReadModel,
+) {
+  const orchestrationEngine = yield* OrchestrationEngineService;
+  for (const thread of snapshot.threads) {
+    if (thread.deletedAt !== null || thread.latestTurn?.state !== "running") continue;
+    const session = thread.session;
+    if (session === null) {
+      yield* Effect.logDebug("running projected turn has no session; skipping startup repair", {
+        threadId: thread.id,
+        turnId: thread.latestTurn.turnId,
+      });
+      continue;
+    }
+    if (
+      session.activeTurnId !== null ||
+      session.status === "running" ||
+      session.status === "starting"
+    ) {
+      continue;
+    }
+    const turnId = thread.latestTurn.turnId;
+    const command = {
+      type: "thread.session.set" as const,
+      commandId: CommandId.make(`server:startup-turn-reconciliation:${crypto.randomUUID()}`),
+      threadId: thread.id,
+      // The session is unchanged; the release only settles the stale turn.
+      session,
+      turnOutcome: {
+        turnId,
+        state: fallbackReleasedTurnState(session),
+        reason: TURN_FINALIZATION_REASON.startupStaleTurn,
+        completedAt: session.updatedAt,
+      },
+      createdAt: new Date().toISOString(),
+    };
+    yield* Effect.suspend(() => orchestrationEngine.dispatch(command)).pipe(
+      Effect.retry(Schedule.recurs(1)),
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("failed to settle stale projected turn", {
+              threadId: thread.id,
+              turnId,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+  }
+});
+
+/**
  * Settle projected provider sessions whose native process did not survive this
  * server process. This runs after the provider/orchestration roots subscribe,
  * but before the startup command gate opens, so repaired state is authoritative
@@ -554,6 +616,11 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerService = yield* ProviderService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+
+  // One snapshot serves both repairs. Stale turns behind released sessions are
+  // settled even when the provider inventory below fails.
+  const snapshot = yield* projectionSnapshotQuery.getCommandReadModel();
+  yield* settleStaleProjectedTurns(snapshot);
 
   const liveSessionsExit = yield* Effect.exit(providerService.listSessions());
   if (Exit.isFailure(liveSessionsExit)) {
@@ -567,7 +634,6 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   }
 
   const liveThreadIds = new Set(liveSessionsExit.value.map((session) => session.threadId));
-  const snapshot = yield* projectionSnapshotQuery.getCommandReadModel();
   // Provider callbacks are process-local. Even ready/error sessions can retain
   // requests from an earlier process; resolve them through normal events so the
   // inbox summary, conversation and settlement policy all recover together.
@@ -657,30 +723,8 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
     );
 
     const reconciledAt = new Date().toISOString();
-    if (session.activeTurnId !== null) {
-      const interruptCommand = {
-        type: "thread.turn.interrupt" as const,
-        commandId: CommandId.make(
-          `provider:startup-reconciliation:turn-interrupt:${crypto.randomUUID()}`,
-        ),
-        threadId: thread.id,
-        turnId: session.activeTurnId,
-        createdAt: reconciledAt,
-      };
-      yield* Effect.suspend(() => orchestrationEngine.dispatch(interruptCommand)).pipe(
-        Effect.retry(Schedule.recurs(1)),
-        Effect.catchCause((cause) =>
-          Cause.hasInterrupts(cause)
-            ? Effect.failCause(cause)
-            : Effect.logWarning("failed to settle orphaned provider turn projection", {
-                threadId: thread.id,
-                turnId: session.activeTurnId,
-                cause: Cause.pretty(cause),
-              }),
-        ),
-      );
-    }
-
+    // One session-set releases the session and settles its turn atomically. Without
+    // an active turn id, the decider still settles a running latest turn.
     const sessionCommand = {
       type: "thread.session.set" as const,
       commandId: CommandId.make(`server:startup-reconciliation:${crypto.randomUUID()}`),
@@ -691,6 +735,12 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
         activeTurnId: null,
         lastError: ORPHANED_PROVIDER_SESSION_ERROR,
         updatedAt: reconciledAt,
+      },
+      turnOutcome: {
+        ...(session.activeTurnId !== null ? { turnId: session.activeTurnId } : {}),
+        state: "interrupted" as const,
+        reason: TURN_FINALIZATION_REASON.startupOrphanedSession,
+        completedAt: reconciledAt,
       },
       createdAt: reconciledAt,
     };

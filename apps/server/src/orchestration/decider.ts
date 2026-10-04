@@ -36,6 +36,7 @@ import {
   requireWorktree,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
 
 const nowIso = () => new Date().toISOString();
 const defaultMetadata: Omit<OrchestrationEvent, "sequence" | "type" | "payload"> = {
@@ -1723,6 +1724,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // The decider is the one place that decides which turn a release ends and how,
+      // using the authoritative in-memory model; every reducer applies `releasedTurn`.
+      const releasedTurn = resolveReleasedTurn({
+        thread,
+        nextSession: command.session,
+        outcome: command.turnOutcome,
+      });
       const sessionEvent: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
@@ -1735,6 +1743,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          ...(releasedTurn ? { releasedTurn } : {}),
         },
       };
       if (command.session.status === "error") {
@@ -1807,18 +1816,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command.completedTurnIds.includes(thread.session.activeTurnId)
       ) {
         const failed = command.failedTurnIds.includes(thread.session.activeTurnId);
+        const restoredSession = {
+          ...thread.session,
+          status: failed ? ("error" as const) : ("ready" as const),
+          activeTurnId: null,
+          lastError: failed ? "Codex reported that the recovered turn failed." : null,
+          updatedAt: command.createdAt,
+        };
+        const releasedTurn = resolveReleasedTurn({
+          thread,
+          nextSession: restoredSession,
+          outcome: {
+            turnId: thread.session.activeTurnId,
+            state: failed ? "error" : "completed",
+            reason: TURN_FINALIZATION_REASON.providerHistory,
+            completedAt: command.createdAt,
+          },
+        });
         events.push({
           ...base(),
           type: "thread.session-set",
           payload: {
             threadId: command.threadId,
-            session: {
-              ...thread.session,
-              status: failed ? "error" : "ready",
-              activeTurnId: null,
-              lastError: failed ? "Codex reported that the recovered turn failed." : null,
-              updatedAt: command.createdAt,
-            },
+            session: restoredSession,
+            ...(releasedTurn ? { releasedTurn } : {}),
           },
         });
       }
