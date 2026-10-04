@@ -15,6 +15,7 @@ import {
 import { Context, Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { toPersistenceSqlError } from "../Errors.ts";
+import { latestUserMessageIdQuery } from "../userMessageAnchors.ts";
 
 export const CompletionReturnRecord = Schema.Struct({
   ...AgentControlCompletionReturn.fields,
@@ -132,10 +133,9 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     );
   const latestUserMessageId = (threadId: ThreadId) =>
     safe(
-      sql<{ messageId: string }>`
-    SELECT message_id AS "messageId" FROM projection_thread_messages
-    WHERE thread_id = ${threadId} AND role = 'user' ORDER BY created_at DESC, rowid DESC LIMIT 1
-  `.pipe(Effect.map((rows) => (rows[0] ? MessageId.make(rows[0].messageId) : null))),
+      latestUserMessageIdQuery(sql, threadId).pipe(
+        Effect.map((rows) => (rows[0] ? MessageId.make(rows[0].messageId) : null)),
+      ),
     );
   const output = (threadId: ThreadId, turnId: TurnId) =>
     safe(
