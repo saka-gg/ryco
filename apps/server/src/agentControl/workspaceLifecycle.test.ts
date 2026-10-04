@@ -117,15 +117,21 @@ function fixture() {
     threads: [thread("caller", null, "main"), thread("history", checkout, "topic")],
     updatedAt: NOW,
   };
+  const commands: Parameters<GitVcsDriverShape["execute"]>[0][] = [];
+  let truncateStatus = false;
   const driver = {
     execute: (input: Parameters<GitVcsDriverShape["execute"]>[0]) =>
-      Effect.sync(() => ({
-        stdout: git(input.cwd, ...input.args),
-        stderr: "",
-        exitCode: 0,
-        stdoutTruncated: false,
-        stderrTruncated: false,
-      })),
+      Effect.sync(() => {
+        commands.push(input);
+        const truncated = truncateStatus && input.args.includes("status");
+        return {
+          stdout: truncated ? "?? user-output" : git(input.cwd, ...input.args),
+          stderr: "",
+          exitCode: 0,
+          stdoutTruncated: truncated,
+          stderrTruncated: false,
+        };
+      }),
   } as unknown as GitVcsDriverShape;
   const layer = AgentControlWorkspacesLive.pipe(
     Layer.provide(
@@ -171,6 +177,10 @@ function fixture() {
       snapshot = value;
     },
     thread,
+    commands,
+    truncateStatus: () => {
+      truncateStatus = true;
+    },
   };
 }
 
@@ -216,6 +226,32 @@ describe("governed workspace preflight", () => {
     rmSync(path.join(f.checkout, "ignored-output"));
     f.git(f.checkout, "switch", "-c", "different-branch");
     expect(workspacePlanBlockers(await f.plan()).length).toBeGreaterThan(0);
+  });
+  it("summarizes ignored directories without expanding large dependency trees", async () => {
+    const f = fixture();
+    writeFileSync(path.join(f.repo, ".git", "info", "exclude"), "dependencies/\n");
+    const dependency = path.join(f.checkout, "dependencies", "package");
+    mkdirSync(dependency, { recursive: true });
+    writeFileSync(path.join(dependency, "index.js"), "generated dependency");
+    const state = await f.read();
+    expect(state).toMatchObject({ checkout: "present", dirty: true, blockers: [] });
+    const status = f.commands.find((input) => input.args.includes("status"));
+    expect(status).toMatchObject({ truncateOutputAtMaxBytes: true });
+    expect(status?.args).toContain("--untracked-files=normal");
+    expect(status?.args).not.toContain("--untracked-files=all");
+    expect(f.git(f.checkout, ...status!.args)).toBe("!! dependencies/\n");
+  });
+  it("treats truncated change output as dirty while retaining checkout identity", async () => {
+    const f = fixture();
+    f.truncateStatus();
+    const plan = await f.plan();
+    expect(plan.expected).toMatchObject({
+      checkout: "present",
+      gitRegistered: true,
+      dirty: true,
+      blockers: [],
+    });
+    expect(workspacePlanBlockers(plan).join(" ")).toContain("clean checkout");
   });
   it("rejects replaced checkout inodes and symlinks", async () => {
     const f = fixture();
