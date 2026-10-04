@@ -201,6 +201,19 @@ describe("hosted runtime configuration", () => {
     expect(typeof configuration.createRelaySocket).toBe("function");
   });
 
+  it("hands enrollment recovery to the shared coordinator on the runtime's own lifecycle", async () => {
+    await configureMobileHostedRuntime();
+    const { timers, subscribeForeground } = getHostedRuntimeConfiguration();
+
+    // One retry policy, in client-runtime: this app supplies the same bound
+    // timers and once-per-transition foreground signal the runtime uses.
+    expect(createNativeE2eeEnrollmentCoordinator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recovery: expect.objectContaining({ timers, subscribeForeground }),
+      }),
+    );
+  });
+
   it("targets the Hub public origin, which is what the proof signs into htu", async () => {
     await configureMobileHostedRuntime();
     expect(getHostedRuntimeConfiguration().endpoint.origin()).toBe(HOSTED_CONFIG.hubOrigin);

@@ -74,7 +74,7 @@ function summary(revision = 1, status: "active" | "revoked" = "active") {
   } as const;
 }
 
-function harness() {
+function harness(options: { readonly recovery?: boolean } = {}) {
   const trusted = new Map();
   const platform: NativeE2eePlatformService = {
     platform: "ios",
@@ -98,6 +98,7 @@ function harness() {
   } as unknown as Pick<HostedHubApi, "upsertE2eeDeviceEnrollment">;
   const refreshDirectory = vi.fn(async () => undefined);
   const invalidateHostedGeneration = vi.fn();
+  const lifecycle = recoveryLifecycle();
   const coordinator = createNativeE2eeEnrollmentCoordinator({
     platform,
     api,
@@ -107,8 +108,52 @@ function harness() {
     now: () => NOW + 1,
     refreshDirectory,
     invalidateHostedGeneration,
+    ...(options.recovery ? { recovery: lifecycle.recovery } : {}),
   });
-  return { platform, api, coordinator, refreshDirectory, invalidateHostedGeneration };
+  return { platform, api, coordinator, refreshDirectory, invalidateHostedGeneration, lifecycle };
+}
+
+/** A manual clock and foreground signal, so recovery runs only when a case says so. */
+function recoveryLifecycle() {
+  let nextTimer = 0;
+  const timers = new Map<number, { readonly callback: () => void; readonly delayMs: number }>();
+  const foregroundListeners = new Set<() => void>();
+  const lifecycle = {
+    foreground: true,
+    timers,
+    foregroundListeners,
+    recovery: {
+      timers: {
+        setTimeout: (callback: () => void, delayMs: number) => {
+          nextTimer += 1;
+          timers.set(nextTimer, { callback, delayMs });
+          return nextTimer as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeout: (timer: ReturnType<typeof setTimeout>) => {
+          timers.delete(timer as unknown as number);
+        },
+      },
+      isForeground: () => lifecycle.foreground,
+      subscribeForeground: (listener: () => void) => {
+        foregroundListeners.add(listener);
+        return () => foregroundListeners.delete(listener);
+      },
+    },
+    /** Fire every pending timer, returning the delays they were scheduled with. */
+    flushTimers: () => {
+      const pending = [...timers.values()];
+      timers.clear();
+      for (const timer of pending) timer.callback();
+      return pending.map((timer) => timer.delayMs);
+    },
+    enterForeground: () => {
+      lifecycle.foreground = true;
+      const pending = [...foregroundListeners];
+      foregroundListeners.clear();
+      for (const listener of pending) listener();
+    },
+  };
+  return lifecycle;
 }
 
 describe("native E2EE enrollment coordinator", () => {
@@ -304,5 +349,141 @@ describe("native E2EE enrollment coordinator", () => {
       status: "unavailable",
       errorCode: "device_material_invalid",
     });
+  });
+});
+
+describe("native E2EE enrollment recovery", () => {
+  const status = (coordinator: ReturnType<typeof harness>["coordinator"]) =>
+    coordinator.getState().status;
+
+  it("retries a transient Hub failure with capped backoff until enrollment succeeds", async () => {
+    const { coordinator, api, lifecycle } = harness({ recovery: true });
+    vi.mocked(api.upsertE2eeDeviceEnrollment)
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503));
+
+    await expect(coordinator.ensure(ACCOUNT_ID)).rejects.toMatchObject({
+      code: "enrollment_unavailable",
+    });
+    expect(lifecycle.flushTimers()).toEqual([1_000]);
+    await vi.waitFor(() => expect(status(coordinator)).toBe("unavailable"));
+    expect(lifecycle.flushTimers()).toEqual([2_000]);
+    await vi.waitFor(() => expect(status(coordinator)).toBe("ready"));
+
+    expect(api.upsertE2eeDeviceEnrollment).toHaveBeenCalledTimes(3);
+    expect(lifecycle.timers.size).toBe(0);
+    expect(lifecycle.foregroundListeners.size).toBe(0);
+  });
+
+  it("waits at least as long as the Hub's retry guidance", async () => {
+    const { coordinator, api, lifecycle } = harness({ recovery: true });
+    vi.mocked(api.upsertE2eeDeviceEnrollment).mockRejectedValueOnce(
+      new HostedHubApiError("rate_limited", 429, 12_000),
+    );
+
+    await expect(coordinator.ensure(ACCOUNT_ID)).rejects.toBeInstanceOf(NativeE2eeEnrollmentError);
+    expect(lifecycle.flushTimers()).toEqual([12_000]);
+  });
+
+  it("retries unreadable device material on the next foreground", async () => {
+    const { coordinator, platform, lifecycle } = harness({ recovery: true });
+    lifecycle.foreground = false;
+    vi.mocked(platform.ensureIdentity).mockRejectedValueOnce(new Error("keychain locked"));
+
+    await expect(coordinator.ensure(ACCOUNT_ID)).rejects.toMatchObject({
+      code: "device_material_unavailable",
+    });
+    expect(lifecycle.timers.size).toBe(0);
+    expect(lifecycle.foregroundListeners.size).toBe(1);
+
+    lifecycle.enterForeground();
+    await vi.waitFor(() => expect(status(coordinator)).toBe("ready"));
+    expect(platform.ensureIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries invalid device material once and then stops", async () => {
+    const { coordinator, platform, lifecycle } = harness({ recovery: true });
+    vi.mocked(platform.ensureIdentity).mockResolvedValue({
+      publicKey: IDENTITY_PUBLIC,
+      fingerprint: new Uint8Array(32).fill(99),
+      backing: "secure-enclave",
+    });
+
+    await expect(coordinator.ensure(ACCOUNT_ID)).rejects.toMatchObject({
+      code: "device_material_invalid",
+    });
+    expect(lifecycle.flushTimers()).toHaveLength(1);
+    await vi.waitFor(() => expect(platform.ensureClientPrekey).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(status(coordinator)).toBe("unavailable"));
+
+    expect(lifecycle.timers.size).toBe(0);
+    expect(lifecycle.foregroundListeners.size).toBe(0);
+  });
+
+  it("re-ensures a frame-revoked enrollment on the next foreground and renews it", async () => {
+    const { coordinator, api, lifecycle } = harness({ recovery: true });
+    await coordinator.ensure(ACCOUNT_ID);
+    coordinator.applyRevocation({ enrollmentId: ENROLLMENT_ID, enrollmentRevision: 1 });
+    expect(coordinator.getState()).toMatchObject({ status: "revoked", errorCode: null });
+    expect(lifecycle.timers.size).toBe(0);
+
+    lifecycle.enterForeground();
+    await vi.waitFor(() => expect(status(coordinator)).toBe("ready"));
+    expect(api.upsertE2eeDeviceEnrollment).toHaveBeenCalledTimes(2);
+  });
+
+  it("stays revoked once the Hub answers enrollment_revoked", async () => {
+    const { coordinator, api, lifecycle } = harness({ recovery: true });
+    await coordinator.ensure(ACCOUNT_ID);
+    coordinator.applyRevocation({ enrollmentId: ENROLLMENT_ID, enrollmentRevision: 1 });
+    vi.mocked(api.upsertE2eeDeviceEnrollment).mockRejectedValue(
+      new HostedHubApiError("enrollment_revoked", 409),
+    );
+
+    lifecycle.enterForeground();
+    await vi.waitFor(() =>
+      expect(coordinator.getState()).toMatchObject({
+        status: "revoked",
+        errorCode: "enrollment_revoked",
+      }),
+    );
+    lifecycle.enterForeground();
+
+    expect(api.upsertE2eeDeviceEnrollment).toHaveBeenCalledTimes(2);
+    expect(lifecycle.timers.size).toBe(0);
+    expect(lifecycle.foregroundListeners.size).toBe(0);
+  });
+
+  it("keeps a revocation in place when the re-ensure cannot reach the Hub", async () => {
+    const { coordinator, api, lifecycle } = harness({ recovery: true });
+    await coordinator.ensure(ACCOUNT_ID);
+    coordinator.applyRevocation({ enrollmentId: ENROLLMENT_ID, enrollmentRevision: 1 });
+    vi.mocked(api.upsertE2eeDeviceEnrollment).mockRejectedValueOnce(
+      new HostedHubApiError("internal_error", 500),
+    );
+
+    lifecycle.enterForeground();
+    await vi.waitFor(() => expect(api.upsertE2eeDeviceEnrollment).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(coordinator.getState()).toMatchObject({ status: "revoked", errorCode: null }),
+    );
+
+    // Once per foreground, never a backoff loop against the Hub.
+    expect(lifecycle.timers.size).toBe(0);
+    expect(lifecycle.foregroundListeners.size).toBe(1);
+  });
+
+  it("cancels pending recovery when the session ends", async () => {
+    const { coordinator, api, lifecycle } = harness({ recovery: true });
+    vi.mocked(api.upsertE2eeDeviceEnrollment).mockRejectedValueOnce(
+      new HostedHubApiError("unavailable", 503),
+    );
+    await expect(coordinator.ensure(ACCOUNT_ID)).rejects.toBeInstanceOf(NativeE2eeEnrollmentError);
+    expect(lifecycle.timers.size).toBe(1);
+
+    await coordinator.invalidate("signed-out");
+
+    expect(lifecycle.timers.size).toBe(0);
+    expect(coordinator.getState().status).toBe("idle");
   });
 });

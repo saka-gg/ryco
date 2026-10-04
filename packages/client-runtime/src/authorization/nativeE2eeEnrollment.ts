@@ -17,6 +17,7 @@ import type {
   NativeE2eePrekeyDescriptor,
 } from "../platform/index.ts";
 import { HostedHubApiError, type HostedHubApi } from "./api.ts";
+import type { HostedRuntimeTimers } from "./runtime.ts";
 import type { HostedRelayEnrollmentRevocation } from "./types.ts";
 
 export type NativeE2eeEnrollmentStatus =
@@ -78,6 +79,42 @@ export interface NativeE2eeEnrollmentCoordinatorInput {
   readonly refreshDirectory?: () => Promise<void>;
   /** Synchronously invalidates connection/mutation readiness when this coordinator is invalidated. */
   readonly invalidateHostedGeneration?: () => void;
+  /**
+   * The lifecycle automatic recovery runs on. Absent means none: the caller
+   * drives every `ensure`/`retry` itself, which is Desktop's shape.
+   */
+  readonly recovery?: NativeE2eeEnrollmentRecovery;
+}
+
+/**
+ * Automatic recovery, owned here so no client grows its own retry policy.
+ *
+ * - A transient failure — the Hub or the network (`enrollment_unavailable`), or
+ *   device key material that could not be read, typically a keychain read while
+ *   the device is locked (`device_material_unavailable`) — retries with capped
+ *   exponential backoff while foreground, and on the next foreground otherwise.
+ * - Device material that failed validation retries ONCE; the retry re-ensures
+ *   the prekey, and a second invalid result is not transient.
+ * - A revocation is the Hub's to lift. A device revoked by the relay frame
+ *   re-ensures once per foreground transition: the Hub either renews it or
+ *   answers `enrollment_revoked`, which is final for this session.
+ */
+export interface NativeE2eeEnrollmentRecovery {
+  readonly timers: Pick<HostedRuntimeTimers, "setTimeout" | "clearTimeout">;
+  readonly isForeground: () => boolean;
+  /** Notifies once, on the next foreground transition. */
+  readonly subscribeForeground: (listener: () => void) => () => void;
+}
+
+const RECOVERY_BASE_DELAY_MS = 1_000;
+const RECOVERY_MAX_DELAY_MS = 30_000;
+
+function recoveryDelayMs(attempt: number, retryAfterMs: number | undefined): number {
+  const backoff = Math.min(
+    RECOVERY_MAX_DELAY_MS,
+    RECOVERY_BASE_DELAY_MS * 2 ** Math.min(attempt, 5),
+  );
+  return Math.max(backoff, retryAfterMs ?? 0);
 }
 
 export interface NativeE2eeEnrollmentCoordinator {
@@ -205,15 +242,92 @@ export function createNativeE2eeEnrollmentCoordinator(
     input.invalidateHostedGeneration?.();
   };
 
+  // Automatic recovery (see `NativeE2eeEnrollmentRecovery`). At most one wait
+  // is pending, and it is bound to the generation that scheduled it: any
+  // operation or invalidation since makes it a no-op.
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  let recoveryForeground: (() => void) | undefined;
+  let recoveryAttempt = 0;
+  let invalidMaterialRetried = false;
+  /** The scope the relay frame revoked; what a foreground re-ensure renews. */
+  let revokedNamespace: NativeE2eeEnrollmentNamespace | null = null;
+
+  const cancelRecovery = () => {
+    if (recoveryTimer !== undefined) input.recovery?.timers.clearTimeout(recoveryTimer);
+    recoveryTimer = undefined;
+    const unsubscribe = recoveryForeground;
+    recoveryForeground = undefined;
+    unsubscribe?.();
+  };
+  const resetRecovery = () => {
+    cancelRecovery();
+    recoveryAttempt = 0;
+    invalidMaterialRetried = false;
+  };
+  const scheduleRecovery = (when: "backoff" | "foreground", retryAfterMs?: number) => {
+    const recovery = input.recovery;
+    if (recovery === undefined) return;
+    cancelRecovery();
+    const scheduled = generation;
+    const run = () => {
+      cancelRecovery();
+      if (generation !== scheduled) return;
+      if (state.status === "revoked") {
+        const revoked = revokedNamespace;
+        if (revoked === null || state.errorCode === "enrollment_revoked") return;
+        namespace = revoked;
+        void start(revoked.accountId, true, true).catch(() => undefined);
+        return;
+      }
+      if (state.status !== "unavailable" || namespace === null) return;
+      recoveryAttempt += 1;
+      void start(namespace.accountId, true).catch(() => undefined);
+    };
+    if (when === "foreground" || !recovery.isForeground()) {
+      recoveryForeground = recovery.subscribeForeground(run);
+      return;
+    }
+    recoveryTimer = recovery.timers.setTimeout(run, recoveryDelayMs(recoveryAttempt, retryAfterMs));
+  };
+  const scheduleFailureRecovery = (code: NativeE2eeEnrollmentErrorCode, cause: unknown) => {
+    switch (code) {
+      case "enrollment_unavailable":
+      case "device_material_unavailable":
+        scheduleRecovery(
+          "backoff",
+          cause instanceof HostedHubApiError ? cause.retryAfterMs : undefined,
+        );
+        return;
+      case "device_material_invalid":
+        if (invalidMaterialRetried) return;
+        invalidMaterialRetried = true;
+        scheduleRecovery("backoff");
+        return;
+      case "enrollment_refused":
+      case "enrollment_revoked":
+        return;
+    }
+  };
+  /** The Hub's own revocation answer: final until a new session, so nothing is scheduled. */
+  const markHubRevoked = () => {
+    resetRecovery();
+    revokedNamespace = null;
+    invalidateCurrent("revoked", "enrollment_revoked");
+  };
+
   const start = async (
     accountId: string,
     retrying: boolean,
+    recoveringRevocation = false,
   ): Promise<NativeE2eeReadyEnrollment> => {
     const nextNamespace = { hubOrigin: input.hubOrigin, accountId };
     if (operation && sameNamespace(namespace, nextNamespace)) return operation;
+    cancelRecovery();
     if (!sameNamespace(namespace, nextNamespace)) {
       const previous = namespace;
       namespace = nextNamespace;
+      resetRecovery();
+      revokedNamespace = null;
       invalidateCurrent("idle");
       if (previous) await input.platform.clearEnrollment(previous).catch(() => undefined);
     }
@@ -280,9 +394,7 @@ export function createNativeE2eeEnrollmentCoordinator(
           // session can never succeed, so it must not read as `unavailable`
           // and feed a retry loop.
           if (!isHubEnrollmentRevoked(cause)) throw cause;
-          if (issued === generation && sameNamespace(namespace, nextNamespace)) {
-            invalidateCurrent("revoked", "enrollment_revoked");
-          }
+          if (issued === generation && sameNamespace(namespace, nextNamespace)) markHubRevoked();
           return enrollmentError("enrollment_revoked");
         }
         if (issued !== generation || !sameNamespace(namespace, nextNamespace)) {
@@ -290,12 +402,14 @@ export function createNativeE2eeEnrollmentCoordinator(
         }
         if (!exactEnrollmentResponse(enrollment, request)) {
           if (enrollment.enrollmentId === request.enrollmentId && enrollment.status !== "active") {
-            invalidateCurrent("revoked", "enrollment_revoked");
+            markHubRevoked();
             return enrollmentError("enrollment_revoked");
           }
           return enrollmentError("enrollment_refused");
         }
         const ready = { namespace: nextNamespace, enrollment, identity, prekey };
+        resetRecovery();
+        revokedNamespace = null;
         publish({ status: "ready", ready, errorCode: null });
         return ready;
       } catch (cause) {
@@ -306,7 +420,15 @@ export function createNativeE2eeEnrollmentCoordinator(
                 phase === "device" ? "device_material_unavailable" : "enrollment_unavailable",
               );
         if (issued === generation && state.status !== "revoked") {
-          publish({ status: "unavailable", ready: null, errorCode: error.code });
+          if (recoveringRevocation) {
+            // Re-ensuring could not reach a Hub answer. The revocation stands
+            // until the Hub renews this enrollment; try again next foreground.
+            publish({ status: "revoked", ready: null, errorCode: null });
+            if (issued === generation) scheduleRecovery("foreground");
+          } else {
+            publish({ status: "unavailable", ready: null, errorCode: error.code });
+            if (issued === generation) scheduleFailureRecovery(error.code, cause);
+          }
         }
         throw error;
       } finally {
@@ -320,7 +442,10 @@ export function createNativeE2eeEnrollmentCoordinator(
   const invalidate: NativeE2eeEnrollmentCoordinator["invalidate"] = async (reason) => {
     const previous = namespace;
     namespace = null;
+    resetRecovery();
+    revokedNamespace = reason === "revoked" ? previous : null;
     invalidateCurrent(reason === "revoked" ? "revoked" : "idle");
+    if (reason === "revoked" && previous) scheduleRecovery("foreground");
     if (previous) await input.platform.clearEnrollment(previous).catch(() => undefined);
   };
 

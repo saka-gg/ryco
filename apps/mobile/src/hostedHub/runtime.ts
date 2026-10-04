@@ -68,37 +68,6 @@ let configured = false;
 let session: Promise<void> | undefined;
 let selectionWatch: (() => void) | undefined;
 let enrollmentCoordinator: NativeE2eeEnrollmentCoordinator | null = null;
-let enrollmentRetryTimer: ReturnType<typeof setTimeout> | undefined;
-let enrollmentRetryAttempt = 0;
-let enrollmentRetryForegroundUnsubscribe: (() => void) | undefined;
-
-function clearEnrollmentRetry(): void {
-  if (enrollmentRetryTimer !== undefined) globalThis.clearTimeout(enrollmentRetryTimer);
-  enrollmentRetryTimer = undefined;
-  enrollmentRetryAttempt = 0;
-  enrollmentRetryForegroundUnsubscribe?.();
-  enrollmentRetryForegroundUnsubscribe = undefined;
-}
-
-function scheduleEnrollmentRetry(accountId: string): void {
-  if (enrollmentRetryTimer !== undefined || enrollmentRetryForegroundUnsubscribe !== undefined) {
-    return;
-  }
-  const run = (): void => {
-    enrollmentRetryTimer = undefined;
-    enrollmentRetryForegroundUnsubscribe = undefined;
-    const state = hostedHubStore.getState();
-    if (state.accountStatus !== "authenticated" || state.account?.id !== accountId) return;
-    enrollmentRetryAttempt += 1;
-    void enrollmentCoordinator?.retry(accountId).catch(() => undefined);
-  };
-  if (!mobileAppLifecycle.isForeground()) {
-    enrollmentRetryForegroundUnsubscribe = subscribeForeground(run);
-    return;
-  }
-  const delay = Math.min(30_000, 1_000 * 2 ** Math.min(enrollmentRetryAttempt, 5));
-  enrollmentRetryTimer = globalThis.setTimeout(run, delay);
-}
 
 export { isMobileHostedModeAvailable, subscribeMobileHostedModeAvailability };
 
@@ -205,6 +174,14 @@ export async function configureMobileHostedRuntime(): Promise<boolean> {
     requestedMaximumRole: "owner",
     requestedCapabilities: ["ryco.rpc"],
     refreshDirectory: () => hostedHubController.refreshDirectory(),
+    // The coordinator owns the retry policy; this app supplies only the
+    // lifecycle it runs on. Sign-out and account changes cancel it through
+    // `invalidate`/`ensure` in the selection watcher below.
+    recovery: {
+      timers,
+      isForeground: () => mobileAppLifecycle.isForeground(),
+      subscribeForeground,
+    },
     invalidateHostedGeneration: () => {
       disposeMobileRelayE2eeAttempt();
       resetMobileE2eeSession();
@@ -287,18 +264,11 @@ function watchSelectionForE2ee(): void {
           enrollment.ready !== null &&
           enrollment.ready.namespace.accountId !== state.account.id)
       ) {
-        clearEnrollmentRetry();
         void enrollmentCoordinator?.ensure(state.account.id).catch(() => undefined);
-      } else if (
-        enrollment?.status === "unavailable" &&
-        enrollment.errorCode === "enrollment_unavailable"
-      ) {
-        scheduleEnrollmentRetry(state.account.id);
-      } else if (enrollment?.status === "ready") {
-        clearEnrollmentRetry();
       }
+      // `unavailable` and `revoked` recover inside the coordinator, on the
+      // lifecycle wired at construction.
     } else if (enrollment && enrollment.status !== "idle") {
-      clearEnrollmentRetry();
       void enrollmentCoordinator?.invalidate("signed-out");
     }
     if (state.accountStatus !== "authenticated" || state.selectedNode === null) {
@@ -380,7 +350,6 @@ export function ensureMobileHostedSession(): Promise<void> {
 /** Invalidate hosted availability after a deliberate Hub profile change. */
 export function invalidateMobileHostedRuntime(): void {
   configured = false;
-  clearEnrollmentRetry();
   setMobileHostedModeAvailable(false);
   session = undefined;
   selectionWatch?.();
