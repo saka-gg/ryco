@@ -223,8 +223,13 @@ interface ClaudeTurnState {
   completion: Deferred.Deferred<void> | undefined;
   /** Uuids of steers offered into this turn. The turn owns every CLI segment they start. */
   readonly steerPromptUuids: Set<string>;
-  /** Steers a result already consumed. */
+  /**
+   * Steers that need nothing more: a result consumed them, or Stop's interrupt cancelled them
+   * (the CLI never runs those, so no result may discard them again).
+   */
   readonly settledSteerPromptUuids: Set<string>;
+  /** Steers whose CLI segment's echo was routed into this turn: they run, whatever a receipt says. */
+  readonly startedSteerPromptUuids: Set<string>;
   /** Echo sets already re-interrupted after Stop (once per CLI segment). */
   readonly reinterruptedEchoKeys: Set<string>;
   /** Stop was requested for this turn; it never waits for a steer again. */
@@ -264,6 +269,7 @@ function makeClaudeTurnState(input: {
     completion: undefined,
     steerPromptUuids: new Set(),
     settledSteerPromptUuids: new Set(),
+    startedSteerPromptUuids: new Set(),
     reinterruptedEchoKeys: new Set(),
     interruptRequested: false,
     sealedSegmentCount: 0,
@@ -4377,8 +4383,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
-  /** The discarded CLI turn's result: drop it, keep its usage, forget its uuids. */
-  const dropDiscardedSteerResult = Effect.fn("dropDiscardedSteerResult")(function* (
+  /**
+   * The discarded CLI turn's result: forget its uuids, then drop it (keeping its usage). Returns
+   * whether it was dropped. It is not when the CLI turn's output already reached an open provider
+   * turn (its frames carried no echo, or beat Stop's bookkeeping): only this result can end that
+   * turn, so it is routed on and completes it.
+   */
+  const endDiscardedSteerCliTurn = Effect.fn("endDiscardedSteerCliTurn")(function* (
     context: ClaudeSessionContext,
     message: SDKResultMessage,
     uuids: Iterable<string>,
@@ -4390,6 +4401,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     context.discardingCliTurn = undefined;
     context.wakeSignalDeferred = false;
+    const open = context.turnState;
+    if (open !== undefined && open.promptUuid === undefined && open.rootContentObserved) {
+      yield* Effect.logInfo("claude.turn.discarded-steer-output-leaked", {
+        threadId: context.session.threadId,
+        turnId: open.turnId,
+        openedBy: open.openedBy,
+        uuids: count,
+      });
+      return false;
+    }
     yield* emitTokenUsageSnapshot(
       context,
       yield* resolveResultUsageSnapshot(context, message),
@@ -4400,13 +4421,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId: context.session.threadId,
       uuids: count,
     });
+    return true;
   });
 
   /**
    * Routes frames of CLI segments started by steers. Returns true when the frame was consumed
    * (dropped). A CLI turn whose echo holds only steers Stop (or a failed segment) discarded is
    * interrupted again and dropped up to and including its result; a result with such an echo
-   * and no stream before it is dropped alone. The open turn owns its own steers' segments.
+   * and no stream before it is dropped alone, unless its output already reached an open provider
+   * turn (see `endDiscardedSteerCliTurn`). The open turn owns its own steers' segments.
    */
   const routeSteerFrame = Effect.fn("routeSteerFrame")(function* (
     context: ClaudeSessionContext,
@@ -4416,11 +4439,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (discarding !== undefined) {
       switch (message.type) {
         case "result":
-          yield* dropDiscardedSteerResult(context, message, [
+          return yield* endDiscardedSteerCliTurn(context, message, [
             ...discarding.uuids,
             ...claudeEchoedPromptUuids(message),
           ]);
-          return true;
         case "stream_event":
         case "assistant":
         case "user":
@@ -4444,6 +4466,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       echoed.some((uuid) => uuid === turnState.promptUuid || turnState.steerPromptUuids.has(uuid));
     if (owned || !echoed.every((uuid) => discarded.has(uuid))) {
       if (owned && message.type === "stream_event") {
+        // Its output now streams into this turn, so Stop must wait for its result even when a
+        // receipt written before it started still lists it as queued.
+        for (const uuid of echoed) {
+          if (turnState.steerPromptUuids.has(uuid)) turnState.startedSteerPromptUuids.add(uuid);
+        }
         // S5: a steer that was in transit at Stop started its own segment. End it too.
         const echoKey = [...echoed].toSorted().join(" ");
         if (
@@ -4465,10 +4492,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (message.type === "result") {
-      // The discarded CLI turn ended before it streamed anything (it failed, or the re-run
-      // aborted at once). Nothing of it reached a turn.
-      yield* dropDiscardedSteerResult(context, message, echoed);
-      return true;
+      // The discarded CLI turn ended with no echo before its result: it failed or the re-run
+      // aborted before streaming, or its stream carried no echo.
+      return yield* endDiscardedSteerCliTurn(context, message, echoed);
     }
 
     context.discardingCliTurn = { uuids: new Set(echoed) };
@@ -5748,6 +5774,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               unsettledSteers: [...target.steerPromptUuids].filter(
                 (uuid) => !target.settledSteerPromptUuids.has(uuid),
               ),
+              startedSteers: target.startedSteerPromptUuids,
               promptUuid: target.promptUuid,
               sealedSegmentCount: target.sealedSegmentCount,
               awaitingSteerContinuation: target.awaitingSteerContinuation !== undefined,
@@ -5761,7 +5788,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 rememberDiscardedSteer(context.discardedSteerPromptUuids, uuid);
               }
             }
-            for (const uuid of stop.release) context.discardedSteerPromptUuids.delete(uuid);
+            // Settled too: a stopped turn's closing result discards its unsettled steers, and a
+            // cancelled one would then never leave the discard set.
+            for (const uuid of stop.release) {
+              context.discardedSteerPromptUuids.delete(uuid);
+              target.settledSteerPromptUuids.add(uuid);
+            }
             if (stop.forceClose && context.turnState === target) {
               // No CLI segment of this turn is running, so no result will close it.
               yield* completeTurn(context, "interrupted", "Interrupted by user.", undefined, {

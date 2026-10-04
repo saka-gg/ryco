@@ -174,6 +174,11 @@ export function readClaudeInterruptReceipt(value: unknown): ClaudeInterruptRecei
 
 export interface ClaudeStopDecisionInput {
   readonly unsettledSteers: ReadonlyArray<string>;
+  /**
+   * Steers whose CLI segment already streamed into the turn. They are running whatever the
+   * receipt says: the receipt was written before they started, and handled after.
+   */
+  readonly startedSteers: ReadonlySet<string>;
   readonly promptUuid: string | undefined;
   /** Segments this turn already sealed while waiting for a steer. */
   readonly sealedSegmentCount: number;
@@ -190,16 +195,18 @@ export interface ClaudeStopDecision {
   /** Steer uuids the CLI may still run; their CLI turn is interrupted and dropped. */
   readonly discard: ReadonlyArray<string>;
   /**
-   * Steers the interrupt cancelled: they never run, so they leave the discard set. A result
-   * handled before the receipt may already have put them there.
+   * Steers the interrupt cancelled: they never run, so they leave the discard set and count as
+   * settled, so a result handled after the receipt cannot discard them again. A result handled
+   * before the receipt may already have put them there.
    */
   readonly release: ReadonlyArray<string>;
 }
 
 /**
- * Stop with steers pending. A steer the receipt does not list as queued or cancelled counts as
- * running (in transit or started), so its own aborted result closes the turn. The discard and
- * release lists hold whether or not the stopped turn is still open.
+ * Stop with steers pending. A steer that already streamed into the turn, or that the receipt
+ * does not list as queued or cancelled (in transit), counts as running, so its own aborted
+ * result closes the turn. The discard and release lists hold whether or not the stopped turn is
+ * still open.
  */
 export function decideClaudeStop(input: ClaudeStopDecisionInput): ClaudeStopDecision {
   if (input.receipt === undefined) {
@@ -211,14 +218,17 @@ export function decideClaudeStop(input: ClaudeStopDecisionInput): ClaudeStopDeci
   }
   const cancelled = new Set(input.receipt.cancelled ?? []);
   const outstanding = new Set([...input.receipt.stillQueued, ...cancelled]);
-  const runningSteers = input.unsettledSteers.filter((uuid) => !outstanding.has(uuid));
+  const runningSteers = input.unsettledSteers.filter(
+    (uuid) => input.startedSteers.has(uuid) || !outstanding.has(uuid),
+  );
+  const isReleased = (uuid: string) => cancelled.has(uuid) && !input.startedSteers.has(uuid);
   const promptDone =
     input.sealedSegmentCount > 0 ||
     (input.promptUuid !== undefined && cancelled.has(input.promptUuid));
   return {
     forceClose: promptDone && runningSteers.length === 0,
-    discard: input.unsettledSteers.filter((uuid) => !cancelled.has(uuid)),
-    release: input.unsettledSteers.filter((uuid) => cancelled.has(uuid)),
+    discard: input.unsettledSteers.filter((uuid) => !isReleased(uuid)),
+    release: input.unsettledSteers.filter(isReleased),
   };
 }
 

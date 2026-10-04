@@ -210,6 +210,7 @@ describe("decideClaudeStop", () => {
   const stop = (input: Partial<ClaudeStopDecisionInput>) =>
     decideClaudeStop({
       unsettledSteers: [],
+      startedSteers: new Set(),
       promptUuid: P,
       sealedSegmentCount: 0,
       awaitingSteerContinuation: false,
@@ -261,6 +262,25 @@ describe("decideClaudeStop", () => {
         sealedSegmentCount: 1,
         awaitingSteerContinuation: true,
         receipt: { stillQueued: [], cancelled: undefined },
+      }),
+    ).toEqual({ forceClose: false, discard: [S], release: [] });
+  });
+
+  it("S3/S5: a steer that already streamed counts as running despite a stale receipt", () => {
+    expect(
+      stop({
+        unsettledSteers: [S],
+        startedSteers: new Set([S]),
+        sealedSegmentCount: 1,
+        receipt: { stillQueued: [S], cancelled: undefined },
+      }),
+    ).toEqual({ forceClose: false, discard: [S], release: [] });
+    expect(
+      stop({
+        unsettledSteers: [S],
+        startedSteers: new Set([S]),
+        sealedSegmentCount: 1,
+        receipt: { stillQueued: [], cancelled: [S] },
       }),
     ).toEqual({ forceClose: false, discard: [S], release: [] });
   });

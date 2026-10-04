@@ -265,9 +265,9 @@ How it works:
 
 Stop also stops pending steers. On Claude Code versions with `interrupt_cancel_queued_v1`, Stop
 cancels the queued steer with the interrupt. On versions with only `interrupt_receipt_v1`, Ryco
-uses the interrupt receipt: if Claude Code still runs the steer later, Ryco interrupts it again
-and drops its output, so no new turn appears. A request that fails also drops its pending steers
-the same way, instead of running them as a surprise turn after the failure.
+uses the interrupt receipt: if Claude Code still runs the steer later on its own, Ryco interrupts
+it again and drops its output, so no new turn appears. A request that fails also drops its pending
+steers the same way, instead of running them as a surprise turn after the failure.
 
 Known edges:
 
@@ -277,10 +277,20 @@ Known edges:
   the steered turn.
 - The token usage shown on the completed turn covers the last request only. The context meter is
   updated after every request.
+- A dropped steer that Claude Code runs together with your next message is not dropped: it is
+  answered in that message's turn.
+- If you steer while your own message still waits behind a background request, and Claude Code
+  runs the steer first, the turn completes after the steer's reply and your message's reply
+  appears in a background turn. Whether Claude Code orders the two this way, rather than running
+  them together, is not yet verified.
 - Ryco recognises a dropped steer's request by the message ids Claude Code echoes on its first
   streamed frame (Ryco always enables partial messages) or, when nothing streamed, on its result.
   While a dropped steer is pending, a background turn opens at its first streamed output instead
-  of at Claude's "requesting" status.
+  of at Claude's "requesting" status. If the output carries no early echo, it appears in that
+  background turn, which the steer's result then ends.
+- A steer whose reply already started streaming when Stop's receipt arrives counts as running:
+  Ryco interrupts it, the part that already streamed stays in the stopped turn, and that turn ends
+  with the steer's result, so no background turn appears.
 
 Not yet verified against a live Claude Code: whether a `priority: "now"` message aborts the
 running request or folds into it, which `terminal_reason` an abort reports, and which
