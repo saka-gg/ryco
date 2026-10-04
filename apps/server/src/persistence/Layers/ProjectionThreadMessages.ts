@@ -48,6 +48,8 @@ function toProjectionThreadMessage(
 const makeProjectionThreadMessageRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
+  // `thread_id = excluded.thread_id` on conflict can only rewrite the same value:
+  // message ownership is enforced by the callers' guard in `upsert`/`applyEvent`.
   const upsertProjectionThreadMessageRow = SqlSchema.void({
     Request: ProjectionThreadMessage,
     execute: (row) => {
@@ -162,21 +164,45 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       `,
   });
 
+  // A message id is owned by the first thread that projected it. Writes from
+  // another thread are skipped (and logged) instead of moving the message.
+  const logForeignThreadWriteSkipped = (
+    row: ProjectionThreadMessage,
+    ownerThreadId: string,
+    sequence: number | undefined,
+  ) =>
+    Effect.logWarning("projection.thread-message.foreign-thread-write-skipped", {
+      messageId: row.messageId,
+      ownerThreadId,
+      eventThreadId: row.threadId,
+      sequence,
+    });
+
   const upsert: ProjectionThreadMessageRepositoryShape["upsert"] = (row, options) =>
     sql
       .withTransaction(
-        upsertProjectionThreadMessageRow(row).pipe(
-          Effect.andThen(
-            sql`DELETE FROM projection_message_chunks WHERE message_id = ${row.messageId}`,
-          ),
-          Effect.andThen(
-            options === undefined
-              ? Effect.void
-              : sql`UPDATE projection_thread_messages SET text_event_sequence = ${options.eventSequence} WHERE message_id = ${row.messageId}`.pipe(
-                  Effect.asVoid,
-                ),
-          ),
-        ),
+        Effect.gen(function* () {
+          const owners = yield* sql<{ threadId: string }>`
+            SELECT thread_id AS "threadId" FROM projection_thread_messages WHERE message_id = ${row.messageId}
+          `;
+          const owner = owners[0];
+          if (owner !== undefined && owner.threadId !== row.threadId) {
+            yield* logForeignThreadWriteSkipped(row, owner.threadId, options?.eventSequence);
+            return;
+          }
+          yield* upsertProjectionThreadMessageRow(row).pipe(
+            Effect.andThen(
+              sql`DELETE FROM projection_message_chunks WHERE message_id = ${row.messageId}`,
+            ),
+            Effect.andThen(
+              options === undefined
+                ? Effect.void
+                : sql`UPDATE projection_thread_messages SET text_event_sequence = ${options.eventSequence} WHERE message_id = ${row.messageId}`.pipe(
+                    Effect.asVoid,
+                  ),
+            ),
+          );
+        }),
       )
       .pipe(
         Effect.mapError(toPersistenceSqlError("ProjectionThreadMessageRepository.upsert:query")),
@@ -188,12 +214,42 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
     sql
       .withTransaction(
         Effect.gen(function* () {
-          const states = yield* sql<{ sequence: number; createdAt: string }>`
-        SELECT text_event_sequence AS sequence, created_at AS "createdAt"
+          const states = yield* sql<{
+            threadId: string;
+            turnId: string | null;
+            isStreaming: number;
+            sequence: number;
+            createdAt: string;
+          }>`
+        SELECT thread_id AS "threadId", turn_id AS "turnId", is_streaming AS "isStreaming",
+          text_event_sequence AS sequence, created_at AS "createdAt"
         FROM projection_thread_messages WHERE message_id = ${row.messageId}
       `;
           const state = states[0];
+          if (state !== undefined && state.threadId !== row.threadId) {
+            // No metadata write, no chunk insert/delete, no text_event_sequence bump.
+            yield* logForeignThreadWriteSkipped(row, state.threadId, sequence);
+            return;
+          }
           if (state !== undefined && state.sequence >= sequence) return;
+          if (
+            row.isStreaming &&
+            state !== undefined &&
+            state.isStreaming === 0 &&
+            state.turnId !== null &&
+            row.turnId !== null &&
+            state.turnId !== row.turnId
+          ) {
+            // Diagnostic only: appending after completion is designed behaviour,
+            // but a delta from another turn hints at a reused assistant id.
+            yield* Effect.logWarning("projection.thread-message.cross-turn-append", {
+              messageId: row.messageId,
+              threadId: row.threadId,
+              previousTurnId: state.turnId,
+              turnId: row.turnId,
+              sequence,
+            });
+          }
           if (!row.isStreaming) {
             const existing =
               row.text.length === 0

@@ -5,6 +5,7 @@ import type { WsRpcClient } from "@ryco/client-runtime/rpc";
 import { resetAppAtomRegistryForTests } from "@ryco/client-runtime/rpc";
 import {
   getGitStatusSnapshot,
+  readLocalGitRefName,
   resetGitStatusStateForTests,
   refreshGitStatus,
   watchGitStatus,
@@ -443,5 +444,52 @@ describe("gitStatusState", () => {
 
   it("returns the cached snapshot when refresh is requested before the client is registered", async () => {
     await expect(refreshGitStatus(TARGET)).resolves.toBeNull();
+  });
+});
+
+describe("readLocalGitRefName", () => {
+  it("reads a watched cwd's live snapshot without any refresh or new stream", async () => {
+    // The ChatView watch polls the remote; the read still reuses its stream.
+    const release = watchGitStatus(TARGET, gitClient, { automaticRemoteRefreshIntervalMs: 30_000 });
+    emitGitStatus(BASE_STATUS);
+    await expect(readLocalGitRefName(TARGET, { client: gitClient })).resolves.toBe(
+      "feature/push-status",
+    );
+    expect(gitClient.onStatus).toHaveBeenCalledOnce();
+    expect(gitClient.refreshStatus).not.toHaveBeenCalled();
+    expect(gitStatusListeners.size).toBe(1);
+    release();
+  });
+
+  it("reads an unwatched cwd from a short-lived stream snapshot, ignoring stale data", async () => {
+    const earlier = watchGitStatus(TARGET, gitClient);
+    emitGitStatus({ ...BASE_STATUS, refName: "stale" });
+    earlier();
+
+    const read = readLocalGitRefName(TARGET, { client: gitClient });
+    expect(gitStatusListeners.size).toBe(1);
+    emitGitStatus({ ...BASE_STATUS, refName: "main" });
+    await expect(read).resolves.toBe("main");
+    expect(gitStatusListeners.size).toBe(0);
+    expect(gitClient.refreshStatus).not.toHaveBeenCalled();
+  });
+
+  it("reads a detached checkout as null", async () => {
+    const read = readLocalGitRefName(TARGET, { client: gitClient });
+    emitGitStatus({ ...BASE_STATUS, refName: null });
+    await expect(read).resolves.toBeNull();
+  });
+
+  it("gives up as unknown after the timeout and releases the stream", async () => {
+    vi.useFakeTimers();
+    try {
+      const read = readLocalGitRefName(TARGET, { client: gitClient, timeoutMs: 1_000 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(read).resolves.toBeUndefined();
+      expect(gitStatusListeners.size).toBe(0);
+      expect(gitClient.refreshStatus).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

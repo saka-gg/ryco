@@ -16,8 +16,10 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import {
   clearLatestProviderVersionCacheForTests,
   makeProviderMaintenanceCapabilities,
+  resolveLatestProviderVersion,
   type ProviderMaintenanceCapabilities,
 } from "./providerMaintenance.ts";
+import { BUNDLED_MODEL_MANIFEST, ModelManifest, type ModelManifestData } from "./ModelManifest.ts";
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
@@ -191,13 +193,58 @@ function makeRegistry(
   });
 }
 
-const makeTestRunner = (registry: ProviderRegistryShape) =>
-  Effect.service(ProviderMaintenanceRunner.ProviderMaintenanceRunner).pipe(
+/** `manifestLayer` is an optional `ModelManifest` stub; without it the runner rates against the
+ * bundled policies and the code-owned floors. */
+const makeTestRunner = (
+  registry: ProviderRegistryShape,
+  manifestLayer?: Layer.Layer<ModelManifest>,
+) => {
+  const runnerLayer = ProviderMaintenanceRunner.layer.pipe(
+    Layer.provide(Layer.succeed(ProviderRegistry, registry)),
+    Layer.provide(ServerSettingsService.layerTest()),
+  );
+  return Effect.service(ProviderMaintenanceRunner.ProviderMaintenanceRunner).pipe(
     Effect.provide(
-      ProviderMaintenanceRunner.layer.pipe(
-        Layer.provide(Layer.succeed(ProviderRegistry, registry)),
-        Layer.provide(ServerSettingsService.layerTest()),
-      ),
+      manifestLayer === undefined ? runnerLayer : runnerLayer.pipe(Layer.provide(manifestLayer)),
+    ),
+  );
+};
+
+const manifestWithPolicies = (compatibility: ReadonlyArray<unknown>): ModelManifestData => ({
+  ...BUNDLED_MODEL_MANIFEST,
+  compatibility,
+});
+
+// The realistic kill switch: a provider release that breaks this Ryco release.
+const CODEX_BROKEN_RELEASE_MANIFEST = manifestWithPolicies([
+  {
+    driver: "codex",
+    rycoRange: ">=0.0.0",
+    ranges: [
+      { range: ">=0.200.0", status: "broken", message: "Codex 0.200 breaks approvals." },
+      { range: "<0.200.0", status: "supported" },
+    ],
+  },
+]);
+
+const manifestStubLayer = (manifest: Ref.Ref<ModelManifestData>) =>
+  Layer.succeed(ModelManifest, {
+    current: Ref.get(manifest),
+    refresh: Ref.get(manifest),
+    refreshIfStale: Ref.get(manifest),
+    refreshInBackground: Effect.void,
+  });
+
+const staticManifestLayer = (manifest: ModelManifestData) =>
+  Layer.effect(
+    ModelManifest,
+    Ref.make(manifest).pipe(
+      Effect.map((ref) => ({
+        current: Ref.get(ref),
+        refresh: Ref.get(ref),
+        refreshIfStale: Ref.get(ref),
+        refreshInBackground: Effect.void,
+      })),
     ),
   );
 
@@ -640,4 +687,220 @@ describe("providerMaintenanceRunner", () => {
         ),
       ),
   );
+
+  describe("compatibility refusal", () => {
+    it.effect("refuses to install a latest version the manifest marks broken", () => {
+      const calls: Array<string> = [];
+      return Effect.gen(function* () {
+        const { registry, updateStatesRef } = yield* makeRegistry(baseProvider);
+        const updater = yield* makeTestRunner(
+          registry,
+          staticManifestLayer(CODEX_BROKEN_RELEASE_MANIFEST),
+        );
+
+        const result = yield* updater.updateProvider(CODEX_DRIVER);
+        const updateState = result.providers[0]?.updateState;
+
+        assert.strictEqual(updateState?.status, "failed");
+        assert.include(updateState?.message, "v0.200.1");
+        assert.include(updateState?.message, "breaks approvals");
+        assert.strictEqual(updateState?.startedAt, null);
+        assert.deepStrictEqual(calls, []);
+        assert.deepStrictEqual(
+          (yield* Ref.get(updateStatesRef)).map((state) => state.status),
+          ["queued", "failed"],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            latestVersionHttpClient("0.200.1"),
+            mockSpawnerLayer((_command, args) => {
+              calls.push(args.join(" "));
+              return { stdout: "updated" };
+            }),
+          ),
+        ),
+      );
+    });
+
+    it.effect("rates a click-time fetch instead of the cached latest version", () => {
+      const calls: Array<string> = [];
+      return Effect.gen(function* () {
+        // Warm the hourly cache with a version the policy allows.
+        assert.strictEqual(
+          yield* resolveLatestProviderVersion(lifecycleFor(CODEX_DRIVER)).pipe(
+            Effect.provide(latestVersionHttpClient("0.199.0")),
+          ),
+          "0.199.0",
+        );
+        const { registry } = yield* makeRegistry(baseProvider);
+        const updater = yield* makeTestRunner(
+          registry,
+          staticManifestLayer(CODEX_BROKEN_RELEASE_MANIFEST),
+        );
+
+        const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+        assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
+        assert.include(result.providers[0]?.updateState?.message, "v0.200.1");
+        assert.deepStrictEqual(calls, []);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            latestVersionHttpClient("0.200.1"),
+            mockSpawnerLayer((_command, args) => {
+              calls.push(args.join(" "));
+              return { stdout: "updated" };
+            }),
+          ),
+        ),
+      );
+    });
+
+    it.effect(
+      "ignores a stale rating on the snapshot and rates against the current manifest",
+      () => {
+        const calls: Array<string> = [];
+        return Effect.gen(function* () {
+          const { registry } = yield* makeRegistry({
+            ...baseProvider,
+            version: "0.199.0",
+            versionAdvisory: {
+              status: "behind_latest",
+              currentVersion: "0.199.0",
+              latestVersion: "0.200.1",
+              updateCommand: "npm install -g @openai/codex@latest",
+              canUpdate: true,
+              checkedAt: "2026-10-04T00:00:00.000Z",
+              message: "Update available.",
+            },
+            compatibilityAdvisory: {
+              status: "supported",
+              latestVersionStatus: "supported",
+              message: null,
+            },
+          });
+          const updater = yield* makeTestRunner(
+            registry,
+            staticManifestLayer(CODEX_BROKEN_RELEASE_MANIFEST),
+          );
+
+          const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+          assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
+          assert.include(result.providers[0]?.updateState?.message, "breaks approvals");
+          assert.deepStrictEqual(calls, []);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              latestVersionHttpClient("0.200.1"),
+              mockSpawnerLayer((_command, args) => {
+                calls.push(args.join(" "));
+                return { stdout: "updated" };
+              }),
+            ),
+          ),
+        );
+      },
+    );
+
+    it.effect("re-checks a queued update after it acquires the lock", () => {
+      const firstStartedLatch: { resolve: () => void } = { resolve: () => {} };
+      const releaseFirstLatch: { resolve: () => void } = { resolve: () => {} };
+      const firstStarted = new Promise<void>((resolve) => {
+        firstStartedLatch.resolve = resolve;
+      });
+      const releaseFirst = new Promise<void>((resolve) => {
+        releaseFirstLatch.resolve = resolve;
+      });
+      const calls: Array<string> = [];
+      return Effect.gen(function* () {
+        const manifest = yield* Ref.make<ModelManifestData>(BUNDLED_MODEL_MANIFEST);
+        const { registry } = yield* makeRegistry([baseProvider, baseOpenCodeProvider]);
+        const updater = yield* makeTestRunner(registry, manifestStubLayer(manifest));
+
+        const first = yield* updater.updateProvider(CODEX_DRIVER).pipe(Effect.forkScoped);
+        yield* Effect.promise(() => firstStarted);
+
+        const second = yield* updater.updateProvider(OPENCODE_DRIVER).pipe(Effect.forkScoped);
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const queuedStatus = (yield* registry.getProviders).find(
+            (provider) => provider.instanceId === OPENCODE_INSTANCE_ID,
+          )?.updateState?.status;
+          if (queuedStatus === "queued") {
+            break;
+          }
+          yield* Effect.yieldNow;
+        }
+        yield* Ref.set(
+          manifest,
+          manifestWithPolicies([
+            {
+              driver: "opencode",
+              rycoRange: ">=0.0.0",
+              ranges: [
+                { range: "=1.18.40", status: "broken", message: "1.18.40 corrupts sessions." },
+              ],
+            },
+          ]),
+        );
+
+        releaseFirstLatch.resolve();
+        yield* Fiber.join(first);
+        const secondResult = yield* Fiber.join(second);
+
+        const openCodeState = secondResult.providers.find(
+          (provider) => provider.instanceId === OPENCODE_INSTANCE_ID,
+        )?.updateState;
+        assert.strictEqual(openCodeState?.status, "failed");
+        assert.include(openCodeState?.message, "corrupts sessions");
+        assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            latestVersionHttpClient("1.18.40"),
+            mockSpawnerLayer((_command, args) => {
+              calls.push(args.join(" "));
+              if (calls.length === 1) {
+                firstStartedLatch.resolve();
+                return {
+                  stdout: "updated",
+                  exitCode: Effect.promise(() => releaseFirst).pipe(
+                    Effect.as(ChildProcessSpawner.ExitCode(0)),
+                  ),
+                };
+              }
+              return { stdout: "updated" };
+            }),
+          ),
+        ),
+      );
+    });
+
+    it.effect("installs a latest version the manifest allows", () => {
+      const calls: Array<string> = [];
+      return Effect.gen(function* () {
+        const { registry } = yield* makeRegistry(baseProvider);
+        const updater = yield* makeTestRunner(
+          registry,
+          staticManifestLayer(CODEX_BROKEN_RELEASE_MANIFEST),
+        );
+
+        const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+        assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+        assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            latestVersionHttpClient("0.199.5"),
+            mockSpawnerLayer((_command, args) => {
+              calls.push(args.join(" "));
+              return { stdout: "updated" };
+            }),
+          ),
+        ),
+      );
+    });
+  });
 });

@@ -34,14 +34,19 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { isPersistableChatAttachment } from "../attachmentStore.ts";
-import { compareCliVersions } from "./cliVersion.ts";
-import { collectStreamAsString } from "./providerSnapshot.ts";
+import {
+  describeUnsupportedOpenCodeVersion,
+  normalizeOpenCodeVersion,
+  OPENCODE_NON_JSON_HEALTH_MESSAGE,
+  OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
+} from "./openCodeVersion.ts";
+import { collectStreamAsString, parseGenericCliVersion } from "./providerSnapshot.ts";
 import { NetService } from "@ryco/shared/Net";
 
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 5_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
-export const MINIMUM_OPENCODE_VERSION = "1.14.19";
+const OPENCODE_VERSION_PREFLIGHT_TIMEOUT_MS = 5_000;
 export interface OpenCodeServerProcess {
   readonly url: string;
   readonly serverPassword?: string;
@@ -106,6 +111,17 @@ export const verifyOpenCodeServerVersion = (
           }),
         );
       }
+      // The SDK parses `text/*` responses as text, so an HTML page (an OpenCode 2.x web UI, a
+      // proxy or a sign-in page) arrives here as a string rather than a health object.
+      const raw: unknown = result.value.data;
+      if (typeof raw === "string") {
+        return Effect.fail(
+          new OpenCodeRuntimeError({
+            operation: "global.health",
+            detail: OPENCODE_NON_JSON_HEALTH_MESSAGE,
+          }),
+        );
+      }
       const health = result.value.data;
       if (!health?.healthy || typeof health.version !== "string" || health.version.length === 0) {
         return Effect.fail(
@@ -115,15 +131,59 @@ export const verifyOpenCodeServerVersion = (
           }),
         );
       }
-      if (compareCliVersions(health.version, MINIMUM_OPENCODE_VERSION) < 0) {
+      // Fails closed: an unparseable or 2.x version is refused, never compared as a string.
+      const problem = describeUnsupportedOpenCodeVersion(health.version, "server");
+      if (problem !== null) {
+        return Effect.fail(
+          new OpenCodeRuntimeError({ operation: "global.health", detail: problem }),
+        );
+      }
+      return Effect.succeed(normalizeOpenCodeVersion(health.version));
+    }),
+  );
+
+/**
+ * Runs `<binary> --version` and fails unless it reports an OpenCode version this build can run.
+ * Called before every `opencode serve` spawn: Ryco must never start a 2.x server (2.x converts the
+ * shared OpenCode database in place and prints a generated password on stdout). Deliberately not
+ * cached — a binary swapped on PATH is caught at the next cold start. Ignores the exit code, like
+ * the provider probe.
+ */
+export const assertSupportedOpenCodeBinary = (
+  runCommand: OpenCodeRuntimeShape["runOpenCodeCommand"],
+  input: { readonly binaryPath: string; readonly environment?: NodeJS.ProcessEnv },
+): Effect.Effect<string, OpenCodeRuntimeError> =>
+  runCommand({
+    binaryPath: input.binaryPath,
+    args: ["--version"],
+    ...(input.environment !== undefined ? { environment: input.environment } : {}),
+  }).pipe(
+    Effect.timeoutOption(OPENCODE_VERSION_PREFLIGHT_TIMEOUT_MS),
+    Effect.flatMap((result) => {
+      if (Option.isNone(result)) {
         return Effect.fail(
           new OpenCodeRuntimeError({
-            operation: "global.health",
-            detail: `OpenCode v${health.version} is too old. Upgrade to v${MINIMUM_OPENCODE_VERSION} or newer.`,
+            operation: "startOpenCodeServerProcess",
+            detail: `Could not check the OpenCode version: \`${input.binaryPath} --version\` did not finish within ${OPENCODE_VERSION_PREFLIGHT_TIMEOUT_MS / 1_000} seconds.`,
           }),
         );
       }
-      return Effect.succeed(health.version);
+      const version = parseGenericCliVersion(result.value.stdout);
+      if (version === null) {
+        return Effect.fail(
+          new OpenCodeRuntimeError({
+            operation: "startOpenCodeServerProcess",
+            detail: OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
+          }),
+        );
+      }
+      const problem = describeUnsupportedOpenCodeVersion(version, "binary");
+      if (problem !== null) {
+        return Effect.fail(
+          new OpenCodeRuntimeError({ operation: "startOpenCodeServerProcess", detail: problem }),
+        );
+      }
+      return Effect.succeed(version);
     }),
   );
 
@@ -417,6 +477,13 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
   const startOpenCodeServerProcess: OpenCodeRuntimeShape["startOpenCodeServerProcess"] = (input) =>
     Effect.gen(function* () {
+      // Version gate before anything else: never spawn `serve` on an OpenCode this build cannot
+      // run. This is the single spawn site, so the owner, the probe and the adapter all inherit it.
+      yield* assertSupportedOpenCodeBinary(runOpenCodeCommand, {
+        binaryPath: input.binaryPath,
+        ...(input.environment !== undefined ? { environment: input.environment } : {}),
+      });
+
       // Bind this server's lifetime to the caller's scope. When the caller's
       // scope closes, the spawned child is killed and all associated fibers
       // are interrupted automatically — no `close()` method needed.

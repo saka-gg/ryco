@@ -1,6 +1,10 @@
 import { inboxModelName } from "./inboxContextHandoff";
 import { getModelDisplayName } from "@ryco/shared/model";
-import { deriveThreadActivityStatus } from "@ryco/client-runtime/state/threads";
+import {
+  deriveThreadActivityStatus,
+  deriveUsageLimitStatus,
+  type UsageLimitStatus,
+} from "@ryco/client-runtime/state/threads";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
 import type { WsConnectionUiState } from "@ryco/client-runtime/rpc";
@@ -10,7 +14,12 @@ import type {
   SidebarThreadSummary,
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
-import { buildThreadInbox, type ThreadInboxEntry } from "@ryco/client-runtime/state/threads";
+import {
+  buildThreadInbox,
+  planDelegatedNesting,
+  type DelegatedNestingItem,
+  type ThreadInboxEntry,
+} from "@ryco/client-runtime/state/threads";
 import {
   describeThreadPriorityFocus,
   type ThreadPriorityFocusMetadata,
@@ -24,6 +33,7 @@ import {
   type ProviderDriverKind,
   type SidebarAutoSettleAfterDays,
   type ThreadId,
+  type ThreadLineage,
 } from "@ryco/contracts";
 
 export type InboxSidebarThreadState =
@@ -31,6 +41,7 @@ export type InboxSidebarThreadState =
   | "delivery-unknown"
   | "working"
   | "connecting"
+  | "limited"
   | "error"
   | "reconnecting"
   | "offline"
@@ -98,6 +109,8 @@ export interface InboxSidebarRow {
   readonly attention: InboxSidebarAttention | null;
   /** Provider error text, set only while `state` is "error". */
   readonly errorDetail: string | null;
+  /** The usage limit's phase and reset, set only while `state` is "limited". */
+  readonly usageLimit?: Pick<UsageLimitStatus, "phase" | "resetAt"> | null;
   /** Start of the running turn, set only while `state` is "working". */
   readonly runningSince: string | null;
   /** Completion of the latest turn; compared against the last visit for unseen work. */
@@ -124,6 +137,10 @@ export interface InboxSidebarRow {
   readonly settlementDisabledReason: string | null;
   readonly effectiveSettlementTimestamp: string | null;
   readonly focus: ThreadPriorityFocusMetadata | null;
+  /** Server-owned provenance; null on root threads. */
+  readonly lineage: ThreadLineage | null;
+  /** Quiet delegated descendants folded under this host row; empty unless it is a host. */
+  readonly delegatedChildren: ReadonlyArray<InboxSidebarRow>;
 }
 
 export interface InboxSidebarSection {
@@ -159,6 +176,8 @@ export interface BuildInboxSidebarInput {
   readonly pinnedThreadKeys?: ReadonlySet<string>;
   /** The environment rows are implicitly about; other machines are labelled. */
   readonly primaryEnvironmentId?: EnvironmentId | null;
+  /** Fold quiet delegated children under their host (default true; off on the phone tier). */
+  readonly nestDelegated?: boolean;
   readonly nowMs?: number;
 }
 
@@ -254,6 +273,7 @@ const ACTIVE_PRIORITY: Readonly<
 > = {
   "delivery-unknown": 0,
   error: 1,
+  limited: 1,
   working: 2,
   connecting: 3,
   reconnecting: 4,
@@ -274,6 +294,7 @@ function resolveThreadState(
   thread: SidebarThreadSummary,
   environment: InboxSidebarEnvironment | undefined,
   deliveryUnknownThreadKeys: ReadonlySet<string>,
+  nowMs: number,
 ): InboxSidebarThreadState {
   if (environment?.stale || environment?.connectionState === "offline") return "offline";
   const activity = deriveThreadActivityStatus(thread);
@@ -291,6 +312,8 @@ function resolveThreadState(
   if (activity === "connecting" || environment?.connectionState === "connecting") {
     return "connecting";
   }
+  // A running resumed turn wins above; a usage limit outranks the error it ended in.
+  if (deriveUsageLimitStatus(thread, nowMs) !== null) return "limited";
   if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
   return "idle";
@@ -312,8 +335,11 @@ function resolveRunningSince(thread: SidebarThreadSummary): string | null {
 function statusLabel(
   state: InboxSidebarThreadState,
   environment: InboxSidebarEnvironment | undefined,
+  usageLimit: UsageLimitStatus | null,
 ): string {
   switch (state) {
+    case "limited":
+      return usageLimit?.label ?? "Limited";
     case "needs-input":
       return "Needs input";
     case "delivery-unknown":
@@ -340,18 +366,72 @@ function statusLabel(
 export function resolveInboxThreadStatus(
   thread: SidebarThreadSummary,
 ): Pick<InboxSidebarRow, "state" | "statusLabel" | "attention"> {
-  const state = resolveThreadState(thread, undefined, new Set());
+  const nowMs = Date.now();
+  const state = resolveThreadState(thread, undefined, new Set(), nowMs);
   return {
     state,
-    statusLabel: statusLabel(state, undefined),
+    statusLabel: statusLabel(
+      state,
+      undefined,
+      state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null,
+    ),
     attention: state === "needs-input" ? resolveAttention(thread) : null,
   };
 }
 
-function sectionKey(state: InboxSidebarThreadState): InboxSidebarSectionKey {
+/**
+ * State-derived section. Also the delegated-nesting attention predicate: a state
+ * that must never fold under a host has to map to "active" or "needs-input".
+ */
+function sectionKey(
+  state: InboxSidebarThreadState,
+): Extract<InboxSidebarSectionKey, "needs-input" | "active" | "recent"> {
   if (state === "needs-input") return "needs-input";
   if (state === "idle" || state === "offline") return "recent";
   return "active";
+}
+
+const NO_DELEGATED_CHILDREN: ReadonlyArray<InboxSidebarRow> = [];
+
+/**
+ * Folds quiet delegated children under their topmost visible host (spec D7/D8).
+ * Live, failing and attention children stay top-level, so section counts stay exact.
+ */
+function nestDelegatedRows(
+  rows: ReadonlyArray<InboxSidebarRow>,
+  threads: ReadonlyArray<SidebarThreadSummary>,
+): InboxSidebarRow[] {
+  // All threads, so filtered-out or archived intermediates can still be walked.
+  const lineageByKey = new Map(
+    threads.map((thread) => [
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      thread.lineage,
+    ]),
+  );
+  const items = rows.map((row): DelegatedNestingItem => ({
+    key: row.key,
+    environmentId: row.environmentId,
+    threadId: row.threadId,
+    lineage: row.lineage,
+    pinned: row.pinned,
+    focused: row.focus !== null,
+    urgency: row.snoozedUntil ? "snoozed" : row.settled ? "settled" : sectionKey(row.state),
+  }));
+  const plan = planDelegatedNesting(items, { lineageByKey });
+  if (plan.hostByChildKey.size === 0) return [...rows];
+  const rowByKey = new Map(rows.map((row) => [row.key, row]));
+  return rows.flatMap((row) => {
+    if (plan.hostByChildKey.has(row.key)) return [];
+    const childKeys = plan.childKeysByHostKey.get(row.key);
+    if (childKeys === undefined) return [row];
+    const delegatedChildren = childKeys
+      .flatMap((key) => {
+        const child = rowByKey.get(key);
+        return child ? [child] : [];
+      })
+      .toSorted(compareRecent);
+    return [{ ...row, delegatedChildren }];
+  });
 }
 
 function timestamp(thread: SidebarThreadSummary): string {
@@ -441,6 +521,7 @@ function modelDisplayName(
 }
 
 export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSidebarModel {
+  const nowMs = input.nowMs ?? Date.now();
   const environmentById = new Map(
     input.environments.map((environment) => [environment.environmentId, environment] as const),
   );
@@ -468,7 +549,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     currentThreadKey: input.activeThreadKey,
     aiFocusEnabled: input.aiFocusEnabled,
     autoSettleAfterDays: input.autoSettleAfterDays,
-    nowMs: input.nowMs ?? Date.now(),
+    nowMs,
   });
 
   const threadEnvironmentIds = new Set(input.threads.map((thread) => thread.environmentId));
@@ -494,7 +575,8 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     const workspaceLabel =
       worktree?.title ?? worktree?.branch ?? thread.branch ?? "Local workspace";
     const contextLabel = `${machineLabel} · ${projectLabel} · ${workspaceLabel}`;
-    const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys);
+    const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys, nowMs);
+    const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
     const rowSection = entry.pinned
@@ -541,9 +623,10 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       workspaceLabel,
       contextLabel,
       state,
-      statusLabel: statusLabel(state, environment),
+      statusLabel: statusLabel(state, environment, usageLimit),
       attention: state === "needs-input" ? resolveAttention(thread) : null,
       errorDetail: state === "error" ? thread.session?.lastError?.trim() || null : null,
+      usageLimit: usageLimit ? { phase: usageLimit.phase, resetAt: usageLimit.resetAt } : null,
       runningSince: state === "working" ? resolveRunningSince(thread) : null,
       latestTurnCompletedAt: thread.latestTurn?.completedAt ?? null,
       showProject: !singleProject,
@@ -593,11 +676,19 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       settlementDisabledReason: settlementDisabledReason(entry),
       effectiveSettlementTimestamp: entry.lifecycle.effectiveSettlementTimestamp,
       focus: entry.focus,
+      lineage: thread.lineage ?? null,
+      delegatedChildren: NO_DELEGATED_CHILDREN,
     });
   }
 
-  const pinned = rows.filter((row) => row.pinned).toSorted(compareRecent);
-  const unpinnedRows = rows.filter((row) => !row.pinned);
+  // Text search shows every match as its own row. A status filter keeps folding,
+  // but only under hosts that pass the filter themselves.
+  const topLevelRows =
+    input.nestDelegated !== false && input.filters.query.trim() === ""
+      ? nestDelegatedRows(rows, input.threads)
+      : rows;
+  const pinned = topLevelRows.filter((row) => row.pinned).toSorted(compareRecent);
+  const unpinnedRows = topLevelRows.filter((row) => !row.pinned);
   const unsettledRows = unpinnedRows.filter((row) => !row.settled && !row.snoozedUntil);
   const focus = unsettledRows.filter((row) => row.focus !== null);
   const active = unsettledRows

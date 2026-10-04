@@ -6,6 +6,7 @@ import * as BitbucketApi from "./BitbucketApi.ts";
 import type * as BitbucketPullRequests from "./bitbucketPullRequests.ts";
 import * as BitbucketSourceControlProvider from "./BitbucketSourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
+import { makeLayer as makeBitbucketApiLayer } from "./bitbucketApiTestLayer.ts";
 
 function makeProvider(bitbucket: Partial<BitbucketApi.BitbucketApiShape>) {
   return BitbucketSourceControlProvider.make().pipe(
@@ -484,4 +485,34 @@ describe("BitbucketSourceControlProvider pull requests page", () => {
       assert.deepStrictEqual(merged, { outcome: "merged" });
     }),
   );
+});
+
+it.effect("reports no PR terminal time because Bitbucket has no close timestamp", () => {
+  // `updated_on` moves on every later comment, so it is not a close time: the
+  // refresh falls back to the time Ryco first observed the terminal state.
+  const { layer } = makeBitbucketApiLayer({
+    response: () =>
+      Response.json({
+        id: 42,
+        title: "Merged Bitbucket PR",
+        state: "MERGED",
+        updated_on: "2026-01-02T00:00:00.000Z",
+        links: { html: { href: "https://bitbucket.org/pingdotgg/ryco/pull-requests/42" } },
+        source: {
+          branch: { name: "feature/merged" },
+          repository: { full_name: "pingdotgg/ryco", workspace: { slug: "pingdotgg" } },
+        },
+        destination: {
+          branch: { name: "main" },
+          repository: { full_name: "pingdotgg/ryco", workspace: { slug: "pingdotgg" } },
+        },
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const provider = yield* BitbucketSourceControlProvider.make();
+    const state = yield* provider.getPullRequestState({ cwd: "/repo", number: 42 });
+    assert.deepStrictEqual(state, { state: "merged", isDraft: false });
+    assert.isUndefined(state.terminalAt);
+  }).pipe(Effect.provide(layer));
 });

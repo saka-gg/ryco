@@ -27,10 +27,13 @@ const emitStaleXAiPromptCompleteBeforeSecondHang =
 const emitLateIdlessXAiPromptSequence =
   readEnv("RYCO_ACP_EMIT_LATE_IDLESS_XAI_PROMPT_SEQUENCE") === "1";
 const failSetConfigOption = readEnv("RYCO_ACP_FAIL_SET_CONFIG_OPTION") === "1";
+const failPrompt = readEnv("RYCO_ACP_FAIL_PROMPT") === "1";
 const advertiseHttpMcp = readEnv("RYCO_ACP_ADVERTISE_HTTP_MCP") === "1";
 const failMcpSetupOnce = readEnv("RYCO_ACP_FAIL_MCP_SETUP_ONCE") === "1";
 const exitOnSetConfigOption = readEnv("RYCO_ACP_EXIT_ON_SET_CONFIG_OPTION") === "1";
 const promptResponseText = readEnv("RYCO_ACP_PROMPT_RESPONSE_TEXT");
+// Number of assistant history chunks `session/load` replays before it answers.
+const replayHistoryChunks = Number(readEnv("RYCO_ACP_REPLAY_HISTORY_CHUNKS") ?? "0");
 const permissionOptionIds = {
   allowOnce: readEnv("RYCO_ACP_ALLOW_ONCE_OPTION_ID") ?? "allow-once",
   allowAlways: readEnv("RYCO_ACP_ALLOW_ALWAYS_OPTION_ID") ?? "allow-always",
@@ -315,21 +318,84 @@ const program = Effect.gen(function* () {
   );
 
   yield* agent.handleLoadSession((request) =>
-    agent.client
-      .sessionUpdate({
-        sessionId: String(request.sessionId ?? sessionId),
+    Effect.gen(function* () {
+      const loadedSessionId = String(request.sessionId ?? sessionId);
+      yield* agent.client.sessionUpdate({
+        sessionId: loadedSessionId,
         update: {
           sessionUpdate: "user_message_chunk",
           content: { type: "text", text: "replay" },
         },
-      })
-      .pipe(
-        Effect.as({
-          modes: modeState(),
-          models: modelState(),
-          configOptions: configOptions(),
-        }),
-      ),
+      });
+
+      // ACP requires the whole transcript to be replayed before the load
+      // response, so a long history arrives while the client is still starting.
+      for (let index = 0; index < replayHistoryChunks; index += 1) {
+        if (index > 0 && index % 500 === 0) {
+          const toolCallId = `replay-tool-${index}`;
+          yield* agent.client.sessionUpdate({
+            sessionId: loadedSessionId,
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId,
+              title: "Terminal",
+              kind: "execute",
+              status: "pending",
+              rawInput: {
+                command: ["echo", "replayed"],
+              },
+            },
+          });
+          yield* agent.client.sessionUpdate({
+            sessionId: loadedSessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId,
+              title: "Terminal",
+              kind: "execute",
+              status: "completed",
+              rawOutput: {
+                exitCode: 0,
+                stdout: "replayed",
+                stderr: "",
+              },
+            },
+          });
+        }
+        yield* agent.client.sessionUpdate({
+          sessionId: loadedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `replayed ${index} ` },
+          },
+        });
+        if (index % 250 === 249) {
+          yield* agent.client.sessionUpdate({
+            sessionId: loadedSessionId,
+            update: {
+              sessionUpdate: "usage_update",
+              used: index + 1,
+              size: 128_000,
+            },
+          });
+        }
+      }
+      if (replayHistoryChunks > 0) {
+        yield* agent.client.sessionUpdate({
+          sessionId: loadedSessionId,
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands: [{ name: "replayed-command", description: "from replay" }],
+          },
+        });
+      }
+
+      return {
+        modes: modeState(),
+        models: modelState(),
+        configOptions: configOptions(),
+      };
+    }),
   );
 
   yield* agent.handleSetSessionModel((request) =>
@@ -395,6 +461,13 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
       promptCount += 1;
+
+      if (failPrompt) {
+        return yield* AcpError.AcpRequestError.invalidParams("Mock failure for session/prompt", {
+          method: "session/prompt",
+          params: request,
+        });
+      }
 
       if (emitStaleXAiPromptCompleteBeforeSecondHang && promptCount === 1) {
         return {

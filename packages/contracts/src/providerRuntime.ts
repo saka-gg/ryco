@@ -103,6 +103,8 @@ const RuntimeErrorClass = Schema.Literals([
   "transport_error",
   "permission_error",
   "validation_error",
+  /** The provider account hit a usage limit; `resetAt` says when it resets, if known. */
+  "usage_limit",
   "unknown",
 ]);
 export type RuntimeErrorClass = typeof RuntimeErrorClass.Type;
@@ -782,8 +784,20 @@ const AccountUpdatedPayload = Schema.Struct({
 });
 export type AccountUpdatedPayload = typeof AccountUpdatedPayload.Type;
 
+/**
+ * Provider-agnostic reading of a rate-limit update. `exhausted` means at least one
+ * window is rejected or at 100%; `resetAt` is when ALL exhausted windows reset, or
+ * null when any of their resets is unknown.
+ */
+export const UsageLimitState = Schema.Struct({
+  exhausted: Schema.Boolean,
+  resetAt: Schema.NullOr(IsoDateTime),
+});
+export type UsageLimitState = typeof UsageLimitState.Type;
+
 const AccountRateLimitsUpdatedPayload = Schema.Struct({
   rateLimits: Schema.Unknown,
+  usageLimitState: Schema.optional(UsageLimitState),
 });
 export type AccountRateLimitsUpdatedPayload = typeof AccountRateLimitsUpdatedPayload.Type;
 
@@ -856,6 +870,11 @@ const RuntimeErrorPayload = Schema.Struct({
   message: TrimmedNonEmptyStringSchema,
   class: Schema.optional(RuntimeErrorClass),
   detail: Schema.optional(Schema.Unknown),
+  /**
+   * Only meaningful for `class: "usage_limit"`: when the limit resets. null = a limit
+   * with an unknown reset; absent = not applicable.
+   */
+  resetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type RuntimeErrorPayload = typeof RuntimeErrorPayload.Type;
 

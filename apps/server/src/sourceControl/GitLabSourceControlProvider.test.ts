@@ -500,3 +500,45 @@ describe("GitLabSourceControlProvider pull request page", () => {
     }),
   );
 });
+
+it.effect("reports the MR terminal time from GitLab merged_at and closed_at", () =>
+  Effect.gen(function* () {
+    const mergedAt = DateTime.makeUnsafe("2026-05-01T10:00:00.000Z");
+    const closedAt = DateTime.makeUnsafe("2026-05-01T10:00:05.000Z");
+    const stateOf = (
+      state: "open" | "closed" | "merged",
+      times: { readonly mergedAt?: DateTime.Utc; readonly closedAt?: DateTime.Utc },
+    ) =>
+      makeProvider({
+        getMergeRequest: () =>
+          Effect.succeed({
+            number: 42,
+            title: "Terminal time",
+            url: "https://gitlab.com/pingdotgg/ryco/-/merge_requests/42",
+            baseRefName: "main",
+            headRefName: "feature/terminal-time",
+            state,
+            isDraft: false,
+            ...times,
+          }),
+      }).pipe(
+        Effect.flatMap((provider) => provider.getPullRequestState({ cwd: "/repo", number: 42 })),
+      );
+
+    assert.deepStrictEqual(yield* stateOf("merged", { mergedAt, closedAt }), {
+      state: "merged",
+      isDraft: false,
+      terminalAt: mergedAt,
+    });
+    assert.deepStrictEqual(yield* stateOf("closed", { closedAt }), {
+      state: "closed",
+      isDraft: false,
+      terminalAt: closedAt,
+    });
+    assert.deepStrictEqual(yield* stateOf("open", {}), {
+      state: "open",
+      isDraft: false,
+      terminalAt: null,
+    });
+  }),
+);

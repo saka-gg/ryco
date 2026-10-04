@@ -102,11 +102,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     }),
   );
 
-  public readonly rollbackThreadImpl = vi.fn((_numTurns: number): Promise<CodexThreadSnapshot> =>
-    Promise.resolve({
-      threadId: "provider-thread-1",
-      turns: [],
-    }),
+  public readonly rollbackThreadImpl = vi.fn(
+    (
+      _input: Parameters<CodexSessionRuntimeShape["rollbackThread"]>[0],
+    ): Promise<CodexThreadSnapshot> =>
+      Promise.resolve({
+        threadId: "provider-thread-1",
+        turns: [],
+      }),
   );
 
   public readonly respondToRequestImpl = vi.fn(
@@ -131,14 +134,23 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Effect.promise(() => this.startImpl());
   }
 
-  getSession = Effect.promise(() => this.startImpl());
+  /** When set, the runtime reports this session instead of the started one. */
+  public sessionOverride: ProviderSession | null = null;
+
+  getSession = Effect.suspend(() =>
+    this.sessionOverride
+      ? Effect.succeed(this.sessionOverride)
+      : Effect.promise(() => this.startImpl()),
+  );
 
   sendTurn(input: CodexSessionRuntimeSendTurnInput) {
     return Effect.promise(() => this.sendTurnImpl(input));
   }
 
+  public steerTurnEffect: ReturnType<CodexSessionRuntimeShape["steerTurn"]> | null = null;
+
   steerTurn(input: CodexSessionRuntimeSteerTurnInput) {
-    return Effect.promise(() => this.steerTurnImpl(input));
+    return this.steerTurnEffect ?? Effect.promise(() => this.steerTurnImpl(input));
   }
 
   interruptTurn(turnId?: TurnId) {
@@ -147,8 +159,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   readThread = Effect.promise(() => this.readThreadImpl());
 
-  rollbackThread(numTurns: number) {
-    return Effect.promise(() => this.rollbackThreadImpl(numTurns));
+  rollbackThread(input: Parameters<CodexSessionRuntimeShape["rollbackThread"]>[0]) {
+    return Effect.promise(() => this.rollbackThreadImpl(input));
   }
 
   setGoal(input: Omit<EffectCodexSchema.V2ThreadGoalSetParams, "threadId">) {
@@ -488,6 +500,83 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         input: "Check this before continuing",
       });
       assert.equal(result.turnId, expectedTurnId);
+    }),
+  );
+
+  it.effect("defers a Codex steer that lost its race with the end of the turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-steer-late");
+      const expectedTurnId = asTurnId("turn-ended");
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-codexadapter-steer-late"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.steerTurnEffect = Effect.fail(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32600,
+          errorMessage: "no active turn",
+        }),
+      );
+
+      const failure = yield* Effect.flip(
+        adapter.steerTurn!({
+          threadId,
+          expectedTurnId,
+          messageId: MessageId.make("message-steer-late"),
+          input: "Too late",
+          attachments: [],
+        }),
+      );
+      runtime.steerTurnEffect = null;
+
+      assert.equal(failure._tag, "ProviderTurnNotSteerableError");
+      if (failure._tag === "ProviderTurnNotSteerableError") {
+        assert.equal(failure.reason, "turn-ended");
+        assert.equal(failure.turnId, expectedTurnId);
+      }
+    }),
+  );
+
+  it.effect("keeps a Codex steer request error while the expected turn still runs", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-steer-error");
+      const expectedTurnId = asTurnId("turn-running");
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-codexadapter-steer-error"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      const started = yield* Effect.promise(() => runtime.startImpl());
+      runtime.sessionOverride = { ...started, status: "running", activeTurnId: expectedTurnId };
+      runtime.steerTurnEffect = Effect.fail(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32603,
+          errorMessage: "steer exploded",
+        }),
+      );
+
+      const failure = yield* Effect.flip(
+        adapter.steerTurn!({
+          threadId,
+          expectedTurnId,
+          messageId: MessageId.make("message-steer-error"),
+          input: "Check this",
+          attachments: [],
+        }),
+      );
+      runtime.steerTurnEffect = null;
+      runtime.sessionOverride = null;
+
+      assert.equal(failure._tag, "ProviderAdapterRequestError");
     }),
   );
 
@@ -924,6 +1013,20 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }).pipe(TestClock.withLive),
   );
 
+  it.effect("reverts before the first dropped turn", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime, session } = yield* startLifecycleRuntime();
+      yield* adapter.rollbackThread(session.threadId, {
+        numTurns: 2,
+        targetTurnId: asTurnId("turn-1"),
+        droppedTurnIds: [asTurnId("turn-2"), asTurnId("turn-3")],
+      });
+      assert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [
+        [{ numTurns: 2, beforeTurnId: "turn-2" }],
+      ]);
+    }),
+  );
+
   it.effect("recycles a provider session when its interrupt RPC never settles", () =>
     Effect.gen(function* () {
       const { adapter, runtime, session } = yield* startLifecycleRuntime();
@@ -1289,6 +1392,124 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         firstEvent.value.payload.message,
         "2026-03-31T18:14:06.833399Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 503 Service Unavailable, url: wss://chatgpt.com/backend-api/codex/responses",
       );
+    }),
+  );
+
+  it.effect("keeps a failed turn/completed whose codexErrorInfo is not in the pinned schema", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-completed-unknown-error-literal"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        method: "turn/completed",
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "thread-1",
+          turn: {
+            id: "turn-1",
+            status: "failed",
+            items: [],
+            error: { message: "Rate limit reached", codexErrorInfo: "rateLimitExceeded" },
+          },
+        },
+      } satisfies ProviderEvent);
+
+      // Today strict decoding drops the whole notification, so the turn never completes.
+      const firstEvent = yield* Fiber.join(firstEventFiber).pipe(Effect.timeout("2 seconds"));
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") return;
+      const completed = firstEvent.value;
+      assert.equal(completed.type, "turn.completed");
+      if (completed.type !== "turn.completed") return;
+      assert.equal(completed.turnId, "turn-1");
+      assert.equal(completed.payload.state, "failed");
+      assert.equal(completed.payload.errorMessage, "Rate limit reached");
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("classifies an exhausted usageLimitExceeded error as usage_limit with its reset", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const resetsAtSeconds = Math.floor(Date.now() / 1000) + 3_600;
+
+      yield* runtime.emit({
+        id: asEventId("evt-rate-limits-exhausted"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        method: "account/rateLimits/updated",
+        payload: {
+          rateLimits: { primary: { usedPercent: 100, resetsAt: resetsAtSeconds } },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-usage-limit-error"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        method: "error",
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          error: { message: "You've hit your usage limit.", codexErrorInfo: "usageLimitExceeded" },
+          willRetry: false,
+        },
+      } satisfies ProviderEvent);
+
+      const [rateLimits, error] = Array.from(yield* Fiber.join(eventsFiber));
+      assert.equal(rateLimits?.type, "account.rate-limits.updated");
+      if (rateLimits?.type === "account.rate-limits.updated") {
+        assert.deepEqual(rateLimits.payload.usageLimitState, {
+          exhausted: true,
+          resetAt: new Date(resetsAtSeconds * 1000).toISOString(),
+        });
+      }
+      assert.equal(error?.type, "runtime.error");
+      if (error?.type !== "runtime.error") return;
+      assert.equal(error.turnId, "turn-1");
+      assert.equal(error.payload.class, "usage_limit");
+      assert.equal(error.payload.resetAt, new Date(resetsAtSeconds * 1000).toISOString());
+    }),
+  );
+
+  it.effect("keeps a non-limit Codex error as provider_error", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-non-limit-error"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        method: "error",
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          error: { message: "Bad request", codexErrorInfo: "badRequest" },
+          willRetry: false,
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "runtime.error") return;
+      assert.equal(firstEvent.value.payload.class, "provider_error");
+      assert.equal(firstEvent.value.payload.resetAt, undefined);
     }),
   );
 

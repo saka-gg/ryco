@@ -8,6 +8,7 @@ import type {
   OrchestrationMessage,
   OrchestrationProposedPlan,
   OrchestrationReadModel,
+  OrchestrationReleasedTurn,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
   OrchestrationSession,
@@ -30,6 +31,7 @@ import type { ThreadId, TurnId } from "@ryco/contracts";
 import { Schema } from "effect";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
+import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 import { create } from "zustand";
 import {
   type ChatMessage,
@@ -47,6 +49,7 @@ import {
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
 import { getThreadsRuntimeConfiguration } from "./runtime.ts";
+import { selectDelegatedChildThreads, threadLineagesEqual } from "./threadLineage.ts";
 
 export interface EnvironmentState {
   projectIds: ProjectId[];
@@ -311,6 +314,8 @@ function mapWorktree(
     issueTitle: worktree.issueTitle,
     prState: worktree.prState ?? null,
     prIsDraft: worktree.prIsDraft ?? null,
+    // Absent stays absent: it tells the classifier the server predates the field.
+    ...(worktree.prTerminalAt !== undefined ? { prTerminalAt: worktree.prTerminalAt } : {}),
     issueState: worktree.issueState ?? null,
     workItemProvider: worktree.workItemProvider ?? null,
     workItemKey: worktree.workItemKey ?? null,
@@ -346,6 +351,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
     pendingSourceProposedPlan: thread.latestTurn?.sourceProposedPlan,
@@ -355,6 +361,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     manualStatusBucket: thread.manualStatusBucket ?? null,
     manualPosition: thread.manualPosition ?? 0,
     goal: thread.goal ?? null,
+    lineage: thread.lineage ?? null,
     turnDiffSummaries: thread.checkpoints.map(mapTurnDiffSummary),
     activities: thread.activities.map((activity) => ({ ...activity })),
   };
@@ -386,6 +393,7 @@ function mapThreadShell(
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
@@ -393,6 +401,7 @@ function mapThreadShell(
     manualStatusBucket: thread.manualStatusBucket ?? null,
     manualPosition: thread.manualPosition ?? 0,
     goal: thread.goal ?? null,
+    lineage: thread.lineage ?? null,
   };
   const session = thread.session ? mapSession(thread.session) : null;
   const turnState: ThreadTurnState = {
@@ -415,6 +424,7 @@ function mapThreadShell(
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
     branch: thread.branch,
@@ -429,6 +439,7 @@ function mapThreadShell(
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     backgroundLiveness: thread.backgroundLiveness ?? null,
     priority: thread.priority,
+    lineage: thread.lineage ?? null,
   };
   return {
     shell,
@@ -456,6 +467,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
@@ -463,6 +475,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     manualStatusBucket: thread.manualStatusBucket,
     manualPosition: thread.manualPosition,
     goal: thread.goal ?? null,
+    lineage: thread.lineage ?? null,
   };
 }
 
@@ -565,6 +578,7 @@ function sidebarThreadSummariesEqual(
     left.settledAt === right.settledAt &&
     left.snoozedUntil === right.snoozedUntil &&
     left.snoozedAt === right.snoozedAt &&
+    threadUsageLimitsEqual(left.usageLimit, right.usageLimit) &&
     left.updatedAt === right.updatedAt &&
     latestTurnsEqual(left.latestTurn, right.latestTurn) &&
     left.branch === right.branch &&
@@ -578,7 +592,30 @@ function sidebarThreadSummariesEqual(
     left.hasPendingUserInput === right.hasPendingUserInput &&
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     (left.backgroundLiveness ?? null) === (right.backgroundLiveness ?? null) &&
-    threadPrioritiesEqual(left.priority, right.priority)
+    threadPrioritiesEqual(left.priority, right.priority) &&
+    threadLineagesEqual(left.lineage, right.lineage)
+  );
+}
+
+function threadUsageLimitsEqual(
+  left: ThreadShell["usageLimit"],
+  right: ThreadShell["usageLimit"],
+): boolean {
+  const a = left ?? null;
+  const b = right ?? null;
+  if (a === b) return true;
+  return (
+    a !== null &&
+    b !== null &&
+    a.limitId === b.limitId &&
+    a.provider === b.provider &&
+    a.providerInstanceId === b.providerInstanceId &&
+    a.turnId === b.turnId &&
+    a.message === b.message &&
+    a.limitedAt === b.limitedAt &&
+    a.resetAt === b.resetAt &&
+    a.autoResume === b.autoResume &&
+    a.updatedAt === b.updatedAt
   );
 }
 
@@ -622,13 +659,15 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.settledAt === right.settledAt &&
     left.snoozedUntil === right.snoozedUntil &&
     left.snoozedAt === right.snoozedAt &&
+    threadUsageLimitsEqual(left.usageLimit, right.usageLimit) &&
     left.updatedAt === right.updatedAt &&
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&
     left.worktreeId === right.worktreeId &&
     left.manualStatusBucket === right.manualStatusBucket &&
     left.manualPosition === right.manualPosition &&
-    threadGoalsEqual(left.goal, right.goal)
+    threadGoalsEqual(left.goal, right.goal) &&
+    threadLineagesEqual(left.lineage, right.lineage)
   );
 }
 
@@ -651,6 +690,7 @@ function sidebarWorktreesEqual(
     left.issueTitle === right.issueTitle &&
     left.prState === right.prState &&
     left.prIsDraft === right.prIsDraft &&
+    left.prTerminalAt === right.prTerminalAt &&
     left.issueState === right.issueState &&
     left.workItemProvider === right.workItemProvider &&
     left.workItemKey === right.workItemKey &&
@@ -1199,16 +1239,6 @@ function removeWorktreeState(state: EnvironmentState, worktreeId: WorktreeId): E
   };
 }
 
-function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
-  if (status === "error") {
-    return "error" as const;
-  }
-  if (status === "missing") {
-    return "interrupted" as const;
-  }
-  return "completed" as const;
-}
-
 function compareActivities(
   left: Thread["activities"][number],
   right: Thread["activities"][number],
@@ -1224,6 +1254,25 @@ function compareActivities(
   }
 
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+/** Apply a server-decided release to the latest turn it names; other turns are untouched. */
+function settleReleasedLatestTurn(
+  latestTurn: Thread["latestTurn"],
+  releasedTurn: OrchestrationReleasedTurn | undefined,
+): Thread["latestTurn"] {
+  if (latestTurn === null || releasedTurn === undefined) return latestTurn;
+  if (latestTurn.turnId !== releasedTurn.turnId) return latestTurn;
+  const merged = mergeReleasedTurn(latestTurn, releasedTurn);
+  return buildLatestTurn({
+    previous: latestTurn,
+    turnId: latestTurn.turnId,
+    state: merged.state,
+    requestedAt: latestTurn.requestedAt,
+    startedAt: latestTurn.startedAt,
+    completedAt: merged.completedAt,
+    assistantMessageId: latestTurn.assistantMessageId,
+  });
 }
 
 function buildLatestTurn(params: {
@@ -2422,6 +2471,8 @@ function applyEnvironmentOrchestrationEvent(
         ...thread,
         session: mapSession(event.payload.session),
         error: sanitizeThreadErrorMessage(event.payload.session.lastError),
+        // The server decided which turn this release ends; settle only that turn, in
+        // the same frame as the session, so the open view never flashes Working.
         latestTurn:
           event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
             ? buildLatestTurn({
@@ -2443,7 +2494,7 @@ function applyEnvironmentOrchestrationEvent(
                     : null,
                 sourceProposedPlan: thread.pendingSourceProposedPlan,
               })
-            : thread.latestTurn,
+            : settleReleasedLatestTurn(thread.latestTurn, event.payload.releasedTurn),
         updatedAt: event.occurredAt,
       }));
 
@@ -2510,19 +2561,38 @@ function applyEnvironmentOrchestrationEvent(
               (right.checkpointTurnCount ?? Number.MAX_SAFE_INTEGER),
           )
           .slice(-MAX_THREAD_CHECKPOINTS);
+        // A checkpoint never changes an existing turn's state; it only decides the
+        // state of a latest-turn entry it creates.
+        const sameTurn =
+          thread.latestTurn !== null && thread.latestTurn.turnId === event.payload.turnId
+            ? thread.latestTurn
+            : null;
         const latestTurn =
-          thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId
+          sameTurn !== null
             ? buildLatestTurn({
-                previous: thread.latestTurn,
-                turnId: event.payload.turnId,
-                state: checkpointStatusToLatestTurnState(event.payload.status),
-                requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
-                startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
-                completedAt: event.payload.completedAt,
+                previous: sameTurn,
+                turnId: sameTurn.turnId,
+                state: sameTurn.state,
+                requestedAt: sameTurn.requestedAt,
+                startedAt: sameTurn.startedAt ?? event.payload.completedAt,
+                completedAt:
+                  sameTurn.state === "running"
+                    ? sameTurn.completedAt
+                    : (sameTurn.completedAt ?? event.payload.completedAt),
                 assistantMessageId: event.payload.assistantMessageId,
-                sourceProposedPlan: thread.pendingSourceProposedPlan,
               })
-            : thread.latestTurn;
+            : thread.latestTurn === null
+              ? buildLatestTurn({
+                  previous: null,
+                  turnId: event.payload.turnId,
+                  state: checkpointStatusToTurnState(event.payload.status),
+                  requestedAt: event.payload.completedAt,
+                  startedAt: event.payload.completedAt,
+                  completedAt: event.payload.completedAt,
+                  assistantMessageId: event.payload.assistantMessageId,
+                  sourceProposedPlan: thread.pendingSourceProposedPlan,
+                })
+              : thread.latestTurn;
         return {
           ...thread,
           turnDiffSummaries,
@@ -2570,7 +2640,7 @@ function applyEnvironmentOrchestrationEvent(
               ? null
               : {
                   turnId: latestCheckpoint.turnId,
-                  state: checkpointStatusToLatestTurnState(
+                  state: checkpointStatusToTurnState(
                     (latestCheckpoint.status ?? "ready") as "ready" | "missing" | "error",
                   ),
                   requestedAt: latestCheckpoint.completedAt,
@@ -2650,6 +2720,10 @@ function applyEnvironmentOrchestrationEvent(
             ...(event.payload.prTitle !== undefined ? { prTitle: event.payload.prTitle } : {}),
             prState: event.payload.prState,
             prIsDraft: event.payload.prIsDraft,
+            // Absent on legacy events: keep the stored value.
+            ...(event.payload.prTerminalAt !== undefined
+              ? { prTerminalAt: event.payload.prTerminalAt }
+              : {}),
             issueState: event.payload.issueState,
             updatedAt: event.payload.updatedAt,
           })
@@ -2928,6 +3002,31 @@ export function selectSidebarThreadsForProjectRef(
     const thread = environmentState.sidebarThreadSummaryById[threadId];
     return thread ? [thread] : [];
   });
+}
+
+/**
+ * Direct delegated children of a thread, oldest first. Children are always in the
+ * parent's project (the decider enforces it); without a parent shell, fall back
+ * to every summary in the environment.
+ */
+export function selectDelegatedChildThreadsForThreadRef(
+  state: AppState,
+  ref: ScopedThreadRef | null | undefined,
+): SidebarThreadSummary[] {
+  if (!ref) {
+    return [];
+  }
+  const environmentState = selectEnvironmentState(state, ref.environmentId);
+  const parentShell = environmentState.threadShellById[ref.threadId];
+  const candidateIds =
+    parentShell === undefined
+      ? environmentState.threadIds
+      : (environmentState.threadIdsByProjectId[parentShell.projectId] ?? EMPTY_THREAD_IDS);
+  const candidates = candidateIds.flatMap((threadId) => {
+    const thread = environmentState.sidebarThreadSummaryById[threadId];
+    return thread ? [thread] : [];
+  });
+  return selectDelegatedChildThreads(candidates, ref);
 }
 
 export function selectSidebarThreadsForProjectRefs(

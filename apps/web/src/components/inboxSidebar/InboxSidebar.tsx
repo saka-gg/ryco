@@ -7,10 +7,11 @@ import type {
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { ChevronDownIcon, ChevronRightIcon, ListFilterIcon } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { PREFERS_REDUCED_MOTION_QUERY, shouldEnableAutoAnimate } from "../../lib/perf/motion";
 import { newCommandId } from "../../lib/utils";
 import { sidebarUndo } from "../../sidebarUndo";
@@ -20,6 +21,7 @@ import { Input } from "../ui/input";
 import { SidebarContent } from "../ui/sidebar";
 import { toastManager } from "../ui/toast";
 import { TooltipCreateHandle } from "../ui/tooltip";
+import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
 import { InboxHoverLayer } from "./InboxHoverLayer";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
@@ -71,6 +73,17 @@ export function InboxSidebar(props: InboxSidebarProps) {
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
+  // The web phone tier is frozen (AGENTS.md): no delegated folding there.
+  const nestDelegated = usePresentationTier() !== "phone";
+  const [expandedHostKeys, setExpandedHostKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleHost = useCallback((hostKey: string) => {
+    setExpandedHostKeys((previous) => {
+      const next = new Set(previous);
+      if (next.has(hostKey)) next.delete(hostKey);
+      else next.add(hostKey);
+      return next;
+    });
+  }, []);
   const setThreadSettlement = useCallback(
     async (row: InboxSidebarRow, settled: boolean): Promise<boolean> => {
       const api = readEnvironmentApi(row.environmentId);
@@ -125,10 +138,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
         autoSettleAfterDays: props.autoSettleAfterDays,
         pinnedThreadKeys: props.pinnedThreadKeys,
         primaryEnvironmentId: props.primaryEnvironmentId ?? null,
+        nestDelegated,
         nowMs: Math.max(settlementNowMs, Date.now()),
       }),
     [
       environmentId,
+      nestDelegated,
       props.primaryEnvironmentId,
       props.activeThreadKey,
       props.aiFocusEnabled,
@@ -172,14 +187,25 @@ export function InboxSidebar(props: InboxSidebarProps) {
     (key === "snoozed" ? snoozedOpen : settledOpen) ||
     status === key ||
     query.trim().length > 0;
+  // A host stays open while the open thread is one of its folded children.
+  const isHostExpanded = (row: InboxSidebarRow) =>
+    expandedHostKeys.has(row.key) ||
+    row.delegatedChildren.some((child) => child.key === props.activeThreadKey);
+  const visibleRowKeys = (row: InboxSidebarRow) =>
+    isHostExpanded(row) && row.delegatedChildren.length > 0
+      ? [row.key, ...row.delegatedChildren.map((child) => child.key)]
+      : [row.key];
   const orderSignature = sections
     .map((section) =>
       isExpanded(section.key)
-        ? `${section.key}:${section.rows.map((row) => row.key).join(",")}`
+        ? `${section.key}:${section.rows.flatMap(visibleRowKeys).join(",")}`
         : section.key,
     )
     .join("|");
-  const rowCount = sections.reduce((total, section) => total + section.rows.length, 0);
+  const rowCount = sections.reduce(
+    (total, section) => total + section.rows.flatMap(visibleRowKeys).length,
+    0,
+  );
   const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
   const motionEnabled = shouldEnableAutoAnimate({
     prefersReducedMotion,
@@ -191,6 +217,17 @@ export function InboxSidebar(props: InboxSidebarProps) {
   });
   const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
   const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
+  const renderRow = (row: InboxSidebarRow) => (
+    <InboxThreadRow
+      threadActions={props.threadActions}
+      active={props.activeThreadKey === row.key}
+      motionEnabled={motionEnabled}
+      previewHandle={previewHandle}
+      onOpen={() => props.onOpenThread(scopeThreadRef(row.environmentId, row.threadId))}
+      onSetSettlement={setThreadSettlement}
+      row={row}
+    />
+  );
 
   return (
     <InboxMotionContext value={gateRef}>
@@ -342,18 +379,21 @@ export function InboxSidebar(props: InboxSidebarProps) {
                     {expanded ? (
                       <div className="space-y-px">
                         {section.rows.map((row) => (
-                          <InboxThreadRow
-                            key={row.key}
-                            threadActions={props.threadActions}
-                            active={props.activeThreadKey === row.key}
-                            motionEnabled={motionEnabled}
-                            previewHandle={previewHandle}
-                            onOpen={() =>
-                              props.onOpenThread(scopeThreadRef(row.environmentId, row.threadId))
-                            }
-                            onSetSettlement={setThreadSettlement}
-                            row={row}
-                          />
+                          <Fragment key={row.key}>
+                            {renderRow(row)}
+                            {row.delegatedChildren.length > 0 ? (
+                              <InboxDelegatedGroup
+                                count={row.delegatedChildren.length}
+                                expanded={isHostExpanded(row)}
+                                hostTitle={row.title}
+                                onToggle={() => toggleHost(row.key)}
+                              >
+                                {row.delegatedChildren.map((child) => (
+                                  <Fragment key={child.key}>{renderRow(child)}</Fragment>
+                                ))}
+                              </InboxDelegatedGroup>
+                            ) : null}
+                          </Fragment>
                         ))}
                       </div>
                     ) : null}

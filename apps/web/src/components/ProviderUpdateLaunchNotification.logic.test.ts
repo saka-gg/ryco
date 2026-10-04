@@ -18,6 +18,7 @@ import {
   getSingleProviderUpdateProgressToastView,
   hasOneClickUpdateProviderCandidate,
   isProviderUpdateCandidate,
+  isProviderUpdateOffered,
   providerUpdateNotificationKey,
   withProviderUpdateOrigin,
   type ProviderUpdateCandidate,
@@ -694,5 +695,90 @@ describe("provider update launch notification logic", () => {
         provider({ driver: driver("cursor"), canUpdate: false }),
       ]),
     ).toBeNull();
+  });
+});
+
+describe("provider update compatibility gating", () => {
+  const rated = (
+    input: Parameters<typeof provider>[0],
+    latestVersionStatus: NonNullable<
+      ServerProvider["compatibilityAdvisory"]
+    >["latestVersionStatus"],
+  ): ServerProvider => ({
+    ...provider(input),
+    compatibilityAdvisory: {
+      status: "supported",
+      ...(latestVersionStatus !== undefined ? { latestVersionStatus } : {}),
+      message: null,
+    },
+  });
+
+  it("stops offering a latest version rated unsupported but keeps it an update candidate", () => {
+    const blocked = rated({ driver: driver("codex"), latestVersion: "0.200.1" }, "unsupported");
+
+    expect(collectProviderUpdateCandidates([blocked])).toEqual([]);
+    expect(hasOneClickUpdateProviderCandidate(blocked as ProviderUpdateCandidate, [blocked])).toBe(
+      false,
+    );
+    expect(isProviderUpdateOffered(blocked)).toBe(false);
+    expect(isProviderUpdateCandidate(blocked)).toBe(true);
+  });
+
+  it("keeps offering a latest version rated graceful", () => {
+    const graceful = rated({ driver: driver("codex"), latestVersion: "0.199.5" }, "graceful");
+
+    expect(collectProviderUpdateCandidates([graceful])).toHaveLength(1);
+    expect(
+      hasOneClickUpdateProviderCandidate(graceful as ProviderUpdateCandidate, [graceful]),
+    ).toBe(true);
+    expect(isProviderUpdateOffered(graceful)).toBe(true);
+  });
+
+  it("does not report success when a running update is re-rated to a blocked latest", () => {
+    const view = getProviderUpdateProgressToastView({
+      providers: [
+        rated(
+          {
+            driver: driver("codex"),
+            latestVersion: "0.200.1",
+            updateState: {
+              status: "running",
+              startedAt: checkedAt,
+              finishedAt: null,
+              message: "Updating provider.",
+              output: null,
+            },
+          },
+          "broken",
+        ),
+      ],
+      providerCount: 1,
+    });
+
+    expect(view.phase).toBe("running");
+  });
+
+  it("does not count a not-yet-updated provider re-rated to a blocked latest as updated", () => {
+    const view = getProviderUpdateProgressToastView({
+      providers: [
+        provider({
+          driver: driver("codex"),
+          version: "1.1.0",
+          latestVersion: "1.1.0",
+          advisoryStatus: "current",
+          updateState: {
+            status: "succeeded",
+            startedAt: checkedAt,
+            finishedAt: checkedAt,
+            message: "Provider updated.",
+            output: null,
+          },
+        }),
+        rated({ driver: driver("opencode"), latestVersion: "1.18.40" }, "broken"),
+      ],
+      providerCount: 2,
+    });
+
+    expect(view.phase).not.toBe("succeeded");
   });
 });

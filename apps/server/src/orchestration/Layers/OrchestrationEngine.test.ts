@@ -20,6 +20,7 @@ import {
   WorktreeId,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@ryco/contracts";
 import {
@@ -38,6 +39,8 @@ import { describe, expect, it } from "vite-plus/test";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { OrchestrationCommandAdmissionError } from "../Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { buildDelegationReturnCommand } from "../../agentControl/completionReturnMessages.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import {
@@ -67,6 +70,7 @@ import {
 } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
+import { threadSettlementInput } from "../threadSettlementInput.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { metricNames } from "../../observability/Metrics.ts";
 import { hasMetricSnapshot } from "../../observability/testMetricSnapshots.ts";
@@ -107,6 +111,8 @@ async function createOrchestrationSystem(databasePath?: string) {
     sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     readShell: () => runtime.runPromise(snapshotQuery.getShellSnapshot()),
+    // Before any dispatch after a (re)start, this is exactly the engine's bootstrap model.
+    commandReadModel: () => runtime.runPromise(snapshotQuery.getCommandReadModel()),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
     dispose: () => runtime.dispose(),
   };
@@ -410,6 +416,85 @@ describe("OrchestrationEngine", () => {
       expect(await system.run(sql`SELECT * FROM synthetic_admission`)).toHaveLength(1);
     } finally {
       await system.dispose();
+    }
+  });
+
+  it("hydrates delegated lineage from SQL after closing and reopening the database", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-lineage-restart-"));
+    const database = path.join(directory, "state.sqlite");
+    const projectId = ProjectId.make("lineage-project");
+    const parentId = ThreadId.make("lineage-parent");
+    const childId = ThreadId.make("lineage-child");
+    const grandchildId = ThreadId.make("lineage-grandchild");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+    const threadFields = (threadId: ThreadId) => ({
+      commandId: CommandId.make(`create-${threadId}`),
+      threadId,
+      projectId,
+      title: `Thread ${threadId}`,
+      modelSelection,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "full-access" as const,
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+    let system = await createOrchestrationSystem(database);
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("lineage-project-create"),
+          projectId,
+          title: "Lineage",
+          workspaceRoot: directory,
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({ type: "thread.create", ...threadFields(parentId) }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.delegated.create",
+          ...threadFields(childId),
+          parentThreadId: parentId,
+        }),
+      );
+      await system.dispose();
+
+      system = await createOrchestrationSystem(database);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.delegated.create",
+          ...threadFields(grandchildId),
+          parentThreadId: childId,
+        }),
+      );
+      const rows = await system.run(
+        system.sql<{ readonly payload: string }>`
+          SELECT payload_json AS "payload"
+          FROM orchestration_events
+          WHERE event_type = 'thread.created' AND stream_id = ${grandchildId}
+        `,
+      );
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]!.payload).lineage).toEqual({
+        parentThreadId: childId,
+        rootThreadId: parentId,
+        relationship: "delegated",
+      });
+      const shell = await system.readShell();
+      expect(shell.threads.find((thread) => thread.id === grandchildId)?.lineage).toEqual({
+        parentThreadId: childId,
+        rootThreadId: parentId,
+        relationship: "delegated",
+      });
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -1531,7 +1616,7 @@ describe("OrchestrationEngine", () => {
         Layer.provide(OrchestrationEventStoreLive),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolverLive),
-        Layer.provide(SqlitePersistenceMemory),
+        Layer.provideMerge(SqlitePersistenceMemory),
       ),
     );
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
@@ -1598,9 +1683,23 @@ describe("OrchestrationEngine", () => {
       "project.created",
       "thread.created",
     ]);
+    // The intent row was written after the request event's append, inside the
+    // same transaction: the rollback removes it too.
+    const openIntentSequences = () =>
+      runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{
+            readonly sequence: number;
+          }>`SELECT sequence FROM provider_effect_intents ORDER BY sequence`;
+          return rows.map((row) => row.sequence);
+        }),
+      );
+    expect(await openIntentSequences()).toEqual([]);
 
     const retryResult = await runtime.runPromise(engine.dispatch(turnStartCommand));
     expect(retryResult.sequence).toBe(4);
+    expect(await openIntentSequences()).toEqual([4]);
 
     const eventsAfterRetry = await runtime.runPromise(
       Stream.runCollect(engine.readEvents(0)).pipe(
@@ -2516,3 +2615,586 @@ it.each([
     }
   },
 );
+
+const DELEGATION_PARENT_ID = ThreadId.make("delegation-parent");
+const delegationAt = (seconds: number) =>
+  new Date(Date.parse("2026-01-01T00:00:00.000Z") + seconds * 1000).toISOString();
+
+type DelegationSystem = Awaited<ReturnType<typeof createOrchestrationSystem>>;
+type DelegationReturnCommand = Extract<OrchestrationCommand, { type: "thread.turn.start" }>;
+
+// Engine commands only (no provider reactors): a parent with two completed turns,
+// each bound to its own user message through projection_turns.pending_message_id.
+async function seedDelegationParent(databasePath?: string) {
+  const system = await createOrchestrationSystem(databasePath);
+  try {
+    const projectId = ProjectId.make("delegation-project");
+    const threadId = DELEGATION_PARENT_ID;
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "fixture" };
+    await system.run(
+      system.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("delegation-project-create"),
+        projectId,
+        title: "Delegation fixture",
+        workspaceRoot: "/tmp/ryco-delegation-fixture",
+        defaultModelSelection: modelSelection,
+        createdAt: delegationAt(0),
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("delegation-thread-create"),
+        threadId,
+        projectId,
+        title: "Delegation parent",
+        modelSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt: delegationAt(0),
+      }),
+    );
+    for (const turn of [1, 2]) {
+      const t = turn === 1 ? 1 : 10;
+      const turnId = TurnId.make(`turn-${turn}`);
+      const session = {
+        threadId,
+        status: "running" as const,
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+        runtimeMode: "full-access" as const,
+        activeTurnId: turnId,
+        lastError: null,
+        updatedAt: delegationAt(t + 1),
+      };
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`start-${turn}`),
+          threadId,
+          message: {
+            messageId: MessageId.make(`msg-${turn}`),
+            role: "user",
+            text: `Fixture ${turn}`,
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: delegationAt(t),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`running-${turn}`),
+          threadId,
+          session,
+          createdAt: delegationAt(t + 1),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make(`answer-${turn}`),
+          threadId,
+          messageId: MessageId.make(`answer-${turn}`),
+          turnId,
+          text: "Fixture answer",
+          createdAt: delegationAt(t + 2),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`ready-${turn}`),
+          threadId,
+          session: {
+            ...session,
+            status: "ready",
+            activeTurnId: null,
+            updatedAt: delegationAt(t + 3),
+          },
+          // Mirrors ingestion: a provider turn.completed releases the turn with its outcome.
+          turnOutcome: {
+            turnId,
+            state: "completed",
+            reason: "provider-turn-completed",
+            completedAt: delegationAt(t + 3),
+          },
+          createdAt: delegationAt(t + 3),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make(`diff-${turn}`),
+          threadId,
+          turnId,
+          completedAt: delegationAt(t + 3),
+          checkpointRef: CheckpointRef.make(`fixture-checkpoint-${turn}`),
+          status: "ready",
+          files: [],
+          assistantMessageId: MessageId.make(`answer-${turn}`),
+          checkpointTurnCount: turn,
+          createdAt: delegationAt(t + 3),
+        }),
+      );
+    }
+    return system;
+  } catch (error) {
+    await system.dispose();
+    throw error;
+  }
+}
+
+function delegationRepository(system: DelegationSystem) {
+  return system.run(
+    makeCompletionReturnRepository.pipe(Effect.provideService(SqlClient.SqlClient, system.sql)),
+  );
+}
+
+// The command CompletionReturnDelivery dispatches, built by the shared builder.
+async function buildDelegatedReturn(
+  system: DelegationSystem,
+  options: {
+    readonly latestUserMessageId?: MessageId | null;
+    readonly anchorChildThreadId?: string;
+    readonly now?: string;
+  } = {},
+): Promise<DelegationReturnCommand> {
+  const shell = (await system.readShell()).threads.find(
+    (thread) => thread.id === DELEGATION_PARENT_ID,
+  );
+  if (!shell) throw new Error("Delegation parent fixture missing");
+  const repository = await delegationRepository(system);
+  return buildDelegationReturnCommand({
+    parent: shell,
+    latestUserMessageId:
+      options.latestUserMessageId !== undefined
+        ? options.latestUserMessageId
+        : await system.run(repository.latestUserMessageId(DELEGATION_PARENT_ID)),
+    sections: ["Fixture delegated result"],
+    anchorChildThreadId: ThreadId.make(options.anchorChildThreadId ?? "child-1"),
+    attempt: 0,
+    now: options.now ?? delegationAt(30),
+  });
+}
+
+describe("delegated return fence across restarts", () => {
+  it("accepts a delegated return without a restart (fixture control)", async () => {
+    const system = await seedDelegationParent();
+    try {
+      await system.run(system.engine.dispatch(await buildDelegatedReturn(system)));
+      const repository = await delegationRepository(system);
+      expect(await system.run(repository.latestUserMessageId(DELEGATION_PARENT_ID))).toBe(
+        "delegation-result:child-1",
+      );
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("accepts a delegated return to a parent whose latest user message predates a restart", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-delegation-restart-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await seedDelegationParent(database);
+    try {
+      await system.dispose();
+      system = await createOrchestrationSystem(database);
+      const model = await system.commandReadModel();
+      const parent = model.threads.find((thread) => thread.id === DELEGATION_PARENT_ID)!;
+      expect(parent.messages.map((message) => message.id)).toEqual(["msg-1", "msg-2"]);
+      const latestUserMessage = parent.messages.findLast((message) => message.role === "user");
+      const repository = await delegationRepository(system);
+      expect(await system.run(repository.latestUserMessageId(DELEGATION_PARENT_ID))).toBe("msg-2");
+      expect(latestUserMessage?.id).toBe("msg-2");
+      const [projected] = await system.run(
+        system.sql<{ readonly latestUserMessageAt: string | null }>`
+          SELECT latest_user_message_at AS "latestUserMessageAt"
+          FROM projection_threads WHERE thread_id = ${DELEGATION_PARENT_ID}
+        `,
+      );
+      expect(projected?.latestUserMessageAt).toBe(delegationAt(10));
+      expect(threadSettlementInput(model, parent, delegationAt(30)).latestUserMessageAt).toBe(
+        delegationAt(10),
+      );
+      expect(latestUserMessage?.createdAt).toBe(delegationAt(10));
+
+      await expect(
+        system.run(system.engine.dispatch(await buildDelegatedReturn(system))),
+      ).resolves.toBeDefined();
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps rejecting a guard pinned to an older user message after a restart", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-delegation-fence-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await seedDelegationParent(database);
+    try {
+      await system.dispose();
+      system = await createOrchestrationSystem(database);
+      // After a restart the fence was weaker than before it. This is not reachable through
+      // CompletionReturnDelivery, which re-reads the latest id from SQL, and a guard only
+      // adds rejections.
+      const command = await buildDelegatedReturn(system, {
+        latestUserMessageId: MessageId.make("msg-1"),
+      });
+      await expect(system.run(system.engine.dispatch(command))).rejects.toThrow(
+        "Delegated result origin changed",
+      );
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the minimal guard after a restart when the reaper stopped the parent session", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-delegation-reaped-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await seedDelegationParent(database);
+    try {
+      await system.dispose();
+      system = await createOrchestrationSystem(database);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("reaped"),
+          threadId: DELEGATION_PARENT_ID,
+          session: {
+            threadId: DELEGATION_PARENT_ID,
+            status: "stopped",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: delegationAt(20),
+          },
+          createdAt: delegationAt(20),
+        }),
+      );
+      const command = await buildDelegatedReturn(system);
+      expect(command.delegationReturnGuard).toEqual({
+        latestUserMessageId: "msg-2",
+        projectId: "delegation-project",
+        runtimeMode: "full-access",
+        worktreePath: null,
+      });
+      await expect(system.run(system.engine.dispatch(command))).resolves.toBeDefined();
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the next return after a user message whose createdAt predates the delivered wake", async () => {
+    // Both fence sides order by max(createdAt), ties by insertion order (review major #2).
+    const system = await seedDelegationParent();
+    try {
+      await system.run(system.engine.dispatch(await buildDelegatedReturn(system)));
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("skewed-user-start"),
+          threadId: DELEGATION_PARENT_ID,
+          message: {
+            messageId: MessageId.make("skewed-user-message"),
+            role: "user",
+            text: "Sent from a client whose clock is behind",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: delegationAt(20),
+        }),
+      );
+      const next = await buildDelegatedReturn(system, {
+        anchorChildThreadId: "child-2",
+        now: delegationAt(40),
+      });
+      expect(next.delegationReturnGuard?.latestUserMessageId).toBe("delegation-result:child-1");
+      await expect(system.run(system.engine.dispatch(next))).resolves.toBeDefined();
+    } finally {
+      await system.dispose();
+    }
+  });
+});
+
+describe("usage limits across projections and restarts", () => {
+  const limitThreadId = ThreadId.make("usage-limit-thread");
+  const limitTurnId = TurnId.make("usage-limit-turn");
+  const limitId = `usage-limit:${limitThreadId}:${limitTurnId}`;
+  const claude = ProviderInstanceId.make("claudeAgent");
+  const at = (seconds: number) => new Date(Date.UTC(2026, 9, 4, 10, 0, seconds)).toISOString();
+
+  async function seedLimitedThread(databasePath: string) {
+    const system = await createOrchestrationSystem(databasePath);
+    const projectId = ProjectId.make("usage-limit-project");
+    const modelSelection = { instanceId: claude, model: "claude-sonnet-4-5" };
+    const session = (overrides: Record<string, unknown>) => ({
+      threadId: limitThreadId,
+      status: "running" as const,
+      providerName: "claudeAgent",
+      providerInstanceId: claude,
+      runtimeSessionId: RuntimeSessionId.make("runtime-limit"),
+      runtimeMode: "full-access" as const,
+      activeTurnId: limitTurnId,
+      lastError: null,
+      updatedAt: at(2),
+      ...overrides,
+    });
+    const commands: OrchestrationCommand[] = [
+      {
+        type: "project.create",
+        commandId: CommandId.make("limit-project-create"),
+        projectId,
+        title: "Limits",
+        workspaceRoot: "/tmp/ryco-usage-limit-fixture",
+        defaultModelSelection: modelSelection,
+        createdAt: at(0),
+      },
+      {
+        type: "thread.create",
+        commandId: CommandId.make("limit-thread-create"),
+        threadId: limitThreadId,
+        projectId,
+        title: "Limited",
+        modelSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt: at(0),
+      },
+      {
+        type: "thread.turn.start",
+        commandId: CommandId.make("limit-start"),
+        threadId: limitThreadId,
+        message: {
+          messageId: MessageId.make("limit-message"),
+          role: "user",
+          text: "Work",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: at(1),
+      },
+      {
+        type: "thread.session.set",
+        commandId: CommandId.make("limit-running"),
+        threadId: limitThreadId,
+        session: session({}),
+        createdAt: at(2),
+      },
+      {
+        type: "thread.session.set",
+        commandId: CommandId.make("limit-error"),
+        threadId: limitThreadId,
+        session: session({ status: "error", activeTurnId: null, lastError: "Limited" }),
+        turnOutcome: { turnId: limitTurnId, state: "error", reason: "usage-limit" },
+        createdAt: at(3),
+      },
+      {
+        type: "thread.usage-limit.record",
+        commandId: CommandId.make(`usage-limit-record:${limitId}`),
+        threadId: limitThreadId,
+        limitId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: claude,
+        turnId: limitTurnId,
+        message: "Claude usage limit reached.",
+        resetAt: at(50),
+        createdAt: at(3),
+      },
+    ];
+    for (const command of commands) {
+      await system.run(system.engine.dispatch(command));
+    }
+    return system;
+  }
+
+  const resume = (commandId: string): OrchestrationCommand => ({
+    type: "thread.turn.start",
+    commandId: CommandId.make(commandId),
+    threadId: limitThreadId,
+    message: {
+      messageId: MessageId.make(commandId),
+      role: "user",
+      text: "Continue where you left off.",
+      attachments: [],
+    },
+    usageLimitResumeGuard: { limitId, origin: "auto" },
+    runtimeMode: "full-access",
+    interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+    createdAt: at(60),
+  });
+
+  it("projects the limit into shells, detail and the command model, and fences resumes after a restart", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-usage-limit-restart-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await seedLimitedThread(database);
+    try {
+      const shell = (await system.readShell()).threads.find((t) => t.id === limitThreadId);
+      expect(shell?.usageLimit).toMatchObject({ limitId, resetAt: at(50), autoResume: null });
+      const detail = (await system.readModel()).threads.find((t) => t.id === limitThreadId);
+      expect(detail?.usageLimit?.limitId).toBe(limitId);
+
+      await system.dispose();
+      system = await createOrchestrationSystem(database);
+      const hydrated = (await system.commandReadModel()).threads.find(
+        (t) => t.id === limitThreadId,
+      );
+      expect(hydrated?.usageLimit?.limitId).toBe(limitId);
+
+      await system.run(system.engine.dispatch(resume("usage-limit-resume-first")));
+      await expect(
+        system.run(system.engine.dispatch(resume("usage-limit-resume-second"))),
+      ).rejects.toThrow("usage-limit resume is stale");
+      const cleared = (await system.readShell()).threads.find((t) => t.id === limitThreadId);
+      expect(cleared?.usageLimit ?? null).toBeNull();
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("OrchestrationEngine provider effect intents", () => {
+  const intentThreadId = ThreadId.make("thread-intents");
+  const intentMessageId = asMessageId("message-intents");
+
+  const seedIntentThread = async (
+    system: Awaited<ReturnType<typeof createOrchestrationSystem>>,
+  ) => {
+    const createdAt = now();
+    await system.run(
+      system.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-intents-project"),
+        projectId: asProjectId("project-intents"),
+        title: "Intents",
+        workspaceRoot: "/tmp/project-intents",
+        defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt" },
+        createdAt,
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-intents-thread"),
+        threadId: intentThreadId,
+        projectId: asProjectId("project-intents"),
+        title: "intents",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+  };
+
+  const openIntents = (system: Awaited<ReturnType<typeof createOrchestrationSystem>>) =>
+    system.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql<{ readonly sequence: number; readonly kind: string; messageId: string }>`
+          SELECT sequence, kind, message_id AS "messageId" FROM provider_effect_intents
+          ORDER BY sequence ASC
+        `;
+      }).pipe(Effect.provideService(SqlClient.SqlClient, system.sql)),
+    );
+
+  it("records a turn start intent with its request and settles it with the visible failure", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      await seedIntentThread(system);
+      const createdAt = now();
+      const { sequence } = await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-intents-start"),
+          threadId: intentThreadId,
+          message: { messageId: intentMessageId, role: "user", text: "hi", attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        }),
+      );
+      const events = await system.run(
+        Stream.runCollect(system.engine.readEvents(0)).pipe(
+          Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+        ),
+      );
+      expect(events.at(-1)).toMatchObject({ sequence, type: "thread.turn-start-requested" });
+      expect(await openIntents(system)).toEqual([
+        { sequence, kind: "turn-start", messageId: intentMessageId },
+      ]);
+
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("cmd-intents-failure"),
+          threadId: intentThreadId,
+          activity: {
+            id: EventId.make("activity-intents-failure"),
+            tone: "error",
+            kind: "provider.turn.start.failed",
+            summary: "Provider turn start failed",
+            payload: { messageId: intentMessageId, detail: "boom" },
+            turnId: null,
+            createdAt,
+          },
+          createdAt,
+        }),
+      );
+      expect(await openIntents(system)).toEqual([]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("captures the boot sequence before any dispatch of this engine", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-intents-boot-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await createOrchestrationSystem(database);
+    try {
+      expect(system.engine.bootSequence).toBe(0);
+      await seedIntentThread(system);
+      expect(system.engine.bootSequence).toBe(0);
+      await system.dispose();
+
+      system = await createOrchestrationSystem(database);
+      const head = await system.run(
+        system.engine.readEventsPage(0, 100).pipe(Effect.map((page) => page.events.length)),
+      );
+      expect(head).toBe(2);
+      expect(system.engine.bootSequence).toBe(2);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-intents-stop"),
+          threadId: intentThreadId,
+          createdAt: now(),
+        }),
+      );
+      expect(system.engine.bootSequence).toBe(2);
+      expect(await openIntents(system)).toEqual([
+        { sequence: 3, kind: "session-stop", messageId: null },
+      ]);
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+});

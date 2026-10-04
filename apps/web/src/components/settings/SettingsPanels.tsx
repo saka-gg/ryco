@@ -11,6 +11,7 @@ import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
+import { UsageLimitSettings } from "./UsageLimitSettings";
 import { ArchiveIcon, ArchiveX, ChevronRightIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -685,6 +686,7 @@ export function GeneralSettingsPanel({
           }
         />
       </SettingsSection>
+      {!isPhoneTier && <UsageLimitSettings />}
       {!isPhoneTier && editingScope !== "node" && <ComposerSettings />}
       {!isPhoneTier && <ProjectDefaultsSection />}
       {!isPhoneTier && <StorageSettings />}
@@ -807,6 +809,38 @@ export function GeneralSettingsPanel({
               />
             )}
           </>
+        )}
+
+        {!isPhoneTier && (
+          <SettingsRow
+            title="Continue after restart"
+            description="When Ryco restarts while an agent is working, send “Continue where you left off.” automatically. Threads you stopped, threads waiting for your approval, and restarts more than 30 minutes later are not continued."
+            owner="node"
+            scope={nodeScopeLabel}
+            resetAction={
+              settings.continueThreadsAfterRestart !==
+              DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart ? (
+                <SettingResetButton
+                  label="continue after restart"
+                  onClick={() =>
+                    updateSettings({
+                      continueThreadsAfterRestart:
+                        DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.continueThreadsAfterRestart}
+                onCheckedChange={(checked) =>
+                  updateSettings({ continueThreadsAfterRestart: Boolean(checked) })
+                }
+                aria-label="Continue threads automatically after a restart"
+              />
+            }
+          />
         )}
 
         <SettingsRow

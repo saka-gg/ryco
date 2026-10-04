@@ -142,3 +142,32 @@ export function createEnvironmentFallbackThreadRefSelector(
     return previousResult;
   };
 }
+
+/**
+ * True once a thread-detail window or full-detail snapshot has been applied.
+ * Both detail paths write one of these maps (`syncServerThreadWindow` writes
+ * the history entry, `syncServerThreadDetail` the message ids); the shell
+ * stream writes neither.
+ */
+export function selectThreadDetailLoaded(state: AppState, ref: ScopedThreadRef): boolean {
+  const environmentState = selectEnvironmentState(state, ref.environmentId);
+  return (
+    environmentState.threadHistoryByThreadId?.[ref.threadId] !== undefined ||
+    environmentState.messageIdsByThreadId[ref.threadId] !== undefined
+  );
+}
+
+/**
+ * True when the environment's rows come from a live shell snapshot: bootstrap
+ * completed and not cache provenance. Rows hydrated from the snapshot cache, or
+ * demoted after a disconnect, are last-known state with every session dropped.
+ */
+export function selectEnvironmentShellLive(
+  state: AppState,
+  environmentId: ScopedThreadRef["environmentId"] | null | undefined,
+): boolean {
+  const environmentState = selectEnvironmentState(state, environmentId);
+  return (
+    environmentState.bootstrapComplete && (environmentState.hydratedFromCacheAt ?? null) === null
+  );
+}

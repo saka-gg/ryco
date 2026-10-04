@@ -114,6 +114,7 @@ describe("sessionActions", () => {
       environmentUnavailable: false,
       environmentUnavailableLabel: null,
       turnInProgress: false,
+      providerRefusal: null,
       confirmMessage: "Revert?",
     };
 
@@ -146,10 +147,36 @@ describe("sessionActions", () => {
       environmentUnavailable: false,
       environmentUnavailableLabel: null,
       turnInProgress: true,
+      providerRefusal: null,
       confirmMessage: "Revert?",
       confirm: async () => true,
     });
     expect(result).toEqual({ ok: false, reason: { type: "turn-in-progress" } });
+    expect(dispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("refuses providers that cannot forget turns before asking for confirmation", async () => {
+    const { api, dispatchCommand } = fakeApi();
+    const confirm = vi.fn(async () => true);
+    const result = await revertThreadCheckpointWithGuards({
+      api,
+      thread: { id: THREAD_ID },
+      turnCount: 3,
+      environmentUnavailable: false,
+      environmentUnavailableLabel: null,
+      turnInProgress: false,
+      providerRefusal: "Cursor can't remove turns from its conversation.",
+      confirmMessage: "Revert?",
+      confirm,
+    });
+    expect(result).toEqual({
+      ok: false,
+      reason: {
+        type: "provider-unsupported",
+        message: "Cursor can't remove turns from its conversation.",
+      },
+    });
+    expect(confirm).not.toHaveBeenCalled();
     expect(dispatchCommand).not.toHaveBeenCalled();
   });
 });

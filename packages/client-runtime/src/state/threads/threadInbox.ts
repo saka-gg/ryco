@@ -16,7 +16,9 @@ import {
   compareSettledInboxEntries,
   getEffectiveSettlementTimestamp,
   getNextThreadSettlementEvaluationAtMs,
+  getThreadAutoSettlementBlocker,
   type CanSettleThreadResult,
+  type ThreadAutoSettlementBlocker,
   type ThreadSettlementBlocker,
   type ThreadSettlementClassification,
   type ThreadSettlementInput,
@@ -70,6 +72,8 @@ export interface ThreadInboxLifecycle {
   readonly eligibility: CanSettleThreadResult;
   readonly effectiveSettlementTimestamp: string | null;
   readonly settlementBlocker: ThreadSettlementBlocker | null;
+  /** Why automatic settlement is held back; manual settle is unaffected. */
+  readonly autoSettlementBlocker: ThreadAutoSettlementBlocker | null;
 }
 
 export interface ThreadInboxEntry {
@@ -186,7 +190,8 @@ function mutationBlocker(
 function settlementInput(input: {
   readonly thread: SidebarThreadSummary;
   readonly worktree: SidebarWorktreeSummary | null;
-  readonly environment: ThreadInboxEnvironment;
+  readonly environment: Pick<ThreadInboxEnvironment, "threadSettlementSupported">;
+  readonly pinned: boolean;
   readonly hasLocalQueuedMessage: boolean;
   readonly deliveryUnknown: boolean;
   readonly autoSettleAfterDays: SidebarAutoSettleAfterDays;
@@ -210,13 +215,46 @@ function settlementInput(input: {
       input.thread.hasPendingUserInput || deriveThreadActivityStatus(input.thread) === "plan-ready",
     hasLocalQueuedMessage: input.hasLocalQueuedMessage,
     deliveryUnknown: input.deliveryUnknown,
+    pinned: input.pinned,
+    backgroundLiveness: input.thread.backgroundLiveness ?? null,
+    prNumber: input.worktree?.prNumber ?? null,
     prState: input.worktree?.prState ?? null,
+    // Absent (undefined) means the server predates the field: legacy merged rule.
+    prTerminalAt: input.worktree === null ? null : input.worktree.prTerminalAt,
     worktreeUpdatedAt: input.worktree?.updatedAt ?? null,
     updatedAt: input.thread.updatedAt ?? null,
     createdAt: input.thread.createdAt,
     autoSettleAfterDays: input.autoSettleAfterDays,
     nowMs: input.nowMs,
   };
+}
+
+export interface ThreadSnoozeEligibilityInput {
+  readonly thread: SidebarThreadSummary;
+  readonly worktree?: SidebarWorktreeSummary | null | undefined;
+  readonly environment: Pick<ThreadInboxEnvironment, "threadSettlementSupported">;
+  /** A locally queued follow-up blocks snoozing, as in the inbox. */
+  readonly hasLocalQueuedMessage: boolean;
+  readonly deliveryUnknown?: boolean | undefined;
+  readonly nowMs: number;
+}
+
+/** The inbox's snooze eligibility for one thread, for surfaces outside the inbox. */
+export function deriveThreadSnoozeEligibility(
+  input: ThreadSnoozeEligibilityInput,
+): ReturnType<typeof canSnoozeThread> {
+  return canSnoozeThread(
+    settlementInput({
+      thread: input.thread,
+      worktree: input.worktree ?? null,
+      environment: input.environment,
+      pinned: false,
+      hasLocalQueuedMessage: input.hasLocalQueuedMessage,
+      deliveryUnknown: input.deliveryUnknown ?? false,
+      autoSettleAfterDays: resolveAutoSettleAfterDays(undefined),
+      nowMs: input.nowMs,
+    }),
+  );
 }
 
 function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | undefined): boolean {
@@ -337,10 +375,12 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         }),
       ) ?? null;
     const worktree = resolveWorktree({ thread, worktreeByKey, worktreesByProjectKey });
+    const pinned = pinnedKeys.has(key);
     const policyInput = settlementInput({
       thread,
       worktree,
       environment,
+      pinned,
       hasLocalQueuedMessage: localQueueKeys.has(key),
       deliveryUnknown: deliveryUnknownKeys.has(key),
       autoSettleAfterDays: resolveAutoSettleAfterDays(input.autoSettleAfterDays),
@@ -383,10 +423,11 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         eligibility,
         effectiveSettlementTimestamp: getEffectiveSettlementTimestamp(policyInput),
         settlementBlocker: eligibility.blocker,
+        autoSettlementBlocker: getThreadAutoSettlementBlocker(policyInput),
       },
       mutationEnabled: blocker === null,
       mutationBlocker: blocker,
-      pinned: pinnedKeys.has(key),
+      pinned,
       current: input.currentThreadKey === key,
       isDraft: false,
       canSnooze:
@@ -435,6 +476,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         eligibility: { canSettle: false, blocker: "unsupported" },
         effectiveSettlementTimestamp: null,
         settlementBlocker: "unsupported",
+        autoSettlementBlocker: null,
       },
       mutationEnabled: false,
       mutationBlocker: "client-draft",

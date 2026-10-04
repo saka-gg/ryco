@@ -1,4 +1,9 @@
-import type { ServerProvider, ServerProviderVersionAdvisory } from "@ryco/contracts";
+import type {
+  ServerProvider,
+  ServerProviderCompatibilityAdvisory,
+  ServerProviderVersionAdvisory,
+} from "@ryco/contracts";
+import { isBlockingProviderCompatibilityStatus } from "@ryco/shared/providerCapabilities";
 
 /**
  * Visual treatment for each server-reported provider status. Centralized so
@@ -90,14 +95,23 @@ export function getProviderVersionLabel(version: string | null | undefined) {
   return version.startsWith("v") ? version : `v${version}`;
 }
 
+/**
+ * The update offer for a provider card. `null` when the provider is current or its latest version
+ * is rated unsupported/broken for this Ryco release (the server refuses to install it, so the card
+ * stops offering it; `getProviderCompatibilityNotice` explains why).
+ */
 export function getProviderVersionAdvisoryPresentation(
   advisory: ServerProviderVersionAdvisory | undefined,
+  compatibility?: ServerProviderCompatibilityAdvisory | undefined,
 ): {
   readonly detail: string;
   readonly updateCommand: string | null;
   readonly emphasis: "normal" | "strong";
 } | null {
   if (!advisory || advisory.status === "current" || advisory.status === "unknown") {
+    return null;
+  }
+  if (isBlockingProviderCompatibilityStatus(compatibility?.latestVersionStatus)) {
     return null;
   }
 
@@ -114,4 +128,37 @@ export function getProviderVersionAdvisoryPresentation(
     updateCommand: advisory.updateCommand,
     emphasis: "normal" as const,
   };
+}
+
+/**
+ * One plain line of compatibility copy for a provider card, or `null`. Silent for disabled
+ * providers and for `error` status: the summary already carries the gate message there, and the
+ * card never repeats a fact.
+ */
+export function getProviderCompatibilityNotice(provider: ServerProvider | undefined): {
+  readonly tone: "muted" | "warning";
+  readonly text: string;
+} | null {
+  const compatibility = provider?.compatibilityAdvisory;
+  if (!provider || !compatibility || !provider.enabled || provider.status === "error") {
+    return null;
+  }
+  if (isBlockingProviderCompatibilityStatus(compatibility.status) && compatibility.message) {
+    return { tone: "warning", text: compatibility.message };
+  }
+  if (compatibility.status === "graceful" && compatibility.message) {
+    return { tone: "muted", text: compatibility.message };
+  }
+  const versionAdvisory = provider.versionAdvisory;
+  if (
+    versionAdvisory?.status === "behind_latest" &&
+    versionAdvisory.latestVersion &&
+    isBlockingProviderCompatibilityStatus(compatibility.latestVersionStatus)
+  ) {
+    return {
+      tone: "muted",
+      text: `${getProviderVersionLabel(versionAdvisory.latestVersion)} is available, but it is not compatible with this Ryco release, so Ryco won't offer it.`,
+    };
+  }
+  return null;
 }

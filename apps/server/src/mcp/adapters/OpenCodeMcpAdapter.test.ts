@@ -154,12 +154,61 @@ describe("OpenCodeMcpAdapter", () => {
     expect(tools.command).toEqual(["node", "new.js"]);
   });
 
+  it("manages real `opencode v1.x` output like a bare version", async () => {
+    const globalPath = "/test/home/.config/opencode/opencode.json";
+    const prefixed = makeIo("opencode v1.18.18\n", { [globalPath]: { mcp: {} } });
+    const bare = makeIo("1.18.18\n", { [globalPath]: { mcp: {} } });
+    const discover = (io: OpenCodeMcpAdapterIo) =>
+      runAdapter(
+        Effect.gen(function* () {
+          const adapter = yield* makeOpenCodeMcpAdapter(io);
+          return yield* adapter.listWorkspaces;
+        }),
+      );
+
+    const [prefixedResult, bareResult] = await Promise.all([
+      discover(prefixed.io),
+      discover(bare.io),
+    ]);
+    expect(prefixedResult).toEqual(bareResult);
+    expect(prefixedResult.providers[0]?.status).toBe("managed");
+    expect(
+      prefixedResult.workspaces.find((workspace) => workspace.nativeScope === "user")
+        ?.formatGeneration,
+    ).toBe("opencode-v1-json");
+  });
+
+  it("detects OpenCode 2.x and refuses to manage its configuration", async () => {
+    const globalPath = "/test/home/.config/opencode/opencode.json";
+    const { io, documents } = makeIo("opencode v2.0.18\n", { [globalPath]: { mcp: {} } });
+    let writes = 0;
+    const countingIo: OpenCodeMcpAdapterIo = {
+      ...io,
+      writeJson: async (snapshot, value) => {
+        writes += 1;
+        return io.writeJson(snapshot, value);
+      },
+    };
+    const result = await runAdapter(
+      Effect.gen(function* () {
+        const adapter = yield* makeOpenCodeMcpAdapter(countingIo);
+        return yield* adapter.listWorkspaces;
+      }),
+    );
+
+    expect(result.providers[0]?.status).toBe("unsupported");
+    expect(result.providers[0]?.message).toContain("OpenCode 2.x detected");
+    expect(result.workspaces).toHaveLength(0);
+    expect(writes).toBe(0);
+    expect(documents.get(globalPath)).toEqual({ mcp: {} });
+  });
+
   it("uses the V2 mcp.servers shape and installs the external bridge", async () => {
     const globalPath = "/test/home/.config/opencode/opencode.json";
-    const { io, documents } = makeIo("2.0.1\n");
+    const { io, documents } = makeIo("opencode v2.0.18\n");
     const removed = await runAdapter(
       Effect.gen(function* () {
-        const adapter = yield* makeOpenCodeMcpAdapter(io);
+        const adapter = yield* makeOpenCodeMcpAdapter(io, { managedGenerations: ["v1", "v2"] });
         const discovery = yield* adapter.listWorkspaces;
         const workspaceId = discovery.workspaces.find(
           (workspace) => workspace.nativeScope === "user",

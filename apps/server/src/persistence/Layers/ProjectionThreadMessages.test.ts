@@ -1,8 +1,8 @@
 import { messageTextForSearch } from "../messageText.ts";
-import { MessageId, ThreadId } from "@ryco/contracts";
+import { MessageId, ThreadId, TurnId } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { Effect, Layer, Option } from "effect";
+import { Effect, Layer, Logger, Option } from "effect";
 
 import { ProjectionThreadMessageRepository } from "../Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadMessageRepositoryLive } from "./ProjectionThreadMessages.ts";
@@ -304,6 +304,146 @@ layer("durable message chunks", (it) => {
         0,
       );
       assert.equal(Option.getOrThrow(yield* repo.getByMessageId(fork)).text, "prefix suffix");
+    }),
+  );
+});
+
+layer("message ownership", (it) => {
+  const threadA = ThreadId.make("ownership-thread-a");
+  const threadB = ThreadId.make("ownership-thread-b");
+  const makeRow = (
+    id: string,
+    threadId: ThreadId,
+    text: string,
+    isStreaming: boolean,
+    turnId: TurnId | null = null,
+  ) => ({
+    messageId: MessageId.make(id),
+    threadId,
+    turnId,
+    role: "assistant" as const,
+    text,
+    isStreaming,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  });
+
+  const captureLogs = () => {
+    const messages: Array<string> = [];
+    const logger = Logger.make(({ message }) => {
+      messages.push(Array.isArray(message) ? message.map(String).join(" ") : String(message));
+    });
+    return {
+      messages,
+      provide: Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+    };
+  };
+
+  const readStorage = (id: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const chunks = yield* sql<{
+        count: number;
+      }>`SELECT count(*) AS count FROM projection_message_chunks WHERE message_id = ${id}`;
+      const sequences = yield* sql<{
+        sequence: number | null;
+      }>`SELECT text_event_sequence AS sequence FROM projection_thread_messages WHERE message_id = ${id}`;
+      return { chunkCount: chunks[0]?.count, sequence: sequences[0]?.sequence };
+    });
+
+  const assertOwnedByA = (id: string, text: string) =>
+    Effect.gen(function* () {
+      const repo = yield* ProjectionThreadMessageRepository;
+      const row = Option.getOrThrow(yield* repo.getByMessageId({ messageId: MessageId.make(id) }));
+      assert.equal(row.threadId, threadA);
+      assert.equal(row.text, text);
+      assert.isFalse(row.isStreaming);
+      assert.deepEqual(yield* repo.listByThreadId({ threadId: threadB }), []);
+      assert.deepEqual(yield* readStorage(id), { chunkCount: 0, sequence: 2 });
+    });
+
+  it.effect("skips a streaming delta from another thread and keeps the owner writable", () =>
+    Effect.gen(function* () {
+      const repo = yield* ProjectionThreadMessageRepository;
+      const id = "ownership-foreign-delta";
+      yield* repo.applyEvent(makeRow(id, threadA, "a", true), 1);
+      yield* repo.applyEvent(makeRow(id, threadA, "", false), 2);
+
+      const logs = captureLogs();
+      yield* repo.applyEvent(makeRow(id, threadB, " b", true), 3).pipe(logs.provide);
+      yield* assertOwnedByA(id, "a");
+      assert.isTrue(
+        logs.messages.some((message) =>
+          message.includes("projection.thread-message.foreign-thread-write-skipped"),
+        ),
+      );
+
+      // The skipped write did not advance the fence, so the owner still appends.
+      yield* repo.applyEvent(makeRow(id, threadA, " more", true), 4);
+      const row = Option.getOrThrow(yield* repo.getByMessageId({ messageId: MessageId.make(id) }));
+      assert.equal(row.threadId, threadA);
+      assert.equal(row.text, "a more");
+      assert.isTrue(row.isStreaming);
+    }),
+  );
+
+  it.effect("skips a final message from another thread", () =>
+    Effect.gen(function* () {
+      const repo = yield* ProjectionThreadMessageRepository;
+      const id = "ownership-foreign-final";
+      yield* repo.applyEvent(makeRow(id, threadA, "a", true), 1);
+      yield* repo.applyEvent(makeRow(id, threadA, "", false), 2);
+
+      yield* repo.applyEvent(makeRow(id, threadB, "replacement", false), 3);
+      yield* assertOwnedByA(id, "a");
+    }),
+  );
+
+  it.effect("skips an upsert from another thread without deleting the owner's chunks", () =>
+    Effect.gen(function* () {
+      const repo = yield* ProjectionThreadMessageRepository;
+      const id = "ownership-foreign-upsert";
+      yield* repo.applyEvent(makeRow(id, threadA, "hello", true), 1);
+      yield* repo.applyEvent(makeRow(id, threadA, " world", true), 2);
+
+      const logs = captureLogs();
+      yield* repo.upsert(makeRow(id, threadB, "x", false), { eventSequence: 3 }).pipe(logs.provide);
+
+      const row = Option.getOrThrow(yield* repo.getByMessageId({ messageId: MessageId.make(id) }));
+      assert.equal(row.threadId, threadA);
+      assert.equal(row.text, "hello world");
+      assert.isTrue(row.isStreaming);
+      assert.deepEqual(yield* repo.listByThreadId({ threadId: threadB }), []);
+      assert.deepEqual(yield* readStorage(id), { chunkCount: 2, sequence: 2 });
+      assert.isTrue(
+        logs.messages.some((message) =>
+          message.includes("projection.thread-message.foreign-thread-write-skipped"),
+        ),
+      );
+    }),
+  );
+
+  it.effect("only logs when a completed message receives a delta from another turn", () =>
+    Effect.gen(function* () {
+      const repo = yield* ProjectionThreadMessageRepository;
+      const id = "ownership-cross-turn";
+      const turn1 = TurnId.make("ownership-turn-1");
+      const turn2 = TurnId.make("ownership-turn-2");
+      yield* repo.applyEvent(makeRow(id, threadA, "first", false, turn1), 1);
+
+      const logs = captureLogs();
+      yield* repo.applyEvent(makeRow(id, threadA, " second", true, turn2), 2).pipe(logs.provide);
+
+      const row = Option.getOrThrow(yield* repo.getByMessageId({ messageId: MessageId.make(id) }));
+      assert.equal(row.threadId, threadA);
+      assert.equal(row.text, "first second");
+      assert.equal(row.turnId, turn2);
+      assert.isTrue(row.isStreaming);
+      assert.isTrue(
+        logs.messages.some((message) =>
+          message.includes("projection.thread-message.cross-turn-append"),
+        ),
+      );
     }),
   );
 });

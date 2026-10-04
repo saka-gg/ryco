@@ -4,8 +4,12 @@ import type { CommandId, MessageId, ModelSelection, ThreadId, TurnId } from "@ry
 import {
   buildQueuedMessageSteerCommand,
   getQueuedThreadKeys,
+  indexTurnSteerRejections,
   moveQueuedMessage,
+  resolveComposerFollowUpAction,
   resolveQueuedMessageSteerEligibility,
+  resolveQueuedMessageSteerOutcome,
+  type QueuedMessageSteerAttempt,
 } from "./logic.ts";
 
 const activeSelection = {
@@ -96,5 +100,94 @@ describe("message queue", () => {
         "environment-a:thread-b": [],
       }),
     ).toEqual(new Set(["environment-a:thread-a"]));
+  });
+});
+
+describe("resolveComposerFollowUpAction", () => {
+  const resolve = (overrides: Partial<Parameters<typeof resolveComposerFollowUpAction>[0]> = {}) =>
+    resolveComposerFollowUpAction({
+      turnRunning: true,
+      followUpBehavior: "queue",
+      invert: false,
+      surfaceAllowsSteer: true,
+      isSlashCommand: false,
+      ...overrides,
+    });
+
+  it("sends when no turn runs, whatever the modifier", () => {
+    expect(resolve({ turnRunning: false })).toBe("send");
+    expect(resolve({ turnRunning: false, invert: true, followUpBehavior: "steer" })).toBe("send");
+  });
+
+  it("applies the setting and inverts it with the modifier", () => {
+    expect(resolve()).toBe("queue");
+    expect(resolve({ invert: true })).toBe("steer");
+    expect(resolve({ followUpBehavior: "steer" })).toBe("steer");
+    expect(resolve({ followUpBehavior: "steer", invert: true })).toBe("queue");
+  });
+
+  it("queues on a surface that cannot steer and for slash commands", () => {
+    expect(resolve({ followUpBehavior: "steer", surfaceAllowsSteer: false })).toBe("queue");
+    expect(resolve({ invert: true, surfaceAllowsSteer: false })).toBe("queue");
+    expect(resolve({ followUpBehavior: "steer", isSlashCommand: true })).toBe("queue");
+  });
+});
+
+describe("resolveQueuedMessageSteerOutcome", () => {
+  const attempt: QueuedMessageSteerAttempt = {
+    commandId: "cmd-new",
+    expectedTurnId: "turn-active" as TurnId,
+    startedAt: "2026-10-04T10:00:00.000Z",
+    explicit: false,
+  };
+  const rejection = (commandId: string, payload: Record<string, unknown>) => ({
+    id: `turn-steer-rejected:${commandId}`,
+    kind: "provider.turn.steer.failed",
+    payload: { messageId: "message-1", error: "Not now.", ...payload },
+  });
+  const outcome = (
+    activities: ReadonlyArray<{ id: string; kind: string; payload: unknown }>,
+    projected: ReadonlyArray<string> = [],
+  ) =>
+    resolveQueuedMessageSteerOutcome({
+      messageId: "message-1",
+      attempt,
+      projectedMessageIds: new Set(projected),
+      rejectionsByActivityId: indexTurnSteerRejections(activities),
+    });
+
+  it("is accepted once the message is projected", () => {
+    expect(outcome([], ["message-1"])).toEqual({ status: "accepted" });
+  });
+
+  it("is rejected only by this attempt's own request", () => {
+    expect(outcome([rejection("cmd-new", { reason: "deferred" })])).toEqual({
+      status: "rejected",
+      reason: "deferred",
+      error: "Not now.",
+      deliveryUncertain: false,
+    });
+  });
+
+  it("carries a rejection whose delivery to the provider is uncertain", () => {
+    expect(outcome([rejection("cmd-new", { reason: "failed", deliveryUncertain: true })])).toEqual({
+      status: "rejected",
+      reason: "failed",
+      error: "Not now.",
+      deliveryUncertain: true,
+    });
+  });
+
+  it("stays pending on a stale rejection of an earlier attempt", () => {
+    expect(outcome([rejection("cmd-old", { reason: "failed" })])).toEqual({ status: "pending" });
+  });
+
+  it("reads a legacy rejection without a reason as failed", () => {
+    expect(outcome([rejection("cmd-new", {})])).toEqual({
+      status: "rejected",
+      reason: "failed",
+      error: "Not now.",
+      deliveryUncertain: false,
+    });
   });
 });

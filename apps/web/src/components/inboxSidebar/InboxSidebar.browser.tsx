@@ -681,3 +681,91 @@ describe("Inbox sidebar rendering and settlement", () => {
     },
   );
 });
+
+describe("Inbox sidebar delegated threads", () => {
+  afterEach(() => {
+    __resetEnvironmentApiOverridesForTests();
+    document.body.innerHTML = "";
+  });
+
+  const coordinatorId = ThreadId.make("Coordinator");
+  const workerId = ThreadId.make("Worker");
+  const delegatedProps = (activeThreadKey: string | null): InboxSidebarProps => ({
+    projects: [],
+    worktrees: [],
+    environments: [],
+    threads: [coordinatorId, workerId].map((id) => ({
+      id,
+      environmentId: ENVIRONMENT_ID,
+      projectId: PROJECT_ID,
+      title: `${id} task`,
+      interactionMode: "default",
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      latestTurn: null,
+      branch: null,
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      lineage:
+        id === workerId
+          ? {
+              parentThreadId: coordinatorId,
+              rootThreadId: coordinatorId,
+              relationship: "delegated",
+            }
+          : null,
+    })),
+    deliveryUnknownThreadKeys: new Set(),
+    localQueuedThreadKeys: new Set(),
+    activeThreadKey,
+    aiFocusEnabled: false,
+    autoSettleAfterDays: null,
+    pinnedThreadKeys: new Set(),
+    onOpenThread: vi.fn(),
+  });
+  const rowTitles = () =>
+    [...document.querySelectorAll('[data-testid="inbox-thread-row"]')].map((row) =>
+      row.querySelector(".inbox-row-title")?.textContent?.trim(),
+    );
+
+  it("folds a quiet delegated child behind a collapsed disclosure under its host", async () => {
+    await page.viewport(1280, 800);
+    const mounted = await render(<InboxSidebar {...delegatedProps(null)} />);
+    try {
+      const disclosure = page.getByRole("button", {
+        name: "Show 1 delegated thread from Coordinator task",
+      });
+      await expect.element(disclosure).toBeInTheDocument();
+      await expect.element(disclosure).toHaveTextContent("1 delegated");
+      await expect.element(disclosure).toHaveAttribute("aria-expanded", "false");
+      expect(rowTitles()).toEqual(["Coordinator task"]);
+
+      await disclosure.click();
+      await expect.element(disclosure).toHaveAttribute("aria-expanded", "true");
+      expect(rowTitles()).toEqual(["Coordinator task", "Worker task"]);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("keeps a host open while its delegated child is the open thread", async () => {
+    await page.viewport(1280, 800);
+    const mounted = await render(
+      <InboxSidebar {...delegatedProps(`${ENVIRONMENT_ID}:${workerId}`)} />,
+    );
+    try {
+      await expect
+        .element(
+          page.getByRole("button", { name: "Show 1 delegated thread from Coordinator task" }),
+        )
+        .toHaveAttribute("aria-expanded", "true");
+      expect(rowTitles()).toEqual(["Coordinator task", "Worker task"]);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+});

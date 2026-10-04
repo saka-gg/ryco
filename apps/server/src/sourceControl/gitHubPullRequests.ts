@@ -54,6 +54,8 @@ export interface NormalizedGitHubPullRequestRecord {
   readonly mergeability?: SourceControlChangeRequestMergeability;
   readonly checkRollup?: ReadonlyArray<NormalizedGitHubCheckRollupItem>;
   readonly createdAt?: DateTime.Utc;
+  readonly mergedAt?: DateTime.Utc;
+  readonly closedAt?: DateTime.Utc;
   readonly reviewDecision?: SourceControlChangeRequestReviewDecision | null;
   readonly additions?: number;
   readonly deletions?: number;
@@ -355,6 +357,8 @@ function normalizeGitHubPullRequestRecord(
   const headSha = trimOptionalString(raw.headRefOid);
   const mergeability = normalizeMergeability(raw.mergeable);
   const createdAt = Option.getOrNull(optionFromIsoDateTime(raw.createdAt));
+  const mergedAt = Option.getOrNull(optionFromIsoDateTime(raw.mergedAt));
+  const closedAt = Option.getOrNull(optionFromIsoDateTime(raw.closedAt));
   const additions = nonNegativeInt(raw.additions);
   const deletions = nonNegativeInt(raw.deletions);
   const changedFiles = nonNegativeInt(raw.changedFiles);
@@ -380,6 +384,8 @@ function normalizeGitHubPullRequestRecord(
     ...(headSha ? { headSha } : {}),
     ...(mergeability ? { mergeability } : {}),
     ...(createdAt ? { createdAt } : {}),
+    ...(mergedAt ? { mergedAt } : {}),
+    ...(closedAt ? { closedAt } : {}),
     ...(raw.reviewDecision !== undefined
       ? { reviewDecision: normalizeReviewDecision(raw.reviewDecision) }
       : {}),
@@ -475,8 +481,6 @@ export interface NormalizedGitHubPullRequestDetail extends NormalizedGitHubPullR
   readonly reviewerStates: ReadonlyArray<SourceControlChangeRequestReviewer>;
   readonly mergeStateStatus?: SourceControlChangeRequestMergeStateStatus;
   readonly autoMerge?: SourceControlChangeRequestAutoMerge | null;
-  readonly closedAt?: DateTime.Utc;
-  readonly mergedAt?: DateTime.Utc;
   readonly mergedBy?: string;
 }
 
@@ -763,8 +767,6 @@ export function decodeGitHubPullRequestDetailJson(
   const files = normalizeFiles(result.success.files);
   const mergeStateStatus = normalizeMergeStateStatus(result.success.mergeStateStatus);
   const autoMerge = normalizeAutoMerge(result.success.autoMergeRequest);
-  const closedAt = Option.getOrNull(optionFromIsoDateTime(result.success.closedAt));
-  const mergedAt = Option.getOrNull(optionFromIsoDateTime(result.success.mergedAt));
   const mergedBy = trimNonEmpty(result.success.mergedBy?.login);
   const detail: NormalizedGitHubPullRequestDetail = {
     ...summary,
@@ -784,8 +786,6 @@ export function decodeGitHubPullRequestDetailJson(
     }),
     ...(mergeStateStatus ? { mergeStateStatus } : {}),
     ...(autoMerge !== undefined ? { autoMerge } : {}),
-    ...(closedAt ? { closedAt } : {}),
-    ...(mergedAt ? { mergedAt } : {}),
     ...(mergedBy ? { mergedBy } : {}),
   };
   return Result.succeed(detail);

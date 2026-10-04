@@ -73,6 +73,28 @@ export class ProviderAdapterRequestError extends Schema.TaggedError<ProviderAdap
 }
 
 /**
+ * ProviderTurnNotSteerableError - The turn cannot take a steer right now: it already ended, the
+ * provider is busy (an approval or question is pending), or steering is unsupported. The message
+ * stays queued and is sent as the next turn, so callers treat this as a deferral, not a failure.
+ */
+export class ProviderTurnNotSteerableError extends Schema.TaggedError<ProviderTurnNotSteerableError>()(
+  "ProviderTurnNotSteerableError",
+  {
+    provider: Schema.String,
+    threadId: Schema.String,
+    turnId: Schema.optional(Schema.String),
+    reason: Schema.Literals(["turn-ended", "busy", "unsupported"]),
+    /** User-facing sentence; surfaced verbatim in the deferred activity. */
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/**
  * ProviderAdapterProcessError - Provider process lifecycle failure.
  */
 export class ProviderAdapterProcessError extends Schema.TaggedError<ProviderAdapterProcessError>()(
@@ -117,6 +139,24 @@ export class ProviderUnsupportedError extends Schema.TaggedError<ProviderUnsuppo
 ) {
   override get message(): string {
     return `Provider '${this.provider}' is not implemented`;
+  }
+}
+
+/**
+ * ProviderOperationUnsupportedError - The provider cannot perform this
+ * operation at all. The message is user-facing.
+ */
+export class ProviderOperationUnsupportedError extends Schema.TaggedError<ProviderOperationUnsupportedError>()(
+  "ProviderOperationUnsupportedError",
+  {
+    provider: Schema.String,
+    operation: Schema.String,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.detail;
   }
 }
 
@@ -191,18 +231,53 @@ export class ProviderSessionDirectoryPersistenceError extends Schema.TaggedError
   }
 }
 
+/**
+ * ProviderOperationTimeoutError - Ryco stopped waiting for a provider
+ * operation at its deadline. The operation itself may still finish in the
+ * background (and is then undone). `detail` is one user-facing sentence.
+ */
+export class ProviderOperationTimeoutError extends Schema.TaggedError<ProviderOperationTimeoutError>()(
+  "ProviderOperationTimeoutError",
+  {
+    provider: Schema.String,
+    operation: Schema.Literals([
+      "session.start",
+      "session.recover",
+      "session.lock",
+      "turn.start",
+      "turn.interrupt",
+      "session.stop",
+      "request.respond",
+      "user-input.respond",
+      "goal.sync",
+      "conversation.rollback",
+    ]),
+    timeoutMs: Schema.Number,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+export type ProviderOperationTimeoutOperation = ProviderOperationTimeoutError["operation"];
+
 export type ProviderAdapterError =
   | ProviderAdapterValidationError
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
-  | ProviderAdapterProcessError;
+  | ProviderAdapterProcessError
+  | ProviderTurnNotSteerableError;
 
 export type ProviderServiceError =
   | ProviderValidationError
   | ProviderUnsupportedError
+  | ProviderOperationUnsupportedError
   | ProviderInstanceNotFoundError
   | ProviderSessionNotFoundError
   | ProviderSessionDirectoryPersistenceError
+  | ProviderOperationTimeoutError
   | ProviderAdapterError
   | CheckpointServiceError;

@@ -26,8 +26,8 @@ it.effect("keeps sessions paired before rotation as their own chain", () =>
         '2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z')
     `;
 
-    yield* runMigrations({ toMigrationInclusive: 72 });
-    yield* runMigrations({ toMigrationInclusive: 72 });
+    yield* runMigrations({ toMigrationInclusive: 76 });
+    yield* runMigrations({ toMigrationInclusive: 76 });
 
     assert.deepEqual(yield* rotationColumns, ROTATION_COLUMNS);
     const rows = yield* sql<{ chainId: string; chainIssuedAt: string; rotatedFrom: null }>`
@@ -43,16 +43,16 @@ it.effect("keeps sessions paired before rotation as their own chain", () =>
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );
 
-it.effect("adds the rotation columns when another branch recorded migration 72", () =>
+it.effect("adds the rotation columns when another branch recorded migration 76", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations({ toMigrationInclusive: 71 });
     yield* sql`
       INSERT INTO effect_sql_migrations (migration_id, created_at, name)
-      VALUES (72, 'now', 'ParallelBranchMigration')
+      VALUES (76, 'now', 'ParallelBranchMigration')
     `;
 
-    yield* runMigrations({ toMigrationInclusive: 72 });
+    yield* runMigrations({ toMigrationInclusive: 76 });
 
     assert.deepEqual(yield* rotationColumns, ROTATION_COLUMNS);
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),

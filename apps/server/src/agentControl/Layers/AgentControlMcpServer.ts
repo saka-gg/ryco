@@ -3,6 +3,11 @@ import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { WorkspaceFileSystem } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
 import { withInspectionTools } from "../Mcp/inspectionTools.ts";
+import { withDelegationTools } from "../Mcp/delegationTools.ts";
+import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
+import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { TerminalManager } from "../../terminal/Services/Manager.ts";
 /**
  * AgentControlMcpServer - Lifecycle owner of the private Agent Control
@@ -69,6 +74,9 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const files = yield* Effect.serviceOption(WorkspaceFileSystem);
   const diffs = yield* Effect.serviceOption(CheckpointDiffQuery);
   const terminals = yield* Effect.serviceOption(TerminalManager);
+  const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
+  const proposalRepository = yield* Effect.serviceOption(AgentControlProposalRepository);
+  const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const toolDeps = {
     policy,
     proposals,
@@ -85,12 +93,27 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     ...(Option.isSome(projectPlans) ? { projectPlans: projectPlans.value } : {}),
     getTurnAuthority: registry.getTurnAuthority,
   };
-  const baseTools = withInspectionTools(makeAgentControlMcpTools(toolDeps), {
+  const inspectionTools = withInspectionTools(makeAgentControlMcpTools(toolDeps), {
     ...toolDeps,
     ...(Option.isSome(files) ? { files: files.value } : {}),
     ...(Option.isSome(diffs) ? { diffs: diffs.value } : {}),
     ...(Option.isSome(terminals) ? { terminals: terminals.value } : {}),
   });
+  // Stateless ledger reads and CAS writes: no second delivery worker is forked here.
+  const baseTools =
+    Option.isSome(completionReturns) && Option.isSome(proposalRepository) && Option.isSome(sql)
+      ? withDelegationTools(inspectionTools, {
+          policy,
+          registry,
+          control: makeDelegatedTaskControl({
+            repository: completionReturns.value,
+            proposals: proposalRepository.value,
+            events: proposalEvents,
+            projections,
+            sql: sql.value,
+          }),
+        })
+      : inspectionTools;
   const fileTools =
     Option.isSome(config) && Option.isSome(workspaceAccess) && Option.isSome(engine)
       ? yield* withAssistantAttachmentTools(baseTools, {

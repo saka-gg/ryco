@@ -49,8 +49,8 @@ import {
 } from "../ui/alert-dialog";
 import {
   canOneClickUpdateProviderCandidate,
-  isProviderUpdateCandidate,
   isProviderUpdateActive,
+  isProviderUpdateOffered,
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
@@ -379,7 +379,7 @@ export function ProvidersSettingsPanel() {
       String(selectedRow.driver)
     : null;
   const selectedUpdateCandidate =
-    selectedLiveProvider && isProviderUpdateCandidate(selectedLiveProvider)
+    selectedLiveProvider && isProviderUpdateOffered(selectedLiveProvider)
       ? selectedLiveProvider
       : null;
   const canRunSelectedUpdate =

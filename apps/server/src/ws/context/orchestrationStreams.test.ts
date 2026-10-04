@@ -4,15 +4,19 @@ import {
   MessageId,
   OrchestrationGetSnapshotError,
   type OrchestrationEvent,
+  type OrchestrationWorktreeShell,
+  ProjectId,
   ThreadId,
+  WorktreeId,
 } from "@ryco/contracts";
-import { Cause, Effect, Metric, Queue, Ref } from "effect";
+import { Cause, Effect, Metric, Option, Queue, Ref } from "effect";
 
 import { makeWsReplayMetrics } from "../../wsReplayMetrics.ts";
 import {
   releaseQueuedEventBytes,
   offerOrchestrationLiveEventOrFail,
   offerOrchestrationThreadLiveEventOrFail,
+  toShellStreamEvent,
 } from "./orchestrationStreams.ts";
 
 const LIVE_OVERFLOWS_METRIC_ID = "t3_ws_orchestration_live_buffer_overflows_total";
@@ -289,4 +293,107 @@ const makeLargeActivityEvent = (
       createdAt: "2026-04-05T00:00:00.000Z",
     },
   },
+});
+
+describe("toShellStreamEvent", () => {
+  const worktreeId = WorktreeId.make("worktree-pr");
+  const mergedWorktree: OrchestrationWorktreeShell = {
+    worktreeId,
+    projectId: ProjectId.make("project-1"),
+    title: null,
+    branch: "feature/pr",
+    worktreePath: "/tmp/project/pr",
+    origin: "pr",
+    prNumber: 12,
+    issueNumber: null,
+    prTitle: "Feature",
+    issueTitle: null,
+    prState: "merged",
+    prIsDraft: false,
+    prTerminalAt: "2026-04-05T00:00:00.000Z",
+    issueState: null,
+    workItemProvider: null,
+    workItemKey: null,
+    workItemTitle: null,
+    workItemState: null,
+    workItemStateName: null,
+    workItemUrl: null,
+    createdAt: "2026-04-04T00:00:00.000Z",
+    updatedAt: "2026-04-05T00:00:01.000Z",
+    archivedAt: null,
+    manualPosition: 0,
+  };
+  const makeQuery = (worktree: Option.Option<OrchestrationWorktreeShell>) => ({
+    getProjectShellById: () => Effect.succeed(Option.none()),
+    getThreadShellById: () => Effect.succeed(Option.none()),
+    getWorktreeShellById: () => Effect.succeed(worktree),
+  });
+  const sourceControlEvent: OrchestrationEvent = {
+    sequence: 7,
+    eventId: EventId.make("event-source-control-7"),
+    aggregateKind: "worktree",
+    aggregateId: worktreeId,
+    occurredAt: "2026-04-05T00:00:01.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "worktree.sourceControlStateUpdated",
+    payload: {
+      worktreeId,
+      prState: "merged",
+      prIsDraft: false,
+      issueState: null,
+      updatedAt: "2026-04-05T00:00:01.000Z",
+    },
+  };
+
+  it.effect("streams source-control state changes as worktree upserts from the SQL row", () =>
+    Effect.gen(function* () {
+      const result = yield* toShellStreamEvent(
+        makeQuery(Option.some(mergedWorktree)),
+        sourceControlEvent,
+      );
+      assert.deepStrictEqual(
+        result,
+        Option.some({ kind: "worktree-upserted" as const, sequence: 7, worktree: mergedWorktree }),
+      );
+      const streamed = Option.getOrThrow(result);
+      assert.equal(streamed.kind, "worktree-upserted");
+      if (streamed.kind === "worktree-upserted") {
+        assert.equal(streamed.worktree.prState, "merged");
+        assert.equal(streamed.worktree.prTerminalAt, "2026-04-05T00:00:00.000Z");
+      }
+    }),
+  );
+
+  it.effect("drops the upsert when the worktree row is gone", () =>
+    Effect.gen(function* () {
+      const result = yield* toShellStreamEvent(makeQuery(Option.none()), sourceControlEvent);
+      assert.isTrue(Option.isNone(result));
+    }),
+  );
+
+  it.effect("drops unmapped non-thread events", () =>
+    Effect.gen(function* () {
+      const result = yield* toShellStreamEvent(makeQuery(Option.some(mergedWorktree)), {
+        sequence: 8,
+        eventId: EventId.make("event-manual-position-8"),
+        aggregateKind: "worktree",
+        aggregateId: worktreeId,
+        occurredAt: "2026-04-05T00:00:02.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "worktree.manualPositionSet",
+        payload: {
+          worktreeId,
+          position: 3,
+          changedAt: "2026-04-05T00:00:02.000Z",
+        },
+      });
+      assert.isTrue(Option.isNone(result));
+    }),
+  );
 });

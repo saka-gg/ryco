@@ -54,7 +54,11 @@ export type DeleteProjectionThreadMessagesInput = typeof DeleteProjectionThreadM
  * ProjectionThreadMessageRepositoryShape - Service API for projected thread messages.
  */
 export interface ProjectionThreadMessageRepositoryShape {
-  /** Apply one ordered message event atomically; streaming text is a delta. */
+  /**
+   * Apply one ordered message event atomically; streaming text is a delta.
+   * A `message_id` is owned by the first thread that projected it; writes from
+   * another thread are skipped and logged.
+   */
   readonly applyEvent: (
     message: ProjectionThreadMessage,
     sequence: number,
@@ -63,6 +67,8 @@ export interface ProjectionThreadMessageRepositoryShape {
   /**
    * Replace a complete body by messageId and discard any pending chunks.
    * Revert passes its sequence to fence retained rows against older deltas.
+   * A `message_id` is owned by the first thread that projected it; writes from
+   * another thread are skipped and logged.
    */
   readonly upsert: (
     message: ProjectionThreadMessage,

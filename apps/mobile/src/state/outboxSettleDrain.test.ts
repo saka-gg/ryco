@@ -52,11 +52,25 @@ describe("outbox settle-edge drain (MAJOR 4)", () => {
     const sendQueuedMessage = vi.fn(async () => undefined);
     const runDrain = () =>
       void drainThreadOutbox({
-        readThreadDeliveryState: () => ({
-          threadExists: true,
-          shellStatus: "live",
-          environmentConnected: true,
-          threadBusy: false, // the thread has now settled
+        readThreadDrainState: (ref) => ({
+          // The thread has now settled.
+          view: {
+            ref,
+            started: true,
+            archived: false,
+            detailLoaded: true,
+            running: false,
+            hasPendingApproval: false,
+            hasPendingUserInput: false,
+            session: null,
+            latestTurn: null,
+            latestTurnPlaceholderCheckpoint: false,
+            projectedMessageIds: new Set(),
+            turnStartFailures: [],
+            steerRejectionsByActivityId: new Map(),
+            turnStartCancelledMessageIds: new Set(),
+          },
+          environment: { shellLive: true, mutationReady: true },
         }),
         sendQueuedMessage,
       });

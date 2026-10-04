@@ -253,7 +253,19 @@ const makeOrchestrationCommandApplication = Effect.gen(function* () {
   const apply: OrchestrationCommandApplicationShape["apply"] = (command) =>
     applyWithDispatcher(command, engineDispatcher);
 
-  return { apply, applyWithDispatcher } satisfies OrchestrationCommandApplicationShape;
+  const applyInternal: OrchestrationCommandApplicationShape["applyInternal"] = (command) =>
+    applyOrchestrationNormalizedCommand({
+      command,
+      dispatch: engineDispatcher,
+      projections,
+      terminals,
+    });
+
+  return {
+    apply,
+    applyWithDispatcher,
+    applyInternal,
+  } satisfies OrchestrationCommandApplicationShape;
 });
 
 export const OrchestrationCommandApplicationLive = Layer.effect(

@@ -13,20 +13,23 @@ import type {
 
 import type { DraftComposerAttachment } from "../lib/composerFiles";
 
-// §3-14 (ratified option 2): the pure delivery/retry state machine for the
-// persistent offline outbox, ported verbatim from the upstream thread-outbox
-// model minus the Atom / upstream-runtime imports and the pending-task *creation*
-// the mobile MVP queues messages for EXISTING threads only (§3-6 drops
-// new-task creation). Kept node-testable (no store / react-native / native KV).
+// §3-14 (ratified option 2): the pure retry state machine, grouping and
+// attachment normalization for the persistent offline outbox, ported from the
+// upstream thread-outbox model minus the Atom / upstream-runtime imports and the
+// pending-task *creation* the mobile MVP queues messages for EXISTING threads
+// only (§3-6 drops new-task creation). Delivery decisions use the shared
+// client-runtime queue policy (`resolveQueueDrainStep`). Kept node-testable (no
+// store / react-native / native KV).
 
 const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
 
-// Local mirror of the runtime shell status (no `state/shell` export in runtime A);
-// only the "live" case is load-bearing here.
-export type EnvironmentShellStatus = "idle" | "loading" | "live";
-
 export interface QueuedThreadMessage {
   readonly resumeReviewError?: string;
+  /**
+   * A steer of this message was cut off after the provider may have received it. The message
+   * no longer drains: it waits for an explicit retry or removal, so it is never sent twice.
+   */
+  readonly uncertainSteerError?: string;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
@@ -173,28 +176,6 @@ export function flattenQueuedThreadMessages(
 
 export function threadOutboxRetryDelayMs(attempt: number): number {
   return Math.min(1_000 * 2 ** Math.max(0, attempt - 1), THREAD_OUTBOX_MAX_RETRY_DELAY_MS);
-}
-
-export type ThreadOutboxDeliveryAction = "wait" | "remove" | "send";
-
-// Existing-thread delivery only (no creation branch): a queued message for a
-// thread that has vanished from a live shell is dropped; otherwise it sends once
-// the environment is connected and the thread is not mid-turn.
-export function resolveThreadOutboxDeliveryAction(input: {
-  readonly threadExists: boolean;
-  readonly shellStatus: EnvironmentShellStatus;
-  readonly environmentConnected: boolean;
-  readonly threadBusy: boolean;
-  readonly alreadyDelivered?: boolean;
-  /** False until detailed messages are loaded and stable-id delivery can be checked. */
-  readonly deliveryReconciled?: boolean;
-}): ThreadOutboxDeliveryAction {
-  if (input.alreadyDelivered === true) return "remove";
-  if (input.deliveryReconciled === false) return "wait";
-  if (!input.threadExists) {
-    return input.shellStatus === "live" ? "remove" : "wait";
-  }
-  return input.environmentConnected && !input.threadBusy ? "send" : "wait";
 }
 
 function errorMessage(error: unknown): string | null {

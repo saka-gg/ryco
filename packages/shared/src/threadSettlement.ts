@@ -30,6 +30,16 @@ export type ThreadSettlementBlocker =
   | "local-queue"
   | "delivery-unknown";
 
+/**
+ * Signals that gate only *automatic* settlement. Manual settle eligibility
+ * (`canSettleThread`) ignores them, so a user can still settle such a thread.
+ */
+export type ThreadAutoSettlementBlocker =
+  | "pinned"
+  | "background-work"
+  | "pull-request-open"
+  | "pull-request-unknown";
+
 export interface ThreadSettlementInput {
   readonly threadSettlementSupported: boolean;
   readonly archivedAt: string | null;
@@ -47,7 +57,19 @@ export interface ThreadSettlementInput {
   readonly hasPendingUserInput: boolean;
   readonly hasLocalQueuedMessage: boolean;
   readonly deliveryUnknown: boolean;
+  /** Client-local pin. Servers and pin-less clients pass false. */
+  readonly pinned: boolean;
+  /** Shell background liveness. Only "working" blocks automatic settlement. */
+  readonly backgroundLiveness: "working" | "monitoring" | null;
+  readonly prNumber: number | null;
   readonly prState: PullRequestState | null;
+  /**
+   * When the PR reached its current merged/closed state: the forge-reported
+   * close time when available, else the time the server first recorded that
+   * state (an upper bound). `null` while open, unknown, or absent.
+   * `undefined` = the server predates the field, so the legacy merged rule applies.
+   */
+  readonly prTerminalAt: string | null | undefined;
   readonly worktreeUpdatedAt: string | null;
   readonly updatedAt: string | null;
   readonly createdAt: string;
@@ -68,7 +90,12 @@ function timestampMs(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function hasQueuedTurnStart(input: ThreadSettlementInput): boolean {
+export function hasQueuedTurnStart(
+  input: Pick<
+    ThreadSettlementInput,
+    "latestTurnState" | "sessionStatus" | "latestUserMessageAt" | "latestTurnRequestedAt" | "nowMs"
+  >,
+): boolean {
   if (input.latestTurnState === "error" || input.sessionStatus === "error") {
     return false;
   }
@@ -109,6 +136,45 @@ export function canSettleThread(input: ThreadSettlementInput): CanSettleThreadRe
   return { canSettle: true, blocker: null };
 }
 
+export type QueuedTurnIdleBlocker =
+  | "thread-archived"
+  | "pending-approval"
+  | "pending-user-input"
+  | "session-starting"
+  | "session-running"
+  | "background-working"
+  | "queued-turn";
+
+export interface QueuedTurnIdleInput {
+  readonly archivedAt: string | null;
+  readonly sessionStatus: OrchestrationSessionStatus | null;
+  readonly latestTurnState: OrchestrationLatestTurnState | null;
+  readonly latestTurnRequestedAt: string | null;
+  readonly latestUserMessageAt: string | null;
+  readonly hasPendingApprovals: boolean;
+  readonly hasPendingUserInput: boolean;
+  readonly backgroundLiveness: "working" | "monitoring" | null;
+  readonly nowMs: number;
+}
+
+/**
+ * Whether a server-initiated queued turn (delegation wake) may start now. Same order as
+ * `canSettleThread`. Monitoring-only background work (e.g. a dev server watcher) does not
+ * block: a chat that leaves one running would otherwise never be woken. A stopped, errored
+ * or missing session does not block either; the turn start (re)creates it.
+ */
+export function queuedTurnIdleBlocker(input: QueuedTurnIdleInput): QueuedTurnIdleBlocker | null {
+  if (input.archivedAt !== null) return "thread-archived";
+  if (input.hasPendingApprovals) return "pending-approval";
+  if (input.hasPendingUserInput) return "pending-user-input";
+  if (input.sessionStatus === "starting") return "session-starting";
+  if (input.sessionStatus === "running" || input.latestTurnState === "running")
+    return "session-running";
+  if (input.backgroundLiveness === "working") return "background-working";
+  if (hasQueuedTurnStart(input)) return "queued-turn";
+  return null;
+}
+
 function newestValidTimestamp(candidates: ReadonlyArray<string | null>): string | null {
   let newest: { value: string; ms: number } | null = null;
   for (const candidate of candidates) {
@@ -145,20 +211,62 @@ function autoSettleBoundaryMs(input: ThreadSettlementInput): number | null {
   return Number.isFinite(boundaryMs) ? boundaryMs : null;
 }
 
-function canUseInactivitySettlement(input: ThreadSettlementInput): boolean {
-  return input.settledOverride === null && input.prState === null;
+/**
+ * Why automatic settlement is held back, independent of manual eligibility.
+ * Re-evaluated whenever the underlying pin, liveness, or PR data changes.
+ */
+export function getThreadAutoSettlementBlocker(
+  input: ThreadSettlementInput,
+): ThreadAutoSettlementBlocker | null {
+  if (input.pinned) return "pinned";
+  if (input.backgroundLiveness === "working") return "background-work";
+  if (input.prState === "open") return "pull-request-open";
+  if (input.prState === null && input.prNumber !== null) return "pull-request-unknown";
+  return null;
+}
+
+/** The user's last deliberate interaction: thread creation, a message, or a requested turn. */
+function pullRequestUserAnchorMs(input: ThreadSettlementInput): number | null {
+  return timestampMs(
+    newestValidTimestamp([input.createdAt, input.latestUserMessageAt, input.latestTurnRequestedAt]),
+  );
+}
+
+/** Settlement timestamp contributed by a merged/closed PR, or null when it is not a signal. */
+function pullRequestSettlementTimestamp(input: ThreadSettlementInput): string | null {
+  if (input.prState !== "merged" && input.prState !== "closed") return null;
+  if (input.prTerminalAt === undefined) {
+    // The server predates prTerminalAt: keep the pre-existing rule unchanged.
+    return newestValidTimestamp([
+      input.worktreeUpdatedAt,
+      input.latestTurnCompletedAt,
+      input.latestUserMessageAt,
+      input.updatedAt,
+      input.createdAt,
+    ]);
+  }
+  const terminalMs = timestampMs(input.prTerminalAt);
+  const anchorMs = pullRequestUserAnchorMs(input);
+  // A PR that closed before the user's latest activity is no longer a signal;
+  // the inactivity rule decides instead.
+  if (terminalMs === null || anchorMs === null || terminalMs < anchorMs) return null;
+  return newestValidTimestamp([input.prTerminalAt, getThreadLastActivityTimestamp(input)]);
 }
 
 export function getNextThreadSettlementEvaluationAtMs(input: ThreadSettlementInput): number | null {
-  if (!canUseInactivitySettlement(input) || !Number.isFinite(input.nowMs)) return null;
-  const autoSettleAtMs = autoSettleBoundaryMs(input);
-  if (autoSettleAtMs === null) return null;
+  if (input.settledOverride !== null || !Number.isFinite(input.nowMs)) return null;
+  // Blocked threads are re-evaluated when the blocking data changes, not on a timer.
+  if (getThreadAutoSettlementBlocker(input) !== null) return null;
 
   const eligibility = canSettleThread(input);
   if (!eligibility.canSettle && eligibility.blocker !== "queued-turn") return null;
 
+  const pullRequestSettles = pullRequestSettlementTimestamp(input) !== null;
+  const autoSettleAtMs = pullRequestSettles ? null : autoSettleBoundaryMs(input);
+  if (!pullRequestSettles && autoSettleAtMs === null) return null;
+
   const candidates: number[] = [];
-  if (autoSettleAtMs > input.nowMs) candidates.push(autoSettleAtMs);
+  if (autoSettleAtMs !== null && autoSettleAtMs > input.nowMs) candidates.push(autoSettleAtMs);
   if (eligibility.blocker === "queued-turn") {
     const latestUserMessageAtMs = timestampMs(input.latestUserMessageAt);
     if (latestUserMessageAtMs !== null) {
@@ -173,16 +281,12 @@ export function getEffectiveSettlementTimestamp(input: ThreadSettlementInput): s
   if (input.settledOverride === "settled") {
     return timestampMs(input.settledAt) === null ? null : input.settledAt;
   }
-  if (input.prState === "merged" || input.prState === "closed") {
-    return newestValidTimestamp([
-      input.worktreeUpdatedAt,
-      input.latestTurnCompletedAt,
-      input.latestUserMessageAt,
-      input.updatedAt,
-      input.createdAt,
-    ]);
+  if (input.settledOverride !== null) return null;
+  if (!canSettleThread(input).canSettle || getThreadAutoSettlementBlocker(input) !== null) {
+    return null;
   }
-  if (!canUseInactivitySettlement(input) || !canSettleThread(input).canSettle) return null;
+  const pullRequestAt = pullRequestSettlementTimestamp(input);
+  if (pullRequestAt !== null) return pullRequestAt;
   const boundaryMs = autoSettleBoundaryMs(input);
   if (boundaryMs === null || !Number.isFinite(input.nowMs) || input.nowMs < boundaryMs) return null;
   return new Date(boundaryMs).toISOString();
@@ -199,14 +303,7 @@ export function classifyThreadSettlement(
     return getEffectiveSettlementTimestamp(input) === null ? "active" : "settled";
   }
   if (input.settledOverride === "active") return "active";
-  if (
-    (input.prState === "merged" || input.prState === "closed") &&
-    getEffectiveSettlementTimestamp(input) !== null
-  ) {
-    return "settled";
-  }
-  if (getEffectiveSettlementTimestamp(input) !== null) return "settled";
-  return "active";
+  return getEffectiveSettlementTimestamp(input) === null ? "active" : "settled";
 }
 
 export interface ActiveInboxSortInput {

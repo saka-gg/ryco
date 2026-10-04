@@ -41,7 +41,8 @@ const fail = (
   detail: string,
 ) => Effect.fail(new AgentControlPlanValidationError({ reason, detail }));
 
-const runtimeRank: Record<RuntimeMode, number> = {
+/** Privilege order of runtime modes: lower is less privileged. */
+export const agentControlRuntimeRank: Record<RuntimeMode, number> = {
   "approval-required": 0,
   "auto-accept-edits": 1,
   auto: 2,
@@ -293,7 +294,10 @@ const validatePlanAgainstSnapshot = (input: {
   Effect.gen(function* () {
     const assertPrivilege = (target: OrchestrationThreadShell) =>
       Effect.gen(function* () {
-        if (runtimeRank[target.runtimeMode] > runtimeRank[input.originRuntimeMode]) {
+        if (
+          agentControlRuntimeRank[target.runtimeMode] >
+          agentControlRuntimeRank[input.originRuntimeMode]
+        ) {
           return yield* fail(
             "privilege-escalation",
             "The target thread has a more privileged runtime mode than the caller.",
@@ -321,7 +325,10 @@ const validatePlanAgainstSnapshot = (input: {
         if (!project) {
           return yield* fail("project-unavailable", "The requested project is unavailable.");
         }
-        if (runtimeRank[entry.runtimeMode] > runtimeRank[input.originRuntimeMode]) {
+        if (
+          agentControlRuntimeRank[entry.runtimeMode] >
+          agentControlRuntimeRank[input.originRuntimeMode]
+        ) {
           return yield* fail(
             "privilege-escalation",
             "The requested runtime mode is more privileged than the caller.",
@@ -379,7 +386,8 @@ const validatePlanAgainstSnapshot = (input: {
         yield* providerForSelection(input.providers, input.plan.modelSelection);
       if (
         input.plan.runtimeMode !== undefined &&
-        runtimeRank[input.plan.runtimeMode] > runtimeRank[input.originRuntimeMode]
+        agentControlRuntimeRank[input.plan.runtimeMode] >
+          agentControlRuntimeRank[input.originRuntimeMode]
       ) {
         return yield* fail(
           "privilege-escalation",

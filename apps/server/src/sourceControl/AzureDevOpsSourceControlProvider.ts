@@ -363,7 +363,11 @@ export const make = Effect.fn("makeAzureDevOpsSourceControlProvider")(function* 
         .pipe(Effect.mapError((error) => providerError("listAssignees", error))),
     getPullRequestState: (input) =>
       azure.getPullRequest({ cwd: input.cwd, reference: String(input.number) }).pipe(
-        Effect.map((summary) => ({ state: summary.state, isDraft: summary.isDraft ?? false })),
+        Effect.map((summary) => ({
+          state: summary.state,
+          isDraft: summary.isDraft ?? false,
+          terminalAt: summary.state === "open" ? null : (summary.closedAt ?? null),
+        })),
         Effect.mapError((error) => providerError("getPullRequestState", error)),
       ),
     getIssueState: () =>

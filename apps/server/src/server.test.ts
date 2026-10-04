@@ -845,6 +845,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.mergeAll(
           Layer.mock(OrchestrationEngineService)({
+            bootSequence: 0,
             readEvents: () => Stream.empty,
             readEventsPage: (fromSequenceExclusive) =>
               Effect.succeed({

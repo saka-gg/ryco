@@ -231,4 +231,85 @@ different API keys, base URLs, or router settings, use Environment variables.
 
 Do not put environment variable assignments in `Launch arguments`.
 
+## Background Wake Turns
+
+Claude can start a turn without a prompt from you, for example when a background command or agent
+finishes. Ryco shows the thread as working from the moment Claude starts that request, and the turn's
+reasoning and text stream like any other turn. Stop ends a background turn too. If a background turn
+starts but produces no output for two minutes, Ryco ends it.
+
+## Steering A Running Turn
+
+A message you send while a Claude turn runs can steer that turn instead of waiting in the queue.
+Choose the default in Settings → Composer controls → Messages sent while a turn runs: Queue (the
+default) or Steer. While a turn runs, ⌘↵ / Ctrl+Enter does the opposite. Each queued row also has
+a Steer button.
+
+How it works:
+
+- Ryco sends the message to Claude Code as a user message with `priority: "now"` and its own id.
+  Claude Code either folds it into the running request at the next tool boundary, or stops the
+  current request and runs the message next. Either way it stays one Ryco turn: the message
+  appears in that turn and the reply continues there, with one working state and one completion.
+- The turn waits for the steered message's reply only while Claude Code reports more queued work
+  (`queued_turn_count > 0`). It never waits on a timer.
+- A steer that cannot be applied stays in the queue and is sent as the next turn. This happens
+  when the turn has already finished, while Claude waits for an approval or an answer, for slash
+  commands, and on Claude Code versions without the `interrupt_receipt_v1` capability. A deferral
+  never adds an error or a work-log row. A steer sent automatically by the follow-up setting is
+  deferred silently; an explicit steer (the Steer button or ⌘↵ / Ctrl+Enter) shows a "Not
+  steered" notice saying why.
+- If a steer stops Claude's current request but Claude Code reports no further queued work, the
+  turn completes normally rather than as interrupted, so the queue keeps draining. The steered
+  message then runs as its own request and its reply appears in a background turn.
+
+Stop also stops pending steers. On Claude Code versions with `interrupt_cancel_queued_v1`, Stop
+cancels the queued steer with the interrupt. On versions with only `interrupt_receipt_v1`, Ryco
+uses the interrupt receipt: if Claude Code still runs the steer later on its own, Ryco drops its
+output and interrupts it again (unless its first reply is an API error, which ends it anyway), so
+no new turn appears. A stopped turn always ends as stopped, even when a steered request that was
+already running closes it with an API error. A request that fails also drops its pending steers
+the same way, instead of running them as a surprise turn after the failure. The turn then ends as
+failed with the request's error, so the queue holds and you can see why the steer got no reply.
+This includes an API error after Claude Code's retries, which Claude Code reports as a finished
+request flagged as an error.
+
+Known edges:
+
+- A steer accepted just as Claude finishes the turn runs as its own Claude request. Its reply then
+  appears in a separate background turn, while your message stays in the finished turn.
+- A background wake that runs between the stopped request and the steered message is shown inside
+  the steered turn.
+- The token usage shown on the completed turn covers the last request only. The context meter is
+  updated after every request.
+- A dropped steer that Claude Code runs together with your next message is not dropped: it is
+  answered in that message's turn.
+- If Claude Code folds your next message into a dropped steer's request after it started, that
+  message gets no reply. Claude Code reports the fold only on the request's result, so the
+  request's output was already being dropped, and Ryco's interrupt of the dropped request usually
+  aborts it before your message runs. A folded message never runs as a request of its own. Its
+  turn ends as failed with a notice to send the message again, not as stopped, so the queue holds
+  as after any failure rather than pausing as after Stop.
+- If you steer while your own message still waits behind a background request, and Claude Code
+  runs the steer first, the turn completes after the steer's reply and your message's reply
+  appears in a background turn. Whether Claude Code orders the two this way, rather than running
+  them together, is not yet verified.
+- Ryco recognises a dropped steer's request by the message ids Claude Code echoes on its first
+  reply: the first streamed frame (Ryco always enables partial messages) or, when nothing
+  streamed, the first reply message, such as the error reply of a request that failed at the API.
+  A request that echoes on neither is recognised by its result. While a dropped steer is pending,
+  a background turn opens at its first output instead of at Claude's "requesting" status. If the
+  output carries no early echo, it appears in that background turn, which the steer's result then
+  ends.
+- A steer whose reply already started streaming when Stop's receipt arrives counts as running:
+  Ryco interrupts it (an API-error reply ends it anyway), the part that already streamed stays in
+  the stopped turn, and that turn ends as stopped with the steer's result, so no background turn
+  appears.
+
+Not yet verified against a live Claude Code: whether a `priority: "now"` message aborts the
+running request or folds into it, which `terminal_reason` an abort reports, and which
+`queued_turn_count` the aborted result carries. Ryco handles every combination above. The manual
+checks that settle them (steer mid-stream, steer during a Bash tool, Stop right after a steer on
+each capability level) still need to be run and their findings recorded here.
+
 See [observed cache usage and resume review](./claude-cache.md) for evidence scopes, compaction, and recovery behavior.

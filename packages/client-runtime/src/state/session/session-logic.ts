@@ -2,6 +2,7 @@ import { ApprovalResponseIdentity, ApprovalResponseState } from "@ryco/contracts
 import { Schema } from "effect";
 import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import { isContextCompactionActivity } from "@ryco/shared/threadActivity";
+import { readTurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
 
 import { isBackgroundTaskActivity } from "./subagentRuntime.ts";
 import {
@@ -926,6 +927,10 @@ function shouldIncludeActivityInWorkLog(
     return false;
   }
   if (!agentTimeline && isAgentInternalActivity(activity)) {
+    return false;
+  }
+  // A deferred steer is not news: the message stays queued and is sent next.
+  if (readTurnSteerRejectionActivity(activity)?.reason === "deferred") {
     return false;
   }
   return (

@@ -359,6 +359,30 @@ export function createModelSelection(
   return selections.length > 0 ? { ...base, options: selections } : base;
 }
 
+function canonicalOptionKeys(
+  options: ReadonlyArray<ProviderOptionSelection> | undefined,
+): ReadonlyArray<string> {
+  return (options ?? [])
+    .map((option) => JSON.stringify([option.id, option.value]))
+    .toSorted((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
+/**
+ * Semantic equality of two model selections: same instance and model, and the
+ * same options regardless of their order (absent options equal an empty list).
+ * Key order never matters, so a selection round-tripped through JSON and schema
+ * decode equals the hydrated one.
+ */
+export function sameModelSelection(left: ModelSelection, right: ModelSelection): boolean {
+  if (left.instanceId !== right.instanceId || left.model !== right.model) return false;
+  const leftOptions = canonicalOptionKeys(left.options);
+  const rightOptions = canonicalOptionKeys(right.options);
+  return (
+    leftOptions.length === rightOptions.length &&
+    leftOptions.every((key, index) => rightOptions[index] === key)
+  );
+}
+
 /**
  * Context handoff is a provider-instance boundary. Model and option changes
  * within one configured instance remain on that provider's normal turn path.

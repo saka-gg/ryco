@@ -1,5 +1,6 @@
 import type {
   ClientOrchestrationCommand,
+  InternalOrchestrationCommand,
   OrchestrationCommand,
   OrchestrationDispatchCommandError,
 } from "@ryco/contracts";
@@ -25,6 +26,15 @@ export interface OrchestrationCommandApplicationShape {
   readonly applyWithDispatcher: (
     command: ClientOrchestrationCommand,
     dispatch: OrchestrationNormalizedCommandDispatcher,
+  ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
+
+  /**
+   * Apply a server-originated internal command (no client normalization; same
+   * engine dispatcher, archive follow-ups and error mapping as `apply`).
+   * Never pass decoded client input here.
+   */
+  readonly applyInternal: (
+    command: InternalOrchestrationCommand,
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
 }
 

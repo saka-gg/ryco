@@ -47,7 +47,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { failStartedTurnOnError, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import { type AcpSessionRuntimeShape } from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -896,7 +896,8 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
               ...(displayModel ? { model: displayModel } : {}),
             };
 
-            yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
+            const runtimeSessionId = ctx.session.runtimeSessionId!;
+            yield* offerRuntimeEventForRuntime(runtimeSessionId, {
               type: "turn.started",
               ...(yield* makeEventStamp()),
               provider: PROVIDER,
@@ -908,6 +909,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             return {
               acp: ctx.acp,
               acpSessionId: ctx.acpSessionId,
+              runtimeSessionId,
               displayModel,
               promptParts,
               turnId,
@@ -915,56 +917,80 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
           }),
         );
 
-        const result = yield* prepared.acp
-          .prompt({
-            prompt: prepared.promptParts,
-          })
-          .pipe(
-            Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
-            ),
-          );
+        // Once turn.started is out, every failure must also close the turn on the
+        // runtime stream; otherwise ingestion keeps it running forever.
+        let terminalEmitted = false;
+        return yield* Effect.gen(function* () {
+          const result = yield* prepared.acp
+            .prompt({
+              prompt: prepared.promptParts,
+            })
+            .pipe(
+              Effect.mapError((error) =>
+                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+              ),
+            );
 
-        return yield* withThreadLock(
-          input.threadId,
-          Effect.gen(function* () {
-            const ctx = yield* requireSession(input.threadId);
-            if (ctx.acpSessionId !== prepared.acpSessionId) {
-              return yield* new ProviderAdapterRequestError({
+          return yield* withThreadLock(
+            input.threadId,
+            Effect.gen(function* () {
+              const ctx = yield* requireSession(input.threadId);
+              if (ctx.acpSessionId !== prepared.acpSessionId) {
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/prompt",
+                  detail: "ACP session changed before the turn completed.",
+                });
+              }
+
+              ctx.turns = [
+                ...ctx.turns,
+                { id: prepared.turnId, items: [{ prompt: prepared.promptParts, result }] },
+              ];
+              ctx.session = {
+                ...ctx.session,
+                activeTurnId: prepared.turnId,
+                updatedAt: yield* nowIso,
+                ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
+              };
+
+              yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
+                type: "turn.completed",
+                ...(yield* makeEventStamp()),
                 provider: PROVIDER,
-                method: "session/prompt",
-                detail: "ACP session changed before the turn completed.",
+                threadId: input.threadId,
+                turnId: prepared.turnId,
+                payload: {
+                  state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+                  stopReason: result.stopReason ?? null,
+                },
               });
-            }
+              terminalEmitted = true;
 
-            ctx.turns = [
-              ...ctx.turns,
-              { id: prepared.turnId, items: [{ prompt: prepared.promptParts, result }] },
-            ];
-            ctx.session = {
-              ...ctx.session,
-              activeTurnId: prepared.turnId,
-              updatedAt: yield* nowIso,
-              ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
-            };
-
-            yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
-              type: "turn.completed",
-              ...(yield* makeEventStamp()),
-              provider: PROVIDER,
-              threadId: input.threadId,
-              turnId: prepared.turnId,
-              payload: {
-                state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-                stopReason: result.stopReason ?? null,
-              },
-            });
-
-            return {
-              threadId: input.threadId,
-              turnId: prepared.turnId,
-              resumeCursor: ctx.session.resumeCursor,
-            };
+              return {
+                threadId: input.threadId,
+                turnId: prepared.turnId,
+                resumeCursor: ctx.session.resumeCursor,
+              };
+            }),
+          );
+        }).pipe(
+          failStartedTurnOnError({
+            isTerminalEmitted: () => terminalEmitted,
+            // Stamped with the turn's own runtime: if the ACP session was replaced,
+            // ingestion drops it as stale and the rebind's session-replaced release
+            // labels the turn instead.
+            emitFailed: (errorMessage) =>
+              Effect.gen(function* () {
+                yield* offerRuntimeEventForRuntime(prepared.runtimeSessionId, {
+                  type: "turn.completed",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  turnId: prepared.turnId,
+                  payload: { state: "failed", errorMessage },
+                });
+              }),
           }),
         );
       });
@@ -1021,20 +1047,14 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
         return { threadId, turns: ctx.turns };
       });
 
-    const rollbackThread: AcpAdapterShape["rollbackThread"] = (threadId, numTurns) =>
+    // ACP sessions cannot forget turns; ProviderService refuses before reaching this.
+    const rollbackThread: AcpAdapterShape["rollbackThread"] = (threadId) =>
       Effect.gen(function* () {
         yield* requireSession(threadId);
-        if (!Number.isInteger(numTurns) || numTurns < 1) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "rollbackThread",
-            issue: "numTurns must be an integer >= 1.",
-          });
-        }
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
           method: "thread/rollback",
-          detail: "ACP sessions do not support provider-side rollback yet.",
+          detail: "This ACP agent does not support conversation rollback.",
         });
       });
 
@@ -1072,8 +1092,12 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
       provider: PROVIDER,
       capabilities: {
         get sessionModelSwitch() {
-          return options.getSessionModelSwitch?.() ?? "unsupported";
+          // sendTurn applies the model through applyAcpModelSelection. Drivers
+          // override this only when the agent advertises no model API.
+          return options.getSessionModelSwitch?.() ?? "in-session";
         },
+        // sendTurn awaits the whole ACP prompt after emitting turn.started.
+        turnSubmission: "completion",
       },
       startSession,
       sendTurn,

@@ -234,3 +234,64 @@ describe("send engine — dispatch assembly", () => {
     expect(turnStart).toHaveProperty("sourceControlContexts");
   });
 });
+
+describe("send engine — onBeforeTurnStart", () => {
+  it("runs exactly once, after beginLocalDispatch and immediately before turn.start", async () => {
+    const harness = makeDispatchHarness({ isFirstMessage: true });
+    const input = {
+      ...harness.input,
+      onBeforeTurnStart: () => {
+        harness.calls.push("onBeforeTurnStart");
+      },
+    };
+    await commitSendTurnDispatch(input);
+    expect(harness.calls).toEqual([
+      "dispatch:thread.meta.update",
+      "persist",
+      "beginLocalDispatch",
+      "onBeforeTurnStart",
+      "dispatch:thread.turn.start",
+    ]);
+  });
+
+  it("is not called when the send fails before the turn command", async () => {
+    let called = 0;
+    const harness = makeDispatchHarness({
+      messageId: MessageId.make("message-readiness"),
+      bootstrap: { requireWorktree: true },
+      assertMutationReady: () => {
+        throw new Error("Reconnect before sending.");
+      },
+      onBeforeTurnStart: () => {
+        called += 1;
+      },
+    });
+    await expect(commitSendTurnDispatch(harness.input)).rejects.toThrow("Reconnect");
+    expect(called).toBe(0);
+    expect(harness.calls).not.toContain("dispatch:thread.turn.start");
+  });
+});
+
+describe("send engine — usage-limit resume", () => {
+  it("passes a commandId override and the usage-limit guard to turn.start", async () => {
+    const harness = makeDispatchHarness({
+      isFirstMessage: false,
+      commandId: CommandId.make("usage-limit-resume:limit-1"),
+      usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" },
+    });
+    await commitSendTurnDispatch(harness.input);
+    const turnStart = harness.commands.find((command) => command.type === "thread.turn.start");
+    expect(turnStart).toMatchObject({
+      commandId: "usage-limit-resume:limit-1",
+      usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" },
+    });
+  });
+
+  it("keeps the default command id and omits the guard otherwise", async () => {
+    const harness = makeDispatchHarness();
+    await commitSendTurnDispatch(harness.input);
+    const turnStart = harness.commands.find((command) => command.type === "thread.turn.start");
+    expect(turnStart?.commandId).toBe("composer-send:thread-1:message-1");
+    expect(turnStart).not.toHaveProperty("usageLimitResumeGuard");
+  });
+});

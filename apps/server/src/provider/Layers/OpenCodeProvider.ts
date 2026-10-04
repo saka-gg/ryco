@@ -16,10 +16,12 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import type { ServerProviderRateLimits } from "@ryco/contracts";
-import { compareCliVersions } from "../cliVersion.ts";
 import { probeOpenCodeGoUsageRateLimits } from "./OpenCodeGoUsage.ts";
 import {
-  MINIMUM_OPENCODE_VERSION,
+  describeUnsupportedOpenCodeVersion,
+  OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
+} from "../openCodeVersion.ts";
+import {
   OpenCodeRuntime,
   openCodeRuntimeErrorDetail,
   type OpenCodeInventory,
@@ -419,14 +421,13 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     version = parseGenericCliVersion(versionExit.value.stdout) ?? null;
 
     if (!version) {
-      return fallback(
-        new Error(
-          `Unable to determine OpenCode version from \`opencode --version\` output. Ryco requires OpenCode v${MINIMUM_OPENCODE_VERSION} or newer.`,
-        ),
-        null,
-      );
+      return fallback(new Error(OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE), null);
     }
-    if (compareCliVersions(version, MINIMUM_OPENCODE_VERSION) < 0) {
+    // Gate before connecting: a 2.x binary must never be started as a server (it converts the
+    // shared OpenCode database in place). Built directly, so formatOpenCodeProbeError never
+    // rewrites the message.
+    const versionProblem = describeUnsupportedOpenCodeVersion(version, "binary");
+    if (versionProblem !== null) {
       return buildServerProvider({
         presentation: OPENCODE_PRESENTATION,
         enabled: openCodeSettings.enabled,
@@ -442,7 +443,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
           version,
           status: "error",
           auth: { status: "unknown" },
-          message: `OpenCode v${version} is too old. Upgrade to v${MINIMUM_OPENCODE_VERSION} or newer.`,
+          message: versionProblem,
         },
       });
     }

@@ -1,11 +1,43 @@
 import type { OrchestrationEvent } from "@ryco/contracts";
-import { Context } from "effect";
-import type { Effect } from "effect";
+import { Context, Effect } from "effect";
+
+import type {
+  ContextHandoffRepositoryError,
+  ProjectionRepositoryError,
+} from "../../persistence/Errors.ts";
+import type { OrchestrationDispatchError } from "../Errors.ts";
+import type { ProviderSessionStartCancelledError } from "../threadLaneControl.ts";
 
 export type ContextHandoffTurnStartEvent = Extract<
   OrchestrationEvent,
   { readonly type: "thread.turn-start-requested" }
 >;
+
+/**
+ * The reactor's per-thread lane hooks for one handoff turn start.
+ *
+ * - `guardStart` wraps the target session start, so a Stop cancels it.
+ * - `onDispatchStarted` runs right after `dispatching` is persisted and before
+ *   the turn is sent. From then on the lane item owns a running turn and Stop
+ *   reaches the provider out of band. It fails Cancelled when a user stop or
+ *   interrupt was already noted, closing the gap between start and ownership.
+ * - `stopRequested` tells the failure path that the user stopped the thread, so
+ *   the source is put back as `stopped`, never `ready`.
+ */
+export interface ContextHandoffLaneControl {
+  readonly guardStart: <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | ProviderSessionStartCancelledError, R>;
+  readonly onDispatchStarted: Effect.Effect<void, ProviderSessionStartCancelledError>;
+  readonly stopRequested: Effect.Effect<boolean>;
+}
+
+/** No lane: startup recovery and direct callers. */
+export const NO_LANE_CONTROL: ContextHandoffLaneControl = {
+  guardStart: (effect) => effect,
+  onDispatchStarted: Effect.void,
+  stopRequested: Effect.succeed(false),
+};
 
 export interface ContextHandoffCoordinatorShape {
   /**
@@ -13,11 +45,34 @@ export interface ContextHandoffCoordinatorShape {
    * The implementation owns terminal failure projection and never throws an
    * operational failure back into the generic provider-turn path.
    */
-  readonly processTurnStart: (event: ContextHandoffTurnStartEvent) => Effect.Effect<void>;
+  readonly processTurnStart: (
+    event: ContextHandoffTurnStartEvent,
+    control?: ContextHandoffLaneControl,
+  ) => Effect.Effect<void>;
 
   /** Reconcile durable operations left in preparing/dispatching at startup. */
   readonly recover: () => Effect.Effect<void>;
+
+  /**
+   * Resolve a handoff turn start whose process died before the coordinator
+   * took it past `requested`. Never touches source/target runtimes: nothing was
+   * swapped yet. `owned`: in flight here, or `recover()` owns or finished the
+   * record. `abandoned`: the terminal `failed` activity was appended (it settles
+   * the start). `unrecognized`: the request cannot be validated; nothing changed.
+   * A failed terminal append propagates and leaves the record `requested`.
+   */
+  readonly abandonUnstartedTurnStart: (
+    event: ContextHandoffTurnStartEvent,
+    detail: string,
+  ) => Effect.Effect<AbandonUnstartedTurnStartResult, ContextHandoffAbandonError>;
 }
+
+export type AbandonUnstartedTurnStartResult = "owned" | "abandoned" | "unrecognized";
+
+export type ContextHandoffAbandonError =
+  | ContextHandoffRepositoryError
+  | ProjectionRepositoryError
+  | OrchestrationDispatchError;
 
 export class ContextHandoffCoordinator extends Context.Service<
   ContextHandoffCoordinator,
