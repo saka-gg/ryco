@@ -206,6 +206,22 @@ describe("restartCandidateShape + classifyRestartCandidate", () => {
     ).toEqual(skipped("disabled"));
   });
 
+  it("never continues a thread one of whose checks could not be read", () => {
+    expect(classify(thread(), { signals: undefined })).toEqual(skipped("check-failed"));
+    expect(classify(thread(), { pendingDelegatedReturn: undefined })).toEqual(
+      skipped("check-failed"),
+    );
+    expect(classify(thread(), { resumable: undefined })).toEqual(skipped("check-failed"));
+    // Reasons that need no IO still win.
+    expect(classify(thread({ latestTurnState: "interrupted" }), { signals: undefined })).toEqual(
+      skipped("user-interrupted"),
+    );
+    expect(classify(thread({ activities: pendingApproval }), { signals: undefined })).toEqual(
+      skipped("pending-request"),
+    );
+    expect(restartSkipNotice("check-failed")).toBeNull();
+  });
+
   it("(l) refuses to continue an automatic continuation again", () => {
     expect(
       classify(thread({ userMessageId: restartContinuationIds(threadId, turnId).messageId })),

@@ -87,6 +87,7 @@ async function createSystem(options: SystemOptions = {}) {
     enabled: true,
     bindings: new Map<string, ProviderRuntimeBinding>(),
     delegatedReturnStatus: new Map<string, string>(),
+    delegatedReturnReadFails: false,
     commands: [] as OrchestrationCommand[],
   };
   const infrastructure = Layer.mergeAll(
@@ -131,11 +132,13 @@ async function createSystem(options: SystemOptions = {}) {
     } as unknown as ProviderSessionDirectory["Service"]),
     Layer.succeed(CompletionReturnRepository, {
       get: (threadId: ThreadId) =>
-        Effect.succeed(
-          state.delegatedReturnStatus.has(threadId)
-            ? { status: state.delegatedReturnStatus.get(threadId) }
-            : undefined,
-        ),
+        state.delegatedReturnReadFails
+          ? Effect.die(new Error("completion returns unavailable"))
+          : Effect.succeed(
+              state.delegatedReturnStatus.has(threadId)
+                ? { status: state.delegatedReturnStatus.get(threadId) }
+                : undefined,
+            ),
     } as unknown as CompletionReturnRepository["Service"]),
   );
   const layer = makeRestartContinuationLayer(options).pipe(
@@ -438,6 +441,39 @@ describe("RestartContinuation", () => {
     expect(deriveBackgroundWork(window.thread.activities, seeded.runtimeSessionId).tasks).toEqual(
       [],
     );
+  });
+
+  it("still stops background work when a capture check cannot be read, and never continues", async () => {
+    const system = await createSystem();
+    const seeded = await system.seedThread({ id: "unchecked" });
+    await system.dispatch(
+      backgroundTask({
+        threadId: seeded.threadId,
+        runtimeSessionId: seeded.runtimeSessionId,
+        taskId: "tail",
+        title: "Tail the deploy log",
+        createdAt: system.ago(1),
+      }),
+    );
+    system.state.delegatedReturnReadFails = true;
+
+    const captured = await system.startup([seeded.threadId]);
+    expect(captured).toMatchObject([{ status: "skipped", reason: "check-failed" }]);
+    expect(await system.rowOf(seeded.threadId, seeded.turnId)).toMatchObject({
+      status: "skipped",
+      reason: "check-failed",
+      record: { backgroundWork: { tasks: [{ id: "tail", title: "Tail the deploy log" }] } },
+    });
+    expect(
+      await system.activities(seeded.threadId, "background-work.session-boundary"),
+    ).toHaveLength(1);
+    expect(
+      await system.activities(seeded.threadId, RESTART_BACKGROUND_WORK_STOPPED_KIND),
+    ).toHaveLength(1);
+    expect(await system.activities(seeded.threadId, RESTART_CONTINUATION_SKIPPED_KIND)).toEqual([]);
+
+    await system.run(system.restart.dispatchPending());
+    expect(system.turnStarts()).toEqual([]);
   });
 
   it("reads a user stop from the event log even after SQL flips the turn back to running", async () => {

@@ -261,6 +261,12 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
         }
 
         const enabled = input.settingEnabled;
+        // A failed check reads as undefined and fails closed in the classifier, so the row
+        // (and its background-work boundary and note) is still recorded.
+        const check = <A, E, R>(name: string, effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(
+            logFailure(`restart capture could not read ${name}`, { threadId: thread.id }),
+          );
         const classification = input.overCapacity
           ? ({
               status: "skipped",
@@ -271,32 +277,41 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
               shape,
               settingEnabled: enabled,
               signals: enabled
-                ? yield* repository.sourceTurnSignals({
-                    threadId: thread.id,
-                    turnId: shape.sourceTurnId,
-                    turnMessageId: thread.latestTurn?.userMessageId ?? null,
-                  })
+                ? yield* check(
+                    "the source turn signals",
+                    repository.sourceTurnSignals({
+                      threadId: thread.id,
+                      turnId: shape.sourceTurnId,
+                      turnMessageId: thread.latestTurn?.userMessageId ?? null,
+                    }),
+                  )
                 : NO_RESTART_SIGNALS,
               pendingDelegatedReturn: enabled
-                ? yield* completionReturns
-                    .get(thread.id)
-                    .pipe(
-                      Effect.map((record) =>
-                        record === undefined ? false : isPendingCompletionReturn(record),
+                ? yield* check(
+                    "the delegated return",
+                    completionReturns
+                      .get(thread.id)
+                      .pipe(
+                        Effect.map((record) =>
+                          record === undefined ? false : isPendingCompletionReturn(record),
+                        ),
                       ),
-                    )
+                  )
                 : false,
               usageLimited: applicableUsageLimit(thread) !== null,
               resumable: enabled
-                ? yield* directory.getBinding(thread.id).pipe(
-                    Effect.map((binding) =>
-                      Option.match(binding, {
-                        onNone: () => false,
-                        onSome: (value) =>
-                          value.resumeCursor !== undefined &&
-                          value.resumeCursor !== null &&
-                          value.providerInstanceId === thread.modelSelection.instanceId,
-                      }),
+                ? yield* check(
+                    "the provider binding",
+                    directory.getBinding(thread.id).pipe(
+                      Effect.map((binding) =>
+                        Option.match(binding, {
+                          onNone: () => false,
+                          onSome: (value) =>
+                            value.resumeCursor !== undefined &&
+                            value.resumeCursor !== null &&
+                            value.providerInstanceId === thread.modelSelection.instanceId,
+                        }),
+                      ),
                     ),
                   )
                 : false,

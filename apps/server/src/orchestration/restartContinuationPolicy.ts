@@ -59,6 +59,8 @@ export type RestartSkipReason =
   | "usage-limited"
   | "not-resumable"
   | "capacity"
+  /** A capture-time read failed; fails closed and stays silent (it may have been a Stop). */
+  | "check-failed"
   // dispatch time
   | "thread-closed"
   | "thread-changed"
@@ -162,23 +164,28 @@ export type RestartClassification =
   | { readonly status: "pending" }
   | { readonly status: "skipped"; readonly reason: RestartSkipReason };
 
-/** Capture-time decision, first match wins (spec §3.3). */
+/**
+ * Capture-time decision, first match wins (spec §3.3). An IO input is `undefined` when it
+ * could not be read: the thread is then never continued (`check-failed`), but the reasons
+ * that need no IO still win.
+ */
 export function classifyRestartCandidate(input: {
   readonly thread: OrchestrationThread;
   readonly shape: RestartCandidateShape;
   readonly settingEnabled: boolean;
-  readonly signals: RestartSourceTurnSignals;
-  readonly pendingDelegatedReturn: boolean;
+  readonly signals: RestartSourceTurnSignals | undefined;
+  readonly pendingDelegatedReturn: boolean | undefined;
   readonly usageLimited: boolean;
-  readonly resumable: boolean;
+  readonly resumable: boolean | undefined;
 }): RestartClassification {
   const skip = (reason: RestartSkipReason): RestartClassification => ({
     status: "skipped",
     reason,
   });
   const latestTurn = input.thread.latestTurn;
+  const signals = input.signals;
   if (!input.settingEnabled) return skip("disabled");
-  if (input.signals.interruptRequested || latestTurn?.state === "interrupted") {
+  if (signals?.interruptRequested === true || latestTurn?.state === "interrupted") {
     return skip("user-interrupted");
   }
   if (latestTurn?.state === "error") return skip("turn-failed");
@@ -186,10 +193,13 @@ export function classifyRestartCandidate(input: {
   if (derivePendingThreadRequests(input.thread.activities).length > 0) {
     return skip("pending-request");
   }
-  if (input.signals.unresolvedSteer) return skip("pending-steer");
-  if (input.signals.computerUse) return skip("computer-use");
+  if (signals === undefined) return skip("check-failed");
+  if (signals.unresolvedSteer) return skip("pending-steer");
+  if (signals.computerUse) return skip("computer-use");
+  if (input.pendingDelegatedReturn === undefined) return skip("check-failed");
   if (input.pendingDelegatedReturn) return skip("delegated-child");
   if (input.usageLimited) return skip("usage-limited");
+  if (input.resumable === undefined) return skip("check-failed");
   if (!input.resumable) return skip("not-resumable");
   return { status: "pending" };
 }
