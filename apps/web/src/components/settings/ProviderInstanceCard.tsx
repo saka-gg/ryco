@@ -43,6 +43,7 @@ import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
+  getProviderCompatibilityNotice,
   getProviderVersionAdvisoryPresentation,
   PROVIDER_STATUS_STYLES,
   getProviderVersionLabel,
@@ -472,7 +473,11 @@ export function ProviderInstanceCard({
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
-  const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
+  const versionAdvisory = getProviderVersionAdvisoryPresentation(
+    liveProvider?.versionAdvisory,
+    liveProvider?.compatibilityAdvisory,
+  );
+  const compatibilityNotice = getProviderCompatibilityNotice(liveProvider);
   const updateCommand = versionAdvisory?.updateCommand ?? null;
   const FallbackIconComponent = driverOption?.icon;
   const { copyToClipboard } = useCopyToClipboard<{ providerName: string }>({
@@ -740,6 +745,16 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
+            {compatibilityNotice ? (
+              <p
+                className={cn(
+                  "text-xs",
+                  compatibilityNotice.tone === "warning" ? "text-warning" : "text-muted-foreground",
+                )}
+              >
+                {compatibilityNotice.text}
+              </p>
+            ) : null}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Switch
