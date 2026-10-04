@@ -1566,6 +1566,16 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.strictEqual(ghost?.driver, "ghostDriver");
             assert.strictEqual(ghost?.availability, "unavailable");
             assert.match(ghost?.unavailableReason ?? "", /ghostDriver/);
+            // Unavailable shadows have no adapter, so revert support stays unknown.
+            assert.strictEqual(ghost?.supportsConversationRollback, undefined);
+            // Every live snapshot carries its adapter's rollback capability.
+            const rollbackSupport = (instanceId: string) =>
+              providers.find((provider) => provider.instanceId === instanceId)
+                ?.supportsConversationRollback;
+            assert.strictEqual(rollbackSupport("claudeAgent"), true);
+            assert.strictEqual(rollbackSupport("codex"), true);
+            assert.strictEqual(rollbackSupport("opencode"), true);
+            assert.strictEqual(rollbackSupport("cursor"), false);
           }).pipe(Effect.provide(runtimeServices));
         }),
       );

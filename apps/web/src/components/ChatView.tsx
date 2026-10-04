@@ -14,7 +14,10 @@ import {
 import { usePaneEffect, usePaneFocus, usePaneFocusRef, usePaneThreadRef } from "./chat/PaneFocus";
 import { startSelectionChat } from "../lib/selectionChat";
 import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
-import { appendSelectionQuote } from "@ryco/client-runtime/state/composer";
+import {
+  appendSelectionQuote,
+  checkpointRevertUnsupportedMessage,
+} from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
 import type { BackgroundTask } from "@ryco/shared/backgroundWork";
@@ -3041,18 +3044,25 @@ export default function ChatView(props: ChatViewProps) {
 
   const onRevertToTurnCount = useCallback(
     async (turnCount: number) => {
+      const providerInstanceId =
+        activeThread?.session?.providerInstanceId ?? activeThread?.modelSelection.instanceId;
+      const provider = providerInstanceId
+        ? composerProviderStatuses.find((entry) => entry.instanceId === providerInstanceId)
+        : undefined;
       await revertToTurnCount({
         thread: activeThread ?? null,
         turnCount,
         environmentUnavailable: activeEnvironmentUnavailable,
         environmentUnavailableLabel: activeEnvironmentUnavailableLabel,
         turnInProgress: phase === "running" || isSendBusy || isConnecting,
+        providerRefusal: checkpointRevertUnsupportedMessage(provider),
       });
     },
     [
       activeEnvironmentUnavailable,
       activeEnvironmentUnavailableLabel,
       activeThread,
+      composerProviderStatuses,
       isConnecting,
       isSendBusy,
       phase,

@@ -1253,19 +1253,15 @@ export function makeCursorAdapter(
         return { threadId, turns: ctx.turns };
       });
 
-    const rollbackThread: CursorAdapterShape["rollbackThread"] = (threadId, { numTurns }) =>
+    // Cursor cannot forget turns; ProviderService refuses before reaching this.
+    const rollbackThread: CursorAdapterShape["rollbackThread"] = (threadId) =>
       Effect.gen(function* () {
-        const ctx = yield* requireSession(threadId);
-        if (!Number.isInteger(numTurns) || numTurns < 1) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "rollbackThread",
-            issue: "numTurns must be an integer >= 1.",
-          });
-        }
-        const nextLength = Math.max(0, ctx.turns.length - numTurns);
-        ctx.turns.splice(nextLength);
-        return { threadId, turns: ctx.turns };
+        yield* requireSession(threadId);
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/rollback",
+          detail: "Cursor does not support conversation rollback.",
+        });
       });
 
     const stopSession: CursorAdapterShape["stopSession"] = (threadId) =>

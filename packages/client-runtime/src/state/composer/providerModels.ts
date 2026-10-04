@@ -106,3 +106,16 @@ export function getDefaultServerModel(
     configuredDefault
   );
 }
+
+/**
+ * Why a checkpoint revert cannot run on this provider, or null when it may.
+ * Only an explicit `false` refuses: an absent field means an older server, so
+ * the server decides.
+ */
+export function checkpointRevertUnsupportedMessage(
+  provider: ServerProvider | undefined,
+): string | null {
+  if (provider?.supportsConversationRollback !== false) return null;
+  const label = provider.displayName ?? formatProviderDriverKindLabel(provider.driver);
+  return `${label} can't remove turns from its conversation, so this thread can't be reverted. Start a new thread to try a different approach.`;
+}

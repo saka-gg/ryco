@@ -1047,20 +1047,14 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
         return { threadId, turns: ctx.turns };
       });
 
-    const rollbackThread: AcpAdapterShape["rollbackThread"] = (threadId, { numTurns }) =>
+    // ACP sessions cannot forget turns; ProviderService refuses before reaching this.
+    const rollbackThread: AcpAdapterShape["rollbackThread"] = (threadId) =>
       Effect.gen(function* () {
         yield* requireSession(threadId);
-        if (!Number.isInteger(numTurns) || numTurns < 1) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "rollbackThread",
-            issue: "numTurns must be an integer >= 1.",
-          });
-        }
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
           method: "thread/rollback",
-          detail: "ACP sessions do not support provider-side rollback yet.",
+          detail: "This ACP agent does not support conversation rollback.",
         });
       });
 

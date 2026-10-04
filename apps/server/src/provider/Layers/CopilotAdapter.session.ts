@@ -671,8 +671,12 @@ export const makeReadThread =
       return buildThreadSnapshot(threadId, record.turns);
     });
 
-export const makeRollbackThread = (): CopilotAdapterShape["rollbackThread"] => (threadId) =>
-  Effect.succeed({
-    threadId,
-    turns: [],
-  });
+/** Copilot cannot forget turns; ProviderService refuses before reaching this. */
+export const makeRollbackThread = (): CopilotAdapterShape["rollbackThread"] => () =>
+  Effect.fail(
+    new ProviderAdapterRequestError({
+      provider: COPILOT_DRIVER_KIND,
+      method: "thread/rollback",
+      detail: "GitHub Copilot does not support conversation rollback.",
+    }),
+  );

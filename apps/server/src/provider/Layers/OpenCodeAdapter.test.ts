@@ -36,6 +36,7 @@ import { agentControlHostContext } from "../../agentControl/ProviderInjection.ts
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import type { OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import {
+  buildOpenCodePermissionRules,
   isOpenCodeNativeAttachment,
   OpenCodeRuntime,
   OpenCodeRuntimeError,
@@ -100,6 +101,15 @@ const runtimeMock = {
     questionReplyCalls: [] as Array<{ requestID: string; answers: Array<Array<string>> }>,
     closeCalls: [] as string[],
     revertCalls: [] as Array<{ sessionID: string; messageID?: string }>,
+    forkCalls: [] as Array<{ sessionID: string; messageID?: string }>,
+    /** Messages of sessions other than the root (forks). */
+    messagesBySession: new Map<string, MessageEntry[]>(),
+    /** Overrides how many messages a fork keeps; default is everything before the boundary. */
+    forkRetainedCount: null as number | null,
+    /** Emit a session.created for the fork through the live event stream while forking. */
+    announceFork: false,
+    sessionUpdateInputs: [] as Array<{ sessionID: string; permission?: unknown }>,
+    liveEvents: null as null | { queue: unknown[]; wake: (() => void) | null; closed: boolean },
     promptCalls: [] as Array<unknown>,
     promptAsyncError: null as Error | null,
     promptAsyncHandler: null as
@@ -129,6 +139,12 @@ const runtimeMock = {
     this.state.questionReplyCalls.length = 0;
     this.state.closeCalls.length = 0;
     this.state.revertCalls.length = 0;
+    this.state.forkCalls.length = 0;
+    this.state.messagesBySession.clear();
+    this.state.forkRetainedCount = null;
+    this.state.announceFork = false;
+    this.state.sessionUpdateInputs.length = 0;
+    this.state.liveEvents = null;
     this.state.promptCalls.length = 0;
     this.state.promptAsyncError = null;
     this.state.promptAsyncHandler = null;
@@ -209,8 +225,9 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           }
           throw { response: { status: 404 } };
         },
-        update: async ({ sessionID }: { sessionID: string }) => {
-          runtimeMock.state.sessionUpdateCalls.push(sessionID);
+        update: async (input: { sessionID: string; permission?: unknown }) => {
+          runtimeMock.state.sessionUpdateCalls.push(input.sessionID);
+          runtimeMock.state.sessionUpdateInputs.push(input);
           return { data: runtimeMock.state.resumableSession };
         },
         abort: async ({ sessionID }: { sessionID: string }) => {
@@ -228,9 +245,37 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             throw runtimeMock.state.promptAsyncError;
           }
         },
-        messages: async () => {
+        messages: async ({ sessionID }: { sessionID: string }) => {
           runtimeMock.state.startupOrder.push("history");
-          return { data: runtimeMock.state.messages };
+          return {
+            data: runtimeMock.state.messagesBySession.get(sessionID) ?? runtimeMock.state.messages,
+          };
+        },
+        fork: async ({ sessionID, messageID }: { sessionID: string; messageID?: string }) => {
+          runtimeMock.state.forkCalls.push({ sessionID, ...(messageID ? { messageID } : {}) });
+          const forkId = `${sessionID}/fork-${runtimeMock.state.forkCalls.length}`;
+          const boundary = runtimeMock.state.messages.findIndex(
+            (entry) => entry.info.id === messageID,
+          );
+          const kept = runtimeMock.state.forkRetainedCount ?? Math.max(0, boundary);
+          runtimeMock.state.messagesBySession.set(
+            forkId,
+            runtimeMock.state.messages.slice(0, kept),
+          );
+          const live = runtimeMock.state.liveEvents;
+          if (runtimeMock.state.announceFork && live) {
+            live.queue.push({
+              type: "session.created",
+              properties: {
+                sessionID: forkId,
+                info: { id: forkId, parentID: sessionID, title: "Fork", directory: "/tmp" },
+              },
+            });
+            live.wake?.();
+            live.wake = null;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          return { data: { id: forkId } };
         },
         children: async () => ({ data: runtimeMock.state.children }),
         revert: async ({ sessionID, messageID }: { sessionID: string; messageID?: string }) => {
@@ -261,6 +306,17 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
               if (runtimeMock.state.streamReadError) throw runtimeMock.state.streamReadError;
               for (const event of runtimeMock.state.subscribedEvents) {
                 yield event;
+              }
+              const live = runtimeMock.state.liveEvents;
+              if (live) {
+                // Tests push live events and close the stream when they finish.
+                for (;;) {
+                  while (live.queue.length > 0) yield live.queue.shift();
+                  if (live.closed) break;
+                  await new Promise<void>((resolve) => {
+                    live.wake = resolve;
+                  });
+                }
               }
             })(),
           };
@@ -1410,27 +1466,64 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }).pipe(Effect.provide(adapterLayer));
   });
 
-  it.effect("reverts the full thread when rollback removes every assistant turn", () =>
+  const rollbackMessages = () => [
+    { info: { id: "u1", role: "user" as const }, parts: [] },
+    { info: { id: "a1a", role: "assistant" as const }, parts: [] },
+    { info: { id: "a1b", role: "assistant" as const }, parts: [] },
+    { info: { id: "u2", role: "user" as const }, parts: [] },
+    { info: { id: "a2", role: "assistant" as const }, parts: [] },
+  ];
+  const ROOT_SESSION_ID = "http://127.0.0.1:9999/session";
+
+  const startRollbackSession = (
+    threadId: ThreadId,
+    runtimeMode: "full-access" | "approval-required" = "full-access",
+  ) =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
-      const threadId = asThreadId("thread-rollback-all");
       yield* adapter.startSession({
-        runtimeSessionId: RuntimeSessionId.make("test-opencodeadapter-10"),
+        runtimeSessionId: RuntimeSessionId.make(`runtime-${threadId}`),
         provider: ProviderDriverKind.make("opencode"),
         threadId,
-        runtimeMode: "full-access",
+        runtimeMode,
+      });
+      runtimeMock.state.messages = rollbackMessages();
+      return adapter;
+    });
+
+  it.effect("forks before the first dropped user message so the kept turn survives", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-fork");
+      const adapter = yield* startRollbackSession(threadId, "approval-required");
+
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 1,
+        targetTurnId: null,
+        droppedTurnIds: [],
       });
 
-      runtimeMock.state.messages = [
-        {
-          info: { id: "assistant-1", role: "assistant" },
-          parts: [],
-        },
-        {
-          info: { id: "assistant-2", role: "assistant" },
-          parts: [],
-        },
-      ];
+      assert.deepEqual(runtimeMock.state.forkCalls, [
+        { sessionID: ROOT_SESSION_ID, messageID: "u2" },
+      ]);
+      assert.deepEqual(runtimeMock.state.revertCalls, []);
+      const forkId = `${ROOT_SESSION_ID}/fork-1`;
+      assert.deepEqual(
+        runtimeMock.state.messagesBySession.get(forkId)?.map((entry) => entry.info.id),
+        ["u1", "a1a", "a1b"],
+      );
+      assert.deepEqual(runtimeMock.state.sessionUpdateInputs.at(-1), {
+        sessionID: forkId,
+        permission: buildOpenCodePermissionRules("approval-required"),
+      });
+      const session = (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId);
+      assert.deepEqual(session?.resumeCursor, { schemaVersion: 1, sessionId: forkId });
+    }),
+  );
+
+  it.effect("forks at the first user message when reverting every turn", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-all");
+      const adapter = yield* startRollbackSession(threadId);
 
       const snapshot = yield* adapter.rollbackThread(threadId, {
         numTurns: 2,
@@ -1438,12 +1531,76 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         droppedTurnIds: [],
       });
 
-      assert.deepEqual(runtimeMock.state.revertCalls, [
-        { sessionID: "http://127.0.0.1:9999/session" },
+      assert.deepEqual(runtimeMock.state.forkCalls, [
+        { sessionID: ROOT_SESSION_ID, messageID: "u1" },
       ]);
       assert.deepEqual(snapshot.turns, []);
     }),
   );
+
+  it.effect("refuses to drop more turns than OpenCode's conversation has", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-short");
+      const adapter = yield* startRollbackSession(threadId);
+
+      const error = yield* Effect.flip(
+        adapter.rollbackThread(threadId, { numTurns: 3, targetTurnId: null, droppedTurnIds: [] }),
+      );
+
+      assert.match(error.message, /conversation is shorter than this thread's history/);
+      assert.deepEqual(runtimeMock.state.forkCalls, []);
+    }),
+  );
+
+  it.effect("fails when the fork does not keep the requested boundary", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-mismatch");
+      const adapter = yield* startRollbackSession(threadId);
+      runtimeMock.state.forkRetainedCount = 4;
+
+      const error = yield* Effect.flip(
+        adapter.rollbackThread(threadId, { numTurns: 1, targetTurnId: null, droppedTurnIds: [] }),
+      );
+
+      assert.match(error.message, /did not preserve the requested rewind boundary/);
+      const session = (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId);
+      assert.deepEqual(session?.resumeCursor, { schemaVersion: 1, sessionId: ROOT_SESSION_ID });
+    }),
+  );
+
+  it.effect("does not adopt the fork as a child session", () => {
+    const live = { queue: [] as unknown[], wake: null as (() => void) | null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-announce");
+      runtimeMock.state.liveEvents = live;
+      runtimeMock.state.announceFork = true;
+      // Startup primes the stream with its first event before reading history.
+      runtimeMock.state.subscribedEvents = [{ type: "server.connected", properties: {} }];
+      const adapter = yield* startRollbackSession(threadId);
+      const subagentEvents = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "subagent.started",
+      ).pipe(Stream.runHead, Effect.forkChild);
+
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 1,
+        targetTurnId: null,
+        droppedTurnIds: [],
+      });
+
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 30)));
+      assert.equal(runtimeMock.state.forkCalls.length, 1);
+      assert.equal(subagentEvents.pollUnsafe(), undefined);
+      yield* Fiber.interrupt(subagentEvents);
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          live.closed = true;
+          live.wake?.();
+        }),
+      ),
+    );
+  });
 
   it.effect(
     "releases completed text without replaying late snapshots, deltas, or removed messages",

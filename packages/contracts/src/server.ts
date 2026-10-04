@@ -257,6 +257,9 @@ export const ServerProvider = Schema.Struct({
   // option disabled with an explanation.
   supportsAskMode: Schema.optional(Schema.Boolean),
   supportsTurnSteering: Schema.optional(Schema.Boolean),
+  // Whether a checkpoint revert can make this provider forget turns. Stamped by
+  // the server from the adapter capability; absent means an older server (unknown).
+  supportsConversationRollback: Schema.optional(Schema.Boolean),
   enabled: Schema.Boolean,
   installed: Schema.Boolean,
   version: Schema.NullOr(TrimmedNonEmptyString),
