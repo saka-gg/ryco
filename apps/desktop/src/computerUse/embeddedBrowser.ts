@@ -76,7 +76,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   }
   async open(
     url: string,
-    visible: boolean,
+    _visible: boolean,
     signal: AbortSignal,
     project = "",
   ): Promise<BrowserTab> {
@@ -107,7 +107,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       view,
       host,
       project,
-      presentation: visible ? "window" : "background",
+      presentation: "background",
       error: null,
       requestedUrl: target,
     };
@@ -181,7 +181,6 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     try {
       await wc.loadURL(target);
       signal.throwIfAborted();
-      if (visible) host.showInactive();
       return { id, title: wc.getTitle(), url: wc.getURL() };
     } catch (error) {
       if (signal.aborted) {
@@ -288,12 +287,9 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   }
   async show(tab: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
-    const entry = this.entry(tab);
-    if (entry.presentation === "panel") return;
-    entry.presentation = "window";
-    this.fitHost(entry);
-    entry.host.showInactive();
-    this.publish();
+    // Agent presentation never creates a native window. The user can view
+    // this retained tab in the workspace panel or explicitly choose Pop out.
+    this.entry(tab);
   }
   private destroy(tab: string, destroyed?: "guest" | "host"): void {
     const entry = this.entries.get(tab);

@@ -1,7 +1,9 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Dialog, DialogDescription, DialogHeader, DialogPopup, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
-import { attachmentDownloadUrl } from "./AttachmentVideo";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { AttachmentFileRow, attachmentDownloadUrl } from "./AttachmentVideo";
 import {
   ATTACHMENT_TEXT_PREVIEW_MAX_BYTES,
   attachmentPreviewKind,
@@ -18,7 +20,7 @@ export interface PreviewDocumentAttachment {
   file?: File | null | undefined;
 }
 
-function TextAttachmentPreview({ src }: { src: string }) {
+function TextAttachmentPreview({ src, markdown }: { src: string; markdown: boolean }) {
   const [text, setText] = useState<string>();
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -58,6 +60,32 @@ function TextAttachmentPreview({ src }: { src: string }) {
     <p role="status" className="p-6">
       Loading preview…
     </p>
+  ) : markdown ? (
+    <div className="chat-markdown min-h-0 flex-1 overflow-auto break-words p-6 text-sm leading-relaxed text-foreground/80">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        components={{
+          // Previewing an attachment must not fetch images or open local file links.
+          img: ({ alt }) => <span className="text-muted-foreground">{alt ?? "Image"}</span>,
+          a: ({ href, children }) =>
+            href && /^https?:\/\//i.test(href) ? (
+              <a href={href} target="_blank" rel="noopener noreferrer">
+                {children}
+              </a>
+            ) : (
+              <span>{children}</span>
+            ),
+          table: ({ children }) => (
+            <div className="chat-markdown-table-scroll">
+              <table>{children}</table>
+            </div>
+          ),
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
   ) : (
     <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-6 font-mono text-xs">
       {text}
@@ -92,7 +120,11 @@ export function AttachmentDocumentPreview({
           </DialogTitle>
           <DialogDescription>
             {formatAttachmentBytes(attachment.sizeBytes)}
-            {kind === "text" ? " · Text preview" : " · PDF preview"}
+            {kind === "pdf"
+              ? " · PDF preview"
+              : kind === "markdown"
+                ? " · Markdown preview"
+                : " · Text preview"}
           </DialogDescription>
           {src && (
             <a
@@ -122,7 +154,7 @@ export function AttachmentDocumentPreview({
               Text previews are limited to 512 KB. Download this file to open it.
             </p>
           ) : (
-            <TextAttachmentPreview key={src} src={src} />
+            <TextAttachmentPreview key={src} src={src} markdown={kind === "markdown"} />
           ))}
       </DialogPopup>
     </Dialog>
@@ -132,11 +164,14 @@ export function AttachmentDocumentPreview({
 export function AttachmentPreviewButton({
   attachment,
   initiallyOpen = false,
+  variant = "button",
 }: {
   attachment: PreviewDocumentAttachment;
   initiallyOpen?: boolean;
+  variant?: "button" | "file";
 }) {
   const [open, setOpen] = useState(initiallyOpen);
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const localResource = useRef<string | undefined>(undefined);
   const [localSource, setLocalSource] = useState<string>();
@@ -156,23 +191,47 @@ export function AttachmentPreviewButton({
   if (!attachmentPreviewKind(attachment) || (!attachment.file && !attachment.previewUrl))
     return null;
   return (
-    <>
-      <Button
-        ref={buttonRef}
-        variant="ghost"
-        size="sm"
-        aria-label={`Preview ${attachment.name}`}
-        onClick={() => changeOpen(true)}
-      >
-        Preview
-      </Button>
+    <div ref={cardRef} className={variant === "button" ? "contents" : undefined}>
+      {variant === "file" ? (
+        <>
+          <AttachmentFileRow
+            attachment={{
+              type: "file",
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              sizeBytes: attachment.sizeBytes,
+            }}
+            onPreview={() => changeOpen(true)}
+          />
+          {attachment.previewUrl && (
+            <a
+              href={attachmentDownloadUrl(attachment.previewUrl, attachment.name)}
+              download={attachment.name}
+              aria-label={`Download ${attachment.name}`}
+              className="block border-t border-border/60 px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
+            >
+              Download
+            </a>
+          )}
+        </>
+      ) : (
+        <Button
+          ref={buttonRef}
+          variant="ghost"
+          size="sm"
+          aria-label={`Preview ${attachment.name}`}
+          onClick={() => changeOpen(true)}
+        >
+          Preview
+        </Button>
+      )}
       <AttachmentDocumentPreview
         attachment={{ ...attachment, previewUrl: localSource ?? attachment.previewUrl }}
         open={open}
         onOpenChange={changeOpen}
         // The whole attachment card, not just its Preview button.
-        morphOrigin={() => buttonRef.current?.parentElement ?? buttonRef.current}
+        morphOrigin={() => cardRef.current?.parentElement ?? buttonRef.current}
       />
-    </>
+    </div>
   );
 }

@@ -1,57 +1,87 @@
-import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  buildCachedNativeBinary,
+  desktopBuildArch,
+  fingerprint,
+  nativeBuildEnvironment,
+  swiftModuleCacheDirectory,
+  swiftToolchainIdentity,
+} from "./native-build-cache.mjs";
 
-if (process.platform !== "darwin") process.exit(0);
+const scriptPath = fileURLToPath(import.meta.url);
+const desktop = resolve(dirname(scriptPath), "..");
 
-const scriptDir = dirname(fileURLToPath(import.meta.url));
-const desktopDir = resolve(scriptDir, "..");
-const source = join(desktopDir, "native/macos/RycoDesktopSecurityHelper.swift");
-const output = join(desktopDir, "resources/ryco-desktop-security-helper");
-const temporaryDir = mkdtempSync(join(tmpdir(), "ryco-desktop-security-helper-"));
-
-function run(command, args) {
-  const result = spawnSync(command, args, {
-    cwd: desktopDir,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (result.status === 0) return;
-  const details = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
-  throw new Error(
-    `Desktop native security helper build failed.${details.length > 0 ? `\n${details}` : ""}`,
+export function buildNativeSecurityHelper(
+  desktopDirectory = desktop,
+  { development = false } = {},
+) {
+  if (process.platform !== "darwin") return;
+  const arch = desktopBuildArch({ development });
+  const source = join(desktopDirectory, "native/macos/RycoDesktopSecurityHelper.swift");
+  const output = join(desktopDirectory, "resources/ryco-desktop-security-helper");
+  const toolchain = swiftToolchainIdentity();
+  const key = fingerprint(
+    "security-v2",
+    arch,
+    toolchain,
+    nativeBuildEnvironment(),
+    readFileSync(source),
+    readFileSync(scriptPath),
   );
+  const moduleCache = swiftModuleCacheDirectory(toolchain);
+  function run(command, args) {
+    const result = spawnSync(command, args, {
+      cwd: desktopDirectory,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CLANG_MODULE_CACHE_PATH: moduleCache,
+        SWIFT_MODULECACHE_PATH: moduleCache,
+      },
+    });
+    if (result.error || result.status !== 0)
+      throw new Error(
+        `Desktop native security helper build failed.\n${result.error?.message ?? `${result.stdout ?? ""}${result.stderr ?? ""}`}`,
+      );
+  }
+  return buildCachedNativeBinary({
+    name: "security",
+    key,
+    output,
+    validate: (binary) =>
+      spawnSync("codesign", ["--verify", "--strict", binary], { encoding: "utf8" }).status === 0,
+    build(binary, temporary) {
+      const architectures =
+        arch === "universal" ? ["x86_64", "arm64"] : [arch === "x64" ? "x86_64" : "arm64"];
+      const binaries = architectures.map((architecture) => {
+        const thin = join(temporary, architecture);
+        run("xcrun", [
+          "--sdk",
+          "macosx",
+          "swiftc",
+          "-O",
+          "-target",
+          `${architecture}-apple-macosx11.0`,
+          "-framework",
+          "Security",
+          "-framework",
+          "CryptoKit",
+          source,
+          "-o",
+          thin,
+        ]);
+        return thin;
+      });
+      if (binaries.length === 1) copyFileSync(binaries[0], binary);
+      else run("xcrun", ["lipo", "-create", ...binaries, "-output", binary]);
+      run("codesign", ["--force", "--sign", "-", "--timestamp=none", binary]);
+    },
+  });
 }
 
-try {
-  const binaries = [];
-  for (const architecture of ["x86_64", "arm64"]) {
-    const binary = join(temporaryDir, `ryco-desktop-security-helper-${architecture}`);
-    run("xcrun", [
-      "--sdk",
-      "macosx",
-      "swiftc",
-      "-O",
-      "-target",
-      `${architecture}-apple-macosx11.0`,
-      "-framework",
-      "Security",
-      "-framework",
-      "CryptoKit",
-      source,
-      "-o",
-      binary,
-    ]);
-    binaries.push(binary);
-  }
-
-  const universal = join(temporaryDir, "ryco-desktop-security-helper");
-  run("xcrun", ["lipo", "-create", ...binaries, "-output", universal]);
-  chmodSync(universal, 0o755);
-  mkdirSync(dirname(output), { recursive: true });
-  renameSync(universal, output);
-} finally {
-  rmSync(temporaryDir, { recursive: true, force: true });
+if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
+  buildNativeSecurityHelper(desktop, { development: process.argv.includes("--dev") });
 }

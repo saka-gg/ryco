@@ -8,6 +8,7 @@ import type { ThreadSubagentView } from "../../threadWorkspaceViewModel";
 import {
   buildOpenAgentSearch,
   buildOpenAgentsSearch,
+  buildOpenBrowserSearch,
   buildOpenFilesSearch,
   buildOpenReviewSearch,
   buildOpenSimulatorSearch,
@@ -38,6 +39,7 @@ export interface UseChatWorkspacePanelsResult {
   onOpenReviewPanel: () => void;
   onToggleDiff: () => void;
   onOpenFilesPanel: () => void;
+  onOpenBrowserPanel: () => void;
   onOpenTerminalPanel: () => void;
   onOpenSimulatorPanel: () => void;
   onToggleWorkspacePanel: () => void;
@@ -143,6 +145,20 @@ export function useChatWorkspacePanels(
       replace: true,
       search: nextSearch,
     });
+  });
+  const onOpenBrowserPanel = useEvent(() => {
+    if (!hasActiveProject || isPhoneTier) return;
+    const search = (previous: Record<string, unknown>) => buildOpenBrowserSearch(previous);
+    if (routeKind === "draft" && draftId) {
+      void navigate({ to: "/draft/$draftId", params: { draftId }, replace: true, search });
+    } else {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId, threadId },
+        replace: true,
+        search,
+      });
+    }
   });
   const onOpenTerminalPanel = useEvent(() => {
     onTerminalPanelOpen?.();
@@ -320,6 +336,7 @@ export function useChatWorkspacePanels(
     onOpenReviewPanel,
     onToggleDiff,
     onOpenFilesPanel,
+    onOpenBrowserPanel,
     onOpenTerminalPanel,
     onOpenSimulatorPanel,
     onToggleWorkspacePanel,

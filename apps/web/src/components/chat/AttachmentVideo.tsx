@@ -18,6 +18,7 @@ export function isVideoAttachmentMimeType(mimeType: string): boolean {
 
 export const AttachmentFileRow = memo(function AttachmentFileRow(props: {
   attachment: ChatFileAttachment | ChatUnknownAttachment;
+  onPreview?: (() => void) | undefined;
 }) {
   const { attachment } = props;
   const sizeLabel =
@@ -37,6 +38,17 @@ export const AttachmentFileRow = memo(function AttachmentFileRow(props: {
   );
   const className =
     "flex min-h-[72px] items-center gap-2 px-3 py-3 text-left text-xs text-foreground/80";
+  if (props.onPreview)
+    return (
+      <button
+        type="button"
+        onClick={props.onPreview}
+        className={`${className} w-full hover:bg-accent/50`}
+        aria-label={`Preview ${attachment.name}`}
+      >
+        {body}
+      </button>
+    );
   return attachment.previewUrl ? (
     <a
       href={attachmentDownloadUrl(attachment.previewUrl, attachment.name)}
