@@ -3205,15 +3205,112 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn).not.toHaveBeenCalled();
   });
 
+  /**
+   * Gives thread-1 the default title and a temporary worktree branch, so a
+   * first turn generates both a title and a branch.
+   */
+  async function enableFirstTurnGeneration(harness: ReactorHarness) {
+    const now = new Date().toISOString();
+    const threadId = ThreadId.make("thread-1");
+    const worktreeId = WorktreeId.make("worktree-first-turn-generation");
+    const temporaryBranch = "ryco/1234abcd";
+    const worktreePath = "/tmp/provider-project-first-turn-worktree";
+    harness.listLocalBranchNames.mockReturnValue(Effect.succeed([temporaryBranch]));
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "worktree.create",
+        commandId: CommandId.make("cmd-first-turn-generation-worktree"),
+        worktreeId,
+        projectId: asProjectId("project-1"),
+        branch: temporaryBranch,
+        worktreePath,
+        origin: "branch",
+        prNumber: null,
+        issueNumber: null,
+        prTitle: null,
+        issueTitle: null,
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.attach-to-worktree",
+        commandId: CommandId.make("cmd-first-turn-generation-attach"),
+        threadId,
+        worktreeId,
+        attachedAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-first-turn-generation-meta"),
+        threadId,
+        title: "New thread",
+        branch: temporaryBranch,
+        worktreePath,
+      }),
+    );
+  }
+
+  it("generates a title and branch on a readable first turn (control for the read-failure cases)", async () => {
+    const harness = await createHarness({ worktreeBranchPrefix: "ryco" });
+    await enableFirstTurnGeneration(harness);
+
+    await dispatchTurnStart(harness, "generation-control");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(
+      () =>
+        harness.generateThreadTitle.mock.calls.length === 1 &&
+        harness.generateBranchName.mock.calls.length === 1,
+    );
+    expect(await turnStartFailures(harness)).toHaveLength(0);
+  });
+
   it("still sends the turn when the first-turn message count cannot be read", async () => {
     const hooks = makeReadFailureHooks();
-    const harness = await createHarness({ decorateSnapshotQuery: hooks.decorateSnapshotQuery });
+    const harness = await createHarness({
+      decorateSnapshotQuery: hooks.decorateSnapshotQuery,
+      worktreeBranchPrefix: "ryco",
+    });
+    await enableFirstTurnGeneration(harness);
 
     hooks.armed.userMessageCount = Effect.fail(storageFailure());
     await dispatchTurnStart(harness, "count-read");
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     await harness.drain();
 
+    expect(hooks.armed.userMessageCount).toBeUndefined();
+    expect(await turnStartFailures(harness)).toHaveLength(0);
+    expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+    expect(harness.generateBranchName).not.toHaveBeenCalled();
+  });
+
+  it("still sends a first turn when the project read for title and branch generation fails", async () => {
+    // Session start and the send request read the project first; the third
+    // read of the turn is the generation block's.
+    let countProjectReads = false;
+    let projectReads = 0;
+    const generationProjectRead = 3;
+    const harness = await createHarness({
+      worktreeBranchPrefix: "ryco",
+      decorateSnapshotQuery: (live) => ({
+        ...live,
+        getProjectShellById: (projectId) =>
+          countProjectReads && ++projectReads === generationProjectRead
+            ? Effect.fail(storageFailure())
+            : live.getProjectShellById(projectId),
+      }),
+    });
+    await enableFirstTurnGeneration(harness);
+
+    countProjectReads = true;
+    await dispatchTurnStart(harness, "generation-project-read");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    expect(projectReads).toBeGreaterThanOrEqual(generationProjectRead);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
     expect(await turnStartFailures(harness)).toHaveLength(0);
     expect(harness.generateThreadTitle).not.toHaveBeenCalled();
     expect(harness.generateBranchName).not.toHaveBeenCalled();
