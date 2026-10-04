@@ -1772,6 +1772,96 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("keeps a message id owned by the first thread that projected it", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const at = (second: number) => `2026-01-02T00:00:${String(second).padStart(2, "0")}.000Z`;
+      const projectId = ProjectId.make("project-message-owner");
+      const threadA = ThreadId.make("thread-message-owner-a");
+      const threadB = ThreadId.make("thread-message-owner-b");
+      const messageId = MessageId.make("message-owned-by-a");
+      let sequence = 0;
+      const base = () => {
+        sequence += 1;
+        return {
+          eventId: EventId.make(`evt-message-owner-${sequence}`),
+          occurredAt: at(sequence),
+          commandId: CommandId.make(`cmd-message-owner-${sequence}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-message-owner-${sequence}`),
+          metadata: {},
+        };
+      };
+
+      yield* eventStore.append({
+        ...base(),
+        type: "project.created",
+        aggregateKind: "project",
+        aggregateId: projectId,
+        payload: {
+          projectId,
+          title: "Project",
+          workspaceRoot: "/tmp/project-message-owner",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: at(0),
+          updatedAt: at(0),
+        },
+      });
+      for (const threadId of [threadA, threadB]) {
+        yield* eventStore.append({
+          ...base(),
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          payload: {
+            threadId,
+            projectId,
+            title: "Thread",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: at(0),
+            updatedAt: at(0),
+          },
+        });
+      }
+      for (const [threadId, text] of [
+        [threadA, "owned by A"],
+        [threadB, "from B"],
+      ] as const) {
+        yield* eventStore.append({
+          ...base(),
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          payload: {
+            threadId,
+            messageId,
+            role: "assistant",
+            text,
+            turnId: null,
+            streaming: false,
+            createdAt: at(10),
+            updatedAt: at(10),
+          },
+        });
+      }
+
+      yield* projectionPipeline.bootstrap;
+
+      const rows = yield* sql<{ readonly threadId: string; readonly text: string }>`
+        SELECT thread_id AS "threadId", text
+        FROM projection_thread_messages
+        WHERE message_id = ${messageId}
+      `;
+      assert.deepEqual(rows, [{ threadId: threadA, text: "owned by A" }]);
+    }),
+  );
+
   it.effect("keeps accumulated assistant text when completion payload text is empty", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
