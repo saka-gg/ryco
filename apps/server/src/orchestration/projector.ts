@@ -16,6 +16,7 @@ import {
 } from "@ryco/contracts";
 import { Effect, Schema } from "effect";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
+import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import {
@@ -60,12 +61,6 @@ type WorktreePatch = Partial<Omit<OrchestrationWorktreeShell, "worktreeId" | "pr
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 const MAX_THREAD_ACTIVITIES = 500;
-
-function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
-  if (status === "error") return "error" as const;
-  if (status === "missing") return "interrupted" as const;
-  return "completed" as const;
-}
 
 function updateThread(
   threads: ReadonlyArray<OrchestrationThread>,
@@ -727,6 +722,14 @@ export function projectEvent(
           ...session,
           tokenMode: session.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
         };
+        // The decider decided which turn this release ends; apply it only to that turn.
+        const released = payload.releasedTurn;
+        const settledLatestTurn =
+          released !== undefined &&
+          thread.latestTurn !== null &&
+          thread.latestTurn.turnId === released.turnId
+            ? { ...thread.latestTurn, ...mergeReleasedTurn(thread.latestTurn, released) }
+            : thread.latestTurn;
 
         return {
           ...nextBase,
@@ -751,7 +754,7 @@ export function projectEvent(
                         ? thread.latestTurn.assistantMessageId
                         : null,
                   }
-                : thread.latestTurn,
+                : settledLatestTurn,
             updatedAt: event.occurredAt,
           }),
         };
@@ -864,24 +867,38 @@ export function projectEvent(
           .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
           .slice(-MAX_THREAD_CHECKPOINTS);
 
+        // A checkpoint never changes an existing turn's state: it only attaches checkpoint
+        // fields. The state comes from the shared mapping only when the diff creates the
+        // latest-turn entry (no entry for this turn yet).
+        const sameTurn =
+          thread.latestTurn !== null && thread.latestTurn.turnId === payload.turnId
+            ? thread.latestTurn
+            : null;
+        const latestTurn =
+          sameTurn !== null
+            ? {
+                ...sameTurn,
+                startedAt: sameTurn.startedAt ?? payload.completedAt,
+                completedAt:
+                  sameTurn.state === "running"
+                    ? sameTurn.completedAt
+                    : (sameTurn.completedAt ?? payload.completedAt),
+                assistantMessageId: payload.assistantMessageId,
+              }
+            : {
+                turnId: payload.turnId,
+                state: checkpointStatusToTurnState(payload.status),
+                requestedAt: payload.completedAt,
+                startedAt: payload.completedAt,
+                completedAt: payload.completedAt,
+                assistantMessageId: payload.assistantMessageId,
+              };
+
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             checkpoints,
-            latestTurn: {
-              turnId: payload.turnId,
-              state: checkpointStatusToLatestTurnState(payload.status),
-              requestedAt:
-                thread.latestTurn?.turnId === payload.turnId
-                  ? thread.latestTurn.requestedAt
-                  : payload.completedAt,
-              startedAt:
-                thread.latestTurn?.turnId === payload.turnId
-                  ? (thread.latestTurn.startedAt ?? payload.completedAt)
-                  : payload.completedAt,
-              completedAt: payload.completedAt,
-              assistantMessageId: payload.assistantMessageId,
-            },
+            latestTurn,
             updatedAt: event.occurredAt,
           }),
         };
@@ -917,7 +934,7 @@ export function projectEvent(
               ? null
               : {
                   turnId: latestCheckpoint.turnId,
-                  state: checkpointStatusToLatestTurnState(latestCheckpoint.status),
+                  state: checkpointStatusToTurnState(latestCheckpoint.status),
                   requestedAt: latestCheckpoint.completedAt,
                   startedAt: latestCheckpoint.completedAt,
                   completedAt: latestCheckpoint.completedAt,

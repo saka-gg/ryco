@@ -11,6 +11,11 @@ import {
   ThreadId,
 } from "@ryco/contracts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import {
+  checkpointStatusToTurnState,
+  laterIsoTimestamp,
+  mergeReleasedTurn,
+} from "@ryco/shared/turnFinalization";
 import { Effect, FileSystem, Layer, Option, Path, Stream, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -199,16 +204,6 @@ const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsFor
   (input: { readonly attachments: ReadonlyArray<ChatAttachment> }) =>
     Effect.succeed(input.attachments.length === 0 ? [] : input.attachments),
 );
-
-/** The later of two ISO timestamps (null-tolerant). */
-function laterIsoTimestamp(current: string | null, next: string): string {
-  if (current === null) return next;
-  const currentMs = Date.parse(current);
-  const nextMs = Date.parse(next);
-  if (!Number.isFinite(currentMs)) return next;
-  if (!Number.isFinite(nextMs)) return current;
-  return nextMs > currentMs ? next : current;
-}
 
 function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
   if (typeof payload !== "object" || payload === null) {
@@ -1715,6 +1710,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.session-set": {
+          // The decider decided which turn this release ends and how. Apply it to that
+          // row only; an unknown turn creates no row.
+          const released = event.payload.releasedTurn;
+          if (released !== undefined) {
+            const releasedRow = yield* projectionTurnRepository.getByTurnId({
+              threadId: event.payload.threadId,
+              turnId: released.turnId,
+            });
+            if (Option.isSome(releasedRow)) {
+              yield* projectionTurnRepository.upsertByTurnId({
+                ...releasedRow.value,
+                ...mergeReleasedTurn(releasedRow.value, released),
+              });
+            }
+          }
+
           const turnId = event.payload.session.activeTurnId;
           if (turnId === null || event.payload.session.status !== "running") {
             return;
@@ -1884,25 +1895,30 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
           });
-          const nextState = event.payload.status === "error" ? "error" : "completed";
           yield* projectionTurnRepository.clearCheckpointTurnConflict({
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
             checkpointTurnCount: event.payload.checkpointTurnCount,
           });
 
+          // A checkpoint never changes an existing turn's state: it only attaches
+          // checkpoint fields. A still-open turn keeps its null completedAt; a finished
+          // one keeps the completedAt its release (or final message) recorded.
           if (Option.isSome(existingTurn)) {
+            const turnOpen =
+              existingTurn.value.state === "running" || existingTurn.value.state === "pending";
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               assistantMessageId: event.payload.assistantMessageId,
-              state: nextState,
               checkpointTurnCount: event.payload.checkpointTurnCount,
               checkpointRef: event.payload.checkpointRef,
               checkpointStatus: event.payload.status,
               checkpointFiles: event.payload.files,
               startedAt: existingTurn.value.startedAt ?? event.payload.completedAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.completedAt,
-              completedAt: event.payload.completedAt,
+              completedAt: turnOpen
+                ? existingTurn.value.completedAt
+                : (existingTurn.value.completedAt ?? event.payload.completedAt),
             });
             return;
           }
@@ -1913,7 +1929,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             sourceProposedPlanThreadId: null,
             sourceProposedPlanId: null,
             assistantMessageId: event.payload.assistantMessageId,
-            state: nextState,
+            state: checkpointStatusToTurnState(event.payload.status),
             requestedAt: event.payload.completedAt,
             startedAt: event.payload.completedAt,
             completedAt: event.payload.completedAt,

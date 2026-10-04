@@ -1052,3 +1052,233 @@ describe("orchestration projector", () => {
     expect(thread?.checkpoints.at(-1)?.turnId).toBe("turn-599");
   });
 });
+
+describe("orchestration projector turn finalization", () => {
+  const createdAt = "2026-02-23T08:00:00.000Z";
+  const startedAt = "2026-02-23T08:00:05.000Z";
+  const releasedAt = "2026-02-23T08:00:10.000Z";
+  const lateAt = "2026-02-23T08:00:20.000Z";
+
+  function sessionPayload(input: {
+    status: string;
+    activeTurnId: string | null;
+    updatedAt: string;
+  }) {
+    return {
+      threadId: "thread-1",
+      status: input.status,
+      providerName: "codex",
+      runtimeMode: "full-access",
+      activeTurnId: input.activeTurnId,
+      lastError: null,
+      updatedAt: input.updatedAt,
+    };
+  }
+
+  async function runningThread() {
+    const afterCreate = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(createdAt),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: createdAt,
+          commandId: "cmd-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: { provider: ProviderDriverKind.make("codex"), model: "gpt-5.3-codex" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      ),
+    );
+    return Effect.runPromise(
+      projectEvent(
+        afterCreate,
+        makeEvent({
+          sequence: 2,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: startedAt,
+          commandId: "cmd-running",
+          payload: {
+            threadId: "thread-1",
+            session: sessionPayload({
+              status: "running",
+              activeTurnId: "turn-1",
+              updatedAt: startedAt,
+            }),
+          },
+        }),
+      ),
+    );
+  }
+
+  function release(
+    sequence: number,
+    releasedTurn: { turnId: string; state: string; completedAt: string; reason: string },
+  ) {
+    return makeEvent({
+      sequence,
+      type: "thread.session-set",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: releasedTurn.completedAt,
+      commandId: `cmd-release-${sequence}`,
+      payload: {
+        threadId: "thread-1",
+        session: sessionPayload({
+          status: "ready",
+          activeTurnId: null,
+          updatedAt: releasedTurn.completedAt,
+        }),
+        releasedTurn,
+      },
+    });
+  }
+
+  function diff(sequence: number, status: "ready" | "missing" | "error", completedAt: string) {
+    return makeEvent({
+      sequence,
+      type: "thread.turn-diff-completed",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: completedAt,
+      commandId: `cmd-diff-${sequence}`,
+      payload: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        checkpointTurnCount: 1,
+        checkpointRef: "refs/ryco/checkpoints/thread-1/turn/1",
+        status,
+        files: [],
+        assistantMessageId: null,
+        completedAt,
+      },
+    });
+  }
+
+  it("settles the running turn from releasedTurn", async () => {
+    const running = await runningThread();
+    const released = await Effect.runPromise(
+      projectEvent(
+        running,
+        release(3, {
+          turnId: "turn-1",
+          state: "completed",
+          completedAt: releasedAt,
+          reason: "provider-turn-completed",
+        }),
+      ),
+    );
+    expect(released.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-1",
+      state: "completed",
+      startedAt,
+      completedAt: releasedAt,
+    });
+  });
+
+  it("keeps an interrupted turn sticky across a later completed release", async () => {
+    const running = await runningThread();
+    const interrupted = await Effect.runPromise(
+      projectEvent(
+        running,
+        makeEvent({
+          sequence: 3,
+          type: "thread.turn-interrupt-requested",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: releasedAt,
+          commandId: "cmd-interrupt",
+          payload: { threadId: "thread-1", turnId: "turn-1", createdAt: releasedAt },
+        }),
+      ),
+    );
+    const released = await Effect.runPromise(
+      projectEvent(
+        interrupted,
+        release(4, {
+          turnId: "turn-1",
+          state: "completed",
+          completedAt: lateAt,
+          reason: "provider-turn-completed",
+        }),
+      ),
+    );
+    expect(released.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-1",
+      state: "interrupted",
+      completedAt: releasedAt,
+    });
+  });
+
+  it("leaves latestTurn alone when releasedTurn names another turn", async () => {
+    const running = await runningThread();
+    const released = await Effect.runPromise(
+      projectEvent(
+        running,
+        release(3, {
+          turnId: "turn-other",
+          state: "completed",
+          completedAt: releasedAt,
+          reason: "provider-turn-completed",
+        }),
+      ),
+    );
+    expect(released.threads[0]?.latestTurn).toEqual(running.threads[0]?.latestTurn);
+  });
+
+  it("keeps a running turn running when a placeholder diff lands mid-turn", async () => {
+    const running = await runningThread();
+    const afterPlaceholder = await Effect.runPromise(
+      projectEvent(running, diff(3, "missing", releasedAt)),
+    );
+    expect(afterPlaceholder.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-1",
+      state: "running",
+      completedAt: null,
+    });
+    expect(afterPlaceholder.threads[0]?.checkpoints).toHaveLength(1);
+
+    const afterRealCapture = await Effect.runPromise(
+      projectEvent(afterPlaceholder, diff(4, "ready", releasedAt)),
+    );
+    expect(afterRealCapture.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-1",
+      state: "running",
+      completedAt: null,
+    });
+  });
+
+  it("keeps the released state and completedAt when a late diff arrives", async () => {
+    const running = await runningThread();
+    const released = await Effect.runPromise(
+      projectEvent(
+        running,
+        release(3, {
+          turnId: "turn-1",
+          state: "error",
+          completedAt: releasedAt,
+          reason: "provider-turn-completed",
+        }),
+      ),
+    );
+    const afterDiff = await Effect.runPromise(projectEvent(released, diff(4, "ready", lateAt)));
+    expect(afterDiff.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-1",
+      state: "error",
+      completedAt: releasedAt,
+    });
+    expect(afterDiff.threads[0]?.checkpoints[0]?.status).toBe("ready");
+  });
+});
