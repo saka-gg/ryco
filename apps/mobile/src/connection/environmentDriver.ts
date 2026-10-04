@@ -1,9 +1,15 @@
 import type { EnvironmentId, OrchestrationEvent, ThreadId } from "@ryco/contracts";
 import {
+  checkSavedEnvironmentSession,
   createEnvironmentConnection,
   createEnvironmentConnectionSupervisor,
+  createSavedSessionRenewal,
+  isSavedEnvironmentAwaitingRepair,
+  isSavedEnvironmentCredentialRejection,
+  SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentConnectionCancelledError,
   SavedEnvironmentCredentialError,
+  savedEnvironmentRequiresAuthState,
   type EnvironmentConnection,
   type EnvironmentConnectionSupervisor,
   type EnvironmentStateSink,
@@ -128,6 +134,7 @@ export interface MobileCatalogLike {
   };
   readonly runtimeStore: {
     readonly getState: () => {
+      readonly byId: Readonly<Record<EnvironmentId, SavedEnvironmentRuntimeState | undefined>>;
       readonly ensure: (environmentId: EnvironmentId) => void;
       readonly patch: (
         environmentId: EnvironmentId,
@@ -140,11 +147,15 @@ export interface MobileCatalogLike {
   readonly list: () => ReadonlyArray<SavedEnvironmentRecord>;
   readonly get: (environmentId: EnvironmentId) => SavedEnvironmentRecord | null;
   readonly readBearerToken: (environmentId: EnvironmentId) => Promise<string | null>;
+  readonly writeBearerToken: (environmentId: EnvironmentId, token: string) => Promise<boolean>;
 }
 
 export interface MobileEnvironmentDriverDeps {
   readonly catalog: MobileCatalogLike;
-  readonly remoteApi: Pick<MobileRemoteEnvironmentApi, "resolveRemoteWebSocketConnectionUrl">;
+  readonly remoteApi: Pick<
+    MobileRemoteEnvironmentApi,
+    "fetchRemoteSessionState" | "resolveRemoteWebSocketConnectionUrl" | "rotateRemoteBearerSession"
+  >;
   readonly stateSink?: EnvironmentStateSink;
   readonly subscribeResume?: (listener: (reason: string) => void) => () => void;
   /**
@@ -256,10 +267,38 @@ export function createMobileEnvironmentDriver(
       lastError: error instanceof Error ? error.message : String(error),
       lastErrorAt: nowIso(),
     });
+  const setRuntimeRequiresAuth = (environmentId: EnvironmentId) =>
+    patchRuntime(environmentId, savedEnvironmentRequiresAuthState(nowIso()));
+
+  // Direct pairings renew their bearer while in use (shared with web and
+  // desktop). The renewal replaces the stored bearer, so every use reads it
+  // from the store and never presents one remembered from earlier: that one may
+  // be superseded, and the node revokes the pairing when it sees it again.
+  const savedSessionRenewal = createSavedSessionRenewal({
+    readBearerToken: (environmentId) => catalog.readBearerToken(environmentId),
+    writeBearerToken: (environmentId, token) => catalog.writeBearerToken(environmentId, token),
+    setTimeout: boundSetTimeout,
+    clearTimeout: boundClearTimeout,
+  });
+  const renewalCalls = (record: SavedEnvironmentRecord) => ({
+    fetchSessionState: (bearerToken: string) =>
+      remoteApi.fetchRemoteSessionState({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
+    rotate: (bearerToken: string) =>
+      remoteApi.rotateRemoteBearerSession({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
+  });
 
   function createSavedEnvironmentClient(
     environmentId: EnvironmentId,
-    bearerToken: string,
+    owner: {
+      /**
+       * Whether this client's attempt, or the connection it registered, still
+       * owns the environment's state. A socket an attempt left behind once
+       * cancelled or replaced keeps reporting until it stops, and must not
+       * overwrite the state of the connection that replaced it.
+       */
+      readonly speaksForEnvironment: () => boolean;
+      readonly onCredentialRejected: () => void;
+    },
   ): WsRpcClient {
     catalog.runtimeStore.getState().ensure(environmentId);
     return createWsRpcClient(
@@ -270,18 +309,29 @@ export function createMobileEnvironmentDriver(
           return remoteApi.resolveRemoteWebSocketConnectionUrl({
             wsBaseUrl: record.wsBaseUrl,
             httpBaseUrl: record.httpBaseUrl,
-            bearerToken,
+            bearerToken: await savedSessionRenewal.readBearerToken(environmentId),
           });
         },
         {
           getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
           getEnvironmentId: () => environmentId,
           persistentReconnect: true,
-          onAttempt: () => setRuntimeConnecting(environmentId),
-          onOpen: () => setRuntimeConnected(environmentId),
-          onError: (message) => setRuntimeError(environmentId, new Error(message)),
+          // A rejected bearer is not an outage the backoff can wait out.
+          isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+          onTerminalUrlError: owner.onCredentialRejected,
+          onAttempt: () => {
+            if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
+          },
+          onOpen: () => {
+            if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
+          },
+          onError: (message) => {
+            if (owner.speaksForEnvironment()) setRuntimeError(environmentId, new Error(message));
+          },
           onClose: (details, context) => {
-            if (!context.intentional) setRuntimeDisconnected(environmentId, details.reason);
+            if (!context.intentional && owner.speaksForEnvironment()) {
+              setRuntimeDisconnected(environmentId, details.reason);
+            }
           },
         },
       ),
@@ -292,26 +342,88 @@ export function createMobileEnvironmentDriver(
     record: SavedEnvironmentRecord,
     isCancelled: () => boolean = () => false,
   ): Promise<EnvironmentConnection> {
+    let registered: EnvironmentConnection | null = null;
+    // Only this environment's live attempt, or the connection it registered,
+    // reports the environment's state. An attempt a disconnect or a new pairing
+    // cancelled, and a connection something else has since replaced, say
+    // nothing about the credential the environment holds now.
+    const speaksForEnvironment = () => {
+      if (isCancelled()) return false;
+      const current = getSupervisor().read(record.environmentId);
+      return registered !== null ? current === registered : current === null;
+    };
+
     const bearerToken = await catalog.readBearerToken(record.environmentId);
     if (!bearerToken) {
-      patchRuntime(record.environmentId, {
-        authState: "requires-auth",
-        connectionState: "disconnected",
-        lastError: "Saved environment is missing its saved credential. Pair it again.",
-        lastErrorAt: nowIso(),
-      });
+      if (speaksForEnvironment()) {
+        patchRuntime(record.environmentId, {
+          authState: "requires-auth",
+          connectionState: "disconnected",
+          lastError: "Saved environment is missing its saved credential. Pair it again.",
+          lastErrorAt: nowIso(),
+        });
+      }
       throw new SavedEnvironmentCredentialError(
         "Saved environment is missing its saved credential.",
       );
     }
 
-    const client = createSavedEnvironmentClient(record.environmentId, bearerToken);
+    // Asked before any socket exists: the node answers an expired or revoked
+    // bearer with `authenticated: false`, and a socket built on it would retry
+    // its ws-token request forever.
+    const sessionCheck = await checkSavedEnvironmentSession({
+      fetchSessionState: () =>
+        remoteApi.fetchRemoteSessionState({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
+    }).catch((error: unknown) => {
+      if (speaksForEnvironment()) setRuntimeError(record.environmentId, error);
+      throw error;
+    });
+    if (sessionCheck.status === "requires-auth") {
+      if (speaksForEnvironment()) setRuntimeRequiresAuth(record.environmentId);
+      throw new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE);
+    }
+    if (speaksForEnvironment()) {
+      // The node accepts the credential again (after pairing again, say), so
+      // background reconnects resume.
+      patchRuntime(record.environmentId, {
+        authState: "authenticated",
+        role: sessionCheck.session.role ?? null,
+      });
+    }
+    // A pairing in use renews its bearer before a socket is built on it.
+    const renewal = await savedSessionRenewal.renew({
+      environmentId: record.environmentId,
+      session: sessionCheck.session,
+      bearerToken,
+      ...renewalCalls(record),
+    });
+
+    const client = createSavedEnvironmentClient(record.environmentId, {
+      speaksForEnvironment,
+      onCredentialRejected: () => {
+        if (!speaksForEnvironment()) return;
+        setRuntimeRequiresAuth(record.environmentId);
+        // Its transport has stopped; the dead connection leaves the supervisor
+        // so a reconnect starts over with a session check. Deferred out of the
+        // transport callback that reported it.
+        globalThis.setTimeout(() => {
+          if (registered !== null && getSupervisor().read(record.environmentId) === registered) {
+            void getSupervisor()
+              .remove(record.environmentId)
+              .catch(() => false);
+          }
+        }, 0);
+      },
+    });
     const knownEnvironment = createKnownEnvironment({
       id: record.environmentId,
       label: record.label,
       source: "manual",
       target: { httpBaseUrl: record.httpBaseUrl, wsBaseUrl: record.wsBaseUrl },
     });
+    // The pairing's renewal, kept while this connection is registered, stops
+    // with it.
+    let stopRenewal: () => void = () => undefined;
     const connection = createEnvironmentConnection({
       kind: "saved",
       knownEnvironment: {
@@ -338,6 +450,7 @@ export function createMobileEnvironmentDriver(
         getSupervisor().syncShellSnapshot(snapshot, environmentId),
       // Terminal streaming is deferred to v1.1.
       applyTerminalEvent: () => undefined,
+      onDispose: () => stopRenewal(),
     });
 
     try {
@@ -345,11 +458,17 @@ export function createMobileEnvironmentDriver(
         await connection.dispose().catch(() => undefined);
         throw new SavedEnvironmentConnectionCancelledError(record.environmentId);
       }
-      getSupervisor().register(connection);
+      registered = getSupervisor().register(connection);
+      stopRenewal = savedSessionRenewal.keepRenewed({
+        environmentId: record.environmentId,
+        session: renewal.session,
+        isCurrent: () => getSupervisor().read(record.environmentId) === registered,
+        ...renewalCalls(record),
+      });
       return connection;
     } catch (error) {
       if (!(error instanceof SavedEnvironmentConnectionCancelledError)) {
-        setRuntimeError(record.environmentId, error);
+        if (speaksForEnvironment()) setRuntimeError(record.environmentId, error);
         await connection.dispose().catch(() => undefined);
       }
       throw error;
@@ -388,6 +507,8 @@ export function createMobileEnvironmentDriver(
     subscribeSavedEnvironmentRegistry: (listener) => catalog.registryStore.subscribe(listener),
     connectSavedEnvironment: (record, isCancelled) =>
       (deps.connectSavedEnvironment ?? connectSavedEnvironment)(record, isCancelled),
+    isSavedEnvironmentAwaitingRepair: (environmentId) =>
+      isSavedEnvironmentAwaitingRepair(catalog.runtimeStore.getState().byId[environmentId]),
     disconnectSavedEnvironment: async (environmentId) => {
       await getSupervisor().remove(environmentId);
     },

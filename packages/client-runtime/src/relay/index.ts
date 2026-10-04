@@ -1,4 +1,5 @@
 export * from "./base64url.ts";
+export * from "./dispatchReplay.ts";
 export * from "./dpop.ts";
 export * from "./ecdsa.ts";
 export * from "./reconnectPolicy.ts";

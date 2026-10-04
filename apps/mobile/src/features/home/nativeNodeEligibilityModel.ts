@@ -12,12 +12,22 @@ export interface NativeNodeTrustScope {
   readonly accountId: string;
 }
 
-export type NativeNodeTrustClassifier = (input: {
+export interface NativeNodeTrustSelection {
   readonly kind: "node-id-hint";
   readonly hubOrigin: string;
   readonly accountId: string;
   readonly nodeId: string;
-}) => Promise<E2eeTrustClassification>;
+}
+
+export type NativeNodeTrustClassifier = (
+  input: NativeNodeTrustSelection,
+) => Promise<E2eeTrustClassification>;
+
+/**
+ * Whether the selection resolves to a §13.2 pairing record, read after the
+ * classifier's load completed. Only ever narrows eligibility.
+ */
+export type NativeNodePairingProbe = (input: NativeNodeTrustSelection) => boolean;
 
 /**
  * Resolve native trust through the durable async classifier. This is the
@@ -28,6 +38,7 @@ export async function resolveAuthoritativeNativeNodeTrust(input: {
   readonly scope: NativeNodeTrustScope | null;
   readonly targets: ReadonlyArray<NativeNodeTrustTarget>;
   readonly classify: NativeNodeTrustClassifier;
+  readonly pairing: NativeNodePairingProbe;
   readonly accountEnrollmentReady?: boolean;
   readonly identityConflictEnvironmentIds?: ReadonlySet<string>;
 }): Promise<ReadonlyMap<string, WorkspaceNativeTrustState>> {
@@ -39,12 +50,19 @@ export async function resolveAuthoritativeNativeNodeTrust(input: {
       }
       if (input.scope === null) return [target.environmentId, "unknown"] as const;
       try {
-        const classification = await input.classify({
+        const selection = {
           kind: "node-id-hint",
           hubOrigin: input.scope.hubOrigin,
           accountId: input.scope.accountId,
           nodeId: target.nodeId,
-        });
+        } as const;
+        const classification = await input.classify(selection);
+        // A pending approval request routes every channel to this node
+        // pairing-only, which no account grant or legacy consent changes, so
+        // the node cannot carry a workspace. `unverified` keeps it out of the
+        // eligible set and lists it under Needs verification, the way back to
+        // the request, its safety number and the scanner.
+        if (input.pairing(selection)) return [target.environmentId, "unverified"] as const;
         return [
           target.environmentId,
           classification.class === "latched"

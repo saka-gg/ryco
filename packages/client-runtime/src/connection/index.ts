@@ -12,6 +12,8 @@ export * from "./projectionTracker.ts";
 export * from "./remoteApi.ts";
 export * from "./remoteTarget.ts";
 export * from "./savedEnvironmentConnectionScheduler.ts";
+export * from "./savedEnvironmentSession.ts";
+export * from "./savedSessionRenewal.ts";
 export * from "./supervision.ts";
 export * from "./threadHistoryPagination.ts";
 export * from "./projectIconSource.ts";

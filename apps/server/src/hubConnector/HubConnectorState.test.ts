@@ -226,14 +226,13 @@ describe("classifyConnectorFailure", () => {
     }
   });
 
-  it("stops every configuration, identity, authentication, and replacement failure", () => {
+  it("stops only the failures no retry can fix", () => {
     for (const kind of [
       "configuration_invalid",
-      "identity_unavailable",
+      "identity_store_unavailable",
       "identity_origin_mismatch",
       "enrollment_unavailable",
-      "authentication_failed",
-      "connection_replaced",
+      "enrollment_expired",
     ] as const) {
       expect(classifyConnectorFailure(kind, 0)).toMatchObject({ action: "operator" });
     }
@@ -247,9 +246,51 @@ describe("classifyConnectorFailure", () => {
     });
   });
 
+  it("retries usually-transient identity, replacement, and refusal failures on their own clocks", () => {
+    // A locked keychain is checked soon and is worth checking again on wake.
+    expect(classifyConnectorFailure("identity_unavailable", 0)).toMatchObject({
+      action: "slow_retry",
+      failure: "identity_unavailable",
+      policy: { baseDelayMs: 30_000, maxDelayMs: 600_000 },
+      nudgeable: true,
+    });
+    // A duplicate is displaced by every retry, so the gap is long and capped.
+    expect(classifyConnectorFailure("connection_replaced", 0)).toMatchObject({
+      action: "slow_retry",
+      failure: "connection_replaced",
+      policy: { baseDelayMs: 300_000, maxPerHour: 3 },
+      nudgeable: false,
+    });
+    expect(classifyConnectorFailure("authentication_failed", 0)).toMatchObject({
+      action: "slow_retry",
+      failure: "authentication_failed",
+      policy: { baseDelayMs: 900_000, maxDelayMs: 3_600_000 },
+      nudgeable: false,
+    });
+    // A local duplicate caught by the process lock reads like the replacement
+    // it prevented, but costs the Hub nothing to re-check, so it has no budget.
+    const local = classifyConnectorFailure("identity_in_use", 0);
+    expect(local).toMatchObject({
+      action: "slow_retry",
+      failure: "connection_replaced",
+      policy: { baseDelayMs: 30_000, maxDelayMs: 120_000 },
+    });
+    expect(local.action === "slow_retry" && local.policy.maxPerHour).toBeUndefined();
+  });
+
   it("allows one backed-off canonical violation and stops the second before stability", () => {
     expect(classifyConnectorFailure("protocol_invalid", 0).action).toBe("retry");
     expect(classifyConnectorFailure("protocol_invalid", 1).action).toBe("operator");
+  });
+
+  it("retries one stale-proof rejection and treats the next as a real rejection", () => {
+    expect(classifyConnectorFailure("authentication_stale", 0, 0)).toEqual({
+      action: "retry",
+      failure: "authentication_timeout",
+    });
+    expect(classifyConnectorFailure("authentication_stale", 0, 1)).toEqual(
+      classifyConnectorFailure("authentication_failed", 0),
+    );
   });
   it("keeps expiry distinguishable from denial, and a dead store from a locked one", () => {
     // Each pair needs opposite operator instructions, so collapsing either into
@@ -268,8 +309,8 @@ describe("classifyConnectorFailure", () => {
       action: "operator",
       failure: "identity_store_unavailable",
     });
-    expect(classifyConnectorFailure("identity_unavailable", 0)).toEqual({
-      action: "operator",
+    expect(classifyConnectorFailure("identity_unavailable", 0)).toMatchObject({
+      action: "slow_retry",
       failure: "identity_unavailable",
     });
   });

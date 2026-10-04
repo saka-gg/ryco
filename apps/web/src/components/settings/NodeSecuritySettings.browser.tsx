@@ -72,7 +72,7 @@ vi.mock("~/environments/primary", async (importOriginal) => ({
   }),
   fetchNodeE2eeClients: vi.fn(async () => {
     calls.push("clients");
-    return CLIENTS;
+    return clients;
   }),
   fetchNodeE2eeSessions: vi.fn(async () => {
     calls.push("sessions");
@@ -88,7 +88,7 @@ vi.mock("~/environments/primary", async (importOriginal) => ({
   }),
   fetchNodeE2eeContinuity: vi.fn(async () => {
     calls.push("continuity");
-    return CONTINUITY;
+    return readContinuity();
   }),
   fetchNodeE2eeFallback: vi.fn(async () => {
     calls.push("fallback");
@@ -163,7 +163,11 @@ import {
   nodeE2eeActionConfirmation,
   nodeE2eeRecordConfirmation,
   nodePolicyPreviewWarnings,
+  NODE_APPROVAL_REVOKED_NOTICE,
+  NODE_APPROVE_NUMBER_PROMPT,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
+  NODE_REVOKE_PENDING_NOTE,
+  NODE_SAFETY_NUMBER_MATCH_LABEL,
   NODE_SESSION_WEB_SAS_ADVISORY,
 } from "./NodeSecuritySettings.logic";
 
@@ -191,6 +195,14 @@ const SECOND_SAFETY_NUMBER = Array.from(
     String(13_570 + index).padStart(E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup, "0"),
 ).join(E2EE_SAFETY_NUMBER_DIGITS.separator);
 
+/** A third key under the same account, for the partition with two requests waiting. */
+const THIRD_FINGERPRINT = "SHA256:CCCCtabletCCCCtabletCCCCtabletCCCCtabletC2";
+const THIRD_SAFETY_NUMBER = Array.from(
+  { length: E2EE_SAFETY_NUMBER_DIGITS.groups },
+  (_unused, index) =>
+    String(97_530 - index).padStart(E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup, "0"),
+).join(E2EE_SAFETY_NUMBER_DIGITS.separator);
+
 const CLIENTS: NodeE2eeClientListing = {
   records: [
     {
@@ -203,6 +215,8 @@ const CLIENTS: NodeE2eeClientListing = {
       createdAt: 1_700_000_000_000,
       safetyNumber: SAFETY_NUMBER,
       pairingReserved: false,
+      // The owner's own phone: the Hub opens its channels as `owner`.
+      observedRole: "owner",
     },
     {
       status: "approved",
@@ -215,12 +229,31 @@ const CLIENTS: NodeE2eeClientListing = {
       approvedAt: 1_700_000_000_000,
       safetyNumber: SECOND_SAFETY_NUMBER,
       pairingReserved: false,
+      observedRole: "operator",
     },
   ],
   pendingGlobalSaturated: false,
   saturatedAccounts: [],
   refusedPairingAttempts: 2,
 };
+
+/** What the clients route answers with in the current test. */
+let clients: NodeE2eeClientListing = CLIENTS;
+
+/**
+ * `CLIENTS` with one record's observed role replaced — or removed, which is a
+ * record from before the node kept it.
+ */
+function withObservedRole(index: number, observedRole: string | undefined): NodeE2eeClientListing {
+  return {
+    ...CLIENTS,
+    records: CLIENTS.records.map((record, at) => {
+      if (at !== index) return record;
+      const { observedRole: _previous, ...rest } = record;
+      return observedRole === undefined ? rest : { ...rest, observedRole };
+    }),
+  };
+}
 
 const SESSIONS: NodeE2eeSessionList = {
   sessions: [
@@ -262,6 +295,9 @@ const CONTINUITY: NodeE2eeContinuity = {
   chainLength: 2,
 };
 
+/** What the continuity route does in the current test. */
+let readContinuity: () => Promise<NodeE2eeContinuity> = async () => CONTINUITY;
+
 const FALLBACK: NodeE2eeFallback = {
   windowStartedAt: 1_700_000_000_000,
   peerLegacy: { occurrences: 1, ringOverflows: 0, lastOccurrenceAt: 1_700_000_100_000 },
@@ -274,6 +310,8 @@ let mounted: Awaited<ReturnType<typeof render>> | null = null;
 beforeEach(() => {
   calls.length = 0;
   localSessionRole = "owner";
+  clients = CLIENTS;
+  readContinuity = async () => CONTINUITY;
   // Call history only — the factory's implementations stay in place. Without it
   // an assertion in one test would be satisfied by a click in an earlier one.
   vi.clearAllMocks();
@@ -309,6 +347,20 @@ async function mountLocalPanel() {
   mounted = await render(<NodeSecuritySettings />);
   await expect.element(page.getByText(SAFETY_NUMBER)).toBeVisible();
   return mounted;
+}
+
+/** Every "This number matches the phone" statement on the page, in row order. */
+const numberMatchStatements = () =>
+  [...document.querySelectorAll<HTMLElement>('[data-testid="node-safety-number-match"]')].map(
+    (statement) => statement.querySelector<HTMLElement>('[role="checkbox"]')!,
+  );
+
+/** The owner says the `index`th approvable row's number matches the phone. */
+async function confirmNumberMatches(index = 0) {
+  numberMatchStatements()[index]!.click();
+  await vi.waitFor(() => {
+    expect(numberMatchStatements()[index]!.getAttribute("aria-checked")).toBe("true");
+  });
 }
 
 describe("local mode: the node's operator state, and no alarm about a relay that is not there", () => {
@@ -396,6 +448,34 @@ describe("local mode: the node's operator state, and no alarm about a relay that
     // …and a native session gets the pointer at the long-term value instead of a
     // blank that reads as a missing code.
     expect(document.body.textContent).toContain("Native sessions have no per-session code");
+  });
+
+  it("draws every other read, and names the other copy, in a backend that does not own the identity", async () => {
+    // The node's own sentence, carried rather than restated.
+    const remedy =
+      "Another copy of Ryco is using this machine's Hub identity, and only that copy reads the continuity chain.";
+    readContinuity = async () => ({ status: "identity_in_use", remedy });
+    await mountLocalPanel();
+
+    await expect.element(page.getByText(remedy)).toBeVisible();
+    expect(document.body.textContent).toContain("not read here");
+    // Nothing that reads as a lineage this backend never read.
+    expect(document.body.textContent).not.toContain("lineage-1");
+    expect(document.body.textContent).not.toContain("advertisable");
+    // It is an answer, not a failure: the panel raises no error over it.
+    expect(document.body.textContent).not.toContain("That didn't work");
+  });
+
+  it("draws the reads that answered when one of them fails", async () => {
+    readContinuity = async () => {
+      throw new Error("Unable to read continuity state.");
+    };
+    // The client list is drawn — the one section an empty panel would misreport
+    // as "nothing is authorized" — beside the failure, not instead of it.
+    await mountLocalPanel();
+    await expect.element(page.getByText("Unable to read continuity state.")).toBeVisible();
+    await expect.element(page.getByText(PREKEY.prekeyId!)).toBeVisible();
+    expect(document.body.textContent).toContain(NODE_SESSION_CODE);
   });
 });
 
@@ -569,6 +649,33 @@ describe("the confirmation stands between the click and the network", () => {
     expect(second).not.toContain(FINGERPRINT);
   });
 
+  it("points a pending request's Revoke at Delete, and only a pending one's", async () => {
+    // Revoking a request leaves a row this panel never approves; an owner who
+    // only meant to set it aside has to hear that before confirming, not after.
+    await mountLocalPanel();
+
+    buttonsLabelled("Revoke")[0]!.click();
+    const pending = await vi.waitFor(() => {
+      const found = confirmDialog();
+      expect(found).not.toBeNull();
+      return found!.textContent ?? "";
+    });
+    expect(pending).toContain(NODE_REVOKE_PENDING_NOTE);
+    cancelButton()!.click();
+    await vi.waitFor(() => {
+      expect(confirmDialog()).toBeNull();
+    });
+
+    buttonsLabelled("Revoke")[1]!.click();
+    const approved = await vi.waitFor(() => {
+      const found = confirmDialog();
+      expect(found).not.toBeNull();
+      return found!.textContent ?? "";
+    });
+    expect(approved).toContain(SECOND_FINGERPRINT);
+    expect(approved).not.toContain(NODE_REVOKE_PENDING_NOTE);
+  });
+
   it("echoes the fingerprint a pairing window would admit", async () => {
     await mountLocalPanel();
     const input = document.querySelector<HTMLInputElement>(
@@ -590,19 +697,20 @@ describe("the confirmation stands between the click and the network", () => {
 });
 
 describe("§13.6 the request an approval builds is the one the owner was shown", () => {
-  it("sends the named role and a capability set the node can admit", async () => {
+  it("approves at the role the device connects with, with a capability set the node can admit", async () => {
     // The dialog and the wire could disagree silently: nothing asserted the
     // built request at all, so `maxRole: "owner", capabilitySet: ["*"]` behind a
-    // button labelled "Approve as viewer" left both suites green. And the
-    // shipped set was EMPTY, which §8.6 step 6 refuses on every native
-    // handshake — an `approved` record that cannot connect.
+    // differently labelled button left both suites green. And the shipped set
+    // was EMPTY, which §8.6 step 6 refuses on every native handshake — an
+    // `approved` record that cannot connect.
     await mountLocalPanel();
+    await confirmNumberMatches();
 
-    buttonsLabelled("Approve as viewer")[0]!.click();
+    buttonsLabelled("Approve as owner")[0]!.click();
     await vi.waitFor(() => {
       expect(confirmButton()).not.toBeNull();
     });
-    expect(confirmDialog()!.textContent).toContain("Approve this client key as viewer?");
+    expect(confirmDialog()!.textContent).toContain("Approve this client key as owner?");
     confirmButton()!.click();
 
     await vi.waitFor(() => {
@@ -613,7 +721,7 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
       accountId: "acct_reader",
       fingerprint: FINGERPRINT,
       action: "approve",
-      maxRole: "viewer",
+      maxRole: "owner",
       capabilitySet: NODE_E2EE_APPROVAL_CAPABILITY_SET,
     });
     await vi.waitFor(() => {
@@ -627,26 +735,69 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
     expect(NODE_E2EE_APPROVAL_CAPABILITY_SET.length).toBeGreaterThan(0);
   });
 
-  it("discriminates between sibling roles rather than sending a default", async () => {
+  it("offers no ceiling below the role the device connects with", async () => {
+    // §8.3 makes a native client's intended role equal its `channel.open` role,
+    // so a smaller ceiling refuses the device rather than limiting it. The
+    // buttons this replaced led with "Approve as viewer" — a green row whose
+    // every handshake was then refused.
     await mountLocalPanel();
-
-    buttonsLabelled("Approve as owner")[0]!.click();
-    await vi.waitFor(() => {
-      expect(confirmButton()).not.toBeNull();
-    });
-    confirmButton()!.click();
-    await vi.waitFor(() => {
-      expect(applyNodeE2eeAuthorization).toHaveBeenCalledTimes(1);
-    });
-    expect(applyNodeE2eeAuthorization).toHaveBeenCalledWith(
-      expect.objectContaining({ maxRole: "owner" }),
-    );
+    await confirmNumberMatches();
+    for (const role of ["viewer", "operator"]) {
+      expect(buttonsLabelled(`Approve as ${role}`), role).toHaveLength(0);
+    }
+    expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
+    expect(document.querySelector('[data-testid="node-approval-withheld"]')).toBeNull();
   });
 
-  it("offers no narrowing on a record already at the smallest ceiling", async () => {
-    // The node treats a narrow that changes nothing as a no-op, so the button
-    // would offer an action with no effect behind a dialog promising immediate
-    // channel closure. Only the `operator` record gets one.
+  it("offers no approval at all for a request that does not say its role", async () => {
+    // A record from before the node kept the role. Any button here would be a
+    // guess, and the wrong guess is the lockout — so the row says what to do.
+    clients = withObservedRole(0, undefined);
+    await mountLocalPanel();
+    expect(
+      [...document.querySelectorAll<HTMLElement>("button")].filter((element) =>
+        (element.textContent ?? "").trim().startsWith("Approve as"),
+      ),
+    ).toHaveLength(0);
+    expect(document.querySelector('[data-testid="node-approval-withheld"]')?.textContent).toContain(
+      "Have the device try again",
+    );
+    // …and no comparison is asked for an approval that is not on offer.
+    expect(numberMatchStatements()).toHaveLength(0);
+  });
+
+  it("re-approves no revoked key, and says how to bring it back", async () => {
+    // A revoked record keeps the role the device introduced itself with; the
+    // Hub may assign another now, so a re-approval at it could lock the device
+    // out or grant what the Hub no longer assigns.
+    const [phone, approved] = CLIENTS.records;
+    clients = {
+      ...CLIENTS,
+      records: [{ ...phone!, status: "revoked", revokedAt: 1_700_000_000_000 }, approved!],
+    };
+    await mountLocalPanel();
+    expect(
+      [...document.querySelectorAll<HTMLElement>("button")].filter((element) =>
+        (element.textContent ?? "").trim().startsWith("Approve as"),
+      ),
+    ).toHaveLength(0);
+    expect(numberMatchStatements()).toHaveLength(0);
+    expect(document.querySelector('[data-testid="node-approval-withheld"]')?.textContent).toBe(
+      NODE_APPROVAL_REVOKED_NOTICE,
+    );
+    expect(document.body.textContent).toContain("Connected as (when introduced)");
+  });
+
+  it("offers Reduce to viewer only where the device would still get in", async () => {
+    // The approved record connects as `operator`: a `viewer` ceiling would
+    // refuse it on its next handshake, not narrow it — Revoke says that honestly.
+    await mountLocalPanel();
+    expect(buttonsLabelled("Reduce to viewer")).toHaveLength(0);
+    expect(buttonsLabelled("Revoke").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("narrows a record approved above the role it connects with", async () => {
+    clients = withObservedRole(1, "viewer");
     await mountLocalPanel();
     expect(buttonsLabelled("Reduce to viewer")).toHaveLength(1);
 
@@ -664,6 +815,163 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
         hubOrigin: "https://hub.example.test",
       }).body,
     );
+  });
+});
+
+describe("§13.2 step 5 an approval waits for the owner to match the number", () => {
+  // A Hub mints the tickets, so it can introduce a key of its own under the
+  // owner's account. That pending row reads exactly like the phone's except for
+  // the fingerprint and the §13.4 number — so the comparison is the one human
+  // check strict mode rests on, and an advisory beside an always-present button
+  // left it optional.
+  const approveButtons = () =>
+    [...document.querySelectorAll<HTMLElement>("button")].filter((element) =>
+      (element.textContent ?? "").trim().startsWith("Approve as"),
+    );
+
+  it("offers no approve action until the owner says the number matches the phone", async () => {
+    await mountLocalPanel();
+    expect(approveButtons()).toHaveLength(0);
+
+    // The statement sits with the number it is about, on the approvable row only.
+    expect(numberMatchStatements()).toHaveLength(1);
+    expect(
+      document.querySelector('[data-testid="node-safety-number-match"]')!.textContent,
+    ).toContain(NODE_SAFETY_NUMBER_MATCH_LABEL);
+
+    await confirmNumberMatches();
+    expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
+
+    // Taking it back takes the action away again.
+    numberMatchStatements()[0]!.click();
+    await vi.waitFor(() => {
+      expect(approveButtons()).toHaveLength(0);
+    });
+    expect(applyNodeE2eeAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("withdraws the statement when a re-read brings another number for the same key", async () => {
+    // A rotated node identity, or a record purged and introduced again under
+    // the same client key, keeps the row — and its React key — while the number
+    // changes. A tick carried across would approve a number the owner never
+    // compared.
+    await mountLocalPanel();
+    await confirmNumberMatches();
+    expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
+
+    const [phone, approved] = CLIENTS.records;
+    clients = {
+      ...CLIENTS,
+      records: [{ ...phone!, safetyNumber: THIRD_SAFETY_NUMBER }, approved!],
+    };
+    buttonsLabelled("Refresh")[0]!.click();
+    await expect.element(page.getByText(THIRD_SAFETY_NUMBER)).toBeVisible();
+
+    expect(approveButtons()).toHaveLength(0);
+    expect(numberMatchStatements()).toHaveLength(1);
+    expect(numberMatchStatements()[0]!.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("keeps it withdrawn when a later read brings the matched values back", async () => {
+    // Revoked, then purged and introduced again between two reads: the same
+    // status and number are back, but nobody has compared this request.
+    await mountLocalPanel();
+    await confirmNumberMatches();
+
+    const [phone, approved] = CLIENTS.records;
+    clients = {
+      ...CLIENTS,
+      records: [{ ...phone!, status: "revoked", revokedAt: 1_700_000_000_000 }, approved!],
+    };
+    buttonsLabelled("Refresh")[0]!.click();
+    await vi.waitFor(() => {
+      expect(numberMatchStatements()).toHaveLength(0);
+    });
+
+    clients = CLIENTS;
+    buttonsLabelled("Refresh")[0]!.click();
+    await vi.waitFor(() => {
+      expect(numberMatchStatements()).toHaveLength(1);
+    });
+    expect(numberMatchStatements()[0]!.getAttribute("aria-checked")).toBe("false");
+    expect(approveButtons()).toHaveLength(0);
+  });
+
+  it("repeats the whole number in the approval dialog, never a tail of it", async () => {
+    await mountLocalPanel();
+    await confirmNumberMatches();
+    buttonsLabelled("Approve as owner")[0]!.click();
+    await vi.waitFor(() => {
+      expect(confirmDialog()).not.toBeNull();
+    });
+
+    // The dialog's scrim hides the row just compared, so the last look has to
+    // be inside it — all sixty digits, in the face a digit-by-digit read needs.
+    const facts = document.querySelector<HTMLElement>('[data-testid="node-confirmation-facts"]')!;
+    const value = [...facts.querySelectorAll<HTMLElement>("dd")].find(
+      (element) => (element.textContent ?? "").trim() === SAFETY_NUMBER,
+    );
+    expect(value, "the dialog does not carry the whole number").toBeDefined();
+    expect(getComputedStyle(value!).fontFamily.toLowerCase()).toMatch(/mono/u);
+    expect(confirmDialog()!.textContent).toContain(NODE_APPROVE_NUMBER_PROMPT);
+    expect(confirmDialog()!.textContent).toContain(FINGERPRINT);
+    expect(applyNodeE2eeAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("warns on each row, and in the dialog, when an account has two requests waiting", async () => {
+    const [phone, approved] = CLIENTS.records;
+    clients = {
+      ...CLIENTS,
+      records: [
+        phone!,
+        // A second pending key under the SAME account and origin — another
+        // device, or one the Hub introduced. Nothing but the fingerprint and
+        // the number tell it from the phone.
+        { ...phone!, fingerprint: THIRD_FINGERPRINT, safetyNumber: THIRD_SAFETY_NUMBER },
+        approved!,
+      ],
+    };
+    await mountLocalPanel();
+
+    const warnings = [
+      ...document.querySelectorAll<HTMLElement>('[data-testid="node-pending-partition-warning"]'),
+    ];
+    expect(warnings).toHaveLength(2);
+    for (const warning of warnings) {
+      expect(warning.textContent).toContain("2 requests are waiting under this account");
+    }
+
+    // Matching the SECOND row approves the second row, and its dialog repeats
+    // the warning along with that row's own number — not the first row's.
+    await confirmNumberMatches(1);
+    expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
+    buttonsLabelled("Approve as owner")[0]!.click();
+    const dialog = await vi.waitFor(() => {
+      const found = confirmDialog();
+      expect(found).not.toBeNull();
+      return found!.textContent ?? "";
+    });
+    expect(dialog).toContain("2 requests are waiting under this account");
+    expect(dialog).toContain(THIRD_SAFETY_NUMBER);
+    expect(dialog).toContain(THIRD_FINGERPRINT);
+    expect(dialog).not.toContain(SAFETY_NUMBER);
+  });
+
+  it("does not warn when the only other record under the account is approved", async () => {
+    await mountLocalPanel();
+    expect(document.querySelector('[data-testid="node-pending-partition-warning"]')).toBeNull();
+  });
+
+  it("offers no approval for a record whose number it cannot show", async () => {
+    // No readable number, nothing to compare — so nothing to approve from here.
+    clients = {
+      ...CLIENTS,
+      records: [{ ...CLIENTS.records[0]!, safetyNumber: "12345" }, CLIENTS.records[1]!],
+    };
+    mounted = await render(<NodeSecuritySettings />);
+    await expect.element(page.getByText(SECOND_SAFETY_NUMBER)).toBeVisible();
+    expect(numberMatchStatements()).toHaveLength(0);
+    expect(approveButtons()).toHaveLength(0);
   });
 });
 

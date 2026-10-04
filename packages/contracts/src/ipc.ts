@@ -381,12 +381,24 @@ export interface PersistedSavedEnvironmentRecord {
 
 export type DesktopServerExposureMode = "local-only" | "network-accessible";
 
+/**
+ * What the running backend serves. The `pending*` fields describe a change
+ * saved for the next launch, which only a relaunch applies.
+ */
 export interface DesktopServerExposureState {
   mode: DesktopServerExposureMode;
   endpointUrl: string | null;
   advertisedHost: string | null;
   tailscaleServeEnabled: boolean;
   tailscaleServePort: number;
+  /**
+   * The network access mode the next launch binds, while it differs from
+   * `mode`: a change deferred until running turns finish, or one the network
+   * could not serve when Ryco started. Absent when nothing is pending.
+   */
+  pendingMode?: DesktopServerExposureMode;
+  /** What the next launch serves through Tailscale, while it differs from what runs. */
+  pendingTailscaleServe?: { readonly enabled: boolean; readonly port: number };
 }
 
 export interface PickFolderOptions {
@@ -406,12 +418,47 @@ export interface DesktopTurnCompleteNotification {
 }
 
 export interface DesktopHubLaunchConfig {
+  /**
+   * The operator (or account setup) explicitly turned the connector on. When
+   * false and not turned off, a configured Hub still runs its connector in
+   * standby for a node with no Hub identity yet.
+   */
   readonly enabled: boolean;
   readonly origin: string | null;
   readonly nodeName: string | null;
   readonly allowFileSecretStore: boolean;
   /** Whether this host can use the hardened permissioned-file fallback. */
   readonly fileSecretStoreFallbackSupported: boolean;
+  /**
+   * Whether Desktop main can run native Ryco account setup on this host. When
+   * false the node enrols through the Hub's device-code ceremony instead.
+   */
+  readonly hostedIdentitySupported: boolean;
+  /**
+   * The saved launch configuration differs from what the running backend
+   * serves, so it applies only after a relaunch. Absent means false.
+   */
+  readonly restartRequired?: boolean;
+}
+
+/** What `setHubLaunchConfig` did with a change. */
+export interface DesktopHubLaunchConfigResult {
+  /**
+   * Desktop is relaunching to apply it. False when the change was only saved
+   * for a later launch, or when the running backend already serves it.
+   */
+  readonly relaunching: boolean;
+}
+
+/** Whether Desktop main is holding this machine awake for the devices that reach it. */
+export interface DesktopKeepAwakeState {
+  /** The operator's preference. On by default. */
+  readonly enabled: boolean;
+  /** Other devices can reach this node through the Hub, the network, or Tailscale. */
+  readonly reachable: boolean;
+  readonly onBattery: boolean;
+  /** Ryco currently holds the system awake. Only ever true on AC power. */
+  readonly active: boolean;
 }
 
 /** Secret-free projection of Desktop main's native Hub identity workflow. */
@@ -691,12 +738,27 @@ export interface DesktopBridge {
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
-  setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
+  /**
+   * Network access and Tailscale Serve apply by relaunching Desktop. With
+   * `deferRelaunch`, the change is only saved: the running backend keeps what
+   * it serves, the returned state still describes it (with the saved change as
+   * `pending*`), and the change applies on the next launch, which the caller
+   * schedules. Requesting what the backend already serves withdraws a saved
+   * change and never relaunches.
+   */
+  setServerExposureMode: (
+    mode: DesktopServerExposureMode,
+    options?: { readonly deferRelaunch?: boolean },
+  ) => Promise<DesktopServerExposureState>;
   setTailscaleServeEnabled: (input: {
     readonly enabled: boolean;
     readonly port?: number;
+    readonly deferRelaunch?: boolean;
   }) => Promise<DesktopServerExposureState>;
   getHubLaunchConfig: () => Promise<DesktopHubLaunchConfig>;
+  /** Keep a reachable desktop node awake while it is plugged in. Applies live. */
+  getKeepAwakeState?: () => Promise<DesktopKeepAwakeState>;
+  setKeepAwakeEnabled?: (enabled: boolean) => Promise<DesktopKeepAwakeState>;
   /** Relaunch the Desktop shell without changing persisted launch configuration. */
   restartApp?: () => Promise<void>;
   /** Native account setup is available only in Desktop builds that support hardware-backed keys. */
@@ -770,13 +832,27 @@ export interface DesktopBridge {
    * The connector is built during server startup, so a change cannot take effect
    * in the running process — the same reason network access and Tailscale Serve
    * relaunch. Callers must confirm with the operator first.
+   *
+   * `applyOnNextLaunch` is accepted only with `enabled: true` and nothing else,
+   * and only while the running backend runs its connector in standby: it
+   * records that enrollment started here without restarting a backend that
+   * already serves it.
+   *
+   * `deferRelaunch` saves any other change without relaunching; it applies on
+   * the next launch, which the caller schedules. `restartRequired` reports it
+   * meanwhile.
+   *
+   * A change the running backend already serves, such as reverting a deferred
+   * change, is saved without a relaunch; the result says which happened.
    */
   setHubLaunchConfig: (input: {
     readonly enabled?: boolean;
     readonly origin?: string | null;
     readonly nodeName?: string | null;
     readonly allowFileSecretStore?: boolean;
-  }) => Promise<void>;
+    readonly applyOnNextLaunch?: boolean;
+    readonly deferRelaunch?: boolean;
+  }) => Promise<DesktopHubLaunchConfigResult>;
   /** Validate a typed Hub address without persisting it. */
   validateHubOrigin: (raw: string) => Promise<DesktopHubOriginValidation>;
   getAdvertisedEndpoints: () => Promise<readonly AdvertisedEndpoint[]>;

@@ -743,7 +743,14 @@ describe("hosted node route restore pipeline", () => {
 
     // A browser resume that never completes parks browserStatus in a
     // node-scoped phase.
-    restoreSession.mockImplementation(() => new Promise<never>(() => undefined));
+    restoreSession.mockImplementationOnce(() => new Promise<never>(() => undefined));
+    let finishRecheck: (value: typeof sessionResponse) => void = () => undefined;
+    restoreSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRecheck = resolve;
+        }),
+    );
     void hostedHubController.resumeBrowser();
     await vi.waitFor(() =>
       expect(useHostedHubStore.getState().browserStatus).toBe("checking-access"),
@@ -751,11 +758,14 @@ describe("hosted node route restore pipeline", () => {
 
     win.history.back();
     await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
-    expect(useHostedHubStore.getState().browserStatus).toBe("current");
     expect(useHostedHubStore.getState().selectedNode).toBeNull();
+    // Back does not stand in for the access check the abandoned resume never
+    // finished: an account-scoped one re-runs before the directory is current.
+    expect(useHostedHubStore.getState().browserStatus).toBe("checking-access");
+    finishRecheck(sessionResponse);
+    await vi.waitFor(() => expect(useHostedHubStore.getState().browserStatus).toBe("current"));
 
     // The abandoned resume no longer gates a subsequent selection.
-    restoreSession.mockResolvedValue(sessionResponse);
     expect(selectHostedNodeRoute(target.id)).toBe(true);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledTimes(2));
     expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);

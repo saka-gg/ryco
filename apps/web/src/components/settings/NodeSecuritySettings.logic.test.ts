@@ -1,6 +1,12 @@
 import { E2EE_SAFETY_NUMBER_DIGITS, E2EE_WEB_SAS_CHARS } from "@ryco/shared/relayE2eeConstants";
 import { describe, expect, it } from "vite-plus/test";
 
+import type {
+  NodeE2eeClientListing,
+  NodeE2eeClientRecord,
+  NodeE2eeContinuity,
+} from "@ryco/client-runtime/connection";
+
 import {
   E2EE_WEB_SAS_ADVISORY,
   E2EE_WEB_SAS_DETAIL,
@@ -8,9 +14,13 @@ import {
 import {
   everyNodeSecurityString,
   formatNodeEpoch,
+  nodeApprovalRole,
+  nodeApprovalWithheldNotice,
   nodeApproveConfirmation,
+  nodeClientRows,
   nodeClientRowTitle,
   nodeConnectionStatement,
+  nodeContinuityRemedy,
   nodeContinuityRows,
   nodeE2eeActionConfirmation,
   nodeE2eePairingWindowConfirmation,
@@ -19,6 +29,9 @@ import {
   nodeE2eeStrictPolicyDisposition,
   nodeEnrollmentFingerprintView,
   nodeFallbackReport,
+  nodeNarrowOffered,
+  nodePendingInPartition,
+  nodePendingPartitionWarning,
   nodeOperatorDataAvailability,
   nodePairingWindowRows,
   nodePolicyChangeDestructive,
@@ -30,14 +43,21 @@ import {
   nodeRefusedAttemptsDescription,
   nodeSafetyNumberGroups,
   nodeSafetyNumberView,
+  mergeNodeSecurityReads,
   nodeSecurityMode,
+  nodeSecurityReadFailure,
   nodeSessionRows,
   nodeSessionVerificationView,
+  NODE_APPROVAL_REVOKED_NOTICE,
+  NODE_APPROVAL_ROLE_UNKNOWN_PENDING,
+  NODE_APPROVE_NUMBER_PROMPT,
   NODE_E2EE_ACTION_IDS,
   NODE_E2EE_APPROVABLE_ROLES,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
   NODE_E2EE_RECORD_ACTION_IDS,
+  NODE_REVOKE_PENDING_NOTE,
   NODE_SAFETY_NUMBER_ADVISORY,
+  NODE_SAFETY_NUMBER_MATCH_HINT,
   NODE_SESSION_WEB_SAS_ADVISORY,
 } from "./NodeSecuritySettings.logic";
 
@@ -324,6 +344,10 @@ describe("prohibited claims", () => {
       "nodeSessionSasAdvisory",
       "policyNoWithdrawal",
       "policyValueUnreadable",
+      "approvalWithheld",
+      "pendingPartitionWarning",
+      "safetyNumberMatchLabel",
+      "approveNumberPrompt",
       // The claim-bearing `.tsx` copy, moved here so a unit scan can see it. The
       // browser suite runs the same list over the rendered DOM for the rest.
       "requireE2eeDescription",
@@ -377,11 +401,36 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
     }
   });
 
-  it("makes the owner name the role, and names it back in the confirmation", () => {
-    // §13.6: "`approved` requires explicit owner action naming the maximum role
-    // and capability set." A single Approve button with a default would be the
-    // PANEL naming the role — and the value it picked would become the ceiling
-    // every channel that key opens is admitted under (§8.6 step 6).
+  it("does not promise a way back from revocation that this panel refuses", () => {
+    // The panel withholds re-approval of a revoked key (`NODE_APPROVAL_REVOKED_NOTICE`),
+    // so a dialog saying the device can reconnect "until you approve it again"
+    // sent owners into a revocation they expected to undo with one click.
+    const body = nodeE2eeActionConfirmation("revoke").body;
+    expect(body).not.toMatch(/until you approve it again/u);
+    expect(body).toContain("ryco e2ee client approve");
+    expect(body).toMatch(/deleted and the device introduces itself again/u);
+
+    // On a request nothing has approved yet, revoking leaves a row this panel
+    // can never approve — so the dialog names Delete as the way to set it aside.
+    const subject = {
+      fingerprint: "SHA256:AAAAphoneAAAA",
+      accountId: "acct_reader",
+      hubOrigin: "https://hub.example.test",
+    };
+    expect(nodeE2eeRecordConfirmation("revoke", { ...subject, status: "pending" }).body).toContain(
+      NODE_REVOKE_PENDING_NOTE,
+    );
+    for (const status of ["approved", undefined] as const) {
+      expect(nodeE2eeRecordConfirmation("revoke", { ...subject, status }).body).not.toContain(
+        NODE_REVOKE_PENDING_NOTE,
+      );
+    }
+    expect(
+      nodeE2eeRecordConfirmation("purge", { ...subject, status: "pending" }).body,
+    ).not.toContain(NODE_REVOKE_PENDING_NOTE);
+  });
+
+  it("names the role it grants back in the confirmation, with what a smaller one does", () => {
     expect([...NODE_E2EE_APPROVABLE_ROLES]).toEqual(["viewer", "operator", "owner"]);
     for (const role of NODE_E2EE_APPROVABLE_ROLES) {
       const confirmation = nodeApproveConfirmation(role);
@@ -392,15 +441,222 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
       for (const capability of NODE_E2EE_APPROVAL_CAPABILITY_SET) {
         expect(confirmation.body, role).toContain(capability);
       }
+      // …and the owner who wants to grant less is told that a lower ceiling
+      // locks the device out, and pointed at the action that says so honestly.
+      expect(confirmation.body, role).toContain("would refuse the device rather than limit it");
+      expect(confirmation.body, role).toContain("revoke the key instead");
+      // The role is stated as a fact about the device, not as a sentence that
+      // opens on a lowercase role, and nothing implies it was chosen here.
+      expect(confirmation.body, role).toContain(`This device connects as ${role},`);
+      expect(confirmation.body, role).not.toContain("you grant here");
     }
-    // Least authority first, so the first thing under the cursor is the
-    // smallest grant.
-    expect(NODE_E2EE_APPROVABLE_ROLES[0]).toBe("viewer");
     // Three distinct confirmations, so no two roles read the same.
     const labels = NODE_E2EE_APPROVABLE_ROLES.map(
       (role) => nodeApproveConfirmation(role).confirmLabel,
     );
     expect(new Set(labels).size).toBe(labels.length);
+  });
+
+  it("approves at the role the device connects with, and at no other", () => {
+    // §8.3 makes a native client's intended role equal its `channel.open` role,
+    // and §8.6 step 6 admits it only under a `maxRole` at least that high. The
+    // three buttons this replaced led with `viewer`, which approved the owner's
+    // own phone into a green row that every handshake then refused.
+    const record = (
+      observedRole: string | undefined,
+      status: NodeE2eeClientRecord["status"] = "pending",
+    ): NodeE2eeClientRecord => ({
+      status,
+      hubOrigin: "https://hub.example.test",
+      accountId: "acct_reader",
+      fingerprint: "SHA256:AAAAphone0",
+      maxRole: "viewer",
+      capabilitySet: [],
+      createdAt: 0,
+      safetyNumber: SAFETY_NUMBER,
+      pairingReserved: false,
+      ...(observedRole === undefined ? {} : { observedRole }),
+    });
+    for (const role of NODE_E2EE_APPROVABLE_ROLES) {
+      expect(nodeApprovalRole(record(role)), role).toBe(role);
+      expect(nodeApprovalWithheldNotice(record(role)), role).toBeNull();
+    }
+    // Nothing to approve on an approved record.
+    expect(nodeApprovalRole(record("owner", "approved"))).toBeNull();
+    expect(nodeApprovalWithheldNotice(record(undefined, "approved"))).toBeNull();
+
+    // A record that does not say which role is offered NONE — never a guess,
+    // and in particular never `owner` because the account looks like the
+    // owner's — and the row says what to do instead.
+    for (const observedRole of [undefined, "superuser"]) {
+      expect(nodeApprovalRole(record(observedRole)), String(observedRole)).toBeNull();
+    }
+    expect(nodeApprovalWithheldNotice(record(undefined))).toBe(NODE_APPROVAL_ROLE_UNKNOWN_PENDING);
+
+    // A revoked record's role is the one the device introduced itself with —
+    // frozen there, since a peer's hello never rewrites it — and the Hub may
+    // assign another now. Re-approving at it widens authority on a value the
+    // panel can no longer vouch for, so a revoked key is re-approved nowhere
+    // here, whether or not it carries a role, and the row says what to do.
+    for (const observedRole of [...NODE_E2EE_APPROVABLE_ROLES, undefined]) {
+      const revoked = record(observedRole, "revoked");
+      expect(nodeApprovalRole(revoked), String(observedRole)).toBeNull();
+      expect(nodeApprovalWithheldNotice(revoked), String(observedRole)).toBe(
+        NODE_APPROVAL_REVOKED_NOTICE,
+      );
+    }
+    expect(NODE_APPROVAL_REVOKED_NOTICE).toContain("introduce itself again");
+    expect(NODE_APPROVAL_REVOKED_NOTICE).toContain("ryco e2ee client approve --max-role");
+  });
+
+  it("says when the role it shows was read, once the node stopped following it", () => {
+    // The node refreshes the observed role only while a record is pending; an
+    // approved or revoked one keeps the role from its introduction, which the
+    // Hub may have changed since.
+    const record = (status: NodeE2eeClientRecord["status"]): NodeE2eeClientRecord => ({
+      status,
+      hubOrigin: "https://hub.example.test",
+      accountId: "acct_reader",
+      fingerprint: "SHA256:AAAAphone0",
+      maxRole: "owner",
+      capabilitySet: [],
+      createdAt: 0,
+      safetyNumber: SAFETY_NUMBER,
+      pairingReserved: false,
+      observedRole: "owner",
+    });
+    const labels = (status: NodeE2eeClientRecord["status"]) =>
+      nodeClientRows(record(status)).map((row) => row.label);
+    expect(labels("pending")).toContain("Connects as");
+    for (const status of ["approved", "revoked"] as const) {
+      expect(labels(status), status).toContain("Connected as (when introduced)");
+      expect(labels(status), status).not.toContain("Connects as");
+    }
+  });
+
+  it("offers a narrowing only when the device would still get in", () => {
+    // A ceiling below the role the device connects with refuses it rather than
+    // narrowing it, on both suites. "Reduce to viewer" on an owner's phone was a
+    // revocation whose dialog promised a reconnect.
+    const approved = (maxRole: string, observedRole?: string): NodeE2eeClientRecord => ({
+      status: "approved",
+      hubOrigin: "https://hub.example.test",
+      accountId: "acct_reader",
+      fingerprint: "SHA256:AAAAphone0",
+      maxRole,
+      capabilitySet: ["ryco.rpc"],
+      createdAt: 0,
+      safetyNumber: SAFETY_NUMBER,
+      pairingReserved: false,
+      ...(observedRole === undefined ? {} : { observedRole }),
+    });
+    expect(nodeNarrowOffered(approved("owner", "owner"), "viewer")).toBe(false);
+    expect(nodeNarrowOffered(approved("operator", "operator"), "viewer")).toBe(false);
+    // A record that does not carry the role cannot be shown to survive it.
+    expect(nodeNarrowOffered(approved("owner"), "viewer")).toBe(false);
+    // The one case that genuinely narrows: approved above what it connects with.
+    expect(nodeNarrowOffered(approved("operator", "viewer"), "viewer")).toBe(true);
+    expect(nodeNarrowOffered(approved("owner", "operator"), "operator")).toBe(true);
+    // Never a no-op, and never on a record that is not approved.
+    expect(nodeNarrowOffered(approved("viewer", "viewer"), "viewer")).toBe(false);
+    expect(nodeNarrowOffered({ ...approved("owner", "viewer"), status: "revoked" }, "viewer")).toBe(
+      false,
+    );
+  });
+
+  it("carries the whole number into the approval dialog, and never a tail", () => {
+    // The dialog's scrim hides the row the owner just compared, so the last look
+    // before approving has to be inside it. A tail is not a comparison: a Hub
+    // that holds the phone's enrolled key can grind a key to match one.
+    const subject = {
+      fingerprint: "SHA256:AAAAphoneAAAA",
+      accountId: "acct_reader",
+      hubOrigin: "https://hub.example.test",
+      safetyNumber: SAFETY_NUMBER,
+      pendingInPartition: 1,
+    };
+    const confirmation = nodeApproveConfirmation("owner", subject);
+    const number = confirmation.facts?.find((fact) => fact.value === SAFETY_NUMBER);
+    expect(number, "the approval dialog does not carry the whole number").toBeDefined();
+    expect(number!.mono).toBe(true);
+    expect(confirmation.body).toContain(NODE_APPROVE_NUMBER_PROMPT);
+    // One request under the account: nothing to warn about.
+    expect(confirmation.body).not.toContain("requests are waiting");
+    // An unreadable number is not drawn as one.
+    expect(
+      nodeApproveConfirmation("owner", { ...subject, safetyNumber: "12345" }).facts?.map(
+        (fact) => fact.label,
+      ),
+    ).not.toContain("Comparison number");
+    // The statement that gates the action is about all the digits — and says
+    // the fingerprint tail in the row's title is not something to compare.
+    expect(NODE_SAFETY_NUMBER_MATCH_HINT).toContain(String(E2EE_SAFETY_NUMBER_DIGITS.digits));
+    expect(NODE_SAFETY_NUMBER_MATCH_HINT).toContain(
+      "title only tell rows apart and are no comparison",
+    );
+  });
+
+  it("warns when an account has more than one request waiting, on the row and in the dialog", () => {
+    const pending = (fingerprint: string, accountId = "acct_reader"): NodeE2eeClientRecord => ({
+      status: "pending",
+      hubOrigin: "https://hub.example.test",
+      accountId,
+      fingerprint,
+      maxRole: "viewer",
+      capabilitySet: [],
+      createdAt: 0,
+      safetyNumber: SAFETY_NUMBER,
+      pairingReserved: false,
+      observedRole: "owner",
+    });
+    const phone = pending("SHA256:AAAAphone0");
+    const hubKey = pending("SHA256:BBBBunknown1");
+    const otherAccount = pending("SHA256:CCCCother2", "acct_other");
+    const approved: NodeE2eeClientRecord = {
+      ...pending("SHA256:DDDDlaptop3"),
+      status: "approved",
+      maxRole: "owner",
+      capabilitySet: ["ryco.rpc"],
+    };
+    const listing = {
+      records: [phone, hubKey, otherAccount, approved],
+      pendingGlobalSaturated: false,
+      saturatedAccounts: [],
+      refusedPairingAttempts: 0,
+    };
+
+    // The partition is (hubOrigin, accountId), and only pending records count.
+    expect(nodePendingInPartition(listing, phone)).toBe(2);
+    expect(nodePendingInPartition(listing, hubKey)).toBe(2);
+    expect(nodePendingInPartition(listing, otherAccount)).toBe(1);
+    expect(nodePendingInPartition(listing, approved)).toBe(0);
+    expect(nodePendingInPartition(null, phone)).toBe(0);
+
+    expect(nodePendingPartitionWarning(1)).toBeNull();
+    expect(nodePendingPartitionWarning(0)).toBeNull();
+    const warning = nodePendingPartitionWarning(2)!;
+    expect(warning).toContain("2 requests are waiting under this account");
+    expect(warning.toLowerCase()).toContain("matches the phone in your hand");
+    // The partition may be any account at the Hub, not only the owner's own.
+    expect(warning).not.toContain("your account");
+
+    const dialog = nodeApproveConfirmation("owner", {
+      fingerprint: phone.fingerprint,
+      accountId: phone.accountId,
+      hubOrigin: phone.hubOrigin,
+      safetyNumber: phone.safetyNumber,
+      pendingInPartition: 2,
+    });
+    expect(dialog.body).toContain(warning);
+  });
+
+  it("does not promise a reconnect a narrowing cannot deliver", () => {
+    const lower = nodeE2eeActionConfirmation("narrow").body.toLowerCase();
+    expect(lower).not.toContain("the device reconnects with the smaller role ceiling");
+    expect(lower).toContain("refused, not limited");
+    // The role it was offered on is the one from its introduction, which the
+    // Hub may have raised since — the sentence says that case is refused too.
+    expect(lower).toContain("if the hub has raised its account's role since");
   });
 
   it("says that approving takes effect only on a fresh connection", () => {
@@ -821,6 +1077,104 @@ describe("§6.4 and §7.5 carry their own remedies", () => {
       chainLength: 2,
     });
     expect(rows.find((row) => row.label === "Rotation generation")!.value).toBe("7");
+  });
+
+  it("says a chain another copy of Ryco owns was not read here, in the node's words", () => {
+    const continuity: NodeE2eeContinuity = {
+      status: "identity_in_use",
+      remedy: "Another copy of Ryco is using this machine's Hub identity.",
+    };
+    // No lineage row at all: nothing here read one, so nothing may look like one.
+    expect(nodeContinuityRows(continuity)).toEqual([
+      { label: "Continuity", value: "not read here" },
+    ]);
+    expect(nodeContinuityRemedy(continuity)).toBe(
+      "Another copy of Ryco is using this machine's Hub identity.",
+    );
+  });
+});
+
+describe("each operator read stands on its own", () => {
+  const LISTING: NodeE2eeClientListing = {
+    records: [],
+    pendingGlobalSaturated: false,
+    saturatedAccounts: [],
+    refusedPairingAttempts: 0,
+  };
+  const EMPTY = {
+    clients: null,
+    sessions: null,
+    policy: null,
+    prekey: null,
+    continuity: null,
+    fallback: null,
+  };
+  const answered = <A>(value: A): PromiseFulfilledResult<A> => ({ status: "fulfilled", value });
+  const refused = (message: string): PromiseRejectedResult => ({
+    status: "rejected",
+    reason: new Error(message),
+  });
+
+  it("draws every read that answered when one beside it fails", () => {
+    const results = {
+      clients: answered(LISTING),
+      sessions: answered({ sessions: [] }),
+      policy: refused("Unable to read the node admission policy."),
+      prekey: answered({ present: false }),
+      continuity: refused("Hub E2EE operation failed."),
+      fallback: answered({
+        peerLegacy: { occurrences: 0, ringOverflows: 0 },
+        advertisementUnavailable: { occurrences: 0, ringOverflows: 0 },
+        ring: [],
+      }),
+    };
+    const reads = mergeNodeSecurityReads(EMPTY, results);
+    expect(reads.clients).toBe(LISTING);
+    expect(reads.sessions).toEqual({ sessions: [] });
+    expect(reads.prekey).toEqual({ present: false });
+    expect(reads.fallback).not.toBeNull();
+    // The failures stay a stated absence, and the first one is the message.
+    expect(reads.policy).toBeNull();
+    expect(reads.continuity).toBeNull();
+    expect(nodeSecurityReadFailure(results)).toBe("Unable to read the node admission policy.");
+  });
+
+  it("keeps a failed read's last value rather than blanking it", () => {
+    const previous = { ...EMPTY, clients: LISTING };
+    const results = {
+      clients: refused("Unable to read client authorization records."),
+      sessions: answered({ sessions: [] }),
+      policy: refused("down"),
+      prekey: refused("down"),
+      continuity: refused("down"),
+      fallback: refused("down"),
+    };
+    // An emptied list would read as "nothing is authorized".
+    expect(mergeNodeSecurityReads(previous, results).clients).toBe(LISTING);
+    expect(nodeSecurityReadFailure(results)).toBe("Unable to read client authorization records.");
+  });
+
+  it("reports no failure once every read answers", () => {
+    const results = {
+      clients: answered(LISTING),
+      sessions: answered({ sessions: [] }),
+      policy: answered({
+        requireE2EE: false,
+        requireApprovedClientE2EE: false,
+        effectiveRequireE2EE: false,
+        admittedPatterns: ["IK" as const],
+        suiteRegistry: [1],
+        generation: 1,
+      }),
+      prekey: answered({ present: false }),
+      continuity: answered<NodeE2eeContinuity>({ status: "identity_in_use" }),
+      fallback: answered({
+        peerLegacy: { occurrences: 0, ringOverflows: 0 },
+        advertisementUnavailable: { occurrences: 0, ringOverflows: 0 },
+        ring: [],
+      }),
+    };
+    expect(nodeSecurityReadFailure(results)).toBeNull();
   });
 });
 

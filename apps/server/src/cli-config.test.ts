@@ -16,6 +16,7 @@ import {
   resolveNodeE2eePolicyConfig,
 } from "./config.ts";
 import { resolveServerConfig } from "./cli.ts";
+import { hubIdentityHoldsKeyMaterial } from "./hubConnector/HubIdentityRuntime.ts";
 
 it("resolves bounded connector defaults and invalid enabled configuration without reflecting input", () => {
   expect(resolveHubConnectorConfig({})).toEqual(DEFAULT_HUB_CONNECTOR_CONFIG);
@@ -715,6 +716,80 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         preventSleep: false,
       });
       assert.equal(join(baseDir, "dev"), resolved.stateDir);
+    }),
+  );
+
+  it.effect("runs a Desktop standby connector only for a node with no Hub identity", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-cli-config-standby-" });
+      const resolveStandby = (env: Record<string, string> = {}) =>
+        Effect.gen(function* () {
+          const fd = yield* openBootstrapFd({
+            mode: "desktop",
+            port: 4888,
+            rycoHome: baseDir,
+            noBrowser: true,
+            hubConnectorEnabled: true,
+            hubConnectorStandby: true,
+            hubOrigin: "https://standby.example",
+          });
+          return yield* resolveServerConfig(
+            makeServerFlags(baseDir, { baseDir: Option.none(), port: Option.none() }),
+            Option.none(),
+          ).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                ConfigProvider.layer(
+                  ConfigProvider.fromEnv({ env: { RYCO_BOOTSTRAP_FD: String(fd), ...env } }),
+                ),
+                NetService.layer,
+              ),
+            ),
+          );
+        });
+
+      // Fresh node: enabled-but-idle, so account sign-in can claim it in place.
+      const fresh = yield* resolveStandby();
+      expect(fresh.hubConnector).toMatchObject({
+        enabled: true,
+        origin: "https://standby.example",
+      });
+
+      yield* fs.writeFileString(
+        fresh.hubIdentityStatePath,
+        JSON.stringify({
+          version: 1,
+          revision: 3,
+          environmentId: `env_${"E".repeat(22)}`,
+          protectedStoreBackend: "os",
+          pendingEnrollment: null,
+          activeNode: {
+            hubOrigin: "https://standby.example",
+            nodeId: `node_${"N".repeat(22)}`,
+            activeKeyId: `nkey_${"K".repeat(22)}`,
+            activeKeySecretName: "node-key.active",
+            cleanupPollingSecretName: null,
+            enrolledAt: 1,
+          },
+          stagedRotation: null,
+          pendingTeardown: null,
+        }),
+      );
+      // A parsed identity, not an unreadable file.
+      expect(
+        yield* Effect.promise(() =>
+          hubIdentityHoldsKeyMaterial({ statePath: fresh.hubIdentityStatePath }),
+        ),
+      ).toBe(true);
+      // An existing identity may have been switched off on purpose; standby
+      // never connects it and never opens its key custody.
+      const enrolled = yield* resolveStandby();
+      expect(enrolled.hubConnector).toEqual(DEFAULT_HUB_CONNECTOR_CONFIG);
+
+      // An explicit operator statement is not refined by standby.
+      const explicit = yield* resolveStandby({ RYCO_HUB_CONNECTOR_ENABLED: "true" });
+      expect(explicit.hubConnector?.enabled).toBe(true);
     }),
   );
 

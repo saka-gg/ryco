@@ -7,6 +7,7 @@ import { deriveE2eeAgreementPublicKey } from "@ryco/shared/relayE2eeKeys";
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeNodeContinuityAnchor } from "../hubIdentity/NodeContinuityAnchor.ts";
+import { NODE_E2EE_FAIL_CLOSED_POLICY } from "../hubIdentity/NodeE2eePolicyStore.ts";
 import { makeNodeE2eePrekeyStore } from "../hubIdentity/NodeE2eePrekeyStore.ts";
 import { makeNodeIdentityContinuityStore } from "../hubIdentity/NodeIdentityContinuityStore.ts";
 import { makeNodeIdentityKeyRetirementStore } from "../hubIdentity/NodeIdentityKeyRetirementStore.ts";
@@ -19,6 +20,7 @@ import {
 import {
   HubIdentityRuntimeError,
   HubRelayAuthenticationError,
+  hubIdentityHoldsKeyMaterial,
   makeHubIdentityRuntime,
 } from "./HubIdentityRuntime.ts";
 
@@ -394,6 +396,88 @@ describe("HubIdentityRuntime", () => {
     expect(state.activeNode).toBeNull();
     expect(state.pendingTeardown).toBeNull();
     expect(state.environmentId).not.toBe(`env_${"E".repeat(22)}`);
+  });
+
+  it("leaves startup's writes to a process that owns the identity when asked to defer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-deferred-start-"));
+    const statePath = join(root, "hub-identity.json");
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        revision: 4,
+        environmentId: `env_${"E".repeat(22)}`,
+        pendingEnrollment: null,
+        activeNode: null,
+        stagedRotation: null,
+        pendingTeardown: { secretNames: ["node-key.gone"], requestedAt: 99_000 },
+      }),
+      { mode: 0o600 },
+    );
+    const options = {
+      statePath,
+      fileSecretRoot: join(root, "secrets"),
+      allowFileFallback: false,
+      secretStore: makeMemoryStore(),
+      now: () => 100_000,
+    } as const;
+
+    // Another backend owns this identity: it may be the one finishing that
+    // leave, and a policy committed here could not close its channels.
+    const waiting = await makeHubIdentityRuntime({ ...options, deferStartup: true });
+    expect((await waiting.readState()).pendingTeardown).not.toBeNull();
+    expect(waiting.e2eeGeneration()).toBe(0);
+    expect(waiting.e2eePolicy()).toEqual(NODE_E2EE_FAIL_CLOSED_POLICY);
+
+    // It exited; this one owns the identity now.
+    await Promise.all([waiting.completeStartup!(), waiting.completeStartup!()]);
+    expect((await waiting.readState()).pendingTeardown).toBeNull();
+    expect(waiting.e2eeGeneration()).toBeGreaterThan(0);
+  });
+
+  it("reports key material from state files alone", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-material-"));
+    const fresh = join(root, "fresh", "hub-identity.json");
+    await mkdir(dirname(fresh), { recursive: true, mode: 0o700 });
+    expect(await hubIdentityHoldsKeyMaterial({ statePath: fresh })).toBe(false);
+
+    const enrolled = join(root, "enrolled", "hub-identity.json");
+    await writeLegacyActiveState(enrolled);
+    expect(await hubIdentityHoldsKeyMaterial({ statePath: enrolled })).toBe(true);
+  });
+
+  it("builds key custody for an identity-less node without touching the OS store", async () => {
+    // A Desktop standby connector builds this runtime on every launch; it must
+    // not raise a credential-store prompt before anyone asks to enroll.
+    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-standby-"));
+    const touched: string[] = [];
+    const osStore = makeMemoryStore("keytar");
+    const runtime = await makeHubIdentityRuntime({
+      statePath: join(root, "state", "hub-identity.json"),
+      fileSecretRoot: join(root, "secrets"),
+      allowFileFallback: false,
+      makeOsSecretStore: async () => ({
+        backend: osStore.backend,
+        get: async (name) => {
+          touched.push(`get:${name}`);
+          return osStore.get(name);
+        },
+        create: async (name, value) => {
+          touched.push(`create:${name}`);
+          await osStore.create(name, value);
+        },
+        remove: async (name) => {
+          touched.push(`remove:${name}`);
+          await osStore.remove(name);
+        },
+      }),
+      fetch: enrollmentFetch,
+      now: () => 100_000,
+    });
+    const state = await runtime.readState();
+    expect(state.activeNode).toBeNull();
+    expect(state.pendingEnrollment).toBeNull();
+    expect(touched).toEqual([]);
   });
 
   it("keeps a file-backed identity on files when the OS store later becomes available", async () => {

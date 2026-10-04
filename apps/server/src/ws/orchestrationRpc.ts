@@ -22,7 +22,10 @@ import {
 } from "@ryco/contracts";
 
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
-import { applyOrchestrationCommand } from "../orchestration/Layers/OrchestrationCommandApplication.ts";
+import {
+  applyOrchestrationCommand,
+  orchestrationCommandFlights,
+} from "../orchestration/Layers/OrchestrationCommandApplication.ts";
 import { readTaskOutput, taskOutputRootsFromSettings } from "../orchestration/taskOutputQuery.ts";
 import {
   readWorkflowScript,
@@ -43,6 +46,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   const {
     ownerEffect,
     projectionSnapshotQuery,
+    commandReceipts,
     dispatchNormalizedCommand,
     dispatchWorktreeCommand,
     serverCommandId,
@@ -228,6 +232,11 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
             dispatch: dispatchNormalizedCommand,
             projections: projectionSnapshotQuery,
             terminals: terminalManager,
+            // A hosted client replays a command whose response a relay drop
+            // lost: join its still-running first attempt, or answer it from
+            // its receipt before normalizing it again.
+            ...(commandReceipts ? { receipts: commandReceipts } : {}),
+            flights: orchestrationCommandFlights,
           }).pipe(
             Effect.mapError((cause) =>
               Schema.is(OrchestrationDispatchCommandError)(cause)

@@ -2,8 +2,10 @@ import type { EnvironmentId, RelayEffectiveRole } from "@ryco/contracts";
 import type * as HostedIdentity from "@ryco/contracts/hosted-identity";
 import type * as NativeE2ee from "@ryco/contracts/native-e2ee";
 
+import { HostedReconnectPolicy } from "../relay/reconnectPolicy.ts";
 import { HostedHubApiError, type HostedAccountStepUp, type HostedHubFailureReason } from "./api.ts";
 import { activateHostedNode, deactivateHostedNode, suspendHostedNode } from "./environment.ts";
+import { getHostedDispatchReplay } from "../relay/dispatchReplay.ts";
 import { NativeHandoffClientError } from "./nativeHandoff.ts";
 import { getHostedHubApi, getHostedRuntimeConfiguration } from "./runtime.ts";
 import type {
@@ -67,6 +69,16 @@ export interface HostedHubState {
   readonly errorMessage: string | null;
   /** Client-known failure category used by native/web presentation; never server detail. */
   readonly errorReason?: HostedHubFailureReason | null;
+  /**
+   * Whether the runtime re-runs a failed access check on its own — on its
+   * backoff timer, or on the next foreground when it came due in the
+   * background — so a surface may promise that it "keeps trying". `false` for
+   * a definite Hub answer, which only a lifecycle signal or the user re-checks.
+   * Published with every `unavailable` account and `stale` browser; it means
+   * nothing alongside any other status. Optional for the same fixture reason
+   * as `totpEnrollment`.
+   */
+  readonly accessRecoveryPending?: boolean;
   readonly generation: number;
 }
 
@@ -89,6 +101,7 @@ const initialState: HostedHubState = {
   totpEnrollment: null,
   errorMessage: null,
   errorReason: null,
+  accessRecoveryPending: false,
   generation: 0,
 };
 
@@ -343,9 +356,56 @@ function refusedLocally(
   };
 }
 
+/**
+ * Whether the Hub itself answered that this session is gone. A `401` whose body
+ * is not the Hub's (a captive portal's or corporate proxy's own page decodes as
+ * `invalid_response`) is not that answer, and must not end a session — in
+ * bearer mode ending it deletes the only copy of the native token.
+ */
 function isSessionFailure(error: unknown): boolean {
   return (
-    error instanceof HostedHubApiError && (error.status === 401 || error.code === "session_invalid")
+    error instanceof HostedHubApiError &&
+    error.code !== "invalid_response" &&
+    (error.status === 401 || error.code === "session_invalid")
+  );
+}
+
+/**
+ * Whether a failed access check is one a later attempt can outlive: no answer
+ * at all (transport loss, the request deadline, a proof a locked device could
+ * not sign), a Hub that is busy or failing (408, 429, 5xx), or a body that is
+ * not the Hub's (a captive portal or proxy page decodes as `invalid_response`).
+ * A definite 4xx answer is not retried on a timer; the next lifecycle signal
+ * still re-checks it.
+ */
+function isTransientAccessFailure(error: unknown): boolean {
+  if (!(error instanceof HostedHubApiError)) return true;
+  if (error.code === "invalid_response") return true;
+  return error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500;
+}
+
+/**
+ * Whether a lifecycle binding must forward foreground and connectivity signals
+ * to {@link HostedHubController.recoverAfterConnectivity}: an authenticated
+ * account resumes on them, and one whose access check could not reach the Hub
+ * re-runs it. Every other status has nothing a connectivity change can repair.
+ */
+export function hostedAccountRecoversOnConnectivity(status: HostedAccountStatus): boolean {
+  return status === "authenticated" || status === "unavailable";
+}
+
+/**
+ * The states the access-recovery backoff exists to leave: an account whose
+ * bootstrap could not reach the Hub, and an authenticated browser whose resume
+ * could not revalidate access and is therefore `stale` (no mutation authority).
+ * Exported for platform work deferred until such a recovery has landed.
+ */
+export function hostedAccessAwaitsRecovery(
+  state: Pick<HostedHubState, "accountStatus" | "browserStatus">,
+): boolean {
+  return (
+    state.accountStatus === "unavailable" ||
+    (state.accountStatus === "authenticated" && state.browserStatus === "stale")
   );
 }
 
@@ -376,6 +436,14 @@ function createFence(): {
 }
 
 const DIRECTORY_REFRESH_MS = 20_000;
+/** Directory cadence while a surface waits for an offline node to come back. */
+export const DIRECTORY_PRESENCE_REFRESH_MS = 5_000;
+/**
+ * How long one presence watch keeps the faster cadence. A node that is back
+ * within minutes is seen within seconds; one shut down for the weekend is
+ * polled at the normal cadence after this rather than at 4x for days.
+ */
+export const DIRECTORY_PRESENCE_WINDOW_MS = 5 * 60_000;
 const DIRECTORY_RETRY_MAX_MS = 60_000;
 const HOSTED_SESSION_SYNC_DEADLINE_MS = 30_000;
 export const HOSTED_SESSION_SYNC_FAILURE_MESSAGE = "Ryco state could not be synchronized.";
@@ -410,6 +478,11 @@ class HostedHubController {
   #operation: AbortController | null = null;
   #directoryTimer: ReturnType<typeof setTimeout> | null = null;
   #directoryRetry = 0;
+  /**
+   * One token per surface waiting on node presence, mapped to when it started;
+   * see `watchDirectoryPresence`.
+   */
+  #directoryPresenceWatches = new Map<symbol, number>();
   #directoryOperation: AbortController | null = null;
   #directoryPromise: Promise<void> | null = null;
   #bootstrapPromise: Promise<void> | null = null;
@@ -420,6 +493,16 @@ class HostedHubController {
   #browserResumePromise: Promise<void> | null = null;
   #browserSuspendPromise: Promise<void> | null = null;
   #browserLifecycleGeneration = 0;
+  /**
+   * The bounded, jittered (1s to 60s) backoff that retries a failed access
+   * check on its own — see {@link HostedHubController.recoverAfterConnectivity}.
+   * The attempt count is reset only once the Hub has answered with a session.
+   * Jitter reads `Math.random` per delay rather than capturing it here, so the
+   * one controller instance follows whatever source is current.
+   */
+  #accessRetryPolicy = new HostedReconnectPolicy({ random: () => Math.random() });
+  #accessRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  #accessRetryForeground: (() => void) | null = null;
   #totpEnrollmentFence = createFence();
   #recoveryCodesFence = createFence();
   /**
@@ -449,9 +532,97 @@ class HostedHubController {
   bootstrap(): Promise<void> {
     if (this.#bootstrapPromise) return this.#bootstrapPromise;
     const operation = this.#replaceOperation();
-    const promise = getHostedHubApi()
+    const promise = this.#restoreAccess(operation).finally(() => {
+      if (this.#operation === operation) this.#operation = null;
+      if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
+    });
+    this.#bootstrapPromise = promise;
+    return promise;
+  }
+
+  /**
+   * Adopt a session credential committed outside this controller, then
+   * re-check access with it.
+   *
+   * The native identity ceremonies (password, email, recovery code, and the
+   * completion journal that survives a restart) mint their credential through
+   * the API directly and commit it to the platform store themselves, and a
+   * browser recovery-code sign-in has the Hub commit it as a cookie with its
+   * answer (see {@link signInWithRecoveryCode}). While
+   * they run, the access-recovery backoff and the lifecycle bindings keep
+   * re-running {@link bootstrap} with the credential being replaced, and the
+   * answer to such a check is about that old credential: a `401` would clear
+   * the new one, a timeout would leave the account `unavailable` after a
+   * successful sign-in, and a plain `bootstrap()` after the commit would only
+   * join it. So the check in flight is aborted and the pending retry cancelled
+   * before the commit starts, any `bootstrap()` requested while the commit
+   * runs joins this adoption instead of reading a credential mid-write, and
+   * the check that follows is always a fresh one.
+   *
+   * Access is re-checked whether or not the commit succeeded — against
+   * whatever credential the store holds once it has settled — because the
+   * check this aborted must be replaced by something. Resolves to the
+   * commit's own result once that check has settled.
+   */
+  adoptSessionCredential(commit: () => Promise<boolean>): Promise<boolean> {
+    const operation = this.#replaceOperation();
+    // A new credential starts its backoff over. The published pending flag is
+    // left alone: a check is still coming, and its outcome replaces it.
+    this.#accessRetryPolicy.reset();
+    let committed = false;
+    const promise = commit()
+      .catch(() => false)
+      .then((result) => {
+        committed = result;
+        if (operation.signal.aborted) return undefined;
+        return this.#restoreAccess(operation);
+      })
+      .finally(() => {
+        if (this.#operation === operation) this.#operation = null;
+        if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
+      });
+    this.#bootstrapPromise = promise;
+    return promise.then(() => committed);
+  }
+
+  /**
+   * Sign in with a single-use recovery code on the browser transport.
+   *
+   * The Hub commits the new session with its answer, so the sign-in itself is
+   * the commit an adoption fences. While the account is `unavailable` the
+   * access-recovery backoff routinely has a check of the replaced session in
+   * flight, and joining it after the sign-in let its `401` clear the new
+   * session and publish `signed-out` for a code already spent. Running the
+   * sign-in inside {@link adoptSessionCredential} aborts that check before the
+   * code is sent, so its answer publishes nothing, and access is re-checked
+   * with the new session afterwards.
+   *
+   * Rejects with the sign-in's own failure, once access has been re-checked,
+   * for the form to show.
+   */
+  async signInWithRecoveryCode(code: string): Promise<void> {
+    let signInFailure: unknown = null;
+    const signedIn = await this.adoptSessionCredential(async () => {
+      try {
+        await getHostedHubApi().signInWithRecoveryCode(code);
+        return true;
+      } catch (error) {
+        signInFailure = error;
+        return false;
+      }
+    });
+    if (!signedIn) throw signInFailure;
+  }
+
+  /** The access check behind {@link bootstrap} and {@link adoptSessionCredential}. */
+  #restoreAccess(operation: AbortController): Promise<void> {
+    return getHostedHubApi()
       .restoreSession(operation.signal)
       .then(async (result) => {
+        // An answer for a check that a newer account operation replaced is
+        // about the credential that check was sent with, not the current one.
+        if (operation.signal.aborted) return;
+        this.#resetAccessRetry();
         patchState({
           accountStatus: "authenticated",
           account: result.account,
@@ -462,8 +633,9 @@ class HostedHubController {
       })
       .catch((error) => {
         if (operation.signal.aborted) return undefined;
-        getHostedHubApi().clearSessionMaterial();
         if (isSessionFailure(error)) {
+          // Only the Hub's own answer that this session is gone ends it.
+          getHostedHubApi().clearSessionMaterial();
           return getHostedHubApi()
             .getBootstrapAvailability(operation.signal)
             .catch(() => false)
@@ -471,19 +643,40 @@ class HostedHubController {
               if (!operation.signal.aborted) patchState({ ...initialState, bootstrapAvailable });
             });
         }
+        // No answer, the request deadline, a busy or failing Hub, or a captive
+        // portal's page says nothing about the session. In bearer mode the
+        // stored token is the only copy of a still-valid DPoP-bound session, so
+        // clearing it here turned every offline launch into a forced sign-in.
+        // The material is kept and the access check retried instead; the
+        // account stays `unavailable`, which grants nothing.
+        const retrying = this.#scheduleAccessRetry(error);
         patchState({
           ...initialState,
           accountStatus: "unavailable",
           ...hostedErrorPatch(error),
+          accessRecoveryPending: retrying,
         });
         return undefined;
-      })
-      .finally(() => {
-        if (this.#operation === operation) this.#operation = null;
-        if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
       });
-    this.#bootstrapPromise = promise;
-    return promise;
+  }
+
+  /**
+   * Re-establish hosted access after a foreground or connectivity signal.
+   *
+   * The one entry point every platform lifecycle binding forwards those signals
+   * to, so what "recovery" means stays with this owner rather than being
+   * re-derived per app: an account whose access check could not reach the Hub
+   * re-runs {@link bootstrap}, and an authenticated account runs the full
+   * {@link resumeBrowser} (session, directory, fresh relay attempt, current
+   * snapshot). The access-recovery backoff re-enters here too, so a timed retry
+   * can never publish anything the ordinary resume would not. Every other
+   * status has nothing a connectivity change can repair.
+   */
+  recoverAfterConnectivity(): Promise<void> {
+    const state = hostedHubStore.getState();
+    if (state.accountStatus === "unavailable") return this.bootstrap();
+    if (state.accountStatus === "authenticated") return this.resumeBrowser();
+    return Promise.resolve();
   }
 
   /**
@@ -507,6 +700,7 @@ class HostedHubController {
     });
     try {
       const result = await getHostedHubApi().signIn(operation.signal);
+      this.#resetAccessRetry();
       patchState({
         accountStatus: "authenticated",
         account: result.account,
@@ -533,6 +727,7 @@ class HostedHubController {
     });
     try {
       const result = await getHostedHubApi().signInWithExternalProvider(provider, operation.signal);
+      this.#resetAccessRetry();
       patchState({
         accountStatus: "authenticated",
         account: result.account,
@@ -580,6 +775,7 @@ class HostedHubController {
     this.#operation = null;
     this.#totpEnrollmentFence.bump();
     this.#recoveryCodesFence.bump();
+    this.#resetAccessRetry();
     patchState({
       accountStatus: "authenticated",
       account: {
@@ -618,6 +814,7 @@ class HostedHubController {
     });
     try {
       const result = await register(operation.signal);
+      this.#resetAccessRetry();
       patchState({
         accountStatus: "authenticated",
         account: result.account,
@@ -1522,6 +1719,7 @@ class HostedHubController {
     this.#operation = null;
     this.#clearDirectoryTimer();
     this.#directoryRetry = 0;
+    this.#directoryPresenceWatches.clear();
     this.#directoryOperation?.abort();
     this.#directoryOperation = null;
     this.#directoryPromise = null;
@@ -1535,6 +1733,7 @@ class HostedHubController {
     this.#browserResumePromise = null;
     this.#browserSuspendPromise = null;
     this.#browserLifecycleGeneration += 1;
+    this.#resetAccessRetry();
     this.#clearAccountSurface();
     // Leases are held by surfaces, not by the session, so only a full reset
     // drops them — otherwise a test's leftover lease would keep the next test's
@@ -1542,6 +1741,7 @@ class HostedHubController {
     // each one can only remove its own token, which is already gone.
     this.#recoveryCodesLeases.clear();
     this.#publishRecoveryCodeDisplayLease();
+    getHostedDispatchReplay().resetForTests();
     getHostedHubApi().clearSessionMaterial();
     hostedHubStore.setState(initialState, true);
   }
@@ -1581,6 +1781,9 @@ class HostedHubController {
     this.#browserResumeOperation?.abort();
     this.#browserResumeOperation = null;
     this.#browserResumePromise = null;
+    // The next resume is driven by the foreground/online signal that ends this
+    // suspension, not by a retry armed for the access check it supersedes.
+    this.#cancelAccessRetry();
     this.#retrySelectedNodeOperation?.abort();
     this.#clearSessionSyncTimer();
     this.#clearDirectoryTimer();
@@ -1632,6 +1835,7 @@ class HostedHubController {
         await this.expireSession();
         return;
       }
+      this.#resetAccessRetry();
       patchState({ account: restored.account, session: restored.session });
       await this.refreshDirectory();
       if (this.#browserLifecycleGeneration !== browserGeneration) return;
@@ -1654,12 +1858,22 @@ class HostedHubController {
         await this.expireSession(error);
         return;
       }
-      patchState({ browserStatus: "stale", ...hostedErrorPatch(error) });
+      // Suspension already cleared the directory timer and this failure came
+      // before `refreshDirectory`, so nothing else would ever resume a `stale`
+      // browser short of another visibility/online event or a manual refresh.
+      // The retry re-runs the whole resume, never a shortcut to `current`.
+      const retrying = this.#scheduleAccessRetry(error);
+      patchState({
+        browserStatus: "stale",
+        ...hostedErrorPatch(error),
+        accessRecoveryPending: retrying,
+      });
     }
   }
 
   async clearAccount(status: "signed-out" | "session-expired"): Promise<void> {
     this.#browserLifecycleGeneration += 1;
+    this.#resetAccessRetry();
     this.#browserResumeOperation?.abort();
     this.#browserResumeOperation = null;
     this.#browserResumePromise = null;
@@ -1673,7 +1887,12 @@ class HostedHubController {
     this.#directoryPromise = null;
     this.#operation?.abort();
     this.#operation = null;
+    // The access check that abort just ended can publish nothing, so the next
+    // `bootstrap()` must start a fresh one rather than join it.
+    this.#bootstrapPromise = null;
     this.#clearAccountSurface();
+    // No orchestration command replays into whatever account signs in next.
+    getHostedDispatchReplay().endAccountSession();
     const previousEnvironmentId = hostedHubStore.getState().selectedNode?.environmentId ?? null;
     patchState({
       ...initialState,
@@ -1695,6 +1914,40 @@ class HostedHubController {
     });
     this.#directoryPromise = promise;
     return promise;
+  }
+
+  /**
+   * Poll the node directory at {@link DIRECTORY_PRESENCE_REFRESH_MS} instead of
+   * the 20s cadence for as long as the returned release has not been called.
+   *
+   * For a surface holding connection demand for a node the directory reports
+   * offline: presence is only learned from this poll, so at the normal cadence
+   * a node that came back could wait 20s to be seen. Watches are tokens, one
+   * per caller, and the release is idempotent. Each watch keeps the faster
+   * cadence for {@link DIRECTORY_PRESENCE_WINDOW_MS} only, after which the poll
+   * falls back to 20s even while it is held. The poll stays foreground-only
+   * and a failure backoff is never shortened; a pending normal-cadence refresh
+   * is pulled in when a watch starts the faster cadence.
+   */
+  watchDirectoryPresence(): () => void {
+    const watch = Symbol("hosted-directory-presence-watch");
+    const wasFast = this.#directoryPresenceCadenceActive();
+    this.#directoryPresenceWatches.set(watch, getHostedRuntimeConfiguration().timers.now());
+    if (!wasFast && this.#directoryTimer !== null && this.#directoryRetry === 0) {
+      this.#scheduleDirectory(DIRECTORY_PRESENCE_REFRESH_MS);
+    }
+    return () => {
+      this.#directoryPresenceWatches.delete(watch);
+    };
+  }
+
+  #directoryPresenceCadenceActive(): boolean {
+    if (this.#directoryPresenceWatches.size === 0) return false;
+    const now = getHostedRuntimeConfiguration().timers.now();
+    for (const startedAt of this.#directoryPresenceWatches.values()) {
+      if (now - startedAt < DIRECTORY_PRESENCE_WINDOW_MS) return true;
+    }
+    return false;
   }
 
   async #refreshDirectory(operation: AbortController): Promise<void> {
@@ -1748,7 +2001,11 @@ class HostedHubController {
             : {}),
         });
       }
-      this.#scheduleDirectory(DIRECTORY_REFRESH_MS);
+      this.#scheduleDirectory(
+        this.#directoryPresenceCadenceActive()
+          ? DIRECTORY_PRESENCE_REFRESH_MS
+          : DIRECTORY_REFRESH_MS,
+      );
       if (resumeStaleBrowser) {
         getHostedRuntimeConfiguration().timers.queueMicrotask(() => {
           const recovered = hostedHubStore.getState();
@@ -1832,7 +2089,10 @@ class HostedHubController {
     // selection being torn down. Abort it and invalidate its lifecycle
     // generation so it can neither publish stale state nor leave
     // browserStatus stuck in a node-scoped phase that would gate every
-    // subsequent selection.
+    // subsequent selection. A pending access retry is deliberately left armed:
+    // it is account-scoped, a `stale` browser keeps `selectNode` closed until
+    // a resume succeeds, and the retry re-checks the state and opens a fresh
+    // lifecycle generation when it fires.
     this.#browserLifecycleGeneration += 1;
     this.#browserResumeOperation?.abort();
     this.#browserResumeOperation = null;
@@ -1841,6 +2101,12 @@ class HostedHubController {
     this.#retrySelectedNodeOperation = null;
     this.#retrySelectedNodePromise = null;
     this.#clearSessionSyncTimer();
+    // A `synchronizing` resume had already revalidated the session and the
+    // directory and was only waiting on the node's snapshot, so the directory
+    // it returns to is current. A `checking-access` one had not: the browser
+    // goes `stale` and a fresh resume, with no selection left to reconnect,
+    // re-runs that check rather than handing back `current` unverified.
+    const accessUnchecked = state.browserStatus === "checking-access";
     patchState({
       selectedNode: null,
       selectionStatus: preserve ? state.selectionStatus : "none",
@@ -1850,13 +2116,16 @@ class HostedHubController {
       sessionEstablished: false,
       sessionRecoveredAfterUnknown: false,
       browserStatus:
-        state.browserStatus === "synchronizing" || state.browserStatus === "checking-access"
+        state.browserStatus === "synchronizing"
           ? "current"
-          : state.browserStatus,
+          : accessUnchecked
+            ? "stale"
+            : state.browserStatus,
       errorMessage: preserve ? state.errorMessage : null,
       errorReason: preserve ? (state.errorReason ?? null) : null,
       generation: state.generation + 1,
     });
+    if (accessUnchecked) void this.resumeBrowser();
     await deactivateHostedNode(node.environmentId);
   }
 
@@ -1976,6 +2245,22 @@ class HostedHubController {
     patchState({ sessionStatus: "delivery-unknown", sessionRecoveredAfterUnknown: false });
   }
 
+  /**
+   * A replayed orchestration command could not be confirmed on this
+   * environment. Unlike a drop, this can land on a session that is already
+   * current again; that one only needs the user's acknowledgement, while any
+   * other still waits for its snapshot first.
+   */
+  markEnvironmentDeliveryUnknown(environmentId: EnvironmentId): void {
+    const state = hostedHubStore.getState();
+    if (state.selectedNode?.environmentId !== environmentId) return;
+    if (state.sessionStatus === "delivery-unknown") return;
+    patchState({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: state.sessionStatus === "ready",
+    });
+  }
+
   connectionClosed(generation: number): void {
     const state = hostedHubStore.getState();
     if (state.generation !== generation || state.transportStatus === "terminal-failure") return;
@@ -2010,6 +2295,7 @@ class HostedHubController {
       sessionRecoveredAfterUnknown: false,
       browserStatus: state.browserStatus === "synchronizing" ? "current" : state.browserStatus,
     });
+    getHostedDispatchReplay().markReady(environmentId);
   }
 
   markSessionReplaying(environmentId: EnvironmentId): void {
@@ -2042,13 +2328,81 @@ class HostedHubController {
     const state = hostedHubStore.getState();
     if (state.sessionStatus !== "delivery-unknown" || !state.sessionRecoveredAfterUnknown) return;
     patchState({ sessionStatus: "ready", sessionRecoveredAfterUnknown: false });
+    if (state.selectedNode) getHostedDispatchReplay().markReady(state.selectedNode.environmentId);
   }
 
   #replaceOperation(): AbortController {
     this.#operation?.abort();
+    // A new account operation owns access from here; a timed retry armed for
+    // the state it replaces must not fire into it.
+    this.#cancelAccessRetry();
     const operation = new AbortController();
     this.#operation = operation;
     return operation;
+  }
+
+  /**
+   * Arm the access-recovery backoff after a failed access check.
+   *
+   * Without it a failed check is retried only by the next lifecycle signal
+   * (visibility, foreground, online). A Hub deploy, a timeout, or a DNS/TLS
+   * failure while the OS still reports connectivity produces none of those, so
+   * the surface stayed unavailable until the user found a manual repair. Only
+   * transient failures are retried, the delay honors a Hub `retryAfterMs`, and
+   * the retry re-enters through {@link recoverAfterConnectivity} after
+   * re-checking the state it was armed for. Returns whether a retry is now
+   * pending, for the failure patch to publish as `accessRecoveryPending`.
+   */
+  #scheduleAccessRetry(error: unknown): boolean {
+    this.#cancelAccessRetry();
+    if (!isTransientAccessFailure(error)) return false;
+    const delay = this.#accessRetryPolicy.nextDelay(
+      error instanceof HostedHubApiError ? error.retryAfterMs : undefined,
+    );
+    this.#accessRetryTimer = getHostedRuntimeConfiguration().timers.setTimeout(() => {
+      this.#accessRetryTimer = null;
+      this.#runAccessRetry();
+    }, delay);
+    return true;
+  }
+
+  #runAccessRetry(): void {
+    if (!hostedAccessAwaitsRecovery(hostedHubStore.getState())) return;
+    const runtime = getHostedRuntimeConfiguration();
+    if (!runtime.isForeground()) {
+      // A background surface retries on its next foreground, not on a timer.
+      let release: (() => void) | null = null;
+      const onForeground = () => {
+        if (this.#accessRetryForeground !== release) return;
+        this.#cancelAccessRetry();
+        this.#runAccessRetry();
+      };
+      release = runtime.subscribeForeground(onForeground);
+      this.#accessRetryForeground = release;
+      return;
+    }
+    void this.recoverAfterConnectivity();
+  }
+
+  #cancelAccessRetry(): void {
+    if (this.#accessRetryTimer)
+      getHostedRuntimeConfiguration().timers.clearTimeout(this.#accessRetryTimer);
+    this.#accessRetryTimer = null;
+    const release = this.#accessRetryForeground;
+    this.#accessRetryForeground = null;
+    release?.();
+  }
+
+  /**
+   * Drop any pending retry and start the backoff over. Called once the Hub has
+   * answered with a session, and when the account it belonged to goes away.
+   */
+  #resetAccessRetry(): void {
+    this.#cancelAccessRetry();
+    this.#accessRetryPolicy.reset();
+    if (hostedHubStore.getState().accessRecoveryPending) {
+      patchState({ accessRecoveryPending: false });
+    }
   }
 
   #scheduleDirectory(delay: number): void {

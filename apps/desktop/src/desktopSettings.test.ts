@@ -7,10 +7,20 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   DesktopSettingsReadError,
+  desktopHubAllowsBackgroundNodeClaim,
+  desktopHubLaunchNeedsRestart,
+  isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
+  pendingDesktopServerExposureMode,
+  pendingDesktopTailscaleServe,
+  planDesktopServerExposureChange,
+  planDesktopTailscaleServeChange,
   readDesktopSettings,
   resolveDefaultDesktopSettings,
+  resolveDesktopHubConnectorLaunch,
+  resolveDesktopTailscaleServeLaunch,
   setDesktopHubPreference,
+  setDesktopKeepAwakePreference,
   setDesktopServerExposurePreference,
   setDesktopTailscaleServePreference,
   setDesktopUpdateChannelPreference,
@@ -51,9 +61,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -68,9 +80,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -81,9 +95,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -98,9 +114,11 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          keepAwakeWhileReachable: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
+          hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
@@ -112,9 +130,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -129,9 +149,11 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          keepAwakeWhileReachable: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
+          hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
@@ -143,9 +165,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -160,9 +184,11 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 8443,
+          keepAwakeWhileReachable: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
+          hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
@@ -174,13 +200,125 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
+  });
+
+  it("measures a Tailscale Serve request against what the running backend serves", () => {
+    const serving = setDesktopTailscaleServePreference(DEFAULT_DESKTOP_SETTINGS, {
+      enabled: true,
+      port: 443,
+    });
+    const running = resolveDesktopTailscaleServeLaunch(serving);
+
+    // Turns are running: the disable is saved and the backend keeps serving.
+    const deferred = planDesktopTailscaleServeChange({
+      settings: serving,
+      running,
+      requested: { enabled: false, port: 443 },
+      deferRelaunch: true,
+    });
+    expect(deferred.relaunch).toBe(false);
+    expect(deferred.settings.tailscaleServeEnabled).toBe(false);
+
+    // Asking for the saved disable again, now, must still stop serving. It
+    // used to compare with the saved value and silently do nothing.
+    const now = planDesktopTailscaleServeChange({
+      settings: deferred.settings,
+      running,
+      requested: { enabled: false, port: 443 },
+      deferRelaunch: false,
+    });
+    expect(now).toEqual({ settings: deferred.settings, relaunch: true });
+
+    // Asking for what already runs withdraws the saved change in place.
+    const withdrawn = planDesktopTailscaleServeChange({
+      settings: deferred.settings,
+      running,
+      requested: { enabled: true, port: 443 },
+      deferRelaunch: false,
+    });
+    expect(withdrawn.relaunch).toBe(false);
+    expect(resolveDesktopTailscaleServeLaunch(withdrawn.settings)).toEqual(running);
+
+    // A port only matters while serving.
+    expect(
+      planDesktopTailscaleServeChange({
+        settings: DEFAULT_DESKTOP_SETTINGS,
+        running: { enabled: false, port: 8443 },
+        requested: { enabled: false, port: 443 },
+        deferRelaunch: false,
+      }).relaunch,
+    ).toBe(false);
+    expect(
+      planDesktopTailscaleServeChange({
+        settings: serving,
+        running,
+        requested: { enabled: true, port: 8443 },
+        deferRelaunch: false,
+      }).relaunch,
+    ).toBe(true);
+  });
+
+  it("keeps a saved network access change visible and withdrawable until it applies", () => {
+    // Turns are running: turning network access on is saved for the relaunch.
+    const deferred = planDesktopServerExposureChange({
+      settings: DEFAULT_DESKTOP_SETTINGS,
+      running: "local-only",
+      requested: "network-accessible",
+      deferRelaunch: true,
+    });
+    expect(deferred.relaunch).toBe(false);
+    expect(pendingDesktopServerExposureMode(deferred.settings, "local-only")).toBe(
+      "network-accessible",
+    );
+
+    // Asking for the running mode withdraws it, without a relaunch. It used to
+    // return early and leave the widening armed for whatever launch came next.
+    const withdrawn = planDesktopServerExposureChange({
+      settings: deferred.settings,
+      running: "local-only",
+      requested: "local-only",
+      deferRelaunch: false,
+    });
+    expect(withdrawn).toEqual({ settings: DEFAULT_DESKTOP_SETTINGS, relaunch: false });
+    expect(pendingDesktopServerExposureMode(withdrawn.settings, "local-only")).toBeNull();
+
+    // Asking for the saved change again, now, applies it.
+    expect(
+      planDesktopServerExposureChange({
+        settings: deferred.settings,
+        running: "local-only",
+        requested: "network-accessible",
+        deferRelaunch: false,
+      }),
+    ).toEqual({ settings: deferred.settings, relaunch: true });
+  });
+
+  it("reports a Tailscale Serve change saved for the next launch", () => {
+    const serving = setDesktopTailscaleServePreference(DEFAULT_DESKTOP_SETTINGS, {
+      enabled: true,
+      port: 8443,
+    });
+    expect(pendingDesktopTailscaleServe(serving, { enabled: false, port: 443 })).toEqual({
+      enabled: true,
+      port: 8443,
+    });
+    expect(pendingDesktopTailscaleServe(serving, { enabled: true, port: 443 })).toEqual({
+      enabled: true,
+      port: 8443,
+    });
+    expect(pendingDesktopTailscaleServe(serving, { enabled: true, port: 8443 })).toBeNull();
+    expect(
+      pendingDesktopTailscaleServe(DEFAULT_DESKTOP_SETTINGS, { enabled: false, port: 8443 }),
+    ).toBeNull();
   });
 
   it("persists the requested nightly update channel", () => {
@@ -191,9 +329,11 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          keepAwakeWhileReachable: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
+          hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
@@ -205,9 +345,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -312,6 +454,179 @@ describe("desktopSettings", () => {
     expect(isDesktopHubFileSecretStoreSupported("win32")).toBe(false);
   });
 
+  it("launches a configured Hub connector in standby until the operator chooses", () => {
+    // Fresh installs used to launch the connector disabled, so the first
+    // account sign-in had to enable it and relaunch Desktop mid-turn.
+    expect(resolveDesktopHubConnectorLaunch(DEFAULT_DESKTOP_SETTINGS)).toEqual({
+      enabled: true,
+      standby: true,
+      origin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
+      nodeName: null,
+      allowFileSecretStore: false,
+    });
+
+    const turnedOn = setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true });
+    expect(resolveDesktopHubConnectorLaunch(turnedOn)).toMatchObject({
+      enabled: true,
+      standby: false,
+    });
+
+    const turnedOff = setDesktopHubPreference(turnedOn, { enabled: false });
+    expect(turnedOff).toMatchObject({
+      hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: true,
+    });
+    expect(resolveDesktopHubConnectorLaunch(turnedOff)).toMatchObject({
+      enabled: false,
+      standby: false,
+    });
+
+    // Turning it back on, or choosing a Hub, clears the explicit opt-out.
+    expect(setDesktopHubPreference(turnedOff, { enabled: true })).toMatchObject({
+      hubConnectorDisabledByUser: false,
+    });
+    expect(setDesktopHubPreference(turnedOff, { origin: "https://hub.example.com" })).toMatchObject(
+      { hubConnectorEnabled: true, hubConnectorDisabledByUser: false },
+    );
+    // An unrelated launch value keeps the operator's choice.
+    expect(setDesktopHubPreference(turnedOff, { nodeName: "Build node" })).toMatchObject({
+      hubConnectorDisabledByUser: true,
+    });
+
+    expect(
+      resolveDesktopHubConnectorLaunch({ ...DEFAULT_DESKTOP_SETTINGS, hubOrigin: null }),
+    ).toMatchObject({ enabled: false, standby: false });
+  });
+
+  it("reads settings written before the connector choice existed as not chosen", () => {
+    const settingsPath = makeSettingsPath();
+    // A legacy false may be an explicit opt-out; the backend's identity check
+    // keeps standby from ever connecting an identity that already exists.
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: false }));
+    const legacy = readDesktopSettings(settingsPath, "0.1.21");
+    expect(legacy.hubConnectorDisabledByUser).toBe(false);
+    expect(resolveDesktopHubConnectorLaunch(legacy).standby).toBe(true);
+
+    writeDesktopSettings(settingsPath, setDesktopHubPreference(legacy, { enabled: false }));
+    expect(readDesktopSettings(settingsPath, "0.1.21").hubConnectorDisabledByUser).toBe(true);
+  });
+
+  it("keeps a legacy connector off beside a retained account session", () => {
+    // Connect account, Leave Hub (identity erased, session kept), Turn off:
+    // the backend has no identity, so only the session says this was chosen.
+    const settingsPath = makeSettingsPath();
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: false }));
+    let asked = 0;
+    const withSession = readDesktopSettings(settingsPath, "0.1.21", {
+      hasRetainedHubSession: () => {
+        asked += 1;
+        return true;
+      },
+    });
+    expect(withSession.hubConnectorDisabledByUser).toBe(true);
+    expect(resolveDesktopHubConnectorLaunch(withSession)).toMatchObject({
+      enabled: false,
+      standby: false,
+    });
+    expect(desktopHubAllowsBackgroundNodeClaim(withSession)).toBe(false);
+
+    expect(
+      readDesktopSettings(settingsPath, "0.1.21", { hasRetainedHubSession: () => false })
+        .hubConnectorDisabledByUser,
+    ).toBe(false);
+
+    // A legacy enabled connector, and any recorded choice, never ask.
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: true }));
+    readDesktopSettings(settingsPath, "0.1.21", {
+      hasRetainedHubSession: () => {
+        asked += 1;
+        return true;
+      },
+    });
+    writeDesktopSettings(settingsPath, DEFAULT_DESKTOP_SETTINGS);
+    expect(
+      readDesktopSettings(settingsPath, "0.1.21", {
+        hasRetainedHubSession: () => {
+          asked += 1;
+          return true;
+        },
+      }).hubConnectorDisabledByUser,
+    ).toBe(false);
+    expect(asked).toBe(1);
+  });
+
+  it("claims the node in the background only for a connector the operator turned on", () => {
+    // Standby runs the connector so the user's own sign-in can claim the node;
+    // it is not consent to claim it at startup.
+    expect(desktopHubAllowsBackgroundNodeClaim(DEFAULT_DESKTOP_SETTINGS)).toBe(false);
+    const turnedOn = setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true });
+    expect(desktopHubAllowsBackgroundNodeClaim(turnedOn)).toBe(true);
+    expect(
+      desktopHubAllowsBackgroundNodeClaim(setDesktopHubPreference(turnedOn, { enabled: false })),
+    ).toBe(false);
+    expect(desktopHubAllowsBackgroundNodeClaim({ ...turnedOn, hubOrigin: null })).toBe(false);
+  });
+
+  it("restarts only for launch changes the running backend cannot already serve", () => {
+    const standby = resolveDesktopHubConnectorLaunch(DEFAULT_DESKTOP_SETTINGS);
+    const enabled = resolveDesktopHubConnectorLaunch(
+      setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true }),
+    );
+    // Account setup or enrollment in standby persists an explicit enable.
+    expect(desktopHubLaunchNeedsRestart(enabled, standby, true)).toBe(false);
+    expect(desktopHubLaunchNeedsRestart(enabled, standby, null)).toBe(false);
+    expect(desktopHubLaunchNeedsRestart(standby, standby, false)).toBe(false);
+
+    const disabled = resolveDesktopHubConnectorLaunch(
+      setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: false }),
+    );
+    expect(desktopHubLaunchNeedsRestart(enabled, disabled, false)).toBe(true);
+    expect(desktopHubLaunchNeedsRestart(disabled, standby, true)).toBe(true);
+    expect(
+      desktopHubLaunchNeedsRestart({ ...enabled, origin: "https://other.example" }, enabled, true),
+    ).toBe(true);
+    expect(
+      desktopHubLaunchNeedsRestart({ ...enabled, nodeName: "Build node" }, enabled, true),
+    ).toBe(true);
+    expect(
+      desktopHubLaunchNeedsRestart({ ...enabled, allowFileSecretStore: true }, enabled, true),
+    ).toBe(true);
+  });
+
+  it("restarts for an explicit enable that a standby backend resolved to off", () => {
+    // Without key custody (or beside an existing identity) the standby
+    // connector runs off. Account setup's explicit enable then read as served,
+    // leaving a signed-in account, an unclaimed node, and no way forward.
+    const standby = resolveDesktopHubConnectorLaunch(DEFAULT_DESKTOP_SETTINGS);
+    const enabled = resolveDesktopHubConnectorLaunch(
+      setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true }),
+    );
+    expect(desktopHubLaunchNeedsRestart(enabled, standby, false)).toBe(true);
+    // Saved settings that still ask for standby resolve the same way again.
+    expect(desktopHubLaunchNeedsRestart(standby, standby, false)).toBe(false);
+  });
+
+  it("keeps a reachable node awake by default and persists an opt-out", () => {
+    expect(DEFAULT_DESKTOP_SETTINGS.keepAwakeWhileReachable).toBe(true);
+    const settingsPath = makeSettingsPath();
+    // Settings written before the preference existed keep the default.
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: true }));
+    expect(readDesktopSettings(settingsPath, "0.1.21").keepAwakeWhileReachable).toBe(true);
+
+    const optedOut = setDesktopKeepAwakePreference(DEFAULT_DESKTOP_SETTINGS, false);
+    writeDesktopSettings(settingsPath, optedOut);
+    expect(readDesktopSettings(settingsPath, "0.1.21").keepAwakeWhileReachable).toBe(false);
+    expect(setDesktopKeepAwakePreference(optedOut, false)).toBe(optedOut);
+  });
+
+  it("offers native account setup only where the hardware-backed helper ships", () => {
+    expect(isDesktopHostedIdentitySupported("darwin")).toBe(true);
+    // Linux and Windows desktops are released too; they enrol through the
+    // device-code ceremony and must never wait on native account setup.
+    expect(isDesktopHostedIdentitySupported("linux")).toBe(false);
+    expect(isDesktopHostedIdentitySupported("win32")).toBe(false);
+  });
+
   it("defaults legacy Hub settings to OS-protected key storage only", () => {
     const settingsPath = makeSettingsPath();
     fs.writeFileSync(
@@ -340,9 +655,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -366,9 +683,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -385,6 +704,7 @@ describe("desktopSettings", () => {
         updateChannel: "latest",
         updateChannelConfiguredByUser: true,
         hubConnectorEnabled: false,
+        hubConnectorDisabledByUser: false,
         hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
         hubNodeName: null,
         hubAllowFileSecretStore: false,
@@ -397,9 +717,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -422,9 +744,11 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,

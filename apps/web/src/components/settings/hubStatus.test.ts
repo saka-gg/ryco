@@ -112,6 +112,22 @@ describe("presentHubStatus", () => {
     ).toBe("restart");
   });
 
+  it("names the key-store fixes instead of only suggesting a restart", () => {
+    // On a headless Linux node with no Secret Service a restart repeats the
+    // failure; the copy must point at the store and the explicit fallback.
+    const detail = presentHubStatus(
+      status({
+        state: "degraded",
+        degradedMode: "operator_action_required",
+        failure: "identity_store_unavailable",
+      }),
+      identity("none"),
+      NOW,
+    ).detail;
+    expect(detail).toMatch(/Secret Service/);
+    expect(detail).toMatch(/permissioned-file fallback/);
+  });
+
   it("distinguishes a never-enrolled node from an enrolled one that is switched off", () => {
     const off = status({ state: "disabled" });
     expect(presentHubStatus(off, identity("none"), NOW)).toMatchObject({
@@ -141,6 +157,46 @@ describe("presentHubStatus", () => {
     expect(result.action).toBe("none");
     expect(result.detail).toContain("24s");
     expect(result.detail).toContain("attempt 5");
+  });
+
+  it("names a self-healing failure, says it is retrying, and still offers Retry", () => {
+    for (const failure of [
+      "identity_unavailable",
+      "connection_replaced",
+      "authentication_failed",
+    ] as const) {
+      const result = presentHubStatus(
+        status({
+          state: "degraded",
+          degradedMode: "backing_off",
+          failure,
+          reconnectAttempt: 1,
+          nextRetryAt: "2026-07-26T12:14:00.000Z",
+        }),
+        identity("active"),
+        NOW,
+      );
+      // Not the generic "Reconnecting": a duplicate process or a removed node
+      // must not hide behind an hour of quiet retries.
+      expect(result.headline, failure).not.toBe("Reconnecting");
+      expect(result.detail, failure).toContain("Retrying automatically in 14m");
+      expect(result.retrying, failure).toBe(true);
+      expect(result.dot, failure).toBe("warning");
+      expect(result.action, failure).toBe("retry");
+    }
+  });
+
+  it("never makes Leave the only way out of a rejected key", () => {
+    for (const degradedMode of ["backing_off", "operator_action_required"] as const) {
+      const result = presentHubStatus(
+        status({ state: "degraded", degradedMode, failure: "authentication_failed" }),
+        identity("active"),
+        NOW,
+      );
+      expect(result.action, degradedMode).toBe("retry");
+      // Still reachable for a node that really was removed on the Hub.
+      expect(result.secondaryAction, degradedMode).toBe("leave");
+    }
   });
 
   it("clamps a retry time that has already passed", () => {

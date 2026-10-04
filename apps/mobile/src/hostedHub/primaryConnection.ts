@@ -16,7 +16,9 @@ import {
   createKnownEnvironment,
 } from "@ryco/client-runtime/knownEnvironment";
 import {
-  authorizeHostedRequestForState,
+  admitHostedRequestForState,
+  bindHostedDispatchReplay,
+  hostedDispatchLineage,
   HostedRelayAttemptFactory,
   recoverHostedRelayConnection,
 } from "@ryco/client-runtime/relay";
@@ -114,14 +116,16 @@ export function createHostedPrimaryConnection(
     authorizeRequest: (info) => {
       const shared = hostedHubStore.getState();
       const current = coordinator.read(descriptor.environmentId);
-      if (!current || current.generation !== connectionGeneration) return false;
-      return authorizeHostedRequestForState(
+      // A superseded connection never becomes current again.
+      if (!current || current.generation !== connectionGeneration) return "forbidden";
+      return admitHostedRequestForState(
         {
           effectiveRole: current.effectiveRole,
           directoryStatus: shared.directoryStatus,
           transportStatus: current.transportStatus,
           browserStatus: shared.browserStatus,
           sessionStatus: current.sessionStatus,
+          sessionRecoveredAfterUnknown: current.sessionRecoveredAfterUnknown,
         },
         info,
       );
@@ -153,8 +157,13 @@ export function createHostedPrimaryConnection(
       if (sharedGeneration !== null) hostedHubController.role(sharedGeneration, role);
     },
     failure: (generation, failure) => {
-      if (failure.kind === "revoked" && failure.closeReason !== "node_revoked") {
-        void getMobileNativeE2eeEnrollmentCoordinator()?.invalidate("revoked");
+      // Only the Hub's enrollment frame speaks for this device, and only when it
+      // names this device's enrollment. A `revoked`, `node_revoked`, or
+      // `grant_revoked` close ends one node's channel — node removal, key
+      // rotation, a grant change — and invalidating the device enrollment for
+      // it took every other node down with it.
+      if (failure.enrollmentRevoked !== undefined) {
+        getMobileNativeE2eeEnrollmentCoordinator()?.applyRevocation(failure.enrollmentRevoked);
       }
       coordinator.failure(descriptor.environmentId, generation, failure);
       const sharedGeneration = sharedSelectionGeneration();
@@ -179,12 +188,24 @@ export function createHostedPrimaryConnection(
   coordinator.registerPendingRequestReader(descriptor.environmentId, connectionGeneration, () =>
     attemptFactory.hasPendingRequests(),
   );
-  const client = createWsRpcClient(
-    new WsTransport(() => attemptFactory.nextUrl(), {
-      ...attemptFactory.lifecycleHandlers(),
-      getConnectionLabel: () => descriptor.label ?? null,
-      getEnvironmentId: () => descriptor.environmentId,
-    }),
+  const dispatchReplay = bindHostedDispatchReplay({
+    environmentId: descriptor.environmentId,
+    lineage: hostedDispatchLineage(selectedState),
+    // Environment-scoped, not generation-scoped: the replay may give up after
+    // this connection's generation has been replaced.
+    markUncertain: () => {
+      coordinator.markEnvironmentDeliveryUnknown(descriptor.environmentId);
+      hostedHubController.markEnvironmentDeliveryUnknown(descriptor.environmentId);
+    },
+  });
+  const client = dispatchReplay.wrap(
+    createWsRpcClient(
+      new WsTransport(() => attemptFactory.nextUrl(), {
+        ...attemptFactory.lifecycleHandlers(dispatchReplay),
+        getConnectionLabel: () => descriptor.label ?? null,
+        getEnvironmentId: () => descriptor.environmentId,
+      }),
+    ),
   );
 
   // The node is reached only through the relay, so the "target" is the Hub's

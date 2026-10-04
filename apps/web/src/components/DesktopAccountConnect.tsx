@@ -1,6 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import { useSettingsDialogStore } from "../settingsDialogStore";
+import {
+  relaunchIfHubRestartRequired,
+  useDesktopRelaunchGuard,
+} from "./settings/useDesktopRelaunchGuard";
 import { Button } from "./ui/button";
 
 /** Native main owns sign-in, protected storage, and automatic node setup. */
@@ -8,8 +12,28 @@ export function DesktopAccountConnect() {
   const workspace = useDesktopWorkspaceState();
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
-  const connect = window.desktopBridge?.connectHostedIdentity;
-  if (!connect || workspace.status === "ready") return null;
+  // Native account setup only exists where main can run it. Elsewhere the node
+  // enrols from Connection settings, and this prompt would fail on every click.
+  const [supported, setSupported] = useState<boolean | null>(null);
+  const { guardRelaunch, dialog: relaunchGuardDialog } = useDesktopRelaunchGuard();
+  const bridge = window.desktopBridge;
+  const connect = bridge?.connectHostedIdentity;
+  useEffect(() => {
+    if (!bridge?.getHubLaunchConfig) return;
+    let active = true;
+    void bridge
+      .getHubLaunchConfig()
+      .then((config) => {
+        if (active) setSupported(config.origin !== null && config.hostedIdentitySupported === true);
+      })
+      .catch(() => {
+        if (active) setSupported(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [bridge]);
+  if (!connect || supported !== true || workspace.status === "ready") return null;
 
   return (
     <div className="mt-6 space-y-3">
@@ -25,6 +49,9 @@ export function DesktopAccountConnect() {
             try {
               const state = await connect();
               setFailed(state.status === "unavailable");
+              if (state.status === "ready" && bridge) {
+                await relaunchIfHubRestartRequired({ bridge, guardRelaunch });
+              }
             } catch {
               setFailed(true);
             } finally {
@@ -46,6 +73,7 @@ export function DesktopAccountConnect() {
           Account setup is temporarily unavailable. Retry or open Connection settings for details.
         </p>
       ) : null}
+      {relaunchGuardDialog}
     </div>
   );
 }

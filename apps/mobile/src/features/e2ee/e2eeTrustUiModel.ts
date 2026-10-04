@@ -9,9 +9,13 @@ import {
   clearMobileE2eeTrustEvent,
   type MobileE2eeIdentityDisplay,
   type MobileE2eeLocalDiagnostic,
+  type MobileE2eeSelection,
   type MobileE2eeSessionState,
 } from "../../hostedHub/e2eeSession";
-import { e2eeUnexpectedNodeResolutions } from "../../platform/e2eeTrustModel";
+import {
+  e2eeUnexpectedNodeResolutions,
+  type E2eeTrustRecordIndex,
+} from "../../platform/e2eeTrustModel";
 import {
   mintE2eeOwnerLegacyConsentDecision,
   mintE2eeOwnerUnresolvedLegacyConsentDecision,
@@ -543,6 +547,29 @@ export function deriveE2eeVerificationView(input: E2eeVerificationInput): E2eeVe
 }
 
 /**
+ * §13.2 step 2's handle: the selection's own record, or one minted now — the
+ * ordinary shape, because a channel that reached first contact resolved to no
+ * record at all — and attached to the session so a retry reuses it.
+ */
+async function ceremonyIndex(selection: MobileE2eeSelection): Promise<E2eeTrustRecordIndex> {
+  if (selection.localNodeHandle !== null) {
+    return {
+      hubOrigin: selection.hubOrigin,
+      accountId: selection.accountId,
+      localNodeHandle: selection.localNodeHandle,
+    };
+  }
+  const index = await mobileE2eeTrustStore.beginPairing({
+    hubOrigin: selection.hubOrigin,
+    accountId: selection.accountId,
+    nodeId: selection.nodeId,
+    ...(selection.environmentId === null ? {} : { environmentId: selection.environmentId }),
+  });
+  attachMobileE2eeLocalNodeHandle(index.localNodeHandle, "unverified", selection.environmentId);
+  return index;
+}
+
+/**
  * §13.2 step 5, and the only call to the decision minter in this application.
  *
  * Returns `null` on success, or one bounded message. NOTHING about the failure —
@@ -560,23 +587,7 @@ async function confirmE2eeVerification(input: {
     return E2EE_VERIFICATION_UNAVAILABLE;
   }
   try {
-    // §13.2 step 2's handle, minted here when the selection has none — the
-    // ordinary shape, because a channel that reached first contact resolved to
-    // no record at all.
-    const index =
-      selection.localNodeHandle === null
-        ? await mobileE2eeTrustStore.beginPairing({
-            hubOrigin: selection.hubOrigin,
-            accountId: selection.accountId,
-            nodeId: selection.nodeId,
-            ...(selection.environmentId === null ? {} : { environmentId: selection.environmentId }),
-          })
-        : {
-            hubOrigin: selection.hubOrigin,
-            accountId: selection.accountId,
-            localNodeHandle: selection.localNodeHandle,
-          };
-    attachMobileE2eeLocalNodeHandle(index.localNodeHandle, selection.environmentId);
+    const index = await ceremonyIndex(selection);
     const decision = mintE2eeOwnerVerificationDecision({
       index,
       nodeIdentityPublicKey: presented.nodeIdentityPublicKey,
@@ -634,20 +645,7 @@ export async function confirmE2eeApprovalQr(input: {
   const { approval } = verification;
 
   try {
-    const index =
-      selection.localNodeHandle === null
-        ? await mobileE2eeTrustStore.beginPairing({
-            hubOrigin: selection.hubOrigin,
-            accountId: selection.accountId,
-            nodeId: selection.nodeId,
-            ...(selection.environmentId === null ? {} : { environmentId: selection.environmentId }),
-          })
-        : {
-            hubOrigin: selection.hubOrigin,
-            accountId: selection.accountId,
-            localNodeHandle: selection.localNodeHandle,
-          };
-    attachMobileE2eeLocalNodeHandle(index.localNodeHandle, selection.environmentId);
+    const index = await ceremonyIndex(selection);
     const decision = mintE2eeOwnerVerificationDecision({
       index,
       nodeIdentityPublicKey: presented.nodeIdentityPublicKey,
@@ -667,10 +665,11 @@ export async function confirmE2eeApprovalQr(input: {
 }
 
 /**
- * Create the local unverified record that makes the next connection
- * pairing-only. No node key is trusted here and the pairing channel cannot carry
- * application data; its sole purpose is to let the node authenticate this
- * phone's client key and create the pending record the owner will approve.
+ * Put this selection's record into §13.2 pairing, which makes the next
+ * connection pairing-only. No node key is trusted here and the pairing channel
+ * cannot carry application data; its sole purpose is to let the node
+ * authenticate this phone's client key and create the pending record the owner
+ * will approve.
  */
 export async function requestE2eeApproval(session: MobileE2eeSessionState): Promise<string | null> {
   const selection = session.selection;
@@ -678,23 +677,178 @@ export async function requestE2eeApproval(session: MobileE2eeSessionState): Prom
     selection === null ||
     selection.clientIdentityPublicKey === null ||
     session.presented === null ||
-    session.pinVerified
+    session.pinVerified ||
+    selection.localRecordState === "verified"
   ) {
     return E2EE_VERIFICATION_UNAVAILABLE;
   }
-  if (selection.localNodeHandle !== null) return null;
+  // Already requested: the caller's reconnect is the whole retry.
+  if (selection.localRecordState === "unverified") return null;
   try {
-    const index = await mobileE2eeTrustStore.beginPairing({
+    if (selection.localNodeHandle === null) {
+      await ceremonyIndex(selection);
+      return null;
+    }
+    // A legacy consent's no-pin record: a handle that never sent a pairing hello.
+    await mobileE2eeTrustStore.beginPairingForRecord({
       hubOrigin: selection.hubOrigin,
       accountId: selection.accountId,
-      nodeId: selection.nodeId,
-      ...(selection.environmentId === null ? {} : { environmentId: selection.environmentId }),
+      localNodeHandle: selection.localNodeHandle,
     });
-    attachMobileE2eeLocalNodeHandle(index.localNodeHandle, selection.environmentId);
+    attachMobileE2eeLocalNodeHandle(
+      selection.localNodeHandle,
+      "unverified",
+      selection.environmentId,
+    );
     return null;
   } catch {
     return E2EE_VERIFICATION_UNAVAILABLE;
   }
+}
+
+export const E2EE_APPROVAL_CANCEL_UNAVAILABLE =
+  "Ryco could not cancel the request on this device. Nothing was changed. Try again.";
+
+/**
+ * Withdraw a pending approval request. The record leaves pairing, so the next
+ * connection takes the account grant again; nothing becomes trusted and nothing
+ * else the owner recorded is forgotten.
+ */
+export async function cancelE2eeApprovalRequest(
+  session: MobileE2eeSessionState,
+): Promise<string | null> {
+  const selection = session.selection;
+  if (
+    selection === null ||
+    selection.localNodeHandle === null ||
+    !isE2eeApprovalRequested(session)
+  ) {
+    return E2EE_APPROVAL_CANCEL_UNAVAILABLE;
+  }
+  try {
+    await mobileE2eeTrustStore.cancelPairing({
+      hubOrigin: selection.hubOrigin,
+      accountId: selection.accountId,
+      localNodeHandle: selection.localNodeHandle,
+    });
+    return null;
+  } catch {
+    return E2EE_APPROVAL_CANCEL_UNAVAILABLE;
+  }
+}
+
+/**
+ * Whether this phone has asked the node for approval: its record is in §13.2
+ * pairing. A handle alone is not that, because a legacy consent's no-pin record
+ * and a verified pin carry one too, and neither sent a pairing hello.
+ */
+export function isE2eeApprovalRequested(session: MobileE2eeSessionState): boolean {
+  return session.selection?.localRecordState === "unverified" && !session.pinVerified;
+}
+
+/**
+ * The §13.4 number this phone shows once it has asked for approval.
+ *
+ * Desktop lists every pending row with its full number and tells the owner to
+ * compare it with the device. Without this the phone showed nothing to compare,
+ * so a row the Hub minted from a key of its own — it issues the tickets — looked
+ * the same as this phone's, and approving it would hand the Hub an approved
+ * record (§2.3). The WHOLE number or nothing: the Hub holds this phone's enrolled
+ * identity key and can grind a key whose fingerprint shares any short tail, so a
+ * partial value is no check at all.
+ */
+export interface E2eeApprovalComparison {
+  readonly groups: readonly string[];
+  readonly value: string;
+  readonly caption: string;
+}
+
+export const E2EE_APPROVAL_REQUESTED_MESSAGE =
+  "Approval requested. In Ryco Desktop, approve only the row for this phone whose safety number matches the one below.";
+
+/** Approval was requested, but no channel has presented the node's identity yet. */
+export const E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE =
+  "Approval requested. This phone's safety number appears here once the node answers; do not approve a Desktop row before you can compare it.";
+
+export const E2EE_APPROVAL_SAFETY_NUMBER_CAPTION =
+  `This phone's safety number. The row you approve on Desktop must show all ${E2EE_SAFETY_NUMBER_DIGITS.groups} groups, in this order. ` +
+  "If any group differs, do not approve it.";
+
+export function deriveE2eeApprovalComparison(
+  session: MobileE2eeSessionState,
+): E2eeApprovalComparison | null {
+  const selection = session.selection;
+  const presented = session.presented;
+  if (
+    selection === null ||
+    // Before "Request approval" there is no pending row to compare against.
+    !isE2eeApprovalRequested(session) ||
+    selection.clientIdentityPublicKey === null ||
+    presented === null
+  ) {
+    return null;
+  }
+  const groups = e2eeSafetyNumberGroups(presented.display.safetyNumber);
+  if (groups.length === 0) return null;
+  return {
+    groups,
+    value: presented.display.safetyNumber,
+    caption: E2EE_APPROVAL_SAFETY_NUMBER_CAPTION,
+  };
+}
+
+/** The fast path's lead line before this phone has asked for approval. */
+export const E2EE_APPROVAL_INTRO_MESSAGE =
+  "Ask an already trusted owner to approve this phone, then scan the one-time code it shows.";
+
+/**
+ * Before any request, with no node identity presented yet. "Request approval"
+ * needs that identity, so this line must not invite an approval either.
+ */
+export const E2EE_APPROVAL_AWAITING_NODE_MESSAGE =
+  "Waiting for the node to present its identity. This phone can ask for approval once it does; do not approve a Desktop row for it before then.";
+
+export type E2eeApprovalRequestTone = "neutral" | "success" | "warning";
+
+/** The fast path's lead line and the number it is read against. */
+export interface E2eeApprovalRequestStatus {
+  readonly message: string;
+  readonly tone: E2eeApprovalRequestTone;
+  /** The full §13.4 number to match on Desktop, or `null` while there is none. */
+  readonly comparison: E2eeApprovalComparison | null;
+}
+
+/**
+ * What the fast path tells the owner, decided apart from the ceremony stage.
+ *
+ * A request outlives the identity it was made against. It bumps the trust
+ * revision, the re-prepared channel starts with nothing presented, and until the
+ * node's statement validates again the stage is `no-evidence` — indefinitely, if
+ * the node is offline or the Hub withholds the statement (rows K23/K24). The
+ * phone then has no number to compare, while the Hub, which issues the tickets,
+ * can still put a row of its own on Desktop. So a pending request without a
+ * number says "do not approve yet", whatever the stage, and never falls back to
+ * the generic invitation.
+ */
+export function deriveE2eeApprovalRequestStatus(input: {
+  readonly session: MobileE2eeSessionState;
+  readonly stage: E2eeVerificationStage;
+  readonly approvalRequested: boolean;
+}): E2eeApprovalRequestStatus {
+  if (!input.approvalRequested) {
+    return {
+      message:
+        input.stage === "no-evidence"
+          ? E2EE_APPROVAL_AWAITING_NODE_MESSAGE
+          : E2EE_APPROVAL_INTRO_MESSAGE,
+      tone: "neutral",
+      comparison: null,
+    };
+  }
+  const comparison = deriveE2eeApprovalComparison(input.session);
+  return comparison === null
+    ? { message: E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE, tone: "warning", comparison: null }
+    : { message: E2EE_APPROVAL_REQUESTED_MESSAGE, tone: "success", comparison };
 }
 
 export const E2EE_APPROVAL_QR_INVALID =
@@ -1080,7 +1234,7 @@ async function recordE2eeLegacyConsent(
           decidedAt,
         }),
       );
-      attachMobileE2eeLocalNodeHandle(index.localNodeHandle, selection.environmentId);
+      attachMobileE2eeLocalNodeHandle(index.localNodeHandle, "unpinned", selection.environmentId);
     } else {
       await mobileE2eeTrustStore.recordLegacyConsent(
         mintE2eeOwnerLegacyConsentDecision({

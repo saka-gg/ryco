@@ -17,6 +17,7 @@ import { mobileE2eeAgreementKey } from "../platform/e2eeAgreementKey";
 import { mobileClientE2eePrekey } from "../platform/e2eeClientPrekey";
 import { makeMobileRelayE2eeProvider } from "../platform/e2eeRelayProvider";
 import {
+  isE2eePairingRecord,
   isE2eeVerifiedPinRecord,
   type E2eeTrustClassification,
   type E2eeVerifiedPinRecord,
@@ -29,6 +30,7 @@ import {
   deriveMobileE2eeIdentityDisplay,
   lockMobileE2eeChannelMode,
   markMobileE2eeKeyCustodyUnavailable,
+  mobileE2eeLocalRecordContext,
   observeMobileE2eeStatement,
   raiseMobileE2eeUnexpectedNode,
   recordMobileE2eeInitiatorDiagnostic,
@@ -391,7 +393,7 @@ async function runPreparationPass(): Promise<boolean> {
           nodeId: selection.nodeId,
           nodeLabel: selection.nodeLabel,
           environmentId: selection.environmentId,
-          localNodeHandle: guards.record?.index.localNodeHandle ?? null,
+          ...mobileE2eeLocalRecordContext(guards.record),
         },
         classification: guards.classification,
         legacyPermitted: guards.legacyPermitted,
@@ -427,7 +429,7 @@ async function runPreparationPass(): Promise<boolean> {
       nodeId: selection.nodeId,
       nodeLabel: selection.nodeLabel,
       environmentId: selection.environmentId,
-      localNodeHandle: record?.index.localNodeHandle ?? null,
+      ...mobileE2eeLocalRecordContext(record),
       clientIdentityPublicKey: credentials.clientIdentityPublicKey,
     },
     classification: guards.classification,
@@ -460,7 +462,7 @@ async function runPreparationPass(): Promise<boolean> {
     // the initiator refuses the `e2ee` lock to any native attempt that resolved
     // to no verified pin, so genuine first contact is still free to fall back to
     // legacy under §12.1.1 branch (a) while releasing nothing over E2EE.
-    pairingOnly: record !== null && record.state === "unverified",
+    pairingOnly: isE2eePairingRecord(record),
     localSuitePreference: LOCAL_SUITE_PREFERENCE,
     credentials: {
       tier: "native",

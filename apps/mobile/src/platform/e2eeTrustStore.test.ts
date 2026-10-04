@@ -1056,6 +1056,137 @@ describe("§12.1.1 owner legacy consent", () => {
   });
 });
 
+describe("§13.2 step 2 for a selection that already has a record", () => {
+  it("moves a legacy consent's no-pin record into pairing, keeping what the owner recorded", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const index = await store.recordUnresolvedLegacyConsent(
+      mintE2eeOwnerUnresolvedLegacyConsentDecision({
+        hubOrigin: HUB,
+        accountId: ACCOUNT,
+        nodeId: "node-9",
+        environmentId: "env-9",
+        decidedAt: 12,
+      }),
+    );
+
+    await store.beginPairingForRecord(index);
+
+    // The same handle, so the session's index stays valid, and §13.1's
+    // pairing shape: no fingerprint, no continuity id, no latch, no approval.
+    expect(store.resolve(handleSelection(index))).toEqual({
+      index,
+      state: "unverified",
+      nodeIdHints: ["node-9"],
+      legacyConsent: { kind: "recorded", recordedAt: 12 },
+      environmentId: "env-9",
+    });
+    expect(store.marker(HUB)).toEqual({ kind: "unset" });
+    const restarted = context.create();
+    await restarted.hydrate();
+    expect(restarted.resolve(handleSelection(index))?.state).toBe("unverified");
+  });
+
+  it("leaves a record already in pairing untouched", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const index = await store.beginPairing({ hubOrigin: HUB, accountId: ACCOUNT });
+    const revision = store.revision();
+    context.log.length = 0;
+
+    await store.beginPairingForRecord(index);
+
+    expect(context.log).toEqual([]);
+    expect(store.revision()).toBe(revision);
+  });
+
+  it("never moves a verified pin back into pairing", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const index = await pairAndVerify(store);
+
+    await expect(store.beginPairingForRecord(index)).rejects.toMatchObject({
+      code: "trust_store_selection_verified",
+    });
+    expect(verifiedPin(store, index).latch.kind).toBe("set");
+  });
+});
+
+describe("withdrawing an approval request", () => {
+  it("removes a pairing record that holds nothing else, so the selection resolves to none", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const index = await store.beginPairing({
+      hubOrigin: HUB,
+      accountId: ACCOUNT,
+      nodeId: "node-1",
+    });
+
+    await store.cancelPairing(index);
+
+    expect(store.resolve(handleSelection(index))).toBeNull();
+    expect(
+      await store.classify({
+        kind: "node-id-hint",
+        hubOrigin: HUB,
+        accountId: ACCOUNT,
+        nodeId: "node-1",
+      }),
+    ).toEqual({ class: "legacy-eligible", branch: "a" });
+    const restarted = context.create();
+    await restarted.hydrate();
+    expect(restarted.resolve(handleSelection(index))).toBeNull();
+  });
+
+  it("keeps a consent the owner recorded, on §13.1's no-pin record", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const index = await store.recordUnresolvedLegacyConsent(
+      mintE2eeOwnerUnresolvedLegacyConsentDecision({
+        hubOrigin: HUB,
+        accountId: ACCOUNT,
+        nodeId: "node-9",
+        decidedAt: 12,
+      }),
+    );
+    await store.beginPairingForRecord(index);
+
+    await store.cancelPairing(index);
+
+    expect(store.resolve(handleSelection(index))).toEqual({
+      index,
+      state: "none",
+      nodeIdHints: ["node-9"],
+      legacyConsent: { kind: "recorded", recordedAt: 12 },
+      environmentId: null,
+    });
+  });
+
+  it("never touches a verified pin, and writes nothing for a selection not in pairing", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const pinned = await pairAndVerify(store);
+    await expect(store.cancelPairing(pinned)).rejects.toMatchObject({
+      code: "trust_store_selection_verified",
+    });
+    expect(verifiedPin(store, pinned).latch.kind).toBe("set");
+    expect(store.marker(HUB)).toEqual({ kind: "set" });
+
+    const legacy = await store.recordUnresolvedLegacyConsent(
+      mintE2eeOwnerUnresolvedLegacyConsentDecision({
+        hubOrigin: HUB,
+        accountId: OTHER_ACCOUNT,
+        decidedAt: 12,
+      }),
+    );
+    context.log.length = 0;
+    await store.cancelPairing(legacy);
+    await store.cancelPairing({ hubOrigin: HUB, accountId: ACCOUNT, localNodeHandle: "gone" });
+    expect(context.log).toEqual([]);
+    expect(store.resolve(handleSelection(legacy))?.state).toBe("none");
+  });
+});
+
 describe("§12.1.1 strict legacy policy", () => {
   it("is recorded and evaluated under the Hub origin alone", async () => {
     const store = context.create();

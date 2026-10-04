@@ -1,3 +1,7 @@
+import {
+  isSavedEnvironmentCredentialRejection,
+  RemoteEnvironmentAuthHttpError,
+} from "@ryco/client-runtime/connection";
 import { DEFAULT_SERVER_SETTINGS, WS_METHODS } from "@ryco/contracts";
 import { E2EE_CAPABILITY_CARRIER_TAG } from "@ryco/shared/relayE2eeConstants";
 import { Stream } from "effect";
@@ -277,6 +281,52 @@ describe("WsTransport", () => {
 
     expect(provider).toHaveBeenCalledOnce();
     expect(sockets).toHaveLength(0);
+    await transport.dispose();
+  });
+
+  it("stops a persistent socket and fails its requests when the url provider is terminally rejected", async () => {
+    const rejection = new RemoteEnvironmentAuthHttpError("Unauthorized request.", 401);
+    const provider = vi.fn(async () => {
+      throw rejection;
+    });
+    const onTerminalUrlError = vi.fn();
+    const transport = createTransport(provider, {
+      getReconnectDelayMs: () => 0,
+      persistentReconnect: true,
+      isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+      onTerminalUrlError,
+    });
+
+    const request = transport.request((client) => client[WS_METHODS.serverGetConfig]({}));
+    await expect(request).rejects.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(provider).toHaveBeenCalledOnce();
+    expect(onTerminalUrlError).toHaveBeenCalledExactlyOnceWith(rejection);
+    expect(sockets).toHaveLength(0);
+    await transport.dispose();
+  });
+
+  it("keeps retrying a persistent socket through url provider outages", async () => {
+    let attempt = 0;
+    const provider = vi.fn(async () => {
+      attempt += 1;
+      if (attempt < 3) throw new Error("fetch failed");
+      return "wss://remote.example.com/?wsToken=fresh";
+    });
+    const onTerminalUrlError = vi.fn();
+    const transport = createTransport(provider, {
+      getReconnectDelayMs: () => 0,
+      persistentReconnect: true,
+      isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+      onTerminalUrlError,
+    });
+
+    await waitFor(() => {
+      expect(sockets).toHaveLength(1);
+    });
+    expect(provider).toHaveBeenCalledTimes(3);
+    expect(onTerminalUrlError).not.toHaveBeenCalled();
     await transport.dispose();
   });
 

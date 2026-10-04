@@ -12,12 +12,13 @@ import {
 import { E2EE_SUITE_ACCOUNT_GRANT_25519_CHACHAPOLY_SHA256 } from "@ryco/shared/relayE2eeWire";
 
 import { mobileNativeE2eePlatform } from "../platform/nativeE2ee";
-import { isE2eeVerifiedPinRecord } from "../platform/e2eeTrustModel";
+import { isE2eePairingRecord, isE2eeVerifiedPinRecord } from "../platform/e2eeTrustModel";
 import { mobileE2eeTrustStore } from "../platform/e2eeTrustStore";
 import {
   beginMobileE2eeChannel,
   beginMobileE2eeChannelAttempt,
   lockMobileE2eeChannelMode,
+  mobileE2eeLocalRecordContext,
   observeMobileAccountE2eeStatement,
   recordMobileE2eeInitiatorDiagnostic,
 } from "./e2eeSession";
@@ -120,7 +121,12 @@ export async function prepareMobileRelaySocketContext(): Promise<MobileRelaySock
   }
 
   const record = trustedRecord(selection);
-  if (record !== null && isE2eeVerifiedPinRecord(record)) {
+  // Suite 0x01 for a verified pin, and for a record "Request approval" moved
+  // into §13.2 pairing. Only a 0x01 hello reaches the node's §13.6 admission,
+  // so it is the only channel that puts this phone's key on the pending list
+  // Desktop approves from; the attempt it resolves to is pairing-only and
+  // releases nothing. A 0x02 account-grant channel never creates that record.
+  if (record !== null && (isE2eeVerifiedPinRecord(record) || isE2eePairingRecord(record))) {
     await prepareMobileRelayE2eeAttempt();
     if (!isCurrent(selection)) throw new Error("Hosted node selection changed.");
     const provider = resolveMobileRelayE2eeProvider();
@@ -291,7 +297,7 @@ export async function issueMobileRelayAttempt(input: {
   beginMobileE2eeChannel({
     selection: {
       ...context.selection,
-      localNodeHandle: localRecord?.index.localNodeHandle ?? null,
+      ...mobileE2eeLocalRecordContext(localRecord),
       clientIdentityPublicKey: context.enrollment.identity.publicKey,
     },
     classification,

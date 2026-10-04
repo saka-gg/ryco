@@ -6,6 +6,7 @@ import {
   type UsageLimitStatus,
 } from "@ryco/client-runtime/state/threads";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
 import type { WsConnectionUiState } from "@ryco/client-runtime/rpc";
 import { PROVIDER_OPTIONS } from "@ryco/client-runtime/state/session";
 import type {
@@ -218,6 +219,51 @@ export function buildPrimaryInboxSidebarEnvironment(input: {
     threadSettlementSupported: input.threadSettlementSupported,
     threadSnoozeSupported: input.threadSnoozeSupported,
     mutationReady: connectionState === "connected" && !stale,
+    shellCurrent: !stale,
+  };
+}
+
+/** The inbox's view of a directly paired environment the app saved. */
+export function buildSavedInboxSidebarEnvironment(input: {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly runtime: SavedEnvironmentRuntimeState | null | undefined;
+  readonly hydratedFromCache: boolean;
+}): InboxSidebarEnvironment {
+  const runtime = input.runtime;
+  // A rejected pairing is not an outage: no reconnect will fix it, so the row
+  // says what will, instead of "reconnecting" forever.
+  const requiresAuth = runtime?.authState === "requires-auth";
+  const connectionState = requiresAuth
+    ? "disconnected"
+    : (runtime?.connectionState ?? "disconnected");
+  const stale = input.hydratedFromCache || connectionState !== "connected";
+  return {
+    environmentId: input.environmentId,
+    label: input.label,
+    connectionState:
+      connectionState === "connected"
+        ? "connected"
+        : connectionState === "connecting"
+          ? "connecting"
+          : connectionState === "error"
+            ? "reconnecting"
+            : "offline",
+    stale,
+    ...(requiresAuth
+      ? { staleDetail: "Needs re-pair" }
+      : stale
+        ? { staleDetail: "Offline · last known" }
+        : {}),
+    role: runtime?.role ?? null,
+    trust: "unknown",
+    deliveryUnknown: false,
+    threadSnoozeSupported: runtime?.descriptor?.capabilities.threadSnooze ?? false,
+    threadSettlementSupported: runtime?.descriptor?.capabilities.threadSettlement ?? false,
+    mutationReady:
+      connectionState === "connected" &&
+      (runtime?.role === "owner" || runtime?.role === "client") &&
+      !stale,
     shellCurrent: !stale,
   };
 }

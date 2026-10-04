@@ -138,8 +138,11 @@ built, before any channel exists, and stands until the node is torn down or the 
 signed native tier's two states are not in this client's state type at all, so the browser cannot
 report them even by mistake.
 
-Directory refresh runs on a bounded 20-second visible-page cadence. Failures retain the last bounded
-directory as stale, clear role authority, disable selection/actions, and retry with a capped delay.
+Directory refresh runs on a bounded 20-second visible-page cadence. While connection demand waits
+on a node the directory reports offline, the poll runs every 5 seconds instead, for at most five
+minutes per wait before it falls back to 20 seconds; the faster cadence never shortens a failure
+backoff and stops with the page. Failures retain the last bounded directory as stale, clear role
+authority, disable selection/actions, and retry with a capped delay.
 Machine-detail focus is preserved only while both node ID and environment ID match. Authorization
 removal or an identity change closes that exact environment's live demand.
 
@@ -478,16 +481,80 @@ are terminal. Browser WebSocket APIs intentionally do not reveal whether a pre-h
 failure was DNS or TLS, so the hosted UI reports those cases as a bounded network failure; direct
 and node-side diagnostics retain their more specific classification.
 
+Held demand is re-planned as soon as the directory reports its node online again, or the directory
+and browser become current while its node is online. A terminal relay failure is never re-planned
+from those edges — the browser turning current is then the failure itself — so a node that failed
+its handshake waits for the 25-second demand renewal or for its presence to come back, and is never
+hot-retried.
+
+Access recovery is separate from relay reconnect. When the page returns to the foreground or comes
+back online, the client revalidates the Hub session and directory, opens a fresh relay attempt, and
+accepts a current snapshot before mutation. When that session check cannot reach the Hub — no
+answer, the request deadline, a 408, 429, or 5xx response, or a body that is not the Hub's (a
+captive portal or proxy page) — session material is kept, the account stays unavailable or the
+browser stale (neither grants mutation), and the same full check retries on its own with
+exponential backoff from one second to 60 seconds, bounded ±20% jitter, and bounded Hub
+`retryAfterMs`, in the foreground only. A definite Hub answer is not retried on a timer; the next
+foreground or online signal, or Refresh, re-checks it. Only the Hub's own `401` or
+`session_invalid` answer ends the session.
+
 On reconnect, the existing shell and thread subscriptions resubscribe. Ryco marks the session
 `replaying`, accepts the authoritative shell snapshot, discards duplicate/older projection versions,
 reconciles thread subscriptions, and then marks it ready. Conversations, running tasks, approvals,
 and terminal projections recover from the node, never from Hub.
 
-RPC reads may be retried by their existing subscription behavior. An unacknowledged request is
-conservatively treated as uncertain, and a non-idempotent request is never automatically replayed
-merely because the relay disconnected. If no response chunk or exit made delivery known, the
-session becomes `delivery unknown`; the UI does not claim that the command was accepted. After the
-authoritative replay finishes, the user can explicitly acknowledge the warning.
+Every RPC method carries an explicit delivery-effect classification beside its access tier
+(`RPC_DELIVERY_EFFECT_POLICY` in `packages/shared/src/rpcAccessPolicy.ts`). The tier is not an
+effect: file, VCS, and source-control reads are operator-tier and still reads. A method nobody
+classified counts as a mutation.
+
+- **Reads** — unary reads and long-lived read streams such as the Agent Control queue or device
+  events — never make delivery uncertain. Losing one is harmless, and subscriptions resubscribe on
+  their own. The client tells a request refused only until its session is current (the role is
+  still being validated, the transport is reconnecting, or the rebuilt client's session has not
+  accepted its snapshot) from one refused for good (a role below the method's tier, a method no
+  hosted role may call, or a terminally failed transport). A subscription refused only for now —
+  such as the Agent Control queue on a client rebuilt during recovery — keeps re-checking locally
+  with a capped backoff and starts once the session is current, instead of ending.
+- **Orchestration commands** (`orchestration.dispatchCommand`) are idempotent by receipt: the node
+  persists a receipt for each `commandId` in the same transaction as the command's events and
+  answers a repeated id from it — before normalizing the command again — with the original result
+  or rejection. `thread.archive` is the exception: a repeated archive is normalized again and its
+  follow-ups (stopping the session, closing terminals) run again, since a first attempt may have
+  been cut off between committing and cleaning up, while the engine still answers the archive
+  itself from its receipt. A repeated id that arrives while its first attempt is still running (a
+  bootstrap turn start creating its thread and worktree has no receipt until its turn starts) waits
+  for that attempt and gets its outcome; the attempt runs detached from the request that started
+  it, so a client disconnecting mid-command does not cut it off halfway.
+- The hosted client holds the caller's promise through a reconnect and sends the identical envelope
+  once more, at most once, after the environment's session has a fresh ticket, a completed
+  handshake, and an accepted snapshot again. Which failures leave a command's delivery unknown is
+  decided by what they are: a failure of the transport itself — a socket error, an interruption, a
+  disposed or reconnecting client — or any failure at all once the connection was lost after the
+  send. Whatever the node answered on a live connection is the command's outcome and reaches the
+  caller at once: its typed rejection, its role check, or the defect it returns for a payload it
+  cannot decode (a hosted bundle newer than the node). So does a refusal by the client before
+  sending. The replay stays inside the same environment and the same account session — readiness
+  is bound to those, not to a hosted generation, because every recovery publishes a new generation
+  and readiness is only published from the current one. Hub session-id rotation on resume is the
+  same account session. Leaving the node, signing out, or session expiry fails the command closed,
+  as does a two-minute horizon after sending. Leaving covers a command still in flight when the
+  node was left, too: returning to that node within the horizon is a new visit, and nothing
+  replays across visits. The envelope lives in memory only, and the node re-authorizes the replay
+  under the current role. Receipt retention must always outlive that horizon.
+- A command Ryco cannot confirm — the horizon passed, the replay was lost to a second drop or
+  refused (locally or by the node's role check), or a replayed bootstrap turn start failed on what a
+  node restart left half-created — is reported to the control that issued it as unconfirmed, never
+  as accepted or failed, and the environment becomes `delivery unknown` as below. A client that has
+  not taken over its commands this way keeps them tracked like any other mutation.
+- **Every other mutation** — terminal input, git and file writes, Agent Control decisions — is
+  never automatically replayed merely because the relay disconnected. If no response chunk or exit
+  made its delivery known, the environment's session becomes `delivery unknown`; the UI does not
+  claim that the action was accepted. Once the replacement session has accepted a snapshot, reads
+  work normally again, while new mutations to that environment wait until the user has seen the
+  notice shown inline on the environment's threads and continued. A mutation tried meanwhile is
+  refused with its own answer pointing at that notice, not the "still synchronizing" one, since
+  waiting alone will not admit it.
 
 ## Browser capability adaptation
 
@@ -630,7 +697,9 @@ remain server-enforced.
   seconds and both peers support canonical relay protocol 1.2.
 - **Incompatible or revoked:** an administrator must restore compatible node access. The browser
   will not downgrade the protocol or bypass authorization.
-- **Delivery unknown:** inspect the authoritative node state before issuing the command again.
+- **Delivery unknown:** inspect the authoritative node state — the thread's notice names the
+  machine — before issuing the action again, then continue from the notice. Orchestration commands
+  end up here only when their replay by `commandId` could not confirm them.
 - **Channel says legacy plaintext:** rule out the page first. An origin that is not a secure
   context, or a browser exposing no cryptographic random source, makes this client refuse encryption
   at startup, and the label is then the browser's doing and the node's configuration is untouched.

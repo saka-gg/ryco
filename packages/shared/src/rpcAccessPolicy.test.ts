@@ -7,7 +7,13 @@ import {
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
 } from "@ryco/contracts";
-import { hostedRoleAllows, RPC_ACCESS_POLICY, rpcAccessFor } from "./rpcAccessPolicy.ts";
+import {
+  hostedRoleAllows,
+  RPC_ACCESS_POLICY,
+  RPC_DELIVERY_EFFECT_POLICY,
+  rpcAccessFor,
+  rpcDeliveryEffectFor,
+} from "./rpcAccessPolicy.ts";
 
 describe("shared RPC access policy", () => {
   it("requires current owner authority to inspect and redeem reset credits", () => {
@@ -79,5 +85,40 @@ describe("shared RPC access policy", () => {
     expect(hostedRoleAllows("operator", WS_METHODS.serverGetUsageSummary)).toBe(false);
     expect(hostedRoleAllows("owner", WS_METHODS.serverGetUsageSummary)).toBe(true);
     expect(hostedRoleAllows("owner", WS_METHODS.subscribeAuthAccess)).toBe(false);
+  });
+
+  it("classifies every RPC method's delivery effect independently of its access tier", () => {
+    expect(new Set(Object.keys(RPC_DELIVERY_EFFECT_POLICY))).toEqual(
+      new Set(Object.keys(RPC_ACCESS_POLICY)),
+    );
+    // Operator-tier reads are still reads: the tier is not an effect.
+    for (const method of [
+      WS_METHODS.projectsReadFile,
+      WS_METHODS.vcsReadLocalChanges,
+      WS_METHODS.vcsReadComparison,
+      WS_METHODS.sourceControlListChangeRequests,
+      ORCHESTRATION_WS_METHODS.getTaskOutput,
+    ]) {
+      expect(rpcAccessFor(method)).toBe("operator");
+      expect(rpcDeliveryEffectFor(method)).toBe("read");
+    }
+    // Long-lived read streams outside the session-sync set.
+    expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.subscribeProposals)).toBe("read");
+    expect(rpcDeliveryEffectFor(DEVICE_WS_METHODS.subscribeEvents)).toBe("read");
+    // Viewer-tier is not a proxy for read either.
+    expect(rpcDeliveryEffectFor(ORCHESTRATION_WS_METHODS.dispatchCommand)).toBe("receipted");
+    for (const method of [
+      WS_METHODS.terminalWrite,
+      WS_METHODS.projectsWriteFile,
+      WS_METHODS.gitRunStackedAction,
+      WS_METHODS.vcsPull,
+      AGENT_CONTROL_WS_METHODS.acceptProposal,
+    ]) {
+      expect(rpcDeliveryEffectFor(method)).toBe("mutation");
+    }
+  });
+
+  it("treats an unclassified method's delivery as uncertain", () => {
+    expect(rpcDeliveryEffectFor("server.someFutureMethod")).toBe("mutation");
   });
 });

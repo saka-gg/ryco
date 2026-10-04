@@ -41,6 +41,8 @@ import { WorktreeSubmoduleEditor } from "./WorktreeSubmoduleSettings";
 import { WorktreeRootEditor } from "./WorktreeRootSettings";
 import { ProjectScopeSelect } from "./ProjectDefaultsSection";
 import { GeneralSettingsPanel } from "./SettingsPanels";
+import { desktopRelaunchScheduler } from "./useDesktopRelaunchGuard";
+import { useStore } from "../../store";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 
 const WORKTREE_PROJECTS = [
@@ -139,6 +141,12 @@ const authAccessHarness = vi.hoisted(() => {
 });
 
 const mockConnectDesktopSshEnvironment = vi.hoisted(() => vi.fn());
+const activeDesktopTurns = vi.hoisted(() => ({ count: 0 as number | null }));
+
+vi.mock("../../desktopRelaunchGuard.logic", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../desktopRelaunchGuard.logic")>()),
+  countActiveDesktopTurns: () => activeDesktopTurns.count,
+}));
 const mockUpdateEnvironmentServerSettings = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const originalNavigatorPlatform = navigator.platform;
 
@@ -418,8 +426,10 @@ const createDesktopBridgeStub = (overrides?: {
         nodeName: null,
         allowFileSecretStore: false,
         fileSecretStoreFallbackSupported: true,
+        hostedIdentitySupported: true,
       })),
-    setHubLaunchConfig: overrides?.setHubLaunchConfig ?? vi.fn().mockResolvedValue(undefined),
+    setHubLaunchConfig:
+      overrides?.setHubLaunchConfig ?? vi.fn().mockResolvedValue({ relaunching: true }),
     ...(overrides?.restartApp === undefined ? {} : { restartApp: overrides.restartApp }),
     ...(overrides?.getHostedIdentityState === undefined
       ? {}
@@ -599,6 +609,8 @@ describe("GeneralSettingsPanel observability", () => {
     await __resetLocalApiForTests();
     authAccessHarness.reset();
     useTierOverrideStore.setState({ override: null });
+    activeDesktopTurns.count = 0;
+    desktopRelaunchScheduler.cancel();
   });
 
   function WorktreeSettingsHarness({
@@ -1727,6 +1739,103 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(page.getByText("http://192.168.1.44:3773")).toBeInTheDocument();
   });
 
+  it("saves deferred network access before waiting for running turns", async () => {
+    activeDesktopTurns.count = 1;
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByLabelText("Enable network access").click();
+    await page.getByRole("button", { name: "Restart and enable", exact: true }).click();
+    await page.getByRole("button", { name: "Restart after they finish" }).click();
+    await vi.waitFor(() => {
+      expect(desktopBridge.setServerExposureMode).toHaveBeenCalledWith("network-accessible", {
+        deferRelaunch: true,
+      });
+    });
+    expect(desktopRelaunchScheduler.pending()).toBe(true);
+  });
+
+  it("shows network access saved for the next launch and withdraws it in place", async () => {
+    // Once its waiting notice was dismissed, a deferred change was invisible:
+    // the switch shows the running mode, so nothing could take it back before
+    // a later restart applied it.
+    const restartApp = vi.fn().mockResolvedValue(undefined);
+    const desktopBridge = createDesktopBridgeStub({
+      serverExposureState: {
+        mode: "local-only",
+        endpointUrl: null,
+        advertisedHost: null,
+        tailscaleServeEnabled: false,
+        tailscaleServePort: 443,
+        pendingMode: "network-accessible",
+      },
+      restartApp,
+    });
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Saved to turn on when Ryco restarts.")).toBeVisible();
+    await expect.element(page.getByLabelText("Enable network access")).not.toBeChecked();
+
+    await page.getByRole("button", { name: "Restart", exact: true }).click();
+    await vi.waitFor(() => expect(restartApp).toHaveBeenCalledOnce());
+
+    await page.getByRole("button", { name: "Undo", exact: true }).click();
+    // The running mode: Desktop withdraws the saved change without relaunching.
+    await vi.waitFor(() =>
+      expect(desktopBridge.setServerExposureMode).toHaveBeenCalledWith("local-only"),
+    );
+    await expect
+      .element(page.getByText("Saved to turn on when Ryco restarts."))
+      .not.toBeInTheDocument();
+  });
+
+  it("shows Tailscale HTTPS saved for the next launch and withdraws it in place", async () => {
+    const desktopBridge = createDesktopBridgeStub({
+      serverExposureState: {
+        mode: "network-accessible",
+        endpointUrl: "http://192.168.1.44:3773",
+        advertisedHost: "192.168.1.44",
+        tailscaleServeEnabled: true,
+        tailscaleServePort: 443,
+        pendingTailscaleServe: { enabled: false, port: 443 },
+      },
+    });
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Saved to turn off when Ryco restarts.")).toBeVisible();
+    await page.getByRole("button", { name: "Undo", exact: true }).click();
+    await vi.waitFor(() =>
+      expect(desktopBridge.setTailscaleServeEnabled).toHaveBeenCalledWith({
+        enabled: true,
+        port: 443,
+      }),
+    );
+    await expect
+      .element(page.getByText("Saved to turn off when Ryco restarts."))
+      .not.toBeInTheDocument();
+  });
+
   it("adds desktop ssh environments from the add-environment dialog", async () => {
     const discoverSshHosts = vi.fn().mockResolvedValue([
       {
@@ -2189,6 +2298,8 @@ describe("ConnectionsSettings Hub section", () => {
     vi.unstubAllGlobals();
     delete window.desktopBridge;
     delete window.nativeApi;
+    activeDesktopTurns.count = 0;
+    desktopRelaunchScheduler.cancel();
   });
 
   /**
@@ -2249,6 +2360,7 @@ describe("ConnectionsSettings Hub section", () => {
         nodeName: null,
         allowFileSecretStore: false,
         fileSecretStoreFallbackSupported: true,
+        hostedIdentitySupported: true,
         ...hubConfig,
       }),
       ...bridgeOverrides,
@@ -2301,12 +2413,262 @@ describe("ConnectionsSettings Hub section", () => {
 
     await expect.element(page.getByText("Ready for account setup")).toBeVisible();
     await expect
-      .element(page.getByText(/register this Mac with this Hub automatically/))
+      .element(page.getByText(/register this computer with this Hub automatically/))
       .toBeVisible();
     await expect
       .element(page.getByRole("button", { name: "Start enrollment" }))
       .not.toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Connect account" })).toBeVisible();
+  });
+
+  it("relaunches at once when no agent turn would be stopped", async () => {
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
+    await expect
+      .element(page.getByText("Restart while agents are working?"))
+      .not.toBeInTheDocument();
+  });
+
+  it("asks before a relaunch would stop running agent turns", async () => {
+    // Relaunching stopped the backend and killed in-flight provider turns
+    // without a word; now the operator chooses.
+    activeDesktopTurns.count = 2;
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await expect.element(page.getByText("Restart while agents are working?")).toBeVisible();
+    await expect.element(page.getByText(/2 agent turns are still running/)).toBeVisible();
+    expect(setHubLaunchConfig).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect
+      .element(page.getByText("Restart while agents are working?"))
+      .not.toBeInTheDocument();
+    expect(setHubLaunchConfig).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await page.getByRole("button", { name: "Restart now" }).click();
+    await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
+  });
+
+  it("asks before a relaunch while running turns cannot be counted yet", async () => {
+    // An unknown local environment used to count as no running turns.
+    activeDesktopTurns.count = null;
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await expect.element(page.getByText("Restart while agents are working?")).toBeVisible();
+    await expect.element(page.getByText(/Agent turns may still be running/)).toBeVisible();
+    expect(setHubLaunchConfig).not.toHaveBeenCalled();
+  });
+
+  it("saves a deferred change at once and relaunches once the running turns finish", async () => {
+    // A deferred change used to live only in renderer memory, so quitting or
+    // crashing before the turns finished silently dropped it.
+    activeDesktopTurns.count = 1;
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
+    const restartApp = vi.fn().mockResolvedValue(undefined);
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig, restartApp });
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await page.getByRole("button", { name: "Restart after they finish" }).click();
+    await vi.waitFor(() =>
+      expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true, deferRelaunch: true }),
+    );
+    // The waiting notice is an app toast; this harness renders no toast viewport.
+    await vi.waitFor(() => expect(desktopRelaunchScheduler.pending()).toBe(true));
+    expect(restartApp).not.toHaveBeenCalled();
+
+    activeDesktopTurns.count = 0;
+    useStore.setState({});
+    await vi.waitFor(() => expect(restartApp).toHaveBeenCalledOnce());
+    expect(setHubLaunchConfig).toHaveBeenCalledOnce();
+  });
+
+  it("finishes account setup in place when the backend runs a standby connector", async () => {
+    // Account sign-in used to enable the connector and relaunch Desktop,
+    // killing running turns. A standby connector claims the node in place.
+    activeDesktopTurns.count = 1;
+    const restartApp = vi.fn().mockResolvedValue(undefined);
+    const connectHostedIdentity = vi.fn().mockResolvedValue({ status: "ready" as const });
+    stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(
+      { enabled: false, origin: "https://hub.example.com", restartRequired: false },
+      {
+        getHostedIdentityState: vi.fn().mockResolvedValue({ status: "signed-out" }),
+        connectHostedIdentity,
+        restartApp,
+      },
+    );
+
+    await page.getByRole("button", { name: "Connect account" }).click();
+    await vi.waitFor(() => expect(connectHostedIdentity).toHaveBeenCalledOnce());
+    // The status poll is a static stub here; the account side is what settles.
+    await expect.element(page.getByText("Signed in · Node setup needed")).toBeVisible();
+    expect(restartApp).not.toHaveBeenCalled();
+    await expect
+      .element(page.getByText("Restart while agents are working?"))
+      .not.toBeInTheDocument();
+  });
+
+  it("asks before account setup relaunches a connector that was turned off", async () => {
+    activeDesktopTurns.count = 1;
+    const restartApp = vi.fn().mockResolvedValue(undefined);
+    let restartRequired = false;
+    const connectHostedIdentity = vi.fn().mockImplementation(async () => {
+      // Main persisted the enable; the running backend has the connector off.
+      restartRequired = true;
+      return { status: "ready" as const };
+    });
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(undefined, {
+      getHubLaunchConfig: async () => ({
+        enabled: false,
+        origin: "https://hub.example.com",
+        nodeName: null,
+        allowFileSecretStore: false,
+        fileSecretStoreFallbackSupported: true,
+        hostedIdentitySupported: true,
+        restartRequired,
+      }),
+      getHostedIdentityState: vi.fn().mockResolvedValue({ status: "signed-out" }),
+      connectHostedIdentity,
+      restartApp,
+    });
+
+    await page.getByRole("button", { name: "Connect account" }).click();
+    await expect.element(page.getByText("Restart while agents are working?")).toBeVisible();
+    expect(restartApp).not.toHaveBeenCalled();
+    await page.getByRole("button", { name: "Restart now" }).click();
+    await vi.waitFor(() => expect(restartApp).toHaveBeenCalledOnce());
+  });
+
+  it("records enrollment from a standby connector without restarting", async () => {
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: false });
+    const fetchMock = stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ enabled: false, origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Start enrollment" }).click();
+    await vi.waitFor(() =>
+      expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true, applyOnNextLaunch: true }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/hub/enrollment")),
+      ).toBe(true),
+    );
+  });
+
+  it("records the enrollment enable before the launch configuration has loaded", async () => {
+    // Skipping the record left the new identity to standby, which turns any
+    // existing identity off at the next launch.
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: false });
+    const fetchMock = stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(undefined, {
+      setHubLaunchConfig,
+      getHubLaunchConfig: () => new Promise(() => undefined),
+    });
+
+    await page.getByRole("button", { name: "Start enrollment" }).click();
+    await vi.waitFor(() =>
+      expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true, applyOnNextLaunch: true }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/hub/enrollment")),
+      ).toBe(true),
+    );
+  });
+
+  it("does not start enrollment when the enable cannot be recorded", async () => {
+    const setHubLaunchConfig = vi.fn().mockRejectedValue(new Error("write failed"));
+    const fetchMock = stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ enabled: false, origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Start enrollment" }).click();
+    await expect.element(page.getByText(/couldn't save the Hub connection setting/)).toBeVisible();
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/hub/enrollment")),
+    ).toBe(false);
+  });
+
+  it("offers device-code enrollment where native account setup cannot run", async () => {
+    stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(
+      { enabled: true, origin: "https://hub.example.com", hostedIdentitySupported: false },
+      {
+        getHostedIdentityState: vi.fn().mockResolvedValue({ status: "unavailable" }),
+        connectHostedIdentity: vi.fn().mockResolvedValue({ status: "unavailable" }),
+      },
+    );
+
+    await expect.element(page.getByText("Ready to enrol")).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Start enrollment" })).toBeVisible();
+    await expect
+      .element(page.getByRole("heading", { name: "Ryco account", exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Retry secure setup" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("holds enrollment back while saved Hub settings wait on a restart", async () => {
+    // The running connector enrols against the Hub it launched with, while the
+    // approval hint named the saved address the restart would switch to.
+    stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({
+      enabled: true,
+      origin: "https://new-hub.example.com",
+      hostedIdentitySupported: false,
+      restartRequired: true,
+    });
+
+    await expect.element(page.getByRole("button", { name: "Restart Ryco" })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Start enrollment" }))
+      .not.toBeInTheDocument();
   });
 
   it("offers Finish setup when account login completed before the local node claim", async () => {
@@ -2452,7 +2814,7 @@ describe("ConnectionsSettings Hub section", () => {
   });
 
   it("saves a trimmed pre-enrollment node name", async () => {
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -2468,8 +2830,51 @@ describe("ConnectionsSettings Hub section", () => {
     });
   });
 
+  it("settles a reverted change that the running backend already serves", async () => {
+    // Desktop saves a change back to what runs without relaunching. The panel
+    // used to keep saving and keep the stale restart notice until remount.
+    const config = {
+      enabled: false,
+      origin: null,
+      nodeName: "Release node",
+      allowFileSecretStore: false,
+      fileSecretStoreFallbackSupported: true,
+      hostedIdentitySupported: true,
+      restartRequired: true,
+    };
+    const setHubLaunchConfig = vi.fn().mockImplementation(async () => {
+      config.nodeName = "Build node";
+      config.restartRequired = false;
+      return { relaunching: false };
+    });
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(undefined, {
+      setHubLaunchConfig,
+      getHubLaunchConfig: async () => ({ ...config }),
+    });
+
+    await expect
+      .element(page.getByText("Saved Hub settings apply after Ryco restarts."))
+      .toBeVisible();
+    const input = page.getByRole("textbox", { name: "Hub node name" });
+    await expect.element(input).toHaveValue("Release node");
+    await input.fill("Build node");
+    await page.getByRole("button", { name: "Save and restart" }).click();
+    await vi.waitFor(() =>
+      expect(setHubLaunchConfig).toHaveBeenCalledWith({ nodeName: "Build node" }),
+    );
+    await expect
+      .element(page.getByText("Saved Hub settings apply after Ryco restarts."))
+      .not.toBeInTheDocument();
+    await expect.element(input).toBeEnabled();
+    await expect.element(page.getByRole("button", { name: "Saving…" })).not.toBeInTheDocument();
+  });
+
   it("resets a configured node name to automatic", async () => {
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -2483,7 +2888,7 @@ describe("ConnectionsSettings Hub section", () => {
   });
 
   it("rejects an overlong node name before it reaches the desktop bridge", async () => {
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -2678,7 +3083,7 @@ describe("ConnectionsSettings Hub section", () => {
 
   it("confirms and restarts before enabling permissioned-file key storage", async () => {
     const confirm = vi.fn().mockResolvedValue(true);
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },

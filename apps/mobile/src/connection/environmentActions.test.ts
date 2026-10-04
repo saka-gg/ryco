@@ -44,6 +44,7 @@ function fakeRegistry(
   const writeBearerToken = vi.fn(overrides.writeBearerToken ?? (async () => true));
   const removeBearerToken = vi.fn(async () => undefined);
   const supervisorRemove = vi.fn(async () => true);
+  const cancelPendingSavedEnvironmentConnection = vi.fn();
   const ensureSavedEnvironmentConnection = vi.fn(async () => ({}));
   const disposeForEnv = vi.fn();
   const connectSavedEnvironment = vi.fn(async () => ({}));
@@ -64,6 +65,7 @@ function fakeRegistry(
     driver: {
       supervisor: {
         remove: supervisorRemove,
+        cancelPendingSavedEnvironmentConnection,
         ensureSavedEnvironmentConnection,
         disposeThreadDetailSubscriptionsForEnvironment: disposeForEnv,
       },
@@ -82,6 +84,7 @@ function fakeRegistry(
       writeBearerToken,
       removeBearerToken,
       supervisorRemove,
+      cancelPendingSavedEnvironmentConnection,
       ensureSavedEnvironmentConnection,
       disposeForEnv,
       connectSavedEnvironment,
@@ -112,6 +115,14 @@ describe("environmentActions", () => {
     expect(reg.spies.writeBearerToken).toHaveBeenCalledWith(ENV, "bearer-xyz");
     expect(reg.spies.upsert).toHaveBeenCalledTimes(1);
     expect(reg.spies.ensureSavedEnvironmentConnection).toHaveBeenCalledTimes(1);
+    // A connect still running on the replaced credential is not joined.
+    expect(reg.spies.cancelPendingSavedEnvironmentConnection).toHaveBeenCalledWith(ENV);
+    expect(
+      reg.spies.cancelPendingSavedEnvironmentConnection.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      reg.spies.ensureSavedEnvironmentConnection.mock.invocationCallOrder[0] ??
+        Number.POSITIVE_INFINITY,
+    );
     // Secret boundary: the returned record carries no bearer token.
     expect(record).not.toHaveProperty("bearerToken");
     expect(record.environmentId).toBe(ENV);

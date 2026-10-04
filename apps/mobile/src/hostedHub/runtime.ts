@@ -13,6 +13,7 @@ import {
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
 import { createMobileDpopSigner } from "../platform/dpopSigner";
+import { isE2eePairingRecord } from "../platform/e2eeTrustModel";
 import { mobileE2eeTrustStore } from "../platform/e2eeTrustStore";
 import { mobileKV } from "../platform/kv";
 import { mobileNativeAuthorization } from "../platform/nativeAuthorization";
@@ -51,6 +52,7 @@ import {
 configureAuthoritativeNodeTrustSource({
   hubOrigin: () => getMobileHostedEndpoint()?.origin() ?? null,
   classify: (selection) => mobileE2eeTrustStore.classify(selection),
+  pairing: (selection) => isE2eePairingRecord(mobileE2eeTrustStore.resolve(selection)),
   subscribe: mobileE2eeTrustStore.subscribe,
 });
 
@@ -68,37 +70,6 @@ let configured = false;
 let session: Promise<void> | undefined;
 let selectionWatch: (() => void) | undefined;
 let enrollmentCoordinator: NativeE2eeEnrollmentCoordinator | null = null;
-let enrollmentRetryTimer: ReturnType<typeof setTimeout> | undefined;
-let enrollmentRetryAttempt = 0;
-let enrollmentRetryForegroundUnsubscribe: (() => void) | undefined;
-
-function clearEnrollmentRetry(): void {
-  if (enrollmentRetryTimer !== undefined) globalThis.clearTimeout(enrollmentRetryTimer);
-  enrollmentRetryTimer = undefined;
-  enrollmentRetryAttempt = 0;
-  enrollmentRetryForegroundUnsubscribe?.();
-  enrollmentRetryForegroundUnsubscribe = undefined;
-}
-
-function scheduleEnrollmentRetry(accountId: string): void {
-  if (enrollmentRetryTimer !== undefined || enrollmentRetryForegroundUnsubscribe !== undefined) {
-    return;
-  }
-  const run = (): void => {
-    enrollmentRetryTimer = undefined;
-    enrollmentRetryForegroundUnsubscribe = undefined;
-    const state = hostedHubStore.getState();
-    if (state.accountStatus !== "authenticated" || state.account?.id !== accountId) return;
-    enrollmentRetryAttempt += 1;
-    void enrollmentCoordinator?.retry(accountId).catch(() => undefined);
-  };
-  if (!mobileAppLifecycle.isForeground()) {
-    enrollmentRetryForegroundUnsubscribe = subscribeForeground(run);
-    return;
-  }
-  const delay = Math.min(30_000, 1_000 * 2 ** Math.min(enrollmentRetryAttempt, 5));
-  enrollmentRetryTimer = globalThis.setTimeout(run, delay);
-}
 
 export { isMobileHostedModeAvailable, subscribeMobileHostedModeAvailability };
 
@@ -205,6 +176,14 @@ export async function configureMobileHostedRuntime(): Promise<boolean> {
     requestedMaximumRole: "owner",
     requestedCapabilities: ["ryco.rpc"],
     refreshDirectory: () => hostedHubController.refreshDirectory(),
+    // The coordinator owns the retry policy; this app supplies only the
+    // lifecycle it runs on. Sign-out and account changes cancel it through
+    // `invalidate`/`ensure` in the selection watcher below.
+    recovery: {
+      timers,
+      isForeground: () => mobileAppLifecycle.isForeground(),
+      subscribeForeground,
+    },
     invalidateHostedGeneration: () => {
       disposeMobileRelayE2eeAttempt();
       resetMobileE2eeSession();
@@ -287,18 +266,11 @@ function watchSelectionForE2ee(): void {
           enrollment.ready !== null &&
           enrollment.ready.namespace.accountId !== state.account.id)
       ) {
-        clearEnrollmentRetry();
         void enrollmentCoordinator?.ensure(state.account.id).catch(() => undefined);
-      } else if (
-        enrollment?.status === "unavailable" &&
-        enrollment.errorCode === "enrollment_unavailable"
-      ) {
-        scheduleEnrollmentRetry(state.account.id);
-      } else if (enrollment?.status === "ready") {
-        clearEnrollmentRetry();
       }
+      // `unavailable` and `revoked` recover inside the coordinator, on the
+      // lifecycle wired at construction.
     } else if (enrollment && enrollment.status !== "idle") {
-      clearEnrollmentRetry();
       void enrollmentCoordinator?.invalidate("signed-out");
     }
     if (state.accountStatus !== "authenticated" || state.selectedNode === null) {
@@ -380,7 +352,6 @@ export function ensureMobileHostedSession(): Promise<void> {
 /** Invalidate hosted availability after a deliberate Hub profile change. */
 export function invalidateMobileHostedRuntime(): void {
   configured = false;
-  clearEnrollmentRetry();
   setMobileHostedModeAvailable(false);
   session = undefined;
   selectionWatch?.();
@@ -391,6 +362,16 @@ export function invalidateMobileHostedRuntime(): void {
   // Enrollment invalidation synchronously revokes the hosted generation, warm
   // attempt, and session projection through its configured callback above.
   invalidateMobileHostedRuntimeConfig();
+  // An account that is not authenticated belongs to the Hub being left, and
+  // nothing may keep working on it: an `unavailable` one still has its access
+  // retry armed, and that retry (or a foreground) would bootstrap through the
+  // previous Hub's API until the runtime is configured again, and a later
+  // session setup could join a check still in flight. Resetting it to
+  // signed-out aborts the check and cancels the retry. An authenticated
+  // account is torn down by the profile-change flow itself.
+  if (hostedHubStore.getState().accountStatus !== "authenticated") {
+    void hostedHubController.clearAccount("signed-out");
+  }
 }
 
 /** Test seam: drop the configured/available flags between cases. */

@@ -48,6 +48,7 @@ import {
   stubNativeNodeClaimService,
   stubPolicy,
 } from "./hubConnector/testUtils/e2eeOperatorStub.ts";
+import { E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY } from "./hubConnector/NodeE2eeOperator.ts";
 import { E2EE_CONTINUITY_UNRESOLVABLE_REMEDY } from "./hubIdentity/NodeIdentityContinuityStore.ts";
 import { E2EE_PREKEY_EXPIRED_REMEDY } from "./hubIdentity/NodeE2eePrekeyClient.ts";
 
@@ -212,6 +213,7 @@ const withLiveHubCliServer = <A, E, R>(
     }).pipe(
       Layer.provide(
         Layer.succeed(HubConnectorService, {
+          connectorEnabled: true,
           status: () => waitingStatus,
           resume: async () => undefined,
           enroll: async () => {
@@ -615,6 +617,15 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
             assert.include(listHuman.output, "Status: approved");
             assert.include(listHuman.output, "Status: pending");
             assert.include(listHuman.output, "Max role: operator");
+            // The role the pending device connects with is the `--max-role` an owner
+            // must approve it at. The node stops following it once the record
+            // leaves pending, so an approved record says when it was read.
+            assert.equal(listHuman.output.split("Connects as: owner").length - 1, 1);
+            assert.equal(
+              listHuman.output.split("Connected as (when introduced): operator").length - 1,
+              1,
+            );
+            assert.notInclude(listHuman.output, "Connects as: operator");
             // §13.6's display duty names the safety number among the LISTING's
             // fields, and §13.4 makes it the value an owner compares before
             // trusting a record. Both records carry it, so an owner comparing a
@@ -673,13 +684,14 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
           listClients: async () =>
             stubClientListing({
               records: [
-                stubClientRecord(),
+                stubClientRecord({ observedRole: "operator" }),
                 stubClientRecord({
                   status: "pending",
                   fingerprint: `SHA256:${"D".repeat(42)}A`,
                   approvedAt: undefined,
                   displayLabel: undefined,
                   pairingReserved: true,
+                  observedRole: "owner",
                 }),
               ],
               pendingGlobalSaturated: true,
@@ -1108,6 +1120,33 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
             status: "unavailable",
             reason: "anchor_disagrees",
             remedy: E2EE_CONTINUITY_UNRESOLVABLE_REMEDY,
+          }),
+        },
+      );
+    }),
+  );
+
+  it.effect("says a backend that does not own the identity did not read its continuity", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-e2ee-continuity-in-use-test-"));
+      yield* withLiveHubCliServer(
+        baseDir,
+        () =>
+          Effect.gen(function* () {
+            const continuity = yield* captureStdout(
+              runCli(["e2ee", "continuity", "show", "--base-dir", baseDir]),
+            );
+            // Not a lineage, so nothing that reads as one — and the sentence
+            // that says which copy of Ryco to ask instead.
+            assert.include(continuity.output, "Continuity: not read here");
+            assert.include(continuity.output, E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY);
+            assert.notInclude(continuity.output, "advertisable");
+            assert.notInclude(continuity.output, "Continuity id");
+          }),
+        {
+          readContinuity: async () => ({
+            status: "identity_in_use",
+            remedy: E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY,
           }),
         },
       );

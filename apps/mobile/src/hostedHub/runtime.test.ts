@@ -201,6 +201,19 @@ describe("hosted runtime configuration", () => {
     expect(typeof configuration.createRelaySocket).toBe("function");
   });
 
+  it("hands enrollment recovery to the shared coordinator on the runtime's own lifecycle", async () => {
+    await configureMobileHostedRuntime();
+    const { timers, subscribeForeground } = getHostedRuntimeConfiguration();
+
+    // One retry policy, in client-runtime: this app supplies the same bound
+    // timers and once-per-transition foreground signal the runtime uses.
+    expect(createNativeE2eeEnrollmentCoordinator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recovery: expect.objectContaining({ timers, subscribeForeground }),
+      }),
+    );
+  });
+
   it("targets the Hub public origin, which is what the proof signs into htu", async () => {
     await configureMobileHostedRuntime();
     expect(getHostedRuntimeConfiguration().endpoint.origin()).toBe(HOSTED_CONFIG.hubOrigin);
@@ -247,6 +260,28 @@ describe("hosted runtime configuration", () => {
       expect(hoisted.resetSessionCalls).toBeGreaterThan(0);
     },
   );
+
+  it("drops an account left waiting on the previous Hub when the profile changes", async () => {
+    await configureMobileHostedRuntime();
+    const clearAccount = vi.spyOn(hostedHubController, "clearAccount");
+    hostedHubStore.setState({ accountStatus: "unavailable", account: null } as never);
+
+    invalidateMobileHostedRuntime();
+
+    // Its access retry would otherwise bootstrap through the previous Hub's API.
+    expect(clearAccount).toHaveBeenCalledWith("signed-out");
+    expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
+  });
+
+  it("leaves an authenticated account to the profile-change flow", async () => {
+    await configureMobileHostedRuntime();
+    const clearAccount = vi.spyOn(hostedHubController, "clearAccount").mockResolvedValue();
+    hostedHubStore.setState({ accountStatus: "authenticated" } as never);
+
+    invalidateMobileHostedRuntime();
+
+    expect(clearAccount).not.toHaveBeenCalled();
+  });
 
   it("does not prepare an application channel before native enrollment is ready", async () => {
     hostedHubStore.setState({

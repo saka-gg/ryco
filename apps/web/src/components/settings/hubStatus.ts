@@ -9,7 +9,9 @@ import type {
  *
  * `none` is not "nothing is wrong" — it is "there is nothing useful for a person
  * to press", which is true while the connector is working and true while it is
- * backing off on its own.
+ * backing off from a network failure on its own. A slow retry of a failure a
+ * person can clear sooner — a locked keychain, a duplicate process — still
+ * offers Retry.
  */
 export type HubAction =
   | "none"
@@ -59,9 +61,12 @@ const OPERATOR_FAILURES = {
     detail: "The system keychain is locked or unavailable. Unlock it, then try again.",
     action: "retry",
   },
+  // A restart alone repeats the failure when the host has no credential store
+  // at all, which is the common headless-Linux cause, so name the fixes first.
   identity_store_unavailable: {
-    headline: "Can't read this machine's Hub key",
-    detail: "The keychain was unavailable when Ryco started. Restart Ryco to try again.",
+    headline: "Can't open a key store for this machine's Hub key",
+    detail:
+      "No system credential store answered when Ryco started. Unlock or start it (on Linux, a Secret Service such as GNOME Keyring), or allow the permissioned-file fallback in advanced options, then restart Ryco.",
     action: "restart",
   },
   identity_origin_mismatch: {
@@ -79,10 +84,13 @@ const OPERATOR_FAILURES = {
     detail: "The request timed out before it was approved.",
     action: "enroll",
   },
+  // Retry first: the same refusal follows a Hub-side incident that clears, and
+  // a proxy error once landed here too. Leave stays available as the
+  // secondary action for a node that really was removed.
   authentication_failed: {
     headline: "The Hub rejected this machine's key",
-    detail: "Check this node's status on the Hub. Leaving lets you enrol again from scratch.",
-    action: "open-hub",
+    detail: "Check this node's status on the Hub. If it was removed there, leave and enrol again.",
+    action: "retry",
   },
   connection_replaced: {
     headline: "Another process connected as this machine",
@@ -108,6 +116,36 @@ const OPERATOR_FAILURES = {
   HubConnectorFailureCode,
   { readonly headline: string; readonly detail: string | null; readonly action: HubAction }
 >;
+
+/**
+ * Failures the connector retries on its own slow schedule that a person may
+ * still be able to clear sooner.
+ *
+ * Reported as `backing_off` with the specific code, so the row can say both
+ * what went wrong and that nobody has to act. Showing them as a generic
+ * "Reconnecting" would hide a duplicate process or a removed node for an hour;
+ * showing them as failures needing action would send people to Leave over a
+ * locked keychain.
+ */
+const SELF_HEALING_FAILURES: Partial<
+  Record<
+    HubConnectorFailureCode,
+    { readonly hint: string; readonly secondaryAction: Exclude<HubAction, "retry"> }
+  >
+> = {
+  identity_unavailable: {
+    hint: "Unlock the system keychain to reconnect sooner.",
+    secondaryAction: "none",
+  },
+  connection_replaced: {
+    hint: "Another copy of Ryco is using this machine's Hub identity. Stop it to connect here.",
+    secondaryAction: "none",
+  },
+  authentication_failed: {
+    hint: "If this machine was removed on the Hub, leave and enrol again.",
+    secondaryAction: "leave",
+  },
+};
 
 const formatCountdown = (target: string, now: number): string | null => {
   const remainingMs = new Date(target).getTime() - now;
@@ -219,6 +257,25 @@ export function presentHubStatus(
       if (status.degradedMode === "backing_off") {
         const countdown =
           status.nextRetryAt === undefined ? null : formatCountdown(status.nextRetryAt, now);
+        const selfHealing =
+          status.failure === undefined ? undefined : SELF_HEALING_FAILURES[status.failure];
+        if (status.failure !== undefined && selfHealing !== undefined) {
+          return {
+            dot: "warning",
+            ping: true,
+            headline: OPERATOR_FAILURES[status.failure].headline,
+            detail: `${
+              countdown === null
+                ? "Retrying automatically."
+                : countdown === "now"
+                  ? "Retrying now."
+                  : `Retrying automatically in ${countdown}.`
+            } ${selfHealing.hint}`,
+            action: "retry",
+            secondaryAction: selfHealing.secondaryAction,
+            retrying: true,
+          };
+        }
         const attempt = status.reconnectAttempt;
         return {
           dot: "warning",

@@ -9,14 +9,18 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import { E2eeActionButton, E2eeIdentityColumn, E2eeSafetyNumberCard } from "./E2eeTrustParts";
 import { E2EE_ACKNOWLEDGEMENT_SYMBOLS } from "./e2eeTrustSymbols";
 import {
+  cancelE2eeApprovalRequest,
   createE2eeVerificationDraft,
   confirmE2eeApprovalQr,
+  deriveE2eeApprovalRequestStatus,
   deriveE2eeVerificationView,
   E2EE_COMPARISON_AFFIRMATION,
   E2EE_PRESENTED_COLUMN_TITLE,
   E2EE_PREVIOUSLY_VERIFIED_COLUMN_TITLE,
+  isE2eeApprovalRequested,
   requestE2eeApproval,
   shouldShowE2eeApprovalScanner,
+  type E2eeApprovalRequestTone,
 } from "./e2eeTrustUiModel";
 import { useMobileE2eeSession } from "./useMobileE2eeSession";
 import { getMobileHostedConnectionCoordinator } from "../../connection/hostedConnectionCoordinator";
@@ -32,6 +36,12 @@ import { resolveExactNodeRoute } from "./exactNodeRouteModel";
  */
 type Props = StaticScreenProps<{ readonly nodeId: string; readonly environmentId: string }>;
 
+const APPROVAL_TONE_CLASS: Record<E2eeApprovalRequestTone, string> = {
+  neutral: "text-foreground",
+  success: "text-success",
+  warning: "text-warning",
+};
+
 export function E2eeNodeVerificationRouteScreen(props: Props) {
   const navigation = useNavigation();
   const nodes = useHostedHubStore((state) => state.nodes);
@@ -42,10 +52,11 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
   const [scanningApproval, setScanningApproval] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState(false);
-  const [approvalRequested, setApprovalRequested] = useState(
-    session.selection?.localNodeHandle !== null && session.selection?.localNodeHandle !== undefined,
-  );
+  // Saved but not yet reconnected: offer Request approval again as the retry.
+  const [requestReconnectFailed, setRequestReconnectFailed] = useState(false);
+  const approvalRequested = isE2eeApprovalRequested(session) && !requestReconnectFailed;
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const scanHandledRef = useRef(false);
   const placeholderColor = useThemeColor("--color-foreground-muted");
   const iconColor = useThemeColor("--color-icon-muted");
@@ -61,16 +72,17 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
     return release;
   }, [targetEnvironmentId, targetNodeId]);
 
-  useEffect(() => {
-    if (session.selection?.localNodeHandle) setApprovalRequested(true);
-  }, [session.selection?.localNodeHandle]);
-
   const view = deriveE2eeVerificationView({
     session,
     draft,
     onDraftChange: setDraft,
     onCompleted: () => navigation.goBack(),
     now: () => Date.now(),
+  });
+  const approval = deriveE2eeApprovalRequestStatus({
+    session,
+    stage: view.stage,
+    approvalRequested,
   });
 
   const openApprovalScanner = useCallback(async () => {
@@ -137,11 +149,38 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
         target.environmentId,
       );
       if (!reconnected) throw new Error("Machine reconnect refused");
-      setApprovalRequested(true);
+      setRequestReconnectFailed(false);
     } catch {
-      setApprovalRequested(false);
+      setRequestReconnectFailed(true);
       setApprovalError(
         "The approval request was saved, but Ryco could not reconnect. Try Request approval again.",
+      );
+    } finally {
+      setApprovalBusy(false);
+    }
+  }, [session, target]);
+
+  const cancelApproval = useCallback(async () => {
+    setApprovalBusy(true);
+    setCancelError(null);
+    const failure = await cancelE2eeApprovalRequest(session);
+    if (failure !== null) {
+      setApprovalBusy(false);
+      setCancelError(failure);
+      return;
+    }
+    setRequestReconnectFailed(false);
+    setApprovalError(null);
+    try {
+      if (!target) throw new Error("Invalid machine route");
+      const reconnected = await getMobileHostedConnectionCoordinator().reconnectNode(
+        target.nodeId,
+        target.environmentId,
+      );
+      if (!reconnected) throw new Error("Machine reconnect refused");
+    } catch {
+      setCancelError(
+        "The request was cancelled, but Ryco could not reconnect yet. Close this screen and reconnect to the node.",
       );
     } finally {
       setApprovalBusy(false);
@@ -172,18 +211,23 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
       {view.nodeLabel ? (
         <Text className="mx-5 mt-1 font-sans text-sm text-foreground-muted">{view.nodeLabel}</Text>
       ) : null}
-      <Text className="mx-5 mt-3 font-sans text-sm leading-relaxed text-foreground">
-        {recoveryMode
-          ? view.message
-          : "Ask an already trusted owner to approve this phone, then scan the one-time code it shows."}
+      {/* The request's status, whatever the stage: a request whose node identity
+          has not arrived yet must say "do not approve yet", not invite approval. */}
+      <Text
+        className={`mx-5 mt-3 font-sans text-sm leading-relaxed ${
+          recoveryMode ? "text-foreground" : APPROVAL_TONE_CLASS[approval.tone]
+        }`}
+      >
+        {recoveryMode ? view.message : approval.message}
       </Text>
 
       {shouldShowE2eeApprovalScanner(view.stage) && !recoveryMode ? (
         <View className="mx-5 mt-4 rounded-2xl border border-border bg-card p-4">
           <Text className="font-ryco-bold text-base text-foreground">Fastest: scan one code</Text>
           <Text className="mt-1 font-sans text-xs leading-relaxed text-foreground-muted">
-            Request approval here, approve this phone in Ryco Desktop under Node Security, then scan
-            the code Desktop shows. The code works only for this phone.
+            Request approval here, approve this phone in Ryco Desktop under Node Security once its
+            safety number matches the one shown here, then scan the code Desktop shows. The code
+            works only for this phone.
           </Text>
           {!approvalRequested ? (
             <Pressable
@@ -197,11 +241,7 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
                 {approvalBusy ? "Requesting…" : "Request approval"}
               </Text>
             </Pressable>
-          ) : (
-            <Text className="mt-3 font-ryco-bold text-sm text-success">
-              Approval requested — select this phone in Desktop.
-            </Text>
-          )}
+          ) : null}
           {scanningApproval ? (
             <View className="mt-3 overflow-hidden rounded-2xl" style={{ height: 280 }}>
               <CameraView
@@ -240,6 +280,37 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
             </Text>
           ) : null}
         </View>
+      ) : null}
+
+      {/* §13.2 step 4 on the fast path: the full number the owner matches against
+          the Desktop row before approving it. Never a fingerprint tail. */}
+      {!recoveryMode && approval.comparison ? (
+        <E2eeSafetyNumberCard
+          groups={approval.comparison.groups}
+          caption={approval.comparison.caption}
+          value={approval.comparison.value}
+        />
+      ) : null}
+
+      {/* Withdrawing the request returns the node to the account grant; the
+          record is in pairing even while a failed reconnect offers a retry. */}
+      {!recoveryMode && isE2eeApprovalRequested(session) ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Cancel approval request"
+            disabled={approvalBusy}
+            onPress={() => void cancelApproval()}
+            className="mx-5 mt-3 h-11 items-center justify-center rounded-full px-4 active:opacity-70 disabled:opacity-50"
+          >
+            <Text className="font-ryco-bold text-sm text-foreground-muted">Cancel request</Text>
+          </Pressable>
+          {cancelError ? (
+            <Text className="mx-5 mt-1 font-sans text-xs leading-relaxed text-danger-foreground">
+              {cancelError}
+            </Text>
+          ) : null}
+        </>
       ) : null}
 
       {/* §13.2.1 situation 2 alone: the previously verified pair beside the newly

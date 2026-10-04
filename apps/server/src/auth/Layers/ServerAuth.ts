@@ -23,8 +23,10 @@ import {
   type ServerAuthShape,
 } from "../Services/ServerAuth.ts";
 import {
-  SessionCredentialError,
+  type SessionCredentialError,
   SessionCredentialService,
+  type SessionCredentialUnavailableError,
+  type SessionRotationRefusal,
 } from "../Services/SessionCredentialService.ts";
 import { AuthControlPlaneLive, AuthCoreLive } from "./AuthControlPlane.ts";
 
@@ -154,6 +156,29 @@ export function toBootstrapExchangeAuthError(cause: BootstrapCredentialError): A
   });
 }
 
+const toCredentialRejection = (cause: SessionCredentialError) =>
+  new AuthError({
+    message: "Unauthorized request.",
+    status: 401,
+    cause,
+  });
+
+/** The session store did not answer: a passing fault, not a rejected credential. */
+const toCredentialCheckUnavailable = (cause: SessionCredentialUnavailableError) =>
+  new AuthError({
+    message: "Session credentials cannot be checked right now. Try again.",
+    status: 503,
+    cause,
+  });
+
+const ROTATION_REFUSAL_STATUS = {
+  "not-bearer": 403,
+  superseded: 409,
+  "renewed-recently": 409,
+  "renewal-limit": 409,
+  idle: 401,
+} as const satisfies Record<SessionRotationRefusal, 401 | 403 | 409>;
+
 function parseBearerToken(request: HttpServerRequest.HttpServerRequest): string | null {
   const header = request.headers["authorization"];
   if (typeof header !== "string" || !header.startsWith(AUTHORIZATION_PREFIX)) {
@@ -173,13 +198,6 @@ export const makeServerAuth = Effect.gen(function* () {
 
   const authenticateToken = (token: string): Effect.Effect<AuthenticatedSession, AuthError> =>
     sessions.verify(token).pipe(
-      Effect.tapError((cause: SessionCredentialError) =>
-        Effect.logWarning("Rejected authenticated session credential.").pipe(
-          Effect.annotateLogs({
-            reason: cause.message,
-          }),
-        ),
-      ),
       Effect.map((session) => ({
         sessionId: session.sessionId,
         subject: session.subject,
@@ -187,14 +205,17 @@ export const makeServerAuth = Effect.gen(function* () {
         role: session.role,
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       })),
-      Effect.mapError(
-        (cause) =>
-          new AuthError({
-            message: "Unauthorized request.",
-            status: 401,
-            cause,
-          }),
-      ),
+      Effect.catchTags({
+        SessionCredentialError: (cause) =>
+          Effect.logWarning("Rejected authenticated session credential.").pipe(
+            Effect.annotateLogs({
+              reason: cause.message,
+            }),
+            Effect.andThen(Effect.fail(toCredentialRejection(cause))),
+          ),
+        SessionCredentialUnavailableError: (cause) =>
+          Effect.fail(toCredentialCheckUnavailable(cause)),
+      }),
     );
 
   const authenticateRequest = (request: HttpServerRequest.HttpServerRequest) => {
@@ -228,11 +249,15 @@ export const makeServerAuth = Effect.gen(function* () {
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
           }) satisfies AuthSessionState,
       ),
-      Effect.catchTag("AuthError", () =>
-        Effect.succeed({
-          authenticated: false,
-          auth: descriptor,
-        } satisfies AuthSessionState),
+      // A missing or rejected credential is an answer; a credential that could
+      // not be checked is not one, and is left to fail for the caller to retry.
+      Effect.catchIf(
+        (error) => error.status === 401,
+        () =>
+          Effect.succeed({
+            authenticated: false,
+            auth: descriptor,
+          } satisfies AuthSessionState),
       ),
     );
 
@@ -448,6 +473,51 @@ export const makeServerAuth = Effect.gen(function* () {
       ),
     );
 
+  const rotateBearerSession: ServerAuthShape["rotateBearerSession"] = (request) =>
+    Effect.gen(function* () {
+      // Only the bearer itself renews: a cookie on the same request is ignored.
+      const bearerToken = parseBearerToken(request);
+      if (!bearerToken) {
+        return yield* new AuthError({
+          message: "A bearer session is required.",
+          status: 401,
+        });
+      }
+      const session = yield* authenticateToken(bearerToken);
+      if (session.method !== "bearer-session-token") {
+        return yield* new AuthError({
+          message: "Only bearer sessions renew by rotation.",
+          status: 403,
+        });
+      }
+      const rotated = yield* sessions.rotate(session.sessionId).pipe(
+        Effect.catchTags({
+          SessionRotationError: (cause) =>
+            Effect.fail(
+              new AuthError({
+                message: cause.message,
+                status: ROTATION_REFUSAL_STATUS[cause.reason],
+                cause,
+              }),
+            ),
+          SessionCredentialError: (cause) =>
+            Effect.fail(
+              new AuthError({
+                message: "Failed to renew the session.",
+                cause,
+              }),
+            ),
+        }),
+      );
+      return {
+        authenticated: true,
+        role: rotated.role,
+        sessionMethod: "bearer-session-token",
+        expiresAt: DateTime.toUtc(rotated.expiresAt),
+        sessionToken: rotated.token,
+      } satisfies AuthBearerBootstrapResult;
+    });
+
   const authenticateWebSocketUpgrade: ServerAuthShape["authenticateWebSocketUpgrade"] = (request) =>
     Effect.gen(function* () {
       if (
@@ -479,13 +549,10 @@ export const makeServerAuth = Effect.gen(function* () {
               role: session.role,
               ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
             })),
-            Effect.mapError(
-              (cause) =>
-                new AuthError({
-                  message: "Unauthorized request.",
-                  status: 401,
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              cause._tag === "SessionCredentialUnavailableError"
+                ? toCredentialCheckUnavailable(cause)
+                : toCredentialRejection(cause),
             ),
           );
         }
@@ -511,6 +578,7 @@ export const makeServerAuth = Effect.gen(function* () {
     authenticateHttpRequest: authenticateRequest,
     authenticateWebSocketUpgrade,
     issueWebSocketToken,
+    rotateBearerSession,
     issueStartupPairingUrl,
   } satisfies ServerAuthShape;
 });

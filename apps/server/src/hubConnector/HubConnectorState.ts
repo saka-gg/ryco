@@ -20,10 +20,20 @@ import {
 } from "@ryco/shared/relayE2eeKeys";
 import { E2EE_MAX_CLOCK_SKEW } from "@ryco/shared/relayE2eeConstants";
 
+import {
+  AUTHENTICATION_FAILED_RETRY,
+  CONNECTION_REPLACED_RETRY,
+  IDENTITY_IN_USE_RETRY,
+  IDENTITY_UNAVAILABLE_RETRY,
+  type SlowRetryPolicy,
+} from "./ReconnectPolicy.ts";
+
 export type ConnectorFailureKind =
   | "configuration_invalid"
   | "identity_unavailable"
   | "identity_store_unavailable"
+  /** Another local process holds this node identity's process lock. */
+  | "identity_in_use"
   | "identity_origin_mismatch"
   | "enrollment_unavailable"
   | "enrollment_expired"
@@ -32,6 +42,8 @@ export type ConnectorFailureKind =
   | "tls"
   | "authentication_timeout"
   | "authentication_failed"
+  /** An `authentication_failed` for a proof old enough that its challenge may have expired. */
+  | "authentication_stale"
   | "connection_replaced"
   | "server_draining"
   | "rate_limited"
@@ -42,8 +54,26 @@ export type ConnectorFailureKind =
   | "version_incompatible"
   | "internal_error";
 
+/**
+ * What the connector does after a failure.
+ *
+ * `retry` is the ordinary capped backoff for failures that are transient by
+ * nature. `slow_retry` is for failures that usually clear on their own but
+ * could be real — a locked keychain, a duplicate process, a refused proof —
+ * and retries on that failure's own long schedule instead of parking the node
+ * until someone notices. `operator` is reserved for states no retry can fix:
+ * configuration, a dead credential store, an origin mismatch, enrollment
+ * outcomes, revocation, and an incompatible peer.
+ */
 export type ConnectorFailureDisposition =
   | { readonly action: "retry"; readonly failure: HubConnectorFailureCode }
+  | {
+      readonly action: "slow_retry";
+      readonly failure: HubConnectorFailureCode;
+      readonly policy: SlowRetryPolicy;
+      /** Whether a wake or network change may bring the retry forward; see `HubConnector.nudge`. */
+      readonly nudgeable: boolean;
+    }
   | {
       readonly action: "operator";
       readonly failure: HubConnectorFailureCode;
@@ -53,8 +83,17 @@ export type ConnectorFailureDisposition =
 export function classifyConnectorFailure(
   kind: ConnectorFailureKind,
   protocolViolationsBeforeStability: number,
+  staleProofRetriesBeforeStability = 0,
 ): ConnectorFailureDisposition {
   switch (kind) {
+    case "authentication_stale":
+      // A fresh challenge is enough when the old one simply expired, so one
+      // retry is free. A second stale rejection before the connection proves
+      // stable is no longer evidence of a slow signature, and is treated as the
+      // rejection it may well be.
+      return staleProofRetriesBeforeStability === 0
+        ? { action: "retry", failure: "authentication_timeout" }
+        : classifyConnectorFailure("authentication_failed", protocolViolationsBeforeStability);
     case "dns":
     case "network":
       return { action: "retry", failure: "network_unavailable" };
@@ -76,14 +115,46 @@ export function classifyConnectorFailure(
       return protocolViolationsBeforeStability === 0
         ? { action: "retry", failure: "protocol_invalid" }
         : { action: "operator", failure: "protocol_invalid" };
-    case "configuration_invalid":
     case "identity_unavailable":
+      // A machine waking or a screen unlocking is exactly when a locked
+      // keychain becomes readable, so those signals may bring this one forward.
+      return {
+        action: "slow_retry",
+        failure: kind,
+        policy: IDENTITY_UNAVAILABLE_RETRY,
+        nudgeable: true,
+      };
+    case "connection_replaced":
+      return {
+        action: "slow_retry",
+        failure: kind,
+        policy: CONNECTION_REPLACED_RETRY,
+        nudgeable: false,
+      };
+    case "identity_in_use":
+      // The same condition as a Hub-side replacement, caught locally before it
+      // displaced anything — so it is reported the same way, and checked often:
+      // the check is a file read, and the other copy may exit at any moment.
+      return {
+        action: "slow_retry",
+        failure: "connection_replaced",
+        policy: IDENTITY_IN_USE_RETRY,
+        nudgeable: true,
+      };
+    case "authentication_failed":
+      return {
+        action: "slow_retry",
+        failure: kind,
+        policy: AUTHENTICATION_FAILED_RETRY,
+        nudgeable: false,
+      };
+    // `identity_store_unavailable` is latched for the process lifetime: only a
+    // restart rebuilds custody, so no retry can help.
+    case "configuration_invalid":
     case "identity_store_unavailable":
     case "identity_origin_mismatch":
     case "enrollment_unavailable":
     case "enrollment_expired":
-    case "authentication_failed":
-    case "connection_replaced":
       return { action: "operator", failure: kind };
     case "revoked":
       return { action: "operator", failure: "authentication_failed", terminalState: "revoked" };

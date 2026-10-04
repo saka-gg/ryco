@@ -11,8 +11,8 @@ import {
   writeExternalRuntimeDescriptor,
 } from "../ExternalMcp/runtimeFiles.ts";
 import { makeExternalMcpTools } from "../ExternalMcp/tools.ts";
-import { evaluateExternalMcpTopology } from "../externalTopology.ts";
 import { AgentControlExternalIntegrationService } from "../Services/AgentControlExternalIntegration.ts";
+import { AgentControlExternalTopologyService } from "../Services/AgentControlExternalTopology.ts";
 import { AgentControlExternalTaskService } from "../Services/AgentControlExternalTask.ts";
 import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
@@ -30,7 +30,7 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
   const diagnostics = yield* Effect.serviceOption(AgentControlDiagnosticsService);
   const proposals = yield* Effect.serviceOption(AgentControlProposalService);
-  const topology = evaluateExternalMcpTopology(config);
+  const topology = yield* AgentControlExternalTopologyService;
   const tools = makeExternalMcpTools({
     integrations,
     tasks,
@@ -46,7 +46,7 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   let shuttingDown = false;
 
   const start = Effect.gen(function* () {
-    if (shuttingDown || listenerScope !== null || !topology.available) return;
+    if (shuttingDown || listenerScope !== null || !topology.current().available) return;
     const scope = yield* Scope.make("sequential");
     const started = yield* makeAgentControlExternalListener({ integrations, tools }).pipe(
       Scope.provide(scope),
@@ -88,8 +88,18 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
     yield* Effect.logInfo("External Agent Control listener stopped");
   });
 
+  // Read per transition: the Hub connector can take this process over.
   const converge = (enabled: boolean) =>
-    transitions.withPermits(1)(enabled && topology.available ? start : stop);
+    transitions.withPermits(1)(
+      Effect.suspend(() => (enabled && topology.current().available ? start : stop)),
+    );
+  // A standby Hub connector closes this listener, and its accepted
+  // connections, before it opens its first relay connection. The hand-off
+  // runs before every connection attempt, so it touches nothing when no
+  // listener is up.
+  yield* topology.onYieldToHub(
+    transitions.withPermits(1)(Effect.suspend(() => (listenerScope === null ? Effect.void : stop))),
+  );
   const initial = yield* settings.getSettings.pipe(
     Effect.map((value) => value.agentControl.enabled),
     Effect.catch(() => Effect.succeed(false)),

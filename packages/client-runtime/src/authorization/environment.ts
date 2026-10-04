@@ -1,5 +1,6 @@
 import type { EnvironmentId, ExecutionEnvironmentDescriptor } from "@ryco/contracts";
 
+import { getHostedDispatchReplay } from "../relay/dispatchReplay.ts";
 import { getHostedRuntimeConfiguration } from "./runtime.ts";
 import type { HostedHubNode } from "./types.ts";
 
@@ -36,6 +37,10 @@ async function deactivateCurrentHostedNode(environmentId: EnvironmentId): Promis
   // The core transition queue is the one owner of reset: clearAccount only asks
   // this queue to deactivate and must not reset the attempt factory independently.
   getHostedRuntimeConfiguration().resetRelayAttemptFactory();
+  // Leaving the node — a switch, the directory, or sign-out — ends any command
+  // waiting to replay there, and any still in flight that the disconnect below
+  // cuts off, even if the node is selected again. A reconnect to it does not.
+  getHostedDispatchReplay().end(environmentId);
   await lifecycle.disconnectPrimaryEnvironment();
   clearHostedNodeScopedState(environmentId);
   lifecycle.writePrimaryEnvironmentDescriptor(null);

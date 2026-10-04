@@ -44,6 +44,7 @@ function service(
     queuedBytes: 0,
   };
   return {
+    connectorEnabled: true,
     status: () => status,
     resume: async () => undefined,
     enroll: async () => {

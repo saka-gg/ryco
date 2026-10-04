@@ -172,6 +172,7 @@ export type HostedConnectionStatusText =
   | "Securing"
   | "Securing this device"
   | "Device encryption unavailable"
+  | "Device removed"
   | "Reconnecting"
   | "idle"
   | "requesting ticket"
@@ -256,7 +257,7 @@ export function deriveHostedConnectionStatusText(
                 : selectionStatus === "incompatible"
                   ? "Incompatible"
                   : input.nativeDeviceSecurityStatus === "revoked"
-                    ? "Revoked"
+                    ? "Device removed"
                     : input.nativeDeviceSecurityStatus === "securing"
                       ? "Securing this device"
                       : input.nativeDeviceSecurityStatus === "unavailable"
@@ -387,6 +388,9 @@ export const HOSTED_CONNECTION_STATUS_INDICATORS = {
     connected: false,
     guarantee: "none",
   },
+  // The Hub revoked THIS device's account enrollment. Not the selected node's
+  // `Revoked`: every node is closed to the device until it signs in again.
+  "Device removed": { shortLabel: "Removed", connected: false, guarantee: "none" },
   Reconnecting: { shortLabel: "Reconnecting", connected: false, guarantee: "none" },
   idle: { shortLabel: "Idle", connected: false, guarantee: "none" },
   "requesting ticket": { shortLabel: "Preparing", connected: false, guarantee: "none" },

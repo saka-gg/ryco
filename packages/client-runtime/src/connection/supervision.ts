@@ -39,6 +39,13 @@ const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
  */
 const SAVED_ENVIRONMENT_RETRY_BASE_MS = 5_000;
 const SAVED_ENVIRONMENT_RETRY_MAX_MS = 60_000;
+/**
+ * The longest one saved environment may hold a connect slot. The platform
+ * connect bounds its own steps; this is the backstop that keeps one hung connect
+ * — an SSH password prompt, a keychain read — from stalling every other saved
+ * environment, and every later sync, until the app restarts.
+ */
+export const SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS = 60_000;
 
 export interface EnvironmentSupervisorThrottle {
   readonly maybeExecute: () => void;
@@ -61,6 +68,13 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
     record: SavedEnvironmentRecord,
     isCancelled: () => boolean,
   ) => Promise<EnvironmentConnection>;
+  /**
+   * A saved environment whose credential the node rejected. Syncs skip it: they
+   * run on every registry change and retry tick, and each attempt would only
+   * present the dead credential again. Pairing again and an explicit Connect go
+   * through `ensureSavedEnvironmentConnection` and still reach it.
+   */
+  readonly isSavedEnvironmentAwaitingRepair?: (environmentId: EnvironmentId) => boolean;
   readonly disconnectSavedEnvironment: (environmentId: EnvironmentId) => Promise<void>;
   readonly waitForPrimaryShellSnapshotApplied: (timeoutMs: number) => Promise<void>;
   readonly subscribeBrowserResume: (listener: (reason: string) => void) => () => void;
@@ -96,8 +110,8 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
 }
 
 export class SavedEnvironmentConnectionCancelledError extends Error {
-  constructor(environmentId: EnvironmentId) {
-    super(`Saved environment ${environmentId} connection was cancelled.`);
+  constructor(environmentId: EnvironmentId, options?: { readonly cause?: unknown }) {
+    super(`Saved environment ${environmentId} connection was cancelled.`, options);
     this.name = "SavedEnvironmentConnectionCancelledError";
   }
 }
@@ -602,7 +616,22 @@ export function createEnvironmentConnectionSupervisor<
     } = {
       cancelled: false,
       promise: Promise.resolve().then(async () => {
-        const connection = await connect(() => pendingEntry.cancelled);
+        let connection: EnvironmentConnection;
+        try {
+          connection = await connect(() => pendingEntry.cancelled);
+        } catch (error) {
+          // A cancelled attempt's failure is not the environment's: a disconnect
+          // or a new pairing replaced it, and that owner reports the outcome.
+          if (
+            pendingEntry.cancelled &&
+            !(error instanceof SavedEnvironmentConnectionCancelledError)
+          ) {
+            throw new SavedEnvironmentConnectionCancelledError(record.environmentId, {
+              cause: error,
+            });
+          }
+          throw error;
+        }
         if (pendingEntry.cancelled) {
           const removed = await remove(connection.environmentId).catch(() => false);
           if (!removed) await connection.dispose().catch(NOOP);
@@ -624,6 +653,28 @@ export function createEnvironmentConnectionSupervisor<
     pending.cancelled = true;
     pendingSavedEnvironmentConnections.delete(environmentId);
   };
+  const connectWithinSlot = (
+    environmentId: EnvironmentId,
+    connecting: Promise<EnvironmentConnection>,
+  ): Promise<EnvironmentConnection> =>
+    new Promise((resolve, reject) => {
+      const timeoutId = input.setTimeout(() => {
+        // Only the slot gives up; the attempt keeps running. A Connect or a
+        // pairing may have joined it, and the retry joins it as well instead of
+        // racing a second connect for the same environment.
+        reject(new Error(`Saved environment ${environmentId} did not connect in time.`));
+      }, SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
+      connecting.then(
+        (connection) => {
+          input.clearTimeout(timeoutId);
+          resolve(connection);
+        },
+        (error: unknown) => {
+          input.clearTimeout(timeoutId);
+          reject(error);
+        },
+      );
+    });
   const applyShellEvent = (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => {
     if (
       !shouldApplyProjectionEvent({
@@ -681,15 +732,23 @@ export function createEnvironmentConnectionSupervisor<
       stale.map((environmentId) => input.disconnectSavedEnvironment(environmentId)),
     );
     await input.waitForPrimaryShellSnapshotApplied(SAVED_ENVIRONMENT_STARTUP_DELAY_MS);
+    const awaitingRepair = (environmentId: EnvironmentId) =>
+      input.isSavedEnvironmentAwaitingRepair?.(environmentId) === true;
     for (const environmentId of savedRetries.keys()) {
-      if (!expected.has(environmentId)) clearSavedRetry(environmentId);
+      if (!expected.has(environmentId) || awaitingRepair(environmentId)) {
+        clearSavedRetry(environmentId);
+      }
     }
-    await runSavedEnvironmentConnectionQueue(orderSavedEnvironmentConnectionQueue(records), {
+    const connectable = records.filter((record) => !awaitingRepair(record.environmentId));
+    await runSavedEnvironmentConnectionQueue(orderSavedEnvironmentConnectionQueue(connectable), {
       concurrency: SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
       connect: async (record) => {
         try {
-          await ensureSavedEnvironmentConnection(record, (isCancelled) =>
-            input.connectSavedEnvironment(record, isCancelled),
+          await connectWithinSlot(
+            record.environmentId,
+            ensureSavedEnvironmentConnection(record, (isCancelled) =>
+              input.connectSavedEnvironment(record, isCancelled),
+            ),
           );
           clearSavedRetry(record.environmentId);
         } catch (error) {

@@ -65,6 +65,8 @@ const GET_SERVER_EXPOSURE_STATE_CHANNEL = "desktop:get-server-exposure-state";
 const SET_SERVER_EXPOSURE_MODE_CHANNEL = "desktop:set-server-exposure-mode";
 const SET_TAILSCALE_SERVE_ENABLED_CHANNEL = "desktop:set-tailscale-serve-enabled";
 const GET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:get-hub-launch-config";
+const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
+const SET_KEEP_AWAKE_ENABLED_CHANNEL = "desktop:set-keep-awake-enabled";
 const SET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:set-hub-launch-config";
 const RESTART_APP_CHANNEL = "desktop:restart-app";
 const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
@@ -225,10 +227,13 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   resolveSshPasswordPrompt: (requestId, password) =>
     ipcRenderer.invoke(RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL, requestId, password),
   getServerExposureState: () => ipcRenderer.invoke(GET_SERVER_EXPOSURE_STATE_CHANNEL),
-  setServerExposureMode: (mode) => ipcRenderer.invoke(SET_SERVER_EXPOSURE_MODE_CHANNEL, mode),
+  setServerExposureMode: (mode, options) =>
+    ipcRenderer.invoke(SET_SERVER_EXPOSURE_MODE_CHANNEL, mode, options),
   setTailscaleServeEnabled: (input) =>
     ipcRenderer.invoke(SET_TAILSCALE_SERVE_ENABLED_CHANNEL, input),
   getHubLaunchConfig: () => ipcRenderer.invoke(GET_HUB_LAUNCH_CONFIG_CHANNEL),
+  getKeepAwakeState: () => ipcRenderer.invoke(GET_KEEP_AWAKE_STATE_CHANNEL),
+  setKeepAwakeEnabled: (enabled) => ipcRenderer.invoke(SET_KEEP_AWAKE_ENABLED_CHANNEL, enabled),
   restartApp: () => ipcRenderer.invoke(RESTART_APP_CHANNEL),
   getHostedIdentityState: () => ipcRenderer.invoke(GET_HOSTED_IDENTITY_STATUS_CHANNEL),
   connectHostedIdentity: () => ipcRenderer.invoke(CONNECT_HOSTED_IDENTITY_CHANNEL),
@@ -293,12 +298,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.on(DESKTOP_WORKSPACE_IPC.transportEvent, wrappedListener);
     return () => ipcRenderer.removeListener(DESKTOP_WORKSPACE_IPC.transportEvent, wrappedListener);
   },
-  setHubLaunchConfig: (input: {
-    readonly enabled?: boolean;
-    readonly origin?: string | null;
-    readonly nodeName?: string | null;
-    readonly allowFileSecretStore?: boolean;
-  }) => ipcRenderer.invoke(SET_HUB_LAUNCH_CONFIG_CHANNEL, input),
+  setHubLaunchConfig: (input) => ipcRenderer.invoke(SET_HUB_LAUNCH_CONFIG_CHANNEL, input),
   validateHubOrigin: (raw: string) => ipcRenderer.invoke(VALIDATE_HUB_ORIGIN_CHANNEL, raw),
   getAdvertisedEndpoints: () => ipcRenderer.invoke(GET_ADVERTISED_ENDPOINTS_CHANNEL),
   getPathForFile: (file) => webUtils.getPathForFile(file),

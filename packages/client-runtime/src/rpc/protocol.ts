@@ -76,11 +76,22 @@ export interface WsProtocolLifecycleHandlers {
    */
   readonly persistentReconnect?: boolean;
   /**
+   * Marks a URL provider failure that no retry can fix, such as a saved
+   * credential the server rejected. The socket then stops reconnecting and every
+   * pending request fails, instead of waiting on a schedule that never succeeds.
+   */
+  readonly isTerminalUrlError?: (error: unknown) => boolean;
+  /** Runs once when a terminal URL provider failure stopped this socket. */
+  readonly onTerminalUrlError?: (error: unknown) => void;
+  /**
    * `false` keeps this socket's status out of the global status, which the app
    * reads as its primary connection's. Its environment slot is still written.
    */
   readonly recordGlobalConnectionState?: boolean;
-  readonly authorizeRequest?: (info: { readonly tag: string; readonly stream: boolean }) => boolean;
+  readonly authorizeRequest?: (info: {
+    readonly tag: string;
+    readonly stream: boolean;
+  }) => RpcRequestAdmission;
   /** Secondary feature channels must not replace the app's primary status. */
   readonly recordConnectionState?: boolean;
 }
@@ -104,7 +115,52 @@ export type HostedRpcProtocolClient =
 const WS_URL_PROVIDER_ERROR_MESSAGE = "Unable to prepare the Ryco server WebSocket connection.";
 export const WS_CONNECTION_ERROR_MESSAGE = "Unable to connect to the Ryco server WebSocket.";
 
-class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError") {}
+class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError")<{
+  readonly cause: unknown;
+}> {}
+
+class WsUrlProviderInactiveError extends Data.TaggedError("WsUrlProviderInactiveError") {}
+
+/**
+ * Whether a connection admits a request right now. Both `awaiting-` answers
+ * mean only "not yet", and the same request will be admitted on this
+ * connection later: `awaiting-session` while its session is still being
+ * established or recovered, `awaiting-acknowledgement` while a current session
+ * holds mutations until the user has seen that an earlier action could not be
+ * confirmed. A `forbidden` request will not be admitted on this connection at
+ * all.
+ */
+export type RpcRequestAdmission =
+  | "allowed"
+  | "awaiting-session"
+  | "awaiting-acknowledgement"
+  | "forbidden";
+
+const REFUSAL_MESSAGES: Record<Exclude<RpcRequestAdmission, "allowed">, string> = {
+  "awaiting-session": "Ryco is still synchronizing with this machine. Try again in a moment.",
+  "awaiting-acknowledgement":
+    "Ryco couldn't confirm an earlier action on this machine. Check its result, then choose Continue in the thread's notice.",
+  forbidden: "This action is unavailable for the current hosted role.",
+};
+
+/**
+ * A request this client refused before sending it (`authorizeRequest`).
+ * Nothing reached the server, so the request certainly did not run there.
+ */
+export class RpcRequestRefusedError extends Error {
+  readonly admission: Exclude<RpcRequestAdmission, "allowed">;
+
+  constructor(admission: Exclude<RpcRequestAdmission, "allowed">) {
+    super(REFUSAL_MESSAGES[admission]);
+    this.name = "RpcRequestRefusedError";
+    this.admission = admission;
+  }
+}
+
+/** A refusal only for now: the same request will be admitted on its connection later. */
+export function isAwaitingAdmission(error: unknown): error is RpcRequestRefusedError {
+  return error instanceof RpcRequestRefusedError && error.admission !== "forbidden";
+}
 
 function resolveWsRpcSocketUrl(rawUrl: string, preservePath = false): string {
   const resolved = new URL(rawUrl);
@@ -225,14 +281,16 @@ export function createWsRpcProtocolLayer(
         ),
       ),
   ).pipe(Schedule.while(() => lifecycle.isActive() && (handlers?.shouldReconnect?.() ?? true)));
+  const isTerminalUrlError = (error: WsUrlProviderError) =>
+    handlers?.isTerminalUrlError?.(error.cause) === true;
   const resolvedUrl =
     typeof url === "function"
       ? Effect.tryPromise({
           try: () => {
-            if (!lifecycle.isActive()) throw new WsUrlProviderError();
+            if (!lifecycle.isActive()) throw new WsUrlProviderInactiveError();
             return url();
           },
-          catch: () => new WsUrlProviderError(),
+          catch: (cause) => new WsUrlProviderError({ cause }),
         }).pipe(
           Effect.map((rawUrl) => resolveWsRpcSocketUrl(rawUrl, handlers?.preserveSocketPath)),
           Effect.tapError(() =>
@@ -240,7 +298,16 @@ export function createWsRpcProtocolLayer(
               lifecycle.onError(WS_URL_PROVIDER_ERROR_MESSAGE);
             }),
           ),
-          Effect.retry(retryPolicy),
+          Effect.retry({ schedule: retryPolicy, while: (error) => !isTerminalUrlError(error) }),
+          // Dying fails every pending request through the protocol's error
+          // broadcast and ends the socket's reconnect loop.
+          Effect.tapError((error) =>
+            Effect.sync(() => {
+              if (isTerminalUrlError(error) && lifecycle.isActive()) {
+                handlers?.onTerminalUrlError?.(error.cause);
+              }
+            }),
+          ),
           Effect.orDie,
         )
       : resolveWsRpcSocketUrl(url, handlers?.preserveSocketPath);
@@ -320,9 +387,8 @@ export function createWsRpcProtocolLayer(
           if (!lifecycle.isActive()) {
             return;
           }
-          if (handlers?.authorizeRequest && !handlers.authorizeRequest(info)) {
-            throw new Error("This action is unavailable for the current hosted role.");
-          }
+          const admission = handlers?.authorizeRequest?.(info) ?? "allowed";
+          if (admission !== "allowed") throw new RpcRequestRefusedError(admission);
           handlers?.onRequestStart?.({
             id: String(info.id),
             tag: info.tag,

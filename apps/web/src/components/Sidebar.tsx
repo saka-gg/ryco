@@ -108,6 +108,7 @@ import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
 import {
   buildPrimaryInboxSidebarEnvironment,
+  buildSavedInboxSidebarEnvironment,
   type InboxSidebarEnvironment,
 } from "./inboxSidebar/inboxSidebarModel";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
@@ -421,33 +422,15 @@ export default function Sidebar() {
       }
       const runtime = savedEnvironmentRuntimeById[environmentId];
       const saved = savedEnvironmentRegistry[environmentId];
-      const cached = environmentStateById[environmentId]?.hydratedFromCacheAt !== undefined;
-      const connectionState = runtime?.connectionState ?? "disconnected";
-      const stale = cached || connectionState !== "connected";
-      byEnvironmentId.set(environmentId, {
+      byEnvironmentId.set(
         environmentId,
-        label: runtime?.descriptor?.label ?? saved?.label ?? environmentId,
-        connectionState:
-          connectionState === "connected"
-            ? "connected"
-            : connectionState === "connecting"
-              ? "connecting"
-              : connectionState === "error"
-                ? "reconnecting"
-                : "offline",
-        stale,
-        ...(stale ? { staleDetail: "Offline · last known" } : {}),
-        role: runtime?.role ?? null,
-        trust: "unknown",
-        deliveryUnknown: false,
-        threadSnoozeSupported: runtime?.descriptor?.capabilities.threadSnooze ?? false,
-        threadSettlementSupported: runtime?.descriptor?.capabilities.threadSettlement ?? false,
-        mutationReady:
-          connectionState === "connected" &&
-          (runtime?.role === "owner" || runtime?.role === "client") &&
-          !stale,
-        shellCurrent: !stale,
-      });
+        buildSavedInboxSidebarEnvironment({
+          environmentId,
+          label: runtime?.descriptor?.label ?? saved?.label ?? environmentId,
+          runtime,
+          hydratedFromCache: environmentStateById[environmentId]?.hydratedFromCacheAt !== undefined,
+        }),
+      );
     }
     return [...byEnvironmentId.values()]
       .map((environment) =>

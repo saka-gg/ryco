@@ -1,7 +1,22 @@
-import { hostedHubStore } from "@ryco/client-runtime/authorization";
+import { createPrivateKey, createPublicKey, sign as signBytes, type KeyObject } from "node:crypto";
+
+import { hostedHubStore, type HostedRelayFailure } from "@ryco/client-runtime/authorization";
 import type { RelayE2eeHost, RelayE2eeInitiatorAttempt } from "@ryco/client-runtime/relay";
+import { RELAY_INITIAL_LIMITS } from "@ryco/contracts";
+import { decodeE2eeClientHello } from "@ryco/shared/relayE2eeHandshake";
 import { e2eeKeyFingerprint, formatE2eeKeyFingerprint } from "@ryco/shared/relayE2eeKeys";
+import {
+  encodeCanonicalE2eeCbor,
+  encodeNodeE2eeCapabilitySigningEnvelope,
+  encodeNodeE2eeCapabilityTranscript,
+  encodeNodeE2eePrekeyTranscript,
+} from "@ryco/shared/relayE2eeTranscripts";
 import { deriveE2eeSafetyNumber } from "@ryco/shared/relayE2eeVerificationDisplay";
+import {
+  E2EE_SUITE_25519_CHACHAPOLY_SHA256,
+  encodeE2eeCapabilityCarrier,
+  encodeE2eeHandshakeReject,
+} from "@ryco/shared/relayE2eeWire";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const HUB = "https://hub.example.com";
@@ -19,12 +34,42 @@ const CLIENT_PUBLIC_KEY = bytes(
   "047a593180860c4037c83c12749845c8ee1424dd297fadcb895e358255d2c7d2" +
     "b2a8ca25580f2626fe579062ff1b99ff91c24a0da06fb32b5be20148c9249f5650",
 );
-const AGREEMENT_PUBLIC_KEY = bytes(
-  "0100000000000000000000000000000000000000000000000000000000000000",
-);
+/** RFC 8410 PKCS#8 wrappers, so raw §16.1-style test scalars load into `node:crypto`. */
+const X25519_PKCS8_PREFIX = bytes("302e020100300506032b656e04220420");
+const ED25519_PKCS8_PREFIX = bytes("302e020100300506032b657004220420");
+
+function rawKey(prefix: Uint8Array, secret: Uint8Array): KeyObject {
+  return createPrivateKey({
+    key: Buffer.concat([prefix, secret]),
+    format: "der",
+    type: "pkcs8",
+  });
+}
+
+function rawPublicKey(privateKey: KeyObject): Uint8Array {
+  const jwk = createPublicKey(privateKey).export({ format: "jwk" });
+  return Uint8Array.from(Buffer.from(jwk.x!, "base64url"));
+}
+
 const AGREEMENT_SECRET_KEY = bytes(
   "0200000000000000000000000000000000000000000000000000000000000000",
 );
+/**
+ * The real X25519 public half of `AGREEMENT_SECRET_KEY`: the client handshake
+ * refuses to build a hello whose borrowed scalar does not match its certificate,
+ * so a channel driven through row K1 needs the actual pair.
+ */
+const AGREEMENT_PUBLIC_KEY = rawPublicKey(rawKey(X25519_PKCS8_PREFIX, AGREEMENT_SECRET_KEY));
+/**
+ * A well-formed P-256 `r || s` (both 1). The node verifies this signature; the
+ * client only checks its shape before carrying it in the hello.
+ */
+const PREKEY_SIGNATURE = (() => {
+  const signature = new Uint8Array(64);
+  signature[31] = 1;
+  signature[63] = 1;
+  return signature;
+})();
 /** A §7.1-valid Ed25519 node identity key. §16.1-style material, TEST ONLY. */
 const NODE_PUBLIC_KEY = bytes("03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8");
 
@@ -50,6 +95,7 @@ const custody = vi.hoisted(() => ({
 const relayProvider = vi.hoisted(() => ({
   attempt: null as RelayE2eeInitiatorAttempt | null,
 }));
+const hubApi = vi.hoisted(() => ({ ticketsIssued: 0 }));
 
 vi.mock("expo-secure-store", () => ({
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 0xd,
@@ -121,7 +167,7 @@ vi.mock("../platform/e2eeClientPrekey", () => ({
         identityPublicKey: CLIENT_PUBLIC_KEY,
         agreementPublicKey: AGREEMENT_PUBLIC_KEY,
         transcript: new Uint8Array([1, 2, 3]),
-        signature: new Uint8Array([4, 5, 6]),
+        signature: PREKEY_SIGNATURE,
         createdAt: 0,
         expiresAt: 1,
       };
@@ -137,6 +183,18 @@ vi.mock("../platform/e2eeRelayProvider", async (importOriginal) => {
     },
   };
 });
+// The relay socket routing issues the suite-0x01 ticket itself; the account
+// grant's resolver and key custody are never reached on that path.
+vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@ryco/client-runtime/authorization")>()),
+  getHostedHubApi: () => ({
+    issueRelayTicket: async () => {
+      hubApi.ticketsIssued += 1;
+      return { ticket: "local-ticket", expiresAt: 2_000 };
+    },
+  }),
+}));
+vi.mock("../platform/nativeE2ee", () => ({ mobileNativeE2eePlatform: {} }));
 vi.mock("./runtimeConfig", () => ({
   getMobileHostedConfig: () => ({
     hubOrigin: HUB,
@@ -162,6 +220,12 @@ import {
   resetMobileRelayE2eeAttemptForTests,
   resolveMobileRelayE2eeProvider,
 } from "./e2eeAttempt";
+import {
+  issueMobileRelayAttempt,
+  prepareMobileRelaySocketContext,
+  providerForMobileRelaySocketContext,
+} from "./accountE2eeAttempt";
+import { setMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
 
 function selectNode(
   nodeId = "node_1",
@@ -248,6 +312,8 @@ beforeEach(() => {
   custody.prekeyPending = null;
   custody.onPrekeyStart = null;
   relayProvider.attempt = null;
+  hubApi.ticketsIssued = 0;
+  setMobileNativeE2eeEnrollmentCoordinator(null);
   resetMobileRelayE2eeAttemptForTests();
   resetMobileE2eeSessionForTests();
   signOut();
@@ -824,6 +890,161 @@ describe("what the resolved §4.4 attempt actually carries", () => {
     const provider = resolveMobileRelayE2eeProvider();
     provider!(context.host);
     expect(context.closes.length).toBe(1);
+  });
+});
+
+describe("Request approval's pairing channel, end to end", () => {
+  /**
+   * The routing test in `accountE2eeAttempt.test.ts` proves an `unverified`
+   * record takes the local suite-0x01 provider against mocked attempt modules;
+   * the initiator suite proves a pairing-only attempt sends one hello and closes
+   * for good. Neither alone stops a change that routes this record to the
+   * account grant, drops `pairingOnly` for it, or makes its close retryable,
+   * from turning one pairing request into an account-grant channel, repeated
+   * hellos or a released payload. This enters where the relay socket does —
+   * routing, ticket, then the provider bound to that context — with the real
+   * attempt behind it: one 0x01 hello, nothing else, and a close the transport
+   * will not retry.
+   */
+  const NODE_ID = `node_${"P".repeat(22)}`;
+  const NOW = 1_784_160_030_000;
+  const NODE_IDENTITY = rawKey(
+    ED25519_PKCS8_PREFIX,
+    bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+  );
+  const NODE_AGREEMENT_PUBLIC_KEY = rawPublicKey(
+    rawKey(
+      X25519_PKCS8_PREFIX,
+      bytes("a8abababababababababababababababababababababababababababababab6b"),
+    ),
+  );
+
+  function nodeCarrier(): Uint8Array {
+    const identityPublicKey = rawPublicKey(NODE_IDENTITY);
+    const createdAt = NOW - 30_000;
+    const keyExpiresAt = createdAt + 30 * 24 * 60 * 60 * 1_000;
+    const prekey = {
+      prekeyId: "epk_EEEEEEEEEEEEEEEEEEEEEE",
+      agreementPublicKey: NODE_AGREEMENT_PUBLIC_KEY,
+      createdAt,
+      expiresAt: keyExpiresAt,
+    };
+    const crossSignature = signBytes(
+      null,
+      encodeNodeE2eePrekeyTranscript({
+        hubOrigin: HUB,
+        nodeId: NODE_ID,
+        identityKeyId: "nkey_BBBBBBBBBBBBBBBBBBBBBB",
+        identityPublicKey,
+        ...prekey,
+      }),
+      NODE_IDENTITY,
+    );
+    const transcript = encodeNodeE2eeCapabilityTranscript({
+      hubOrigin: HUB,
+      nodeId: NODE_ID,
+      identityKeyId: "nkey_BBBBBBBBBBBBBBBBBBBBBB",
+      identityPublicKey,
+      e2eeVersionMin: 1,
+      e2eeVersionMax: 1,
+      suiteRegistry: [E2EE_SUITE_25519_CHACHAPOLY_SHA256],
+      prekeyCertificate: { ...prekey, crossSignature: Uint8Array.from(crossSignature) },
+      continuityChain: [],
+      // A node requiring locally approved clients: it lists this phone for
+      // approval from the 0x01 hello and refuses the channel.
+      requireE2EE: true,
+      requireApprovedClientE2EE: true,
+      policyGeneration: 7,
+      issuedAt: NOW,
+      expiresAt: NOW + 600_000,
+      continuityId: "nct_FFFFFFFFFFFFFFFFFFFFFF",
+    });
+    const signature = signBytes(
+      null,
+      encodeNodeE2eeCapabilitySigningEnvelope(transcript),
+      NODE_IDENTITY,
+    );
+    return encodeE2eeCapabilityCarrier(
+      encodeCanonicalE2eeCbor([transcript, Uint8Array.from(signature)]),
+    );
+  }
+
+  it("sends exactly one suite-0x01 pairing hello, releases nothing, and never retries", async () => {
+    await mobileE2eeTrustStore.hydrate();
+    // Exactly what "Request approval" leaves behind.
+    await mobileE2eeTrustStore.beginPairing({
+      hubOrigin: HUB,
+      accountId: ACCOUNT,
+      nodeId: NODE_ID,
+    });
+    selectNode(NODE_ID);
+    // The account enrollment is ready, so only the record keeps this channel
+    // off the account grant.
+    setMobileNativeE2eeEnrollmentCoordinator({
+      getState: () => ({
+        status: "ready",
+        generation: 1,
+        ready: { namespace: { hubOrigin: HUB, accountId: ACCOUNT } },
+        errorCode: null,
+      }),
+      subscribe: () => () => undefined,
+    } as never);
+
+    const prepared = await prepareMobileRelaySocketContext();
+    expect(prepared.kind).toBe("local");
+    const issued = await issueMobileRelayAttempt({
+      nodeId: NODE_ID,
+      preparedSocketContext: prepared,
+    });
+    expect(issued.ticket).toBe("local-ticket");
+    expect(hubApi.ticketsIssued).toBe(1);
+    expect(inspectMobileRelayE2eeAttemptForTests()?.pairingOnly).toBe(true);
+
+    const sent: Uint8Array[] = [];
+    const locked: string[] = [];
+    const closes: (HostedRelayFailure | undefined)[] = [];
+    const provider = providerForMobileRelaySocketContext(issued.preparedSocketContext);
+    const channel = provider({
+      limits: RELAY_INITIAL_LIMITS,
+      channel: {
+        channelId: "ch_cccccccccccccccccccccc",
+        capability: "ryco.rpc",
+        effectiveRole: "owner",
+        relayProtocolMajor: 1,
+        relayProtocolMinor: 2,
+      },
+      admit: () => ({
+        send: (message: Uint8Array) => {
+          sent.push(Uint8Array.from(message));
+          return true;
+        },
+        release: () => undefined,
+      }),
+      lockMode: (mode) => void locked.push(mode),
+      close: (failure) => void closes.push(failure),
+      now: () => NOW,
+      setTimeout: () => 0,
+      clearTimeout: () => undefined,
+    });
+
+    expect(await channel.intercept(nodeCarrier())).toEqual({ kind: "claimed" });
+    expect(sent).toHaveLength(1);
+    const hello = decodeE2eeClientHello(sent[0]!);
+    expect(hello.kind).toBe("ok");
+    if (hello.kind !== "ok") return;
+    expect(hello.value.tier).toBe("native");
+    expect(hello.value.selectedSuite).toBe(E2EE_SUITE_25519_CHACHAPOLY_SHA256);
+
+    // The node lists the phone for approval and refuses the channel, which is
+    // what every pairing attempt ends in (§13.2).
+    await channel.intercept(encodeE2eeHandshakeReject());
+
+    expect(sent).toHaveLength(1);
+    // `lockMode` is the engine's only release valve (§4.4): never opened, so no
+    // buffered application send is flushed and nothing reaches the application.
+    expect(locked).toEqual([]);
+    expect(closes).toHaveLength(1);
+    expect(closes[0]).toMatchObject({ retryable: false, closeReason: "channel_rejected" });
   });
 });
 

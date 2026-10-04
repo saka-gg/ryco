@@ -58,6 +58,12 @@ export interface HubConnectorConfig {
   readonly reconnectJitterRatio: number;
   readonly allowFileSecretStore: boolean;
   readonly configurationIssue: "configuration_invalid" | undefined;
+  /**
+   * A Desktop standby connector that resolved to running: it holds no Hub
+   * identity at launch and gains one only through the user's sign-in or
+   * enrollment in this process (`resolveStandbyHubConnectorConfig`).
+   */
+  readonly standby?: true;
 }
 
 export const DEFAULT_HUB_CONNECTOR_CONFIG: HubConnectorConfig = {

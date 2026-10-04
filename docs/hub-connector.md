@@ -124,6 +124,13 @@ current connector generation. The node republishes after any identity, agreement
 continuity-chain, suite, policy, validity-window, or connector-generation change. Account-grant
 admission remains disabled until the Hub acknowledges the exact digest in the same generation.
 
+A statement the node cannot build — a credential store that is locked for a while, a prekey or
+continuity read that fails — is withdrawn at once and retried in the same generation, 30 seconds
+later and backing off to five minutes, instead of leaving account-grant channels refused until the
+next reconnect. A republish that throws, usually because the send queue is momentarily full, is
+also withdrawn and retried within seconds; only three consecutive failures rebuild the connection,
+because rebuilding it closes every live channel to resend one control frame.
+
 The authenticated connector also receives a bounded, generation-numbered Ed25519 Hub verification
 keyset and enrollment-revocation events. These values remain in memory. Reconnect clears the statement
 acknowledgement, keyset, ticket contexts, and subscriptions before a new generation may report ready.
@@ -177,7 +184,29 @@ desktop settings, removes matching `RYCO_HUB_*` variables from the backend child
 passes the values over the private bootstrap channel. This keeps the visible desktop controls
 authoritative. The Hub card keeps the address and pre-enrollment node name visible and puts key
 fallback, startup ownership, CLI equivalents, and bounded relay counters behind **Show advanced
-options**. Changing a desktop launch value restarts Ryco.
+options**. Changing a desktop launch value restarts Ryco; when agent turns are running on the
+desktop's own backend, Ryco first asks whether to restart now, after they finish, or not at all. A
+change deferred until they finish is saved at once and only the restart waits, so it still applies
+on the next launch if Ryco quits, crashes, or updates first.
+
+Until the operator turns the desktop connector on or off, a configured Hub launches it in
+**standby**: the backend runs the connector only when its own state files show no Hub identity
+(`resolveStandbyHubConnectorConfig`). An identity-less connector parks in `enrolling`, opens no
+socket, and selects key custody without reading the credential store, so device-code enrollment
+and native account sign-in complete in the running process instead of after an onboarding restart.
+Any existing identity, which may have been switched off on purpose or may belong to another runner
+sharing the state directory, resolves standby to disabled without opening key custody. An explicit
+flag or environment value is never refined by standby, and a standby connector whose host cannot
+open a key store stays off instead of reporting the key store failure. Standby is not consent to
+join the Hub:
+only the user's own account sign-in or device-code enrollment puts a standby node on the Hub, and
+the background account resume at startup claims the node only for a connector the operator turned
+on. Settings written before the choice was recorded keep a connector that is off beside a retained
+account session off. An identity-less standby connector is not Hub-connected, so external Agent
+Control integrations keep working beside it. If it gains an identity in the running process, the
+server closes the external integration listener and its connections before the connector opens its
+first relay connection; from then on external integrations stay unavailable until the connector is
+turned off.
 
 For example:
 
@@ -358,6 +387,38 @@ starts instead of silently switching because another backend became available. A
 without the marker is migrated only when all required material is found in exactly one eligible
 store. Missing, split, or ambiguous custody fails closed as `identity_store_unavailable`.
 
+One node identity belongs to one running backend. The desktop app's backend and a default
+`ryco serve` both keep their state in `~/.ryco`, so a backend whose connector is switched on takes a
+process lock, `hub-connector.lock`, beside the identity state before it builds its identity runtime.
+A second backend that finds the lock held by a live process still opens the credential store, but
+defers the rest of its startup work until it holds the lock: it does not finish an interrupted
+leave, destroy retired keys, repair the prekey or continuity chain, or commit its launch E2EE
+policy, so a narrower policy given to it cannot be committed where the first backend's live
+channels would never be swept. Until then its policy reads as the fail-closed default, which is
+also what it enforces, since it serves no channel. It does not sign with or connect as the identity:
+it reports `connection_replaced`, checks again every 30 seconds to two minutes — at once when the
+machine wakes, its network changes, or an owner command here takes the identity over — and takes
+over by itself once the first one exits, running the deferred work first. Until it holds the lock it also
+refuses everything that writes what the owning backend relies on — starting or cancelling an
+enrollment, leaving, the desktop's native node claim and local trusted introduction, and every E2EE
+owner command that changes state (client approval, narrowing, revocation and purge, approval QR
+codes, the pairing window, policy changes and generation recovery, prekey rotation, continuity
+commands, and the fallback reset). It does not read the continuity status either, because that read
+runs the same chain repairs as startup: `ryco e2ee continuity show` answers `not read here` with a
+sentence saying another copy of Ryco is using the identity, and the desktop's Security panel shows
+that sentence in its Continuity row. The other reads are still answered, and the panel still draws
+them; the prekey read reports the stored certificate without issuing one. A backend whose connector
+is switched off or misconfigured does not hold the lock; it claims it for the length of a leave, one
+of those operations, or a continuity read, and while another backend holds it, behaves as above.
+
+A lock left by a process that died — or by one from before a reboot, whose pid may since have been
+reused — is reclaimed automatically. The lock records the kernel's boot id where there is one (Linux
+and macOS), so a wall-clock correction cannot make a live holder look like one from an earlier boot,
+and on Linux the holder's start time, so a pid that a container restart handed to another process is
+not mistaken for the holder. If the lock file cannot be read or written at all, the backend asks once
+more, then proceeds without it and asks again each time it next needs the identity; the Hub still
+allows only one connection per identity.
+
 The standalone [relay architecture atlas](./relay-architecture.html) shows enrollment, client relay
 connection, hosted reconnect, actor capabilities, role intersection, and which data each component
 retains.
@@ -369,16 +430,26 @@ canonical node-authentication transcript with the selected local key, then opens
 `wss://<configured-origin>/v1/relay/node`. The signed `auth` frame is the first WebSocket frame and
 must complete within the negotiated five-second deadline.
 
+The Hub honours a challenge for 30 seconds and rejects an expired one exactly as it rejects a wrong
+key. Signing can be slow — a keychain access prompt, a slow custody backend, a machine suspended
+mid-handshake. A challenge that took 23 seconds or more to sign, measured on the local clock from
+before it was requested, may no longer survive the five-second socket open, so it is discarded and
+replaced once before the socket opens; the replacement's proof is sent however long it took, rather
+than asking for a third signature. A relay rejection of a proof that was 20 seconds or more old when
+sent is retried once with a fresh challenge before it counts as a rejection.
+
 Node WebSockets do not use cookies, Authorization headers, URL credentials, query parameters, or
 bearer subprotocols. A challenge is single-use and in memory only. Replayed proofs, copied node IDs,
-wrong or rotated keys, and ordinary authentication failures require operator action. Successful
+and wrong or rotated keys are refused with `authentication_failed`, which is retried only on the slow
+schedule described below — every retry uses a fresh challenge and the Hub's full verification, so a
+refused key gains nothing from it. Successful
 authentication with an activated staged key confirms rotation locally and removes superseded key
 custody according to the node-identity rules.
 
 Revocation enters `revoked` and requires re-enrollment or an approved recovery procedure. An
-unsupported relay version enters `version_incompatible`. A replacement connection and repeated
-pre-stability protocol violations fail closed for operator action; Ryco never enters a tight retry
-loop for these conditions.
+unsupported relay version enters `version_incompatible`. Repeated pre-stability protocol violations
+fail closed for operator action. Ryco never enters a tight retry loop for a rejection, a replacement,
+or a protocol violation.
 
 ## Connector states and reconnect policy
 
@@ -403,16 +474,41 @@ uses bounded jitter, honors a bounded `retryAfterMs`, and caps at the configured
 attempt counter resets only after the connection remains online for the configured stable interval.
 Only one connection generation and one reconnect timer can exist for the configured Hub.
 
-Configuration, key custody, origin mismatch, enrollment failure, authentication rejection,
-connection replacement, revocation, version incompatibility, and repeated early protocol failure
-require operator action. Restarting the process does not make a revoked identity retry. A proof
-preflight answered with a status a proxy gives while a Hub deploys — 404, 405, 408, 409, 421, or
-425 — retries like a network failure; 400, 401, and 403 still require operator action.
+Three failures usually clear on their own but could be real, so they retry on their own, much
+slower, schedules — reported as `backing_off` with the specific failure code and the next retry time,
+so status says both what went wrong and that the connector is handling it:
+
+| Failure                 | First retry | Grows to   | Notes                                                       |
+| ----------------------- | ----------- | ---------- | ----------------------------------------------------------- |
+| `identity_unavailable`  | 30 seconds  | 10 minutes | A wake or network change retries at once.                   |
+| `connection_replaced`   | 5 minutes   | 15 minutes | At most three an hour, then it stops for operator action.   |
+| `authentication_failed` | 15 minutes  | 1 hour     | Covers a refused proof; an explicit revocation stays final. |
+
+Each delay is jittered and never shorter than its first retry. The replacement budget is what lets
+two processes sharing an identity converge: each retry displaces the other copy, so retrying forever
+would be the flapping itself. The Hub displaces the older connection for an identity either with a
+`connection_replaced` error frame or by closing it with code 1012 and reason `connection_replaced`;
+both are recognized, and only that exact close is — any other close is an ordinary network drop. A
+custody read that fails at startup or on `resume` takes the same
+path as one that fails mid-connection.
+
+Configuration, a credential store that could not be opened at all (`identity_store_unavailable`),
+origin mismatch, enrollment failure, revocation, version incompatibility, and repeated early
+protocol failure require operator action. Restarting the process does not make a revoked identity
+retry. The Hub's
+proof-preflight route never refuses a node by status — it issues a challenge to every well-formed
+request and answers 400 only for a malformed one — so any other client error there (401, 403, 404,
+408, and the rest) comes from a proxy, CDN, or WAF in front of the Hub and retries like a network
+failure. A 400 means this node and the Hub disagree about the request shape: it retries once, then
+stops for an update like any repeated protocol failure.
 
 The connector also watches for the two events that silently kill an outbound socket: the machine
 waking from sleep (its wall clock jumps past its timers) and its external addresses changing. An
 online connector then sends its own `ping` and reconnects if the matching `pong` does not arrive
-within five seconds; a connector backing off retries at once with a fresh backoff. Only the answer
+within five seconds; a connector backing off retries at once with a fresh backoff — except a slow
+retry after the Hub displaced this node (`connection_replaced`) or refused its proof
+(`authentication_failed`), whose spacing is the point. Waiting out another local backend's lock,
+also reported as `connection_replaced`, is a file check and is brought forward too. Only the answer
 to the connector's own outstanding probe is accepted; an unsolicited `pong` remains a protocol
 violation.
 
@@ -430,11 +526,12 @@ The erase is crash-safe. A durable marker records the intent and every secret to
 either store is touched, so an interrupted leave is completed on the next start rather than
 orphaning key material or leaving state that points at keys which are already gone.
 
-`ryco hub resume` retries a connector that stopped without scheduling its own retry, and prints the
-resulting status. Use it for `connection_replaced` and for a `identity_unavailable` caused by a
-credential store that was locked and has since been unlocked; neither schedules a retry timer, so
-neither recovers on its own. Resume is deliberately a no-op for `revoked`, for a stopping connector,
-and for a disabled one — it reports the unchanged state rather than implying it acted.
+`ryco hub resume` retries now instead of on the connector's own schedule, and prints the resulting
+status. It also resets the slow-retry budgets, so after stopping a duplicate process or unlocking a
+credential store the next attempt is immediate and a stopped `connection_replaced` gets a fresh
+hourly budget. Resume is deliberately a no-op for `revoked`, for a stopping connector, for a
+disabled one, and for a connection that is already up or on its way up — it reports the unchanged
+state rather than implying it acted.
 
 ## Relay channels, limits, and roles
 
@@ -490,19 +587,32 @@ and the normal server listener follow their existing shutdown path.
 ## Troubleshooting
 
 - `configuration_invalid`: check the exact boolean spellings, HTTPS origin, and reconnect ranges.
-- `identity_unavailable`: unlock or restore the platform credential store, then `ryco hub resume`;
-  do not copy a node ID or generate a replacement key manually.
+- `identity_unavailable`: the credential store is locked or unreadable. Ryco retries on its own;
+  unlock or restore the store and run `ryco hub resume` to retry at once. Do not copy a node ID or
+  generate a replacement key manually.
 - `identity_store_unavailable`: the credential store could not be opened at all when this process
-  started, and no retry can repair it. Fix the store, then restart Ryco.
+  started, and no retry can repair it. Fix the store, then restart Ryco. On headless Linux this is
+  usually a missing Secret Service; `ryco setup` detects that and offers the explicit
+  permissioned-file fallback.
 - `enrollment_expired`: the ceremony's own expiry passed. Start a new one.
 - `identity_origin_mismatch`: use the origin to which the identity was enrolled or perform an
   approved re-enrollment.
 - `enrollment_unavailable`: the ceremony was denied or cancelled at the Hub. Find out why before
   starting another; a denial is a human saying no.
-- `authentication_failed` or `revoked`: verify approval, key rotation, and node status with the Hub
-  operator; retries are intentionally stopped. `ryco hub resume` will not restart a revoked identity.
-- `connection_replaced`: another process authenticated as this node. Stop it, then run
-  `ryco hub resume`. No retry is scheduled for this failure, so it does not clear on its own.
+- `authentication_failed`: the Hub refused this node's proof. Ryco retries every 15 minutes to an
+  hour in case the cause was on the Hub's side; if it persists, verify approval, key rotation, and
+  node status with the Hub operator. A node that was removed at the Hub needs `ryco hub leave` and a
+  new enrollment.
+- `revoked`: retries are intentionally stopped. `ryco hub resume` will not restart a revoked identity.
+- `connection_replaced`: another process is using this node's identity — locally, another Ryco
+  backend on the same state directory holds its lock; remotely, a copy of the identity
+  authenticated elsewhere. A local copy is waited out automatically. A remote one is retried a few
+  times an hour, then Ryco stops so the other copy keeps the connection. Stop the copy you do not
+  want, then run `ryco hub resume`. If no other Ryco backend uses this state directory and status
+  still reports a local copy, the lock outlived its holder in a way Ryco could not detect: delete
+  `hub-connector.lock` beside `hub-identity.json` in the state directory, then run
+  `ryco hub resume`. Never delete it while another backend runs — both would then connect, and the
+  Hub would displace one of them.
 - `protocol_invalid` or `version_incompatible`: upgrade the incompatible endpoint. Do not modify
   relay schemas or fixtures locally.
 - Repeated `network_unavailable`, `tls_unavailable`, or `heartbeat_timeout`: check DNS, egress, TLS

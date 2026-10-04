@@ -33,14 +33,24 @@ import type {
 } from "../../hostedHub/e2eeSession";
 import type { E2eeTrustClassification } from "../../platform/e2eeTrustModel";
 import {
+  cancelE2eeApprovalRequest,
   CHANNEL_LABELS,
   CHANNEL_MESSAGES,
   createE2eeVerificationDraft,
   confirmE2eeApprovalQr,
+  deriveE2eeApprovalComparison,
+  deriveE2eeApprovalRequestStatus,
   deriveE2eeSecurityView,
   deriveE2eeVerificationView,
   e2eeSafetyNumberGroups,
+  isE2eeApprovalRequested,
   isE2eeSafetyNumberDisplay,
+  E2EE_APPROVAL_AWAITING_NODE_MESSAGE,
+  E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE,
+  E2EE_APPROVAL_CANCEL_UNAVAILABLE,
+  E2EE_APPROVAL_INTRO_MESSAGE,
+  E2EE_APPROVAL_REQUESTED_MESSAGE,
+  E2EE_APPROVAL_SAFETY_NUMBER_CAPTION,
   E2EE_COMPARISON_AFFIRMATION,
   E2EE_ENROLLMENT_FINGERPRINT_MISMATCH,
   E2EE_IDENTITY_CHANGE_MESSAGE,
@@ -157,6 +167,7 @@ function session(overrides: Partial<MobileE2eeSessionState> = {}): MobileE2eeSes
       nodeLabel: "Studio",
       environmentId: "env_1",
       localNodeHandle: null,
+      localRecordState: null,
       clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
     },
     classification: UNEXPECTED_FRESH,
@@ -776,6 +787,9 @@ describe("§13.2 step 5 actually promotes the pin", () => {
    * event cleared and the screen popped as if the ceremony had succeeded, while
    * no pin was ever recorded and every later channel stayed release-gated.
    */
+  /** Run every queued continuation of the action's fire-and-forget chain. */
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
   function ceremony(promote: (decision: unknown) => Promise<void>) {
     const completed = vi.fn();
     let draft: E2eeVerificationDraft = {
@@ -809,9 +823,7 @@ describe("§13.2 step 5 actually promotes the pin", () => {
   it("mints a decision for the presented identity and records it", async () => {
     const test = ceremony(async () => undefined);
     test.run();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
 
     expect(test.promote).toHaveBeenCalledTimes(1);
     const decision = test.promote.mock.calls[0]?.[0] as {
@@ -837,9 +849,7 @@ describe("§13.2 step 5 actually promotes the pin", () => {
       throw new Error("refused");
     });
     test.run();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
 
     expect(test.draft().errorMessage).toBe(E2EE_VERIFICATION_UNAVAILABLE);
     expect(test.draft().busy).toBe(false);
@@ -901,6 +911,247 @@ describe("one-scan cross-device approval", () => {
     vi.restoreAllMocks();
   });
 
+  it("shows nothing to compare before approval is requested", () => {
+    expect(deriveE2eeApprovalComparison(qrSession())).toBeNull();
+  });
+
+  it("shows the full §13.4 number once approval is requested, never a fingerprint tail", () => {
+    const requested = session({
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-qr",
+        localRecordState: "unverified",
+      },
+    });
+    const comparison = deriveE2eeApprovalComparison(requested);
+
+    // Exactly the number the node lists for this phone's pending row: the same
+    // derivation over (node key, this phone's key, Hub origin, account).
+    const nodeSide = deriveE2eeSafetyNumber({
+      nodeIdentityPublicKey: NODE_PUBLIC_KEY,
+      clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
+      hubOrigin: HUB,
+      accountId: ACCOUNT,
+    }).display;
+    expect(comparison?.value).toBe(nodeSide);
+    expect(comparison?.groups).toHaveLength(E2EE_SAFETY_NUMBER_DIGITS.groups);
+    expect(comparison?.groups.join("")).toHaveLength(
+      E2EE_SAFETY_NUMBER_DIGITS.groups * E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup,
+    );
+    expect(comparison?.caption).toBe(E2EE_APPROVAL_SAFETY_NUMBER_CAPTION);
+    expect(comparison?.caption).not.toContain(PRESENTED.fingerprint.slice(-8));
+  });
+
+  it("withholds the number without an identity to derive it from, or once verified", () => {
+    const requested = session({
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-qr",
+        localRecordState: "unverified",
+      },
+    });
+    expect(deriveE2eeApprovalComparison({ ...requested, presented: null })).toBeNull();
+    expect(
+      deriveE2eeApprovalComparison({
+        ...requested,
+        selection: { ...requested.selection!, clientIdentityPublicKey: null },
+      }),
+    ).toBeNull();
+    expect(deriveE2eeApprovalComparison({ ...requested, pinVerified: true })).toBeNull();
+    // A malformed number is not shortened into something comparable.
+    expect(
+      deriveE2eeApprovalComparison({
+        ...requested,
+        presented: {
+          ...requested.presented!,
+          display: { ...PRESENTED, safetyNumber: "12345 67890" },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("warns against approving while a request waits for the node's identity", () => {
+    // Request approval bumps the trust revision and the re-prepared channel
+    // starts with nothing presented, so the ceremony is at `no-evidence` until
+    // the node's statement validates again, and stays there for as long as the
+    // node is offline or the Hub withholds it (rows K23/K24). The scanner card is
+    // hidden at that stage; the request's status must not be.
+    const waiting = session({
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-qr",
+        localRecordState: "unverified",
+      },
+      presented: null,
+    });
+    const stage = verificationView(waiting).view.stage;
+    expect(stage).toBe("no-evidence");
+    expect(shouldShowE2eeApprovalScanner(stage)).toBe(false);
+
+    const status = deriveE2eeApprovalRequestStatus({
+      session: waiting,
+      stage,
+      approvalRequested: true,
+    });
+    expect(status.message).toBe(E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE);
+    expect(status.message).toMatch(/do not approve/i);
+    expect(status.message).not.toBe(E2EE_APPROVAL_INTRO_MESSAGE);
+    expect(status.tone).toBe("warning");
+    expect(status.comparison).toBeNull();
+  });
+
+  it("invites no approval before the node has presented an identity to request against", () => {
+    const unpresented = session({ presented: null });
+    const status = deriveE2eeApprovalRequestStatus({
+      session: unpresented,
+      stage: verificationView(unpresented).view.stage,
+      approvalRequested: false,
+    });
+    expect(status.message).toBe(E2EE_APPROVAL_AWAITING_NODE_MESSAGE);
+    expect(status.message).toMatch(/do not approve/i);
+    expect(status.comparison).toBeNull();
+  });
+
+  it("offers the request, then names the full number to match once it is made", () => {
+    const before = qrSession();
+    expect(
+      deriveE2eeApprovalRequestStatus({
+        session: before,
+        stage: verificationView(before).view.stage,
+        approvalRequested: false,
+      }),
+    ).toEqual({ message: E2EE_APPROVAL_INTRO_MESSAGE, tone: "neutral", comparison: null });
+
+    const requested = session({
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-qr",
+        localRecordState: "unverified",
+      },
+    });
+    const status = deriveE2eeApprovalRequestStatus({
+      session: requested,
+      stage: verificationView(requested).view.stage,
+      approvalRequested: true,
+    });
+    expect(status.message).toBe(E2EE_APPROVAL_REQUESTED_MESSAGE);
+    expect(status.tone).toBe("success");
+    expect(status.comparison).not.toBeNull();
+    expect(status.comparison).toEqual(deriveE2eeApprovalComparison(requested));
+  });
+
+  it("claims no request for a handle whose record never sent a pairing hello", () => {
+    // A legacy consent's no-pin record and a verified pin carry a handle too.
+    // Neither is on Desktop's pending list, so neither may say approval was
+    // requested or show a number to match against a row that does not exist.
+    const legacy = session({
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-legacy",
+        localRecordState: "unpinned",
+      },
+    });
+    const changedPin = session({
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-pin",
+        localRecordState: "verified",
+      },
+      pinVerified: true,
+      presented: null,
+      event: { kind: "identity-change" },
+    });
+    for (const state of [legacy, changedPin]) {
+      expect(isE2eeApprovalRequested(state)).toBe(false);
+      expect(deriveE2eeApprovalComparison(state)).toBeNull();
+      const status = deriveE2eeApprovalRequestStatus({
+        session: state,
+        stage: verificationView(state).view.stage,
+        approvalRequested: isE2eeApprovalRequested(state),
+      });
+      expect(status.message).not.toBe(E2EE_APPROVAL_REQUESTED_MESSAGE);
+      expect(status.message).not.toBe(E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE);
+    }
+
+    const pending = session({
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-qr",
+        localRecordState: "unverified",
+      },
+    });
+    expect(isE2eeApprovalRequested(pending)).toBe(true);
+  });
+
+  it("moves a legacy consent's no-pin record into pairing when approval is requested", async () => {
+    const beginPairing = vi.spyOn(mobileE2eeTrustStore, "beginPairing");
+    const intoPairing = vi.spyOn(mobileE2eeTrustStore, "beginPairingForRecord").mockResolvedValue();
+    const legacy = qrSession();
+    await expect(
+      requestE2eeApproval({
+        ...legacy,
+        selection: {
+          ...legacy.selection!,
+          localNodeHandle: "handle-legacy",
+          localRecordState: "unpinned",
+        },
+      }),
+    ).resolves.toBeNull();
+    expect(intoPairing).toHaveBeenCalledWith({
+      hubOrigin: HUB,
+      accountId: ACCOUNT,
+      localNodeHandle: "handle-legacy",
+    });
+    expect(beginPairing).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it("writes nothing for a request already pending, and refuses a verified pin", async () => {
+    const beginPairing = vi.spyOn(mobileE2eeTrustStore, "beginPairing");
+    const intoPairing = vi.spyOn(mobileE2eeTrustStore, "beginPairingForRecord");
+    const base = qrSession();
+    const withRecord = (localRecordState: "unverified" | "verified") => ({
+      ...base,
+      selection: { ...base.selection!, localNodeHandle: "handle-qr", localRecordState },
+    });
+    await expect(requestE2eeApproval(withRecord("unverified"))).resolves.toBeNull();
+    await expect(requestE2eeApproval(withRecord("verified"))).resolves.toBe(
+      E2EE_VERIFICATION_UNAVAILABLE,
+    );
+    expect(beginPairing).not.toHaveBeenCalled();
+    expect(intoPairing).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it("withdraws only a pending request, by the selection's own handle", async () => {
+    const cancelPairing = vi.spyOn(mobileE2eeTrustStore, "cancelPairing").mockResolvedValue();
+    const base = qrSession();
+    const withRecord = (localRecordState: "unverified" | "unpinned") => ({
+      ...base,
+      selection: { ...base.selection!, localNodeHandle: "handle-qr", localRecordState },
+    });
+
+    await expect(cancelE2eeApprovalRequest(withRecord("unverified"))).resolves.toBeNull();
+    expect(cancelPairing).toHaveBeenCalledWith({
+      hubOrigin: HUB,
+      accountId: ACCOUNT,
+      localNodeHandle: "handle-qr",
+    });
+
+    cancelPairing.mockClear();
+    await expect(cancelE2eeApprovalRequest(withRecord("unpinned"))).resolves.toBe(
+      E2EE_APPROVAL_CANCEL_UNAVAILABLE,
+    );
+    await expect(cancelE2eeApprovalRequest(base)).resolves.toBe(E2EE_APPROVAL_CANCEL_UNAVAILABLE);
+    expect(cancelPairing).not.toHaveBeenCalled();
+
+    cancelPairing.mockRejectedValue(new Error("refused"));
+    await expect(cancelE2eeApprovalRequest(withRecord("unverified"))).resolves.toBe(
+      E2EE_APPROVAL_CANCEL_UNAVAILABLE,
+    );
+    vi.restoreAllMocks();
+  });
+
   it("rejects a copied code for another phone or stale statement before any trust write", async () => {
     const beginPairing = vi.spyOn(mobileE2eeTrustStore, "beginPairing");
     const promote = vi.spyOn(mobileE2eeTrustStore, "promote");
@@ -923,7 +1174,11 @@ describe("one-scan cross-device approval", () => {
 describe("the owner-facing confirmations say what they are confirming", () => {
   function confirmations(): readonly E2eeTrustAction[] {
     const state = session({
-      selection: { ...session().selection!, localNodeHandle: "handle-1" },
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-1",
+        localRecordState: "unverified",
+      },
       event: { kind: "unexpected-node", situation: 1, evidence: "none" },
     });
     const view = securityView(state, { unreadable: true });
@@ -1077,7 +1332,11 @@ describe("§13.3's owner-initiated re-pair", () => {
   it("is offered only for a selection this device already has a record for", () => {
     expect(securityView(session()).rePair).toBeNull();
     const withHandle = session({
-      selection: { ...session().selection!, localNodeHandle: "handle-1" },
+      selection: {
+        ...session().selection!,
+        localNodeHandle: "handle-1",
+        localRecordState: "unverified",
+      },
     });
     const action = securityView(withHandle).rePair;
     expect(action?.id).toBe("re-pair");

@@ -35,6 +35,7 @@ import type {
   E2eePrekeyView,
   E2eeSessionView,
 } from "./e2eeOperatorContract.ts";
+import { HubIdentityInUseError } from "./HubConnector.ts";
 import type { HubConnectorE2eeOperator } from "./HubConnectorLive.ts";
 import type { HubIdentityRuntimeShape, NodeE2eeContinuityStatus } from "./HubIdentityRuntime.ts";
 import type {
@@ -144,6 +145,7 @@ function recordView(record: NodeClientAuthorizationRecord): E2eeClientRecordView
     safetyNumber: record.safetyNumber,
     ...(record.displayLabel === undefined ? {} : { displayLabel: record.displayLabel }),
     pairingReserved: record.pairingReserved,
+    ...(record.observedRole === undefined ? {} : { observedRole: record.observedRole }),
   };
 }
 
@@ -236,6 +238,16 @@ function prekeyView(certificate: NodeE2eePrekeyCertificate | null, now: number):
   };
 }
 
+/**
+ * What the continuity read answers in a backend that does not own the identity.
+ *
+ * Reading the chain can repair it, so only the owner reads it — but refusing
+ * the read outright left the owner's panel with a generic failure in place of
+ * every other read beside it, and no word about the other copy.
+ */
+export const E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY =
+  "Another copy of Ryco is using this machine's Hub identity, and only that copy reads the continuity chain, because reading it can repair it. Read it there, or stop that copy and read it here.";
+
 function continuityView(status: NodeE2eeContinuityStatus): E2eeContinuityView {
   if (status.status === "unavailable") {
     return {
@@ -320,6 +332,17 @@ export function makeNodeE2eeOperator(options: {
     | undefined;
   /** Republish the signed statement after any mutation of advertised material. */
   readonly onAdvertisementChanged?: () => Promise<void>;
+  /**
+   * Run a command that changes durable E2EE state as the identity's owner, or
+   * refuse it (`HubConnector.asIdentityOwner`).
+   *
+   * Every mutation below is a commit another local backend sharing the state
+   * directory would read, and the authority reductions among them are §13.6's
+   * and §12.6's commit-then-sweep: committed by a backend that does not own the
+   * identity, they would sweep that backend's channels — none — and acknowledge
+   * while the owner's live channels kept the withdrawn authority.
+   */
+  readonly asIdentityOwner?: <A>(operation: () => Promise<A>) => Promise<A>;
   readonly now?: () => number;
 }): HubConnectorE2eeOperator {
   const now = options.now ?? Date.now;
@@ -327,6 +350,8 @@ export function makeNodeE2eeOperator(options: {
   const admin = () => identity.e2eeAuthorizationAdmin;
   const liveUndersizedConnection = options.undersizedConnection ?? (() => undefined);
   const advertisementChanged = options.onAdvertisementChanged ?? (() => Promise.resolve());
+  const owned: <A>(operation: () => Promise<A>) => Promise<A> =
+    options.asIdentityOwner ?? ((operation) => operation());
 
   /**
    * Read the listing AFTER the mutation that changed it.
@@ -338,7 +363,7 @@ export function makeNodeE2eeOperator(options: {
    */
   const listing = async (): Promise<E2eeClientListingView> => listingView(await admin().list());
 
-  return {
+  const operator: HubConnectorE2eeOperator = {
     listClients: listing,
     getClient: async (key) => {
       const record = await admin().get(authorizationKey(key));
@@ -468,5 +493,35 @@ export function makeNodeE2eeOperator(options: {
       // zeroes counters and the ring, and this pair is a property of the
       // connection the node is on, which the command does not touch.
       fallbackView(await identity.resetE2eeFallbackState(), liveUndersizedConnection()),
+  };
+
+  // Every command that changes durable state, or signs as the node, goes
+  // through the owner gate. So does the continuity read, which runs §7.5's
+  // repairs — a mint, a restore from the anchor, a recorded chain break — as it
+  // reads; refused, it answers `identity_in_use` rather than failing, so the
+  // reads beside it still reach the owner. The other reads, and clearing this
+  // process's own in-memory refusal count, do not: the prekey read reports the
+  // stored certificate without issuing one.
+  return {
+    ...operator,
+    readContinuity: () =>
+      owned(() => operator.readContinuity()).catch((error: unknown): E2eeContinuityView => {
+        if (!(error instanceof HubIdentityInUseError)) throw error;
+        return { status: "identity_in_use", remedy: E2EE_CONTINUITY_IDENTITY_IN_USE_REMEDY };
+      }),
+    approveClient: (input) => owned(() => operator.approveClient(input)),
+    narrowClient: (input) => owned(() => operator.narrowClient(input)),
+    revokeClient: (key) => owned(() => operator.revokeClient(key)),
+    purgeClient: (key) => owned(() => operator.purgeClient(key)),
+    createClientApprovalQr: (key) => owned(() => operator.createClientApprovalQr(key)),
+    openPairingWindow: (fingerprint) => owned(() => operator.openPairingWindow(fingerprint)),
+    closePairingWindow: () => owned(() => operator.closePairingWindow()),
+    applyPolicy: (proposal) => owned(() => operator.applyPolicy(proposal)),
+    recoverPolicyGeneration: () => owned(() => operator.recoverPolicyGeneration()),
+    rotatePrekey: () => owned(() => operator.rotatePrekey()),
+    adoptContinuityId: (continuityId) => owned(() => operator.adoptContinuityId(continuityId)),
+    remintContinuityId: () => owned(() => operator.remintContinuityId()),
+    breakContinuityChain: () => owned(() => operator.breakContinuityChain()),
+    resetFallback: () => owned(() => operator.resetFallback()),
   };
 }

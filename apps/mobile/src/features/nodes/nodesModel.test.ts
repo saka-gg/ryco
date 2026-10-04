@@ -5,6 +5,7 @@ import type { EnvironmentId } from "@ryco/contracts";
 import {
   buildNodeSections,
   canSelectHubNode,
+  directConnectActionLabel,
   directRoleLabel,
   directTransportLabel,
 } from "./nodesModel";
@@ -105,5 +106,25 @@ describe("Nodes model", () => {
     expect(directRoleLabel("owner")).toBe("Owner");
     expect(directRoleLabel("client")).toBe("Client");
     expect(directRoleLabel(null)).toBe("Role pending");
+  });
+});
+
+describe("directConnectActionLabel", () => {
+  it("retries a machine that rejected its pairing, next to Re-pair", () => {
+    expect(directConnectActionLabel({ connectionState: "disconnected", needsRepair: true })).toBe(
+      "Retry",
+    );
+  });
+
+  it("connects, retries, or uses a machine whose pairing holds", () => {
+    expect(directConnectActionLabel({ connectionState: "disconnected", needsRepair: false })).toBe(
+      "Connect",
+    );
+    expect(directConnectActionLabel({ connectionState: "error", needsRepair: false })).toBe(
+      "Retry",
+    );
+    expect(directConnectActionLabel({ connectionState: "connected", needsRepair: false })).toBe(
+      "Use",
+    );
   });
 });

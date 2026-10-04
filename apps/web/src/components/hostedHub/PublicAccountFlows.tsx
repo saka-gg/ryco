@@ -918,8 +918,7 @@ export function RecoveryCodeFlow({ onCancel }: { readonly onCancel: () => void }
     const submittedCode = code;
     setCode("");
     try {
-      await hostedHubApi.signInWithRecoveryCode(submittedCode);
-      await hostedHubController.bootstrap();
+      await hostedHubController.signInWithRecoveryCode(submittedCode);
     } catch (cause) {
       setError(identityError(cause, "That recovery code could not be used."));
     } finally {

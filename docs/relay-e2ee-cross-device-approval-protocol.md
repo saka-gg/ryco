@@ -47,7 +47,8 @@ serve the QR through a peer-controlled handshake and does not treat a QR scan as
    other application data is sent.
 3. The node commits the pending record under `(hubOrigin, accountId, clientFingerprint)`.
 4. The owner selects that record on a locally trusted node or Desktop security surface, compares the
-   displayed device details, selects the maximum role, and approves it.
+   displayed device details, and approves it at the role the device connects with (the node CLI's
+   `--max-role` can name another).
 5. The node commits the approved record and completes any authorization sweep before acknowledging.
 6. The owner asks the node to display an approval QR for that exact approved record.
 7. The node reads the record again, reads its active identity/continuity/policy descriptor, creates

@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RELAY_INITIAL_LIMITS,
@@ -13,9 +13,16 @@ import { e2eeSha256 } from "@ryco/shared/relayE2eeKeys";
 import { stripRelayChunkCapabilityPrelude } from "@ryco/shared/relayMessageChunks";
 
 import { DEFAULT_HUB_CONNECTOR_CONFIG, type HubConnectorConfig } from "../config.ts";
-import type { NodeE2eeAdvertisement } from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
+import type {
+  NodeE2eeAdvertisement,
+  NodeE2eeAdvertisementResult,
+} from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
 import { NODE_E2EE_FAIL_CLOSED_POLICY } from "../hubIdentity/NodeE2eePolicyStore.ts";
-import { HubRelayAuthenticationError, type HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
+import {
+  HubIdentityRuntimeError,
+  HubRelayAuthenticationError,
+  type HubIdentityRuntimeShape,
+} from "./HubIdentityRuntime.ts";
 import {
   stubCrossDeviceApprovalService,
   stubIdentityE2eeAdmin,
@@ -247,7 +254,11 @@ function scheduler() {
       await Promise.resolve();
     }
   };
-  return { value, timers, advance };
+  /** Move the clock without firing timers — time spent inside an awaited call. */
+  const skip = (milliseconds: number) => {
+    now += milliseconds;
+  };
+  return { value, timers, advance, skip };
 }
 
 const enabledConfig: HubConnectorConfig = {
@@ -283,6 +294,68 @@ describe("HubConnector", () => {
     await connector.start();
     expect(connector.status().state).toBe("disabled");
     expect(opens).toBe(0);
+    await connector.stop();
+  });
+
+  it("opens no relay socket until the process is handed to the Hub", async () => {
+    // A standby connector that gains its identity in this process must close
+    // external Agent Control integrations before it becomes reachable.
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let handOff!: () => void;
+    const handedOff = new Promise<void>((resolve) => {
+      handOff = resolve;
+    });
+    let refuse = false;
+    const beforeConnect = vi.fn(async () => {
+      if (refuse) throw new Error("external listener did not close");
+      await handedOff;
+    });
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      beforeConnect,
+    });
+    const starting = connector.start();
+    await settle();
+    expect(beforeConnect).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(0);
+
+    handOff();
+    await settle();
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await starting;
+    expect(connector.status().state).toBe("online");
+
+    // A hand-off that fails ends the attempt before any socket opens.
+    refuse = true;
+    sockets[0]!.emit("close", {} as CloseEvent);
+    await settle();
+    await clock.advance(1_000);
+    await settle();
+    expect(beforeConnect).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(1);
+    expect(connector.status().state).toBe("degraded");
     await connector.stop();
   });
 
@@ -480,6 +553,190 @@ describe("HubConnector", () => {
     expect(revocations).toHaveLength(1);
     await connector.stop();
     expect(connector.e2eeSnapshot().accountGrantReady).toBe(false);
+  });
+
+  describe("E2EE statement republication", () => {
+    async function minor3Connector(
+      readE2eeAdvertisement: HubIdentityRuntimeShape["readE2eeAdvertisement"],
+    ) {
+      const clock = scheduler();
+      const socket = new FakeSocket();
+      const activeIdentity = identity();
+      const connector = new HubConnector({
+        config: enabledConfig,
+        identity: identity({
+          createRelayAuthenticationFrame: async () => {
+            const frame = await activeIdentity.createRelayAuthenticationFrame(
+              "https://relay.example",
+              { protocolMajor: 1, protocolMinor: 3 },
+            );
+            return { ...frame, protocolMinor: 3 } as RelayNodeAuthHandshake;
+          },
+          readE2eeAdvertisement,
+        }),
+        transport: { open: () => socket },
+        channels: { open: async () => Promise.reject(new Error("unused")) },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+      });
+      const starting = connector.start();
+      await settle();
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "ready",
+          protocolMajor: 1,
+          protocolMinor: 3,
+          limits: RELAY_INITIAL_LIMITS,
+        }),
+      } as MessageEvent);
+      await starting;
+      await settle();
+      const statementsSent = () =>
+        socket.sent
+          .map((bytes) => decodeRelayFrame(bytes))
+          .filter((result) => result.ok && result.value.type === "node.e2ee.statement").length;
+      // The Hub's heartbeat, so a long wait is not mistaken for a dead socket.
+      const advance = async (milliseconds: number) => {
+        socket.emit("message", {
+          data: encoded({
+            type: "ping",
+            protocolMajor: 1,
+            protocolMinor: 3,
+            nonce: new Uint8Array(8).fill(9),
+          }),
+        } as MessageEvent);
+        await settle();
+        await clock.advance(milliseconds);
+        await settle();
+      };
+      return { clock, connector, statementsSent, advance };
+    }
+
+    it("retries an advertisement it could not build instead of waiting for a reconnect", async () => {
+      let unavailable = 2;
+      const { clock, connector, statementsSent, advance } = await minor3Connector(async () =>
+        unavailable-- > 0
+          ? { kind: "unavailable" as const, reason: "identity_unavailable" as const }
+          : { kind: "available" as const, advertisement: e2eeAdvertisement(1, 2_000_000) },
+      );
+      expect(connector.status().state).toBe("online");
+      expect(statementsSent()).toBe(0);
+
+      await advance(30_000);
+      expect(statementsSent()).toBe(0);
+      // Backing off: the second attempt is a minute after the first.
+      await advance(30_000);
+      expect(statementsSent()).toBe(0);
+      await advance(30_000);
+      expect(statementsSent()).toBe(1);
+      expect(connector.e2eeSnapshot().currentStatementDigest).toBeDefined();
+      expect(connector.status().state).toBe("online");
+      await connector.stop();
+      expect(clock.timers.size).toBe(0);
+    });
+
+    it("retries a republish that threw instead of closing every live channel", async () => {
+      let calls = 0;
+      let failing = 0;
+      const { clock, connector, statementsSent } = await minor3Connector(async () => {
+        calls += 1;
+        if (failing > 0) {
+          failing -= 1;
+          throw new Error("send queue full");
+        }
+        return { kind: "available" as const, advertisement: e2eeAdvertisement(calls, 2_000_000) };
+      });
+      expect(statementsSent()).toBe(1);
+
+      failing = 1;
+      await expect(connector.refreshE2eeState()).rejects.toThrow();
+      await settle();
+      // Withdrawn, but the connection — and every channel on it — stays up.
+      expect(connector.status().state).toBe("online");
+      expect(connector.e2eeSnapshot().currentStatementDigest).toBeUndefined();
+      await clock.advance(1_000);
+      await settle();
+      expect(statementsSent()).toBe(2);
+      expect(connector.status().state).toBe("online");
+
+      // A failure that persists is a wedged control path, and is rebuilt.
+      failing = 3;
+      await expect(connector.refreshE2eeState()).rejects.toThrow();
+      await settle();
+      await clock.advance(1_000);
+      await settle();
+      expect(connector.status().state).toBe("online");
+      await clock.advance(2_000);
+      await settle();
+      expect(connector.status()).toMatchObject({ state: "degraded", failure: "internal_error" });
+      await connector.stop();
+    });
+
+    /** Answers each advertisement read from `script` in turn; `throw` is a republish that threw. */
+    const scripted =
+      (script: ("available" | "unavailable" | "throw")[]) =>
+      async (): Promise<NodeE2eeAdvertisementResult> => {
+        const next = script.shift() ?? "available";
+        if (next === "throw") throw new Error("send queue full");
+        return next === "unavailable"
+          ? { kind: "unavailable", reason: "identity_unavailable" }
+          : { kind: "available", advertisement: e2eeAdvertisement(script.length, 2_000_000) };
+      };
+
+    it("rebuilds the connection only for failures that are consecutive", async () => {
+      // Each throw is followed by an attempt that completed — it found the
+      // statement could not be built yet — so no two of them are a run.
+      const script: ("available" | "unavailable" | "throw")[] = [
+        "available",
+        "throw",
+        "unavailable",
+        "throw",
+        "unavailable",
+        "throw",
+        "available",
+      ];
+      const { connector, statementsSent, advance } = await minor3Connector(scripted(script));
+      await expect(connector.refreshE2eeState()).rejects.toThrow();
+      for (let step = 0; step < 40 && script.length > 0; step += 1) {
+        expect(connector.status().state).toBe("online");
+        await advance(30_000);
+      }
+      expect(script).toEqual([]);
+      expect(connector.status().state).toBe("online");
+      expect(statementsSent()).toBe(2);
+      await connector.stop();
+    });
+
+    it("keeps the unavailable and failure schedules from stretching each other", async () => {
+      const script: ("available" | "unavailable" | "throw")[] = [
+        "available",
+        "throw",
+        "unavailable",
+        "unavailable",
+        "throw",
+        "available",
+      ];
+      const { clock, connector, statementsSent, advance } = await minor3Connector(scripted(script));
+      await expect(connector.refreshE2eeState()).rejects.toThrow();
+      await clock.advance(1_000);
+      await settle();
+      expect(script).toHaveLength(3);
+      // The first unavailable retry, not one a step further for the throw before it.
+      await advance(30_000);
+      expect(script).toHaveLength(2);
+      await advance(30_000);
+      await advance(30_000);
+      expect(script).toHaveLength(1);
+      // The first failure retry, not one stretched by the unavailable ones.
+      await clock.advance(1_000);
+      await settle();
+      expect(script).toEqual([]);
+      expect(statementsSent()).toBe(2);
+      expect(connector.status().state).toBe("online");
+      await connector.stop();
+    });
   });
 
   it("retries a transient proof preflight with fresh material and one timer", async () => {
@@ -1171,12 +1428,27 @@ describe("HubConnector", () => {
     await connector.stop();
   });
 
-  it("requires operator action for fresh-proof authentication failure", async () => {
-    const socket = new FakeSocket();
+  it("retries a refused fresh proof on its own slow schedule instead of parking", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let proofs = 0;
+    const activeIdentity = identity();
     const connector = new HubConnector({
       config: enabledConfig,
-      identity: identity(),
-      transport: { open: () => socket },
+      identity: {
+        ...activeIdentity,
+        createRelayAuthenticationFrame: async (...input) => {
+          proofs += 1;
+          return activeIdentity.createRelayAuthenticationFrame(...input);
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
       channels: {
         open: async () => {
           throw new Error("unused");
@@ -1184,11 +1456,12 @@ describe("HubConnector", () => {
       },
       enrollmentMetadata,
       livenessWatch: false,
+      scheduler: clock.value,
     });
     const starting = connector.start();
     await settle();
-    socket.emit("open", {} as Event);
-    socket.emit("message", {
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
       data: encoded({
         type: "error",
         protocolMajor: 1,
@@ -1200,8 +1473,545 @@ describe("HubConnector", () => {
     await starting;
     expect(connector.status()).toMatchObject({
       state: "degraded",
-      degradedMode: "operator_action_required",
+      degradedMode: "backing_off",
       failure: "authentication_failed",
+      reconnectAttempt: 0,
+      nextRetryAt: new Date(clock.value.now() + 1_012_500).toISOString(),
+    });
+    expect(clock.timers.size).toBe(1);
+
+    // Nothing that suggests the network moved makes a refused proof worth
+    // retrying sooner.
+    connector.nudge();
+    await settle();
+    expect(proofs).toBe(1);
+
+    await clock.advance(1_012_500);
+    await settle();
+    // A fresh challenge and a fresh proof, through the full handshake.
+    expect(proofs).toBe(2);
+    expect(sockets).toHaveLength(2);
+    await connector.stop();
+    expect(clock.timers.size).toBe(0);
+  });
+
+  it("retries a keychain that is locked at launch instead of waiting for resume", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const activeIdentity = identity();
+    let locked = true;
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: {
+        ...activeIdentity,
+        readState: async () => {
+          if (locked) throw new Error("keychain locked");
+          return activeIdentity.readState();
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    await connector.start();
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "identity_unavailable",
+      nextRetryAt: new Date(clock.value.now() + 33_000).toISOString(),
+    });
+
+    await clock.advance(33_000);
+    await settle();
+    expect(connector.status()).toMatchObject({
+      failure: "identity_unavailable",
+      reconnectAttempt: 1,
+      nextRetryAt: new Date(clock.value.now() + 60_000).toISOString(),
+    });
+    expect(sockets).toHaveLength(0);
+
+    // Unlocking the screen, or waking the machine, is when a keychain opens.
+    locked = false;
+    connector.nudge();
+    await settle();
+    expect(sockets).toHaveLength(1);
+    expect(connector.status().state).toBe("authenticating");
+    await connector.stop();
+    expect(clock.timers.size).toBe(0);
+  });
+
+  it("still parks a credential store that failed to open, which only a restart rebuilds", async () => {
+    const clock = scheduler();
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity({
+        readState: async () => {
+          throw new HubIdentityRuntimeError("identity_store_unavailable");
+        },
+      }),
+      transport: {
+        open: () => {
+          throw new Error("unused");
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    await connector.start();
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "operator_action_required",
+      failure: "identity_store_unavailable",
+    });
+    expect(clock.timers.size).toBe(0);
+    await connector.stop();
+  });
+
+  it("stays off an identity another local process holds, and takes it over when that one exits", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let otherCopyRunning = true;
+    let identityReads = 0;
+    const lockCalls: string[] = [];
+    const activeIdentity = identity();
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: {
+        ...activeIdentity,
+        readState: async () => {
+          identityReads += 1;
+          return activeIdentity.readState();
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      processLock: {
+        acquire: async () => {
+          lockCalls.push("acquire");
+          return otherCopyRunning ? "held" : "acquired";
+        },
+        release: async () => {
+          lockCalls.push("release");
+        },
+      },
+    });
+    await connector.start();
+    // Diagnosed locally: nothing was read, signed, or sent to the Hub.
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "connection_replaced",
+      nextRetryAt: new Date(clock.value.now() + 33_000).toISOString(),
+    });
+    expect(identityReads).toBe(0);
+    expect(sockets).toHaveLength(0);
+    await expect(connector.leave()).rejects.toThrow("in use by another Ryco process");
+
+    otherCopyRunning = false;
+    await clock.advance(33_000);
+    await settle();
+    expect(identityReads).toBe(1);
+    expect(sockets).toHaveLength(1);
+
+    await connector.stop();
+    expect(lockCalls.at(-1)).toBe("release");
+  });
+
+  it("keeps owner operations and deferred startup off an identity another process holds", async () => {
+    const clock = scheduler();
+    let otherCopyRunning = true;
+    const calls: string[] = [];
+    const lock = {
+      acquire: async () => {
+        calls.push("acquire");
+        return otherCopyRunning ? ("held" as const) : ("acquired" as const);
+      },
+      release: async () => {
+        calls.push("release");
+      },
+    };
+    const activeIdentity = identity();
+    const makeConnector = (config: HubConnectorConfig) =>
+      new HubConnector({
+        config,
+        identity: {
+          ...activeIdentity,
+          completeStartup: async () => {
+            calls.push("startup");
+          },
+          readState: async () => {
+            calls.push("read");
+            return activeIdentity.readState();
+          },
+        },
+        transport: { open: () => new FakeSocket() },
+        channels: { open: async () => Promise.reject(new Error("unused")) },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+        processLock: lock,
+      });
+    // The native claim, a local introduction, an E2EE owner command.
+    const ownerOperation = async () => {
+      calls.push("operation");
+      return "done";
+    };
+
+    const connector = makeConnector(enabledConfig);
+    await connector.start();
+    expect(connector.status()).toMatchObject({ failure: "connection_replaced" });
+    await expect(connector.asIdentityOwner(ownerOperation)).rejects.toThrow(
+      "in use by another Ryco process",
+    );
+    await expect(connector.enroll()).rejects.toThrow("in use by another Ryco process");
+    expect(calls).not.toContain("startup");
+    expect(calls).not.toContain("operation");
+    expect(calls).not.toContain("read");
+
+    // The other copy exited. The operation takes the identity over, and the
+    // startup work deferred for it runs before anything uses it.
+    otherCopyRunning = false;
+    calls.length = 0;
+    await expect(connector.asIdentityOwner(ownerOperation)).resolves.toBe("done");
+    expect(calls.slice(0, 3)).toEqual(["acquire", "startup", "operation"]);
+    // A running connector keeps the claim, and stops waiting out a copy that is
+    // gone: it retries at once rather than when its lock check comes round.
+    await settle();
+    expect(calls).toEqual(["acquire", "startup", "operation", "startup", "read"]);
+    expect(connector.status().failure).not.toBe("connection_replaced");
+    await connector.stop();
+
+    // A connector that is switched off hands an operation's claim straight back.
+    calls.length = 0;
+    const disabled = makeConnector(DEFAULT_HUB_CONNECTOR_CONFIG);
+    await disabled.start();
+    await expect(disabled.asIdentityOwner(ownerOperation)).resolves.toBe("done");
+    expect(calls).toEqual(["acquire", "startup", "operation", "release"]);
+    await disabled.stop();
+  });
+
+  it("asks the lock again after one it could not use, rather than keeping the identity for good", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    // Unreadable once; by the next check another process has taken it.
+    const answers = ["unavailable", "held"] as const;
+    let lockChecks = 0;
+    const operations: string[] = [];
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      processLock: {
+        acquire: async () => answers[Math.min(lockChecks++, answers.length - 1)]!,
+        release: async () => undefined,
+      },
+    });
+    const starting = connector.start();
+    await settle();
+    // An unusable lock diagnoses nothing, so this attempt carries on without it.
+    expect(sockets).toHaveLength(1);
+
+    await expect(
+      connector.asIdentityOwner(async () => {
+        operations.push("owner operation");
+      }),
+    ).rejects.toThrow("in use by another Ryco process");
+    expect(lockChecks).toBe(2);
+    expect(operations).toEqual([]);
+    await connector.stop();
+    await starting;
+  });
+
+  it("does not let a local duplicate's lock checks stretch the gap before a Hub displacement", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let lockChecks = 0;
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      processLock: {
+        // Held for the first three checks, then the other copy exits.
+        acquire: async () => (++lockChecks <= 3 ? "held" : "acquired"),
+        release: async () => undefined,
+      },
+    });
+    await connector.start();
+    for (const delayMs of [33_000, 60_000, 120_000]) {
+      expect(connector.status()).toMatchObject({ failure: "connection_replaced" });
+      await clock.advance(delayMs);
+      await settle();
+    }
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "error",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        code: "connection_replaced",
+        fatal: true,
+      }),
+    } as MessageEvent);
+    await settle();
+    // The Hub-side schedule starts at its own first step.
+    expect(connector.status()).toMatchObject({
+      degradedMode: "backing_off",
+      failure: "connection_replaced",
+      reconnectAttempt: 0,
+      nextRetryAt: new Date(clock.value.now() + 337_500).toISOString(),
+    });
+    await connector.stop();
+  });
+
+  it("spaces out a connection the Hub displaced with a bare close", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const starting = connector.start();
+    await settle();
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await starting;
+    sockets[0]!.emit("close", { code: 1012, reason: "connection_replaced" } as CloseEvent);
+    await settle();
+    // Not the one-second network retry that would displace the other copy right back.
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "connection_replaced",
+      nextRetryAt: new Date(clock.value.now() + 337_500).toISOString(),
+    });
+    await clock.advance(60_000);
+    await settle();
+    expect(sockets).toHaveLength(1);
+    await connector.stop();
+  });
+
+  it("lets two processes sharing an identity converge instead of swapping forever", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const replaceLatest = async () => {
+      const socket = sockets.at(-1)!;
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "ready",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          limits: RELAY_INITIAL_LIMITS,
+        }),
+      } as MessageEvent);
+      await settle();
+      socket.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code: "connection_replaced",
+          fatal: true,
+        }),
+      } as MessageEvent);
+      await settle();
+    };
+
+    const starting = connector.start();
+    await settle();
+    await replaceLatest();
+    await starting;
+    // Three displacements an hour, each at least five minutes apart...
+    for (const [delayMs, attempt] of [
+      [337_500, 0],
+      [600_000, 1],
+      [787_500, 2],
+    ] as const) {
+      expect(connector.status()).toMatchObject({
+        state: "degraded",
+        degradedMode: "backing_off",
+        failure: "connection_replaced",
+        reconnectAttempt: attempt,
+        nextRetryAt: new Date(clock.value.now() + delayMs).toISOString(),
+      });
+      connector.nudge();
+      await settle();
+      expect(sockets).toHaveLength(attempt + 1);
+      await clock.advance(delayMs);
+      await settle();
+      expect(sockets).toHaveLength(attempt + 2);
+      await replaceLatest();
+    }
+    // ...then this copy stops and leaves the other one connected.
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "operator_action_required",
+      failure: "connection_replaced",
+    });
+    expect(clock.timers.size).toBe(0);
+
+    // An owner who stopped the other copy and pressed Retry gets a fresh budget.
+    const resuming = connector.resume();
+    await settle();
+    expect(sockets).toHaveLength(5);
+    await replaceLatest();
+    await resuming;
+    expect(connector.status()).toMatchObject({
+      degradedMode: "backing_off",
+      failure: "connection_replaced",
+    });
+    await connector.stop();
+  });
+
+  it("retries a rejected proof that may have outlived its challenge exactly once", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const activeIdentity = identity();
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: {
+        ...activeIdentity,
+        createRelayAuthenticationFrame: async (...input) => {
+          // A keychain prompt the owner took 25 seconds to answer.
+          clock.skip(25_000);
+          return activeIdentity.createRelayAuthenticationFrame(...input);
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const rejectLatest = () => {
+      const socket = sockets.at(-1)!;
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code: "authentication_failed",
+          fatal: true,
+        }),
+      } as MessageEvent);
+    };
+
+    const starting = connector.start();
+    await settle();
+    rejectLatest();
+    await starting;
+    await settle();
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "authentication_timeout",
+    });
+
+    await clock.advance(1_000);
+    await settle();
+    expect(sockets).toHaveLength(2);
+    rejectLatest();
+    await settle();
+    // The second is taken at its word — but on the refused-proof schedule, a
+    // quarter of an hour away, not the one-second network backoff.
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "authentication_failed",
+      nextRetryAt: new Date(clock.value.now() + 1_012_500).toISOString(),
+    });
+
+    // An owner who answered the prompt and pressed Retry gets the free retry
+    // back, rather than going straight to the quarter-hour schedule.
+    const resuming = connector.resume();
+    await settle();
+    expect(sockets).toHaveLength(3);
+    rejectLatest();
+    await resuming;
+    await settle();
+    expect(connector.status()).toMatchObject({
+      degradedMode: "backing_off",
+      failure: "authentication_timeout",
     });
     await connector.stop();
   });
@@ -1889,5 +2699,22 @@ describe("HubConnector", () => {
     expect(await connector.identitySummary()).toEqual({ enrolled: "active", fingerprint });
     expect(JSON.stringify(await connector.identitySummary())).not.toContain("publicKey");
     expect(JSON.stringify(await connector.identitySummary())).not.toContain("secretName");
+  });
+
+  it("reports enrollment without opening key custody when the fingerprint is not wanted", async () => {
+    // Desktop probes reachability every minute; the fingerprint is derived from
+    // the private key, which that probe must not load.
+    const readActiveFingerprint = vi.fn(async () => `SHA256:${"A".repeat(43)}`);
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity({ readActiveFingerprint }),
+      transport: { open: () => new FakeSocket() },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+    });
+
+    expect(await connector.identitySummary({ fingerprint: false })).toEqual({ enrolled: "active" });
+    expect(readActiveFingerprint).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,8 @@
 import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveHostedRpcCapability } from "./capabilities";
+import { hostedSessionAdmits, resolveHostedRpcCapability } from "./capabilities";
+import { resolveHostedDeliveryNotice } from "./deliveryNotice";
 
 describe("hosted UI capabilities", () => {
   it("keeps standard direct and desktop behavior unchanged", () => {
@@ -59,5 +60,69 @@ describe("hosted UI capabilities", () => {
     expect(allowed("operator", WS_METHODS.serverGetStatistics)).toBe(false);
     expect(allowed("owner", WS_METHODS.serverGetStatistics)).toBe(true);
     expect(allowed("owner", WS_METHODS.subscribeAuthAccess)).toBe(false);
+  });
+});
+
+describe("hosted session admission", () => {
+  it("admits everything in a ready session", () => {
+    const ready = { sessionStatus: "ready", sessionRecoveredAfterUnknown: false } as const;
+    expect(hostedSessionAdmits(ready, WS_METHODS.terminalWrite)).toBe(true);
+    expect(hostedSessionAdmits(ready, WS_METHODS.projectsReadFile)).toBe(true);
+  });
+
+  it("admits only reads after recovering with unconfirmed delivery", () => {
+    const recovered = {
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: true,
+    } as const;
+    expect(hostedSessionAdmits(recovered, WS_METHODS.projectsReadFile)).toBe(true);
+    expect(hostedSessionAdmits(recovered, WS_METHODS.vcsReadLocalChanges)).toBe(true);
+    expect(hostedSessionAdmits(recovered, ORCHESTRATION_WS_METHODS.getThreadWindow)).toBe(true);
+    expect(hostedSessionAdmits(recovered, WS_METHODS.terminalWrite)).toBe(false);
+    expect(hostedSessionAdmits(recovered, ORCHESTRATION_WS_METHODS.dispatchCommand)).toBe(false);
+    expect(
+      hostedSessionAdmits(
+        { sessionStatus: "delivery-unknown", sessionRecoveredAfterUnknown: false },
+        WS_METHODS.projectsReadFile,
+      ),
+    ).toBe(false);
+    expect(
+      hostedSessionAdmits(
+        { sessionStatus: "stale", sessionRecoveredAfterUnknown: false },
+        WS_METHODS.projectsReadFile,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("hosted delivery notice", () => {
+  it("is absent unless delivery is unconfirmed", () => {
+    expect(
+      resolveHostedDeliveryNotice({ sessionStatus: "ready", sessionRecoveredAfterUnknown: false }),
+    ).toBeNull();
+    expect(
+      resolveHostedDeliveryNotice({ sessionStatus: "stale", sessionRecoveredAfterUnknown: false }),
+    ).toBeNull();
+  });
+
+  it("waits for the replacement session before offering to continue", () => {
+    expect(
+      resolveHostedDeliveryNotice(
+        { sessionStatus: "delivery-unknown", sessionRecoveredAfterUnknown: false },
+        "Studio Mac",
+      ),
+    ).toMatchObject({ canAcknowledge: false, actionLabel: "Synchronizing…" });
+    const recovered = resolveHostedDeliveryNotice(
+      { sessionStatus: "delivery-unknown", sessionRecoveredAfterUnknown: true },
+      "Studio Mac",
+    );
+    expect(recovered).toMatchObject({ canAcknowledge: true, actionLabel: "Continue" });
+    expect(recovered?.description).toContain("Studio Mac");
+    expect(
+      resolveHostedDeliveryNotice(
+        { sessionStatus: "delivery-unknown", sessionRecoveredAfterUnknown: true },
+        "  ",
+      )?.description,
+    ).toContain("this machine");
   });
 });

@@ -39,6 +39,7 @@ import {
   hostedHubController,
   hostedHubStore,
   useHostedAccountStore,
+  useHostedHubStore,
 } from "../../hostedHub/state";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
@@ -60,6 +61,7 @@ import {
   type NativeIdentityCompletionJournal,
 } from "./completionJournal";
 import { cancelVerifiedEmailAttempt } from "./nativeIdentityCancellation";
+import { deriveSavedHubSessionView } from "./savedHubSessionModel";
 import {
   mailboxCodePrompt,
   PRIVATE_MAILBOX_PRESENTATION,
@@ -334,6 +336,28 @@ export function NativeIdentityScreen() {
   );
   const browserSignInAction = deriveHostedBrowserSignInAction();
   const externalProviderActions = deriveHostedProviderSignInActions(externalIdentityConfiguration);
+  const hostedAccountStatus = useHostedHubStore((state) => state.accountStatus);
+  const hostedErrorReason = useHostedHubStore((state) => state.errorReason ?? null);
+  const hostedAccessRetrying = useHostedHubStore((state) => state.accessRecoveryPending === true);
+  const [signInRequested, setSignInRequested] = useState(false);
+  const [retryingSavedSession, setRetryingSavedSession] = useState(false);
+  // A launch that could not reach the Hub keeps the stored session; the shared
+  // runtime retries it on its own (when the failure is transient) and on
+  // foreground/online. Show that instead of a sign-in form the user does not
+  // need. Only the token's presence is read, and only for presentation.
+  const savedSession = deriveSavedHubSessionView({
+    accountStatus: hostedAccountStatus,
+    errorReason: hostedErrorReason,
+    retrying: hostedAccessRetrying,
+    savedSession: (mobileSessionCredentials.readBearerToken?.() ?? null) !== null,
+    entryScreen: screen.name === "entry",
+    signInRequested,
+  });
+  const retrySavedSession = () => {
+    if (retryingSavedSession) return;
+    setRetryingSavedSession(true);
+    void hostedHubController.bootstrap().finally(() => setRetryingSavedSession(false));
+  };
 
   const origin = profile?.origin ?? buildConfig?.hubOrigin ?? null;
   const nativePolicy = capability?.nativeIdentity;
@@ -404,9 +428,10 @@ export function NativeIdentityScreen() {
         if (journal?.phase === "recovery-pending") {
           setScreen({ name: "recovery-codes", journal });
         } else if (journal?.phase === "credential-committed") {
-          if (await completionJournal.commitCredential(journal)) {
-            await hostedHubController.bootstrap();
-          } else if (active) {
+          const committed = await hostedHubController.adoptSessionCredential(() =>
+            completionJournal.commitCredential(journal),
+          );
+          if (!committed && active) {
             setError("Ryco could not save the Hub credential. Try again.");
           }
         } else {
@@ -517,10 +542,15 @@ export function NativeIdentityScreen() {
       setScreen({ name: "recovery-codes", journal });
       return;
     }
-    if (!(await completionJournal.commitCredential(journal))) {
+    // Committed through the controller: an access check of the session this
+    // replaces may still be in flight, and its answer must not land on this one.
+    if (
+      !(await hostedHubController.adoptSessionCredential(() =>
+        completionJournal.commitCredential(journal),
+      ))
+    ) {
       throw new Error("credential persistence failed");
     }
-    await hostedHubController.bootstrap();
   };
 
   const antiBotAssertion = (): string | null => {
@@ -778,27 +808,29 @@ export function NativeIdentityScreen() {
   };
 
   const title =
-    screen.name === "entry"
-      ? "Log in or sign up"
-      : screen.name === "reset-request"
-        ? "Reset your password"
-        : screen.name === "mailbox" || screen.name === "reset-mailbox"
-          ? "Check your email"
-          : screen.name === "username"
-            ? "Choose a username"
-            : screen.name === "credential"
-              ? "Secure your account"
-              : screen.name === "factor"
-                ? screen.factor === "totp"
-                  ? "Enter your authenticator code"
-                  : "Enter your email code"
-                : screen.name === "recovery"
-                  ? "Use a recovery code"
-                  : screen.name === "reset-password"
-                    ? "Set a new password"
-                    : screen.name === "recovery-codes"
-                      ? "Save your recovery codes"
-                      : "Enter your password";
+    savedSession.kind === "saved-session"
+      ? savedSession.title
+      : screen.name === "entry"
+        ? "Log in or sign up"
+        : screen.name === "reset-request"
+          ? "Reset your password"
+          : screen.name === "mailbox" || screen.name === "reset-mailbox"
+            ? "Check your email"
+            : screen.name === "username"
+              ? "Choose a username"
+              : screen.name === "credential"
+                ? "Secure your account"
+                : screen.name === "factor"
+                  ? screen.factor === "totp"
+                    ? "Enter your authenticator code"
+                    : "Enter your email code"
+                  : screen.name === "recovery"
+                    ? "Use a recovery code"
+                    : screen.name === "reset-password"
+                      ? "Set a new password"
+                      : screen.name === "recovery-codes"
+                        ? "Save your recovery codes"
+                        : "Enter your password";
 
   return (
     <KeyboardAvoidingView
@@ -821,16 +853,23 @@ export function NativeIdentityScreen() {
             {title}
           </Text>
           <Text className="mx-auto mt-2 max-w-[330px] text-center text-sm leading-relaxed text-foreground-muted">
-            {screen.name === "recovery-codes"
-              ? "Store these somewhere safe. Each code works once."
-              : screen.name === "reset-request"
-                ? "Verify the account before choosing a new password."
-                : screen.name === "mailbox" || screen.name === "reset-mailbox"
-                  ? mailboxCodePrompt(screen.presentation)
-                  : "Native account access on Ryco Hub"}
+            {savedSession.kind === "saved-session"
+              ? savedSession.detail
+              : screen.name === "recovery-codes"
+                ? "Store these somewhere safe. Each code works once."
+                : screen.name === "reset-request"
+                  ? "Verify the account before choosing a new password."
+                  : screen.name === "mailbox" || screen.name === "reset-mailbox"
+                    ? mailboxCodePrompt(screen.presentation)
+                    : "Native account access on Ryco Hub"}
           </Text>
+          {savedSession.kind === "saved-session" ? (
+            <Text className="mx-auto mt-3 max-w-[330px] text-center text-sm leading-relaxed text-foreground-muted">
+              {savedSession.note}
+            </Text>
+          ) : null}
 
-          {error ? (
+          {error && savedSession.kind !== "saved-session" ? (
             <View className="mt-5">
               <ErrorBanner message={error} />
             </View>
@@ -838,7 +877,26 @@ export function NativeIdentityScreen() {
           {notice ? <Text className="mt-4 text-center text-sm text-success">{notice}</Text> : null}
 
           <View className="mt-7 gap-3">
-            {screen.name === "entry" ? (
+            {savedSession.kind === "saved-session" ? (
+              <>
+                <Action
+                  label="Try again"
+                  disabled={retryingSavedSession}
+                  onPress={retrySavedSession}
+                />
+                <Action
+                  label="Sign in another way"
+                  quiet
+                  onPress={() => setSignInRequested(true)}
+                />
+                <View className="mt-0.5 items-center">
+                  <EntryOption
+                    label="Add a machine"
+                    onPress={() => navigation.navigate("ConnectionsNew" as never)}
+                  />
+                </View>
+              </>
+            ) : screen.name === "entry" ? (
               <>
                 <AppTextInput
                   accessibilityLabel="Email or username"
@@ -1285,10 +1343,14 @@ export function NativeIdentityScreen() {
                     void run(async () => {
                       if (screen.name !== "recovery-codes") return;
                       const committed = await completionJournal.acknowledgeRecovery(screen.journal);
-                      if (!committed || !(await completionJournal.commitCredential(committed))) {
+                      if (
+                        !committed ||
+                        !(await hostedHubController.adoptSessionCredential(() =>
+                          completionJournal.commitCredential(committed),
+                        ))
+                      ) {
                         throw new Error("credential persistence failed");
                       }
-                      await hostedHubController.bootstrap();
                     })
                   }
                 />
@@ -1296,7 +1358,11 @@ export function NativeIdentityScreen() {
             ) : null}
           </View>
 
-          {busy ? <ActivityIndicator className="mt-5" /> : null}
+          {busy ||
+          (savedSession.kind === "saved-session" &&
+            (savedSession.waiting || retryingSavedSession)) ? (
+            <ActivityIndicator className="mt-5" />
+          ) : null}
         </View>
       </ScrollView>
 

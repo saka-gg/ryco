@@ -5,6 +5,15 @@ import { render } from "vitest-browser-react";
 import { DesktopAccountConnect } from "./DesktopAccountConnect";
 
 const state = vi.hoisted(() => ({ status: "signed-out" }));
+const launchConfig = (hostedIdentitySupported: boolean) =>
+  vi.fn().mockResolvedValue({
+    enabled: false,
+    origin: "https://app.ryco.space",
+    nodeName: null,
+    allowFileSecretStore: false,
+    fileSecretStoreFallbackSupported: true,
+    hostedIdentitySupported,
+  });
 vi.mock("../platform/desktopWorkspace", () => ({ useDesktopWorkspaceState: () => state }));
 
 let mounted: Awaited<ReturnType<typeof render>> | undefined;
@@ -25,7 +34,7 @@ describe("desktop account onboarding", () => {
     const connect = vi.fn(() => pending);
     Object.defineProperty(window, "desktopBridge", {
       configurable: true,
-      value: { connectHostedIdentity: connect },
+      value: { connectHostedIdentity: connect, getHubLaunchConfig: launchConfig(true) },
     });
     mounted = await render(<DesktopAccountConnect />);
     expect(connect).not.toHaveBeenCalled();
@@ -46,9 +55,22 @@ describe("desktop account onboarding", () => {
     const connect = vi.fn();
     Object.defineProperty(window, "desktopBridge", {
       configurable: true,
-      value: { connectHostedIdentity: connect },
+      value: { connectHostedIdentity: connect, getHubLaunchConfig: launchConfig(true) },
     });
     mounted = await render(<DesktopAccountConnect />);
+    expect(document.querySelector("button")).toBeNull();
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("hides the native sign-in prompt where account setup cannot run", async () => {
+    const connect = vi.fn();
+    const getHubLaunchConfig = launchConfig(false);
+    Object.defineProperty(window, "desktopBridge", {
+      configurable: true,
+      value: { connectHostedIdentity: connect, getHubLaunchConfig },
+    });
+    mounted = await render(<DesktopAccountConnect />);
+    await vi.waitFor(() => expect(getHubLaunchConfig).toHaveBeenCalledOnce());
     expect(document.querySelector("button")).toBeNull();
     expect(connect).not.toHaveBeenCalled();
   });

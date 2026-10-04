@@ -55,8 +55,8 @@ export const E2eeClientAuthorizationStatusSchema = Schema.Literals([
 /**
  * One Branch A record, in exactly the fields §13.6's display duty enumerates.
  *
- * `safetyNumber` is the §13.4 value the record already stores — the only pairing
- * display metadata §13.6 admits — so the verification surface is a read of this
+ * `safetyNumber` is the §13.4 value the record already stores — the only
+ * key-derived pairing display metadata §13.6 admits — so the verification surface is a read of this
  * record rather than a second derivation that could disagree with it.
  */
 export const E2eeClientRecordView = Schema.Struct({
@@ -77,6 +77,13 @@ export const E2eeClientRecordView = Schema.Struct({
     Schema.String.check(Schema.isMaxLength(E2EE_CLIENT_DISPLAY_LABEL_MAX_CHARS)),
   ),
   pairingReserved: Schema.Boolean,
+  /**
+   * The `channel.open` role the device introduced itself under. Display
+   * metadata the owner approves FROM, never authority: §8.3 makes a native
+   * client's intended role equal it, so a ceiling below it refuses the device
+   * rather than limiting it. Absent on records that predate it.
+   */
+  observedRole: Schema.optional(Schema.String.check(Schema.isMaxLength(32))),
 });
 export type E2eeClientRecordView = typeof E2eeClientRecordView.Type;
 
@@ -231,9 +238,13 @@ export type E2eePrekeyView = typeof E2eePrekeyView.Type;
  *
  * `unresolvable` carries the remedy string §7.5 writes for exactly this state,
  * so the surface that prints it cannot drift from the condition that raised it.
+ *
+ * `identity_in_use` is not a lineage state. It is a backend that does not own
+ * the identity declining to read a chain that reading can repair, and it
+ * carries its own remedy so the surface says which copy to ask.
  */
 export const E2eeContinuityView = Schema.Struct({
-  status: Schema.Literals(["advertisable", "unavailable"]),
+  status: Schema.Literals(["advertisable", "unavailable", "identity_in_use"]),
   continuityId: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
   generation: Schema.optional(BoundedCount),
   chainLength: Schema.optional(BoundedCount),

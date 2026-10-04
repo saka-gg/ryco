@@ -97,6 +97,7 @@ import Migration0053 from "./Migrations/053_ThreadPriorityRankings.ts";
 import Migration0075, {
   ensureProjectionThreadUsageLimitColumn,
 } from "./Migrations/075_ProjectionThreadsUsageLimit.ts";
+import Migration0076 from "./Migrations/076_AuthSessionRotation.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -183,6 +184,7 @@ export const migrationEntries = [
   [73, "ProviderEffectIntents", Migration0073],
   [74, "RestartContinuations", Migration0074],
   [75, "ProjectionThreadsUsageLimit", Migration0075],
+  [76, "AuthSessionRotation", Migration0076],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -406,6 +408,16 @@ export const repairContextHandoffRuntimeSessions = Effect.fn("repairContextHando
   },
 );
 
+// Branches developed in parallel claim the same next migration id, and the
+// migrator keys progress by that id alone: a database that recorded another 076
+// would skip bearer rotation's columns. The migration is idempotent; run it as a
+// repair after the ledger pass.
+export const repairAuthSessionRotationColumns = Effect.fn("repairAuthSessionRotationColumns")(
+  function* () {
+    yield* Migration0076;
+  },
+);
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -546,6 +558,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 75) {
     yield* repairProjectionThreadUsageLimitColumn();
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 76) {
+    yield* repairAuthSessionRotationColumns();
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

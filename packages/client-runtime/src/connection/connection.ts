@@ -79,6 +79,8 @@ export interface EnvironmentConnectionInput extends OrchestrationHandlers {
   readonly onWelcome?: (payload: ServerLifecycleWelcomePayload) => void;
   readonly onResubscribe?: (environmentId: EnvironmentId) => void;
   readonly onShellError?: (environmentId: EnvironmentId) => void;
+  /** Runs once the connection is disposed: what its owner keeps running for it stops with it. */
+  readonly onDispose?: () => void;
 }
 
 function createBootstrapGate() {
@@ -328,6 +330,7 @@ export function createEnvironmentConnection(
     },
     dispose: async () => {
       cleanup();
+      input.onDispose?.();
       await input.client.dispose();
       // The transport drops close events once a session is inactive, so a
       // disposed environment's keyed WS status would otherwise stay "connected"

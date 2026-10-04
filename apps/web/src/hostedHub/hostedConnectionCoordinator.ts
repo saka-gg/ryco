@@ -1,4 +1,4 @@
-import type { HostedHubNode } from "@ryco/client-runtime/authorization";
+import type { HostedHubNode, HostedHubState } from "@ryco/client-runtime/authorization";
 import {
   createNodeMutationLeaseAuthority,
   type NodeMutationLease,
@@ -290,6 +290,90 @@ export function hostedNodeRequiresNativeClient(node: HostedHubNode): boolean {
   return node.capabilities?.nativeClientRequired === true;
 }
 
+/** A directory node Hosted Web may open a connection to right now. */
+function isHostedWebConnectableNode(node: HostedHubNode): boolean {
+  return node.revokedAt === null && node.presence.online && !hostedNodeRequiresNativeClient(node);
+}
+
+/**
+ * The parts of the hosted state that decide whether held connection demand can
+ * be served: the coordinator's `connect` refuses anything while the directory
+ * or browser is not current, and refuses a node that is not connectable.
+ */
+export interface HostedDemandReadiness {
+  readonly connectable: boolean;
+  /**
+   * The selected node's relay attempt ended in a terminal failure. A terminal
+   * failure (and the session-sync deadline) hands a `synchronizing` browser
+   * back as `current` in the same patch, so a readiness edge that arrives with
+   * one is the failure itself, not a reason the node could now be served.
+   */
+  readonly relayFailed: boolean;
+  readonly eligible: ReadonlySet<EnvironmentId>;
+}
+
+export function readHostedDemandReadiness(state: HostedHubState): HostedDemandReadiness {
+  return {
+    connectable:
+      state.accountStatus === "authenticated" &&
+      state.directoryStatus === "ready" &&
+      state.browserStatus === "current",
+    relayFailed: state.selectedNode !== null && state.transportStatus === "terminal-failure",
+    eligible: new Set(
+      state.nodes.filter(isHostedWebConnectableNode).map((node) => node.environmentId),
+    ),
+  };
+}
+
+/**
+ * Whether a hosted state change may unblock demand the coordinator already
+ * holds: a demanded node's directory presence came online, or the directory
+ * and browser became current while a demanded node is connectable.
+ *
+ * Without this the coordinator re-planned only on scope changes and its 25s
+ * renewal tick, so demand whose connect had been refused waited for the next
+ * tick after the directory poll saw the node, about 45s at worst. A presence
+ * edge is a new answer from the directory and always counts. A readiness edge
+ * never counts while the selected relay is terminally failed: the failure is
+ * what turned the browser `current`, and re-planning then would open a fresh
+ * ticket and handshake at once — after an E2EE FATAL-PRE, which must never be
+ * hot-retried, or for a grant that was just revoked. Such a node is retried
+ * by the renewal tick, or by its presence coming back.
+ */
+export function hostedDemandUnblocked(
+  previous: HostedDemandReadiness,
+  next: HostedDemandReadiness,
+  demanded: Iterable<EnvironmentId>,
+): boolean {
+  if (!next.connectable) return false;
+  for (const environmentId of demanded) {
+    if (!next.eligible.has(environmentId)) continue;
+    if (!previous.eligible.has(environmentId)) return true;
+    if (!previous.connectable && !next.relayFailed) return true;
+  }
+  return false;
+}
+
+/** Whether held demand is waiting on a node the current directory reports offline. */
+export function hostedDemandAwaitsPresence(
+  state: HostedHubState,
+  demanded: Iterable<EnvironmentId>,
+): boolean {
+  if (state.accountStatus !== "authenticated" || state.directoryStatus !== "ready") return false;
+  const offline = new Set(
+    state.nodes
+      .filter(
+        (node) =>
+          node.revokedAt === null && !node.presence.online && !hostedNodeRequiresNativeClient(node),
+      )
+      .map((node) => node.environmentId),
+  );
+  for (const environmentId of demanded) {
+    if (offline.has(environmentId)) return true;
+  }
+  return false;
+}
+
 function machineCatalog(
   nodes: ReadonlyArray<HostedHubNode>,
   selectedEnvironmentId: EnvironmentId | null,
@@ -383,10 +467,7 @@ export function startHostedWorkspaceCoordinator(input?: {
       }
       const node = state.nodes.find(
         (candidate) =>
-          candidate.environmentId === environmentId &&
-          candidate.revokedAt === null &&
-          candidate.presence.online &&
-          !hostedNodeRequiresNativeClient(candidate),
+          candidate.environmentId === environmentId && isHostedWebConnectableNode(candidate),
       );
       if (!node) throw new Error("Hosted Web environment is not eligible.");
       if (state.selectedNode?.id === node.id && state.transportStatus === "terminal-failure") {
@@ -534,10 +615,7 @@ export function startHostedWorkspaceCoordinator(input?: {
       state.browserStatus === "current" &&
       !coordinator.snapshot().demand.backgrounded &&
       !foregroundDemand;
-    const eligible = state.nodes.filter(
-      (node) =>
-        node.revokedAt === null && node.presence.online && !hostedNodeRequiresNativeClient(node),
-    );
+    const eligible = state.nodes.filter(isHostedWebConnectableNode);
     if (!canDiscover) {
       releaseDiscovery();
     } else {
@@ -710,7 +788,32 @@ export function startHostedWorkspaceCoordinator(input?: {
     }, 100);
   };
 
-  const unsubscribeHub = hostedHubStore.subscribe(() => void synchronize());
+  // Re-plan held demand the moment the directory says it can be served, and
+  // ask the directory to watch presence faster while demand waits on an
+  // offline node. `connect` still enforces every readiness condition itself.
+  let demandReadiness = readHostedDemandReadiness(hostedHubStore.getState());
+  let releasePresenceWatch: (() => void) | null = null;
+  const observeDemand = () => {
+    if (disposed) return;
+    const state = hostedHubStore.getState();
+    const demanded = hostedWebConnectionScopes.list().map((entry) => entry.environmentId);
+    const next = readHostedDemandReadiness(state);
+    const unblocked = hostedDemandUnblocked(demandReadiness, next, demanded);
+    demandReadiness = next;
+    if (hostedDemandAwaitsPresence(state, demanded)) {
+      releasePresenceWatch ??= hostedHubController.watchDirectoryPresence();
+    } else if (releasePresenceWatch) {
+      releasePresenceWatch();
+      releasePresenceWatch = null;
+    }
+    if (unblocked) void coordinator.reconcile();
+  };
+
+  const unsubscribeHub = hostedHubStore.subscribe(() => {
+    observeDemand();
+    void synchronize();
+  });
+  const unsubscribeDemandScopes = hostedWebConnectionScopes.subscribe(observeDemand);
   const unsubscribeReadCache = subscribeHostedReadCache(() => void synchronize());
   const unsubscribeRoute = subscribeRoutedHostedNode(scheduleHomeDiscovery);
   const unsubscribeScopes = hostedWebConnectionScopes.subscribe(scheduleHomeDiscovery);
@@ -721,12 +824,16 @@ export function startHostedWorkspaceCoordinator(input?: {
   });
   const resetRouteResolver = setHostedNodeRouteEnvironmentResolver(nodeIdForHostedEnvironment);
   void coordinator.reconcile();
+  observeDemand();
   void synchronize();
   return () => {
     disposed = true;
     syncGeneration += 1;
     if (publishTimer !== null) cancel(publishTimer);
     unsubscribeHub();
+    unsubscribeDemandScopes();
+    releasePresenceWatch?.();
+    releasePresenceWatch = null;
     unsubscribeReadCache();
     unsubscribeRoute();
     unsubscribeScopes();

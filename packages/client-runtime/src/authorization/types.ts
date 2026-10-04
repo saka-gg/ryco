@@ -389,9 +389,22 @@ export type HostedRelayFailureKind =
   | "protocol"
   | "internal";
 
+/** The account enrollment an `e2ee.enrollment-revoked` relay frame names. */
+export interface HostedRelayEnrollmentRevocation {
+  readonly enrollmentId: string;
+  readonly enrollmentRevision: number;
+}
+
 export interface HostedRelayFailure {
   readonly kind: HostedRelayFailureKind;
   readonly retryable: boolean;
   readonly retryAfterMs?: number;
   readonly closeReason?: RelayCloseReason;
+  /**
+   * Present only when the Hub's `e2ee.enrollment-revoked` frame ended the
+   * channel. It is the ONE relay signal about this device's account enrollment:
+   * every `revoked`, `node_revoked`, or `grant_revoked` close describes one
+   * node's channel and must never be read as a device-wide revocation.
+   */
+  readonly enrollmentRevoked?: HostedRelayEnrollmentRevocation;
 }

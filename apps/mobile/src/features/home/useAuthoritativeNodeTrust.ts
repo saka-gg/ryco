@@ -78,6 +78,7 @@ export function useAuthoritativeNodeTrust(
           source === null
             ? Promise.reject(new Error("Trust source unavailable"))
             : source.classify(selection),
+        pairing: (selection) => source?.pairing(selection) ?? false,
         identityConflictEnvironmentIds: conflicts,
         accountEnrollmentReady:
           enrollment.status === "ready" && enrollment.ready?.namespace.accountId === accountId,

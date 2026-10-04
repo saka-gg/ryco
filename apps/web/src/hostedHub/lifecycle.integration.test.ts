@@ -13,7 +13,7 @@ interface CapturedTransport {
     readonly authorizeRequest?: (request: {
       readonly tag: string;
       readonly stream: boolean;
-    }) => boolean;
+    }) => string;
     readonly onOpen?: () => void;
   };
 }
@@ -21,6 +21,10 @@ interface CapturedTransport {
 interface CapturedClient {
   readonly reconnect: ReturnType<typeof vi.fn>;
   readonly dispose: ReturnType<typeof vi.fn>;
+  readonly orchestration: {
+    readonly dispatchCommand: ReturnType<typeof vi.fn>;
+    readonly subscribeShell: ReturnType<typeof vi.fn>;
+  };
   readonly server: {
     readonly discoverSourceControl: ReturnType<typeof vi.fn>;
     readonly subscribeConfig: ReturnType<typeof vi.fn>;
@@ -112,6 +116,7 @@ function makeClient(): CapturedClient & Record<string, unknown> {
       })),
     },
     orchestration: {
+      dispatchCommand: vi.fn(async () => ({ sequence: 0 })),
       subscribeShell: vi.fn((listener: typeof shellListener) => {
         shellListener = listener;
         return () => {
@@ -273,7 +278,7 @@ describe("hosted browser lifecycle integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(true);
+    ).toBe("allowed");
 
     hostedHubController.suspendBrowser("offline");
     expect(
@@ -281,7 +286,7 @@ describe("hosted browser lifecycle integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(false);
+    ).not.toBe("allowed");
     await vi.waitFor(() => expect(capturedClients[0]!.dispose).toHaveBeenCalledOnce());
 
     await hostedHubController.resumeBrowser();
@@ -300,7 +305,7 @@ describe("hosted browser lifecycle integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(false);
+    ).not.toBe("allowed");
 
     capturedClients[0]!.emitShellSnapshot(shellSnapshot(2));
     expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
@@ -316,7 +321,88 @@ describe("hosted browser lifecycle integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(true);
+    ).toBe("allowed");
     expect(issueRelayTicket).toHaveBeenCalledTimes(2);
+  });
+
+  it("replays a command whose client a suspend disposed, on the resumed session only", async () => {
+    const { hostedHubApi } = await import("./api");
+    const { activateHostedNode } = await import("./environment");
+    const { listEnvironmentConnections } = await import("../environments/runtime/service");
+    const { hostedHubController, useHostedHubStore } = await import("./state");
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    // Restoring re-mints the Hub session id on every resume.
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue({
+      ...sessionResponse,
+      session: { ...sessionResponse.session, id: "sess_bbbbbbbbbbbbbbbbbbbbbb" },
+    });
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selectedNode]);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [selectedNode],
+      selectedNode,
+      selectionStatus: "online",
+      effectiveRole: "operator",
+      transportStatus: "online",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+      browserStatus: "current",
+      generation: 4,
+    });
+    await activateHostedNode(selectedNode, null);
+    capturedClients[0]!.emitShellSnapshot(shellSnapshot(1));
+    expect(useHostedHubStore.getState().sessionStatus).toBe("ready");
+
+    const command = {
+      type: "thread.meta.update",
+      commandId: "cmd-lost-to-suspend",
+      threadId: "thread-1",
+      title: "Renamed",
+    } as const;
+    // In flight until its client is disposed, which interrupts it — the
+    // rejection a real disposal produces, with no socket error in it.
+    let interrupt!: () => void;
+    capturedClients[0]!.orchestration.dispatchCommand.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          interrupt = () => reject(new Error("All fibers interrupted without error"));
+        }),
+    );
+    capturedClients[0]!.dispose.mockImplementation(async () => interrupt());
+    const connection = listEnvironmentConnections()[0]!;
+    let outcome: unknown = "pending";
+    const sent = connection.client.orchestration
+      .dispatchCommand(command as never)
+      .then((value) => (outcome = value));
+
+    hostedHubController.suspendBrowser("offline");
+    await vi.waitFor(() => expect(capturedClients[0]!.dispose).toHaveBeenCalledOnce());
+    await hostedHubController.resumeBrowser();
+    expect(capturedClients).toHaveLength(2);
+    capturedClients[1]!.orchestration.dispatchCommand.mockResolvedValue({ sequence: 9 });
+
+    // Ticket and handshake alone are not enough: the replacement must accept
+    // a current snapshot first.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(outcome).toBe("pending");
+    expect(capturedClients[1]!.orchestration.dispatchCommand).not.toHaveBeenCalled();
+
+    capturedClients[1]!.emitShellSnapshot(shellSnapshot(2));
+    await sent;
+    expect(outcome).toEqual({ sequence: 9 });
+    expect(capturedClients[0]!.orchestration.dispatchCommand).toHaveBeenCalledOnce();
+    expect(capturedClients[1]!.orchestration.dispatchCommand).toHaveBeenCalledExactlyOnceWith(
+      command,
+    );
+    // Replayed and confirmed, so nothing is left uncertain.
+    expect(useHostedHubStore.getState().sessionStatus).toBe("ready");
   });
 });

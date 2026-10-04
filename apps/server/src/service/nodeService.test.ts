@@ -5,6 +5,8 @@ import {
   isEphemeralCliInstall,
   nodeServiceDefinitionPath,
   nodeServiceLabel,
+  nodeServiceLingerCommand,
+  nodeServiceUser,
   parseLaunchctlPrint,
   parseSystemctlShow,
   renderLaunchAgentPlist,
@@ -110,5 +112,19 @@ describe("node service definitions", () => {
     });
     expect(sleepInhibitorCommand("linux", 99)?.args).toContain("--pid=99");
     expect(sleepInhibitorCommand("win32", 99)).toBeNull();
+  });
+
+  it("enables lingering for the service user through sudo unless already root", () => {
+    expect(nodeServiceLingerCommand("ada", 1000)).toEqual({
+      command: "sudo",
+      args: ["loginctl", "enable-linger", "ada"],
+    });
+    expect(nodeServiceLingerCommand("root", 0)).toEqual({
+      command: "loginctl",
+      args: ["enable-linger", "root"],
+    });
+    expect(nodeServiceUser({ USER: "ada", LOGNAME: "other" })).toBe("ada");
+    expect(nodeServiceUser({ LOGNAME: "ada" })).toBe("ada");
+    expect(nodeServiceUser({})).toBe("");
   });
 });

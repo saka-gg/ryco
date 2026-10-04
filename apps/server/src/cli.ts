@@ -125,6 +125,7 @@ import {
   describeAccountLinkFailure,
   startPasswordSignIn,
 } from "./hubConnector/cliAccountLink.ts";
+import { resolveStandbyHubConnectorConfig } from "./hubConnector/HubConnectorStandby.ts";
 import {
   nodeServiceLabel,
   nodeServicePlatform,
@@ -183,6 +184,12 @@ const BootstrapEnvelopeSchema = Schema.Struct({
   tailscaleServeEnabled: Schema.optional(Schema.Boolean),
   tailscaleServePort: Schema.optional(PortSchema),
   hubConnectorEnabled: Schema.optional(Schema.Boolean),
+  /**
+   * Desktop only: run the connector only while this node holds no Hub
+   * identity (`resolveStandbyHubConnectorConfig`). Honoured only when the
+   * envelope is what enabled the connector.
+   */
+  hubConnectorStandby: Schema.optional(Schema.Boolean),
   hubOrigin: Schema.optional(Schema.String),
   hubNodeName: Schema.optional(Schema.String),
   hubAllowFileSecretStore: Schema.optional(Schema.Boolean),
@@ -686,7 +693,7 @@ export const resolveServerConfig = (
     // matching every other option here. In the desktop that contest never
     // happens: `backendChildEnv()` strips the Hub variables, so the envelope is
     // the only source. A headless `ryco serve` sends no envelope.
-    const hubConnector = resolveHubConnectorConfig({
+    const configuredHubConnector = resolveHubConnectorConfig({
       enabled: Option.getOrUndefined(
         resolveOptionPrecedence(
           Option.map(normalizedFlags.hubConnectorEnabled, String),
@@ -727,6 +734,20 @@ export const resolveServerConfig = (
         ),
       ),
     });
+    // An explicit flag or environment value is the operator's statement for
+    // this run, so standby only refines an envelope-enabled Desktop connector.
+    const hubConnector =
+      mode === "desktop" &&
+      bootstrap?.hubConnectorStandby === true &&
+      Option.isNone(normalizedFlags.hubConnectorEnabled) &&
+      env.hubConnectorEnabled === undefined
+        ? yield* Effect.promise(() =>
+            resolveStandbyHubConnectorConfig({
+              config: configuredHubConnector,
+              statePath: derivedPaths.hubIdentityStatePath,
+            }),
+          )
+        : configuredHubConnector;
     // Same flag > env > envelope precedence as everything above. An option left
     // unset by all three stays unset all the way through to
     // `NodeE2eePolicyStore`, where it means "leave the committed policy alone" —
@@ -2146,6 +2167,17 @@ const formatE2eeClientRecord = (record: E2eeClientRecordView): readonly string[]
   `Hub origin: ${record.hubOrigin}`,
   `Account: ${record.accountId}`,
   `Max role: ${record.maxRole}`,
+  // The role the device connects with. An approval below it refuses the device
+  // rather than limiting it (§8.3), so this is the `--max-role` an owner wants.
+  // The node follows it only while the record is pending; once approved or
+  // revoked it is the role from the device's introduction, and says so.
+  ...(record.observedRole === undefined
+    ? []
+    : [
+        record.status === "pending"
+          ? `Connects as: ${record.observedRole}`
+          : `Connected as (when introduced): ${record.observedRole}`,
+      ]),
   `Capabilities: ${record.capabilitySet.length === 0 ? "none" : record.capabilitySet.join(", ")}`,
   ...(record.displayLabel === undefined ? [] : [`Label: ${record.displayLabel}`]),
   // §13.6's display duty enumerates the safety number among the fields the
@@ -2349,6 +2381,13 @@ const formatE2eeContinuity = (view: E2eeContinuityView, json: boolean): string =
       // condition rather than restated here.
       view.remedy ?? "",
     ]
+      .filter((line) => line.length > 0)
+      .join("\n");
+  }
+  if (view.status === "identity_in_use") {
+    // Not a lineage state: this backend does not own the identity, and the
+    // sentence says which copy to ask.
+    return ["Continuity: not read here", view.remedy ?? ""]
       .filter((line) => line.length > 0)
       .join("\n");
   }

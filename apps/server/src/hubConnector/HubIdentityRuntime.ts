@@ -93,6 +93,7 @@ import { makeNodeIdentityKeyRetirementStore } from "../hubIdentity/NodeIdentityK
 import { makeNodeSigningIdentity } from "../hubIdentity/NodeSigningIdentity.ts";
 import {
   makeOsProtectedSecretStore,
+  NODE_IDENTITY_SECRET_SERVICE,
   makePermissionedFileSecretStore,
   type ProtectedSecretStore,
   type ProtectedSecretStoreBackend,
@@ -200,6 +201,13 @@ export type NodeE2eeAuthorizationAdmin = Pick<
 
 export interface HubIdentityRuntimeShape {
   readonly backend: ProtectedSecretStoreBackend;
+  /**
+   * Run the startup work a runtime built with `deferStartup` has not run yet;
+   * see that option. Idempotent once it succeeds, and retried by the next call
+   * when it fails. Absent, or resolved at once, for a runtime that ran it while
+   * it was built.
+   */
+  readonly completeStartup?: () => Promise<void>;
   readonly readState: () => Promise<LocalHubIdentityState>;
   /** The active public-key fingerprint only; no raw key or custody metadata. */
   readonly readActiveFingerprint?: () => Promise<string | null>;
@@ -573,7 +581,8 @@ async function selectProtectedSecretStore(options: {
       };
     });
   };
-  const makeOs = () => (options.makeOsStore ?? makeOsProtectedSecretStore)("ryco.node.identity");
+  const makeOs = () =>
+    (options.makeOsStore ?? makeOsProtectedSecretStore)(NODE_IDENTITY_SECRET_SERVICE);
   const makeFile = () => {
     if (!options.allowFileFallback) return protectedStoreUnavailable();
     return (options.makeFileStore ?? makePermissionedFileSecretStore)(options.fileSecretRoot, {
@@ -697,6 +706,35 @@ async function selectProtectedSecretStore(options: {
   };
 }
 
+/**
+ * Whether this node's identity state references anything in key custody.
+ *
+ * Reads only the owner-only state files and never opens a protected store.
+ * When it returns false, building the runtime selects a store without reading
+ * from it, because `selectProtectedSecretStore` only probes keys the state
+ * names; that is what lets a Desktop standby connector start without a
+ * credential-store prompt.
+ */
+export async function hubIdentityHoldsKeyMaterial(options: {
+  readonly statePath: string;
+  readonly retirementStatePath?: string;
+}): Promise<boolean> {
+  const stateStore = await makeLocalHubIdentityStateStore(options.statePath);
+  const retirementStore = await makeNodeIdentityKeyRetirementStore({
+    path:
+      options.retirementStatePath ??
+      join(dirname(options.statePath), "hub-identity-retirement.json"),
+  });
+  const state = await stateStore.readOrCreate();
+  return (
+    state.activeNode !== null ||
+    state.pendingEnrollment !== null ||
+    state.stagedRotation !== null ||
+    state.pendingTeardown !== null ||
+    identitySecretNames(state, await retirementStore.names()).length > 0
+  );
+}
+
 export async function makeHubIdentityRuntime(options: {
   readonly statePath: string;
   /**
@@ -757,6 +795,20 @@ export async function makeHubIdentityRuntime(options: {
    * incapable of weakening the policy.
    */
   readonly e2eePolicy?: NodeE2eePolicyProposal;
+  /**
+   * Leave the startup work — finishing an interrupted leave, destroying retired
+   * keys, validating custody, prekey and continuity repair, and committing this
+   * run's `e2eePolicy` — to `completeStartup`.
+   *
+   * For a backend that found the identity owned by another local process
+   * (`HubIdentityProcessLock`). Every step of that work writes state the owner
+   * relies on, and the policy commit in particular is §12.6's commit-then-sweep:
+   * run here it would commit and sweep nothing, leaving the owner's live
+   * channels open under a policy that was just narrowed. Until it runs, the
+   * policy client is at §12.4's fail-closed default — which is also what this
+   * backend enforces, since it serves no channel.
+   */
+  readonly deferStartup?: boolean;
   readonly fileSecretRoot: string;
   readonly allowFileFallback: boolean;
   readonly secretStore?: ProtectedSecretStore;
@@ -1235,82 +1287,100 @@ export async function makeHubIdentityRuntime(options: {
   };
   const maintainPrekeyQuietly = (): Promise<void> => maintainPrekey().catch(() => undefined);
 
-  // Resume an interrupted leave before anything reads key custody: the keys it
-  // names may already be gone, which would otherwise fail the validation below
-  // and leave the node permanently unstartable.
-  await bounded("identity_unavailable", async () => {
-    const state = await stateStore.readOrCreate();
-    if (state.pendingTeardown !== null) {
-      await completeTeardown(state.pendingTeardown.secretNames);
-    }
-  });
+  /**
+   * Everything a start does to the identity beyond opening it, in order.
+   *
+   * Run while the runtime is built unless `deferStartup` asks otherwise, in
+   * which case `completeStartup` runs it once this process owns the identity.
+   */
+  const startup = async (): Promise<void> => {
+    // Resume an interrupted leave before anything reads key custody: the keys it
+    // names may already be gone, which would otherwise fail the validation below
+    // and leave the node permanently unstartable.
+    await bounded("identity_unavailable", async () => {
+      const state = await stateStore.readOrCreate();
+      if (state.pendingTeardown !== null) {
+        await completeTeardown(state.pendingTeardown.secretNames);
+      }
+    });
 
-  // Finish a promotion's outstanding destruction. The promotion itself is
-  // already committed — that is the ordering rule — so what is left here is a
-  // key that is no longer in service and must not be left in the protected
-  // store. Best effort: an undeletable key stays queued, and a node must start
-  // whether or not its credential store is cooperating this minute.
-  await rotation.destroyRetiredKeys().catch(() => undefined);
+    // Finish a promotion's outstanding destruction. The promotion itself is
+    // already committed — that is the ordering rule — so what is left here is a
+    // key that is no longer in service and must not be left in the protected
+    // store. Best effort: an undeletable key stays queued, and a node must start
+    // whether or not its credential store is cooperating this minute.
+    await rotation.destroyRetiredKeys().catch(() => undefined);
 
-  await bounded("identity_unavailable", async () => {
-    const state = await stateStore.readOrCreate();
-    if (state.activeNode !== null) {
-      const selected = await rotation.authenticationKey(state.activeNode.hubOrigin);
-      await signingIdentity.getPublicDescriptor(selected.secretName);
-    }
-    if (state.stagedRotation !== null) {
-      await signingIdentity.getPublicDescriptor(state.stagedRotation.newKeySecretName);
-    }
-  });
+    await bounded("identity_unavailable", async () => {
+      const state = await stateStore.readOrCreate();
+      if (state.activeNode !== null) {
+        const selected = await rotation.authenticationKey(state.activeNode.hubOrigin);
+        await signingIdentity.getPublicDescriptor(selected.secretName);
+      }
+      if (state.stagedRotation !== null) {
+        await signingIdentity.getPublicDescriptor(state.stagedRotation.newKeySecretName);
+      }
+    });
 
-  // §6.4's node remedy: validate this node's own prekey certificate at startup
-  // and re-sign a fresh one when it is expired or would expire within
-  // `E2EE_PREKEY_ROTATION_OVERLAP`. This also destroys an outgoing agreement key
-  // whose overlap window elapsed while the node was down.
-  //
-  // A failure here does NOT fail startup. The prekey decides whether this node
-  // can SERVE E2EE, not whether it can run: a node that cannot issue one relays
-  // exactly as before and simply has nothing to advertise. The condition stays
-  // reportable — the forced-rotation command below surfaces the same failure
-  // with its §6.4 diagnostic instead of hiding it behind a start-up abort.
-  await maintainPrekeyQuietly();
+    // §6.4's node remedy: validate this node's own prekey certificate at startup
+    // and re-sign a fresh one when it is expired or would expire within
+    // `E2EE_PREKEY_ROTATION_OVERLAP`. This also destroys an outgoing agreement key
+    // whose overlap window elapsed while the node was down.
+    //
+    // A failure here does NOT fail startup. The prekey decides whether this node
+    // can SERVE E2EE, not whether it can run: a node that cannot issue one relays
+    // exactly as before and simply has nothing to advertise. The condition stays
+    // reportable — the forced-rotation command below surfaces the same failure
+    // with its §6.4 diagnostic instead of hiding it behind a start-up abort.
+    await maintainPrekeyQuietly();
 
-  // §7.5's startup pass, for its repairs: mint the continuity id once if this
-  // node has never advertised, restore it from the anchor if a restore rolled
-  // the stored copy back, adopt a stored value into a lost anchor, and record a
-  // chain break if the retained chain no longer reaches a key this node holds.
-  //
-  // Like the prekey pass above, a failure here does NOT fail startup. Under
-  // effective `requireE2EE` the disposition is a policy decision the caller
-  // makes from `readE2eeContinuity` (§5.5 U2, §11.2 P23); custody has nothing to
-  // say about whether a node that cannot advertise may still relay.
-  await (async () => {
-    const state = await stateStore.readOrCreate();
-    if (state.activeNode === null) return;
-    await evaluateContinuity(state.activeNode.hubOrigin);
-  })().catch(() => undefined);
+    // §7.5's startup pass, for its repairs: mint the continuity id once if this
+    // node has never advertised, restore it from the anchor if a restore rolled
+    // the stored copy back, adopt a stored value into a lost anchor, and record a
+    // chain break if the retained chain no longer reaches a key this node holds.
+    //
+    // Like the prekey pass above, a failure here does NOT fail startup. Under
+    // effective `requireE2EE` the disposition is a policy decision the caller
+    // makes from `readE2eeContinuity` (§5.5 U2, §11.2 P23); custody has nothing to
+    // say about whether a node that cannot advertise may still relay.
+    await (async () => {
+      const state = await stateStore.readOrCreate();
+      if (state.activeNode === null) return;
+      await evaluateContinuity(state.activeNode.hubOrigin);
+    })().catch(() => undefined);
 
-  // §12.4: the effective policy is recomputed deterministically from durable
-  // configuration on every start, and an absent configured value leaves the
-  // committed one untouched.
-  //
-  // A failure here does NOT fail startup, and the consequence is deliberate
-  // rather than lenient: the client stays at §12.4's fail-closed policy with
-  // generation 0, so this node advertises nothing (§5.7) and every channel takes
-  // the effective-`requireE2EE` branch of §5.5 — FATAL-PRE with the generic
-  // §11.2 surface. That is §7.6.1's "fail rather than start and close every
-  // channel one at a time", applied to the connector rather than to the whole
-  // server: the alternative reachable here is a process abort whose operator
-  // message would name the wrong remedy, and the §5.7 condition this most often
-  // is — a generation below the anchor's high-water mark — is repaired by the
-  // recovery command, not by a restart.
-  await policyClient
-    .start(options.e2eePolicy ?? {})
-    .then(() => undefined)
-    .catch(() => undefined);
+    // §12.4: the effective policy is recomputed deterministically from durable
+    // configuration on every start, and an absent configured value leaves the
+    // committed one untouched.
+    //
+    // A failure here does NOT fail startup, and the consequence is deliberate
+    // rather than lenient: the client stays at §12.4's fail-closed policy with
+    // generation 0, so this node advertises nothing (§5.7) and every channel takes
+    // the effective-`requireE2EE` branch of §5.5 — FATAL-PRE with the generic
+    // §11.2 surface. That is §7.6.1's "fail rather than start and close every
+    // channel one at a time", applied to the connector rather than to the whole
+    // server: the alternative reachable here is a process abort whose operator
+    // message would name the wrong remedy, and the §5.7 condition this most often
+    // is — a generation below the anchor's high-water mark — is repaired by the
+    // recovery command, not by a restart.
+    await policyClient
+      .start(options.e2eePolicy ?? {})
+      .then(() => undefined)
+      .catch(() => undefined);
+  };
+  let startupRun: Promise<void> | undefined;
+  const completeStartup = (): Promise<void> => {
+    startupRun ??= startup().catch((error: unknown) => {
+      startupRun = undefined;
+      throw error;
+    });
+    return startupRun;
+  };
+  if (options.deferStartup !== true) await completeStartup();
 
   return {
     backend: secretStore.backend,
+    completeStartup,
     readState: () => bounded("identity_unavailable", () => stateStore.readOrCreate()),
     readActiveFingerprint: () =>
       bounded("identity_unavailable", async () => {

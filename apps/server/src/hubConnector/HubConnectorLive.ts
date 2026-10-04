@@ -1,8 +1,11 @@
-import { Context, Effect, Exit, Layer, Scope } from "effect";
+import { dirname, join } from "node:path";
+
+import { Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import { WsHostedRpcGroup } from "@ryco/contracts";
 import type { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
 
-import { ServerConfig } from "../config.ts";
+import { AgentControlExternalTopologyService } from "../agentControl/Services/AgentControlExternalTopology.ts";
+import { DEFAULT_HUB_CONNECTOR_CONFIG, ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import {
   makeRpcByteSession,
@@ -13,11 +16,16 @@ import { relayRpcPrincipal } from "../ws/RpcPrincipal.ts";
 import { makeDeviceWsRpcLayer } from "../ws/index.ts";
 import { makeServerWsRpcLayer } from "../ws.ts";
 import { HubConnector } from "./HubConnector.ts";
+import { hubConnectorConfigWithoutKeyCustody } from "./HubConnectorStandby.ts";
 import {
   HubIdentityRuntimeError,
   type HubIdentityRuntimeShape,
   makeHubIdentityRuntime,
 } from "./HubIdentityRuntime.ts";
+import {
+  type HubIdentityProcessLock,
+  makeHubIdentityProcessLock,
+} from "../hubIdentity/HubIdentityProcessLock.ts";
 import { makeLocalHubIdentityStateStore } from "../hubIdentity/LocalHubIdentityState.ts";
 import type { NodeE2eeAdvertisementResult } from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
 import type { NodeE2eeFallbackState } from "../hubIdentity/NodeE2eeFallbackCounter.ts";
@@ -140,6 +148,10 @@ export interface HubConnectorE2eeOperator {
   /** §6.4: the prekey this node holds now, without issuing one. */
   readonly readPrekey: () => Promise<E2eePrekeyView>;
   readonly rotatePrekey: () => Promise<E2eePrekeyView>;
+  /**
+   * §7.5's status. Runs the chain's repairs as it reads, so it is an owner
+   * operation; a backend that does not own the identity answers `identity_in_use`.
+   */
   readonly readContinuity: () => Promise<E2eeContinuityView>;
   readonly adoptContinuityId: (continuityId: string) => Promise<E2eeContinuityChangeView>;
   readonly remintContinuityId: () => Promise<E2eeContinuityChangeView>;
@@ -149,6 +161,11 @@ export interface HubConnectorE2eeOperator {
 }
 
 export interface HubConnectorServiceShape {
+  /**
+   * Whether this backend runs its connector at all. A standby launch resolves
+   * to off for an existing identity, or where key custody cannot be built.
+   */
+  readonly connectorEnabled: boolean;
   readonly status: HubConnector["status"];
   readonly resume: HubConnector["resume"];
   readonly enroll: HubConnector["enroll"];
@@ -349,6 +366,7 @@ const readOnlyIdentity = (options: {
   readonly statePath: string;
   readonly fileSecretRoot: string;
   readonly allowFileFallback: boolean;
+  readonly makeIdentityRuntime: HubConnectorLiveDependencies["makeIdentityRuntime"];
 }): HubIdentityRuntimeShape => {
   const unavailable = async (): Promise<never> => {
     throw new HubIdentityRuntimeError("identity_unavailable");
@@ -370,7 +388,7 @@ const readOnlyIdentity = (options: {
      * full runtime is built on demand rather than on every launch.
      */
     leave: async () => {
-      const runtime = await makeHubIdentityRuntime({
+      const runtime = await options.makeIdentityRuntime({
         statePath: options.statePath,
         fileSecretRoot: options.fileSecretRoot,
         allowFileFallback: options.allowFileFallback,
@@ -396,19 +414,71 @@ const readOnlyIdentity = (options: {
   };
 };
 
-export const HubConnectorLive = Layer.effect(
-  HubConnectorService,
+/**
+ * The two things `HubConnectorLive` opens on this machine: the identity's
+ * process lock and its key custody.
+ *
+ * Injectable so the composition that decides who may use the identity — the
+ * lock taken before the runtime is built, startup deferred for a backend that
+ * lost it, and every surface that writes what the owner relies on gated behind
+ * it — can be tested as it is wired, without a second process or a credential
+ * store.
+ */
+export interface HubConnectorLiveDependencies {
+  readonly makeProcessLock: (path: string) => HubIdentityProcessLock;
+  readonly makeIdentityRuntime: typeof makeHubIdentityRuntime;
+}
+
+const machineDependencies: HubConnectorLiveDependencies = {
+  makeProcessLock: (path) => makeHubIdentityProcessLock({ path }),
+  makeIdentityRuntime: makeHubIdentityRuntime,
+};
+
+const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
   Effect.gen(function* () {
     const config = yield* ServerConfig;
     const environment = yield* ServerEnvironment;
     const descriptor = yield* environment.getDescriptor;
+    const externalTopology = yield* AgentControlExternalTopologyService;
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromiseWith(runtimeContext as Context.Context<R>)(effect);
-    const identity = config.hubConnector?.enabled
+    // Beside the identity it guards, so every backend sharing that identity —
+    // the desktop's child and a `ryco serve` on the same state directory —
+    // contends for the same file.
+    const processLock = dependencies.makeProcessLock(
+      join(dirname(config.hubIdentityStatePath), "hub-connector.lock"),
+    );
+    // Taken before the full runtime is built, because building it runs startup
+    // work that writes what the identity's owner relies on. A backend that finds
+    // the lock held builds the runtime with that work deferred, and its
+    // connector runs it once it takes the lock over. The connector hands it back
+    // as it stops, before the §12.5 flush below; releasing it here as well
+    // covers a layer that failed before the connector existed.
+    //
+    // An unusable lock is asked once more before startup runs without it: that
+    // answer lets this backend do the owner's work, so it has to mean the lock
+    // cannot be used, not that one filesystem call lost a race.
+    const identityClaim = config.hubConnector?.enabled
+      ? yield* Effect.acquireRelease(
+          Effect.promise(async () => {
+            const claim = await processLock.acquire();
+            return claim === "unavailable" ? processLock.acquire() : claim;
+          }),
+          () => Effect.promise(() => processLock.release()),
+        )
+      : undefined;
+    const readOnly = () =>
+      readOnlyIdentity({
+        statePath: config.hubIdentityStatePath,
+        fileSecretRoot: `${config.secretsDir}/hub-node`,
+        allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
+        makeIdentityRuntime: dependencies.makeIdentityRuntime,
+      });
+    const custody = config.hubConnector?.enabled
       ? yield* Effect.tryPromise({
           try: () =>
-            makeHubIdentityRuntime({
+            dependencies.makeIdentityRuntime({
               statePath: config.hubIdentityStatePath,
               fileSecretRoot: `${config.secretsDir}/hub-node`,
               allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
@@ -421,14 +491,22 @@ export const HubConnectorLive = Layer.effect(
                 requireE2EE: config.hubE2eePolicy?.requireE2EE,
                 requireApprovedClientE2EE: config.hubE2eePolicy?.requireApprovedClientE2EE,
               },
+              deferStartup: identityClaim === "held",
             }),
           catch: () => new HubIdentityRuntimeError("identity_unavailable"),
-        }).pipe(Effect.orElseSucceed(unavailableIdentity))
-      : readOnlyIdentity({
-          statePath: config.hubIdentityStatePath,
-          fileSecretRoot: `${config.secretsDir}/hub-node`,
-          allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
-        });
+        }).pipe(Effect.option)
+      : Option.none();
+    const hubConfig = config.hubConnector ?? DEFAULT_HUB_CONNECTOR_CONFIG;
+    const quietStandby =
+      hubConfig.enabled && Option.isNone(custody)
+        ? hubConnectorConfigWithoutKeyCustody(hubConfig)
+        : null;
+    const connectorConfig = quietStandby ?? hubConfig;
+    const identity = Option.isSome(custody)
+      ? custody.value
+      : connectorConfig.enabled
+        ? unavailableIdentity()
+        : readOnly();
 
     /**
      * The §5.2 advertiser for this connector's origin.
@@ -646,17 +724,7 @@ export const HubConnectorLive = Layer.effect(
     };
 
     connector = new HubConnector({
-      config: config.hubConnector ?? {
-        enabled: false,
-        origin: undefined,
-        nodeName: undefined,
-        reconnectBaseMs: 1_000,
-        reconnectMaxMs: 60_000,
-        reconnectStableMs: 60_000,
-        reconnectJitterRatio: 0.2,
-        allowFileSecretStore: false,
-        configurationIssue: undefined,
-      },
+      config: connectorConfig,
       identity,
       transport: makeHubRelayTransport(),
       channels: channelFactory,
@@ -669,7 +737,16 @@ export const HubConnectorLive = Layer.effect(
       onE2eeEnrollmentRevoked: async (frame) => {
         await sessionDirectory.revokeEnrollment(frame);
       },
+      processLock,
+      // Only a lock actually held: past an unusable one the connector asks
+      // again each time it needs the identity.
+      ownsIdentity: identityClaim === "acquired",
+      // A standby connector may gain its identity in this process; external
+      // integrations it left running close before this node is reachable.
+      beforeConnect: () => runPromise(externalTopology.yieldToHub),
     });
+    const asIdentityOwner = <A>(operation: () => Promise<A>) =>
+      connector.asIdentityOwner(operation);
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         void connector.start();
@@ -685,19 +762,30 @@ export const HubConnectorLive = Layer.effect(
         }),
     );
     return {
+      connectorEnabled: connectorConfig.enabled,
       status: () => connector.status(),
       resume: () => connector.resume(),
       enroll: () => connector.enroll(),
       readEnrollment: () => connector.readEnrollment(),
-      identitySummary: () => connector.identitySummary(),
+      identitySummary: (options) => connector.identitySummary(options),
       leave: () => connector.leave(),
       cancelEnrollment: () => connector.cancelEnrollment(),
       stop: () => connector.stop(),
-      localIntroduction: identity.localIntroduction,
-      nativeNodeClaim: identity.nativeNodeClaim,
+      // Both commit what the identity's owner relies on — an approved client,
+      // an active node — so neither runs while another local process owns it.
+      localIntroduction: {
+        descriptor: () => asIdentityOwner(() => identity.localIntroduction.descriptor()),
+        complete: (input) => asIdentityOwner(() => identity.localIntroduction.complete(input)),
+      },
+      nativeNodeClaim: {
+        prepare: (hubOrigin) => asIdentityOwner(() => identity.nativeNodeClaim.prepare(hubOrigin)),
+        sign: (input) => asIdentityOwner(() => identity.nativeNodeClaim.sign(input)),
+        commit: (input) => asIdentityOwner(() => identity.nativeNodeClaim.commit(input)),
+      },
       e2ee: makeNodeE2eeOperator({
         identity,
         sessions: sessionDirectory,
+        asIdentityOwner,
         // §12.5 Display: the live §5.5 U1 pair, read from the connection the
         // advertiser is on right now. It is not in the durable counter and must
         // not be — §12.5 says the pair is not retained in the ring.
@@ -710,5 +798,10 @@ export const HubConnectorLive = Layer.effect(
         onAdvertisementChanged: () => connector.refreshE2eeState(),
       }),
     } satisfies HubConnectorServiceShape;
-  }),
-);
+  });
+
+export const makeHubConnectorLive = (
+  dependencies: HubConnectorLiveDependencies = machineDependencies,
+) => Layer.effect(HubConnectorService, makeHubConnectorService(dependencies));
+
+export const HubConnectorLive = makeHubConnectorLive();

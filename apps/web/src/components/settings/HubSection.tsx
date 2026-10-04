@@ -47,7 +47,20 @@ import { DataList, DataListItem } from "../ui/data-list";
 import { Input } from "../ui/input";
 import { HubAdvancedOptions } from "./HubAdvancedOptions";
 import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import {
+  hubLaunchChange,
+  relaunchIfHubRestartRequired,
+  savedChangeRelaunch,
+  useDesktopRelaunchGuard,
+} from "./useDesktopRelaunchGuard";
 import { canEditHubOrigin, presentHubStatus, type HubAction } from "./hubStatus";
+import {
+  clearHubEnrollmentIntent,
+  consumeHubEnrollmentIntent,
+  offeredHubAction,
+  presentHubSetup,
+  recordHubEnrollmentIntent,
+} from "./hubSetup.logic";
 
 /**
  * Matches the diagnostics panel's cadence.
@@ -80,6 +93,14 @@ const ACTION_LABELS: Record<Exclude<HubAction, "none">, string> = {
 };
 
 const VERIFICATION_METADATA_BOOTSTRAP_MS = 10_000;
+
+function readIntentStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 export function HubSection({
   desktopBridge,
@@ -122,6 +143,7 @@ export function HubSection({
   const [hostedGitHubTotpCode, setHostedGitHubTotpCode] = useState("");
   const mountedRef = useRef(true);
   const pollerRef = useRef<VisibilityAwarePoller | null>(null);
+  const { guardRelaunch, dialog: relaunchGuardDialog } = useDesktopRelaunchGuard();
   const { copyToClipboard } = useCopyToClipboard();
   // Same derivation the pairing rows use: clipboard writes need a secure context.
   const canCopyToClipboard =
@@ -169,6 +191,17 @@ export function HubSection({
   }, [refresh]);
 
   const refreshCurrent = useCallback(() => pollerRef.current?.refresh() ?? refresh(), [refresh]);
+
+  // A change saved for a deferred relaunch is what the panel shows until then.
+  const reloadConfig = useCallback(async () => {
+    if (!desktopBridge) return;
+    try {
+      const value = await desktopBridge.getHubLaunchConfig();
+      if (mountedRef.current) setConfig(value);
+    } catch {
+      // Keep the last good configuration; the next mount reads it again.
+    }
+  }, [desktopBridge]);
 
   useEffect(() => {
     if (!desktopBridge) return;
@@ -226,6 +259,13 @@ export function HubSection({
         const next = await invoke();
         if (!mountedRef.current) return;
         setHostedIdentity(next);
+        if (action === "connect" && desktopBridge) {
+          const latest = await relaunchIfHubRestartRequired({
+            bridge: desktopBridge,
+            guardRelaunch,
+          });
+          if (latest !== null && mountedRef.current) setConfig(latest);
+        }
       } catch {
         if (!mountedRef.current) return;
         setHostedIdentity({ status: "unavailable" });
@@ -238,7 +278,7 @@ export function HubSection({
         if (mountedRef.current) setHostedIdentityPending(false);
       }
     },
-    [desktopBridge],
+    [desktopBridge, guardRelaunch],
   );
 
   const refreshDesktopWorkspace = useCallback(async () => {
@@ -367,6 +407,20 @@ export function HubSection({
     [desktopBridge],
   );
 
+  const presentation =
+    snapshot === null ? null : presentHubStatus(snapshot.status, snapshot.identity, nowMs);
+  const setup = presentHubSetup({
+    config,
+    bridgeOffersAccountSetup:
+      desktopBridge?.getHostedIdentityState !== undefined &&
+      desktopBridge.connectHostedIdentity !== undefined,
+    identity: snapshot?.identity ?? null,
+    action: presentation?.action ?? null,
+  });
+  // Without native account setup, turning the connector on is the first step of
+  // the device-code ceremony, so enrolment continues on its own afterwards.
+  const enrollAfterEnable = setup.path === "device-code" && snapshot?.identity.enrolled === "none";
+
   const runAction = useCallback(
     async (action: HubAction) => {
       setPendingAction(action);
@@ -374,9 +428,29 @@ export function HubSection({
       try {
         switch (action) {
           case "enroll":
+            // A standby connector only runs while no identity exists. Record
+            // that this installation now enrols, so the next launch keeps the
+            // connector on for the identity it is about to create, without
+            // restarting the backend that already serves it. Main validates
+            // standby itself, so this does not wait for the launch config to
+            // load, and an enable it cannot record stops the enrollment: the
+            // new identity would otherwise go offline at the next restart.
+            if (config?.enabled !== true && desktopBridge) {
+              await desktopBridge
+                .setHubLaunchConfig({ enabled: true, applyOnNextLaunch: true })
+                .catch(() => {
+                  throw new Error(
+                    "Ryco couldn't save the Hub connection setting, so enrollment didn't start.",
+                  );
+                });
+              if (mountedRef.current) {
+                setConfig((current) => (current === null ? null : { ...current, enabled: true }));
+              }
+            }
             await startHubEnrollment();
             break;
           case "cancel-enrollment":
+            clearHubEnrollmentIntent(readIntentStorage());
             await cancelHubEnrollment();
             break;
           case "retry":
@@ -386,13 +460,29 @@ export function HubSection({
             await leaveHub();
             break;
           case "enable":
-          case "disable":
-            await desktopBridge?.setHubLaunchConfig({ enabled: action === "enable" });
-            return; // The app relaunches; nothing after this runs.
-          case "restart":
-            if (!desktopBridge?.restartApp) throw new Error("Desktop restart is unavailable.");
-            await desktopBridge.restartApp();
+          case "disable": {
+            if (!desktopBridge) return;
+            // A relaunch ends this renderer. A cancelled one changed nothing; a
+            // deferred one saved the change, which the panel then shows, as it
+            // does one the running backend already served without a relaunch.
+            const save = hubLaunchChange(desktopBridge, { enabled: action === "enable" });
+            const outcome = await guardRelaunch(async (timing) => {
+              if (action === "enable" && enrollAfterEnable) {
+                recordHubEnrollmentIntent(readIntentStorage(), Date.now());
+              } else {
+                clearHubEnrollmentIntent(readIntentStorage());
+              }
+              await save(timing);
+            });
+            if (outcome === "scheduled" || outcome === "applied") await reloadConfig();
             return;
+          }
+          case "restart": {
+            const restartApp = desktopBridge?.restartApp;
+            if (!restartApp) throw new Error("Desktop restart is unavailable.");
+            await guardRelaunch(savedChangeRelaunch(restartApp));
+            return;
+          }
           case "open-hub": {
             // The origin root only. The node derives exactly one route from the
             // origin, so synthesising an approval path would invent a Hub
@@ -412,8 +502,22 @@ export function HubSection({
         if (mountedRef.current) setPendingAction(null);
       }
     },
-    [config, desktopBridge, refreshCurrent],
+    [config, desktopBridge, enrollAfterEnable, guardRelaunch, refreshCurrent, reloadConfig],
   );
+
+  // Turning the connector on relaunched Ryco; finish what the operator started
+  // once the restarted connector is ready to enrol. The intent is taken once,
+  // so a cancelled or failed enrolment never restarts itself.
+  const connectorState = snapshot?.status.state;
+  // Saved settings waiting on a restart hold it back, as they hold back the
+  // Start enrollment button (see `offeredHubAction`).
+  const restartRequired = config?.restartRequired === true;
+  useEffect(() => {
+    if (connectorState !== "enrolling" || !enrollAfterEnable || pendingAction !== null) return;
+    if (restartRequired) return;
+    if (!consumeHubEnrollmentIntent(readIntentStorage(), Date.now())) return;
+    void runAction("enroll");
+  }, [connectorState, enrollAfterEnable, pendingAction, restartRequired, runAction]);
 
   const handleOriginBlur = useCallback(async () => {
     if (!desktopBridge || originDraft.trim() === "") {
@@ -448,14 +552,16 @@ export function HubSection({
       if (!desktopBridge) return;
       setPendingAction("enable");
       try {
-        await desktopBridge.setHubLaunchConfig({ origin });
+        const outcome = await guardRelaunch(hubLaunchChange(desktopBridge, { origin }));
+        if (outcome === "scheduled" || outcome === "applied") await reloadConfig();
+        if (outcome !== "relaunched" && mountedRef.current) setPendingAction(null);
       } catch (cause) {
         if (!mountedRef.current) return;
         setError(cause instanceof Error ? cause.message : "Unable to save the Hub address.");
         setPendingAction(null);
       }
     },
-    [desktopBridge],
+    [desktopBridge, guardRelaunch, reloadConfig],
   );
 
   const updateNodeNameDraft = useCallback((value: string) => {
@@ -474,7 +580,11 @@ export function HubSection({
     setSavingNodeName(true);
     setNodeNameError(null);
     try {
-      await desktopBridge.setHubLaunchConfig({ nodeName: nodeName === "" ? null : nodeName });
+      const outcome = await guardRelaunch(
+        hubLaunchChange(desktopBridge, { nodeName: nodeName === "" ? null : nodeName }),
+      );
+      if (outcome === "scheduled" || outcome === "applied") await reloadConfig();
+      if (outcome !== "relaunched" && mountedRef.current) setSavingNodeName(false);
     } catch (cause) {
       if (!mountedRef.current) return;
       setNodeNameError(
@@ -482,7 +592,7 @@ export function HubSection({
       );
       setSavingNodeName(false);
     }
-  }, [desktopBridge, nodeNameDraft]);
+  }, [desktopBridge, guardRelaunch, nodeNameDraft, reloadConfig]);
 
   const setFileSecretStoreFallback = useCallback(
     async (enabled: boolean) => {
@@ -496,7 +606,11 @@ export function HubSection({
       setSavingFileFallback(true);
       setConfigError(null);
       try {
-        await desktopBridge.setHubLaunchConfig({ allowFileSecretStore: enabled });
+        const outcome = await guardRelaunch(
+          hubLaunchChange(desktopBridge, { allowFileSecretStore: enabled }),
+        );
+        if (outcome === "scheduled" || outcome === "applied") await reloadConfig();
+        if (outcome !== "relaunched" && mountedRef.current) setSavingFileFallback(false);
       } catch (cause) {
         if (!mountedRef.current) return;
         setConfigError(
@@ -505,7 +619,7 @@ export function HubSection({
         setSavingFileFallback(false);
       }
     },
-    [desktopBridge],
+    [desktopBridge, guardRelaunch, reloadConfig],
   );
 
   const openRelayGuide = useCallback(async () => {
@@ -524,20 +638,10 @@ export function HubSection({
   if (!desktopBridge) return null;
 
   const stale = snapshot !== null && nowMs - snapshot.readAt > STALE_AFTER_MS;
-  const presentation =
-    snapshot === null ? null : presentHubStatus(snapshot.status, snapshot.identity, nowMs);
   const editable = snapshot === null ? false : canEditHubOrigin(snapshot.identity);
   const originChanged = originDraft.trim() !== (config?.origin ?? "");
   const nodeNameChanged = nodeNameDraft.trim() !== (config?.nodeName ?? "");
-  const automaticNativeSetup =
-    config !== null &&
-    config.origin !== null &&
-    desktopBridge.getHostedIdentityState !== undefined &&
-    desktopBridge.connectHostedIdentity !== undefined &&
-    snapshot?.identity.enrolled === "none";
-  const automaticNativeSetupWaiting =
-    automaticNativeSetup &&
-    (presentation?.action === "enable" || presentation?.action === "enroll");
+  const automaticNativeSetupWaiting = setup.automaticNativeSetupWaiting;
 
   const renderAction = (action: HubAction, variant: "outline" | "destructive-outline") =>
     action === "none" ? null : (
@@ -563,11 +667,11 @@ export function HubSection({
         title="Connection"
         description={
           automaticNativeSetupWaiting
-            ? "Connect your Ryco account below. Ryco will register this Mac with this Hub automatically."
+            ? "Connect your Ryco account below. Ryco will register this computer with this Hub automatically."
             : presentation === null
               ? "Loading…"
               : presentation.detail === null
-                ? "Reach this Mac from anywhere, including behind NAT or CGNAT, without opening a port."
+                ? "Reach this computer from anywhere, including behind NAT or CGNAT, without opening a port."
                 : presentation.detail
         }
         status={
@@ -596,17 +700,33 @@ export function HubSection({
               </span>
             )}
             {error ? <span className="block text-destructive">{error}</span> : null}
+            {restartRequired ? (
+              <span className="block text-warning">
+                Saved Hub settings apply after Ryco restarts.
+              </span>
+            ) : null}
           </>
         }
         control={
           presentation === null ? null : (
             <>
+              {restartRequired && presentation.action !== "restart"
+                ? renderAction("restart", "outline")
+                : null}
               {renderAction(
-                automaticNativeSetupWaiting ? "none" : presentation.action,
+                offeredHubAction({
+                  action: presentation.action,
+                  automaticNativeSetupWaiting,
+                  restartRequired,
+                }),
                 presentation.action === "leave" ? "destructive-outline" : "outline",
               )}
               {renderAction(
-                automaticNativeSetupWaiting ? "none" : presentation.secondaryAction,
+                offeredHubAction({
+                  action: presentation.secondaryAction,
+                  automaticNativeSetupWaiting,
+                  restartRequired,
+                }),
                 presentation.secondaryAction === "leave" ? "destructive-outline" : "outline",
               )}
             </>
@@ -659,6 +779,13 @@ export function HubSection({
                   {snapshot.enrollment.deviceCode}
                 </DataListItem>
               </DataList>
+              {/* The saved address is the running connector's only while no
+                  saved change waits on a restart; never name another Hub. */}
+              <p className="pt-2 text-xs text-muted-foreground/80">
+                {config?.origin && !restartRequired
+                  ? `Approve it at ${config.origin}: open your machines, choose Enroll node, and enter the device code.`
+                  : "Approve it on your Hub: open your machines, choose Enroll node, and enter the device code."}
+              </p>
               <p className="pt-2 text-[11px] text-muted-foreground/70">
                 The device code only routes the request. It does not prove which machine you are
                 approving.
@@ -673,9 +800,7 @@ export function HubSection({
         </AnimatedHeight>
       </SettingsRow>
 
-      {config !== null &&
-      config.origin !== null &&
-      desktopBridge.getHostedIdentityState !== undefined ? (
+      {setup.showAccountRow ? (
         <SettingsRow
           title="Ryco account"
           description={
@@ -1026,6 +1151,8 @@ export function HubSection({
         onFileFallbackChange={(enabled) => void setFileSecretStoreFallback(enabled)}
         onOpenGuide={() => void openRelayGuide()}
       />
+
+      {relaunchGuardDialog}
 
       <AlertDialog open={leaveOpen} onOpenChange={setLeaveOpen}>
         <AlertDialogPopup>

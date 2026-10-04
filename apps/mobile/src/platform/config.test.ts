@@ -226,6 +226,7 @@ function createGuardCatalog() {
     registryStore: { subscribe: subscribeRegistry, getState: () => ({ markConnected: () => {} }) },
     runtimeStore: {
       getState: () => ({
+        byId: {},
         ensure: () => {},
         patch: (_id: EnvironmentId, _patch: Partial<SavedEnvironmentRuntimeState>) => {},
       }),
@@ -235,6 +236,7 @@ function createGuardCatalog() {
     list: () => [],
     get: () => null,
     readBearerToken: async () => null,
+    writeBearerToken: async () => false,
   };
   return { catalog, subscribeRegistry, waitForHydration };
 }
@@ -252,7 +254,15 @@ describe("two-plane isolation guard", () => {
     const subscribeResume = vi.fn(() => () => {});
     const driver = createMobileEnvironmentDriver({
       catalog,
-      remoteApi: { resolveRemoteWebSocketConnectionUrl: async () => "ws://node.local/?wsToken=t" },
+      remoteApi: {
+        fetchRemoteSessionState: async () => {
+          throw new Error("The guard never reaches a real connect.");
+        },
+        resolveRemoteWebSocketConnectionUrl: async () => "ws://node.local/?wsToken=t",
+        rotateRemoteBearerSession: async () => {
+          throw new Error("The guard never reaches a real connect.");
+        },
+      },
       subscribeResume,
       connectSavedEnvironment: async (record: SavedEnvironmentRecord) =>
         ({ environmentId: record.environmentId }) as unknown as EnvironmentConnection,

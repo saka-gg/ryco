@@ -1,8 +1,9 @@
 import { ORCHESTRATION_WS_METHODS, type RelayEffectiveRole, WS_METHODS } from "@ryco/contracts";
-import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
+import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 
-import type { WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
+import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
 import { HostedHubApiError } from "../authorization/api.ts";
+import { hostedSessionAdmits } from "../authorization/capabilities.ts";
 import { getHostedHubApi, getHostedRuntimeConfiguration } from "../authorization/runtime.ts";
 import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
 import type {
@@ -41,44 +42,72 @@ const HOSTED_SESSION_SYNC_SUBSCRIPTIONS = new Set<string>([
   WS_METHODS.subscribeVcsStatus,
 ]);
 
-const HOSTED_READ_ONLY_STREAMS = new Set<string>([
-  ...HOSTED_SESSION_SYNC_SUBSCRIPTIONS,
-  WS_METHODS.subscribeAuthAccess,
-]);
-
 type HostedRequestAuthorizationState = Pick<
   ReturnType<typeof hostedHubStore.getState>,
-  "effectiveRole" | "directoryStatus" | "transportStatus" | "browserStatus" | "sessionStatus"
+  | "effectiveRole"
+  | "directoryStatus"
+  | "transportStatus"
+  | "browserStatus"
+  | "sessionStatus"
+  | "sessionRecoveredAfterUnknown"
 >;
+
+/**
+ * Whether the hosted session admits a request now, not yet, or not at all.
+ *
+ * A method no hosted role may call, a role this session already knows that
+ * does not reach the method's tier, or a terminally failed transport refuses
+ * for good. Everything else that is refused is only waiting — for the session
+ * (a role still being validated, a transport reconnecting, a replacement
+ * session that has not accepted its snapshot) or, on a current session that
+ * could not confirm an earlier action, for the user's acknowledgement — and a
+ * subscription retries it rather than giving up: the client is rebuilt while
+ * its session synchronizes, and a long-lived read stream started then must
+ * survive that.
+ */
+export function admitHostedRequestForState(
+  state: HostedRequestAuthorizationState,
+  info: { readonly tag: string; readonly stream: boolean },
+): RpcRequestAdmission {
+  const roleFresh = state.directoryStatus === "ready";
+  if (hostedRoleAllows(state.effectiveRole, info.tag, roleFresh)) {
+    const live = state.transportStatus === "online" && state.browserStatus === "current";
+    if (live && hostedSessionAdmits(state, info.tag)) return "allowed";
+    if (
+      info.stream &&
+      (state.browserStatus === "current" || state.browserStatus === "synchronizing") &&
+      (state.sessionStatus === "synchronizing" ||
+        state.sessionStatus === "replaying" ||
+        state.sessionStatus === "delivery-unknown" ||
+        state.sessionStatus === "stale" ||
+        state.sessionStatus === "closed") &&
+      HOSTED_SESSION_SYNC_SUBSCRIPTIONS.has(info.tag)
+    ) {
+      return "allowed";
+    }
+    // Current, but holding mutations until the user has continued past an
+    // unconfirmed action: waiting will not help, the inline notice will.
+    if (live && state.sessionStatus === "delivery-unknown" && state.sessionRecoveredAfterUnknown) {
+      return "awaiting-acknowledgement";
+    }
+  } else if (!hostedRoleAllows("owner", info.tag) || (roleFresh && state.effectiveRole !== null)) {
+    return "forbidden";
+  }
+  return state.transportStatus === "terminal-failure" ? "forbidden" : "awaiting-session";
+}
 
 export function authorizeHostedRequestForState(
   state: HostedRequestAuthorizationState,
   info: { readonly tag: string; readonly stream: boolean },
 ): boolean {
-  if (!hostedRoleAllows(state.effectiveRole, info.tag, state.directoryStatus === "ready")) {
-    return false;
-  }
-  if (
-    state.transportStatus === "online" &&
-    state.browserStatus === "current" &&
-    state.sessionStatus === "ready"
-  ) {
-    return true;
-  }
-  return (
-    info.stream &&
-    (state.browserStatus === "current" || state.browserStatus === "synchronizing") &&
-    (state.sessionStatus === "synchronizing" ||
-      state.sessionStatus === "replaying" ||
-      state.sessionStatus === "delivery-unknown" ||
-      state.sessionStatus === "stale" ||
-      state.sessionStatus === "closed") &&
-    HOSTED_SESSION_SYNC_SUBSCRIPTIONS.has(info.tag)
-  );
+  return admitHostedRequestForState(state, info) === "allowed";
 }
 
-function authorizeHostedRequest(info: { readonly tag: string; readonly stream: boolean }): boolean {
-  return authorizeHostedRequestForState(hostedHubStore.getState(), info);
+function admitHostedRequest(info: {
+  readonly tag: string;
+  readonly stream: boolean;
+}): RpcRequestAdmission {
+  return admitHostedRequestForState(hostedHubStore.getState(), info);
 }
 
 export function ticketFailure(error: HostedHubApiError): HostedRelayFailure {
@@ -154,7 +183,10 @@ export interface HostedRelayAttemptBinding {
     };
     readonly preparedSocketContext: unknown;
   }) => unknown;
-  readonly authorizeRequest: (info: { readonly tag: string; readonly stream: boolean }) => boolean;
+  readonly authorizeRequest: (info: {
+    readonly tag: string;
+    readonly stream: boolean;
+  }) => RpcRequestAdmission;
   readonly shouldReconnect: (generation: number) => boolean;
   readonly transportStatus: (generation: number, status: HostedRelayTransportStatus) => void;
   readonly sessionStatus: (generation: number, status: HostedRycoSessionStatus) => void;
@@ -185,7 +217,7 @@ function defaultBinding(): HostedRelayAttemptBinding {
     },
     disposeSocketContext: (context) =>
       getHostedRuntimeConfiguration().disposeRelaySocketContext?.(context),
-    authorizeRequest: authorizeHostedRequest,
+    authorizeRequest: admitHostedRequest,
     shouldReconnect: (generation) => {
       const state = hostedHubStore.getState();
       return (
@@ -232,6 +264,18 @@ export function recoverHostedRelayConnection(generation: number): void {
       void hostedHubController.retrySelectedNode();
     }
   });
+}
+
+/**
+ * Whoever answers for a connection's receipted requests after a drop
+ * (`bindHostedDispatchReplay`). Until it claims them they are tracked like any
+ * other mutation, so a client that does not replay them still leaves their
+ * delivery uncertain.
+ */
+export interface HostedReceiptedRequestOwner {
+  readonly ownsReceiptedRequests: () => boolean;
+  /** The connection closed unexpectedly: what it had in flight may not have arrived. */
+  readonly connectionLost: () => void;
 }
 
 export class HostedRelayAttemptFactory {
@@ -379,7 +423,9 @@ export class HostedRelayAttemptFactory {
     }
   }
 
-  lifecycleHandlers(): WsProtocolLifecycleHandlers {
+  lifecycleHandlers(
+    receiptedRequestOwner?: HostedReceiptedRequestOwner,
+  ): WsProtocolLifecycleHandlers {
     return {
       webSocketConstructor: (url) => this.createSocket(url) as WebSocket,
       isSocketCurrent: (socket) => socket === this.#activeSocket,
@@ -397,6 +443,7 @@ export class HostedRelayAttemptFactory {
       onOpen: () => this.#reconnect.opened(),
       onClose: (_details, context) => {
         if (context.intentional) return;
+        receiptedRequestOwner?.connectionLost();
         const generation = this.#activeGeneration;
         if (generation === null) return;
         this.#reconnect.closed();
@@ -404,7 +451,16 @@ export class HostedRelayAttemptFactory {
         this.#binding.connectionClosed(generation);
       },
       onRequestStart: (info) => {
-        if (info.stream && HOSTED_READ_ONLY_STREAMS.has(info.tag)) return;
+        // Only a request that may have changed something can leave its
+        // delivery uncertain. Reads — unary, or long-lived streams such as the
+        // Agent Control queue — are harmless to lose. A receipted command is
+        // left to its client only once that client has claimed it: the client
+        // then replays it, or marks the session itself when it cannot.
+        const effect = rpcDeliveryEffectFor(info.tag);
+        if (effect === "read") return;
+        if (effect === "receipted" && receiptedRequestOwner?.ownsReceiptedRequests() === true) {
+          return;
+        }
         this.#pendingRequests.set(info.id, info.stream ? "exit" : "first-chunk");
       },
       onRequestChunk: (info) => {

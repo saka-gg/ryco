@@ -35,6 +35,7 @@ import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
 import { HubConnectorLive } from "./hubConnector/HubConnectorLive.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import { desktopLocalIntroductionRoutesLayer } from "./hubConnector/localIntroductionHttp.ts";
+import { desktopHubReachabilityRouteLayer } from "./hubConnector/desktopHubReachabilityHttp.ts";
 import { desktopNativeNodeClaimRoutesLayer } from "./hubConnector/desktopNativeNodeClaimHttp.ts";
 import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -98,6 +99,7 @@ import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegis
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import {
   authBearerBootstrapRouteLayer,
+  authBearerRotateRouteLayer,
   authBootstrapRouteLayer,
   authClientsRevokeOthersRouteLayer,
   authClientsRevokeRouteLayer,
@@ -134,6 +136,7 @@ import { AgentControlActionValidatorLive } from "./agentControl/Layers/AgentCont
 import { AgentControlExecutionLive } from "./agentControl/Layers/AgentControlExecution.ts";
 import { AgentControlProjectPlansLive } from "./agentControl/Layers/AgentControlProjectPlans.ts";
 import { AgentControlExternalIntegrationServiceLive } from "./agentControl/Layers/AgentControlExternalIntegration.ts";
+import { AgentControlExternalTopologyLive } from "./agentControl/Layers/AgentControlExternalTopology.ts";
 import { AgentControlExternalTaskServiceLive } from "./agentControl/Layers/AgentControlExternalTask.ts";
 import { AgentControlExternalMcpServerLive } from "./agentControl/Layers/AgentControlExternalMcpServer.ts";
 import { AgentControlAutomationServiceLive } from "./agentControl/Layers/AgentControlAutomation.ts";
@@ -282,6 +285,10 @@ const AgentControlLayerLive = Layer.mergeAll(
   Layer.provideMerge(AgentControlExternalRepositoryLive),
   Layer.provideMerge(AgentControlAutomationRepositoryLive),
   Layer.provideMerge(AgentControlMcpInstallationRepositoryLive),
+  // One process-wide external topology: the external integration surface, its
+  // listener, and the Hub connector (which hands the process over before its
+  // first relay connection) must all read the same value.
+  Layer.provideMerge(AgentControlExternalTopologyLive),
 );
 
 // In-memory credential/lease authority for the internal provider-session
@@ -530,6 +537,7 @@ const RuntimeServicesLive = Layer.mergeAll(
 
 const authRoutesLayer = Layer.mergeAll(
   authBearerBootstrapRouteLayer,
+  authBearerRotateRouteLayer,
   authBootstrapRouteLayer,
   authClientsRevokeOthersRouteLayer,
   authClientsRevokeRouteLayer,
@@ -564,6 +572,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   hubConnectorRoutesLayer,
   desktopLocalIntroductionRoutesLayer,
   desktopNativeNodeClaimRoutesLayer,
+  desktopHubReachabilityRouteLayer,
 ).pipe(Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(

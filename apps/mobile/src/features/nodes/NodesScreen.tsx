@@ -19,7 +19,7 @@ import {
 import { HOME_LIST_PADDING_BOTTOM } from "../home/homeChromeModel";
 import { HubNodeSection } from "../hostedHub/HubNodeSection";
 import { NodeRow, type NodeRowAction } from "./NodeRow";
-import { directRoleLabel, directTransportLabel } from "./nodesModel";
+import { directConnectActionLabel, directRoleLabel, directTransportLabel } from "./nodesModel";
 
 interface RenameTarget {
   readonly environmentId: EnvironmentId;
@@ -132,12 +132,25 @@ export function NodesScreen(props: {
     const isConnected = row.runtime.connectionState === "connected";
     const isConnecting = row.runtime.connectionState === "connecting";
     const isSelected = activeEnvironmentId === id;
+    const needsRepair = row.runtime.authState === "requires-auth";
     const disabled = busy !== null;
     const rowActions: NodeRowAction[] = [];
 
+    if (needsRepair) {
+      // The machine no longer accepts the saved pairing: pairing it again from
+      // its saved address replaces the credential in place.
+      rowActions.push({
+        label: "Re-pair",
+        disabled,
+        onPress: () => navigation.navigate("ConnectionsNew", { repairEnvironmentId: id }),
+      });
+    }
     if (!isSelected || !isConnected) {
       rowActions.push({
-        label: isConnected ? "Use" : row.runtime.connectionState === "error" ? "Retry" : "Connect",
+        label: directConnectActionLabel({
+          connectionState: row.runtime.connectionState,
+          needsRepair,
+        }),
         disabled,
         onPress: () =>
           void withBusy(id, async () => {

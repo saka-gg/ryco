@@ -72,6 +72,24 @@ export function relayErrorKind(frame: RelayErrorFrame): ConnectorFailureKind {
   }
 }
 
+/**
+ * The close the Hub gives a socket another connection displaced.
+ *
+ * The Hub terminates the older of two connections for one node identity with
+ * this close and no error frame. Read as an ordinary network drop, both copies
+ * reconnect at once and displace each other indefinitely, and neither ever
+ * reaches the `connection_replaced` handling that spaces them out. Matched on
+ * the exact code and reason, so no other 1012 ("service restart") is affected.
+ */
+const REPLACED_CLOSE_CODE = 1012;
+const REPLACED_CLOSE_REASON = "connection_replaced";
+
+function closeEventKind(event: CloseEvent | undefined): ConnectorFailureKind {
+  return event?.code === REPLACED_CLOSE_CODE && event.reason === REPLACED_CLOSE_REASON
+    ? "connection_replaced"
+    : "network";
+}
+
 function binaryMessage(data: unknown): Uint8Array | undefined {
   if (data instanceof Uint8Array) return Uint8Array.from(data);
   if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
@@ -133,6 +151,17 @@ function detachRelayFrameBytes(frame: RelayFrame): RelayFrame {
 
 const MAX_PENDING_POST_READY_FRAMES = 16;
 
+/**
+ * A proof this old may have reached the Hub after its challenge expired.
+ *
+ * The Hub honours a challenge for 30 seconds and rejects an expired one with
+ * the same `authentication_failed` it uses for a wrong or revoked key, so the
+ * two cannot be told apart from the frame. Age is measured locally, from before
+ * the challenge was requested until the proof was sent, which overstates it and
+ * is immune to clock skew.
+ */
+const STALE_PROOF_AGE_MS = 20_000;
+
 function clearRelayFrameBytes(frame: RelayFrame): void {
   switch (frame.type) {
     case "auth":
@@ -174,6 +203,9 @@ export class RelayConnectionSession {
   readonly #scheduler: RelaySessionScheduler;
   readonly #onFrame: (frame: RelayFrame) => void;
   readonly #onTerminal: (error: RelayConnectionError) => void;
+  readonly #now: () => number;
+  #proofRequestedAt: number | undefined;
+  #proofSentAt: number | undefined;
   #socket: HubRelaySocket | undefined;
   #ready: RelayReadyFrame | undefined;
   #offeredProtocolMinor: number | undefined;
@@ -199,6 +231,8 @@ export class RelayConnectionSession {
     readonly transport: HubRelayTransport;
     readonly hubOrigin: string;
     readonly scheduler?: RelaySessionScheduler;
+    /** Wall clock for the proof's age; injectable for tests. */
+    readonly now?: () => number;
     readonly onFrame: (frame: RelayFrame) => void;
     readonly onTerminal: (error: RelayConnectionError) => void;
   }) {
@@ -206,6 +240,7 @@ export class RelayConnectionSession {
     this.#transport = options.transport;
     this.#hubOrigin = options.hubOrigin;
     this.#scheduler = options.scheduler ?? defaultRelayScheduler;
+    this.#now = options.now ?? Date.now;
     this.#onFrame = options.onFrame;
     this.#onTerminal = options.onTerminal;
   }
@@ -242,6 +277,7 @@ export class RelayConnectionSession {
 
   async #authenticate(): Promise<RelayReadyFrame> {
     let auth: RelayNodeAuthHandshake;
+    this.#proofRequestedAt = this.#now();
     try {
       auth = await this.#identity.createRelayAuthenticationFrame(this.#hubOrigin, {
         protocolMajor: RELAY_PROTOCOL_MAJOR,
@@ -306,6 +342,7 @@ export class RelayConnectionSession {
           fail(new RelayConnectionError("network"));
           return;
         }
+        this.#proofSentAt = this.#now();
         this.#clearPendingAuthentication();
         this.#timer = this.#scheduler.setTimeout(
           () => fail(new RelayConnectionError("authentication_timeout")),
@@ -338,7 +375,15 @@ export class RelayConnectionSession {
         bytes.fill(0);
         if (this.#ready === undefined) {
           if (frame.type === "error") {
-            fail(new RelayConnectionError(relayErrorKind(frame), frame.retryAfterMs));
+            const kind = relayErrorKind(frame);
+            fail(
+              new RelayConnectionError(
+                kind === "authentication_failed" && this.#proofWasStale()
+                  ? "authentication_stale"
+                  : kind,
+                frame.retryAfterMs,
+              ),
+            );
             return;
           }
           if (
@@ -373,14 +418,15 @@ export class RelayConnectionSession {
         this.#onFrame(frame);
       };
       const onError = () => fail(new RelayConnectionError("network"));
-      const onClose = () => {
+      const onClose = (event: CloseEvent) => {
         if (this.#closed) return;
+        const kind = closeEventKind(event);
         if (!this.#settled) {
-          fail(new RelayConnectionError("network"));
+          fail(new RelayConnectionError(kind));
         } else {
           this.#closed = true;
           this.#disposeListeners();
-          this.#onTerminal(new RelayConnectionError("network"));
+          this.#onTerminal(new RelayConnectionError(kind));
         }
       };
       this.#listeners = { open: onOpen, message: onMessage, error: onError, close: onClose };
@@ -461,6 +507,12 @@ export class RelayConnectionSession {
       );
     }
     this.#listeners = undefined;
+  }
+
+  #proofWasStale(): boolean {
+    const requestedAt = this.#proofRequestedAt;
+    if (requestedAt === undefined) return false;
+    return (this.#proofSentAt ?? this.#now()) - requestedAt >= STALE_PROOF_AGE_MS;
   }
 
   #clearPendingAuthentication(): void {

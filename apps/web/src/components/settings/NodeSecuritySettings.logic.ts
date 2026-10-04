@@ -51,6 +51,7 @@ import type {
   NodeE2eePolicyProposal,
   NodeE2eePrekey,
   NodeE2eeSession,
+  NodeE2eeSessionList,
 } from "@ryco/client-runtime/connection";
 import type { HostedConnectionStatusIndicator } from "../../hostedHub/connectionStatus";
 import { hostedE2eeVerificationView } from "../hostedHub/HostedE2eeVerification.logic";
@@ -183,6 +184,72 @@ export function nodeOperatorDataAvailability(
     unavailableBody:
       "Your node's client list, live sessions, admission policy, prekey and fallback counters are held on the node and read over its own local interface, which the relay does not carry. Open Ryco on that machine to see them, or run `ryco e2ee` there.",
   };
+}
+
+/** The six operator reads one poll makes, by the panel field each fills. */
+export interface NodeSecurityReads {
+  readonly clients: NodeE2eeClientListing | null;
+  readonly sessions: NodeE2eeSessionList | null;
+  readonly policy: NodeE2eePolicy | null;
+  readonly prekey: NodeE2eePrekey | null;
+  readonly continuity: NodeE2eeContinuity | null;
+  readonly fallback: NodeE2eeFallback | null;
+}
+
+/** One poll's answers, each settled on its own. */
+export type NodeSecurityReadResults = {
+  readonly [Field in keyof NodeSecurityReads]: PromiseSettledResult<
+    NonNullable<NodeSecurityReads[Field]>
+  >;
+};
+
+/** The order the reads are made in, and so the order a failure is reported from. */
+const NODE_SECURITY_READ_FIELDS = [
+  "clients",
+  "sessions",
+  "policy",
+  "prekey",
+  "continuity",
+  "fallback",
+] as const satisfies ReadonlyArray<keyof NodeSecurityReads>;
+
+export const NODE_SECURITY_READ_FAILED = "Unable to read the node's security state.";
+
+/**
+ * Fold one poll into what the panel shows, ONE READ AT A TIME.
+ *
+ * The six reads were one `Promise.all`, so a single refused route — the
+ * continuity read once refused in a backend that does not own the identity —
+ * left every other section empty behind one generic error. A read that answered
+ * is drawn whatever its neighbours did. A read that failed keeps the value it
+ * last had rather than blanking: an emptied client list reads as "nothing is
+ * authorized", the one wrong answer this data has.
+ */
+export function mergeNodeSecurityReads(
+  previous: NodeSecurityReads,
+  results: NodeSecurityReadResults,
+): NodeSecurityReads {
+  const settled = <A>(result: PromiseSettledResult<A>, kept: A | null): A | null =>
+    result.status === "fulfilled" ? result.value : kept;
+  return {
+    clients: settled(results.clients, previous.clients),
+    sessions: settled(results.sessions, previous.sessions),
+    policy: settled(results.policy, previous.policy),
+    prekey: settled(results.prekey, previous.prekey),
+    continuity: settled(results.continuity, previous.continuity),
+    fallback: settled(results.fallback, previous.fallback),
+  };
+}
+
+/** Why the first failed read failed, or null when every read answered. */
+export function nodeSecurityReadFailure(results: NodeSecurityReadResults): string | null {
+  for (const field of NODE_SECURITY_READ_FIELDS) {
+    const result = results[field];
+    if (result.status === "rejected") {
+      return result.reason instanceof Error ? result.reason.message : NODE_SECURITY_READ_FAILED;
+    }
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -351,6 +418,26 @@ export const NODE_SAFETY_NUMBER_ADVISORY =
   "account reads differently. Approve nothing whose number you have not read off the other " +
   "screen yourself.";
 
+/**
+ * The owner's statement, per row, that gates every approval from this panel.
+ *
+ * §13.2 step 5 has the owner compare the number on both screens before
+ * approving, and strict mode's whole guarantee rests on that one human check: a
+ * Hub mints the tickets, so it can introduce a key of its own under the owner's
+ * account, and that pending row differs from the phone's only in its
+ * fingerprint and this number. An advisory sentence beside an Approve button
+ * leaves the comparison optional, so the button does not exist until the owner
+ * says the numbers match. It is a statement about the whole value — never about
+ * a tail of it, which a Hub that knows the phone's enrolled key can grind a key
+ * to match ahead of time.
+ */
+export const NODE_SAFETY_NUMBER_MATCH_LABEL = "This number matches the phone";
+
+export const NODE_SAFETY_NUMBER_MATCH_HINT =
+  `Read all ${E2EE_SAFETY_NUMBER_DIGITS.digits} digits off the phone's own screen and tick this ` +
+  "only if every group is the same; the approve action appears once you have. The characters " +
+  "in this row's title only tell rows apart and are no comparison.";
+
 export function nodeSafetyNumberView(value: string): NodeSafetyNumberView | null {
   const groups = nodeSafetyNumberGroups(value);
   if (groups.length === 0) return null;
@@ -471,12 +558,18 @@ export function nodePrekeyRemedy(prekey: NodeE2eePrekey | null): string | null {
 
 /**
  * §7.5's lineage. An unresolvable one carries §7.5's own remedy, so this surface
- * cannot drift from the condition that raised it.
+ * cannot drift from the condition that raised it — and so does one this backend
+ * left unread because another copy of Ryco owns the identity.
  */
 export function nodeContinuityRows(
   continuity: NodeE2eeContinuity | null,
 ): ReadonlyArray<NodeFactRow> {
   if (continuity === null) return [{ label: "Continuity", value: UNKNOWN }];
+  if (continuity.status === "identity_in_use") {
+    // Not a lineage state: this backend did not read the chain, and the node's
+    // remedy says which copy of Ryco did.
+    return [{ label: "Continuity", value: "not read here" }];
+  }
   if (continuity.status === "unavailable") {
     return [
       { label: "Continuity", value: "unresolvable" },
@@ -537,6 +630,9 @@ export function nodeClientStatusTone(
  * Enough to tell two devices apart at a glance, and never offered as a substitute
  * for the full value: the row's own `FactRows` and every per-record confirmation
  * carry all of it, because §13.2 step 5's comparison is character for character.
+ * It is not a comparison either — a Hub that knows the phone's enrolled key can
+ * grind one whose tail matches — so the statement that gates an approval says
+ * so next to the number (`NODE_SAFETY_NUMBER_MATCH_HINT`).
  */
 const CLIENT_TITLE_FINGERPRINT_TAIL = 8;
 
@@ -563,6 +659,14 @@ export function nodeClientRows(record: NodeE2eeClientRecord): ReadonlyArray<Node
     { label: "Hub origin", value: record.hubOrigin },
     { label: "Account", value: record.accountId },
     { label: "Maximum role", value: record.maxRole === "" ? "none granted" : record.maxRole },
+    // The role the device introduced itself under — what an approval has to
+    // name for it to connect at all (see `nodeApprovalRole`). The node follows
+    // it only while the record is pending; once it is approved or revoked, a
+    // peer's hello never rewrites it, so the label says when it was read.
+    {
+      label: record.status === "pending" ? "Connects as" : "Connected as (when introduced)",
+      value: record.observedRole ?? "not recorded",
+    },
     {
       label: "Capabilities",
       value: record.capabilitySet.length === 0 ? "none" : record.capabilitySet.join(", "),
@@ -1077,7 +1181,7 @@ const ACTION_CONFIRMATIONS = {
     title: "Approve this client key?",
     // §13.6: a first approval is authority-widening, so it takes effect only on
     // a fresh ticket, channel, and handshake — never on one already open.
-    body: "The device holding this key may then reach this node, up to the role and capabilities you grant here. Compare its number against the device first. It takes effect on its next connection, not on anything open now.",
+    body: "The device holding this key may then reach this node, at most with the role and capability this approval names. Compare its number against the device first. It takes effect on its next connection, not on anything open now.",
     confirmLabel: "Approve key",
     destructive: false,
   },
@@ -1088,15 +1192,26 @@ const ACTION_CONFIRMATIONS = {
     // (`capabilitySet ?? found.entry.capabilitySet`), so the role ceiling is the
     // only dimension that moves — while §13.6 treats the capability grant as a
     // separate authority the owner names, and this panel's own approve flow makes
-    // them name it. "The device reconnects with the smaller authority" without
-    // that clause reads as both.
-    body: "Anything this device has open under the wider authority closes immediately — the node will not confirm the change until those channels are shut. The device reconnects with the smaller role ceiling. Its capability grant is left exactly as it is; only the ceiling drops, and changing the capabilities is a separate command on the node.",
+    // them name it.
+    //
+    // The reconnect clause is CONDITIONAL because the outcome is. §8.3 makes the
+    // device's intended role equal its `channel.open` role, so a ceiling below
+    // that refuses it rather than limiting it. The old sentence — "The device
+    // reconnects with the smaller role ceiling" — promised a reconnect the node
+    // then refused on every handshake. The panel offers this action only when
+    // the role the device connects with already fits (`nodeNarrowOffered`) —
+    // as the node recorded it when the device introduced itself, which nothing
+    // refreshes once the record is approved, so the sentence says that too.
+    body: "Anything this device has open under the wider authority closes immediately — the node will not confirm the change until those channels are shut. It can reconnect only while the role it connects with fits under the new ceiling. The role it introduced itself with does; if the Hub has raised its account's role since, it is refused, not limited. Its capability grant is left exactly as it is; only the ceiling drops, and changing the capabilities is a separate command on the node.",
     confirmLabel: "Reduce authority",
     destructive: true,
   },
   revoke: {
     title: "Revoke this client key?",
-    body: "The device loses access now: every channel it has open closes before this is confirmed, and it cannot reconnect until you approve it again. The record stays, so you can see it was revoked.",
+    // No "until you approve it again": this panel does not re-approve a revoked
+    // key (`NODE_APPROVAL_REVOKED_NOTICE`), so the promise of a one-click way
+    // back was one the same panel then refused. The two ways back are named.
+    body: "The device loses access now: every channel it has open closes before this is confirmed. It cannot reconnect unless the key is approved again on the node itself (`ryco e2ee client approve`), or its record is deleted and the device introduces itself again — this panel does not re-approve a revoked key. The record stays, so you can see it was revoked.",
     confirmLabel: "Revoke key",
     destructive: true,
   },
@@ -1169,7 +1284,23 @@ export interface NodeE2eeRecordSubject {
   readonly fingerprint: string;
   readonly accountId: string;
   readonly hubOrigin: string;
+  /** The row's status, where the consequence depends on it. Never echoed as a fact. */
+  readonly status?: NodeE2eeClientRecord["status"] | undefined;
 }
+
+/**
+ * Revoke on a request nothing has approved yet.
+ *
+ * Revoke is offered on pending rows because it is how an owner blocks a key —
+ * the approve dialog sends them here for an account that should not hold the
+ * role. But an owner who only means to set a request aside would be left with a
+ * row this panel can never approve, so the dialog names the action that does
+ * that instead.
+ */
+export const NODE_REVOKE_PENDING_NOTE =
+  "This is a request nothing has approved yet. Revoking it blocks this key here; to turn the " +
+  "request away without blocking the device, delete it instead — it can then introduce itself " +
+  "again.";
 
 /**
  * Why a per-record confirmation carries the record and not only the verb.
@@ -1198,9 +1329,11 @@ export function nodeE2eeRecordConfirmation(
   subject: NodeE2eeRecordSubject,
 ): NodeE2eeActionConfirmation {
   const base = ACTION_CONFIRMATIONS[action];
+  const pendingNote =
+    action === "revoke" && subject.status === "pending" ? [NODE_REVOKE_PENDING_NOTE] : [];
   return {
     ...base,
-    body: `${base.body} ${NODE_E2EE_RECORD_SUBJECT_PROMPT}`,
+    body: [base.body, ...pendingNote, NODE_E2EE_RECORD_SUBJECT_PROMPT].join(" "),
     facts: nodeE2eeRecordSubjectFacts(subject),
   };
 }
@@ -1224,20 +1357,154 @@ export function nodeE2eePairingWindowConfirmation(fingerprint: string): NodeE2ee
 }
 
 /**
- * §8.3's role ordering, as the roles an approval may name.
+ * §8.3's role vocabulary, in its ordering, least authority first.
  *
- * THE OWNER NAMES THE ROLE. §13.6: "`approved` requires explicit owner action
- * naming the maximum role and capability set." A single Approve button that
- * silently picked one would be the panel naming it, not the owner — and the
- * value it picked would become the ceiling every channel that key opens is
- * admitted under, which is the one decision here that cannot be taken back
- * without closing those channels.
- *
- * Ordered least-authority first, so the first thing under the cursor is the
- * smallest grant.
+ * It is the set an approval may name and the ranking a narrowing is judged by.
+ * It is NOT a menu: see `nodeApprovalRole` for why the panel offers one role.
  */
 export const NODE_E2EE_APPROVABLE_ROLES = ["viewer", "operator", "owner"] as const;
 export type NodeE2eeApprovableRole = (typeof NODE_E2EE_APPROVABLE_ROLES)[number];
+
+/** §8.3's rank, or -1 for anything outside the vocabulary. */
+function nodeRoleRank(role: string | undefined): number {
+  return (NODE_E2EE_APPROVABLE_ROLES as ReadonlyArray<string | undefined>).indexOf(role);
+}
+
+/**
+ * The one role an approval from this panel names: the role the node saw this
+ * device connect with.
+ *
+ * NOT A MENU, AND NOT A DEFAULT THE PANEL PICKED. §8.3 makes a native client's
+ * intended role equal the `channel.open` role the Hub assigns, and §8.6 step 6
+ * admits it only under a `maxRole` at least that high — the node's account-grant
+ * verifier applies the same ceiling, so this holds on both suites. A ceiling
+ * BELOW the observed role does not limit the device: the record commits as
+ * `approved`, the row goes green, and every handshake it attempts is refused.
+ * The three buttons this replaced listed `viewer` first, which put exactly that
+ * lockout under the cursor first, for every owner approving their own phone. A
+ * ceiling ABOVE it grants headroom the Hub never assigned, which is what the
+ * node-local ceiling exists to withhold. The observed role is the only value
+ * that is neither — and it is never inferred from whose account this is.
+ *
+ * The owner still names it (§13.6): the confirmation states the role, what it
+ * can do, and the account it is for, and approving is their action. `null` when
+ * the record carries no role it can rank — it predates the field, or came from a
+ * Local Trusted Introduction — because offering one then is a guess, and a wrong
+ * guess is the lockout. `nodeApprovalWithheldNotice` says what to do instead.
+ *
+ * PENDING RECORDS ONLY. The node follows the observed role while a record is
+ * pending and freezes it once the owner acts, because a peer's hello never
+ * rewrites an `approved` or `revoked` record. On a revoked record it is the role
+ * the device had when it introduced itself, and the Hub may assign another now:
+ * re-approving at it could lock the device out, or grant headroom the Hub no
+ * longer assigns. So a revoked key comes back the way it first arrived — a fresh
+ * introduction this panel can compare and approve — or at a role the owner
+ * names on the node.
+ */
+export function nodeApprovalRole(record: NodeE2eeClientRecord): NodeE2eeApprovableRole | null {
+  if (record.status !== "pending") return null;
+  const rank = nodeRoleRank(record.observedRole);
+  return rank < 0 ? null : NODE_E2EE_APPROVABLE_ROLES[rank]!;
+}
+
+export const NODE_APPROVAL_ROLE_UNKNOWN_PENDING =
+  "This request does not say which role the device connects with, so no approval here could " +
+  "let it in. Have the device try again: its next attempt records the role, and the approve " +
+  "action appears on this row.";
+
+export const NODE_APPROVAL_REVOKED_NOTICE =
+  "A revoked key is not re-approved from here. The role on this record is the one the device " +
+  "introduced itself with, and the Hub may open its channels under another now — a smaller " +
+  "ceiling would refuse the device, a larger one would grant what the Hub no longer assigns. " +
+  "Delete the record and let the device introduce itself again, then approve the new request " +
+  "here, or name the role on the node with `ryco e2ee client approve --max-role`.";
+
+/**
+ * Why a record that is not approved offers no approval, or `null` when it does.
+ *
+ * A pending record recovers on its own — the node refreshes its observed role on
+ * the device's next attempt. A revoked one does not, because a peer's hello never
+ * rewrites a record the owner revoked, so the way back is a fresh introduction
+ * (see `nodeApprovalRole`).
+ */
+export function nodeApprovalWithheldNotice(record: NodeE2eeClientRecord): string | null {
+  switch (record.status) {
+    case "approved":
+      return null;
+    case "revoked":
+      return NODE_APPROVAL_REVOKED_NOTICE;
+    case "pending":
+      return nodeApprovalRole(record) === null ? NODE_APPROVAL_ROLE_UNKNOWN_PENDING : null;
+  }
+}
+
+/**
+ * How many pending records share this record's §13.6 partition — the same
+ * `(hubOrigin, accountId)` — this one included, or 0 for a record that is not
+ * pending.
+ *
+ * Counted from the listing the panel actually holds, so the warning below and
+ * the rows it sits on describe the same read.
+ */
+export function nodePendingInPartition(
+  listing: NodeE2eeClientListing | null,
+  record: NodeE2eeClientRecord,
+): number {
+  if (listing === null || record.status !== "pending") return 0;
+  return listing.records.filter(
+    (entry) =>
+      entry.status === "pending" &&
+      entry.hubOrigin === record.hubOrigin &&
+      entry.accountId === record.accountId,
+  ).length;
+}
+
+/**
+ * The warning for a partition holding more than one pending request.
+ *
+ * One request under an account is the ordinary case: the phone being held. A
+ * second is either another device on that account or a key the Hub introduced
+ * under it — the account need not be the owner's own, hence "this account" —
+ * and the two read identically here except for the fingerprint and the number.
+ * That is the moment an owner most needs to compare rather than pick, so it is
+ * said on the row and again in the dialog.
+ */
+export function nodePendingPartitionWarning(pendingInPartition: number): string | null {
+  if (pendingInPartition <= 1) return null;
+  return (
+    `${pendingInPartition} requests are waiting under this account at this Hub. A Hub can open ` +
+    "one under this account from a key of its own, and it reads exactly like the phone's except " +
+    "for the fingerprint and the number. Approve only the row whose number matches the phone in " +
+    "your hand, and delete any you cannot account for."
+  );
+}
+
+/**
+ * Whether lowering an approved record's ceiling to `ceiling` still lets the
+ * device in.
+ *
+ * Only when the role it connects with already fits under the new ceiling, and
+ * the ceiling actually drops. Anything else is a lockout presented as a limit —
+ * the device is refused on its next handshake, not narrowed — and Revoke already
+ * says that honestly. A record that does not carry the role offers nothing,
+ * for the same reason `nodeApprovalRole` does not guess one.
+ *
+ * The role is the one the device introduced itself with, frozen when the owner
+ * approved it, so the Hub may have raised it since. That is still offered: a
+ * narrowing only ever withdraws authority, so the worst a stale role costs is a
+ * refusal the owner asked for, and the confirmation says it can happen. A
+ * re-approval widens, which is why `nodeApprovalRole` does not offer one on a
+ * record whose role it can no longer vouch for.
+ */
+export function nodeNarrowOffered(
+  record: NodeE2eeClientRecord,
+  ceiling: NodeE2eeApprovableRole,
+): boolean {
+  if (record.status !== "approved") return false;
+  const target = nodeRoleRank(ceiling);
+  const observed = nodeRoleRank(record.observedRole);
+  return nodeRoleRank(record.maxRole) > target && observed >= 0 && observed <= target;
+}
 
 const APPROVAL_ROLE_MEANINGS: Record<NodeE2eeApprovableRole, string> = {
   viewer: "read what is there",
@@ -1265,32 +1532,74 @@ const APPROVAL_ROLE_MEANINGS: Record<NodeE2eeApprovableRole, string> = {
 export const NODE_E2EE_APPROVAL_CAPABILITY_SET: ReadonlyArray<RelayCapability> = ["ryco.rpc"];
 
 /**
- * The approval confirmation, with the role the owner picked written into it and
- * the record it names.
+ * The approval confirmation, with the role it grants written into it and the
+ * record it names.
  *
  * §13.6 has the owner name the maximum role AND the capability set. The role is
- * theirs — one button each, least authority first. The capability set is not a
- * choice this surface can offer, because there is exactly one capability a relay
- * channel carries and any other value approves a key that cannot connect; so the
- * sentence states what is granted rather than implying an empty grant is a
- * smaller one.
+ * the one the device connects with (`nodeApprovalRole`), and the sentence says
+ * so — and says that a smaller one would refuse the device, so an owner who
+ * does not want this account holding that much here revokes instead of
+ * approving lower. The capability set is not a choice this surface can offer,
+ * because there is exactly one capability a relay channel carries and any other
+ * value approves a key that cannot connect; so the sentence states what is
+ * granted rather than implying an empty grant is a smaller one.
+ *
+ * THE DIALOG CARRIES THE WHOLE NUMBER. Its scrim hides the row the owner just
+ * compared, so the last look before the key is approved has to be inside the
+ * dialog — all of it, never a tail — and, when the account has more than one
+ * request waiting, so does the reason to look twice.
  */
+export interface NodeE2eeApprovalSubject extends NodeE2eeRecordSubject {
+  /** §13.4's display string, as the record stores it. */
+  readonly safetyNumber: string;
+  /** `nodePendingInPartition` for the record being approved. */
+  readonly pendingInPartition: number;
+}
+
+export const NODE_APPROVE_NUMBER_PROMPT =
+  "The number below is the one you matched against the phone; read it once more before " +
+  "confirming.";
+
 export function nodeApproveConfirmation(
   role: NodeE2eeApprovableRole,
-  subject?: NodeE2eeRecordSubject,
+  subject?: NodeE2eeApprovalSubject,
 ): NodeE2eeActionConfirmation {
   const base = ACTION_CONFIRMATIONS.approve;
   const capabilities = NODE_E2EE_APPROVAL_CAPABILITY_SET.join(", ");
+  const number = subject === undefined ? null : nodeSafetyNumberView(subject.safetyNumber);
+  const partition =
+    subject === undefined ? null : nodePendingPartitionWarning(subject.pendingInPartition);
+  const subjectSentences =
+    subject === undefined
+      ? []
+      : [
+          ...(number === null ? [] : [NODE_APPROVE_NUMBER_PROMPT]),
+          ...(partition === null ? [] : [partition]),
+          NODE_E2EE_RECORD_SUBJECT_PROMPT,
+        ];
   return {
     title: `Approve this client key as ${role}?`,
-    body:
-      `${base.body} At most it will be able to ${APPROVAL_ROLE_MEANINGS[role]}. ` +
+    body: [
+      `${base.body} This device connects as ${role}, so that is the ceiling it is approved at: ` +
+        `at most it will be able to ${APPROVAL_ROLE_MEANINGS[role]}. A smaller ceiling would ` +
+        `refuse the device rather than limit it — if this account should not hold that much on ` +
+        `this node, revoke the key instead.`,
       `It is granted the one capability a relay channel carries, ${capabilities} — a key ` +
-      `approved with none is admitted by nothing and could not connect at all. ` +
-      `${subject === undefined ? "" : NODE_E2EE_RECORD_SUBJECT_PROMPT}`.trimEnd(),
+        `approved with none is admitted by nothing and could not connect at all.`,
+      ...subjectSentences,
+    ].join(" "),
     confirmLabel: `Approve as ${role}`,
     destructive: false,
-    ...(subject === undefined ? {} : { facts: nodeE2eeRecordSubjectFacts(subject) }),
+    ...(subject === undefined
+      ? {}
+      : {
+          facts: [
+            ...nodeE2eeRecordSubjectFacts(subject),
+            ...(number === null
+              ? []
+              : [{ label: "Comparison number", value: number.display, mono: true }]),
+          ],
+        }),
   };
 }
 
@@ -1398,12 +1707,46 @@ export function everyNodeSecurityString(): ReadonlyArray<{
   for (const action of NODE_E2EE_RECORD_ACTION_IDS) {
     pushConfirmation(`record(${action})`, nodeE2eeRecordConfirmation(action, subject));
   }
+  pushConfirmation(
+    "record(revoke, pending)",
+    nodeE2eeRecordConfirmation("revoke", { ...subject, status: "pending" }),
+  );
   pushConfirmation("pairingWindow", nodeE2eePairingWindowConfirmation("SHA256:example"));
+  const exampleSafetyNumber = Array.from({ length: E2EE_SAFETY_NUMBER_DIGITS.groups }, () =>
+    "1".repeat(E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup),
+  ).join(E2EE_SAFETY_NUMBER_DIGITS.separator);
   for (const role of NODE_E2EE_APPROVABLE_ROLES) {
     pushConfirmation(`approve(${role})`, nodeApproveConfirmation(role));
-    pushConfirmation(`approve(${role}, record)`, nodeApproveConfirmation(role, subject));
+    pushConfirmation(
+      `approve(${role}, record)`,
+      nodeApproveConfirmation(role, {
+        ...subject,
+        safetyNumber: exampleSafetyNumber,
+        pendingInPartition: 2,
+      }),
+    );
   }
+  push("approveNumberPrompt", NODE_APPROVE_NUMBER_PROMPT);
+  push("pendingPartitionWarning", nodePendingPartitionWarning(2) ?? "");
+  push("safetyNumberMatchLabel", NODE_SAFETY_NUMBER_MATCH_LABEL);
+  push("safetyNumberMatchHint", NODE_SAFETY_NUMBER_MATCH_HINT);
   push("recordSubjectPrompt", NODE_E2EE_RECORD_SUBJECT_PROMPT);
+  for (const status of ["pending", "revoked"] as const) {
+    push(
+      `approvalWithheld(${status})`,
+      nodeApprovalWithheldNotice({
+        status,
+        hubOrigin: "https://hub.example",
+        accountId: "acct_example",
+        fingerprint: "SHA256:example",
+        maxRole: "viewer",
+        capabilitySet: [],
+        createdAt: 0,
+        safetyNumber: "",
+        pairingReserved: false,
+      }) ?? "",
+    );
+  }
 
   for (const fingerprint of [null, "SHA256:example"]) {
     push(
@@ -1421,6 +1764,8 @@ export function everyNodeSecurityString(): ReadonlyArray<{
     "continuityRows(unavailable)",
     nodeContinuityRows({ status: "unavailable", reason: "anchor_disagrees" }),
   );
+  pushRows("continuityRows(identity_in_use)", nodeContinuityRows({ status: "identity_in_use" }));
+  push("readFailed", NODE_SECURITY_READ_FAILED);
   pushRows("policyRows(null)", nodePolicyRows(null));
   pushRows("pairingWindowRows(null)", nodePairingWindowRows(null));
   push("refusedAttempts(null)", nodeRefusedAttemptsDescription(null));

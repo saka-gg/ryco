@@ -52,6 +52,7 @@ function fixture() {
   const observedCounts: number[] = [];
   const selections: Array<{ readonly nodeId: string; readonly at: number }> = [];
   let selectedEnvironmentId: EnvironmentId | null = null;
+  let sharedAcknowledgements = 0;
   let coordinator: MobileHostedConnectionCoordinator;
 
   coordinator = createMobileHostedConnectionCoordinator({
@@ -80,13 +81,27 @@ function fixture() {
       coordinator.markAttemptPrepared(target.environmentId, record.generation);
     },
     markSelectedDeliveryUnknown: () => undefined,
+    acknowledgeSelectedDeliveryUnknown: () => {
+      sharedAcknowledgements += 1;
+    },
     listConnections: () => Array.from(active.values()),
     readConnection: (environmentId) => active.get(environmentId) ?? null,
     removeConnection: async (environmentId) => active.delete(environmentId),
     demoteEnvironment: () => undefined,
     restoreActiveEnvironment: () => undefined,
   });
-  return { active, coordinator, nodes, observedCounts, scopes, selections };
+  return {
+    active,
+    coordinator,
+    nodes,
+    observedCounts,
+    scopes,
+    selections,
+    sharedAcknowledgements: () => sharedAcknowledgements,
+    select: (environmentId: EnvironmentId | null) => {
+      selectedEnvironmentId = environmentId;
+    },
+  };
 }
 
 afterEach(() => {
@@ -253,6 +268,63 @@ describe("mobile hosted connection coordinator", () => {
       sessionStatus: "delivery-unknown",
       sessionRecoveredAfterUnknown: true,
     });
+  });
+
+  it("acknowledges a recovered non-selected environment from its own record", () => {
+    const { coordinator, nodes, select, sharedAcknowledgements } = fixture();
+    const selected = coordinator.ensureRecord(nodes[0]!);
+    const retained = coordinator.ensureRecord(nodes[1]!);
+    select(selected.environmentId);
+
+    coordinator.markDeliveryUnknown(retained.environmentId, retained.generation);
+    coordinator.acknowledgeDeliveryUnknown(retained.environmentId);
+    // Not recovered yet: the replacement session has not accepted a snapshot.
+    expect(coordinator.read(retained.environmentId)?.sessionStatus).toBe("delivery-unknown");
+
+    coordinator.markSessionReady(retained.environmentId, retained.generation);
+    coordinator.acknowledgeDeliveryUnknown(retained.environmentId);
+    expect(coordinator.read(retained.environmentId)).toMatchObject({
+      sessionStatus: "ready",
+      sessionRecoveredAfterUnknown: false,
+    });
+    // The shared cursor points at another machine, so it is left alone.
+    expect(sharedAcknowledgements()).toBe(0);
+    // And a later record for the machine no longer starts uncertain.
+    expect(coordinator.ensureRecord(nodes[1]!).sessionStatus).toBe("ready");
+  });
+
+  it("mirrors an acknowledgement of the selected environment into the shared cursor", () => {
+    const { coordinator, nodes, select, sharedAcknowledgements } = fixture();
+    const selected = coordinator.ensureRecord(nodes[0]!);
+    select(selected.environmentId);
+
+    coordinator.markDeliveryUnknown(selected.environmentId, selected.generation);
+    coordinator.markSessionReady(selected.environmentId, selected.generation);
+    coordinator.acknowledgeDeliveryUnknown(selected.environmentId);
+
+    expect(coordinator.read(selected.environmentId)?.sessionStatus).toBe("ready");
+    expect(sharedAcknowledgements()).toBe(1);
+  });
+
+  it("marks an environment whose replayed command went unconfirmed, whatever its generation", async () => {
+    const { coordinator, nodes } = fixture();
+    const current = coordinator.ensureRecord(nodes[0]!);
+    coordinator.markSessionReady(current.environmentId, current.generation);
+
+    coordinator.markEnvironmentDeliveryUnknown(current.environmentId);
+    // A current session only needs the user's acknowledgement.
+    expect(coordinator.read(current.environmentId)).toMatchObject({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: true,
+    });
+    coordinator.acknowledgeDeliveryUnknown(current.environmentId);
+    expect(coordinator.read(current.environmentId)?.sessionStatus).toBe("ready");
+
+    // A released machine stays uncertain for its next connection.
+    const released = coordinator.ensureRecord(nodes[1]!);
+    await coordinator.releaseEnvironment(released.environmentId);
+    coordinator.markEnvironmentDeliveryUnknown(released.environmentId);
+    expect(coordinator.ensureRecord(nodes[1]!).sessionStatus).toBe("delivery-unknown");
   });
 
   it("preserves an in-flight request as delivery unknown across background release", async () => {

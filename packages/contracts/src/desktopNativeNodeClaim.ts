@@ -16,6 +16,12 @@ export const DESKTOP_NATIVE_NODE_CLAIM_SIGN_PATH =
 export const DESKTOP_NATIVE_NODE_CLAIM_COMMIT_PATH =
   "/api/desktop/hub/native-node-claim/commit" as const;
 export const DESKTOP_NATIVE_NODE_CLAIM_MAX_BODY_BYTES = 16 * 1_024;
+/**
+ * Desktop main asks its own backend, over the same per-child local control
+ * channel, whether other devices can reach this node through the Hub, to keep
+ * the machine awake only while they can.
+ */
+export const DESKTOP_HUB_REACHABILITY_PATH = "/api/desktop/hub/reachability" as const;
 
 const strict = <S extends Schema.Top>(schema: S): S =>
   schema.annotate({ parseOptions: { onExcessProperty: "error" } }) as S;
@@ -71,6 +77,19 @@ export const DesktopNativeNodeClaimCommitResponse = strict(
   }),
 );
 export type DesktopNativeNodeClaimCommitResponse = typeof DesktopNativeNodeClaimCommitResponse.Type;
+
+export const DesktopHubReachabilityResponse = strict(
+  Schema.Struct({
+    protocolVersion: Schema.Literal(DESKTOP_NATIVE_NODE_CLAIM_PROTOCOL_VERSION),
+    reachable: Schema.Boolean,
+    /**
+     * Whether the backend runs its connector at all. A standby launch can
+     * resolve to off, which only a relaunch with an explicit enable changes.
+     */
+    connectorEnabled: Schema.Boolean,
+  }),
+);
+export type DesktopHubReachabilityResponse = typeof DesktopHubReachabilityResponse.Type;
 
 export const DesktopNativeNodeClaimErrorResponse = strict(
   Schema.Struct({

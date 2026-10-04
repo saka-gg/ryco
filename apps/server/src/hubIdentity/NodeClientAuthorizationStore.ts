@@ -88,7 +88,8 @@ function stateError(code: NodeClientAuthorizationStoreErrorCode): never {
  *
  * `clientIdentityFingerprint` is the `ryco.client-key.v1` digest of §7.1 in
  * unpadded base64url — NEVER a raw key. `safetyNumber` is the derived §13.4
- * display string, which is the only pairing display metadata §13.6 admits.
+ * display string, which is the only key-derived pairing display metadata §13.6
+ * admits; `observedRole` is the other, relay-visible, one.
  *
  * `maxRole` and `capabilitySet` are carried in every class rather than only in
  * `approved`, so the shape a lookup returns is uniform. A `pending` entry
@@ -115,6 +116,22 @@ export interface StoredClientAuthorizationEntry {
    * `now - pairingReservedAt <= E2EE_PAIRING_RESERVATION_LIFETIME`.
    */
   readonly pairingReservedAt?: number;
+  /**
+   * The `channel.open.effectiveRole` (§8.3 element 14) the node received on the
+   * pairing attempt that created this record — or, for a `pending` record that
+   * carried none, on the first later attempt that did. A peer's hello writes it
+   * at most once per record; a later move is the client's in-memory state until
+   * an owner action settles the record at the role it showed.
+   *
+   * DISPLAY METADATA, NEVER AUTHORITY. §8.6 step 6 and the §13.6 withdrawal test
+   * read `maxRole` alone, and nothing copies this into `maxRole`: the Hub
+   * assigns the value, so it may only ever be what an owner surface OFFERS as
+   * the role to approve, and the owner still names it. It exists because §8.3
+   * makes the native intended role equal the `channel.open` role, so a ceiling
+   * below it refuses the device rather than limiting it — and without the value
+   * an owner surface cannot tell which ceiling is the usable one.
+   */
+  readonly observedRole?: string;
   /**
    * Keys INSIDE this record that a newer binary wrote, carried verbatim.
    *
@@ -257,6 +274,7 @@ const KNOWN_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "safetyNumber",
   "displayLabel",
   "pairingReservedAt",
+  "observedRole",
 ]);
 
 const KNOWN_WINDOW_KEYS: ReadonlySet<string> = new Set([
@@ -371,6 +389,17 @@ function parseDisplayLabel(value: unknown): string | undefined {
   return value;
 }
 
+/** A relay role literal, or absent. Never a value `maxRole` could not also hold. */
+function parseObservedRole(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") return stateError("client_authorization_state_corrupt");
+  try {
+    return assertRelayEffectiveRoleLiteral(value);
+  } catch {
+    return stateError("client_authorization_state_corrupt");
+  }
+}
+
 /** The status class an entry was read from, which is what fixes its invariants. */
 type EntryClass = "pending" | "approved" | "revoked";
 
@@ -402,6 +431,7 @@ function parseEntry(value: unknown, entryClass: EntryClass): StoredClientAuthori
   const lastSeenAt = parseOptionalTimestamp(candidate.lastSeenAt);
   const displayLabel = parseDisplayLabel(candidate.displayLabel);
   const pairingReservedAt = parseOptionalTimestamp(candidate.pairingReservedAt);
+  const observedRole = parseObservedRole(candidate.observedRole);
   // The class fixes the transition timestamps, so a file cannot claim a record
   // reached a state it never took, and cannot park a reservation — which only
   // the pending eviction rule reads — on a record no eviction rule may reach.
@@ -431,6 +461,7 @@ function parseEntry(value: unknown, entryClass: EntryClass): StoredClientAuthori
     safetyNumber: candidate.safetyNumber,
     ...(displayLabel === undefined ? {} : { displayLabel }),
     ...(pairingReservedAt === undefined ? {} : { pairingReservedAt }),
+    ...(observedRole === undefined ? {} : { observedRole }),
     ...(forwardFields === undefined ? {} : { forwardFields }),
   };
 }

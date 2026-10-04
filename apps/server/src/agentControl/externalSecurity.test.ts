@@ -62,9 +62,15 @@ describe("external Agent Control credential and topology boundary", () => {
     expect(evaluateExternalMcpTopology({ ...local, tailscaleServeEnabled: true }).available).toBe(
       false,
     );
+    expect(evaluateExternalMcpTopology({ ...local, hubConnector: { enabled: true } })).toEqual({
+      available: false,
+      reason: "External integrations are disabled while this Ryco is Hub-connected.",
+    });
+    // An identity-less Desktop standby connector is not Hub-connected yet; it
+    // yields the process before its first relay connection instead.
     expect(
-      evaluateExternalMcpTopology({ ...local, hubConnector: { enabled: true } }).available,
-    ).toBe(false);
+      evaluateExternalMcpTopology({ ...local, hubConnector: { enabled: true, standby: true } }),
+    ).toEqual({ available: true, reason: null });
   });
 
   it("generates client-specific setup without credential or pairing material", () => {

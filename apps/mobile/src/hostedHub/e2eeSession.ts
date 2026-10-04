@@ -9,9 +9,12 @@ import type { NodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeTranscri
 import { deriveE2eeSafetyNumber } from "@ryco/shared/relayE2eeVerificationDisplay";
 
 import {
+  e2eeResolvedRecordState,
   resolveE2eeTrustStatementOutcome,
   resolveE2eeUnexpectedNodeSituation,
+  type E2eeResolvedRecordState,
   type E2eeTrustClassification,
+  type E2eeTrustRecord,
   type E2eeUnexpectedNodeSituation,
 } from "../platform/e2eeTrustModel";
 
@@ -80,6 +83,25 @@ export interface MobileE2eeSelectionContext {
    * shape — and the store mints the handle when the owner starts the ceremony.
    */
   readonly localNodeHandle: string | null;
+  /**
+   * The §13.1 shape of the record behind {@link localNodeHandle}, `null` exactly
+   * when the handle is. Only `unverified` means this phone asked the node for
+   * approval: a legacy consent's no-pin record and a verified pin carry a handle
+   * too, and neither sent a pairing hello.
+   */
+  readonly localRecordState: E2eeResolvedRecordState | null;
+}
+
+/** The client-anchored half of a selection context, from the record it resolved to. */
+export function mobileE2eeLocalRecordContext(
+  record: E2eeTrustRecord | null,
+): Pick<MobileE2eeSelectionContext, "localNodeHandle" | "localRecordState"> {
+  return record === null
+    ? { localNodeHandle: null, localRecordState: null }
+    : {
+        localNodeHandle: record.index.localNodeHandle,
+        localRecordState: e2eeResolvedRecordState(record),
+      };
 }
 
 /** The selection projection, including credential material only when available. */
@@ -562,7 +584,8 @@ function presentedFor(
 }
 
 /**
- * Record the handle a ceremony minted, so the promotion has an index.
+ * Record the handle a ceremony minted, so the promotion has an index, together
+ * with the shape of the record it names.
  *
  * §13.2 step 2 mints it; §12.1.1 records consent "per selection", and the
  * selection is the client-anchored handle rather than the `nodeId` that raised
@@ -570,12 +593,16 @@ function presentedFor(
  */
 export function attachMobileE2eeLocalNodeHandle(
   localNodeHandle: string,
+  localRecordState: E2eeResolvedRecordState,
   environmentId?: string | null,
 ): void {
   const state = stateFor(environmentId);
   const selection = state.selection;
   if (selection === null) return;
-  publish({ ...state, selection: { ...selection, localNodeHandle } }, environmentId);
+  publish(
+    { ...state, selection: { ...selection, localNodeHandle, localRecordState } },
+    environmentId,
+  );
 }
 
 /**

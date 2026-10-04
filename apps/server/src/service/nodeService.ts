@@ -201,6 +201,25 @@ async function run(
 
 const launchdDomain = () => `gui/${process.getuid?.() ?? 0}`;
 
+/** The login whose systemd user manager owns the unit. */
+export function nodeServiceUser(environment: NodeJS.ProcessEnv = process.env): string {
+  return environment.USER ?? environment.LOGNAME ?? "";
+}
+
+/**
+ * The command that lets a systemd user unit outlive the last session and start
+ * at boot. It changes system state, so it goes through sudo unless this already
+ * is root, and callers only run it after the user agreed to that exact line.
+ */
+export function nodeServiceLingerCommand(
+  user: string,
+  uid: number | undefined = process.getuid?.(),
+): { readonly command: string; readonly args: ReadonlyArray<string> } {
+  return uid === 0
+    ? { command: "loginctl", args: ["enable-linger", user] }
+    : { command: "sudo", args: ["loginctl", "enable-linger", user] };
+}
+
 export interface NodeServiceStatus {
   readonly platform: NodeServicePlatform;
   readonly label: string;
@@ -357,7 +376,7 @@ export async function readNodeServiceStatus(
     { allowFailure: true },
   );
   const parsed = parseSystemctlShow(shown.stdout);
-  const user = process.env.USER ?? process.env.LOGNAME ?? "";
+  const user = nodeServiceUser();
   const linger = user
     ? await run("loginctl", ["show-user", user, "-p", "Linger"], { allowFailure: true })
     : undefined;

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   canSubmitDirectConnection,
   DIRECT_CONNECTION_METHODS,
+  directRepairPrefill,
 } from "./directConnectionMethodsModel";
 
 describe("direct connection methods", () => {
@@ -32,5 +33,25 @@ describe("direct connection methods", () => {
         code: "secret",
       }),
     ).toBe(true);
+  });
+});
+
+describe("directRepairPrefill", () => {
+  it("starts pairing again from the saved address, keeping its scheme", () => {
+    expect(directRepairPrefill("http://macbook.local:44342/")).toEqual({
+      mode: "lan",
+      host: "http://macbook.local:44342",
+    });
+    expect(directRepairPrefill("https://studio.tail1234.ts.net/")).toEqual({
+      mode: "tailscale",
+      host: "https://studio.tail1234.ts.net",
+    });
+  });
+
+  it("keeps a saved address that is more than an origin as it is", () => {
+    expect(directRepairPrefill("https://proxy.example.com/ryco/")).toEqual({
+      mode: "lan",
+      host: "https://proxy.example.com/ryco/",
+    });
   });
 });

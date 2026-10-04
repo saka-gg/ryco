@@ -42,6 +42,8 @@ const SAFETY_NUMBER = Array.from({ length: 12 }, (_, index) => String(index % 10
   " ",
 );
 const START = 1_700_000_000_000;
+/** The `channel.open` role a pairing attempt arrives under, unless a test names another. */
+const OBSERVED_ROLE = "owner";
 
 function fingerprintBytes(seed: number): Uint8Array {
   return Uint8Array.from({ length: 32 }, (_, offset) =>
@@ -82,6 +84,7 @@ interface Harness {
   readonly stored: () => Promise<NodeClientAuthorizationRecordFile>;
   readonly pair: (
     input: E2eeClientAuthorizationKey,
+    observedRole?: string,
   ) => Promise<ReturnType<NodeClientAuthorizationClient["evaluatePairingAdmission"]>>;
 }
 
@@ -118,12 +121,13 @@ async function harness(seed?: Partial<NodeClientAuthorizationRecordFile>): Promi
     },
     stored: async () =>
       JSON.parse(await readFile(path, "utf8")) as NodeClientAuthorizationRecordFile,
-    pair: async (input) => {
+    pair: async (input, observedRole = OBSERVED_ROLE) => {
       const decision = client.evaluatePairingAdmission({
         hubOrigin: input.hubOrigin,
         accountId: input.accountId,
         clientIdentityFingerprint: input.clientIdentityFingerprint,
         safetyNumber: SAFETY_NUMBER,
+        observedRole,
       });
       await client.commitPairingAdmission(decision);
       return decision;
@@ -294,6 +298,214 @@ describe("node client authorization caps and partitions", () => {
     test.advance(3_600 * 1_000);
     expect(await test.client.touch(key(1))).toBe(true);
     expect(await test.client.touch(key(2))).toBe(false);
+  });
+});
+
+describe("node client authorization observed role", () => {
+  // §8.3 makes a native client's intended role equal the `channel.open` role,
+  // and §8.6 step 6 then requires it to fit under `maxRole` — so an approval
+  // below the role the Hub assigned refuses the device rather than limiting it.
+  // The owner can only name the usable ceiling if the node kept the role it saw.
+
+  it("stores the role a first-seen key arrived under, and never as authority", async () => {
+    const test = await harness();
+    expect((await test.pair(key(30), "operator")).kind).toBe("admit");
+
+    const [record] = (await test.client.list()).records;
+    expect(record).toMatchObject({
+      status: "pending",
+      maxRole: "viewer",
+      observedRole: "operator",
+    });
+    expect((await test.stored()).pending[0]?.observedRole).toBe("operator");
+    // A pending record still grants nothing, whatever role it carries.
+    expect(test.client.lookupClientAuthorization(key(30))).toMatchObject({
+      status: "pending",
+      maxRole: "viewer",
+      capabilitySet: [],
+    });
+  });
+
+  it("follows the device while the record is pending, and writes only a missing role", async () => {
+    // A request recorded before this field existed carries none; the device's
+    // next attempt fills it in, so the owner is not stuck approving blind.
+    const test = await harness({ pending: [pendingEntry(31)] });
+    expect((await test.client.list()).records[0]?.observedRole).toBeUndefined();
+
+    expect(await test.pair(key(31), "owner")).toMatchObject({
+      kind: "existing",
+      status: "pending",
+      observedRoleRefresh: { observedRole: "owner" },
+    });
+    expect((await test.client.list()).records[0]?.observedRole).toBe("owner");
+    expect((await test.stored()).pending[0]?.observedRole).toBe("owner");
+
+    // The same role again owes nothing.
+    const revision = (await test.stored()).revision;
+    expect(await test.pair(key(31), "owner")).toMatchObject({
+      kind: "existing",
+      observedRoleRefresh: undefined,
+    });
+
+    // …and a role the Hub changed since is followed, still pending — in
+    // memory, because the record on disk already carries one.
+    await test.pair(key(31), "viewer");
+    expect((await test.client.list()).records[0]).toMatchObject({
+      status: "pending",
+      maxRole: "viewer",
+      observedRole: "viewer",
+    });
+    const stored = await test.stored();
+    expect(stored.revision).toBe(revision);
+    expect(stored.pending[0]).toMatchObject({ observedRole: "owner", maxRole: "viewer" });
+    expect(stored.approved).toEqual([]);
+  });
+
+  it("bounds a peer's role churn on a pending record to at most one durable write", async () => {
+    // A Hub can open channels for a key it introduced at the relay's rate,
+    // alternating the role it assigns. Were every move a full, fsync'd rewrite
+    // of the record file, the party opening channels would set the node's
+    // durable write rate — and contend the lock with the owner's commands.
+    const roles = ["viewer", "owner"] as const;
+    const churn = async (test: Harness, seed: number) => {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        expect((await test.pair(key(seed), roles[attempt % 2])).kind).toBe("existing");
+      }
+    };
+
+    // Recorded with a role at creation: never written from a hello again.
+    const recorded = await harness();
+    await recorded.pair(key(38), "operator");
+    const created = (await recorded.stored()).revision;
+    await churn(recorded, 38);
+    expect((await recorded.stored()).revision).toBe(created);
+    expect((await recorded.client.get(key(38)))?.observedRole).toBe("owner");
+
+    // Recorded without one: the first attempt fills it in, and that is all.
+    const legacy = await harness({ pending: [pendingEntry(39)] });
+    const seeded = (await legacy.stored()).revision;
+    await churn(legacy, 39);
+    const stored = await legacy.stored();
+    expect(stored.revision).toBe(seeded + 1);
+    expect(stored.pending[0]?.observedRole).toBe("viewer");
+    expect((await legacy.client.get(key(39)))?.observedRole).toBe("owner");
+  });
+
+  it("settles the role the owner was shown, and binds a moved role to its own record", async () => {
+    const test = await harness();
+    await test.pair(key(40), "viewer");
+    await test.pair(key(40), "owner");
+    expect((await test.stored()).pending[0]?.observedRole).toBe("viewer");
+
+    // The owner approved at the role the panel offered; the settled record has
+    // to say that role, or a later narrowing is judged against one the device
+    // no longer connects with.
+    await test.client.approve({ key: key(40), maxRole: "owner", capabilitySet: [CAPABILITY] });
+    expect((await test.stored()).approved[0]?.observedRole).toBe("owner");
+    expect(await test.client.get(key(40))).toMatchObject({
+      status: "approved",
+      observedRole: "owner",
+    });
+
+    // A key that expired and introduced itself again is a new request: it
+    // starts from the role its own first attempt arrived under, not one an
+    // earlier record under the same key moved to.
+    await test.pair(key(41), "viewer");
+    await test.pair(key(41), "owner");
+    test.advance(E2EE_PENDING_CLIENT_RETENTION + 1);
+    expect((await test.pair(key(41), "operator")).kind).toBe("admit");
+    expect((await test.client.get(key(41)))?.observedRole).toBe("operator");
+
+    // A restart keeps only what is on disk, until the device's next attempt.
+    await test.pair(key(41), "owner");
+    expect((await test.client.get(key(41)))?.observedRole).toBe("owner");
+    const restarted = await makeNodeClientAuthorizationClient({
+      store: test.store,
+      now: () => START + E2EE_PENDING_CLIENT_RETENTION + 1,
+    });
+    expect((await restarted.get(key(41)))?.observedRole).toBe("operator");
+  });
+
+  it("never rewrites an approved or revoked record from a peer's hello", async () => {
+    const test = await harness();
+    await test.pair(key(32), "owner");
+    await test.client.approve({ key: key(32), maxRole: "owner", capabilitySet: [CAPABILITY] });
+    await test.pair(key(33), "owner");
+    await test.client.revoke(key(33));
+    const before = await test.stored();
+
+    for (const seed of [32, 33]) {
+      expect(await test.pair(key(seed), "viewer")).toMatchObject({
+        kind: "existing",
+        observedRoleRefresh: undefined,
+      });
+    }
+    expect(await test.stored()).toEqual(before);
+  });
+
+  it("drops a refresh decided while pending once the owner approved or revoked the record", async () => {
+    // The decision is taken before the reject and committed after the close,
+    // so the owner can act in between. The commit must find only the pending
+    // class: a hello may never rewrite what an owner action just settled.
+    const test = await harness();
+    await test.pair(key(36), "owner");
+    await test.pair(key(37), "owner");
+    const decide = (seed: number) =>
+      test.client.evaluatePairingAdmission({
+        hubOrigin: HUB_ORIGIN,
+        accountId: ACCOUNT_ID,
+        clientIdentityFingerprint: fingerprintBytes(seed),
+        safetyNumber: SAFETY_NUMBER,
+        observedRole: "viewer",
+      });
+    const toApproved = decide(36);
+    const toRevoked = decide(37);
+    for (const decision of [toApproved, toRevoked]) {
+      expect(decision).toMatchObject({
+        kind: "existing",
+        status: "pending",
+        observedRoleRefresh: { observedRole: "viewer" },
+      });
+    }
+
+    await test.client.approve({ key: key(36), maxRole: "owner", capabilitySet: [CAPABILITY] });
+    await test.client.revoke(key(37));
+    const before = await test.stored();
+
+    await test.client.commitPairingAdmission(toApproved);
+    await test.client.commitPairingAdmission(toRevoked);
+    expect(await test.stored()).toEqual(before);
+    expect(await test.client.get(key(36))).toMatchObject({
+      status: "approved",
+      observedRole: "owner",
+    });
+    expect(await test.client.get(key(37))).toMatchObject({
+      status: "revoked",
+      observedRole: "owner",
+    });
+  });
+
+  it("is carried through approve, relabel and revoke", async () => {
+    const test = await harness();
+    await test.pair(key(34), "owner");
+    await test.client.approve({ key: key(34), maxRole: "owner", capabilitySet: [CAPABILITY] });
+    expect((await test.client.get(key(34)))?.observedRole).toBe("owner");
+    await test.client.setDisplayLabel({ key: key(34), displayLabel: "Phone" });
+    expect((await test.client.get(key(34)))?.observedRole).toBe("owner");
+    await test.client.revoke(key(34));
+    expect(await test.client.get(key(34))).toMatchObject({
+      status: "revoked",
+      observedRole: "owner",
+    });
+  });
+
+  it("records the request without a role it cannot rank, rather than dropping it", async () => {
+    // §13.2 step 3 must not lose the pending record over display metadata.
+    const test = await harness();
+    expect((await test.pair(key(35), "superuser")).kind).toBe("admit");
+    const [record] = (await test.client.list()).records;
+    expect(record?.status).toBe("pending");
+    expect(record?.observedRole).toBeUndefined();
   });
 });
 
@@ -621,6 +833,7 @@ describe("node client authorization pairing window", () => {
       accountId: ACCOUNT_ID,
       clientIdentityFingerprint: fingerprintBytes(900),
       safetyNumber: SAFETY_NUMBER,
+      observedRole: OBSERVED_ROLE,
     });
     expect(decision.kind).toBe("admit");
 
@@ -652,6 +865,7 @@ describe("node client authorization pairing window", () => {
       accountId: ACCOUNT_ID,
       clientIdentityFingerprint: fingerprintBytes(900),
       safetyNumber: SAFETY_NUMBER,
+      observedRole: OBSERVED_ROLE,
     });
     await test.client.commitPairingAdmission(decision);
     expect((await test.stored()).pairingWindow?.spentAt).toBe(START);
@@ -675,6 +889,7 @@ describe("node client authorization pairing window", () => {
         accountId: ACCOUNT_ID,
         clientIdentityFingerprint: nearMiss,
         safetyNumber: SAFETY_NUMBER,
+        observedRole: OBSERVED_ROLE,
       }),
     );
     expect((await test.client.list()).pairingWindow).toMatchObject({ spent: false });
@@ -1509,6 +1724,7 @@ describe("node client authorization commit failure containment", () => {
       accountId: ACCOUNT_ID,
       clientIdentityFingerprint: fingerprintBytes(900),
       safetyNumber: SAFETY_NUMBER,
+      observedRole: OBSERVED_ROLE,
     });
     expect(decision.kind).toBe("admit");
     failing.fail();

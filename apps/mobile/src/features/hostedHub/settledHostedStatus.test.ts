@@ -127,6 +127,7 @@ describe("hosted status settlement classification", () => {
       "Delivery unknown",
       "Authorization removed",
       "Revoked",
+      "Device removed",
       "Incompatible",
       "Not verified",
       "terminal failure",

@@ -45,11 +45,14 @@ import {
   type HostedRuntimeConfiguration,
 } from "./runtime";
 import {
+  DIRECTORY_PRESENCE_REFRESH_MS,
+  DIRECTORY_PRESENCE_WINDOW_MS,
   HOSTED_ACCOUNT_BUSY_MESSAGE,
   HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE,
   HOSTED_PASSKEY_UNCONFIRMED_MESSAGE,
   HOSTED_RECOVERY_CODES_UNDISPLAYED_MESSAGE,
   HOSTED_TOTP_ENROLLMENT_UNDISPLAYED_MESSAGE,
+  hostedAccountRecoversOnConnectivity,
   hostedAccountStore,
   hostedHubController,
   hostedHubStore,
@@ -65,6 +68,7 @@ const hostedHubApi = {
   getBootstrapAvailability: vi.fn(),
   signIn: vi.fn(),
   signInWithExternalProvider: vi.fn(),
+  signInWithRecoveryCode: vi.fn(),
   signOut: vi.fn(),
   bootstrapOwner: vi.fn(),
   redeemInvitation: vi.fn(),
@@ -244,6 +248,493 @@ describe("hosted account state", () => {
       accountStatus: "signed-out",
       bootstrapAvailable: false,
     });
+  });
+
+  it.each([
+    ["an expired session", new HostedHubApiError("session_invalid", 401)],
+    [
+      "an invalidated native token",
+      new HostedHubApiError(
+        "session_invalid",
+        401,
+        undefined,
+        undefined,
+        undefined,
+        "token-invalidated",
+      ),
+    ],
+  ])("drops session material when bootstrap reports %s", async (_label, failure) => {
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(failure);
+    vi.spyOn(hostedHubApi, "getBootstrapAvailability").mockResolvedValue(false);
+
+    await hostedHubController.bootstrap();
+
+    expect(hostedHubApi.clearSessionMaterial).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
+  });
+
+  it.each([
+    [
+      "transport loss",
+      new HostedHubApiError(
+        "unavailable",
+        0,
+        undefined,
+        undefined,
+        undefined,
+        "transport-unavailable",
+      ),
+    ],
+    [
+      "the request deadline",
+      new HostedHubApiError("timeout", 0, undefined, undefined, undefined, "request-timeout"),
+    ],
+    [
+      "a locked device that cannot sign a proof",
+      new HostedHubApiError(
+        "native_session_unavailable",
+        0,
+        undefined,
+        undefined,
+        undefined,
+        "proof-signing-failed",
+      ),
+    ],
+    ["a proxy error page", new HostedHubApiError("invalid_response", 502)],
+    ["a captive portal page", new HostedHubApiError("invalid_response", 200)],
+    ["a proxy's own 401 page", new HostedHubApiError("invalid_response", 401)],
+    ["Hub rate limiting", new HostedHubApiError("rate_limited", 429, 5_000)],
+    ["a failing Hub", new HostedHubApiError("unavailable", 503)],
+  ])("keeps session material when bootstrap fails with %s", async (_label, failure) => {
+    vi.useFakeTimers();
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(failure);
+
+    await hostedHubController.bootstrap();
+
+    // The stored native token is the only copy of a DPoP-bound session the Hub
+    // never rejected; discarding it here forced a full sign-in after every
+    // offline launch.
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubApi.getBootstrapAvailability).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "unavailable",
+      account: null,
+      session: null,
+      effectiveRole: null,
+      accessRecoveryPending: true,
+    });
+  });
+
+  it("re-runs a failed bootstrap on its own once the Hub answers again", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockRejectedValueOnce(new HostedHubApiError("timeout", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.bootstrap();
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(restoreSession).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+
+    // Bounded exponential backoff: the second retry waits twice as long.
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accessRecoveryPending).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() =>
+      expect(hostedHubStore.getState()).toMatchObject({
+        accountStatus: "authenticated",
+        directoryStatus: "ready",
+        accessRecoveryPending: false,
+      }),
+    );
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+  });
+
+  it("waits out a Hub retry-after before re-running bootstrap", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("rate_limited", 429, 30_000))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.bootstrap();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(restoreSession).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(hostedHubStore.getState().accountStatus).toBe("authenticated"));
+  });
+
+  it("leaves a definite Hub refusal to the next lifecycle signal instead of a timer", async () => {
+    vi.useFakeTimers();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValue(new HostedHubApiError("forbidden", 403));
+
+    await hostedHubController.bootstrap();
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    // Surfaces must not promise an automatic retry that is not coming.
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "unavailable",
+      accessRecoveryPending: false,
+    });
+  });
+
+  it("holds a bootstrap retry that comes due in the background until the next foreground", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const listeners = new Set<() => void>();
+    let visibilityState: "hidden" | "visible" = "visible";
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        get visibilityState() {
+          return visibilityState;
+        },
+        addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+        removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+      },
+    });
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.bootstrap();
+    visibilityState = "hidden";
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(listeners).toHaveLength(1);
+
+    visibilityState = "visible";
+    for (const listener of Array.from(listeners)) listener();
+    await vi.waitFor(() => expect(hostedHubStore.getState().accountStatus).toBe("authenticated"));
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(listeners).toHaveLength(0);
+  });
+
+  it("never lets a pending bootstrap retry interrupt a sign-in the user started", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(
+      new HostedHubApiError("unavailable", 0),
+    );
+    let signInSignal: AbortSignal | undefined;
+    vi.spyOn(hostedHubApi, "signIn").mockImplementation((signal) => {
+      signInSignal = signal;
+      return new Promise(() => undefined);
+    });
+
+    await hostedHubController.bootstrap();
+    void hostedHubController.signIn();
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(hostedHubApi.restoreSession).toHaveBeenCalledOnce();
+    expect(signInSignal?.aborted).toBe(false);
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticating");
+  });
+
+  it("starts a fresh access check after an account teardown ends the one in flight", async () => {
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    void hostedHubController.bootstrap();
+    await hostedHubController.clearAccount("signed-out");
+    await hostedHubController.bootstrap();
+
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+  });
+
+  it("keeps an adopted credential when the replaced session's check is rejected mid-commit", async () => {
+    let rejectReplaced: (error: unknown) => void = () => undefined;
+    let replacedSignal: AbortSignal | undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockImplementationOnce((signal) => {
+        replacedSignal = signal;
+        // The Hub's answer for the revoked credential is already on its way
+        // and lands regardless of the abort.
+        return new Promise((_resolve, reject) => {
+          rejectReplaced = reject;
+        });
+      })
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    let finishCommit: (committed: boolean) => void = () => undefined;
+    const commit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishCommit = resolve;
+        }),
+    );
+
+    const replaced = hostedHubController.bootstrap();
+    const adopted = hostedHubController.adoptSessionCredential(commit);
+    expect(replacedSignal?.aborted).toBe(true);
+
+    // A lifecycle signal during the commit joins the adoption rather than
+    // reading the credential mid-write.
+    void hostedHubController.recoverAfterConnectivity();
+    rejectReplaced(new HostedHubApiError("session_invalid", 401));
+    await replaced;
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(restoreSession).toHaveBeenCalledOnce();
+
+    finishCommit(true);
+
+    await expect(adopted).resolves.toBe(true);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubApi.getBootstrapAvailability).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+    });
+  });
+
+  it("does not wait out a stalled check of the replaced credential", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      // A dead route: the check only ends at the request deadline.
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            globalThis.setTimeout(
+              () =>
+                reject(
+                  new HostedHubApiError(
+                    "timeout",
+                    0,
+                    undefined,
+                    undefined,
+                    undefined,
+                    "request-timeout",
+                  ),
+                ),
+              30_000,
+            );
+          }),
+      )
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    void hostedHubController.bootstrap();
+    await expect(hostedHubController.adoptSessionCredential(async () => true)).resolves.toBe(true);
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+
+    // The stalled check settles later and publishes nothing, nor re-arms a retry.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      errorMessage: null,
+    });
+  });
+
+  it("re-checks the stored credential when an adopted one could not be committed", async () => {
+    vi.useFakeTimers();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.bootstrap();
+    await expect(hostedHubController.adoptSessionCredential(async () => false)).resolves.toBe(
+      false,
+    );
+
+    // The adoption cancelled the pending retry, so it owes the account a check.
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+  });
+
+  it("publishes nothing for the replaced credential when its check succeeds after an adoption", async () => {
+    const replacedAccountId = "acct_bbbbbbbbbbbbbbbbbbbbbb";
+    const replacedResponse: HostedHubSessionResponse = {
+      ...sessionResponse,
+      account: { ...sessionResponse.account, id: replacedAccountId, displayName: "Grace" },
+      session: { ...sessionResponse.session, accountId: replacedAccountId },
+    };
+    let resolveReplaced: (response: HostedHubSessionResponse) => void = () => undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      // The Hub's answer for the replaced credential was already read and
+      // lands regardless of the abort.
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveReplaced = resolve;
+          }),
+      )
+      .mockResolvedValue(sessionResponse);
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    let finishCommit: (committed: boolean) => void = () => undefined;
+    const publishedAccountIds = new Set<string>();
+    const unsubscribe = hostedHubStore.subscribe(() => {
+      const accountId = hostedHubStore.getState().account?.id;
+      if (accountId) publishedAccountIds.add(accountId);
+    });
+
+    try {
+      const replaced = hostedHubController.bootstrap();
+      const adopted = hostedHubController.adoptSessionCredential(
+        () =>
+          new Promise<boolean>((resolve) => {
+            finishCommit = resolve;
+          }),
+      );
+      resolveReplaced(replacedResponse);
+      await replaced;
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        accountStatus: "signed-out",
+        account: null,
+      });
+      expect(listNodes).not.toHaveBeenCalled();
+
+      finishCommit(true);
+      await expect(adopted).resolves.toBe(true);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(publishedAccountIds).toEqual(new Set([sessionResponse.account.id]));
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+    });
+  });
+
+  it("signs in with a recovery code without joining the replaced session's check", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    let replacedSignal: AbortSignal | undefined;
+    let rejectReplaced: (error: unknown) => void = () => undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      // The page loaded during a Hub deploy.
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      // The access-recovery retry, sent with the session the code replaces.
+      .mockImplementationOnce((signal) => {
+        replacedSignal = signal;
+        return new Promise((_resolve, reject) => {
+          rejectReplaced = reject;
+        });
+      })
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "getBootstrapAvailability").mockResolvedValue(false);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    let replacedCheckEndedBeforeSignIn: boolean | undefined;
+    let finishSignIn: () => void = () => undefined;
+    const signIn = vi.spyOn(hostedHubApi, "signInWithRecoveryCode").mockImplementation(() => {
+      replacedCheckEndedBeforeSignIn = replacedSignal?.aborted;
+      return new Promise((resolve) => {
+        finishSignIn = () => resolve(sessionResponse);
+      });
+    });
+
+    await hostedHubController.bootstrap();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+
+    const signedIn = hostedHubController.signInWithRecoveryCode("recovery-code");
+    expect(signIn).toHaveBeenCalledWith("recovery-code");
+    // The Hub commits the new session, and only then answers the check of the
+    // one it replaced.
+    finishSignIn();
+    await vi.advanceTimersByTimeAsync(0);
+    rejectReplaced(new HostedHubApiError("session_invalid", 401));
+    await signedIn;
+
+    expect(replacedCheckEndedBeforeSignIn).toBe(true);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      accessRecoveryPending: false,
+    });
+  });
+
+  it("reports a refused recovery code once the session it left in place is re-checked", async () => {
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValue(new HostedHubApiError("session_invalid", 401));
+    vi.spyOn(hostedHubApi, "getBootstrapAvailability").mockResolvedValue(false);
+    const refused = new HostedHubApiError("forbidden", 403);
+    vi.spyOn(hostedHubApi, "signInWithRecoveryCode").mockRejectedValue(refused);
+
+    await expect(hostedHubController.signInWithRecoveryCode("spent-code")).rejects.toBe(refused);
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
+  });
+
+  it("routes a connectivity signal to the recovery the account status calls for", async () => {
+    const bootstrap = vi.spyOn(hostedHubController, "bootstrap").mockResolvedValue();
+    const resumeBrowser = vi.spyOn(hostedHubController, "resumeBrowser").mockResolvedValue();
+
+    for (const accountStatus of [
+      "signed-out",
+      "authenticating",
+      "signing-out",
+      "session-expired",
+    ] as const) {
+      hostedHubStore.setState({ accountStatus });
+      await hostedHubController.recoverAfterConnectivity();
+    }
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(resumeBrowser).not.toHaveBeenCalled();
+
+    hostedHubStore.setState({ accountStatus: "unavailable" });
+    await hostedHubController.recoverAfterConnectivity();
+    expect(bootstrap).toHaveBeenCalledOnce();
+
+    hostedHubStore.setState({ accountStatus: "authenticated" });
+    await hostedHubController.recoverAfterConnectivity();
+    expect(resumeBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("subscribes lifecycle bindings for exactly the recoverable account statuses", () => {
+    expect(
+      (
+        [
+          "signed-out",
+          "authenticating",
+          "authenticated",
+          "signing-out",
+          "session-expired",
+          "unavailable",
+        ] as const
+      ).filter(hostedAccountRecoversOnConnectivity),
+    ).toEqual(["authenticated", "unavailable"]);
   });
 
   it("restores a session, signs in, signs out, and expires without exposing credentials", async () => {
@@ -660,6 +1151,95 @@ describe("hosted registration and directory state", () => {
     Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
   });
 
+  it("polls presence faster only while a surface is waiting on an offline node", async () => {
+    vi.useFakeTimers();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+    });
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.refreshDirectory();
+    expect(listNodes).toHaveBeenCalledOnce();
+
+    // A watch pulls the pending 20s refresh in to the presence cadence.
+    const release = hostedHubController.watchDirectoryPresence();
+    const second = hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(3);
+
+    // Releases are per watch and idempotent: one live watch keeps the cadence.
+    release();
+    release();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(4);
+
+    second();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(listNodes).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listNodes).toHaveBeenCalledTimes(6);
+  });
+
+  it("falls back to the normal cadence once a presence watch outlives its window", async () => {
+    vi.useFakeTimers();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+    });
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.refreshDirectory();
+    hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_WINDOW_MS);
+    expect(listNodes).toHaveBeenCalledTimes(1 + DIRECTORY_PRESENCE_WINDOW_MS / 5_000);
+
+    // A node that stays offline for days is not polled at 4x for days.
+    const atWindowEnd = listNodes.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(listNodes).toHaveBeenCalledTimes(atWindowEnd);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listNodes).toHaveBeenCalledTimes(atWindowEnd + 1);
+
+    // A fresh watch (the demand changed) gets its own window.
+    const release = hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(atWindowEnd + 2);
+    release();
+  });
+
+  it("never shortens a directory failure backoff for a presence watch", async () => {
+    vi.useFakeTimers();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+    });
+    const listNodes = vi
+      .spyOn(hostedHubApi, "listNodes")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+      .mockResolvedValue([]);
+
+    await hostedHubController.refreshDirectory();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listNodes).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps mutations stale until browser resume revalidates access and node state", async () => {
     const selected = node();
     const order: string[] = [];
@@ -1054,6 +1634,226 @@ describe("hosted registration and directory state", () => {
     });
     hostedHubController.markSessionReady(selected.environmentId);
     expect(hostedHubStore.getState().browserStatus).toBe("current");
+  });
+
+  function resumableSelection(): HostedHubNode {
+    const selected = node();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [selected],
+      selectedNode: selected,
+      selectionStatus: "online",
+      effectiveRole: selected.effectiveRole,
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+      browserStatus: "current",
+      generation: 4,
+    });
+    return selected;
+  }
+
+  it.each([
+    ["a failing Hub", new HostedHubApiError("unavailable", 503)],
+    [
+      "the request deadline",
+      new HostedHubApiError("timeout", 0, undefined, undefined, undefined, "request-timeout"),
+    ],
+    [
+      "a DNS or TLS failure while the OS reports connectivity",
+      new HostedHubApiError(
+        "unavailable",
+        0,
+        undefined,
+        undefined,
+        undefined,
+        "transport-unavailable",
+      ),
+    ],
+  ])(
+    "retries a resume that failed with %s without another lifecycle event",
+    async (_label, failure) => {
+      vi.useFakeTimers();
+      vi.spyOn(Math, "random").mockReturnValue(0.5);
+      const selected = resumableSelection();
+      const restoreSession = vi
+        .spyOn(hostedHubApi, "restoreSession")
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValue(sessionResponse);
+      vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selected]);
+
+      hostedHubController.suspendBrowser("hidden");
+      await hostedHubController.resumeBrowser();
+      expect(hostedHubStore.getState()).toMatchObject({
+        browserStatus: "stale",
+        sessionStatus: "stale",
+        accessRecoveryPending: true,
+      });
+      expect(activateHostedNode).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(restoreSession).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(restoreSession).toHaveBeenCalledTimes(2);
+      // The retry is the full resume: session, then directory, then a fresh relay
+      // attempt that still has to publish a current snapshot before mutation.
+      await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
+      expect(hostedHubStore.getState()).toMatchObject({
+        browserStatus: "synchronizing",
+        directoryStatus: "ready",
+        sessionStatus: "synchronizing",
+        sessionEstablished: false,
+        generation: 6,
+      });
+      hostedHubController.markSessionReady(selected.environmentId);
+      expect(hostedHubStore.getState()).toMatchObject({
+        browserStatus: "current",
+        sessionStatus: "ready",
+      });
+    },
+  );
+
+  it("backs off between repeated resume failures and stops once access is restored", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const selected = resumableSelection();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selected]);
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
+
+    hostedHubController.markSessionReady(selected.environmentId);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+    expect(hostedHubStore.getState().browserStatus).toBe("current");
+  });
+
+  it("drops a pending resume retry when the browser is suspended again", async () => {
+    vi.useFakeTimers();
+    resumableSelection();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValue(new HostedHubApiError("unavailable", 503));
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    expect(hostedHubStore.getState().browserStatus).toBe("stale");
+    hostedHubController.suspendBrowser("offline");
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState().browserStatus).toBe("offline");
+  });
+
+  it("expires the account when a resume retry finds the session revoked", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const selected = resumableSelection();
+    vi.spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+      .mockRejectedValue(new HostedHubApiError("session_invalid", 401));
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await vi.waitFor(() =>
+      expect(hostedHubStore.getState()).toMatchObject({
+        accountStatus: "session-expired",
+        selectedNode: null,
+        effectiveRole: null,
+      }),
+    );
+    expect(deactivateHostedNode).toHaveBeenCalledWith(selected.environmentId);
+    expect(activateHostedNode).not.toHaveBeenCalled();
+  });
+
+  it("does not put a resume the Hub refused on a timer", async () => {
+    vi.useFakeTimers();
+    resumableSelection();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValue(new HostedHubApiError("forbidden", 403));
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState()).toMatchObject({
+      browserStatus: "stale",
+      accessRecoveryPending: false,
+    });
+  });
+
+  it("still recovers a stale browser after the user returns to the directory", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const selected = resumableSelection();
+    vi.spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selected]);
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    await hostedHubController.returnToDirectory();
+    expect(hostedHubStore.getState()).toMatchObject({ browserStatus: "stale", selectedNode: null });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(hostedHubStore.getState().browserStatus).toBe("current"));
+    expect(activateHostedNode).not.toHaveBeenCalled();
+  });
+
+  it("revalidates access when the user leaves a node during an access check", async () => {
+    const selected = resumableSelection();
+    let finishCheck: (value: HostedHubSessionResponse) => void = () => undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishCheck = resolve;
+          }),
+      );
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selected]);
+
+    hostedHubController.suspendBrowser("hidden");
+    void hostedHubController.resumeBrowser();
+    expect(hostedHubStore.getState().browserStatus).toBe("checking-access");
+
+    await hostedHubController.returnToDirectory();
+
+    // Back to the directory must not stand in for the session and directory
+    // check the aborted resume never finished.
+    expect(hostedHubStore.getState()).toMatchObject({
+      selectedNode: null,
+      browserStatus: "checking-access",
+    });
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await hostedHubController.selectNode(selected.id);
+    expect(activateHostedNode).not.toHaveBeenCalled();
+
+    finishCheck(sessionResponse);
+    await vi.waitFor(() => expect(hostedHubStore.getState().browserStatus).toBe("current"));
+    expect(listNodes).toHaveBeenCalledOnce();
+    expect(activateHostedNode).not.toHaveBeenCalled();
   });
 
   it("switches nodes through the ordered environment teardown boundary", async () => {

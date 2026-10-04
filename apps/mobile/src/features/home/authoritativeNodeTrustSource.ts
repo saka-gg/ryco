@@ -1,13 +1,12 @@
-import type { E2eeTrustClassification } from "../../platform/e2eeTrustModel";
+import type {
+  NativeNodePairingProbe,
+  NativeNodeTrustClassifier,
+} from "./nativeNodeEligibilityModel";
 
 export interface AuthoritativeNodeTrustSource {
   readonly hubOrigin: () => string | null;
-  readonly classify: (selection: {
-    readonly kind: "node-id-hint";
-    readonly hubOrigin: string;
-    readonly accountId: string;
-    readonly nodeId: string;
-  }) => Promise<E2eeTrustClassification>;
+  readonly classify: NativeNodeTrustClassifier;
+  readonly pairing: NativeNodePairingProbe;
   readonly subscribe: (listener: () => void) => () => void;
 }
 

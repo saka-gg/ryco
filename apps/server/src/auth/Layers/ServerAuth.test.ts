@@ -1,14 +1,23 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Duration, Effect, Layer } from "effect";
+import { TestClock } from "effect/testing";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
 import { BootstrapCredentialError } from "../Services/BootstrapCredentialService.ts";
 import { ServerAuth, type ServerAuthShape } from "../Services/ServerAuth.ts";
-import { ServerAuthLive, toBootstrapExchangeAuthError } from "./ServerAuth.ts";
+import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
+import { AuthControlPlaneLive } from "./AuthControlPlane.ts";
+import { BootstrapCredentialServiceLive } from "./BootstrapCredentialService.ts";
+import { makeServerAuth, ServerAuthLive, toBootstrapExchangeAuthError } from "./ServerAuth.ts";
+import { ServerAuthPolicyLive } from "./ServerAuthPolicy.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
+import { makeSessionCredentialService } from "./SessionCredentialService.ts";
 
 const makeServerConfigLayer = (overrides?: Partial<ServerConfigShape>) =>
   Layer.effect(
@@ -30,6 +39,53 @@ const makeServerAuthLayer = (overrides?: Partial<ServerConfigShape>) =>
     Layer.provide(ServerSecretStoreLive),
     Layer.provide(makeServerConfigLayer(overrides)),
   );
+
+/** `ServerAuthLive` over a session store whose reads fail while `failing` is set. */
+const makeFaultyServerAuthLayer = (store: { failing: boolean }) =>
+  Layer.effect(ServerAuth, makeServerAuth).pipe(
+    Layer.provideMerge(AuthControlPlaneLive),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        BootstrapCredentialServiceLive,
+        Layer.effect(SessionCredentialService, makeSessionCredentialService).pipe(
+          Layer.provide(
+            Layer.effect(
+              AuthSessionRepository,
+              Effect.gen(function* () {
+                const repository = yield* AuthSessionRepository;
+                return {
+                  ...repository,
+                  getById: (input) =>
+                    store.failing
+                      ? Effect.fail(
+                          new PersistenceSqlError({
+                            operation: "AuthSessionRepository.getById:query",
+                            detail: "database is locked",
+                          }),
+                        )
+                      : repository.getById(input),
+                };
+              }),
+            ).pipe(Layer.provide(AuthSessionRepositoryLive)),
+          ),
+        ),
+      ),
+    ),
+    Layer.provideMerge(ServerAuthPolicyLive),
+    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(ServerSecretStoreLive),
+    Layer.provide(makeServerConfigLayer()),
+  );
+
+const makeWebSocketRequest = (
+  websocketToken: string,
+): Parameters<ServerAuthShape["authenticateWebSocketUpgrade"]>[0] =>
+  ({
+    cookies: {},
+    headers: {},
+    url: `/ws?wsToken=${websocketToken}`,
+    originalUrl: `/ws?wsToken=${websocketToken}`,
+  }) as unknown as Parameters<ServerAuthShape["authenticateWebSocketUpgrade"]>[0];
 
 const makeCookieRequest = (
   sessionToken: string,
@@ -199,5 +255,86 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
         }),
       ),
     ),
+  );
+
+  it.effect("answers a session store fault as unavailable, never as a rejected credential", () => {
+    const store = { failing: false };
+    return Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const pairing = yield* serverAuth.issuePairingCredential({ label: "Studio Mac" });
+      const paired = yield* serverAuth.exchangeBootstrapCredentialForBearerSession(
+        pairing.credential,
+        requestMetadata,
+      );
+      const request = makeBearerRequest(paired.sessionToken);
+      const session = yield* serverAuth.authenticateHttpRequest(request);
+      const websocket = yield* serverAuth.issueWebSocketToken(session);
+
+      // The database is busy: the client is told to retry, not to pair again.
+      store.failing = true;
+      const sessionState = yield* Effect.flip(serverAuth.getSessionState(request));
+      expect(sessionState.status).toBe(503);
+      const http = yield* Effect.flip(serverAuth.authenticateHttpRequest(request));
+      expect(http.status).toBe(503);
+      const upgrade = yield* Effect.flip(
+        serverAuth.authenticateWebSocketUpgrade(makeWebSocketRequest(websocket.token)),
+      );
+      expect(upgrade.status).toBe(503);
+      // A credential the node rejects is still answered as one.
+      expect(yield* serverAuth.getSessionState(makeBearerRequest("not-a-session-token"))).toEqual(
+        expect.objectContaining({ authenticated: false }),
+      );
+
+      store.failing = false;
+      expect(yield* serverAuth.getSessionState(request)).toEqual(
+        expect.objectContaining({ authenticated: true, role: "client" }),
+      );
+    }).pipe(Effect.provide(makeFaultyServerAuthLayer(store)));
+  });
+
+  it.effect("renews a direct bearer pairing over its own bearer only", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const pairing = yield* serverAuth.issuePairingCredential({ label: "Julius iPhone" });
+      const paired = yield* serverAuth.exchangeBootstrapCredentialForBearerSession(
+        pairing.credential,
+        { ...requestMetadata, deviceType: "mobile" },
+      );
+
+      // Renewed right after pairing: nothing to renew yet.
+      const tooSoon = yield* Effect.flip(
+        serverAuth.rotateBearerSession(makeBearerRequest(paired.sessionToken)),
+      );
+      expect(tooSoon.status).toBe(409);
+
+      yield* TestClock.adjust(Duration.days(2));
+      const renewed = yield* serverAuth.rotateBearerSession(makeBearerRequest(paired.sessionToken));
+      expect(renewed).toMatchObject({
+        authenticated: true,
+        role: "client",
+        sessionMethod: "bearer-session-token",
+      });
+      expect(renewed.sessionToken).not.toBe(paired.sessionToken);
+      const verified = yield* serverAuth.authenticateHttpRequest(
+        makeBearerRequest(renewed.sessionToken),
+      );
+      expect(verified.subject).toBe("one-time-token");
+
+      // A browser session cookie never renews into anything, as a cookie or
+      // presented as a bearer.
+      const ownerPairing = yield* serverAuth.issuePairingCredential({ role: "owner" });
+      const browser = yield* serverAuth.exchangeBootstrapCredential(
+        ownerPairing.credential,
+        requestMetadata,
+      );
+      const cookieOnly = yield* Effect.flip(
+        serverAuth.rotateBearerSession(makeCookieRequest(browser.sessionToken)),
+      );
+      expect(cookieOnly.status).toBe(401);
+      const cookieAsBearer = yield* Effect.flip(
+        serverAuth.rotateBearerSession(makeBearerRequest(browser.sessionToken)),
+      );
+      expect(cookieAsBearer.status).toBe(403);
+    }).pipe(Effect.provide(Layer.merge(makeServerAuthLayer(), TestClock.layer()))),
   );
 });

@@ -1,6 +1,7 @@
 /**
  * What `ryco setup` detects about this machine before asking anything: coding
- * agents on PATH, Tailscale, and a friendly name for the node.
+ * agents on PATH, Tailscale, a friendly name for the node, and whether the OS
+ * can hold its Hub key.
  */
 import { access, constants } from "node:fs/promises";
 import path from "node:path";
@@ -9,6 +10,10 @@ import { readTailscaleStatus } from "@ryco/tailscale";
 import { Effect } from "effect";
 
 import { resolveServerEnvironmentLabel } from "../environment/Layers/ServerEnvironmentLabel.ts";
+import {
+  NODE_IDENTITY_SECRET_SERVICE,
+  probeOsProtectedSecretStore,
+} from "../hubIdentity/ProtectedSecretStore.ts";
 
 /** Provider CLIs Ryco drives, by the binary name each provider looks for by default. */
 export const PROVIDER_BINARIES: ReadonlyArray<{ readonly name: string; readonly binary: string }> =
@@ -60,3 +65,24 @@ export const detectTailscale = readTailscaleStatus.pipe(
 );
 
 export const detectMachineName = resolveServerEnvironmentLabel({ cwdBaseName: "" });
+
+/**
+ * Whether this Linux machine has no usable credential store for the Hub key.
+ *
+ * Headless Linux often has the keyring library but no Secret Service to answer
+ * it, which only shows up as a failed read. macOS and Windows always ship a
+ * store, and probing the macOS Keychain can raise a prompt, so only Linux is
+ * probed. A `true` here lets setup ask about the file fallback; it never turns
+ * the fallback on by itself.
+ */
+export async function detectMissingOsKeyStore(
+  input: {
+    readonly platform?: NodeJS.Platform;
+    readonly probe?: () => Promise<boolean>;
+  } = {},
+): Promise<boolean> {
+  if ((input.platform ?? process.platform) !== "linux") return false;
+  const probe =
+    input.probe ?? (() => probeOsProtectedSecretStore({ service: NODE_IDENTITY_SECRET_SERVICE }));
+  return !(await probe());
+}

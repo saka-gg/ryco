@@ -1,7 +1,9 @@
 import {
+  DESKTOP_HUB_REACHABILITY_PATH,
   DESKTOP_NATIVE_NODE_CLAIM_COMMIT_PATH,
   DESKTOP_NATIVE_NODE_CLAIM_DESCRIPTOR_PATH,
   DESKTOP_NATIVE_NODE_CLAIM_SIGN_PATH,
+  DesktopHubReachabilityResponse,
   DesktopNativeNodeClaimCommitResponse,
   DesktopNativeNodeClaimDescriptorResponse,
   DesktopNativeNodeClaimErrorResponse,
@@ -92,6 +94,8 @@ export interface DesktopHubControlClient {
   readonly completeLocalIntroduction: (
     request: LocalIntroductionCompleteRequest,
   ) => Promise<typeof LocalIntroductionCompleteResponse.Type>;
+  /** Whether other devices can reach this node through the Hub right now. */
+  readonly hubReachability: () => Promise<typeof DesktopHubReachabilityResponse.Type>;
 }
 
 export function createDesktopHubControlClient(input: {
@@ -151,5 +155,6 @@ export function createDesktopHubControlClient(input: {
       post(LOCAL_INTRODUCTION_DESCRIPTOR_PATH, LocalIntroductionDescriptorResponse),
     completeLocalIntroduction: (request) =>
       post(LOCAL_INTRODUCTION_COMPLETE_PATH, LocalIntroductionCompleteResponse, request),
+    hubReachability: () => post(DESKTOP_HUB_REACHABILITY_PATH, DesktopHubReachabilityResponse),
   };
 }

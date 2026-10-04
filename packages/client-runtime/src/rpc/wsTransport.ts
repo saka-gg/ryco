@@ -15,6 +15,7 @@ import type { ObservabilityService, SocketService } from "../platform/index.ts";
 import { clearAllTrackedRpcRequests } from "./requestLatencyState.ts";
 import {
   createWsRpcProtocolLayer,
+  isAwaitingAdmission,
   makeHostedRpcProtocolClient,
   makeDeviceRpcProtocolClient,
   makeWsRpcProtocolClient,
@@ -38,6 +39,13 @@ interface RequestOptions {
 }
 
 const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
+/**
+ * Ceiling for re-checking a subscription its connection refused only for now
+ * (`isAwaitingAdmission`). Nothing is sent while it waits, so the cost is a
+ * local check; the cap bounds how late the stream starts after the connection
+ * admits it.
+ */
+export const AWAITING_SESSION_SUBSCRIPTION_MAX_DELAY_MS = 4_000;
 const NOOP: () => void = () => undefined;
 export const THREAD_NOT_FOUND_ERROR_RE = /^Thread\s.+\swas not found$/u;
 export const SUBSCRIPTION_STREAM_DONE_SCHEMA_ERROR_FRAGMENT = "SchemaError(Expected array";
@@ -52,6 +60,14 @@ interface StreamRequestStartInfo {
   readonly id: string;
   readonly tag: string;
   readonly stream: boolean;
+}
+
+/** A request made on a transport that was already disposed: it was never sent. */
+export class RpcTransportDisposedError extends Error {
+  constructor() {
+    super("Transport disposed");
+    this.name = "RpcTransportDisposedError";
+  }
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -112,7 +128,7 @@ class RpcTransport<Client> {
     _options?: RequestOptions,
   ): Promise<TSuccess> {
     if (this.disposed) {
-      throw new Error("Transport disposed");
+      throw new RpcTransportDisposedError();
     }
 
     const session = this.session;
@@ -125,7 +141,7 @@ class RpcTransport<Client> {
     listener: (value: TValue) => void,
   ): Promise<void> {
     if (this.disposed) {
-      throw new Error("Transport disposed");
+      throw new RpcTransportDisposedError();
     }
 
     const session = this.session;
@@ -154,6 +170,7 @@ class RpcTransport<Client> {
 
     let active = true;
     let hasReceivedValue = false;
+    let awaitingSessionRetries = 0;
     const retryDelayMs = Duration.toMillis(
       Duration.fromInputUnsafe(options?.retryDelay ?? DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS),
     );
@@ -190,6 +207,7 @@ class RpcTransport<Client> {
             () => {
               this.hasReportedTransportDisconnect = false;
               hasReceivedValue = true;
+              awaitingSessionRetries = 0;
             },
           );
           cancelCurrentStream = runningStream.cancel;
@@ -202,6 +220,19 @@ class RpcTransport<Client> {
           }
 
           if (session !== this.session) {
+            continue;
+          }
+
+          if (isAwaitingAdmission(error)) {
+            // Expected while a rebuilt hosted client's session synchronizes;
+            // the stream starts once the connection admits it.
+            await sleep(
+              Math.min(
+                Math.max(retryDelayMs, 1) * 2 ** Math.min(awaitingSessionRetries, 16),
+                AWAITING_SESSION_SUBSCRIPTION_MAX_DELAY_MS,
+              ),
+            );
+            awaitingSessionRetries += 1;
             continue;
           }
 
@@ -244,12 +275,12 @@ class RpcTransport<Client> {
 
   async reconnect() {
     if (this.disposed) {
-      throw new Error("Transport disposed");
+      throw new RpcTransportDisposedError();
     }
 
     const reconnectOperation = this.reconnectChain.then(async () => {
       if (this.disposed) {
-        throw new Error("Transport disposed");
+        throw new RpcTransportDisposedError();
       }
 
       clearAllTrackedRpcRequests();

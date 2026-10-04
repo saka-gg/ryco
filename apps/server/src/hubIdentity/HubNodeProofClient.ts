@@ -2,7 +2,10 @@ import {
   canonicalizeHubOrigin,
   encodeNodeAuthenticationTranscript,
 } from "@ryco/shared/nodeIdentity";
-import type { RelayNodeAuthHandshake } from "@ryco/contracts/relay";
+import {
+  RELAY_AUTHENTICATION_DEADLINE_MS,
+  type RelayNodeAuthHandshake,
+} from "@ryco/contracts/relay";
 
 import { fetchBoundedJson, type BoundedJsonFailure } from "./BoundedHttp.ts";
 import type { LocalHubIdentityStateStore } from "./LocalHubIdentityState.ts";
@@ -64,21 +67,53 @@ function proofError(failure: HubNodeProofFailure): never {
   throw new HubNodeProofClientError(failure);
 }
 
+/** How long the Hub honours a node challenge from issue. */
+const HUB_CHALLENGE_LIFETIME_MS = 30_000;
+/** Allowance for the proof's own transit once the socket is open. */
+const CHALLENGE_DELIVERY_MARGIN_MS = 2_000;
 /**
- * Client errors a reverse proxy or load balancer answers with while a Hub
- * deploys or restarts — a missing route, a timeout, a conflict, a misdirected
- * or too-early request. The Hub's own challenge route answers none of them for
- * a node it refuses, so they are retried rather than parking the node for an
- * operator; a genuine refusal (400, 401, 403) still stops.
+ * How long a challenge may take to sign and still be worth sending.
+ *
+ * Whatever the challenge's lifetime leaves after signing must cover opening the
+ * socket — bounded by the relay's own deadline — and the proof's transit. A
+ * proof signed inside this budget therefore reaches the Hub before its
+ * challenge expires; one signed outside it may not. Measured on the local clock
+ * from before the request, so it overstates the challenge's age and is
+ * unaffected by skew between this machine's clock and the Hub's: comparing
+ * `challengeExpiresAt` with local time would refetch forever on a node whose
+ * clock runs ahead. Slow signing is real — a keychain access prompt, a slow
+ * custody backend, a machine suspended mid-handshake.
  */
-const TRANSIENT_PROOF_STATUSES = new Set([404, 405, 408, 409, 421, 425]);
+const CHALLENGE_SIGNING_BUDGET_MS =
+  HUB_CHALLENGE_LIFETIME_MS - RELAY_AUTHENTICATION_DEADLINE_MS - CHALLENGE_DELIVERY_MARGIN_MS;
+/**
+ * One refetch, and the second proof is sent however long it took: signing again
+ * for a third challenge would cost the owner another keychain prompt for a
+ * proof the Hub may well have accepted, and a late one that it refuses is
+ * recognized as stale and retried once (`RelayConnectionSession`).
+ */
+const MAX_CHALLENGE_ATTEMPTS = 2;
 
+/**
+ * Map a proof-preflight HTTP status to the connector's retry policy.
+ *
+ * The Hub's challenge route never refuses a node by status: it answers 201 for
+ * every well-formed request — a dummy challenge for an unknown or revoked node,
+ * whose proof the relay then rejects — and 400 only when the request itself is
+ * malformed. Every other client error therefore comes from something between
+ * the node and the Hub: a proxy without the route mid-deploy, a WAF or CDN
+ * answering 401 or 403, a timeout. Treating those as a refusal would park every
+ * node behind that intermediary for an operator until a restart, so they retry
+ * like a network failure. A 400 means this node and the Hub disagree about the
+ * request shape — an update, not a retry, fixes that — so it is a protocol
+ * failure, which retries once and then stops.
+ */
 function proofHttpError(status: number): never {
   if (status === 429) return proofError("rate_limited");
   if (status === 503) return proofError("server_draining");
   if (status >= 500 && status <= 599) return proofError("network");
-  if (TRANSIENT_PROOF_STATUSES.has(status)) return proofError("network");
-  if (status >= 400 && status <= 499) return proofError("authentication_failed");
+  if (status === 400) return proofError("protocol_invalid");
+  if (status >= 401 && status <= 499) return proofError("network");
   return proofError("protocol_invalid");
 }
 
@@ -145,45 +180,61 @@ export function makeHubNodeProofClient(dependencies: {
         if (error instanceof HubNodeProofClientError) throw error;
         return proofError("identity_unavailable");
       }
-      let challenge: HubNodeChallenge;
-      try {
-        challenge = validateChallenge(
-          await dependencies.transport.request({
+      for (let attempt = 1; ; attempt += 1) {
+        const requestedAt = now();
+        let challenge: HubNodeChallenge;
+        try {
+          challenge = validateChallenge(
+            await dependencies.transport.request({
+              hubOrigin,
+              nodeId: active.nodeId,
+              activeKeyId: selected.keyId,
+              ...protocol,
+            }),
+            protocol,
+            now(),
+          );
+        } catch (error) {
+          if (error instanceof HubNodeProofClientError) throw error;
+          return proofError("network");
+        }
+        try {
+          const transcript = encodeNodeAuthenticationTranscript({
             hubOrigin,
+            ...protocol,
             nodeId: active.nodeId,
             activeKeyId: selected.keyId,
-            ...protocol,
-          }),
-          protocol,
-          now(),
-        );
-      } catch (error) {
-        if (error instanceof HubNodeProofClientError) throw error;
-        return proofError("network");
-      }
-      const transcript = encodeNodeAuthenticationTranscript({
-        hubOrigin,
-        ...protocol,
-        nodeId: active.nodeId,
-        activeKeyId: selected.keyId,
-        challengeExpiresAt: challenge.challengeExpiresAt,
-        challenge: challenge.challenge,
-      });
-      try {
-        const signature = await dependencies.signingIdentity.sign(selected.secretName, transcript);
-        return {
-          type: "auth",
-          peer: "node",
-          ...protocol,
-          nodeId: active.nodeId as RelayNodeAuthHandshake["nodeId"],
-          nonce: Uint8Array.from(challenge.challenge),
-          signature,
-        };
-      } catch {
-        return proofError("identity_unavailable");
-      } finally {
-        challenge.challenge.fill(0);
-        transcript.fill(0);
+            challengeExpiresAt: challenge.challengeExpiresAt,
+            challenge: challenge.challenge,
+          });
+          let signature: Uint8Array;
+          try {
+            signature = await dependencies.signingIdentity.sign(selected.secretName, transcript);
+          } catch {
+            return proofError("identity_unavailable");
+          } finally {
+            transcript.fill(0);
+          }
+          if (
+            attempt >= MAX_CHALLENGE_ATTEMPTS ||
+            now() - requestedAt < CHALLENGE_SIGNING_BUDGET_MS
+          ) {
+            return {
+              type: "auth",
+              peer: "node",
+              ...protocol,
+              nodeId: active.nodeId as RelayNodeAuthHandshake["nodeId"],
+              nonce: Uint8Array.from(challenge.challenge),
+              signature,
+            };
+          }
+          // The proof may reach the Hub after its challenge expired, and be
+          // rejected as an authentication failure that looks exactly like a
+          // revoked key. A fresh challenge is free.
+          signature.fill(0);
+        } finally {
+          challenge.challenge.fill(0);
+        }
       }
     },
   };

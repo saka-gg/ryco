@@ -24,6 +24,7 @@ import {
   nativeImage,
   nativeTheme,
   powerMonitor,
+  powerSaveBlocker,
   Notification,
   protocol,
   safeStorage,
@@ -37,6 +38,7 @@ import {
   type DesktopAppBranding,
   type DesktopHostedIdentityActionResult,
   type DesktopHostedIdentityState,
+  type DesktopHubLaunchConfigResult,
   type DesktopServerExposureMode,
   type DesktopServerExposureState,
   type DesktopUpdateChannel,
@@ -55,17 +57,33 @@ import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSe
 import type { RemoteRycoRunnerOptions } from "@ryco/ssh/tunnel";
 import { DEFAULT_DESKTOP_BACKEND_PORT, resolveDesktopBackendPort } from "./backendPort.ts";
 import {
+  type DesktopHubConnectorLaunch,
   type DesktopSettings,
+  type DesktopTailscaleServeLaunch,
   DEFAULT_DESKTOP_SETTINGS,
+  desktopHubAllowsBackgroundNodeClaim,
+  desktopHubLaunchNeedsRestart,
+  isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
+  pendingDesktopServerExposureMode,
+  pendingDesktopTailscaleServe,
+  planDesktopServerExposureChange,
+  planDesktopTailscaleServeChange,
   readDesktopSettings,
+  resolveDesktopHubConnectorLaunch,
+  resolveDesktopTailscaleServeLaunch,
   setDesktopServerExposurePreference,
-  setDesktopTailscaleServePreference,
   setDesktopUpdateChannelPreference,
   resolveDefaultDesktopSettings,
   setDesktopHubPreference,
+  setDesktopKeepAwakePreference,
   writeDesktopSettings,
 } from "./desktopSettings.ts";
+import {
+  DESKTOP_KEEP_AWAKE_RECHECK_MS,
+  DesktopKeepAwakeController,
+  isDesktopNodeReachable,
+} from "./desktopKeepAwake.ts";
 import {
   readClientSettings,
   readAppKeybindings,
@@ -217,6 +235,8 @@ const SET_TAILSCALE_SERVE_ENABLED_CHANNEL = "desktop:set-tailscale-serve-enabled
 const GET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:get-hub-launch-config";
 const SET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:set-hub-launch-config";
 const RESTART_APP_CHANNEL = "desktop:restart-app";
+const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
+const SET_KEEP_AWAKE_ENABLED_CHANNEL = "desktop:set-keep-awake-enabled";
 const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
 const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
 const NOTIFY_TURN_COMPLETE_CHANNEL = "desktop:notify-turn-complete";
@@ -384,6 +404,12 @@ let desktopNativeE2eeHandshakeService: DesktopNativeE2eeHandshakeService | null 
 let desktopWorkspaceClient: DesktopWorkspaceClient | null = null;
 let desktopWorkspaceRelayManager: DesktopWorkspaceRelayManager | null = null;
 let disposeDesktopWorkspaceSubscription: (() => void) | null = null;
+let desktopKeepAwake: DesktopKeepAwakeController | null = null;
+// The Hub connector configuration the running backend was launched with.
+let backendHubLaunch: DesktopHubConnectorLaunch | null = null;
+// The Tailscale Serve configuration the running backend was launched with. A
+// change saved for a deferred relaunch must not read as already served.
+let backendTailscaleServe: DesktopTailscaleServeLaunch | null = null;
 // Retain live turn-complete notifications: Electron GCs Notification objects once
 // the creating scope returns, which would drop their `click`/`close` handlers.
 const activeTurnCompleteNotifications = new Set<Notification>();
@@ -395,6 +421,18 @@ let backendBootstrapToken = "";
 // exact backend child and authenticates Desktop-main-only local control calls.
 let backendControlToken = "";
 let backendHttpUrl = "";
+// Main-only local control over the running backend child (per-child secret).
+const desktopHubControl = createDesktopHubControlClient({
+  baseUrl: () => backendHttpUrl,
+  controlToken: () => backendControlToken,
+});
+// Whether the running backend reports other devices can reach it through the
+// Hub. Main has no push channel from the child, so it asks; false until known.
+let backendHubReachable = false;
+// Whether the running backend runs its connector at all: a standby launch can
+// resolve to off. `null` until the backend has answered.
+let backendHubConnectorEnabled: boolean | null = null;
+let desktopHubReachabilityProbe: Promise<void> | null = null;
 let backendWsUrl = "";
 let backendEndpointUrl: string | null = null;
 let backendAdvertisedHost: string | null = null;
@@ -429,7 +467,19 @@ let backendObservabilitySettings = readPersistedBackendObservabilitySettings();
 let desktopSettingsUnreadable = false;
 let desktopSettings = ((): DesktopSettings => {
   try {
-    return readDesktopSettings(DESKTOP_SETTINGS_PATH, app.getVersion());
+    return readDesktopSettings(DESKTOP_SETTINGS_PATH, app.getVersion(), {
+      hasRetainedHubSession: () => {
+        try {
+          return desktopProtectedRecordExists({
+            directory: NATIVE_SECURITY_DIR,
+            name: "hub-session-token",
+          });
+        } catch {
+          // Unreadable: assume a session, which only keeps the connector off.
+          return true;
+        }
+      },
+    });
   } catch {
     desktopSettingsUnreadable = true;
     return resolveDefaultDesktopSettings(app.getVersion());
@@ -628,13 +678,23 @@ async function prepareDesktopShellEnvironmentForBackend(): Promise<void> {
   await synchronizeDesktopShellEnvironment("cache-miss");
 }
 
+function runningTailscaleServe(): DesktopTailscaleServeLaunch {
+  return backendTailscaleServe ?? resolveDesktopTailscaleServeLaunch(desktopSettings);
+}
+
 function getDesktopServerExposureState(): DesktopServerExposureState {
+  const tailscaleServe = runningTailscaleServe();
+  // A change saved for a relaunch stays visible, and so withdrawable, until then.
+  const pendingMode = pendingDesktopServerExposureMode(desktopSettings, desktopServerExposureMode);
+  const pendingTailscaleServe = pendingDesktopTailscaleServe(desktopSettings, tailscaleServe);
   return {
     mode: desktopServerExposureMode,
     endpointUrl: backendEndpointUrl,
     advertisedHost: backendAdvertisedHost,
-    tailscaleServeEnabled: desktopSettings.tailscaleServeEnabled,
-    tailscaleServePort: desktopSettings.tailscaleServePort,
+    tailscaleServeEnabled: tailscaleServe.enabled,
+    tailscaleServePort: tailscaleServe.port,
+    ...(pendingMode === null ? {} : { pendingMode }),
+    ...(pendingTailscaleServe === null ? {} : { pendingTailscaleServe }),
   };
 }
 
@@ -651,17 +711,15 @@ async function getDesktopAdvertisedEndpoints() {
     exposure,
     customHttpsEndpointUrls: resolveCustomHttpsEndpointUrls(),
   });
-  if (
-    desktopServerExposureMode !== "network-accessible" &&
-    !desktopSettings.tailscaleServeEnabled
-  ) {
+  const tailscaleServe = runningTailscaleServe();
+  if (desktopServerExposureMode !== "network-accessible" && !tailscaleServe.enabled) {
     return coreEndpoints;
   }
 
   const tailscaleEndpoints = await resolveTailscaleAdvertisedEndpoints({
     port: backendPort,
-    serveEnabled: desktopSettings.tailscaleServeEnabled,
-    servePort: desktopSettings.tailscaleServePort,
+    serveEnabled: tailscaleServe.enabled,
+    servePort: tailscaleServe.port,
     networkInterfaces,
   });
   return [...coreEndpoints, ...tailscaleEndpoints];
@@ -690,7 +748,7 @@ function desktopHostedDeviceLabel(): string {
 const ensureDesktopNativeIdentityContext = lazyAsyncResource(
   async (): Promise<NonNullable<typeof desktopNativeIdentityContext>> => {
     if (desktopNativeIdentityContext !== null) return desktopNativeIdentityContext;
-    if (process.platform !== "darwin" || desktopSettings.hubOrigin === null) {
+    if (!isDesktopHostedIdentitySupported(process.platform) || desktopSettings.hubOrigin === null) {
       throw new Error("Desktop native Hub identity is unavailable.");
     }
     const protection = getDesktopSecretStorage();
@@ -777,10 +835,9 @@ const ensureDesktopHostedIdentityCoordinator = lazyAsyncResource(
       trust: context.trust,
       nativeE2eePlatform: context.nativeE2eePlatform,
       relayDpopSigner: await createDesktopDpopSigner(context.security),
-      control: createDesktopHubControlClient({
-        baseUrl: () => backendHttpUrl,
-        controlToken: () => backendControlToken,
-      }),
+      allowsBackgroundNodeClaim: () => desktopHubAllowsBackgroundNodeClaim(desktopSettings),
+      beforeInteractiveNodeClaim: enableDesktopHubConnectorForAccountSetup,
+      control: desktopHubControl,
     });
     desktopHostedIdentityCoordinator = coordinator;
     return coordinator;
@@ -992,6 +1049,21 @@ async function runDesktopHostedIdentity(
   return desktopHostedIdentityStatus;
 }
 
+/**
+ * Interactive account sign-in is the Desktop onboarding action: once it holds
+ * a durable session, the colocated node connector becomes an explicit part of
+ * this installation. Recorded before the node claim, because a standby launch
+ * resolves to disabled for any existing identity: a claim that outlived an
+ * unrecorded enable would leave the node off after the next restart.
+ */
+function enableDesktopHubConnectorForAccountSetup(): void {
+  if (desktopSettings.hubOrigin === null || desktopSettings.hubConnectorEnabled) return;
+  const nextSettings = setDesktopHubPreference(desktopSettings, { enabled: true });
+  writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+  desktopSettings = nextSettings;
+  desktopKeepAwake?.sync();
+}
+
 function resumeDesktopHostedIdentityForBackend(): void {
   if (
     backendControlToken.length === 0 ||
@@ -1062,19 +1134,121 @@ async function applyDesktopServerExposureMode(
   return getDesktopServerExposureState();
 }
 
-async function applyDesktopTailscaleServeEnabled(
-  nextSettings: DesktopSettings,
-): Promise<DesktopServerExposureState> {
-  desktopSettings = nextSettings;
-  writeDesktopSettings(DESKTOP_SETTINGS_PATH, desktopSettings);
-  relaunchDesktopApp(
-    desktopSettings.tailscaleServeEnabled ? "tailscale-serve-enabled" : "tailscale-serve-disabled",
-  );
-  return getDesktopServerExposureState();
+/**
+ * Refuse to save network access for a later launch when it cannot be served
+ * right now, exactly as an immediate change would be refused.
+ */
+function assertDesktopServerExposureServable(mode: DesktopServerExposureMode): void {
+  if (mode !== "network-accessible") return;
+  const advertisedHostOverride = resolveAdvertisedHostOverride();
+  const exposure = resolveDesktopServerExposure({
+    mode,
+    port: backendPort,
+    networkInterfaces: OS.networkInterfaces(),
+    ...(advertisedHostOverride ? { advertisedHostOverride } : {}),
+  });
+  if (exposure.endpointUrl === null) {
+    throw new Error("No reachable network address is available for this desktop right now.");
+  }
 }
+
+/** `{ deferRelaunch }` from a renderer: save the change, the caller relaunches later. */
+function readDeferRelaunch(raw: unknown, invalid: string): boolean {
+  if (raw === undefined || raw === null) return false;
+  if (typeof raw !== "object") throw new Error(invalid);
+  const value = (raw as { readonly deferRelaunch?: unknown }).deferRelaunch;
+  if (value !== undefined && typeof value !== "boolean") throw new Error(invalid);
+  return value === true;
+}
+
+/** Whether the persisted Hub settings differ from what the running backend serves. */
+function desktopHubRestartRequired(settings: DesktopSettings = desktopSettings): boolean {
+  return (
+    backendHubLaunch !== null &&
+    desktopHubLaunchNeedsRestart(
+      resolveDesktopHubConnectorLaunch(settings),
+      backendHubLaunch,
+      backendHubConnectorEnabled,
+    )
+  );
+}
+
+/**
+ * Ask the running backend whether the Hub can reach it: enrolled, and
+ * connected or reconnecting. A saved enable, an enrollment nobody approved, or
+ * a connector waiting on a restart is not reachable. The same answer says
+ * whether the backend runs its connector at all.
+ */
+function refreshDesktopHubReachability(): Promise<void> {
+  if (desktopHubReachabilityProbe !== null) return desktopHubReachabilityProbe;
+  const probe = (async () => {
+    const child = backendControlToken;
+    const response =
+      backendHubLaunch?.enabled === true
+        ? await desktopHubControl.hubReachability().catch(() => null)
+        : null;
+    // An answer from a backend that has since been replaced says nothing.
+    if (child !== backendControlToken) return;
+    // Fixed for a backend's lifetime: a failed probe keeps what it said before.
+    if (response !== null) backendHubConnectorEnabled = response.connectorEnabled;
+    const reachable = response?.reachable ?? false;
+    if (reachable === backendHubReachable) return;
+    backendHubReachable = reachable;
+    desktopKeepAwake?.sync();
+  })().finally(() => {
+    desktopHubReachabilityProbe = null;
+  });
+  desktopHubReachabilityProbe = probe;
+  return probe;
+}
+
+function readDesktopKeepAwakeInputs() {
+  return {
+    enabled: desktopSettings.keepAwakeWhileReachable,
+    // What the running backend serves, never a change saved for a relaunch.
+    reachable: isDesktopNodeReachable({
+      hubReachable: backendHubReachable,
+      effectiveServerExposureMode: desktopServerExposureMode,
+      tailscaleServeEnabled: runningTailscaleServe().enabled,
+    }),
+  };
+}
+
+function startDesktopKeepAwake(): void {
+  if (desktopKeepAwake !== null) return;
+  // The connector's reachability changes with enrollment and the network.
+  setInterval(() => void refreshDesktopHubReachability(), DESKTOP_KEEP_AWAKE_RECHECK_MS).unref();
+  desktopKeepAwake = new DesktopKeepAwakeController({
+    blocker: powerSaveBlocker,
+    power: powerMonitor,
+    read: readDesktopKeepAwakeInputs,
+    onChange: (active) => {
+      writeDesktopLogHeader(`keep-awake ${active ? "acquired" : "released"}`);
+    },
+  });
+  desktopKeepAwake.start();
+}
+
+function desktopKeepAwakeState() {
+  return (
+    desktopKeepAwake?.state() ?? {
+      ...readDesktopKeepAwakeInputs(),
+      onBattery: false,
+      active: false,
+    }
+  );
+}
+
+let desktopRelaunchRequested = false;
 
 function relaunchDesktopApp(reason: string): void {
   writeDesktopLogHeader(`desktop relaunch requested reason=${reason}`);
+  // A change applied now can follow the renderer's restart for changes saved
+  // earlier. Every change persists before it asks to relaunch, so the first
+  // request already restarts with all of them; a second must not start
+  // another shutdown or spawn a second app instance.
+  if (desktopRelaunchRequested) return;
+  desktopRelaunchRequested = true;
   setImmediate(() => {
     isQuitting = true;
     clearUpdatePollTimer();
@@ -1226,6 +1400,7 @@ function ensureDevelopmentInitialWindowOpen(): void {
       markDesktopStartupPhase("desktop.backend.listening", `source=${source}`);
       writeDesktopLogHeader(`bootstrap development resources ready backendSource=${source}`);
       resumeDesktopHostedIdentityForBackend();
+      void refreshDesktopHubReachability();
     })
     .catch((error) => {
       if (isBackendReadinessAborted(error)) {
@@ -1296,6 +1471,7 @@ function ensureInitialBackendWindowOpen(): void {
       markDesktopStartupPhase("desktop.backend.listening", `source=${source}`);
       writeDesktopLogHeader(`bootstrap backend ready source=${source}`);
       resumeDesktopHostedIdentityForBackend();
+      void refreshDesktopHubReachability();
       const window = ensurePackagedBootstrapWindowOpen("backend-ready");
       if (window) {
         loadPackagedBackendAppWindow(window, "backend-ready");
@@ -2476,6 +2652,11 @@ function startBackend(): void {
   markDesktopStartupPhase("desktop.backend.spawn", `port=${backendPort}`);
   const childControlToken = Crypto.randomBytes(32).toString("base64url");
   backendControlToken = childControlToken;
+  const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings);
+  backendHubLaunch = hubLaunch;
+  backendHubConnectorEnabled = null;
+  const tailscaleServe = resolveDesktopTailscaleServeLaunch(desktopSettings);
+  backendTailscaleServe = tailscaleServe;
   const backendExecutable = isDevelopment ? resolveDevelopmentBunExecutable() : process.execPath;
   const childEnvironment = backendChildEnv();
   if (isDevelopment) {
@@ -2512,14 +2693,13 @@ function startBackend(): void {
         desktopTelemetryFd: 4,
         desktopControlToken: childControlToken,
         ...(computerUseRuntime ? { computerUseBridge: computerUseRuntime.backendBinding() } : {}),
-        tailscaleServeEnabled: desktopSettings.tailscaleServeEnabled,
-        tailscaleServePort: desktopSettings.tailscaleServePort,
-        hubConnectorEnabled: desktopSettings.hubConnectorEnabled,
-        ...(desktopSettings.hubOrigin === null ? {} : { hubOrigin: desktopSettings.hubOrigin }),
-        ...(desktopSettings.hubNodeName === null
-          ? {}
-          : { hubNodeName: desktopSettings.hubNodeName }),
-        hubAllowFileSecretStore: desktopSettings.hubAllowFileSecretStore,
+        tailscaleServeEnabled: tailscaleServe.enabled,
+        tailscaleServePort: tailscaleServe.port,
+        hubConnectorEnabled: hubLaunch.enabled,
+        ...(hubLaunch.standby ? { hubConnectorStandby: true } : {}),
+        ...(hubLaunch.origin === null ? {} : { hubOrigin: hubLaunch.origin }),
+        ...(hubLaunch.nodeName === null ? {} : { hubNodeName: hubLaunch.nodeName }),
+        hubAllowFileSecretStore: hubLaunch.allowFileSecretStore,
         ...(backendObservabilitySettings.otlpTracesUrl
           ? { otlpTracesUrl: backendObservabilitySettings.otlpTracesUrl }
           : {}),
@@ -2823,32 +3003,76 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GET_SERVER_EXPOSURE_STATE_CHANNEL, async () => getDesktopServerExposureState());
 
   ipcMain.removeHandler(SET_SERVER_EXPOSURE_MODE_CHANNEL);
-  ipcMain.handle(SET_SERVER_EXPOSURE_MODE_CHANNEL, async (_event, rawMode: unknown) => {
-    if (rawMode !== "local-only" && rawMode !== "network-accessible") {
-      throw new Error("Invalid desktop server exposure input.");
-    }
+  ipcMain.handle(
+    SET_SERVER_EXPOSURE_MODE_CHANNEL,
+    async (_event, rawMode: unknown, rawOptions: unknown) => {
+      if (rawMode !== "local-only" && rawMode !== "network-accessible") {
+        throw new Error("Invalid desktop server exposure input.");
+      }
+      const deferRelaunch = readDeferRelaunch(rawOptions, "Invalid desktop server exposure input.");
 
-    const nextMode = rawMode as DesktopServerExposureMode;
-    if (nextMode === desktopServerExposureMode) {
+      const nextMode = rawMode as DesktopServerExposureMode;
+      // Measured against the running mode, not only the saved one: a deferred
+      // change leaves the two apart until the relaunch.
+      const plan = planDesktopServerExposureChange({
+        settings: desktopSettings,
+        running: desktopServerExposureMode,
+        requested: nextMode,
+        deferRelaunch,
+      });
+      if (plan.relaunch) {
+        const nextState = await applyDesktopServerExposureMode(nextMode, {
+          persist: true,
+          rejectIfUnavailable: true,
+        });
+        relaunchDesktopApp(`serverExposureMode=${nextMode}`);
+        return nextState;
+      }
+      if (plan.settings !== desktopSettings) {
+        // Saved now so quitting or crashing before the relaunch cannot drop
+        // it; the running backend keeps its listener until then. Asking for
+        // the running mode withdraws a saved change and is always allowed.
+        if (nextMode !== desktopServerExposureMode) assertDesktopServerExposureServable(nextMode);
+        writeDesktopSettings(DESKTOP_SETTINGS_PATH, plan.settings);
+        desktopSettings = plan.settings;
+      }
       return getDesktopServerExposureState();
-    }
+    },
+  );
 
-    const nextState = await applyDesktopServerExposureMode(nextMode, {
-      persist: true,
-      rejectIfUnavailable: true,
-    });
-    relaunchDesktopApp(`serverExposureMode=${nextMode}`);
-    return nextState;
+  ipcMain.removeHandler(GET_KEEP_AWAKE_STATE_CHANNEL);
+  ipcMain.handle(GET_KEEP_AWAKE_STATE_CHANNEL, () => desktopKeepAwakeState());
+
+  ipcMain.removeHandler(SET_KEEP_AWAKE_ENABLED_CHANNEL);
+  ipcMain.handle(SET_KEEP_AWAKE_ENABLED_CHANNEL, (_event, rawEnabled: unknown) => {
+    if (typeof rawEnabled !== "boolean") {
+      throw new Error("Invalid keep-awake input.");
+    }
+    const nextSettings = setDesktopKeepAwakePreference(desktopSettings, rawEnabled);
+    if (nextSettings !== desktopSettings) {
+      writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+      desktopSettings = nextSettings;
+    }
+    // Live: holding or releasing the assertion needs no backend restart.
+    return desktopKeepAwake?.sync() ?? desktopKeepAwakeState();
   });
 
   ipcMain.removeHandler(GET_HUB_LAUNCH_CONFIG_CHANNEL);
-  ipcMain.handle(GET_HUB_LAUNCH_CONFIG_CHANNEL, () => ({
-    enabled: desktopSettings.hubConnectorEnabled,
-    origin: desktopSettings.hubOrigin,
-    nodeName: desktopSettings.hubNodeName,
-    allowFileSecretStore: desktopSettings.hubAllowFileSecretStore,
-    fileSecretStoreFallbackSupported: isDesktopHubFileSecretStoreSupported(process.platform),
-  }));
+  ipcMain.handle(GET_HUB_LAUNCH_CONFIG_CHANNEL, async () => {
+    // Whether a standby backend runs its connector decides `restartRequired`.
+    if (backendHubLaunch?.standby === true && backendHubConnectorEnabled === null) {
+      await refreshDesktopHubReachability();
+    }
+    return {
+      enabled: desktopSettings.hubConnectorEnabled,
+      origin: desktopSettings.hubOrigin,
+      nodeName: desktopSettings.hubNodeName,
+      allowFileSecretStore: desktopSettings.hubAllowFileSecretStore,
+      fileSecretStoreFallbackSupported: isDesktopHubFileSecretStoreSupported(process.platform),
+      hostedIdentitySupported: isDesktopHostedIdentitySupported(process.platform),
+      restartRequired: desktopHubRestartRequired(),
+    };
+  });
 
   const hostedIdentityView = (): DesktopHostedIdentityState =>
     desktopHostedIdentityStatus.status === "ready" && desktopHostedIdentityStatus.github
@@ -2891,13 +3115,13 @@ function registerIpcHandlers(): void {
     } catch {
       await runDesktopHostedIdentity(true);
     }
-    // Interactive account connection is the Desktop onboarding action: once
-    // browser sign-in produced a retained session, make the colocated node
-    // connector part of the same transaction. Older settings could retain
-    // trust while this launch preference was still false. Account readiness
-    // requires a durable session but no longer depends on the local connector.
-    // Startup resumes the node claim after relaunch. A cancelled sign-in or
-    // failed credential write never enables or restarts anything.
+    // Setup recorded the enable before its node claim; this covers a sign-in
+    // whose setup did not reach the claim. A standby backend already runs the
+    // connector, so the claim committed in place and nothing restarts. Only a
+    // connector the operator had turned off needs a relaunch, which the
+    // renderer asks about (running turns would stop) via `restartRequired`. A
+    // cancelled sign-in or failed credential write never enables or restarts
+    // anything.
     if (
       shouldEnableDesktopHubConnectorForAccountSetup({
         hubOrigin: desktopSettings.hubOrigin,
@@ -2907,13 +3131,12 @@ function registerIpcHandlers(): void {
           desktopHostedIdentityStatus.status === "ready",
       })
     ) {
-      const nextSettings = setDesktopHubPreference(desktopSettings, {
-        enabled: true,
-      });
-      writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-      desktopSettings = nextSettings;
-      relaunchDesktopApp("hub-account-setup-enabling-connector");
+      enableDesktopHubConnectorForAccountSetup();
     }
+    // A claim committed in place wakes the connector; keep-awake follows it.
+    // Awaited: whether the backend runs its connector at all decides whether
+    // the enable recorded above needs a relaunch, which the renderer asks next.
+    await refreshDesktopHubReachability();
     return hostedIdentityView();
   });
   ipcMain.removeHandler(DISCONNECT_HOSTED_IDENTITY_CHANNEL);
@@ -3080,77 +3303,126 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.removeHandler(SET_HUB_LAUNCH_CONFIG_CHANNEL);
-  ipcMain.handle(SET_HUB_LAUNCH_CONFIG_CHANNEL, async (_event, rawInput: unknown) => {
-    if (typeof rawInput !== "object" || rawInput === null) {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-    const input = rawInput as {
-      readonly enabled?: unknown;
-      readonly origin?: unknown;
-      readonly nodeName?: unknown;
-      readonly allowFileSecretStore?: unknown;
-    };
-    if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-    if (
-      input.allowFileSecretStore !== undefined &&
-      typeof input.allowFileSecretStore !== "boolean"
-    ) {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-    if (
-      input.allowFileSecretStore === true &&
-      !isDesktopHubFileSecretStoreSupported(process.platform)
-    ) {
-      throw new Error("Permissioned-file Hub key storage is unavailable on this platform.");
-    }
-
-    let origin: string | null | undefined;
-    if (input.origin === null) {
-      origin = null;
-    } else if (typeof input.origin === "string") {
-      // Validate in main, not in the renderer: the renderer cannot import
-      // `@ryco/shared/nodeIdentity` because it pulls in `node:crypto`, and a
-      // value that reaches the connector unvalidated fails closed at startup
-      // with an opaque `configuration_invalid`.
-      const validation = validateHubOrigin(input.origin);
-      if (!validation.ok) throw new Error("Invalid Hub address.");
-      origin = validation.origin;
-    } else if (input.origin !== undefined) {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-
-    let nodeName: string | null | undefined;
-    if (input.nodeName === null) {
-      nodeName = null;
-    } else if (typeof input.nodeName === "string") {
-      try {
-        nodeName = normalizeHubNodeName(input.nodeName);
-      } catch {
-        throw new Error("Invalid Hub node name.");
+  ipcMain.handle(
+    SET_HUB_LAUNCH_CONFIG_CHANNEL,
+    async (_event, rawInput: unknown): Promise<DesktopHubLaunchConfigResult> => {
+      if (typeof rawInput !== "object" || rawInput === null) {
+        throw new Error("Invalid Hub launch configuration input.");
       }
-    } else if (input.nodeName !== undefined) {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
+      const input = rawInput as {
+        readonly enabled?: unknown;
+        readonly origin?: unknown;
+        readonly nodeName?: unknown;
+        readonly allowFileSecretStore?: unknown;
+        readonly applyOnNextLaunch?: unknown;
+        readonly deferRelaunch?: unknown;
+      };
+      if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+      const deferRelaunch = readDeferRelaunch(input, "Invalid Hub launch configuration input.");
+      if (input.applyOnNextLaunch !== undefined && typeof input.applyOnNextLaunch !== "boolean") {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+      if (input.applyOnNextLaunch === true) {
+        // Only an explicit enable of a connector the running backend already
+        // runs in standby may skip the relaunch. Anything else changes what the
+        // running backend serves, so it must still restart.
+        if (
+          input.enabled !== true ||
+          input.origin !== undefined ||
+          input.nodeName !== undefined ||
+          input.allowFileSecretStore !== undefined ||
+          deferRelaunch
+        ) {
+          throw new Error("Invalid Hub launch configuration input.");
+        }
+        // Already explicit: nothing is left to record.
+        if (desktopSettings.hubOrigin !== null && desktopSettings.hubConnectorEnabled) {
+          return { relaunching: false };
+        }
+        if (backendHubLaunch?.standby !== true) {
+          throw new Error("Invalid Hub launch configuration input.");
+        }
+        const nextSettings = setDesktopHubPreference(desktopSettings, { enabled: true });
+        if (nextSettings !== desktopSettings) {
+          writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+          desktopSettings = nextSettings;
+          desktopKeepAwake?.sync();
+        }
+        return { relaunching: false };
+      }
+      if (
+        input.allowFileSecretStore !== undefined &&
+        typeof input.allowFileSecretStore !== "boolean"
+      ) {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+      if (
+        input.allowFileSecretStore === true &&
+        !isDesktopHubFileSecretStoreSupported(process.platform)
+      ) {
+        throw new Error("Permissioned-file Hub key storage is unavailable on this platform.");
+      }
 
-    const nextSettings = setDesktopHubPreference(desktopSettings, {
-      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
-      ...(origin === undefined ? {} : { origin }),
-      ...(nodeName === undefined ? {} : { nodeName }),
-      ...(input.allowFileSecretStore === undefined
-        ? {}
-        : { allowFileSecretStore: input.allowFileSecretStore }),
-    });
-    if (nextSettings === desktopSettings) return;
+      let origin: string | null | undefined;
+      if (input.origin === null) {
+        origin = null;
+      } else if (typeof input.origin === "string") {
+        // Validate in main, not in the renderer: the renderer cannot import
+        // `@ryco/shared/nodeIdentity` because it pulls in `node:crypto`, and a
+        // value that reaches the connector unvalidated fails closed at startup
+        // with an opaque `configuration_invalid`.
+        const validation = validateHubOrigin(input.origin);
+        if (!validation.ok) throw new Error("Invalid Hub address.");
+        origin = validation.origin;
+      } else if (input.origin !== undefined) {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
 
-    // Persist before publishing the new in-memory value. If the atomic write
-    // fails, an identical retry must still attempt the write and relaunch.
-    writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-    desktopSettings = nextSettings;
-    // Never log the origin or node name: together they identify this machine.
-    relaunchDesktopApp("hub-launch-config-changed");
-  });
+      let nodeName: string | null | undefined;
+      if (input.nodeName === null) {
+        nodeName = null;
+      } else if (typeof input.nodeName === "string") {
+        try {
+          nodeName = normalizeHubNodeName(input.nodeName);
+        } catch {
+          throw new Error("Invalid Hub node name.");
+        }
+      } else if (input.nodeName !== undefined) {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+
+      const nextSettings = setDesktopHubPreference(desktopSettings, {
+        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+        ...(origin === undefined ? {} : { origin }),
+        ...(nodeName === undefined ? {} : { nodeName }),
+        ...(input.allowFileSecretStore === undefined
+          ? {}
+          : { allowFileSecretStore: input.allowFileSecretStore }),
+      });
+      // An explicit enable of a standby backend still restarts: the renderer
+      // only offers Enable when the connector reports itself off, which for a
+      // standby launch means an existing identity kept it disabled.
+      const restart =
+        desktopHubRestartRequired(nextSettings) ||
+        (input.enabled === true && backendHubLaunch?.standby === true);
+      if (nextSettings === desktopSettings && !restart) return { relaunching: false };
+
+      // Persist before publishing the new in-memory value. If the atomic write
+      // fails, an identical retry must still attempt the write and relaunch.
+      if (nextSettings !== desktopSettings) {
+        writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+        desktopSettings = nextSettings;
+      }
+      // Never log the origin or node name: together they identify this machine.
+      // A deferred change is saved now and applies with the relaunch the
+      // renderer schedules once running turns finish, or on the next launch.
+      const relaunching = restart && !deferRelaunch;
+      if (relaunching) relaunchDesktopApp("hub-launch-config-changed");
+      return { relaunching };
+    },
+  );
 
   ipcMain.removeHandler(RESTART_APP_CHANNEL);
   ipcMain.handle(RESTART_APP_CHANNEL, () => {
@@ -3165,18 +3437,36 @@ function registerIpcHandlers(): void {
     const input = rawInput as {
       readonly enabled?: unknown;
       readonly port?: unknown;
+      readonly deferRelaunch?: unknown;
     };
     if (typeof input.enabled !== "boolean") {
       throw new Error("Invalid Tailscale Serve input.");
     }
-    const nextSettings = setDesktopTailscaleServePreference(desktopSettings, {
-      enabled: input.enabled,
-      ...(typeof input.port === "number" ? { port: input.port } : {}),
+    const deferRelaunch = readDeferRelaunch(input, "Invalid Tailscale Serve input.");
+    // Measured against what the running backend serves, not only what is
+    // saved: a deferred change leaves the two apart until the relaunch.
+    const plan = planDesktopTailscaleServeChange({
+      settings: desktopSettings,
+      running: runningTailscaleServe(),
+      requested: {
+        enabled: input.enabled,
+        ...(typeof input.port === "number" ? { port: input.port } : {}),
+      },
+      deferRelaunch,
     });
-    if (nextSettings === desktopSettings) {
-      return getDesktopServerExposureState();
+    if (plan.settings !== desktopSettings) {
+      // Saved first; a deferred change keeps the running backend as it is.
+      writeDesktopSettings(DESKTOP_SETTINGS_PATH, plan.settings);
+      desktopSettings = plan.settings;
     }
-    return applyDesktopTailscaleServeEnabled(nextSettings);
+    if (plan.relaunch) {
+      relaunchDesktopApp(
+        desktopSettings.tailscaleServeEnabled
+          ? "tailscale-serve-enabled"
+          : "tailscale-serve-disabled",
+      );
+    }
+    return getDesktopServerExposureState();
   });
 
   ipcMain.removeHandler(GET_ADVERTISED_ENDPOINTS_CHANNEL);
@@ -3685,16 +3975,16 @@ configureAppIdentity();
 /**
  * Refuse to run a second copy of this app against the same state directory.
  *
- * Two backends sharing one `RYCO_HOME` contend over a single node identity, and
- * the loser can land in `connection_replaced` — an operator-action failure with
- * no retry timer, so it never clears on its own.
- *
  * This is a UX guard, not the correctness fix. It coordinates only instances of
- * this Electron application: a headless `ryco serve` or any other process
- * sharing the state directory is unaffected, and the identity writer lock
- * remains the actual arbiter. Desktop Dev also owns this lock so a macOS
- * `ryco-dev://` callback is delivered to the running broker instead of turning
- * the raw callback Electron process into a second hidden primary instance.
+ * this Electron application: a headless `ryco serve` sharing the state
+ * directory is unaffected. Two backends sharing one `RYCO_HOME` would contend
+ * over a single node identity, and the Hub displaces one with a bare close
+ * rather than an error, so the server arbitrates locally instead: whichever
+ * backend's Hub connector starts first holds the identity's process lock, and
+ * the other reports `connection_replaced` and takes over on its own once the
+ * first exits. Desktop Dev also owns this lock so a macOS `ryco-dev://`
+ * callback is delivered to the running broker instead of turning the raw
+ * callback Electron process into a second hidden primary instance.
  */
 if (!isDesktopAuthorizationCallbackRelay && !app.requestSingleInstanceLock()) {
   writeDesktopLogHeader("second instance refused; focusing the existing window");
@@ -3779,6 +4069,7 @@ async function bootstrap(): Promise<void> {
 
   registerIpcHandlers();
   forwardSystemResumeToRenderers();
+  startDesktopKeepAwake();
   try {
     computerUseRuntime = new DesktopComputerUseRuntime({
       stateDir: STATE_DIR,
@@ -3831,6 +4122,7 @@ app.on(
       isQuitting = true;
       shellEnvironmentAbortController.abort();
       computerUseRuntime?.dispose();
+      desktopKeepAwake?.dispose();
       updateInstallInFlight = false;
       writeDesktopLogHeader("before-quit received");
       clearUpdatePollTimer();

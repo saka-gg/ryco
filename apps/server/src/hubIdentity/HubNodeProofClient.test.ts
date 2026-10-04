@@ -232,6 +232,77 @@ describe("Hub node proof client", () => {
     expect(challengeRequests).toBe(1);
   });
 
+  it("refetches a challenge only when its signature could outlive it, and only once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-node-proof-stale-"));
+    const stateStore = await makeLocalHubIdentityStateStore(join(root, "identity.json"));
+    const realSigningIdentity = makeNodeSigningIdentity(memoryStore());
+    await realSigningIdentity.generate("node-key.active");
+    await stateStore.readOrCreate();
+    await stateStore.update((state) => ({
+      ...state,
+      revision: state.revision + 1,
+      activeNode: {
+        hubOrigin,
+        nodeId,
+        activeKeyId: keyId,
+        activeKeySecretName: "node-key.active",
+        cleanupPollingSecretName: null,
+        enrolledAt: now,
+      },
+    }));
+    let clock = now;
+    let challengeRequests = 0;
+    // Each signature takes as long as the next entry says — a keychain prompt
+    // the owner answers slowly, then a fast one.
+    let signingDelays: number[] = [];
+    const client = makeHubNodeProofClient({
+      transport: {
+        request: async () => {
+          challengeRequests += 1;
+          return {
+            protocolMajor: 1,
+            protocolMinor: 1,
+            challenge: new Uint8Array(32).fill(challengeRequests),
+            challengeExpiresAt: clock + 30_000,
+          };
+        },
+      },
+      stateStore,
+      signingIdentity: {
+        ...realSigningIdentity,
+        sign: async (...input: Parameters<typeof realSigningIdentity.sign>) => {
+          clock += signingDelays.shift() ?? 0;
+          return realSigningIdentity.sign(...input);
+        },
+      },
+      keySelector: { authenticationKey: async () => ({ keyId, secretName: "node-key.active" }) },
+      now: () => clock,
+    });
+
+    const prove = () =>
+      client.createRelayAuthenticationFrame(hubOrigin, { protocolMajor: 1, protocolMinor: 1 });
+
+    // An 18-second prompt still leaves the socket open and the send well inside
+    // the Hub's 30 seconds: the proof the owner just approved is the one sent.
+    signingDelays = [18_000];
+    expect((await prove()).nonce).toEqual(new Uint8Array(32).fill(1));
+    expect(challengeRequests).toBe(1);
+
+    // One that could reach the Hub after its challenge expired is replaced.
+    challengeRequests = 0;
+    signingDelays = [24_000, 100];
+    expect((await prove()).nonce).toEqual(new Uint8Array(32).fill(2));
+    expect(challengeRequests).toBe(2);
+
+    // A second slow signature is sent anyway rather than discarded for a third
+    // prompt: the Hub may still accept it, and a refusal of a proof this old is
+    // retried once as stale by the relay session.
+    challengeRequests = 0;
+    signingDelays = [24_000, 24_000];
+    expect((await prove()).nonce).toEqual(new Uint8Array(32).fill(2));
+    expect(challengeRequests).toBe(2);
+  });
+
   it("uses a credential-free HTTP preflight", async () => {
     let requestInit: RequestInit | undefined;
     const transport = makeHubNodeChallengeHttpTransport(async (_input, init) => {
@@ -307,14 +378,28 @@ describe("Hub node proof client", () => {
         failure: "network",
       },
       {
-        name: "identity rejection",
+        // The Hub's challenge route never answers 401 or 403, so either one
+        // is an intermediary — a WAF or CDN — and must not park the node.
+        name: "intermediary unauthorized",
         fetch: async () => Response.json({ error: "IDENTITY-CANARY" }, { status: 401 }),
-        failure: "authentication_failed",
+        failure: "network",
       },
       {
-        name: "forbidden",
+        name: "intermediary forbidden",
         fetch: async () => Response.json({ error: "FORBIDDEN-CANARY" }, { status: 403 }),
-        failure: "authentication_failed",
+        failure: "network",
+      },
+      {
+        name: "other intermediary client error",
+        fetch: async () => new Response("PROXY-CANARY", { status: 451 }),
+        failure: "network",
+      },
+      {
+        // The one status the challenge route itself returns for a refused
+        // request: a body this node and the Hub disagree on.
+        name: "request shape rejected",
+        fetch: async () => Response.json({ error: "SHAPE-CANARY" }, { status: 400 }),
+        failure: "protocol_invalid",
       },
       {
         // A proxy that has not picked up the Hub's routes yet mid-deploy.

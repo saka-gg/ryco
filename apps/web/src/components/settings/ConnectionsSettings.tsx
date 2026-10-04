@@ -62,6 +62,14 @@ import { Button } from "../ui/button";
 import { Group, GroupSeparator } from "../ui/group";
 import { AnimatedHeight } from "../AnimatedHeight";
 import { HubSection } from "./HubSection";
+import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
+import { savedChangeRelaunch, useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
+import {
+  savedBackendConnectionActionLabel,
+  savedBackendNeedsRepair,
+  savedBackendRepairHost,
+  savedPairingLifetimeNote,
+} from "./ConnectionsSettings.logic";
 import {
   Menu,
   MenuGroup,
@@ -176,6 +184,10 @@ function getSavedBackendStatusTooltip(
   nowMs: number,
 ) {
   const connectionState = runtime?.connectionState ?? "disconnected";
+
+  if (savedBackendNeedsRepair(runtime, record)) {
+    return runtime?.lastError ?? "This environment no longer accepts its saved pairing.";
+  }
 
   if (connectionState === "connected") {
     const connectedAt = runtime?.connectedAt ?? record.lastConnectedAt;
@@ -1246,6 +1258,39 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
   );
 });
 
+/**
+ * A network or Tailscale change saved for the next launch.
+ *
+ * The row's switch shows what the running backend serves, so without this a
+ * deferred change would be invisible once its waiting notice was dismissed,
+ * and could not be withdrawn before some later restart applied it.
+ */
+function SavedForRelaunchNotice({
+  message,
+  busy,
+  onRestart,
+  onUndo,
+}: {
+  message: string;
+  busy: boolean;
+  onRestart: (() => void) | null;
+  onUndo: () => void;
+}) {
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="text-warning">{message}</span>
+      {onRestart ? (
+        <Button size="xs" variant="outline" disabled={busy} onClick={onRestart}>
+          Restart
+        </Button>
+      ) : null}
+      <Button size="xs" variant="ghost" disabled={busy} onClick={onUndo}>
+        Undo
+      </Button>
+    </span>
+  );
+}
+
 function NetworkAccessDescription({
   endpoint,
   hiddenEndpointCount,
@@ -1311,6 +1356,7 @@ type SavedBackendListRowProps = {
   removingEnvironmentId: EnvironmentId | null;
   onConnect: (environmentId: EnvironmentId) => void;
   onDisconnect: (environmentId: EnvironmentId) => void;
+  onRepair: (environmentId: EnvironmentId) => void;
   onRemove: (environmentId: EnvironmentId) => void;
 };
 
@@ -1321,6 +1367,7 @@ function SavedBackendListRow({
   removingEnvironmentId,
   onConnect,
   onDisconnect,
+  onRepair,
   onRemove,
 }: SavedBackendListRowProps) {
   const nowMs = useRelativeTimeTick(1_000);
@@ -1336,12 +1383,13 @@ function SavedBackendListRow({
   const isConnecting =
     connectionState === "connecting" || reconnectingEnvironmentId === environmentId;
   const isDisconnecting = disconnectingEnvironmentId === environmentId;
+  const needsRepair = !isConnecting && savedBackendNeedsRepair(runtime, record);
   const stateDotClassName =
     connectionState === "connected"
       ? "bg-success"
       : connectionState === "connecting"
         ? "bg-warning"
-        : connectionState === "error"
+        : connectionState === "error" || needsRepair
           ? "bg-destructive"
           : "bg-muted-foreground/40";
   const roleLabel = runtime?.role ? (runtime.role === "owner" ? "Owner" : "Client") : null;
@@ -1385,6 +1433,11 @@ function SavedBackendListRow({
           ) : null}
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+          {needsRepair ? (
+            <Button size="xs" variant="outline" onClick={() => onRepair(environmentId)}>
+              Re-pair
+            </Button>
+          ) : null}
           <Button
             size="xs"
             variant="outline"
@@ -1393,13 +1446,12 @@ function SavedBackendListRow({
               void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
             }
           >
-            {isConnected
-              ? isDisconnecting
-                ? "Disconnecting…"
-                : "Disconnect"
-              : isConnecting
-                ? "Connecting…"
-                : "Connect"}
+            {savedBackendConnectionActionLabel({
+              isConnected,
+              isConnecting,
+              isDisconnecting,
+              needsRepair,
+            })}
           </Button>
           <Button
             size="xs"
@@ -1565,6 +1617,7 @@ export function ConnectionsSettings() {
   >(null);
   const primaryServerConfig = useServerConfig();
   const primaryVersionMismatch = resolveServerConfigVersionMismatch(primaryServerConfig);
+  const { guardRelaunch, dialog: relaunchGuardDialog } = useDesktopRelaunchGuard();
   const [isAdvertisedEndpointListExpanded, setIsAdvertisedEndpointListExpanded] = useState(false);
   const defaultAdvertisedEndpointKey = useUiStateStore(
     (state) => state.defaultAdvertisedEndpointKey,
@@ -1605,10 +1658,16 @@ export function ConnectionsSettings() {
       setIsUpdatingDesktopServerExposure(true);
       setDesktopServerExposureError(null);
       try {
-        const nextState = await desktopBridge.setServerExposureMode(
-          checked ? "network-accessible" : "local-only",
+        const mode = checked ? "network-accessible" : "local-only";
+        await guardRelaunch(
+          async (timing) => {
+            const nextState = await (timing === "deferred"
+              ? desktopBridge.setServerExposureMode(mode, { deferRelaunch: true })
+              : desktopBridge.setServerExposureMode(mode));
+            setDesktopServerExposureState(nextState);
+          },
+          { beforePrompt: () => setIsDesktopServerExposureDialogOpen(false) },
         );
-        setDesktopServerExposureState(nextState);
         setIsDesktopServerExposureDialogOpen(false);
         setIsUpdatingDesktopServerExposure(false);
       } catch (error) {
@@ -1626,7 +1685,7 @@ export function ConnectionsSettings() {
         setIsUpdatingDesktopServerExposure(false);
       }
     },
-    [desktopBridge],
+    [desktopBridge, guardRelaunch],
   );
 
   const handleConfirmDesktopServerExposureChange = useCallback(() => {
@@ -1641,11 +1700,17 @@ export function ConnectionsSettings() {
     setIsUpdatingTailscaleServe(true);
     setDesktopServerExposureError(null);
     try {
-      const nextState = await desktopBridge.setTailscaleServeEnabled({
-        enabled: true,
-        port: parsedTailscaleServePort,
-      });
-      setDesktopServerExposureState(nextState);
+      await guardRelaunch(
+        async (timing) => {
+          const nextState = await desktopBridge.setTailscaleServeEnabled({
+            enabled: true,
+            port: parsedTailscaleServePort,
+            ...(timing === "deferred" ? { deferRelaunch: true } : {}),
+          });
+          setDesktopServerExposureState(nextState);
+        },
+        { beforePrompt: () => setPendingTailscaleServeEndpoint(null) },
+      );
       setPendingTailscaleServeEndpoint(null);
     } catch (error) {
       const message =
@@ -1661,7 +1726,7 @@ export function ConnectionsSettings() {
     } finally {
       setIsUpdatingTailscaleServe(false);
     }
-  }, [desktopBridge, isTailscaleServePortValid, parsedTailscaleServePort]);
+  }, [desktopBridge, guardRelaunch, isTailscaleServePortValid, parsedTailscaleServePort]);
 
   const handleStartTailscaleServeSetup = useCallback(
     (endpoint: AdvertisedEndpoint) => {
@@ -1678,11 +1743,17 @@ export function ConnectionsSettings() {
     setIsUpdatingTailscaleServe(true);
     setDesktopServerExposureError(null);
     try {
-      const nextState = await desktopBridge.setTailscaleServeEnabled({
-        enabled: false,
-        port: desktopServerExposureState?.tailscaleServePort ?? DEFAULT_TAILSCALE_SERVE_PORT,
-      });
-      setDesktopServerExposureState(nextState);
+      await guardRelaunch(
+        async (timing) => {
+          const nextState = await desktopBridge.setTailscaleServeEnabled({
+            enabled: false,
+            port: desktopServerExposureState?.tailscaleServePort ?? DEFAULT_TAILSCALE_SERVE_PORT,
+            ...(timing === "deferred" ? { deferRelaunch: true } : {}),
+          });
+          setDesktopServerExposureState(nextState);
+        },
+        { beforePrompt: () => setDisableTailscaleServeDialogOpen(false) },
+      );
       setDisableTailscaleServeDialogOpen(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to disable Tailscale HTTPS.";
@@ -1697,11 +1768,67 @@ export function ConnectionsSettings() {
     } finally {
       setIsUpdatingTailscaleServe(false);
     }
-  }, [desktopBridge, desktopServerExposureState?.tailscaleServePort]);
+  }, [desktopBridge, desktopServerExposureState?.tailscaleServePort, guardRelaunch]);
 
   const handleStartTailscaleServeDisable = useCallback((_endpoint: AdvertisedEndpoint) => {
     setDisableTailscaleServeDialogOpen(true);
   }, []);
+
+  // Applies every change saved for the next launch, Hub settings included.
+  const restartForSavedChanges = useMemo(() => {
+    const restartApp = desktopBridge?.restartApp;
+    if (!restartApp) return null;
+    return () => {
+      void guardRelaunch(savedChangeRelaunch(restartApp)).catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Ryco could not restart",
+            description: error instanceof Error ? error.message : "Restart Ryco to apply it.",
+          }),
+        );
+      });
+    };
+  }, [desktopBridge, guardRelaunch]);
+
+  // Asking for what the backend already serves withdraws the saved change;
+  // Desktop never relaunches for it.
+  const handleWithdrawSavedNetworkAccess = useCallback(async () => {
+    if (!desktopBridge || !desktopServerExposureState) return;
+    setIsUpdatingDesktopServerExposure(true);
+    setDesktopServerExposureError(null);
+    try {
+      setDesktopServerExposureState(
+        await desktopBridge.setServerExposureMode(desktopServerExposureState.mode),
+      );
+    } catch (error) {
+      setDesktopServerExposureError(
+        error instanceof Error ? error.message : "Failed to update network exposure.",
+      );
+    } finally {
+      setIsUpdatingDesktopServerExposure(false);
+    }
+  }, [desktopBridge, desktopServerExposureState]);
+
+  const handleWithdrawSavedTailscaleServe = useCallback(async () => {
+    if (!desktopBridge || !desktopServerExposureState) return;
+    setIsUpdatingTailscaleServe(true);
+    setDesktopServerExposureError(null);
+    try {
+      setDesktopServerExposureState(
+        await desktopBridge.setTailscaleServeEnabled({
+          enabled: desktopServerExposureState.tailscaleServeEnabled,
+          port: desktopServerExposureState.tailscaleServePort,
+        }),
+      );
+    } catch (error) {
+      setDesktopServerExposureError(
+        error instanceof Error ? error.message : "Failed to update Tailscale HTTPS.",
+      );
+    } finally {
+      setIsUpdatingTailscaleServe(false);
+    }
+  }, [desktopBridge, desktopServerExposureState]);
 
   const handleRevokeDesktopPairingLink = useCallback(async (id: string) => {
     setRevokingDesktopPairingLinkId(id);
@@ -1865,6 +1992,18 @@ export function ConnectionsSettings() {
     } finally {
       setReconnectingSavedEnvironmentId(null);
     }
+  }, []);
+
+  const handleRepairSavedBackend = useCallback((environmentId: EnvironmentId) => {
+    const record = useSavedEnvironmentRegistryStore.getState().byId[environmentId];
+    if (!record) return;
+    // Pairing the same node again replaces the rejected credential in place:
+    // the record, its label, and its threads stay.
+    setSavedBackendMode("remote");
+    setSavedBackendHost(savedBackendRepairHost(record));
+    setSavedBackendPairingCode("");
+    setSavedBackendError(null);
+    setAddBackendDialogOpen(true);
   }, []);
 
   const handleDisconnectSavedBackend = useCallback(async (environmentId: EnvironmentId) => {
@@ -2256,8 +2395,8 @@ export function ConnectionsSettings() {
       </div>
       <div>
         <span className="mt-1 block text-[11px] text-muted-foreground">
-          Paste a full pairing URL here to fill both fields automatically. The pairing code is not
-          kept; the browser stores a bearer token for 7 days.
+          Paste a full pairing URL here to fill both fields automatically.{" "}
+          {savedPairingLifetimeNote(desktopBridge ? "desktop" : "browser")}
         </span>
       </div>
     </div>
@@ -2401,6 +2540,7 @@ export function ConnectionsSettings() {
           );
         })
       : null;
+  const pendingTailscaleServe = desktopServerExposureState?.pendingTailscaleServe;
   const renderTailscaleRow = () => (
     <SettingsRow
       title="Tailscale HTTPS"
@@ -2410,6 +2550,22 @@ export function ConnectionsSettings() {
             ? tailscaleHttpsEndpoint.httpBaseUrl
             : "Use Tailscale Serve to expose this backend through a MagicDNS HTTPS URL."
           : "Start Tailscale to set up HTTPS access through MagicDNS."
+      }
+      status={
+        pendingTailscaleServe ? (
+          <SavedForRelaunchNotice
+            message={
+              !pendingTailscaleServe.enabled
+                ? "Saved to turn off when Ryco restarts."
+                : desktopServerExposureState?.tailscaleServeEnabled
+                  ? `Saved to serve on port ${pendingTailscaleServe.port} when Ryco restarts.`
+                  : "Saved to turn on when Ryco restarts."
+            }
+            busy={isUpdatingTailscaleServe}
+            onRestart={restartForSavedChanges}
+            onUndo={() => void handleWithdrawSavedTailscaleServe()}
+          />
+        ) : null
       }
       control={
         tailscaleHttpsEndpoint ? (
@@ -2476,8 +2632,24 @@ export function ConnectionsSettings() {
         )
       }
       status={
-        desktopServerExposureError ? (
-          <span className="block text-destructive">{desktopServerExposureError}</span>
+        desktopServerExposureState?.pendingMode || desktopServerExposureError ? (
+          <>
+            {desktopServerExposureState?.pendingMode ? (
+              <SavedForRelaunchNotice
+                message={
+                  desktopServerExposureState.pendingMode === "network-accessible"
+                    ? "Saved to turn on when Ryco restarts."
+                    : "Saved to turn off when Ryco restarts."
+                }
+                busy={isUpdatingDesktopServerExposure}
+                onRestart={restartForSavedChanges}
+                onUndo={() => void handleWithdrawSavedNetworkAccess()}
+              />
+            ) : null}
+            {desktopServerExposureError ? (
+              <span className="block text-destructive">{desktopServerExposureError}</span>
+            ) : null}
+          </>
         ) : null
       }
       control={renderNetworkAccessToggle()}
@@ -2536,6 +2708,7 @@ export function ConnectionsSettings() {
                 {renderNetworkAccessRow()}
                 {renderEndpointRows("endpoint-rail")}
                 {renderTailscaleRow()}
+                <DesktopKeepAwakeRow desktopBridge={desktopBridge} />
               </>
             ) : (
               renderDisabledNetworkAccessRow()
@@ -2723,6 +2896,8 @@ export function ConnectionsSettings() {
         </SettingsSection>
       )}
 
+      {relaunchGuardDialog}
+
       {desktopBridge ? <HubSection desktopBridge={desktopBridge} /> : null}
 
       <SettingsSection
@@ -2786,6 +2961,7 @@ export function ConnectionsSettings() {
             removingEnvironmentId={removingSavedEnvironmentId}
             onConnect={handleConnectSavedBackend}
             onDisconnect={handleDisconnectSavedBackend}
+            onRepair={handleRepairSavedBackend}
             onRemove={handleRemoveSavedBackend}
           />
         ))}

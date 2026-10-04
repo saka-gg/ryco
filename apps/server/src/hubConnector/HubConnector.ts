@@ -1,6 +1,7 @@
 import { networkInterfaces } from "node:os";
 
 import type {
+  HubConnectorFailureCode,
   HubConnectorStatus,
   HubEnrollmentCeremonyDetail,
   HubEnrollmentStartResult,
@@ -19,6 +20,7 @@ import { E2EE_MAX_CLOCK_SKEW } from "@ryco/shared/relayE2eeConstants";
 
 import type { HubConnectorConfig } from "../config.ts";
 import type { HubEnrollmentMetadata } from "../hubIdentity/HubEnrollmentClient.ts";
+import type { HubIdentityProcessLock } from "../hubIdentity/HubIdentityProcessLock.ts";
 import type { NodeE2eeAdvertisement } from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
 import type { E2eeAccountGrantNodeVerificationInput } from "@ryco/shared/relayE2eeHandshake";
 import {
@@ -42,7 +44,12 @@ import {
   type RelayChannelSessionFactory,
 } from "./RelayChannelRegistry.ts";
 import { resolveHubEnrollmentLabel } from "./HubEnrollmentLabel.ts";
-import { reconnectDelay } from "./ReconnectPolicy.ts";
+import {
+  reconnectDelay,
+  type ReconnectPolicyConfig,
+  slowRetryDelay,
+  type SlowRetryPolicy,
+} from "./ReconnectPolicy.ts";
 import { RelaySendQueue } from "./RelaySendQueue.ts";
 import {
   makeNodeAccountGrantVerifier,
@@ -66,6 +73,25 @@ const LIVENESS_WATCH_WAKE_GAP_MS = 15_000;
 /** How long a node-initiated ping may wait for its pong before the socket is declared dead. */
 const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 const RELAY_HEARTBEAT_NONCE_BYTES = 8;
+/**
+ * Republishing a capability statement the node could not build: soon, because
+ * account-grant channels are refused until it is acknowledged, then less often.
+ */
+const E2EE_STATEMENT_UNAVAILABLE_RETRY: ReconnectPolicyConfig = {
+  baseDelayMs: 30_000,
+  maxDelayMs: 300_000,
+  jitterRatio: 0.2,
+};
+/** Republishing after a refresh threw — usually a send queue that drains in moments. */
+const E2EE_STATEMENT_FAILURE_RETRY: ReconnectPolicyConfig = {
+  baseDelayMs: 1_000,
+  maxDelayMs: 30_000,
+  jitterRatio: 0.2,
+};
+/** Consecutive republish failures after which the connection is rebuilt. */
+const E2EE_STATEMENT_REFRESH_FAILURE_LIMIT = 3;
+/** The rolling window a slow-retry policy's `maxPerHour` counts over. */
+const SLOW_RETRY_BUDGET_WINDOW_MS = 3_600_000;
 
 /** The machine's external addresses; a change means the network moved under the socket. */
 export function defaultNetworkFingerprint(): string {
@@ -93,6 +119,14 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
  * as `identity_unavailable` would have the panel offer a Retry that does
  * nothing.
  */
+/** Another local Ryco process holds this node identity's process lock. */
+export class HubIdentityInUseError extends Error {
+  constructor() {
+    super("Hub identity is in use by another Ryco process.");
+    this.name = "HubIdentityInUseError";
+  }
+}
+
 const identityFailure = (error: unknown): "identity_unavailable" | "identity_store_unavailable" =>
   error instanceof HubIdentityRuntimeError && error.code === "identity_store_unavailable"
     ? "identity_store_unavailable"
@@ -120,6 +154,14 @@ export class HubConnector {
   ) => void | Promise<void>;
   readonly #networkFingerprint: () => string;
   readonly #livenessWatchEnabled: boolean;
+  readonly #processLock: HubIdentityProcessLock | undefined;
+  /**
+   * Whether this process owns the identity: it holds the process lock, or no
+   * lock is configured. A lock that could not be used lets one use proceed
+   * without making this true (`#takeIdentity`).
+   */
+  #ownsIdentity: boolean;
+  readonly #beforeConnect: () => Promise<void>;
   #watchTimer: unknown;
   #watchLastTickAt: number | undefined;
   #watchLastNetwork: string | undefined;
@@ -128,6 +170,26 @@ export class HubConnector {
     | undefined;
   #attempt = 0;
   #protocolViolations = 0;
+  #staleProofRetries = 0;
+  /**
+   * Attempt counters for `slow_retry`, one per schedule rather than per reported
+   * failure: a duplicate caught by the local lock and one the Hub displaced are
+   * both reported as `connection_replaced`, and checking a lock file must not
+   * stretch the gap before displacing a remote copy. Reset by stability or an
+   * explicit resume.
+   */
+  readonly #slowAttempts = new Map<SlowRetryPolicy, number>();
+  /**
+   * When each capped slow retry was scheduled, for its rolling-hour budget.
+   * Deliberately not reset by stability: two duplicates that swap every few
+   * minutes each look stable in between.
+   */
+  readonly #slowRetryLog = new Map<SlowRetryPolicy, number[]>();
+  /**
+   * What `nudge` runs in place of the scheduled retry, or undefined when that
+   * retry must keep its own schedule.
+   */
+  #retryNudge: (() => void) | undefined;
   #started = false;
   #stopping = false;
   #connecting = false;
@@ -151,6 +213,18 @@ export class HubConnector {
   #heartbeatTimer: unknown;
   #drainTimer: unknown;
   #e2eeStatementTimer: unknown;
+  /**
+   * Backoff position for rebuilding a statement this generation could not
+   * build; reset by a publish. Apart from the failure count below, so neither
+   * schedule stretches the other.
+   */
+  #e2eeStatementUnavailableAttempts = 0;
+  /**
+   * Consecutive republishes that threw, this generation, which is also the
+   * failure schedule's backoff position; reset by any attempt that does not
+   * throw, including one that finds the statement cannot be built yet.
+   */
+  #e2eeStatementFailures = 0;
   #frameChain: Promise<void> = Promise.resolve();
   #e2eeRefreshChain: Promise<void> = Promise.resolve();
 
@@ -168,6 +242,22 @@ export class HubConnector {
     readonly networkFingerprint?: () => string;
     /** Watch for wake and network changes; see `nudge`. On unless a test opts out. */
     readonly livenessWatch?: boolean;
+    /** Keeps a second local process off this identity; see `HubIdentityProcessLock`. */
+    readonly processLock?: HubIdentityProcessLock;
+    /**
+     * The caller already acquired `processLock` before it built the identity
+     * runtime, as `HubConnectorLive` does so that a backend that loses the lock
+     * defers its startup work. Otherwise the connector claims the lock itself,
+     * when it first needs the identity.
+     */
+    readonly ownsIdentity?: boolean;
+    /**
+     * Awaited before every relay connection attempt opens its socket. The
+     * server hands the process to the Hub here, which closes external Agent
+     * Control integrations first. A failure ends the attempt like any other
+     * connection failure, so the socket never opens without it.
+     */
+    readonly beforeConnect?: () => Promise<void>;
   }) {
     this.#config = options.config;
     this.#identity = options.identity;
@@ -186,6 +276,9 @@ export class HubConnector {
     this.#onE2eeEnrollmentRevoked = options.onE2eeEnrollmentRevoked ?? (() => undefined);
     this.#networkFingerprint = options.networkFingerprint ?? defaultNetworkFingerprint;
     this.#livenessWatchEnabled = options.livenessWatch ?? true;
+    this.#processLock = options.processLock;
+    this.#ownsIdentity = options.processLock === undefined || options.ownsIdentity === true;
+    this.#beforeConnect = options.beforeConnect ?? (async () => undefined);
   }
 
   /**
@@ -194,7 +287,10 @@ export class HubConnector {
    * with a ping it expects answered within `LIVENESS_PROBE_TIMEOUT_MS`; one
    * backing off retries now, with a fresh backoff, rather than when a timer
    * grown during the outage fires. Every other state is left alone — in
-   * particular nothing here retries a failure that needs operator action.
+   * particular nothing here retries a failure that needs operator action, or
+   * brings forward a slow retry whose spacing is the point of it (a copy the
+   * Hub displaced, a refused proof). Waiting out another local copy's lock is
+   * not one of those: checking is a file read, so it is brought forward too.
    */
   nudge(): void {
     if (!this.#started || this.#stopping) return;
@@ -203,14 +299,16 @@ export class HubConnector {
       this.#probeLiveness(this.#state.generation);
       return;
     }
+    const retry = this.#retryNudge;
     if (
       status.state === "degraded" &&
       status.degradedMode === "backing_off" &&
-      this.#retryTimer !== undefined
+      this.#retryTimer !== undefined &&
+      retry !== undefined
     ) {
       this.#clearTimer("retry");
       this.#attempt = 0;
-      void this.#connect();
+      retry();
     }
   }
 
@@ -314,8 +412,33 @@ export class HubConnector {
     // the replacement statement is still being built.
     this.#e2eeState.clearStatement(generation);
     const refresh = this.#e2eeRefreshChain.then(() => this.#publishE2eeState(generation));
-    this.#e2eeRefreshChain = refresh.catch(() => undefined);
+    this.#e2eeRefreshChain = refresh.catch(() => this.#e2eeRefreshFailed(generation));
     return refresh;
+  }
+
+  /**
+   * A republish threw, whoever asked for it — an operator command or the
+   * refresh timer.
+   *
+   * The statement was withdrawn before the attempt, so nothing is advertised
+   * that should not be. What usually throws is a full send queue — the same
+   * condition a channel burst produces and drains in moments — so it is retried
+   * shortly rather than taken as a dead connection: rebuilding the connection
+   * would close every live channel to republish one control frame. Only
+   * failures that persist past the limit rebuild it.
+   */
+  #e2eeRefreshFailed(generation: number): void {
+    if (!this.#state.isCurrent(generation) || this.#stopping) return;
+    this.#e2eeStatementFailures += 1;
+    if (this.#e2eeStatementFailures >= E2EE_STATEMENT_REFRESH_FAILURE_LIMIT) {
+      void this.#handleFailure(generation, "internal_error");
+      return;
+    }
+    this.#scheduleE2eeStatementRetry(
+      generation,
+      E2EE_STATEMENT_FAILURE_RETRY,
+      this.#e2eeStatementFailures - 1,
+    );
   }
 
   async start(): Promise<void> {
@@ -323,23 +446,65 @@ export class HubConnector {
     this.#started = true;
     const generation = this.#state.generation;
     if (!this.#config.enabled) return;
-    if (this.#config.configurationIssue !== undefined || this.#config.origin === undefined) {
+    if (!this.#runsConnector()) {
+      this.#state.transition("degraded", {
+        degradedMode: "operator_action_required",
+        failure: "configuration_invalid",
+      });
+      // A connector that cannot connect does not keep another copy that can
+      // off the identity; an operation that needs it claims it for its length.
+      await this.#handBackIdentity();
+      return;
+    }
+    this.#startLivenessWatch();
+    await this.#establish(generation);
+  }
+
+  /**
+   * Retry now, on an operator's say-so.
+   *
+   * Clears any scheduled retry and the slow-retry budgets: an owner pressing
+   * Retry after stopping a duplicate process, or unlocking a keychain, has
+   * told the connector something its own schedule could not know. A
+   * connection that is already up, or on its way up, is left alone.
+   */
+  async resume(): Promise<void> {
+    if (!this.#started || this.#stopping || !this.#config.enabled) return;
+    if (this.#state.snapshot().state === "revoked") return;
+    if (this.#session !== undefined || this.#connecting) return;
+    this.#clearTimer("retry");
+    this.#slowAttempts.clear();
+    this.#slowRetryLog.clear();
+    // The free retry for a proof that outlived its challenge is part of the
+    // same budget: a Retry after a slow keychain prompt gets it back.
+    this.#staleProofRetries = 0;
+    if (!this.#runsConnector()) {
       this.#state.transition("degraded", {
         degradedMode: "operator_action_required",
         failure: "configuration_invalid",
       });
       return;
     }
-    this.#startLivenessWatch();
+    await this.#establish(this.#state.generation);
+  }
+
+  /**
+   * Read the identity this connector should authenticate as, and connect with
+   * it — or land in the state that identity calls for.
+   *
+   * Shared by `start()`, `resume()`, and every slow retry. A custody read that
+   * fails goes through the same classification as a failed connection, so a
+   * keychain that is locked at launch is retried on its own schedule instead of
+   * parking the node until someone runs `ryco hub resume`.
+   */
+  async #establish(generation: number): Promise<void> {
+    if (!(await this.#claimIdentity(generation))) return;
     let identity;
     try {
+      await this.#completeIdentityStartup();
       identity = await this.#identity.readState();
     } catch (error: unknown) {
-      if (!this.#state.isCurrent(generation) || this.#stopping) return;
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: identityFailure(error),
-      });
+      await this.#handleFailure(generation, identityFailure(error));
       return;
     }
     if (!this.#state.isCurrent(generation) || this.#stopping) return;
@@ -361,52 +526,121 @@ export class HubConnector {
     await this.#connect();
   }
 
-  async resume(): Promise<void> {
-    if (!this.#started || this.#stopping || !this.#config.enabled) return;
-    if (this.#state.snapshot().state === "revoked") return;
-    this.#clearTimer("retry");
-    if (this.#config.configurationIssue !== undefined || this.#config.origin === undefined) {
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: "configuration_invalid",
-      });
-      return;
+  /**
+   * Take this identity's process lock before anything reads or uses it.
+   *
+   * A held lock is reported as `connection_replaced` — the condition it
+   * prevents — and retried on a short local schedule, so the second copy takes
+   * over on its own once the first one exits. False means the caller must stop.
+   */
+  async #claimIdentity(generation: number): Promise<boolean> {
+    const claim = await this.#takeIdentity();
+    if (this.#stopping) {
+      // `stop()` handed the identity back while this claim was in flight.
+      await this.#handBackIdentity();
+      return false;
     }
-    const generation = this.#state.generation;
-    let identity;
+    if (!this.#state.isCurrent(generation)) return false;
+    if (claim === "held") {
+      await this.#handleFailure(generation, "identity_in_use");
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Make this process the identity's owner, unless another live one is.
+   *
+   * `claimed` means ownership was taken just now, so a caller whose connector
+   * will not run can hand it back; ownership is recorded before any caller
+   * looks at its own generation, so a superseded caller cannot leave the lock
+   * file naming this process while the connector believes it does not.
+   *
+   * `unlocked` means the lock could not be used: the caller carries on, as the
+   * lock's contract says, but ownership is not recorded, so the next caller
+   * asks the lock again. Recording it would keep this process on the identity
+   * for good after one failed read — while another process that read the same
+   * file a moment later holds the lock.
+   */
+  async #takeIdentity(): Promise<"owned" | "claimed" | "unlocked" | "held"> {
+    const lock = this.#processLock;
+    if (lock === undefined || this.#ownsIdentity) return "owned";
+    const result = await lock.acquire();
+    if (result !== "acquired") return result === "held" ? "held" : "unlocked";
+    this.#ownsIdentity = true;
+    return "claimed";
+  }
+
+  /** Let another local copy take the identity without waiting for this process to exit. */
+  async #handBackIdentity(): Promise<void> {
+    if (this.#processLock === undefined) return;
+    this.#ownsIdentity = false;
+    await this.#processLock.release();
+  }
+
+  /**
+   * Startup work the identity runtime deferred because another process owned
+   * the identity when it was built — finishing an interrupted leave, retired-key
+   * destruction, prekey and continuity repair, the launch policy commit. Run
+   * once this process owns the identity, before anything else uses it; a no-op
+   * once done, and for a runtime that never deferred.
+   */
+  async #completeIdentityStartup(): Promise<void> {
+    await this.#identity.completeStartup?.();
+  }
+
+  /** Whether this connector is configured to connect, and so keeps a claim it takes. */
+  #runsConnector(): boolean {
+    return (
+      this.#config.enabled &&
+      this.#config.configurationIssue === undefined &&
+      this.#config.origin !== undefined
+    );
+  }
+
+  /** Mutating an identity another local process is connected with would pull it out from under it. */
+  async #requireIdentityOwnership(): Promise<void> {
+    if ((await this.#takeIdentity()) === "held") throw new HubIdentityInUseError();
+    await this.#completeIdentityStartup();
+  }
+
+  /**
+   * Run an operation that changes this identity's shared state, as its owner.
+   *
+   * For the surfaces outside the connector that write what the identity's
+   * owner relies on: the desktop's native claim, which commits an active node;
+   * the local trusted introduction, which approves a client; and the E2EE owner
+   * commands, whose commit-then-sweep could otherwise commit here and sweep
+   * nothing, leaving the owning process's live channels under authority that
+   * was just withdrawn. Refused while another local process owns the identity.
+   * A claim taken for an operation is kept when this connector runs — it will
+   * use the identity next, and one waiting out the other copy's lock retries
+   * at once rather than reporting a copy that is gone — and handed back
+   * afterwards when it does not.
+   */
+  async asIdentityOwner<A>(operation: () => Promise<A>): Promise<A> {
+    if (this.#stopping) throw new Error("Hub identity is unavailable while stopping.");
+    const claim = await this.#takeIdentity();
+    if (claim === "held") throw new HubIdentityInUseError();
     try {
-      identity = await this.#identity.readState();
-    } catch (error: unknown) {
-      if (!this.#state.isCurrent(generation) || this.#stopping) return;
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: identityFailure(error),
-      });
-      return;
-    }
-    if (!this.#state.isCurrent(generation) || this.#stopping) return;
-    if (identity.activeNode === null) {
-      if (identity.pendingEnrollment === null) {
-        this.#state.transition("enrolling");
-      } else {
-        this.#state.transition("awaiting_approval");
-        this.#scheduleEnrollmentPoll(0);
+      await this.#completeIdentityStartup();
+      return await operation();
+    } finally {
+      if (claim === "claimed") {
+        if (!this.#runsConnector() || this.#stopping) {
+          await this.#handBackIdentity();
+        } else if (this.#state.snapshot().failure === "connection_replaced") {
+          // Only the local lock wait is nudgeable; a Hub displacement keeps
+          // its spacing (`nudge`).
+          this.nudge();
+        }
       }
-      return;
     }
-    if (identity.activeNode.hubOrigin !== this.#config.origin) {
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: "identity_origin_mismatch",
-      });
-      return;
-    }
-    this.#nodeId = identity.activeNode.nodeId;
-    await this.#connect();
   }
 
   async enroll(): Promise<HubEnrollmentStartResult> {
     const origin = this.#enrollmentOrigin();
+    await this.#requireIdentityOwnership();
     const initialGeneration = this.#state.generation;
     const state = await this.#identity.readState();
     if (!this.#state.isCurrent(initialGeneration) || this.#stopping) {
@@ -477,7 +711,12 @@ export class HubConnector {
    * enrolled" because the keychain is locked would invite overwriting a real
    * identity.
    */
-  async identitySummary(): Promise<HubIdentitySummary> {
+  /**
+   * `fingerprint: false` answers from the state files alone. The fingerprint
+   * is derived from the private key in key custody, which a caller that only
+   * needs the enrollment state (such as a periodic probe) must not open.
+   */
+  async identitySummary(options?: { readonly fingerprint?: boolean }): Promise<HubIdentitySummary> {
     try {
       const state = await this.#identity.readState();
       // A committed teardown means the erase is under way: the keys it names may
@@ -486,6 +725,7 @@ export class HubConnector {
       // leave no in-panel way to correct it.
       if (state.pendingTeardown !== null) return { enrolled: "none" };
       if (state.activeNode !== null) {
+        if (options?.fingerprint === false) return { enrolled: "active" };
         const fingerprint = await this.#identity.readActiveFingerprint?.();
         return {
           enrolled: "active",
@@ -535,6 +775,7 @@ export class HubConnector {
 
   async cancelEnrollment(): Promise<HubConnectorStatus> {
     const origin = this.#enrollmentOrigin();
+    await this.#requireIdentityOwnership();
     const initialGeneration = this.#state.generation;
     const identity = await this.#identity.readState();
     if (!this.#state.isCurrent(initialGeneration) || this.#stopping) {
@@ -592,6 +833,7 @@ export class HubConnector {
     this.#state.invalidateGeneration();
     if (this.#state.snapshot().state !== "disabled") this.#state.transition("stopping");
     await this.#teardownConnection();
+    await this.#handBackIdentity();
     this.#state.transition("disabled");
     this.#started = false;
   }
@@ -613,8 +855,21 @@ export class HubConnector {
    */
   async leave(): Promise<HubConnectorStatus> {
     if (this.#stopping) throw new Error("Hub identity cannot be erased while stopping.");
+    // A connector that never started — switched off here, perhaps while another
+    // copy runs with it on — has not claimed the identity yet. Claim it now, and
+    // refuse rather than erase keys a running process is authenticating with.
+    const claim = await this.#takeIdentity();
+    if (claim === "held") throw new HubIdentityInUseError();
+    // A connector that will not run afterwards hands the claim back, so a copy
+    // that does run can take the identity — fresh or not — without waiting.
+    const releaseLeaveClaim = async () => {
+      if (claim === "claimed" && !this.#runsConnector()) await this.#handBackIdentity();
+    };
     await this.#teardownConnection();
     this.#started = false;
+    // Budgets earned by the identity being erased say nothing about the next one.
+    this.#slowAttempts.clear();
+    this.#slowRetryLog.clear();
     try {
       await this.#identity.leave();
     } catch (error: unknown) {
@@ -622,6 +877,7 @@ export class HubConnector {
         degradedMode: "operator_action_required",
         failure: identityFailure(error),
       });
+      await releaseLeaveClaim();
       // The cause aids local diagnosis; it never reaches a caller, because the
       // route replaces this error with a bounded message.
       throw new Error("Hub identity could not be erased.", { cause: error });
@@ -631,10 +887,11 @@ export class HubConnector {
     // socket, timer, or channel survives the teardown above. `enrolling` is only
     // honest once the connector is actually configured to enroll.
     this.#state.transition("disabled");
-    if (this.#config.enabled && this.#config.configurationIssue === undefined) {
+    if (this.#runsConnector()) {
       this.#state.transition("enrolling");
       this.#started = true;
     }
+    await releaseLeaveClaim();
     return this.status();
   }
 
@@ -651,6 +908,7 @@ export class HubConnector {
       transport: this.#transport,
       hubOrigin: origin,
       scheduler: this.#scheduler,
+      now: this.#scheduler.now,
       onFrame: (frame) => {
         this.#frameChain = this.#frameChain
           .then(() => this.#handleFrame(generation, frame))
@@ -668,6 +926,11 @@ export class HubConnector {
     this.#session = session;
     this.#state.transition("authenticating");
     try {
+      await this.#beforeConnect();
+      if (!this.#state.isCurrent(generation) || this.#stopping) {
+        session.close();
+        return;
+      }
       const ready = await session.authenticate();
       if (!this.#state.isCurrent(generation) || this.#stopping) {
         session.close();
@@ -675,6 +938,8 @@ export class HubConnector {
       }
       const socket = session.socket;
       if (socket === undefined) throw new RelayConnectionError("internal_error");
+      this.#e2eeStatementUnavailableAttempts = 0;
+      this.#e2eeStatementFailures = 0;
       this.#e2eeState.begin(generation, origin, {
         protocolMajor: ready.protocolMajor,
         protocolMinor: ready.protocolMinor,
@@ -718,8 +983,11 @@ export class HubConnector {
         if (rotation?.hubOrigin === origin && rotation.activatedAt !== null) {
           await this.#identity.confirmAuthenticatedKey(origin, rotation.newKeyId);
         }
-      } catch {
-        throw new RelayConnectionError("authentication_failed");
+      } catch (error: unknown) {
+        // The Hub accepted the proof; it is local custody that failed, and
+        // reporting it as a Hub rejection would point the owner at the wrong
+        // thing and wait a quarter of an hour to retry a keychain read.
+        throw new RelayConnectionError(identityFailure(error));
       }
       if (!this.#state.isCurrent(generation) || this.#stopping) {
         session.close();
@@ -845,8 +1113,20 @@ export class HubConnector {
     }
     if (!this.#state.isCurrent(generation) || this.#stopping) return;
     if (result.kind === "unavailable") {
-      this.#clearTimer("e2eeStatement");
+      // Withdrawn at once, and retried rather than abandoned: the statement is
+      // rebuilt from identity, prekey, and continuity reads that a locked
+      // keychain fails for a while and then serves again, and without a retry
+      // account-grant channels stay refused until the next reconnect — the
+      // Hub drops a statement that is not renewed.
       this.#e2eeState.clearStatement(generation);
+      // The attempt completed: a throw before it is not part of a run.
+      this.#e2eeStatementFailures = 0;
+      this.#scheduleE2eeStatementRetry(
+        generation,
+        E2EE_STATEMENT_UNAVAILABLE_RETRY,
+        this.#e2eeStatementUnavailableAttempts,
+      );
+      this.#e2eeStatementUnavailableAttempts += 1;
       return;
     }
     if (this.#e2eeState.publish(generation, result.advertisement) !== "accepted") {
@@ -867,6 +1147,8 @@ export class HubConnector {
     ) {
       throw new RelayConnectionError("internal_error");
     }
+    this.#e2eeStatementUnavailableAttempts = 0;
+    this.#e2eeStatementFailures = 0;
     this.#flushAndScheduleDrain(generation);
     this.#scheduleE2eeStatementRefresh(generation, result.advertisement.expiresAt);
   }
@@ -876,9 +1158,28 @@ export class HubConnector {
     const delay = Math.max(1, expiresAt - E2EE_MAX_CLOCK_SKEW - this.#scheduler.now());
     this.#e2eeStatementTimer = this.#scheduler.setTimeout(() => {
       this.#e2eeStatementTimer = undefined;
-      if (!this.#state.isCurrent(generation) || this.#stopping) return;
-      void this.refreshE2eeState().catch(() => this.#handleFailure(generation, "internal_error"));
+      this.#refreshE2eeStatementInBackground(generation);
     }, delay);
+  }
+
+  /** Try again later, in the same generation, at `attempt` on the given backoff. */
+  #scheduleE2eeStatementRetry(
+    generation: number,
+    policy: ReconnectPolicyConfig,
+    attempt: number,
+  ): void {
+    this.#clearTimer("e2eeStatement");
+    const decision = reconnectDelay(policy, attempt, this.#scheduler.random());
+    this.#e2eeStatementTimer = this.#scheduler.setTimeout(() => {
+      this.#e2eeStatementTimer = undefined;
+      this.#refreshE2eeStatementInBackground(generation);
+    }, decision.delayMs);
+  }
+
+  /** A timer-driven republish; `refreshE2eeState` handles its failure. */
+  #refreshE2eeStatementInBackground(generation: number): void {
+    if (!this.#state.isCurrent(generation) || this.#stopping) return;
+    void this.refreshE2eeState().catch(() => undefined);
   }
 
   async #handleFrame(generation: number, frame: RelayFrame): Promise<void> {
@@ -970,8 +1271,17 @@ export class HubConnector {
     this.#sendQueue = undefined;
     this.#session?.close();
     this.#session = undefined;
-    const disposition = classifyConnectorFailure(kind, this.#protocolViolations);
+    const disposition = classifyConnectorFailure(
+      kind,
+      this.#protocolViolations,
+      this.#staleProofRetries,
+    );
     if (kind === "protocol_invalid") this.#protocolViolations += 1;
+    if (kind === "authentication_stale") this.#staleProofRetries += 1;
+    if (disposition.action === "slow_retry") {
+      this.#scheduleSlowRetry(disposition.failure, disposition.policy, disposition.nudgeable);
+      return;
+    }
     if (disposition.action === "operator") {
       if (disposition.terminalState !== undefined) {
         this.#state.transition(disposition.terminalState, { failure: disposition.failure });
@@ -1001,10 +1311,61 @@ export class HubConnector {
       reconnectAttempt: decision.attempt,
       nextRetryAt: new Date(this.#scheduler.now() + decision.delayMs).toISOString(),
     });
+    this.#retryNudge = () => void this.#connect();
     this.#retryTimer = this.#scheduler.setTimeout(() => {
       this.#retryTimer = undefined;
       if (!this.#state.isCurrent(retryGeneration) || this.#stopping) return;
       void this.#connect();
+    }, decision.delayMs);
+  }
+
+  /**
+   * Retry a usually-transient failure on its own long schedule.
+   *
+   * Reported as `backing_off` with the specific failure code, so status stays
+   * honest about both facts: what went wrong, and that the connector is
+   * handling it. A policy with an hourly budget that is spent stops for an
+   * operator instead — the one case where retrying is itself the problem.
+   *
+   * The retry re-reads identity rather than reconnecting directly: the failure
+   * may have been the identity read itself, and an identity that changed while
+   * the connector waited must be revalidated before it is used.
+   */
+  #scheduleSlowRetry(
+    failure: HubConnectorFailureCode,
+    policy: SlowRetryPolicy,
+    nudgeable: boolean,
+  ): void {
+    const now = this.#scheduler.now();
+    if (policy.maxPerHour !== undefined) {
+      const recent = (this.#slowRetryLog.get(policy) ?? []).filter(
+        (scheduledAt) => now - scheduledAt < SLOW_RETRY_BUDGET_WINDOW_MS,
+      );
+      if (recent.length >= policy.maxPerHour) {
+        this.#slowRetryLog.set(policy, recent);
+        this.#state.transition("degraded", {
+          degradedMode: "operator_action_required",
+          failure,
+        });
+        return;
+      }
+      this.#slowRetryLog.set(policy, [...recent, now]);
+    }
+    const attempt = this.#slowAttempts.get(policy) ?? 0;
+    this.#slowAttempts.set(policy, attempt + 1);
+    const decision = slowRetryDelay(policy, attempt, this.#scheduler.random());
+    const retryGeneration = this.#state.generation;
+    this.#state.transition("degraded", {
+      degradedMode: "backing_off",
+      failure,
+      reconnectAttempt: decision.attempt,
+      nextRetryAt: new Date(now + decision.delayMs).toISOString(),
+    });
+    this.#retryNudge = nudgeable ? () => void this.#establish(retryGeneration) : undefined;
+    this.#retryTimer = this.#scheduler.setTimeout(() => {
+      this.#retryTimer = undefined;
+      if (!this.#state.isCurrent(retryGeneration) || this.#stopping) return;
+      void this.#establish(retryGeneration);
     }, decision.delayMs);
   }
 
@@ -1015,6 +1376,8 @@ export class HubConnector {
       if (!this.#state.isCurrent(generation) || this.#state.snapshot().state !== "online") return;
       this.#attempt = 0;
       this.#protocolViolations = 0;
+      this.#staleProofRetries = 0;
+      this.#slowAttempts.clear();
     }, this.#config.reconnectStableMs);
   }
 

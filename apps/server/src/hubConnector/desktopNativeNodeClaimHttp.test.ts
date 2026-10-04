@@ -80,6 +80,7 @@ function connector(
     queuedBytes: 0,
   };
   return {
+    connectorEnabled: true,
     status: () => status,
     resume: async () => onResume(),
     enroll: async () => {

@@ -70,6 +70,7 @@ import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts
 import { resolveBootstrapPreferences } from "./context/bootstrapPreferences.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
+import { OrchestrationCommandReceiptRepository } from "../persistence/Services/OrchestrationCommandReceipts.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
 import { refreshWorktreeSourceControlState } from "../sourceControl/refreshWorktreeSourceControlState.ts";
@@ -143,6 +144,12 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // Optional for the same route-test reason; production provides it in the
     // runtime layer and `makeServerWsRpcLayer`.
     const chatAttachmentUploads = yield* Effect.serviceOption(ChatAttachmentUploads);
+    // Optional for the same route-test reason; production provides it with the
+    // orchestration engine. Without it the engine still deduplicates replays,
+    // only after normalization.
+    const commandReceipts = Option.getOrUndefined(
+      yield* Effect.serviceOption(OrchestrationCommandReceiptRepository),
+    );
     // Optional for the same route-test reason; production always provides it
     // through the runtime's Agent Control layer.
     const sessionImport = yield* Effect.serviceOption(SessionImport);
@@ -912,6 +919,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       serverCommandId,
       refreshGitStatus,
       toGitManagerError,
+      commandReceipts,
       dispatchNormalizedCommand,
       dispatchWorktreeCommand,
       enrichOrchestrationEvents,

@@ -114,17 +114,20 @@ export const hubConnectorEnrollmentReadRouteLayer = HttpRouter.add(
 );
 
 /**
- * Retry a connector that stopped without scheduling its own retry.
+ * Retry now rather than on the connector's own schedule.
  *
- * `connection_replaced` and a locked credential store both classify as
- * operator-action failures, so no reconnect timer exists for them. Without this
- * route the only recovery is restarting the process, which in the desktop tears
- * down every provider session and terminal to retry one outbound socket.
+ * A locked credential store, a duplicate process, and a refused proof all
+ * retry on their own, but slowly — and a duplicate stops once its hourly budget
+ * is spent. An owner who has just unlocked the store or stopped the other copy
+ * should not have to wait that out, or restart the process, which in the
+ * desktop tears down every provider session and terminal to retry one outbound
+ * socket.
  *
- * `resume()` is deliberately a no-op for `revoked`, a stopping connector, and a
- * disabled one. Returning the resulting status rather than an error keeps those
- * cases honest: the caller sees the unchanged state instead of a success that
- * implies something happened.
+ * `resume()` is deliberately a no-op for `revoked`, a stopping connector, a
+ * disabled one, and a connection already up or on its way up. Returning the
+ * resulting status rather than an error keeps those cases honest: the caller
+ * sees the unchanged state instead of a success that implies something
+ * happened.
  */
 export const hubConnectorResumeRouteLayer = HttpRouter.add(
   "POST",

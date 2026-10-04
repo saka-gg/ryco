@@ -61,6 +61,13 @@ export interface NodeE2eeClientRecord {
   readonly safetyNumber: string;
   readonly displayLabel?: string;
   readonly pairingReserved: boolean;
+  /**
+   * The `channel.open` role the device introduced itself under — display
+   * metadata the owner approves from, never authority. A native client's
+   * intended role must equal it (§8.3), so an approval below it refuses the
+   * device rather than limiting it. Absent on records that predate it.
+   */
+  readonly observedRole?: string;
 }
 
 /** §13.6: while a window is open a surface must show all three of these. */
@@ -176,9 +183,15 @@ export interface NodeE2eePrekey {
   readonly remedy?: string;
 }
 
-/** §7.5's lineage. `remedy` is §7.5's own sentence for an unresolvable one. */
+/**
+ * §7.5's lineage. `remedy` is §7.5's own sentence for an unresolvable one.
+ *
+ * `identity_in_use` is no lineage at all: a backend that does not own the
+ * identity declines to read a chain that reading can repair, and `remedy` says
+ * which copy to ask.
+ */
 export interface NodeE2eeContinuity {
-  readonly status: "advertisable" | "unavailable";
+  readonly status: "advertisable" | "unavailable" | "identity_in_use";
   readonly continuityId?: string;
   readonly generation?: number;
   readonly chainLength?: number;

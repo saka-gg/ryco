@@ -3,16 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   NodeE2eeAuthorizationRequest,
-  NodeE2eeClientListing,
   NodeE2eeClientRecord,
-  NodeE2eeContinuity,
   NodeE2eeCrossDeviceApproval,
-  NodeE2eeFallback,
-  NodeE2eePolicy,
   NodeE2eePolicyChange,
   NodeE2eePolicyProposal,
-  NodeE2eePrekey,
-  NodeE2eeSessionList,
 } from "@ryco/client-runtime/connection";
 
 import { isHostedHubMode } from "../../env";
@@ -66,6 +60,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
   DialogClose,
@@ -87,6 +82,8 @@ import {
 } from "./settingsLayout";
 import { cn } from "../../lib/utils";
 import {
+  nodeApprovalRole,
+  nodeApprovalWithheldNotice,
   nodeApproveConfirmation,
   nodeClientListingNotices,
   nodeClientRows,
@@ -102,7 +99,12 @@ import {
   nodeE2eeStrictPolicyDisposition,
   nodeEnrollmentFingerprintView,
   nodeFallbackReport,
+  nodeNarrowOffered,
+  nodePendingInPartition,
+  nodePendingPartitionWarning,
   nodeOperatorDataAvailability,
+  mergeNodeSecurityReads,
+  nodeSecurityReadFailure,
   nodePairingWindowRows,
   nodePolicyChangeDestructive,
   nodePolicyChangeSummary,
@@ -123,8 +125,8 @@ import {
   type NodeE2eeStrictPolicyDisposition,
   type NodeLocalOperatorAccess,
   type NodeFactRow,
+  type NodeSecurityReads,
   NODE_CONTINUITY_DESCRIPTION,
-  NODE_E2EE_APPROVABLE_ROLES,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
   NODE_FALLBACK_QUIET,
   NODE_NO_CLIENTS_DESCRIPTION,
@@ -138,6 +140,8 @@ import {
   NODE_POLICY_STRICT_TITLE,
   NODE_POLICY_VALUE_UNREADABLE,
   NODE_PREKEY_DESCRIPTION,
+  NODE_SAFETY_NUMBER_MATCH_HINT,
+  NODE_SAFETY_NUMBER_MATCH_LABEL,
   NODE_SAFETY_NUMBER_UNAVAILABLE,
   NODE_SESSION_NATIVE_CODE_ABSENT,
   NODE_SESSION_WEB_ROW_DESCRIPTION,
@@ -157,21 +161,15 @@ import {
  * is told, which mode they are in, or whether an action may run.
  *
  * Matches `HubSection`'s cadence: one poll for every state, and the last good
- * snapshot is kept while an error is shown rather than blanked — a panel that
- * empties on a transient failure reads as "no clients are authorized", which is
- * the one wrong answer this data has.
+ * value of each read is kept while an error is shown rather than blanked — a
+ * panel that empties on a transient failure reads as "no clients are
+ * authorized", which is the one wrong answer this data has.
  */
 const POLL_INTERVAL_MS = 5_000;
 /** The ceiling the back-off below climbs to while reads keep failing. */
 const POLL_MAX_INTERVAL_MS = 60_000;
 
-interface NodeSecuritySnapshot {
-  readonly clients: NodeE2eeClientListing | null;
-  readonly sessions: NodeE2eeSessionList | null;
-  readonly policy: NodeE2eePolicy | null;
-  readonly prekey: NodeE2eePrekey | null;
-  readonly continuity: NodeE2eeContinuity | null;
-  readonly fallback: NodeE2eeFallback | null;
+interface NodeSecuritySnapshot extends NodeSecurityReads {
   readonly enrollmentFingerprint: string | null;
 }
 
@@ -482,39 +480,35 @@ function PrimaryNodeSecuritySettings() {
 
   const refresh = useCallback(async () => {
     if (!availability.available) return;
-    try {
-      const [clients, sessions, policy, prekey, continuity, fallback] = await Promise.all([
-        fetchNodeE2eeClients(),
-        fetchNodeE2eeSessions(),
-        fetchNodeE2eePolicy(),
-        fetchNodeE2eePrekey(),
-        fetchNodeE2eeContinuity(),
-        fetchNodeE2eeFallback(),
-      ]);
-      // 404 is the normal answer once a ceremony is over, and the helper already
-      // returns null for it rather than throwing.
-      const enrollment = await fetchHubEnrollment().catch(() => null);
-      if (!mountedRef.current) return;
-      failuresRef.current = 0;
-      setSnapshot({
-        clients,
-        sessions,
-        policy,
-        prekey,
-        continuity,
-        fallback,
-        enrollmentFingerprint: enrollment?.fingerprint ?? null,
-      });
-      setError(null);
-    } catch (cause) {
-      if (!mountedRef.current) return;
-      failuresRef.current += 1;
-      // The last good snapshot stays on screen: blanking the client list on a
-      // transient read failure would read as "nothing is authorized".
-      setError(
-        cause instanceof Error ? cause.message : "Unable to read the node's security state.",
-      );
-    }
+    // Settled one by one: a route that refuses costs its own section, not the
+    // five beside it (`mergeNodeSecurityReads`).
+    const [clients, sessions, policy, prekey, continuity, fallback] = await Promise.allSettled([
+      fetchNodeE2eeClients(),
+      fetchNodeE2eeSessions(),
+      fetchNodeE2eePolicy(),
+      fetchNodeE2eePrekey(),
+      fetchNodeE2eeContinuity(),
+      fetchNodeE2eeFallback(),
+    ]);
+    const results = { clients, sessions, policy, prekey, continuity, fallback };
+    // 404 is the normal answer once a ceremony is over, and the helper already
+    // returns null for it rather than throwing. A read that does throw keeps the
+    // fingerprint already shown, as a failed read of any other value does.
+    const enrollmentFingerprint = await fetchHubEnrollment().then(
+      (enrollment) => enrollment?.fingerprint ?? null,
+      () => undefined,
+    );
+    if (!mountedRef.current) return;
+    const failure = nodeSecurityReadFailure(results);
+    failuresRef.current = failure === null ? 0 : failuresRef.current + 1;
+    setSnapshot((previous) => ({
+      ...mergeNodeSecurityReads(previous, results),
+      enrollmentFingerprint:
+        enrollmentFingerprint === undefined
+          ? previous.enrollmentFingerprint
+          : enrollmentFingerprint,
+    }));
+    setError(failure);
   }, [availability.available]);
 
   /**
@@ -668,11 +662,17 @@ function PrimaryNodeSecuritySettings() {
    * named in the dialog and the key in the body cannot disagree.
    */
   const authorize = useCallback(
-    (request: NodeE2eeAuthorizationRequest, action: NodeE2eeRecordActionId, message: string) => {
+    (
+      request: NodeE2eeAuthorizationRequest,
+      action: NodeE2eeRecordActionId,
+      message: string,
+      status: NodeE2eeClientRecord["status"],
+    ) => {
       const subject: NodeE2eeRecordSubject = {
         fingerprint: request.fingerprint,
         accountId: request.accountId,
         hubOrigin: request.hubOrigin,
+        status,
       };
       confirmCopyThen(
         nodeE2eeRecordConfirmation(action, subject),
@@ -683,14 +683,24 @@ function PrimaryNodeSecuritySettings() {
     [confirmCopyThen],
   );
 
-  /** An approval, whose confirmation names the role the owner picked (§13.6). */
+  /**
+   * An approval, whose confirmation names the role it grants (§13.6) and
+   * carries the whole number the owner just matched against the phone.
+   *
+   * The key in the dialog is derived from the request the network gets, as the
+   * withdrawals' is; the number and the partition count come from the row that
+   * gated the button.
+   */
   const approve = useCallback(
-    (request: NodeE2eeAuthorizationRequest, role: NodeE2eeApprovableRole) => {
+    (request: NodeE2eeAuthorizationRequest, approval: NodeE2eeRowApproval) => {
+      const { role } = approval;
       setConfirmation({
         copy: nodeApproveConfirmation(role, {
           fingerprint: request.fingerprint,
           accountId: request.accountId,
           hubOrigin: request.hubOrigin,
+          safetyNumber: approval.safetyNumber,
+          pendingInPartition: approval.pendingInPartition,
         }),
         run: () =>
           run(async () => {
@@ -982,6 +992,7 @@ function PrimaryNodeSecuritySettings() {
               <ClientRecordRow
                 key={`${record.hubOrigin}\u0000${record.accountId}\u0000${record.fingerprint}`}
                 record={record}
+                pendingInPartition={nodePendingInPartition(snapshot.clients, record)}
                 busy={busy}
                 onAuthorize={authorize}
                 onApprove={approve}
@@ -1388,21 +1399,34 @@ function ResetFallbackButton({
   );
 }
 
+/** What one row hands the panel's approval: the role, and what the dialog must repeat. */
+interface NodeE2eeRowApproval {
+  readonly role: NodeE2eeApprovableRole;
+  readonly safetyNumber: string;
+  readonly pendingInPartition: number;
+}
+
 function ClientRecordRow({
   record,
+  pendingInPartition,
   busy,
   onAuthorize,
   onApprove,
   onShowApprovalQr,
 }: {
   readonly record: NodeE2eeClientRecord;
+  readonly pendingInPartition: number;
   readonly busy: boolean;
   readonly onAuthorize: (
     request: NodeE2eeAuthorizationRequest,
     action: NodeE2eeRecordActionId,
     message: string,
+    status: NodeE2eeClientRecord["status"],
   ) => void;
-  readonly onApprove: (request: NodeE2eeAuthorizationRequest, role: NodeE2eeApprovableRole) => void;
+  readonly onApprove: (
+    request: NodeE2eeAuthorizationRequest,
+    approval: NodeE2eeRowApproval,
+  ) => void;
   readonly onShowApprovalQr: (record: NodeE2eeClientRecord) => void;
 }) {
   const key = {
@@ -1411,6 +1435,31 @@ function ClientRecordRow({
     fingerprint: record.fingerprint,
   };
   const tone = nodeClientStatusTone(record.status);
+  const approvalRole = nodeApprovalRole(record);
+  const approvalWithheld = nodeApprovalWithheldNotice(record);
+  const partitionWarning = nodePendingPartitionWarning(pendingInPartition);
+  // §13.2 step 5's comparison, as a per-row statement the owner makes. It is
+  // tied to the exact status and number it was made about, so a re-read that
+  // moves either one — a re-introduction, a revocation, a different number —
+  // takes the approve action away again rather than carrying a stale "yes"
+  // over to a value the owner never compared. In memory only, like the number.
+  const [matched, setMatched] = useState<{
+    readonly status: NodeE2eeClientRecord["status"];
+    readonly safetyNumber: string;
+  } | null>(null);
+  const numberMatches =
+    matched !== null &&
+    matched.status === record.status &&
+    matched.safetyNumber === record.safetyNumber;
+  // …and takes it away for good, not only while the values differ. The same
+  // status and number coming back on a later read — a revocation, then a purge
+  // and a fresh introduction, all between two reads of one row — are a request
+  // the owner has not looked at since, so the statement has to be made again.
+  // Cleared during render rather than in an effect, as React's "adjusting state
+  // when a prop changes" pattern does.
+  if (matched !== null && !numberMatches) setMatched(null);
+  // No readable number, nothing to compare — and so no approval from here.
+  const comparable = approvalRole !== null && nodeSafetyNumberView(record.safetyNumber) !== null;
 
   return (
     <SettingsRow
@@ -1425,43 +1474,49 @@ function ClientRecordRow({
       description={`${record.accountId} at ${record.hubOrigin}`}
       control={
         <>
-          {/* §13.6: an approval names the maximum role, and the OWNER names it.
-              One button per role rather than one button and a default, because a
-              default is the panel choosing the ceiling every channel this key
-              opens is admitted under. Least authority first.
+          {/* §13.6: an approval names the maximum role. It is the ONE role the
+              device connects with (`nodeApprovalRole`): §8.3 makes a native
+              client's intended role equal its `channel.open` role, so a smaller
+              ceiling refuses the device instead of limiting it. No button at all
+              when the record does not say which role that is, or when it is a
+              revoked record whose role dates from its introduction — the row
+              explains why instead of guessing.
 
               The capability set is NOT the owner's to pick here and is not left
               empty: §8.6 step 6 admits a native handshake only if the record's
               set contains the intended capability, and `RelayCapability` has one
               member — so an empty set approves a key that is refused by every
-              handshake it attempts. */}
-          {record.status === "approved"
-            ? null
-            : NODE_E2EE_APPROVABLE_ROLES.map((role) => (
-                <Button
-                  key={role}
-                  size="xs"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    onApprove(
-                      {
-                        ...key,
-                        action: "approve",
-                        maxRole: role,
-                        capabilitySet: NODE_E2EE_APPROVAL_CAPABILITY_SET,
-                      },
-                      role,
-                    )
-                  }
-                >
-                  Approve as {role}
-                </Button>
-              ))}
-          {/* Absent at `viewer`: the node treats a narrow that changes nothing as
-              a no-op, so the button would offer an action with no effect behind a
-              dialog promising immediate channel closure. */}
-          {record.status === "approved" && record.maxRole !== "viewer" ? (
+              handshake it attempts.
+
+              And it does not exist until the owner has said this row's number
+              matches the phone: a Hub can introduce a key of its own under the
+              owner's account, and the number is the only thing that tells that
+              row from the phone's. */}
+          {approvalRole === null || !comparable || !numberMatches ? null : (
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy}
+              onClick={() =>
+                onApprove(
+                  {
+                    ...key,
+                    action: "approve",
+                    maxRole: approvalRole,
+                    capabilitySet: NODE_E2EE_APPROVAL_CAPABILITY_SET,
+                  },
+                  { role: approvalRole, safetyNumber: record.safetyNumber, pendingInPartition },
+                )
+              }
+            >
+              Approve as {approvalRole}
+            </Button>
+          )}
+          {/* Only when the device would still get in: a ceiling below the role it
+              connects with refuses it rather than narrowing it, and Revoke says
+              that honestly. Also absent at `viewer`, where the node treats the
+              narrow as a no-op. */}
+          {nodeNarrowOffered(record, "viewer") ? (
             <Button
               size="xs"
               variant="destructive-outline"
@@ -1471,6 +1526,7 @@ function ClientRecordRow({
                   { ...key, action: "narrow", maxRole: "viewer" },
                   "narrow",
                   "Authority reduced.",
+                  record.status,
                 )
               }
             >
@@ -1493,7 +1549,14 @@ function ClientRecordRow({
               size="xs"
               variant="destructive-outline"
               disabled={busy}
-              onClick={() => onAuthorize({ ...key, action: "revoke" }, "revoke", "Client revoked.")}
+              onClick={() =>
+                onAuthorize(
+                  { ...key, action: "revoke" },
+                  "revoke",
+                  "Client revoked.",
+                  record.status,
+                )
+              }
             >
               Revoke
             </Button>
@@ -1502,7 +1565,9 @@ function ClientRecordRow({
             size="xs"
             variant="destructive-outline"
             disabled={busy}
-            onClick={() => onAuthorize({ ...key, action: "purge" }, "purge", "Record deleted.")}
+            onClick={() =>
+              onAuthorize({ ...key, action: "purge" }, "purge", "Record deleted.", record.status)
+            }
           >
             Delete
           </Button>
@@ -1511,7 +1576,47 @@ function ClientRecordRow({
     >
       <div className="space-y-3 pb-3.5">
         <FactRows rows={nodeClientRows(record)} />
+        {approvalWithheld === null ? null : (
+          <p
+            data-testid="node-approval-withheld"
+            className="text-[11px] leading-relaxed text-muted-foreground"
+          >
+            {approvalWithheld}
+          </p>
+        )}
+        {partitionWarning === null ? null : (
+          <p
+            data-testid="node-pending-partition-warning"
+            className="text-[11px] leading-relaxed font-medium text-warning"
+          >
+            {partitionWarning}
+          </p>
+        )}
         <SafetyNumber value={record.safetyNumber} />
+        {comparable ? (
+          <label data-testid="node-safety-number-match" className="flex items-start gap-2">
+            <Checkbox
+              className="mt-0.5"
+              checked={numberMatches}
+              disabled={busy}
+              onCheckedChange={(checked) =>
+                setMatched(
+                  checked === true
+                    ? { status: record.status, safetyNumber: record.safetyNumber }
+                    : null,
+                )
+              }
+            />
+            <span className="space-y-0.5">
+              <span className="block text-[12px] font-medium">
+                {NODE_SAFETY_NUMBER_MATCH_LABEL}
+              </span>
+              <span className="block text-[11px] leading-relaxed text-muted-foreground">
+                {NODE_SAFETY_NUMBER_MATCH_HINT}
+              </span>
+            </span>
+          </label>
+        ) : null}
       </div>
     </SettingsRow>
   );

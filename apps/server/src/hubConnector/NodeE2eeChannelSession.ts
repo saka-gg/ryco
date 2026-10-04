@@ -971,6 +971,11 @@ export function makeNodeE2eeChannelSession(
                     hubOrigin: client.hubOrigin,
                     accountId: client.accountId,
                   }).display,
+                  // §8.6 step 5 has already made the intended role equal this
+                  // value, so it is the one ceiling an approval can name that
+                  // admits the device. Recorded for the owner's display and
+                  // never as authority (§13.6).
+                  observedRole: sources.channel.channelOpenEffectiveRole,
                 });
               } catch {
                 pairing = undefined;
