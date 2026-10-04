@@ -1115,8 +1115,16 @@ function desktopKeepAwakeState() {
   );
 }
 
+let desktopRelaunchRequested = false;
+
 function relaunchDesktopApp(reason: string): void {
   writeDesktopLogHeader(`desktop relaunch requested reason=${reason}`);
+  // The renderer can apply several deferred changes back to back once agent
+  // turns finish. Each persists before it asks to relaunch, so the first
+  // request already restarts with all of them; a second must not start
+  // another shutdown or spawn a second app instance.
+  if (desktopRelaunchRequested) return;
+  desktopRelaunchRequested = true;
   setImmediate(() => {
     isQuitting = true;
     clearUpdatePollTimer();

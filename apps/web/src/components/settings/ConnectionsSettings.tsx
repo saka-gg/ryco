@@ -63,6 +63,7 @@ import { Group, GroupSeparator } from "../ui/group";
 import { AnimatedHeight } from "../AnimatedHeight";
 import { HubSection } from "./HubSection";
 import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
+import { useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import {
   savedBackendConnectionActionLabel,
   savedBackendNeedsRepair,
@@ -1582,6 +1583,7 @@ export function ConnectionsSettings() {
   >(null);
   const primaryServerConfig = useServerConfig();
   const primaryVersionMismatch = resolveServerConfigVersionMismatch(primaryServerConfig);
+  const { guardRelaunch, dialog: relaunchGuardDialog } = useDesktopRelaunchGuard();
   const [isAdvertisedEndpointListExpanded, setIsAdvertisedEndpointListExpanded] = useState(false);
   const defaultAdvertisedEndpointKey = useUiStateStore(
     (state) => state.defaultAdvertisedEndpointKey,
@@ -1622,10 +1624,15 @@ export function ConnectionsSettings() {
       setIsUpdatingDesktopServerExposure(true);
       setDesktopServerExposureError(null);
       try {
-        const nextState = await desktopBridge.setServerExposureMode(
-          checked ? "network-accessible" : "local-only",
+        await guardRelaunch(
+          async () => {
+            const nextState = await desktopBridge.setServerExposureMode(
+              checked ? "network-accessible" : "local-only",
+            );
+            setDesktopServerExposureState(nextState);
+          },
+          { beforePrompt: () => setIsDesktopServerExposureDialogOpen(false) },
         );
-        setDesktopServerExposureState(nextState);
         setIsDesktopServerExposureDialogOpen(false);
         setIsUpdatingDesktopServerExposure(false);
       } catch (error) {
@@ -1643,7 +1650,7 @@ export function ConnectionsSettings() {
         setIsUpdatingDesktopServerExposure(false);
       }
     },
-    [desktopBridge],
+    [desktopBridge, guardRelaunch],
   );
 
   const handleConfirmDesktopServerExposureChange = useCallback(() => {
@@ -1658,11 +1665,16 @@ export function ConnectionsSettings() {
     setIsUpdatingTailscaleServe(true);
     setDesktopServerExposureError(null);
     try {
-      const nextState = await desktopBridge.setTailscaleServeEnabled({
-        enabled: true,
-        port: parsedTailscaleServePort,
-      });
-      setDesktopServerExposureState(nextState);
+      await guardRelaunch(
+        async () => {
+          const nextState = await desktopBridge.setTailscaleServeEnabled({
+            enabled: true,
+            port: parsedTailscaleServePort,
+          });
+          setDesktopServerExposureState(nextState);
+        },
+        { beforePrompt: () => setPendingTailscaleServeEndpoint(null) },
+      );
       setPendingTailscaleServeEndpoint(null);
     } catch (error) {
       const message =
@@ -1678,7 +1690,7 @@ export function ConnectionsSettings() {
     } finally {
       setIsUpdatingTailscaleServe(false);
     }
-  }, [desktopBridge, isTailscaleServePortValid, parsedTailscaleServePort]);
+  }, [desktopBridge, guardRelaunch, isTailscaleServePortValid, parsedTailscaleServePort]);
 
   const handleStartTailscaleServeSetup = useCallback(
     (endpoint: AdvertisedEndpoint) => {
@@ -1695,11 +1707,16 @@ export function ConnectionsSettings() {
     setIsUpdatingTailscaleServe(true);
     setDesktopServerExposureError(null);
     try {
-      const nextState = await desktopBridge.setTailscaleServeEnabled({
-        enabled: false,
-        port: desktopServerExposureState?.tailscaleServePort ?? DEFAULT_TAILSCALE_SERVE_PORT,
-      });
-      setDesktopServerExposureState(nextState);
+      await guardRelaunch(
+        async () => {
+          const nextState = await desktopBridge.setTailscaleServeEnabled({
+            enabled: false,
+            port: desktopServerExposureState?.tailscaleServePort ?? DEFAULT_TAILSCALE_SERVE_PORT,
+          });
+          setDesktopServerExposureState(nextState);
+        },
+        { beforePrompt: () => setDisableTailscaleServeDialogOpen(false) },
+      );
       setDisableTailscaleServeDialogOpen(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to disable Tailscale HTTPS.";
@@ -1714,7 +1731,7 @@ export function ConnectionsSettings() {
     } finally {
       setIsUpdatingTailscaleServe(false);
     }
-  }, [desktopBridge, desktopServerExposureState?.tailscaleServePort]);
+  }, [desktopBridge, desktopServerExposureState?.tailscaleServePort, guardRelaunch]);
 
   const handleStartTailscaleServeDisable = useCallback((_endpoint: AdvertisedEndpoint) => {
     setDisableTailscaleServeDialogOpen(true);
@@ -2753,6 +2770,8 @@ export function ConnectionsSettings() {
           />
         </SettingsSection>
       )}
+
+      {relaunchGuardDialog}
 
       {desktopBridge ? <HubSection desktopBridge={desktopBridge} /> : null}
 

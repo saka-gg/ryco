@@ -41,6 +41,8 @@ import { WorktreeSubmoduleEditor } from "./WorktreeSubmoduleSettings";
 import { WorktreeRootEditor } from "./WorktreeRootSettings";
 import { ProjectScopeSelect } from "./ProjectDefaultsSection";
 import { GeneralSettingsPanel } from "./SettingsPanels";
+import { desktopRelaunchScheduler } from "./useDesktopRelaunchGuard";
+import { useStore } from "../../store";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 
 const WORKTREE_PROJECTS = [
@@ -139,6 +141,12 @@ const authAccessHarness = vi.hoisted(() => {
 });
 
 const mockConnectDesktopSshEnvironment = vi.hoisted(() => vi.fn());
+const activeDesktopTurns = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock("../../desktopRelaunchGuard.logic", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../desktopRelaunchGuard.logic")>()),
+  countActiveDesktopTurns: () => activeDesktopTurns.count,
+}));
 const mockUpdateEnvironmentServerSettings = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const originalNavigatorPlatform = navigator.platform;
 
@@ -2190,6 +2198,8 @@ describe("ConnectionsSettings Hub section", () => {
     vi.unstubAllGlobals();
     delete window.desktopBridge;
     delete window.nativeApi;
+    activeDesktopTurns.count = 0;
+    desktopRelaunchScheduler.cancel();
   });
 
   /**
@@ -2309,6 +2319,68 @@ describe("ConnectionsSettings Hub section", () => {
       .element(page.getByRole("button", { name: "Start enrollment" }))
       .not.toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Connect account" })).toBeVisible();
+  });
+
+  it("relaunches at once when no agent turn would be stopped", async () => {
+    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
+    await expect
+      .element(page.getByText("Restart while agents are working?"))
+      .not.toBeInTheDocument();
+  });
+
+  it("asks before a relaunch would stop running agent turns", async () => {
+    // Relaunching stopped the backend and killed in-flight provider turns
+    // without a word; now the operator chooses.
+    activeDesktopTurns.count = 2;
+    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await expect.element(page.getByText("Restart while agents are working?")).toBeVisible();
+    await expect.element(page.getByText(/2 agent turns are still running/)).toBeVisible();
+    expect(setHubLaunchConfig).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect
+      .element(page.getByText("Restart while agents are working?"))
+      .not.toBeInTheDocument();
+    expect(setHubLaunchConfig).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await page.getByRole("button", { name: "Restart now" }).click();
+    await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
+  });
+
+  it("applies a deferred change once the running turns finish", async () => {
+    activeDesktopTurns.count = 1;
+    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Enable" }).click();
+    await page.getByRole("button", { name: "Restart after they finish" }).click();
+    // The waiting notice is an app toast; this harness renders no toast viewport.
+    await vi.waitFor(() => expect(desktopRelaunchScheduler.pendingCount()).toBe(1));
+    expect(setHubLaunchConfig).not.toHaveBeenCalled();
+
+    activeDesktopTurns.count = 0;
+    useStore.setState({});
+    await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
   });
 
   it("offers device-code enrollment where native account setup cannot run", async () => {

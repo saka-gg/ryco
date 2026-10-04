@@ -47,6 +47,7 @@ import { DataList, DataListItem } from "../ui/data-list";
 import { Input } from "../ui/input";
 import { HubAdvancedOptions } from "./HubAdvancedOptions";
 import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import { canEditHubOrigin, presentHubStatus, type HubAction } from "./hubStatus";
 import {
   clearHubEnrollmentIntent,
@@ -136,6 +137,7 @@ export function HubSection({
   const [hostedGitHubTotpCode, setHostedGitHubTotpCode] = useState("");
   const mountedRef = useRef(true);
   const pollerRef = useRef<VisibilityAwarePoller | null>(null);
+  const { guardRelaunch, dialog: relaunchGuardDialog } = useDesktopRelaunchGuard();
   const { copyToClipboard } = useCopyToClipboard();
   // Same derivation the pairing rows use: clipboard writes need a secure context.
   const canCopyToClipboard =
@@ -415,18 +417,26 @@ export function HubSection({
             await leaveHub();
             break;
           case "enable":
-          case "disable":
-            if (action === "enable" && enrollAfterEnable) {
-              recordHubEnrollmentIntent(readIntentStorage(), Date.now());
-            } else {
-              clearHubEnrollmentIntent(readIntentStorage());
-            }
-            await desktopBridge?.setHubLaunchConfig({ enabled: action === "enable" });
-            return; // The app relaunches; nothing after this runs.
-          case "restart":
-            if (!desktopBridge?.restartApp) throw new Error("Desktop restart is unavailable.");
-            await desktopBridge.restartApp();
+          case "disable": {
+            if (!desktopBridge) return;
+            // A relaunch ends this renderer. A deferred or cancelled one has
+            // changed nothing yet, so the panel simply stays as it is.
+            await guardRelaunch(async () => {
+              if (action === "enable" && enrollAfterEnable) {
+                recordHubEnrollmentIntent(readIntentStorage(), Date.now());
+              } else {
+                clearHubEnrollmentIntent(readIntentStorage());
+              }
+              await desktopBridge.setHubLaunchConfig({ enabled: action === "enable" });
+            });
             return;
+          }
+          case "restart": {
+            const restartApp = desktopBridge?.restartApp;
+            if (!restartApp) throw new Error("Desktop restart is unavailable.");
+            await guardRelaunch(restartApp);
+            return;
+          }
           case "open-hub": {
             // The origin root only. The node derives exactly one route from the
             // origin, so synthesising an approval path would invent a Hub
@@ -446,7 +456,7 @@ export function HubSection({
         if (mountedRef.current) setPendingAction(null);
       }
     },
-    [config, desktopBridge, enrollAfterEnable, refreshCurrent],
+    [config, desktopBridge, enrollAfterEnable, guardRelaunch, refreshCurrent],
   );
 
   // Turning the connector on relaunched Ryco; finish what the operator started
@@ -492,14 +502,15 @@ export function HubSection({
       if (!desktopBridge) return;
       setPendingAction("enable");
       try {
-        await desktopBridge.setHubLaunchConfig({ origin });
+        const outcome = await guardRelaunch(() => desktopBridge.setHubLaunchConfig({ origin }));
+        if (outcome !== "relaunched" && mountedRef.current) setPendingAction(null);
       } catch (cause) {
         if (!mountedRef.current) return;
         setError(cause instanceof Error ? cause.message : "Unable to save the Hub address.");
         setPendingAction(null);
       }
     },
-    [desktopBridge],
+    [desktopBridge, guardRelaunch],
   );
 
   const updateNodeNameDraft = useCallback((value: string) => {
@@ -518,7 +529,10 @@ export function HubSection({
     setSavingNodeName(true);
     setNodeNameError(null);
     try {
-      await desktopBridge.setHubLaunchConfig({ nodeName: nodeName === "" ? null : nodeName });
+      const outcome = await guardRelaunch(() =>
+        desktopBridge.setHubLaunchConfig({ nodeName: nodeName === "" ? null : nodeName }),
+      );
+      if (outcome !== "relaunched" && mountedRef.current) setSavingNodeName(false);
     } catch (cause) {
       if (!mountedRef.current) return;
       setNodeNameError(
@@ -526,7 +540,7 @@ export function HubSection({
       );
       setSavingNodeName(false);
     }
-  }, [desktopBridge, nodeNameDraft]);
+  }, [desktopBridge, guardRelaunch, nodeNameDraft]);
 
   const setFileSecretStoreFallback = useCallback(
     async (enabled: boolean) => {
@@ -540,7 +554,10 @@ export function HubSection({
       setSavingFileFallback(true);
       setConfigError(null);
       try {
-        await desktopBridge.setHubLaunchConfig({ allowFileSecretStore: enabled });
+        const outcome = await guardRelaunch(() =>
+          desktopBridge.setHubLaunchConfig({ allowFileSecretStore: enabled }),
+        );
+        if (outcome !== "relaunched" && mountedRef.current) setSavingFileFallback(false);
       } catch (cause) {
         if (!mountedRef.current) return;
         setConfigError(
@@ -549,7 +566,7 @@ export function HubSection({
         setSavingFileFallback(false);
       }
     },
-    [desktopBridge],
+    [desktopBridge, guardRelaunch],
   );
 
   const openRelayGuide = useCallback(async () => {
@@ -1063,6 +1080,8 @@ export function HubSection({
         onFileFallbackChange={(enabled) => void setFileSecretStoreFallback(enabled)}
         onOpenGuide={() => void openRelayGuide()}
       />
+
+      {relaunchGuardDialog}
 
       <AlertDialog open={leaveOpen} onOpenChange={setLeaveOpen}>
         <AlertDialogPopup>
