@@ -1291,6 +1291,186 @@ describe("hosted registration and directory state", () => {
     expect(hostedHubStore.getState().browserStatus).toBe("current");
   });
 
+  function resumableSelection(): HostedHubNode {
+    const selected = node();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [selected],
+      selectedNode: selected,
+      selectionStatus: "online",
+      effectiveRole: selected.effectiveRole,
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+      browserStatus: "current",
+      generation: 4,
+    });
+    return selected;
+  }
+
+  it.each([
+    ["a failing Hub", new HostedHubApiError("unavailable", 503)],
+    [
+      "the request deadline",
+      new HostedHubApiError("timeout", 0, undefined, undefined, undefined, "request-timeout"),
+    ],
+    [
+      "a DNS or TLS failure while the OS reports connectivity",
+      new HostedHubApiError(
+        "unavailable",
+        0,
+        undefined,
+        undefined,
+        undefined,
+        "transport-unavailable",
+      ),
+    ],
+  ])(
+    "retries a resume that failed with %s without another lifecycle event",
+    async (_label, failure) => {
+      vi.useFakeTimers();
+      vi.spyOn(Math, "random").mockReturnValue(0.5);
+      const selected = resumableSelection();
+      const restoreSession = vi
+        .spyOn(hostedHubApi, "restoreSession")
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValue(sessionResponse);
+      vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selected]);
+
+      hostedHubController.suspendBrowser("hidden");
+      await hostedHubController.resumeBrowser();
+      expect(hostedHubStore.getState()).toMatchObject({
+        browserStatus: "stale",
+        sessionStatus: "stale",
+      });
+      expect(activateHostedNode).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(restoreSession).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(restoreSession).toHaveBeenCalledTimes(2);
+      // The retry is the full resume: session, then directory, then a fresh relay
+      // attempt that still has to publish a current snapshot before mutation.
+      await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
+      expect(hostedHubStore.getState()).toMatchObject({
+        browserStatus: "synchronizing",
+        directoryStatus: "ready",
+        sessionStatus: "synchronizing",
+        sessionEstablished: false,
+        generation: 6,
+      });
+      hostedHubController.markSessionReady(selected.environmentId);
+      expect(hostedHubStore.getState()).toMatchObject({
+        browserStatus: "current",
+        sessionStatus: "ready",
+      });
+    },
+  );
+
+  it("backs off between repeated resume failures and stops once access is restored", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const selected = resumableSelection();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selected]);
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
+
+    hostedHubController.markSessionReady(selected.environmentId);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+    expect(hostedHubStore.getState().browserStatus).toBe("current");
+  });
+
+  it("drops a pending resume retry when the browser is suspended again", async () => {
+    vi.useFakeTimers();
+    resumableSelection();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValue(new HostedHubApiError("unavailable", 503));
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    expect(hostedHubStore.getState().browserStatus).toBe("stale");
+    hostedHubController.suspendBrowser("offline");
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState().browserStatus).toBe("offline");
+  });
+
+  it("expires the account when a resume retry finds the session revoked", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const selected = resumableSelection();
+    vi.spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+      .mockRejectedValue(new HostedHubApiError("session_invalid", 401));
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await vi.waitFor(() =>
+      expect(hostedHubStore.getState()).toMatchObject({
+        accountStatus: "session-expired",
+        selectedNode: null,
+        effectiveRole: null,
+      }),
+    );
+    expect(deactivateHostedNode).toHaveBeenCalledWith(selected.environmentId);
+    expect(activateHostedNode).not.toHaveBeenCalled();
+  });
+
+  it("does not put a resume the Hub refused on a timer", async () => {
+    vi.useFakeTimers();
+    resumableSelection();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValue(new HostedHubApiError("forbidden", 403));
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState().browserStatus).toBe("stale");
+  });
+
+  it("still recovers a stale browser after the user returns to the directory", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const selected = resumableSelection();
+    vi.spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selected]);
+
+    hostedHubController.suspendBrowser("hidden");
+    await hostedHubController.resumeBrowser();
+    await hostedHubController.returnToDirectory();
+    expect(hostedHubStore.getState()).toMatchObject({ browserStatus: "stale", selectedNode: null });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(hostedHubStore.getState().browserStatus).toBe("current"));
+    expect(activateHostedNode).not.toHaveBeenCalled();
+  });
+
   it("switches nodes through the ordered environment teardown boundary", async () => {
     const first = node();
     const second = node("node_bbbbbbbbbbbbbbbbbbbbbb", "owner");

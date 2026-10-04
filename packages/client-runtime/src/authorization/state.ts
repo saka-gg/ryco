@@ -374,9 +374,16 @@ export function hostedAccountRecoversOnConnectivity(status: HostedAccountStatus)
   return status === "authenticated" || status === "unavailable";
 }
 
-/** The states the access-recovery backoff exists to leave. */
+/**
+ * The states the access-recovery backoff exists to leave: an account whose
+ * bootstrap could not reach the Hub, and an authenticated browser whose resume
+ * could not revalidate access and is therefore `stale` (no mutation authority).
+ */
 function awaitsAccessRecovery(state: HostedHubState): boolean {
-  return state.accountStatus === "unavailable";
+  return (
+    state.accountStatus === "unavailable" ||
+    (state.accountStatus === "authenticated" && state.browserStatus === "stale")
+  );
 }
 
 /**
@@ -1654,6 +1661,9 @@ class HostedHubController {
     this.#browserResumeOperation?.abort();
     this.#browserResumeOperation = null;
     this.#browserResumePromise = null;
+    // The next resume is driven by the foreground/online signal that ends this
+    // suspension, not by a retry armed for the access check it supersedes.
+    this.#cancelAccessRetry();
     this.#retrySelectedNodeOperation?.abort();
     this.#clearSessionSyncTimer();
     this.#clearDirectoryTimer();
@@ -1705,6 +1715,7 @@ class HostedHubController {
         await this.expireSession();
         return;
       }
+      this.#resetAccessRetry();
       patchState({ account: restored.account, session: restored.session });
       await this.refreshDirectory();
       if (this.#browserLifecycleGeneration !== browserGeneration) return;
@@ -1728,6 +1739,11 @@ class HostedHubController {
         return;
       }
       patchState({ browserStatus: "stale", ...hostedErrorPatch(error) });
+      // Suspension already cleared the directory timer and this failure came
+      // before `refreshDirectory`, so nothing else would ever resume a `stale`
+      // browser short of another visibility/online event or a manual refresh.
+      // The retry re-runs the whole resume, never a shortcut to `current`.
+      this.#scheduleAccessRetry(error);
     }
   }
 
@@ -1906,7 +1922,10 @@ class HostedHubController {
     // selection being torn down. Abort it and invalidate its lifecycle
     // generation so it can neither publish stale state nor leave
     // browserStatus stuck in a node-scoped phase that would gate every
-    // subsequent selection.
+    // subsequent selection. A pending access retry is deliberately left armed:
+    // it is account-scoped, a `stale` browser keeps `selectNode` closed until
+    // a resume succeeds, and the retry re-checks the state and opens a fresh
+    // lifecycle generation when it fires.
     this.#browserLifecycleGeneration += 1;
     this.#browserResumeOperation?.abort();
     this.#browserResumeOperation = null;
