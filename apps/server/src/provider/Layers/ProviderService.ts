@@ -321,6 +321,53 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const withSessionStartLock = <A, E, R>(threadId: ThreadId, effect: Effect.Effect<A, E, R>) =>
     Effect.flatMap(getSessionStartLock(threadId), (semaphore) => semaphore.withPermit(effect));
 
+  const serviceScope = yield* Effect.scope;
+
+  // A completed turn can change the live resume cursor; Claude, for one, drops
+  // its rewind marker on the first completed turn after a revert. Persist it
+  // so a stop, idle reap, crash, or CLI exit resumes the conversation the agent
+  // actually has. Forked under the session lock: it never stalls event
+  // delivery and never interleaves with a rollback's own cursor write.
+  const persistLiveResumeCursor = (instanceId: ProviderInstanceId, threadId: ThreadId) =>
+    withSessionStartLock(
+      threadId,
+      Effect.gen(function* () {
+        const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        if (!binding || binding.providerInstanceId !== instanceId) return;
+        const adapter = yield* registry.getByInstance(instanceId);
+        const session = (yield* adapter.listSessions()).find((candidate) =>
+          sessionMatchesBinding(
+            { ...candidate, providerInstanceId: instanceId },
+            instanceId,
+            binding,
+          ),
+        );
+        if (
+          session?.resumeCursor === undefined ||
+          JSON.stringify(session.resumeCursor) === JSON.stringify(binding.resumeCursor ?? null)
+        ) {
+          return;
+        }
+        yield* directory.upsert({
+          threadId,
+          provider: binding.provider,
+          providerInstanceId: instanceId,
+          resumeCursor: session.resumeCursor,
+        });
+      }),
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : Effect.logWarning("provider.resume-cursor.persist-failed", {
+              threadId,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+      Effect.forkIn(serviceScope),
+      Effect.asVoid,
+    );
+
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
@@ -576,7 +623,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         increment(providerRuntimeEventsTotal, {
           provider: canonicalEvent.provider,
           eventType: canonicalEvent.type,
-        }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
+        }).pipe(
+          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+          Effect.andThen(
+            canonicalEvent.type === "turn.completed"
+              ? persistLiveResumeCursor(source.instanceId, canonicalEvent.threadId)
+              : Effect.void,
+          ),
+        ),
       ),
     );
 
@@ -1504,6 +1558,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         if (routed.isActive) {
           yield* routed.adapter.stopSession(routed.threadId);
         }
+        // The live cursor is the newest one (a Claude rewind marker may have been
+        // cleared since the last send); the next start resumes from it.
+        const liveResumeCursor = routed.isActive ? routed.session?.resumeCursor : undefined;
         yield* directory.upsert({
           threadId: input.threadId,
           provider: routed.adapter.provider,
@@ -1511,6 +1568,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(routed.session?.runtimeSessionId
             ? { runtimeSessionId: routed.session.runtimeSessionId }
             : {}),
+          ...(liveResumeCursor !== undefined ? { resumeCursor: liveResumeCursor } : {}),
           status: "stopped",
           runtimePayload: {
             activeTurnId: null,
@@ -1670,18 +1728,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           });
           // Persist the adapter's post-rollback cursor (Claude rewind marker,
           // OpenCode fork session id) so recovery resumes the rewound conversation.
-          const sessions = yield* routed.adapter.listSessions();
-          const session = sessions.find((candidate) => candidate.threadId === routed.threadId);
-          if (session) {
-            yield* upsertSessionBinding(
-              { ...session, providerInstanceId: routed.instanceId },
-              input.threadId,
-              {
-                lastRuntimeEvent: "provider.rollback",
-                lastRuntimeEventAt: new Date().toISOString(),
-              },
-            );
-          }
+          // Best-effort: the agent has already forgotten the turns, so failing
+          // here would report "nothing was changed" when something was. The
+          // next send or completed turn persists the live cursor again.
+          yield* Effect.gen(function* () {
+            const sessions = yield* routed.adapter.listSessions();
+            const session = sessions.find((candidate) => candidate.threadId === routed.threadId);
+            if (session) {
+              yield* upsertSessionBinding(
+                { ...session, providerInstanceId: routed.instanceId },
+                input.threadId,
+                {
+                  lastRuntimeEvent: "provider.rollback",
+                  lastRuntimeEventAt: new Date().toISOString(),
+                },
+              );
+            }
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logError("provider.rollback.persist-binding-failed", {
+                    threadId: input.threadId,
+                    cause: Cause.pretty(cause),
+                  }),
+            ),
+          );
           yield* analytics.record("provider.conversation.rolled_back", {
             provider: routed.adapter.provider,
             turns: input.numTurns,

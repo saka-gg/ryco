@@ -1384,6 +1384,125 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  // A rewind marker the adapter cleared on a completed turn must not survive in
+  // the binding: recovery would truncate the conversation at the old rewind point.
+  const rewoundCursor = { resume: "session-rewound", rewind: { at: "assistant-1" }, turnCount: 1 };
+  const settledCursor = { resume: "session-rewound", resumeSessionAt: "assistant-2", turnCount: 2 };
+
+  it.effect("persists the live resume cursor when a turn completes", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-cursor-after-turn");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-cursor",
+        runtimeMode: "full-access",
+        resumeCursor: rewoundCursor,
+      });
+      yield* provider.sendTurn({ threadId, input: "after the revert", attachments: [] });
+      routing.codex.updateSession(threadId, (existing) => ({
+        ...existing,
+        status: "ready",
+        activeTurnId: undefined,
+        resumeCursor: settledCursor,
+      }));
+
+      routing.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-cursor-after-turn"),
+        provider: CODEX_DRIVER,
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId: asTurnId(`turn-${threadId}`),
+        payload: { state: "completed" },
+      });
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const persisted = yield* runtimeRepository.getByThreadId({ threadId });
+        if (
+          Option.isSome(persisted) &&
+          JSON.stringify(persisted.value.resumeCursor) === JSON.stringify(settledCursor)
+        ) {
+          break;
+        }
+        yield* sleep(5);
+      }
+
+      // The runtime dies without a graceful stop; recovery must use the settled cursor.
+      routing.codex.removeSession(threadId);
+      routing.codex.startSession.mockClear();
+      yield* provider.sendTurn({ threadId, input: "after a crash", attachments: [] });
+
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      assert.deepEqual(routing.codex.startSession.mock.calls[0]?.[0].resumeCursor, settledCursor);
+    }),
+  );
+
+  it.effect("persists the live resume cursor when a session is stopped", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-cursor-on-stop");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-cursor",
+        runtimeMode: "full-access",
+        resumeCursor: rewoundCursor,
+      });
+      routing.codex.updateSession(threadId, (existing) => ({
+        ...existing,
+        resumeCursor: settledCursor,
+      }));
+
+      yield* provider.stopSession({ threadId });
+
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.isTrue(Option.isSome(persisted));
+      if (Option.isSome(persisted)) {
+        assert.equal(persisted.value.status, "stopped");
+        assert.deepEqual(persisted.value.resumeCursor, settledCursor);
+      }
+    }),
+  );
+
+  it.effect("reports a rollback as done when only the binding write after it fails", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-rollback-binding-write");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      routing.codex.rollbackThread.mockImplementationOnce((rolledBackThreadId) =>
+        Effect.sync(() => {
+          // The adapter has already forgotten the turns when the bookkeeping fails.
+          routing.codex.listSessions.mockImplementationOnce(() =>
+            Effect.die(new Error("session listing failed")),
+          );
+          return { threadId: rolledBackThreadId, turns: [] as const };
+        }),
+      );
+
+      const exit = yield* Effect.exit(
+        provider.rollbackConversation({
+          threadId,
+          numTurns: 1,
+          targetTurnId: asTurnId("turn-1"),
+          droppedTurnIds: [asTurnId("turn-2")],
+        }),
+      );
+
+      assert.isTrue(Exit.isSuccess(exit));
+    }),
+  );
+
   it.effect("routes explicit claudeAgent provider session starts to the claude adapter", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

@@ -2518,8 +2518,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (context.turnHeads.length > CLAUDE_TURN_HEADS_CAP) context.turnHeads.shift();
     }
     // The first completed turn after a rewind makes the rewound branch the newest
-    // transcript leaf, so plain resumes are correct again.
+    // transcript leaf, so plain resumes are correct again. Refresh the cursor
+    // before turn.completed goes out: ProviderService persists the live cursor
+    // when it sees that event.
     if (status === "completed") context.pendingRewind = undefined;
+    yield* updateResumeCursor(context);
 
     if (usageSnapshot) {
       const usageStamp = yield* makeEventStamp();
@@ -2586,7 +2589,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Release waiters before the tail effects: the turn is detached.
     Deferred.doneUnsafe(completion, Effect.void);
     if (context.agentControl) yield* context.agentControl.retireTurn(turnState.turnId);
-    yield* updateResumeCursor(context);
     if (status === "completed" && usageSnapshot) {
       yield* maybeEnableAutomaticCompaction(context, usageSnapshot);
     }
