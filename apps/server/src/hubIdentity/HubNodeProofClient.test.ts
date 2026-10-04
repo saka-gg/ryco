@@ -232,7 +232,7 @@ describe("Hub node proof client", () => {
     expect(challengeRequests).toBe(1);
   });
 
-  it("refetches a challenge that went stale while signing, once", async () => {
+  it("refetches a challenge only when its signature could outlive it, and only once", async () => {
     const root = await mkdtemp(join(tmpdir(), "ryco-node-proof-stale-"));
     const stateStore = await makeLocalHubIdentityStateStore(join(root, "identity.json"));
     const realSigningIdentity = makeNodeSigningIdentity(memoryStore());
@@ -279,20 +279,27 @@ describe("Hub node proof client", () => {
       now: () => clock,
     });
 
-    signingDelays = [16_000, 100];
-    const frame = await client.createRelayAuthenticationFrame(hubOrigin, {
-      protocolMajor: 1,
-      protocolMinor: 1,
-    });
-    expect(challengeRequests).toBe(2);
-    expect(frame.nonce).toEqual(new Uint8Array(32).fill(2));
+    const prove = () =>
+      client.createRelayAuthenticationFrame(hubOrigin, { protocolMajor: 1, protocolMinor: 1 });
 
-    // A second slow signature is the connector's backoff to handle, not a loop.
+    // An 18-second prompt still leaves the socket open and the send well inside
+    // the Hub's 30 seconds: the proof the owner just approved is the one sent.
+    signingDelays = [18_000];
+    expect((await prove()).nonce).toEqual(new Uint8Array(32).fill(1));
+    expect(challengeRequests).toBe(1);
+
+    // One that could reach the Hub after its challenge expired is replaced.
     challengeRequests = 0;
-    signingDelays = [16_000, 16_000];
-    await expect(
-      client.createRelayAuthenticationFrame(hubOrigin, { protocolMajor: 1, protocolMinor: 1 }),
-    ).rejects.toMatchObject({ code: "node_proof_failed", failure: "network" });
+    signingDelays = [24_000, 100];
+    expect((await prove()).nonce).toEqual(new Uint8Array(32).fill(2));
+    expect(challengeRequests).toBe(2);
+
+    // A second slow signature is sent anyway rather than discarded for a third
+    // prompt: the Hub may still accept it, and a refusal of a proof this old is
+    // retried once as stale by the relay session.
+    challengeRequests = 0;
+    signingDelays = [24_000, 24_000];
+    expect((await prove()).nonce).toEqual(new Uint8Array(32).fill(2));
     expect(challengeRequests).toBe(2);
   });
 

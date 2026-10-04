@@ -389,10 +389,11 @@ must complete within the negotiated five-second deadline.
 
 The Hub honours a challenge for 30 seconds and rejects an expired one exactly as it rejects a wrong
 key. Signing can be slow — a keychain access prompt, a slow custody backend, a machine suspended
-mid-handshake — so a challenge that took 15 seconds or more to sign, measured on the local clock
-from before it was requested, is discarded and replaced once before the socket opens. A relay
-rejection of a proof that was 20 seconds or more old when sent is retried once with a fresh
-challenge before it counts as a rejection.
+mid-handshake. A challenge that took 23 seconds or more to sign, measured on the local clock from
+before it was requested, may no longer survive the five-second socket open, so it is discarded and
+replaced once before the socket opens; the replacement's proof is sent however long it took, rather
+than asking for a third signature. A relay rejection of a proof that was 20 seconds or more old when
+sent is retried once with a fresh challenge before it counts as a rejection.
 
 Node WebSockets do not use cookies, Authorization headers, URL credentials, query parameters, or
 bearer subprotocols. A challenge is single-use and in memory only. Replayed proofs, copied node IDs,
