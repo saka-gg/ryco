@@ -73,6 +73,28 @@ export class ProviderAdapterRequestError extends Schema.TaggedError<ProviderAdap
 }
 
 /**
+ * ProviderTurnNotSteerableError - The turn cannot take a steer right now: it already ended, the
+ * provider is busy (an approval or question is pending), or steering is unsupported. The message
+ * stays queued and is sent as the next turn, so callers treat this as a deferral, not a failure.
+ */
+export class ProviderTurnNotSteerableError extends Schema.TaggedError<ProviderTurnNotSteerableError>()(
+  "ProviderTurnNotSteerableError",
+  {
+    provider: Schema.String,
+    threadId: Schema.String,
+    turnId: Schema.optional(Schema.String),
+    reason: Schema.Literals(["turn-ended", "busy", "unsupported"]),
+    /** User-facing sentence; surfaced verbatim in the deferred activity. */
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/**
  * ProviderAdapterProcessError - Provider process lifecycle failure.
  */
 export class ProviderAdapterProcessError extends Schema.TaggedError<ProviderAdapterProcessError>()(
@@ -196,7 +218,8 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
-  | ProviderAdapterProcessError;
+  | ProviderAdapterProcessError
+  | ProviderTurnNotSteerableError;
 
 export type ProviderServiceError =
   | ProviderValidationError

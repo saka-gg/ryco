@@ -1,0 +1,328 @@
+import { describe, expect, it } from "vitest";
+import type { SDKMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+
+import {
+  CLAUDE_CLI_CAPABILITY_INTERRUPT_CANCEL_QUEUED,
+  CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT,
+  claudeEchoedPromptUuids,
+  claudeResultBelongsToTurn,
+  classifyClaudeResultKind,
+  decideClaudeStop,
+  decideClaudeTurnResult,
+  isClaudeRootTurnFrame,
+  parseClaudeCliCapabilities,
+  readClaudeInterruptReceipt,
+  rememberDiscardedSteer,
+  type ClaudeResultKind,
+  type ClaudeStopDecisionInput,
+} from "./claudeSteering.ts";
+
+const P = "prompt-uuid";
+const S = "steer-uuid";
+const S2 = "steer-uuid-2";
+
+const frame = (value: Record<string, unknown>) =>
+  ({ uuid: "frame", session_id: "sdk-session", ...value }) as unknown as SDKMessage;
+const result = (value: Record<string, unknown>) =>
+  frame({ type: "result", ...value }) as unknown as SDKResultMessage;
+
+describe("decideClaudeTurnResult", () => {
+  const decide = (input: {
+    readonly steers?: ReadonlyArray<string>;
+    readonly settled?: ReadonlyArray<string>;
+    readonly kind: ClaudeResultKind;
+    readonly echoed?: ReadonlyArray<string>;
+    readonly count?: number;
+    readonly interruptRequested?: boolean;
+  }) =>
+    decideClaudeTurnResult({
+      kind: input.kind,
+      echoedPromptUuids: input.echoed ?? [P],
+      queuedTurnCount: input.count,
+      steerPromptUuids: new Set(input.steers ?? []),
+      settledSteerPromptUuids: new Set(input.settled ?? []),
+      interruptRequested: input.interruptRequested ?? false,
+    });
+
+  it.each([
+    { row: 1, input: { kind: "abort", count: 1 }, decision: "complete" },
+    { row: 2, input: { steers: [S], kind: "abort", count: 1 }, decision: "await-steer" },
+    { row: 3, input: { steers: [S], kind: "abort", count: 0 }, decision: "complete" },
+    { row: 4, input: { steers: [S], kind: "abort" }, decision: "complete" },
+    { row: 5, input: { steers: [S], settled: [S], kind: "abort", count: 1 }, decision: "complete" },
+    { row: 7, input: { steers: [S], kind: "success", count: 1 }, decision: "await-steer" },
+    { row: 8, input: { steers: [S], kind: "failure", count: 1 }, decision: "complete" },
+    {
+      row: 9,
+      input: { steers: [S], kind: "abort", count: 1, interruptRequested: true },
+      decision: "complete",
+    },
+    {
+      row: 10,
+      input: { steers: [S, S2], settled: [S], kind: "abort", count: 1 },
+      decision: "await-steer",
+    },
+  ] as const)("row $row → $decision", ({ input, decision }) => {
+    expect(decide(input).decision).toBe(decision);
+  });
+
+  it("row 6: a folded steer settles and the turn completes", () => {
+    expect(decide({ steers: [S], kind: "success", echoed: [P, S] })).toEqual({
+      decision: "complete",
+      newlySettled: [S],
+      unsettled: [],
+    });
+  });
+
+  it("reports settled and unsettled steers separately", () => {
+    expect(decide({ steers: [S, S2], kind: "abort", echoed: [S], count: 1 })).toEqual({
+      decision: "await-steer",
+      newlySettled: [S],
+      unsettled: [S2],
+    });
+  });
+});
+
+describe("classifyClaudeResultKind", () => {
+  it("treats an aborted_tools terminal reason as an abort even without abort text", () => {
+    expect(
+      classifyClaudeResultKind(
+        result({
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Tool execution stopped"],
+          terminal_reason: "aborted_tools",
+        }),
+      ),
+    ).toBe("abort");
+  });
+
+  it("falls back to the abort text when the terminal reason is absent", () => {
+    expect(
+      classifyClaudeResultKind(
+        result({
+          subtype: "error_during_execution",
+          is_error: false,
+          errors: ["Request was aborted."],
+        }),
+      ),
+    ).toBe("abort");
+  });
+
+  it("classifies a success flagged as an error as a failure", () => {
+    expect(classifyClaudeResultKind(result({ subtype: "success", is_error: true }))).toBe(
+      "failure",
+    );
+    expect(classifyClaudeResultKind(result({ subtype: "success", is_error: false }))).toBe(
+      "success",
+    );
+  });
+
+  it("classifies an api_error as a failure", () => {
+    expect(
+      classifyClaudeResultKind(
+        result({
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Overloaded"],
+          terminal_reason: "api_error",
+        }),
+      ),
+    ).toBe("failure");
+  });
+});
+
+describe("claudeEchoedPromptUuids", () => {
+  it("prefers the uuid list, falls back to the single uuid, and ignores other frames", () => {
+    expect(claudeEchoedPromptUuids(result({ user_message_uuids: [P, S] }))).toEqual([P, S]);
+    expect(
+      claudeEchoedPromptUuids(frame({ type: "stream_event", user_message_uuid: S, event: {} })),
+    ).toEqual([S]);
+    expect(
+      claudeEchoedPromptUuids(result({ user_message_uuids: [], user_message_uuid: P })),
+    ).toEqual([P]);
+    expect(claudeEchoedPromptUuids(frame({ type: "assistant", user_message_uuid: P }))).toEqual([]);
+    expect(claudeEchoedPromptUuids(result({}))).toEqual([]);
+  });
+});
+
+describe("claudeResultBelongsToTurn", () => {
+  const belongs = (echoed: ReadonlyArray<string>, origin?: { readonly kind: string }) =>
+    claudeResultBelongsToTurn({
+      echoed,
+      origin,
+      promptUuid: P,
+      steerPromptUuids: new Set([S]),
+    });
+
+  it("accepts a steer-only echo and rejects a foreign one", () => {
+    expect(belongs([S])).toBe(true);
+    expect(belongs([P])).toBe(true);
+    expect(belongs(["foreign"])).toBe(false);
+  });
+
+  it("without an echo, rejects only non-human origins", () => {
+    expect(belongs([], { kind: "task-notification" })).toBe(false);
+    expect(belongs([], { kind: "human" })).toBe(true);
+    expect(belongs([])).toBe(true);
+  });
+});
+
+describe("decideClaudeStop", () => {
+  const stop = (input: Partial<ClaudeStopDecisionInput>) =>
+    decideClaudeStop({
+      unsettledSteers: [],
+      promptUuid: P,
+      sealedSegmentCount: 0,
+      awaitingSteerContinuation: false,
+      receipt: undefined,
+      ...input,
+    });
+
+  it("S1: no steers never force-closes", () => {
+    expect(stop({ receipt: { stillQueued: [], cancelled: undefined } })).toEqual({
+      forceClose: false,
+      discard: [],
+    });
+    expect(stop({})).toEqual({ forceClose: false, discard: [] });
+  });
+
+  it("S2: a cancelled steer after the prompt segment force-closes and discards nothing", () => {
+    expect(
+      stop({
+        unsettledSteers: [S],
+        sealedSegmentCount: 1,
+        awaitingSteerContinuation: true,
+        receipt: { stillQueued: [], cancelled: [S] },
+      }),
+    ).toEqual({ forceClose: true, discard: [] });
+  });
+
+  it("S3: a still-queued steer after the prompt segment force-closes and is discarded", () => {
+    expect(
+      stop({
+        unsettledSteers: [S],
+        sealedSegmentCount: 1,
+        awaitingSteerContinuation: true,
+        receipt: { stillQueued: [S], cancelled: undefined },
+      }),
+    ).toEqual({ forceClose: true, discard: [S] });
+  });
+
+  it("S4: a still-streaming prompt is not force-closed", () => {
+    expect(
+      stop({ unsettledSteers: [S], receipt: { stillQueued: [S], cancelled: undefined } }),
+    ).toEqual({ forceClose: false, discard: [S] });
+  });
+
+  it("S5: a steer in transit counts as running", () => {
+    expect(
+      stop({
+        unsettledSteers: [S],
+        sealedSegmentCount: 1,
+        awaitingSteerContinuation: true,
+        receipt: { stillQueued: [], cancelled: undefined },
+      }),
+    ).toEqual({ forceClose: false, discard: [S] });
+  });
+
+  it("S6: waiting cleared by a wake, steer queued, prompt done → force-close", () => {
+    expect(
+      stop({
+        unsettledSteers: [S],
+        sealedSegmentCount: 1,
+        awaitingSteerContinuation: false,
+        receipt: { stillQueued: [S], cancelled: undefined },
+      }),
+    ).toEqual({ forceClose: true, discard: [S] });
+  });
+
+  it("S7: a cancelled prompt counts as done", () => {
+    expect(
+      stop({
+        unsettledSteers: [S],
+        sealedSegmentCount: 0,
+        receipt: { stillQueued: [], cancelled: [P, S] },
+      }),
+    ).toEqual({ forceClose: true, discard: [] });
+  });
+
+  it("S8: without a receipt, force-close only while waiting and discard every steer", () => {
+    expect(
+      stop({ unsettledSteers: [S, S2], awaitingSteerContinuation: true, sealedSegmentCount: 1 }),
+    ).toEqual({ forceClose: true, discard: [S, S2] });
+    expect(stop({ unsettledSteers: [S], awaitingSteerContinuation: false })).toEqual({
+      forceClose: false,
+      discard: [S],
+    });
+  });
+});
+
+describe("readClaudeInterruptReceipt", () => {
+  it("parses valid receipts and rejects garbage", () => {
+    expect(readClaudeInterruptReceipt(undefined)).toBeUndefined();
+    expect(readClaudeInterruptReceipt({})).toBeUndefined();
+    expect(readClaudeInterruptReceipt({ still_queued: [1] })).toBeUndefined();
+    expect(readClaudeInterruptReceipt("receipt")).toBeUndefined();
+    expect(readClaudeInterruptReceipt({ still_queued: [S] })).toEqual({
+      stillQueued: [S],
+      cancelled: undefined,
+    });
+    expect(readClaudeInterruptReceipt({ still_queued: [], cancelled: [S] })).toEqual({
+      stillQueued: [],
+      cancelled: [S],
+    });
+    expect(readClaudeInterruptReceipt({ still_queued: [], cancelled: "x" })).toEqual({
+      stillQueued: [],
+      cancelled: undefined,
+    });
+  });
+});
+
+describe("rememberDiscardedSteer", () => {
+  it("evicts the oldest uuid at the cap", () => {
+    const set = new Set<string>();
+    rememberDiscardedSteer(set, "a", 2);
+    rememberDiscardedSteer(set, "b", 2);
+    rememberDiscardedSteer(set, "a", 2);
+    rememberDiscardedSteer(set, "c", 2);
+    expect([...set]).toEqual(["b", "c"]);
+  });
+});
+
+describe("parseClaudeCliCapabilities", () => {
+  it("reads the init capabilities and defaults to none", () => {
+    expect(
+      parseClaudeCliCapabilities(
+        frame({
+          type: "system",
+          subtype: "init",
+          capabilities: [
+            CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT,
+            CLAUDE_CLI_CAPABILITY_INTERRUPT_CANCEL_QUEUED,
+            7,
+          ],
+        }),
+      ),
+    ).toEqual(
+      new Set([
+        CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT,
+        CLAUDE_CLI_CAPABILITY_INTERRUPT_CANCEL_QUEUED,
+      ]),
+    );
+    expect(parseClaudeCliCapabilities(frame({ type: "system", subtype: "init" })).size).toBe(0);
+  });
+});
+
+describe("isClaudeRootTurnFrame", () => {
+  it("matches root model frames only", () => {
+    expect(isClaudeRootTurnFrame(frame({ type: "stream_event", parent_tool_use_id: null }))).toBe(
+      true,
+    );
+    expect(isClaudeRootTurnFrame(frame({ type: "assistant" }))).toBe(true);
+    expect(isClaudeRootTurnFrame(frame({ type: "user", parent_tool_use_id: "tool-1" }))).toBe(
+      false,
+    );
+    expect(isClaudeRootTurnFrame(frame({ type: "system", subtype: "status" }))).toBe(false);
+  });
+});
