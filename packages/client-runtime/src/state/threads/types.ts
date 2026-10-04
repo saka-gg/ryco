@@ -23,6 +23,7 @@ import type {
   WorktreeId,
   WorktreeOrigin,
   ThreadGoal,
+  ThreadLineage,
   ThreadPriorityProjectedRanking,
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE as CONTRACT_DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
@@ -175,6 +176,8 @@ export interface Thread {
   worktreeId?: string | null | undefined;
   manualStatusBucket?: StatusBucket | null | undefined;
   manualPosition?: number | undefined;
+  /** Server-owned provenance; absent/null on root threads and from older servers. */
+  lineage?: ThreadLineage | null | undefined;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
 }
@@ -205,6 +208,8 @@ export interface ThreadShell {
   manualStatusBucket?: StatusBucket | null | undefined;
   manualPosition?: number | undefined;
   goal?: ThreadGoal | null;
+  /** Server-owned provenance; absent/null on root threads and from older servers. */
+  lineage?: ThreadLineage | null | undefined;
 }
 
 export interface ThreadTurnState {
@@ -253,6 +258,8 @@ export interface SidebarThreadSummary {
   hasActionableProposedPlan: boolean;
   /** Optional environment-local derived ranking projected by supporting servers. */
   priority?: ThreadPriorityProjectedRanking | undefined;
+  /** Server-owned provenance; absent/null on root threads and from older servers. */
+  lineage?: ThreadLineage | null | undefined;
 }
 
 export interface SidebarWorktreeSummary {
