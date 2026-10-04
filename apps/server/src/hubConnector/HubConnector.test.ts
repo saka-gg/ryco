@@ -1328,6 +1328,51 @@ describe("HubConnector", () => {
     await connector.stop();
   });
 
+  it("spaces out a connection the Hub displaced with a bare close", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const starting = connector.start();
+    await settle();
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await starting;
+    sockets[0]!.emit("close", { code: 1012, reason: "connection_replaced" } as CloseEvent);
+    await settle();
+    // Not the one-second network retry that would displace the other copy right back.
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "connection_replaced",
+      nextRetryAt: new Date(clock.value.now() + 300_000).toISOString(),
+    });
+    await clock.advance(60_000);
+    await settle();
+    expect(sockets).toHaveLength(1);
+    await connector.stop();
+  });
+
   it("lets two processes sharing an identity converge instead of swapping forever", async () => {
     const clock = scheduler();
     const sockets: FakeSocket[] = [];

@@ -424,7 +424,10 @@ so status says both what went wrong and that the connector is handling it:
 
 Each delay is jittered and never shorter than its first retry. The replacement budget is what lets
 two processes sharing an identity converge: each retry displaces the other copy, so retrying forever
-would be the flapping itself. A custody read that fails at startup or on `resume` takes the same
+would be the flapping itself. The Hub displaces the older connection for an identity either with a
+`connection_replaced` error frame or by closing it with code 1012 and reason `connection_replaced`;
+both are recognized, and only that exact close is — any other close is an ordinary network drop. A
+custody read that fails at startup or on `resume` takes the same
 path as one that fails mid-connection.
 
 Configuration, a credential store that could not be opened at all (`identity_store_unavailable`),

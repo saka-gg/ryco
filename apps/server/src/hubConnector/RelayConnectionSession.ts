@@ -72,6 +72,24 @@ export function relayErrorKind(frame: RelayErrorFrame): ConnectorFailureKind {
   }
 }
 
+/**
+ * The close the Hub gives a socket another connection displaced.
+ *
+ * The Hub terminates the older of two connections for one node identity with
+ * this close and no error frame. Read as an ordinary network drop, both copies
+ * reconnect at once and displace each other indefinitely, and neither ever
+ * reaches the `connection_replaced` handling that spaces them out. Matched on
+ * the exact code and reason, so no other 1012 ("service restart") is affected.
+ */
+const REPLACED_CLOSE_CODE = 1012;
+const REPLACED_CLOSE_REASON = "connection_replaced";
+
+function closeEventKind(event: CloseEvent | undefined): ConnectorFailureKind {
+  return event?.code === REPLACED_CLOSE_CODE && event.reason === REPLACED_CLOSE_REASON
+    ? "connection_replaced"
+    : "network";
+}
+
 function binaryMessage(data: unknown): Uint8Array | undefined {
   if (data instanceof Uint8Array) return Uint8Array.from(data);
   if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
@@ -400,14 +418,15 @@ export class RelayConnectionSession {
         this.#onFrame(frame);
       };
       const onError = () => fail(new RelayConnectionError("network"));
-      const onClose = () => {
+      const onClose = (event: CloseEvent) => {
         if (this.#closed) return;
+        const kind = closeEventKind(event);
         if (!this.#settled) {
-          fail(new RelayConnectionError("network"));
+          fail(new RelayConnectionError(kind));
         } else {
           this.#closed = true;
           this.#disposeListeners();
-          this.#onTerminal(new RelayConnectionError("network"));
+          this.#onTerminal(new RelayConnectionError(kind));
         }
       };
       this.#listeners = { open: onOpen, message: onMessage, error: onError, close: onClose };

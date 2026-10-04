@@ -525,6 +525,43 @@ describe("RelayConnectionSession", () => {
     expect(String(error)).toBe("RelayConnectionError: Hub relay connection failed.");
   });
 
+  it("recognizes the Hub's close for a displaced connection, and only that close", async () => {
+    const closeKind = async (event: Partial<CloseEvent>) => {
+      const socket = new FakeSocket();
+      const terminal: RelayConnectionError[] = [];
+      const session = new RelayConnectionSession({
+        identity: identity(),
+        transport: { open: () => socket },
+        hubOrigin: "https://relay.example",
+        onFrame: () => undefined,
+        onTerminal: (error) => terminal.push(error),
+      });
+      const authenticating = session.authenticate();
+      await Promise.resolve();
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "ready",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          limits: RELAY_INITIAL_LIMITS,
+        }),
+      } as MessageEvent);
+      await authenticating;
+      socket.emit("close", event as CloseEvent);
+      expect(terminal).toHaveLength(1);
+      return terminal[0]!.kind;
+    };
+    // The Hub displaces the older connection for one identity with exactly this
+    // close and no error frame.
+    expect(await closeKind({ code: 1012, reason: "connection_replaced" })).toBe(
+      "connection_replaced",
+    );
+    expect(await closeKind({ code: 1012, reason: "" })).toBe("network");
+    expect(await closeKind({ code: 1006, reason: "connection_replaced" })).toBe("network");
+    expect(await closeKind({})).toBe("network");
+  });
+
   it("marks a rejection of a proof old enough to have expired as stale", async () => {
     const rejection = async (proofTakesMs: number) => {
       let clock = 1_000_000;
