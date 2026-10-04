@@ -15,7 +15,11 @@ import { stripRelayChunkCapabilityPrelude } from "@ryco/shared/relayMessageChunk
 import { DEFAULT_HUB_CONNECTOR_CONFIG, type HubConnectorConfig } from "../config.ts";
 import type { NodeE2eeAdvertisement } from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
 import { NODE_E2EE_FAIL_CLOSED_POLICY } from "../hubIdentity/NodeE2eePolicyStore.ts";
-import { HubRelayAuthenticationError, type HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
+import {
+  HubIdentityRuntimeError,
+  HubRelayAuthenticationError,
+  type HubIdentityRuntimeShape,
+} from "./HubIdentityRuntime.ts";
 import {
   stubCrossDeviceApprovalService,
   stubIdentityE2eeAdmin,
@@ -1175,12 +1179,27 @@ describe("HubConnector", () => {
     await connector.stop();
   });
 
-  it("requires operator action for fresh-proof authentication failure", async () => {
-    const socket = new FakeSocket();
+  it("retries a refused fresh proof on its own slow schedule instead of parking", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let proofs = 0;
+    const activeIdentity = identity();
     const connector = new HubConnector({
       config: enabledConfig,
-      identity: identity(),
-      transport: { open: () => socket },
+      identity: {
+        ...activeIdentity,
+        createRelayAuthenticationFrame: async (...input) => {
+          proofs += 1;
+          return activeIdentity.createRelayAuthenticationFrame(...input);
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
       channels: {
         open: async () => {
           throw new Error("unused");
@@ -1188,11 +1207,12 @@ describe("HubConnector", () => {
       },
       enrollmentMetadata,
       livenessWatch: false,
+      scheduler: clock.value,
     });
     const starting = connector.start();
     await settle();
-    socket.emit("open", {} as Event);
-    socket.emit("message", {
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
       data: encoded({
         type: "error",
         protocolMajor: 1,
@@ -1204,8 +1224,194 @@ describe("HubConnector", () => {
     await starting;
     expect(connector.status()).toMatchObject({
       state: "degraded",
-      degradedMode: "operator_action_required",
+      degradedMode: "backing_off",
       failure: "authentication_failed",
+      reconnectAttempt: 0,
+      nextRetryAt: new Date(clock.value.now() + 900_000).toISOString(),
+    });
+    expect(clock.timers.size).toBe(1);
+
+    // Nothing that suggests the network moved makes a refused proof worth
+    // retrying sooner.
+    connector.nudge();
+    await settle();
+    expect(proofs).toBe(1);
+
+    await clock.advance(900_000);
+    await settle();
+    // A fresh challenge and a fresh proof, through the full handshake.
+    expect(proofs).toBe(2);
+    expect(sockets).toHaveLength(2);
+    await connector.stop();
+    expect(clock.timers.size).toBe(0);
+  });
+
+  it("retries a keychain that is locked at launch instead of waiting for resume", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const activeIdentity = identity();
+    let locked = true;
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: {
+        ...activeIdentity,
+        readState: async () => {
+          if (locked) throw new Error("keychain locked");
+          return activeIdentity.readState();
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    await connector.start();
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "identity_unavailable",
+      nextRetryAt: new Date(clock.value.now() + 30_000).toISOString(),
+    });
+
+    await clock.advance(30_000);
+    await settle();
+    expect(connector.status()).toMatchObject({
+      failure: "identity_unavailable",
+      reconnectAttempt: 1,
+      nextRetryAt: new Date(clock.value.now() + 60_000).toISOString(),
+    });
+    expect(sockets).toHaveLength(0);
+
+    // Unlocking the screen, or waking the machine, is when a keychain opens.
+    locked = false;
+    connector.nudge();
+    await settle();
+    expect(sockets).toHaveLength(1);
+    expect(connector.status().state).toBe("authenticating");
+    await connector.stop();
+    expect(clock.timers.size).toBe(0);
+  });
+
+  it("still parks a credential store that failed to open, which only a restart rebuilds", async () => {
+    const clock = scheduler();
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity({
+        readState: async () => {
+          throw new HubIdentityRuntimeError("identity_store_unavailable");
+        },
+      }),
+      transport: {
+        open: () => {
+          throw new Error("unused");
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    await connector.start();
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "operator_action_required",
+      failure: "identity_store_unavailable",
+    });
+    expect(clock.timers.size).toBe(0);
+    await connector.stop();
+  });
+
+  it("lets two processes sharing an identity converge instead of swapping forever", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const replaceLatest = async () => {
+      const socket = sockets.at(-1)!;
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "ready",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          limits: RELAY_INITIAL_LIMITS,
+        }),
+      } as MessageEvent);
+      await settle();
+      socket.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code: "connection_replaced",
+          fatal: true,
+        }),
+      } as MessageEvent);
+      await settle();
+    };
+
+    const starting = connector.start();
+    await settle();
+    await replaceLatest();
+    await starting;
+    // Three displacements an hour, each at least five minutes apart...
+    for (const [delayMs, attempt] of [
+      [300_000, 0],
+      [600_000, 1],
+      [900_000, 2],
+    ] as const) {
+      expect(connector.status()).toMatchObject({
+        state: "degraded",
+        degradedMode: "backing_off",
+        failure: "connection_replaced",
+        reconnectAttempt: attempt,
+        nextRetryAt: new Date(clock.value.now() + delayMs).toISOString(),
+      });
+      connector.nudge();
+      await settle();
+      expect(sockets).toHaveLength(attempt + 1);
+      await clock.advance(delayMs);
+      await settle();
+      expect(sockets).toHaveLength(attempt + 2);
+      await replaceLatest();
+    }
+    // ...then this copy stops and leaves the other one connected.
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "operator_action_required",
+      failure: "connection_replaced",
+    });
+    expect(clock.timers.size).toBe(0);
+
+    // An owner who stopped the other copy and pressed Retry gets a fresh budget.
+    const resuming = connector.resume();
+    await settle();
+    expect(sockets).toHaveLength(5);
+    await replaceLatest();
+    await resuming;
+    expect(connector.status()).toMatchObject({
+      degradedMode: "backing_off",
+      failure: "connection_replaced",
     });
     await connector.stop();
   });
@@ -1266,11 +1472,14 @@ describe("HubConnector", () => {
     expect(sockets).toHaveLength(2);
     rejectLatest();
     await settle();
+    // The second is taken at its word — but on the refused-proof schedule, a
+    // quarter of an hour away, not the one-second network backoff.
     expect(connector.status()).toMatchObject({
       state: "degraded",
+      degradedMode: "backing_off",
       failure: "authentication_failed",
+      nextRetryAt: new Date(clock.value.now() + 900_000).toISOString(),
     });
-    expect(connector.status().degradedMode).not.toBe("backing_off");
     await connector.stop();
   });
 

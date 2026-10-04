@@ -226,14 +226,13 @@ describe("classifyConnectorFailure", () => {
     }
   });
 
-  it("stops every configuration, identity, authentication, and replacement failure", () => {
+  it("stops only the failures no retry can fix", () => {
     for (const kind of [
       "configuration_invalid",
-      "identity_unavailable",
+      "identity_store_unavailable",
       "identity_origin_mismatch",
       "enrollment_unavailable",
-      "authentication_failed",
-      "connection_replaced",
+      "enrollment_expired",
     ] as const) {
       expect(classifyConnectorFailure(kind, 0)).toMatchObject({ action: "operator" });
     }
@@ -244,6 +243,29 @@ describe("classifyConnectorFailure", () => {
     expect(classifyConnectorFailure("version_incompatible", 0)).toMatchObject({
       action: "operator",
       terminalState: "version_incompatible",
+    });
+  });
+
+  it("retries usually-transient identity, replacement, and refusal failures on their own clocks", () => {
+    // A locked keychain is checked soon and is worth checking again on wake.
+    expect(classifyConnectorFailure("identity_unavailable", 0)).toMatchObject({
+      action: "slow_retry",
+      failure: "identity_unavailable",
+      policy: { baseDelayMs: 30_000, maxDelayMs: 600_000 },
+      nudgeable: true,
+    });
+    // A duplicate is displaced by every retry, so the gap is long and capped.
+    expect(classifyConnectorFailure("connection_replaced", 0)).toMatchObject({
+      action: "slow_retry",
+      failure: "connection_replaced",
+      policy: { baseDelayMs: 300_000, maxPerHour: 3 },
+      nudgeable: false,
+    });
+    expect(classifyConnectorFailure("authentication_failed", 0)).toMatchObject({
+      action: "slow_retry",
+      failure: "authentication_failed",
+      policy: { baseDelayMs: 900_000, maxDelayMs: 3_600_000 },
+      nudgeable: false,
     });
   });
 
@@ -278,8 +300,8 @@ describe("classifyConnectorFailure", () => {
       action: "operator",
       failure: "identity_store_unavailable",
     });
-    expect(classifyConnectorFailure("identity_unavailable", 0)).toEqual({
-      action: "operator",
+    expect(classifyConnectorFailure("identity_unavailable", 0)).toMatchObject({
+      action: "slow_retry",
       failure: "identity_unavailable",
     });
   });

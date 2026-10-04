@@ -378,14 +378,16 @@ challenge before it counts as a rejection.
 
 Node WebSockets do not use cookies, Authorization headers, URL credentials, query parameters, or
 bearer subprotocols. A challenge is single-use and in memory only. Replayed proofs, copied node IDs,
-wrong or rotated keys, and ordinary authentication failures require operator action. Successful
+and wrong or rotated keys are refused with `authentication_failed`, which is retried only on the slow
+schedule described below — every retry uses a fresh challenge and the Hub's full verification, so a
+refused key gains nothing from it. Successful
 authentication with an activated staged key confirms rotation locally and removes superseded key
 custody according to the node-identity rules.
 
 Revocation enters `revoked` and requires re-enrollment or an approved recovery procedure. An
-unsupported relay version enters `version_incompatible`. A replacement connection and repeated
-pre-stability protocol violations fail closed for operator action; Ryco never enters a tight retry
-loop for these conditions.
+unsupported relay version enters `version_incompatible`. Repeated pre-stability protocol violations
+fail closed for operator action. Ryco never enters a tight retry loop for a rejection, a replacement,
+or a protocol violation.
 
 ## Connector states and reconnect policy
 
@@ -410,9 +412,25 @@ uses bounded jitter, honors a bounded `retryAfterMs`, and caps at the configured
 attempt counter resets only after the connection remains online for the configured stable interval.
 Only one connection generation and one reconnect timer can exist for the configured Hub.
 
-Configuration, key custody, origin mismatch, enrollment failure, authentication rejection,
-connection replacement, revocation, version incompatibility, and repeated early protocol failure
-require operator action. Restarting the process does not make a revoked identity retry. The Hub's
+Three failures usually clear on their own but could be real, so they retry on their own, much
+slower, schedules — reported as `backing_off` with the specific failure code and the next retry time,
+so status says both what went wrong and that the connector is handling it:
+
+| Failure                 | First retry | Grows to   | Notes                                                       |
+| ----------------------- | ----------- | ---------- | ----------------------------------------------------------- |
+| `identity_unavailable`  | 30 seconds  | 10 minutes | A wake or network change retries at once.                   |
+| `connection_replaced`   | 5 minutes   | 15 minutes | At most three an hour, then it stops for operator action.   |
+| `authentication_failed` | 15 minutes  | 1 hour     | Covers a refused proof; an explicit revocation stays final. |
+
+Each delay is jittered and never shorter than its first retry. The replacement budget is what lets
+two processes sharing an identity converge: each retry displaces the other copy, so retrying forever
+would be the flapping itself. A custody read that fails at startup or on `resume` takes the same
+path as one that fails mid-connection.
+
+Configuration, a credential store that could not be opened at all (`identity_store_unavailable`),
+origin mismatch, enrollment failure, revocation, version incompatibility, and repeated early
+protocol failure require operator action. Restarting the process does not make a revoked identity
+retry. The Hub's
 proof-preflight route never refuses a node by status — it issues a challenge to every well-formed
 request and answers 400 only for a malformed one — so any other client error there (401, 403, 404,
 408, and the rest) comes from a proxy, CDN, or WAF in front of the Hub and retries like a network
@@ -422,7 +440,8 @@ stops for an update like any repeated protocol failure.
 The connector also watches for the two events that silently kill an outbound socket: the machine
 waking from sleep (its wall clock jumps past its timers) and its external addresses changing. An
 online connector then sends its own `ping` and reconnects if the matching `pong` does not arrive
-within five seconds; a connector backing off retries at once with a fresh backoff. Only the answer
+within five seconds; a connector backing off retries at once with a fresh backoff — except a slow
+retry for `connection_replaced` or `authentication_failed`, whose spacing is the point. Only the answer
 to the connector's own outstanding probe is accepted; an unsolicited `pong` remains a protocol
 violation.
 
@@ -440,11 +459,12 @@ The erase is crash-safe. A durable marker records the intent and every secret to
 either store is touched, so an interrupted leave is completed on the next start rather than
 orphaning key material or leaving state that points at keys which are already gone.
 
-`ryco hub resume` retries a connector that stopped without scheduling its own retry, and prints the
-resulting status. Use it for `connection_replaced` and for a `identity_unavailable` caused by a
-credential store that was locked and has since been unlocked; neither schedules a retry timer, so
-neither recovers on its own. Resume is deliberately a no-op for `revoked`, for a stopping connector,
-and for a disabled one — it reports the unchanged state rather than implying it acted.
+`ryco hub resume` retries now instead of on the connector's own schedule, and prints the resulting
+status. It also resets the slow-retry budgets, so after stopping a duplicate process or unlocking a
+credential store the next attempt is immediate and a stopped `connection_replaced` gets a fresh
+hourly budget. Resume is deliberately a no-op for `revoked`, for a stopping connector, for a
+disabled one, and for a connection that is already up or on its way up — it reports the unchanged
+state rather than implying it acted.
 
 ## Relay channels, limits, and roles
 
@@ -500,8 +520,9 @@ and the normal server listener follow their existing shutdown path.
 ## Troubleshooting
 
 - `configuration_invalid`: check the exact boolean spellings, HTTPS origin, and reconnect ranges.
-- `identity_unavailable`: unlock or restore the platform credential store, then `ryco hub resume`;
-  do not copy a node ID or generate a replacement key manually.
+- `identity_unavailable`: the credential store is locked or unreadable. Ryco retries on its own;
+  unlock or restore the store and run `ryco hub resume` to retry at once. Do not copy a node ID or
+  generate a replacement key manually.
 - `identity_store_unavailable`: the credential store could not be opened at all when this process
   started, and no retry can repair it. Fix the store, then restart Ryco.
 - `enrollment_expired`: the ceremony's own expiry passed. Start a new one.
@@ -509,10 +530,14 @@ and the normal server listener follow their existing shutdown path.
   approved re-enrollment.
 - `enrollment_unavailable`: the ceremony was denied or cancelled at the Hub. Find out why before
   starting another; a denial is a human saying no.
-- `authentication_failed` or `revoked`: verify approval, key rotation, and node status with the Hub
-  operator; retries are intentionally stopped. `ryco hub resume` will not restart a revoked identity.
-- `connection_replaced`: another process authenticated as this node. Stop it, then run
-  `ryco hub resume`. No retry is scheduled for this failure, so it does not clear on its own.
+- `authentication_failed`: the Hub refused this node's proof. Ryco retries every 15 minutes to an
+  hour in case the cause was on the Hub's side; if it persists, verify approval, key rotation, and
+  node status with the Hub operator. A node that was removed at the Hub needs `ryco hub leave` and a
+  new enrollment.
+- `revoked`: retries are intentionally stopped. `ryco hub resume` will not restart a revoked identity.
+- `connection_replaced`: another process authenticated as this node. Ryco retries a few times an
+  hour and then stops so the other copy keeps the connection. Stop the copy you do not want, then
+  run `ryco hub resume`.
 - `protocol_invalid` or `version_incompatible`: upgrade the incompatible endpoint. Do not modify
   relay schemas or fixtures locally.
 - Repeated `network_unavailable`, `tls_unavailable`, or `heartbeat_timeout`: check DNS, egress, TLS

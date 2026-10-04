@@ -1,6 +1,7 @@
 import { networkInterfaces } from "node:os";
 
 import type {
+  HubConnectorFailureCode,
   HubConnectorStatus,
   HubEnrollmentCeremonyDetail,
   HubEnrollmentStartResult,
@@ -42,7 +43,7 @@ import {
   type RelayChannelSessionFactory,
 } from "./RelayChannelRegistry.ts";
 import { resolveHubEnrollmentLabel } from "./HubEnrollmentLabel.ts";
-import { reconnectDelay } from "./ReconnectPolicy.ts";
+import { reconnectDelay, slowRetryDelay, type SlowRetryPolicy } from "./ReconnectPolicy.ts";
 import { RelaySendQueue } from "./RelaySendQueue.ts";
 import {
   makeNodeAccountGrantVerifier,
@@ -66,6 +67,8 @@ const LIVENESS_WATCH_WAKE_GAP_MS = 15_000;
 /** How long a node-initiated ping may wait for its pong before the socket is declared dead. */
 const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 const RELAY_HEARTBEAT_NONCE_BYTES = 8;
+/** The rolling window a slow-retry policy's `maxPerHour` counts over. */
+const SLOW_RETRY_BUDGET_WINDOW_MS = 3_600_000;
 
 /** The machine's external addresses; a change means the network moved under the socket. */
 export function defaultNetworkFingerprint(): string {
@@ -129,6 +132,19 @@ export class HubConnector {
   #attempt = 0;
   #protocolViolations = 0;
   #staleProofRetries = 0;
+  /** Per-failure attempt counters for `slow_retry`; reset by stability or an explicit resume. */
+  readonly #slowAttempts = new Map<HubConnectorFailureCode, number>();
+  /**
+   * When each capped slow retry was scheduled, for its rolling-hour budget.
+   * Deliberately not reset by stability: two duplicates that swap every few
+   * minutes each look stable in between.
+   */
+  readonly #slowRetryLog = new Map<HubConnectorFailureCode, number[]>();
+  /**
+   * What `nudge` runs in place of the scheduled retry, or undefined when that
+   * retry must keep its own schedule.
+   */
+  #retryNudge: (() => void) | undefined;
   #started = false;
   #stopping = false;
   #connecting = false;
@@ -195,7 +211,9 @@ export class HubConnector {
    * with a ping it expects answered within `LIVENESS_PROBE_TIMEOUT_MS`; one
    * backing off retries now, with a fresh backoff, rather than when a timer
    * grown during the outage fires. Every other state is left alone — in
-   * particular nothing here retries a failure that needs operator action.
+   * particular nothing here retries a failure that needs operator action, or
+   * brings forward a slow retry whose spacing is the point of it (a duplicate
+   * process, a refused proof).
    */
   nudge(): void {
     if (!this.#started || this.#stopping) return;
@@ -204,14 +222,16 @@ export class HubConnector {
       this.#probeLiveness(this.#state.generation);
       return;
     }
+    const retry = this.#retryNudge;
     if (
       status.state === "degraded" &&
       status.degradedMode === "backing_off" &&
-      this.#retryTimer !== undefined
+      this.#retryTimer !== undefined &&
+      retry !== undefined
     ) {
       this.#clearTimer("retry");
       this.#attempt = 0;
-      void this.#connect();
+      retry();
     }
   }
 
@@ -332,15 +352,49 @@ export class HubConnector {
       return;
     }
     this.#startLivenessWatch();
+    await this.#establish(generation);
+  }
+
+  /**
+   * Retry now, on an operator's say-so.
+   *
+   * Clears any scheduled retry and the slow-retry budgets: an owner pressing
+   * Retry after stopping a duplicate process, or unlocking a keychain, has
+   * told the connector something its own schedule could not know. A
+   * connection that is already up, or on its way up, is left alone.
+   */
+  async resume(): Promise<void> {
+    if (!this.#started || this.#stopping || !this.#config.enabled) return;
+    if (this.#state.snapshot().state === "revoked") return;
+    if (this.#session !== undefined || this.#connecting) return;
+    this.#clearTimer("retry");
+    this.#slowAttempts.clear();
+    this.#slowRetryLog.clear();
+    if (this.#config.configurationIssue !== undefined || this.#config.origin === undefined) {
+      this.#state.transition("degraded", {
+        degradedMode: "operator_action_required",
+        failure: "configuration_invalid",
+      });
+      return;
+    }
+    await this.#establish(this.#state.generation);
+  }
+
+  /**
+   * Read the identity this connector should authenticate as, and connect with
+   * it — or land in the state that identity calls for.
+   *
+   * Shared by `start()`, `resume()`, and every slow retry. A custody read that
+   * fails goes through the same classification as a failed connection, so a
+   * keychain that is locked at launch is retried on its own schedule instead of
+   * parking the node until someone runs `ryco hub resume`.
+   */
+  async #establish(generation: number): Promise<void> {
     let identity;
     try {
       identity = await this.#identity.readState();
     } catch (error: unknown) {
-      if (!this.#state.isCurrent(generation) || this.#stopping) return;
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: identityFailure(error),
-      });
+      await this.#handleFailure(generation, identityFailure(error));
       return;
     }
     if (!this.#state.isCurrent(generation) || this.#stopping) return;
@@ -349,50 +403,6 @@ export class HubConnector {
         identity.pendingEnrollment === null ? "enrolling" : "awaiting_approval",
       );
       if (identity.pendingEnrollment !== null) this.#scheduleEnrollmentPoll(0);
-      return;
-    }
-    if (identity.activeNode.hubOrigin !== this.#config.origin) {
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: "identity_origin_mismatch",
-      });
-      return;
-    }
-    this.#nodeId = identity.activeNode.nodeId;
-    await this.#connect();
-  }
-
-  async resume(): Promise<void> {
-    if (!this.#started || this.#stopping || !this.#config.enabled) return;
-    if (this.#state.snapshot().state === "revoked") return;
-    this.#clearTimer("retry");
-    if (this.#config.configurationIssue !== undefined || this.#config.origin === undefined) {
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: "configuration_invalid",
-      });
-      return;
-    }
-    const generation = this.#state.generation;
-    let identity;
-    try {
-      identity = await this.#identity.readState();
-    } catch (error: unknown) {
-      if (!this.#state.isCurrent(generation) || this.#stopping) return;
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: identityFailure(error),
-      });
-      return;
-    }
-    if (!this.#state.isCurrent(generation) || this.#stopping) return;
-    if (identity.activeNode === null) {
-      if (identity.pendingEnrollment === null) {
-        this.#state.transition("enrolling");
-      } else {
-        this.#state.transition("awaiting_approval");
-        this.#scheduleEnrollmentPoll(0);
-      }
       return;
     }
     if (identity.activeNode.hubOrigin !== this.#config.origin) {
@@ -616,6 +626,9 @@ export class HubConnector {
     if (this.#stopping) throw new Error("Hub identity cannot be erased while stopping.");
     await this.#teardownConnection();
     this.#started = false;
+    // Budgets earned by the identity being erased say nothing about the next one.
+    this.#slowAttempts.clear();
+    this.#slowRetryLog.clear();
     try {
       await this.#identity.leave();
     } catch (error: unknown) {
@@ -720,8 +733,11 @@ export class HubConnector {
         if (rotation?.hubOrigin === origin && rotation.activatedAt !== null) {
           await this.#identity.confirmAuthenticatedKey(origin, rotation.newKeyId);
         }
-      } catch {
-        throw new RelayConnectionError("authentication_failed");
+      } catch (error: unknown) {
+        // The Hub accepted the proof; it is local custody that failed, and
+        // reporting it as a Hub rejection would point the owner at the wrong
+        // thing and wait a quarter of an hour to retry a keychain read.
+        throw new RelayConnectionError(identityFailure(error));
       }
       if (!this.#state.isCurrent(generation) || this.#stopping) {
         session.close();
@@ -979,6 +995,10 @@ export class HubConnector {
     );
     if (kind === "protocol_invalid") this.#protocolViolations += 1;
     if (kind === "authentication_stale") this.#staleProofRetries += 1;
+    if (disposition.action === "slow_retry") {
+      this.#scheduleSlowRetry(disposition.failure, disposition.policy, disposition.nudgeable);
+      return;
+    }
     if (disposition.action === "operator") {
       if (disposition.terminalState !== undefined) {
         this.#state.transition(disposition.terminalState, { failure: disposition.failure });
@@ -1008,10 +1028,61 @@ export class HubConnector {
       reconnectAttempt: decision.attempt,
       nextRetryAt: new Date(this.#scheduler.now() + decision.delayMs).toISOString(),
     });
+    this.#retryNudge = () => void this.#connect();
     this.#retryTimer = this.#scheduler.setTimeout(() => {
       this.#retryTimer = undefined;
       if (!this.#state.isCurrent(retryGeneration) || this.#stopping) return;
       void this.#connect();
+    }, decision.delayMs);
+  }
+
+  /**
+   * Retry a usually-transient failure on its own long schedule.
+   *
+   * Reported as `backing_off` with the specific failure code, so status stays
+   * honest about both facts: what went wrong, and that the connector is
+   * handling it. A policy with an hourly budget that is spent stops for an
+   * operator instead — the one case where retrying is itself the problem.
+   *
+   * The retry re-reads identity rather than reconnecting directly: the failure
+   * may have been the identity read itself, and an identity that changed while
+   * the connector waited must be revalidated before it is used.
+   */
+  #scheduleSlowRetry(
+    failure: HubConnectorFailureCode,
+    policy: SlowRetryPolicy,
+    nudgeable: boolean,
+  ): void {
+    const now = this.#scheduler.now();
+    if (policy.maxPerHour !== undefined) {
+      const recent = (this.#slowRetryLog.get(failure) ?? []).filter(
+        (scheduledAt) => now - scheduledAt < SLOW_RETRY_BUDGET_WINDOW_MS,
+      );
+      if (recent.length >= policy.maxPerHour) {
+        this.#slowRetryLog.set(failure, recent);
+        this.#state.transition("degraded", {
+          degradedMode: "operator_action_required",
+          failure,
+        });
+        return;
+      }
+      this.#slowRetryLog.set(failure, [...recent, now]);
+    }
+    const attempt = this.#slowAttempts.get(failure) ?? 0;
+    this.#slowAttempts.set(failure, attempt + 1);
+    const decision = slowRetryDelay(policy, attempt, this.#scheduler.random());
+    const retryGeneration = this.#state.generation;
+    this.#state.transition("degraded", {
+      degradedMode: "backing_off",
+      failure,
+      reconnectAttempt: decision.attempt,
+      nextRetryAt: new Date(now + decision.delayMs).toISOString(),
+    });
+    this.#retryNudge = nudgeable ? () => void this.#establish(retryGeneration) : undefined;
+    this.#retryTimer = this.#scheduler.setTimeout(() => {
+      this.#retryTimer = undefined;
+      if (!this.#state.isCurrent(retryGeneration) || this.#stopping) return;
+      void this.#establish(retryGeneration);
     }, decision.delayMs);
   }
 
@@ -1023,6 +1094,7 @@ export class HubConnector {
       this.#attempt = 0;
       this.#protocolViolations = 0;
       this.#staleProofRetries = 0;
+      this.#slowAttempts.clear();
     }, this.#config.reconnectStableMs);
   }
 
