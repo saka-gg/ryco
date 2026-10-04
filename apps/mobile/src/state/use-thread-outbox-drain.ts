@@ -30,16 +30,12 @@ import {
   hydrateThreadOutbox,
   listThreadOutboxMessages,
   subscribeThreadOutbox,
+  trackThreadOutboxLiveCauses,
   type ThreadOutboxDrainState,
 } from "./threadOutbox";
 import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
-import {
-  selectBootstrapCompleteForEnvironment,
-  selectEnvironmentHydratedFromCacheAt,
-  selectThreadByRef,
-  useStore,
-} from "./threadsRuntime";
+import { selectEnvironmentShellLive, selectThreadByRef, useStore } from "./threadsRuntime";
 import { useWsConnectionOpenedCount } from "../rpc/wsConnectionState";
 
 // §3-14: dispatch a queued turn for an EXISTING thread through the runtime send
@@ -111,9 +107,7 @@ export function readThreadOutboxEnvironment(
   // The socket can open one RTT before the live shell snapshot lands, and in
   // that window a cached idle row would read as "exists, not busy" and
   // dispatch a queued message into a thread that is actually mid-turn.
-  const shellLive =
-    selectBootstrapCompleteForEnvironment(state, environmentId) &&
-    selectEnvironmentHydratedFromCacheAt(state, environmentId) === null;
+  const shellLive = selectEnvironmentShellLive(state, environmentId);
   const connected =
     getWsConnectionUiState(getWsConnectionStatusForEnvironment(environmentId)) === "connected";
   return { shellLive, mutationReady: shellLive && connected };
@@ -241,6 +235,10 @@ export function useThreadOutboxDrain(): void {
 
   // Settle-edge: drain when a thread's turn settles while queued messages wait.
   useEffect(() => subscribeOutboxSettleDrain(runOutboxDrain), []);
+
+  // The failures each thread showed live baseline a message composed later
+  // against cached rows.
+  useEffect(() => trackThreadOutboxLiveCauses(), []);
 
   useThreadOutboxDetailRetention();
 }

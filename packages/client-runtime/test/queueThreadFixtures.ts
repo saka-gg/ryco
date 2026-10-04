@@ -1,4 +1,5 @@
 import {
+  CheckpointRef,
   EnvironmentId,
   EventId,
   MessageId,
@@ -58,6 +59,11 @@ export interface ThreadFixture {
     readonly turnId: string;
     readonly state: OrchestrationLatestTurnState;
   } | null;
+  /** The latest turn's checkpoint summary. */
+  readonly latestCheckpoint?: {
+    readonly status: "ready" | "missing" | "error";
+    readonly checkpointRef: string;
+  };
   /** undefined = no detail applied. */
   readonly messageIds?: readonly string[];
   readonly activities?: readonly ActivityFixture[];
@@ -199,6 +205,21 @@ export function withThread(state: AppState, fixture: ThreadFixture): AppState {
     delete activityIdsByThreadId[threadId];
     delete activityByThreadId[threadId];
   }
+  // Left untouched unless given, so a test can mix fixtures with applied
+  // `thread.turn-diff-completed` events.
+  const turnDiffSummaryByThreadId = { ...environment.turnDiffSummaryByThreadId };
+  if (latestTurn && fixture.latestCheckpoint) {
+    turnDiffSummaryByThreadId[threadId] = {
+      [latestTurn.turnId]: {
+        turnId: latestTurn.turnId,
+        completedAt: AT,
+        status: fixture.latestCheckpoint.status,
+        files: [],
+        checkpointRef: CheckpointRef.make(fixture.latestCheckpoint.checkpointRef),
+        checkpointTurnCount: 1,
+      },
+    };
+  }
   const threadHistoryByThreadId = { ...environment.threadHistoryByThreadId };
   if (fixture.history) {
     threadHistoryByThreadId[threadId] = {} as never;
@@ -231,6 +252,7 @@ export function withThread(state: AppState, fixture: ThreadFixture): AppState {
         messageIdsByThreadId,
         activityIdsByThreadId,
         activityByThreadId,
+        turnDiffSummaryByThreadId,
         threadHistoryByThreadId,
         worktreeById,
       },

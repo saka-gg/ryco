@@ -20,7 +20,7 @@ import {
   captureQueuedDispatchSnapshot,
   type QueuedDispatchSnapshot,
 } from "@ryco/client-runtime/state/session";
-import type { ScopedThreadRef } from "@ryco/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { hasRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import { mobileKV } from "../platform/kv";
 import type { DraftComposerFileAttachment } from "../lib/composerFiles";
@@ -28,7 +28,7 @@ import { useMessageQueueStore } from "./messageQueueStore";
 // The shared threads store itself, not the `./threadsRuntime` binding: that
 // module pulls in the React Native platform, and this one stays node-testable.
 // Both name the same singleton.
-import { useStore } from "@ryco/client-runtime/state/threads";
+import { selectEnvironmentShellLive, useStore } from "@ryco/client-runtime/state/threads";
 import {
   groupQueuedThreadMessages,
   normalizePersistedQueuedThreadMessageAttachments,
@@ -41,10 +41,10 @@ import {
 // mirrored into B1's in-memory useMessageQueueStore for the composer UI, and drain
 // through the runtime send path on reconnect. The drain decisions come from the
 // shared client-runtime queue policy (`resolveQueueDrainStep`); this module owns
-// persistence (messages, queue holds and their acknowledged-cause baselines) and
-// the drain loop, which sends at most one message per thread per pass and waits
-// for that message's own turn to start before the next (a bound wrapper, no
-// import-time side effects).
+// persistence (messages, queue holds, their acknowledged-cause baselines and the
+// causes each thread last showed live) and the drain loop, which sends at most
+// one message per thread per pass and waits for that message's own turn to
+// start before the next (a bound wrapper, no import-time side effects).
 
 const OUTBOX_STORAGE_KEY = "ryco.threadOutbox.v1";
 const HOLDS_STORAGE_KEY = "ryco.threadOutboxHolds.v1";
@@ -53,11 +53,20 @@ const ACK_TIMEOUT_MS = 90_000;
 const MAX_STEPS_PER_THREAD = 8;
 const MAX_DISPATCHED_PER_THREAD = 16;
 const MAX_SNAPSHOTS = 64;
+const MAX_SEEN_LIVE_THREADS = 64;
 const EMPTY_DISPATCHED: ReadonlySet<string> = new Set();
 
 let messages: QueuedThreadMessage[] = [];
 let holds: Record<string, QueueHold> = {};
 let acknowledged: Record<string, readonly string[]> = {};
+/**
+ * Failure causes each thread last showed on a LIVE row, newest last. Cached and
+ * demoted rows (a cold start from the snapshot cache, a hosted demotion) drop
+ * every session, so a message composed against them baselines from here: the
+ * error the user saw before going offline does not hold their reply to it.
+ * Only threads with a cause are kept, bounded.
+ */
+let seenLive: Record<string, readonly string[]> = {};
 let hydrated = false;
 let hydrationStarted = false;
 const listeners = new Set<() => void>();
@@ -126,9 +135,11 @@ function persist(): void {
 }
 
 function persistHolds(): void {
-  void mobileKV.setItem(HOLDS_STORAGE_KEY, JSON.stringify({ holds, acknowledged })).catch(() => {
-    // Fire-and-forget, like `persist`.
-  });
+  void mobileKV
+    .setItem(HOLDS_STORAGE_KEY, JSON.stringify({ holds, acknowledged, seenLive }))
+    .catch(() => {
+      // Fire-and-forget, like `persist`.
+    });
 }
 
 function stripFileReadUri(attachment: DraftComposerFileAttachment) {
@@ -157,13 +168,25 @@ function sanitizeHold(value: unknown): QueueHold | null {
   };
 }
 
+function sanitizeCauseKeyRecord(value: unknown): Record<string, readonly string[]> {
+  const next: Record<string, readonly string[]> = {};
+  if (!value || typeof value !== "object") return next;
+  for (const [key, keys] of Object.entries(value)) {
+    if (!Array.isArray(keys)) continue;
+    next[key] = keys
+      .filter((entry): entry is string => typeof entry === "string")
+      .slice(-MAX_ACKNOWLEDGED_CAUSE_KEYS);
+  }
+  return next;
+}
+
 function sanitizeHoldState(raw: unknown): {
   holds: Record<string, QueueHold>;
   acknowledged: Record<string, readonly string[]>;
+  seenLive: Record<string, readonly string[]>;
 } {
   const nextHolds: Record<string, QueueHold> = {};
-  const nextAcknowledged: Record<string, readonly string[]> = {};
-  if (!raw || typeof raw !== "object") return { holds: nextHolds, acknowledged: nextAcknowledged };
+  if (!raw || typeof raw !== "object") return { holds: nextHolds, acknowledged: {}, seenLive: {} };
   const candidate = raw as Record<string, unknown>;
   if (candidate.holds && typeof candidate.holds === "object") {
     for (const [key, value] of Object.entries(candidate.holds)) {
@@ -171,15 +194,100 @@ function sanitizeHoldState(raw: unknown): {
       if (hold) nextHolds[key] = hold;
     }
   }
-  if (candidate.acknowledged && typeof candidate.acknowledged === "object") {
-    for (const [key, value] of Object.entries(candidate.acknowledged)) {
-      if (!Array.isArray(value)) continue;
-      nextAcknowledged[key] = value
-        .filter((entry): entry is string => typeof entry === "string")
-        .slice(-MAX_ACKNOWLEDGED_CAUSE_KEYS);
-    }
+  const nextSeenLive: Record<string, readonly string[]> = {};
+  for (const [key, keys] of Object.entries(sanitizeCauseKeyRecord(candidate.seenLive)).slice(
+    -MAX_SEEN_LIVE_THREADS,
+  )) {
+    if (keys.length > 0) nextSeenLive[key] = keys;
   }
-  return { holds: nextHolds, acknowledged: nextAcknowledged };
+  return {
+    holds: nextHolds,
+    acknowledged: sanitizeCauseKeyRecord(candidate.acknowledged),
+    seenLive: nextSeenLive,
+  };
+}
+
+/** Records a thread's live causes as the newest entry; false when nothing changed. */
+function recordSeenLive(threadKey: string, causeKeys: readonly string[]): boolean {
+  const previous = seenLive[threadKey];
+  if (causeKeys.length === 0) {
+    if (previous === undefined) return false;
+    delete seenLive[threadKey];
+    return true;
+  }
+  if (
+    previous !== undefined &&
+    previous.length === causeKeys.length &&
+    previous.every((key, index) => causeKeys[index] === key)
+  ) {
+    return false;
+  }
+  delete seenLive[threadKey];
+  seenLive[threadKey] = causeKeys.slice(-MAX_ACKNOWLEDGED_CAUSE_KEYS);
+  const keys = Object.keys(seenLive);
+  for (const stale of keys.slice(0, Math.max(0, keys.length - MAX_SEEN_LIVE_THREADS))) {
+    delete seenLive[stale];
+  }
+  return true;
+}
+
+/** The causes a thread shows now, including an interrupt whose turn is still settling. */
+function currentCauseKeys(view: QueueThreadView | null, threadKey: string): string[] {
+  return view
+    ? deriveQueueFailureCauses(view, dispatchedFor(threadKey), { includeUnsettled: true }).map(
+        (cause) => cause.causeKey,
+      )
+    : [];
+}
+
+/**
+ * Keeps {@link seenLive} current from the live rows of every environment.
+ * Only threads whose session or latest turn changed are re-derived. Mounted
+ * once next to the drain; returns an unsubscribe.
+ */
+export function trackThreadOutboxLiveCauses(): () => void {
+  let previous: ReturnType<typeof useStore.getState> | null = null;
+  const sync = () => {
+    const state = useStore.getState();
+    let changed = false;
+    for (const [environmentKey, environmentState] of Object.entries(state.environmentStateById)) {
+      const environmentId = environmentKey as EnvironmentId;
+      if (!environmentState || !selectEnvironmentShellLive(state, environmentId)) continue;
+      const before =
+        previous !== null && selectEnvironmentShellLive(previous, environmentId)
+          ? previous.environmentStateById[environmentId]
+          : undefined;
+      if (
+        before !== undefined &&
+        before.threadSessionById === environmentState.threadSessionById &&
+        before.threadTurnStateById === environmentState.threadTurnStateById
+      ) {
+        continue;
+      }
+      for (const threadId of environmentState.threadIds) {
+        if (
+          before !== undefined &&
+          before.threadSessionById[threadId] === environmentState.threadSessionById[threadId] &&
+          before.threadTurnStateById[threadId] === environmentState.threadTurnStateById[threadId]
+        ) {
+          continue;
+        }
+        const ref = scopeThreadRef(environmentId, threadId as ThreadId);
+        const threadKey = scopedThreadKey(ref);
+        if (
+          recordSeenLive(threadKey, currentCauseKeys(readQueueThreadView(state, ref), threadKey))
+        ) {
+          changed = true;
+        }
+      }
+    }
+    previous = state;
+    // Before hydration a write would replace the persisted holds; hydration
+    // merges what was recorded meanwhile and persists it.
+    if (changed && hydrated) persistHolds();
+  };
+  sync();
+  return useStore.subscribe(sync);
 }
 
 /**
@@ -241,15 +349,27 @@ export async function hydrateThreadOutbox(): Promise<void> {
   } catch {
     messages = [];
   }
+  // Causes recorded live while the KV read was pending are newer than the
+  // persisted ones and win.
+  const recordedBeforeHydration = seenLive;
   try {
     const raw = await mobileKV.getItem(HOLDS_STORAGE_KEY);
-    ({ holds, acknowledged } = sanitizeHoldState(raw ? (JSON.parse(raw) as unknown) : null));
+    let persistedSeenLive: Record<string, readonly string[]>;
+    ({
+      holds,
+      acknowledged,
+      seenLive: persistedSeenLive,
+    } = sanitizeHoldState(raw ? (JSON.parse(raw) as unknown) : null));
+    seenLive = persistedSeenLive;
   } catch {
     holds = {};
     acknowledged = {};
+    seenLive = {};
   }
+  for (const [key, keys] of Object.entries(recordedBeforeHydration)) recordSeenLive(key, keys);
   pruneEmptyThreads();
   hydrated = true;
+  if (Object.keys(recordedBeforeHydration).length > 0) persistHolds();
   mirrorToQueueStore();
   notifyListeners();
 }
@@ -264,17 +384,21 @@ export function enqueueThreadOutboxMessage(message: QueuedThreadMessage): void {
   if (wasEmpty && acknowledged[key] === undefined) {
     // The thread as the user saw it while composing: causes current now are
     // already acknowledged, so an offline message composed in response to an
-    // error is not held by it. Cached or demoted rows carry no session, so a
-    // failure that happened while offline is new on reconnect and holds
-    // (conservative: one Resume clears an error the user had already seen).
+    // error is not held by it. Cached or demoted rows carry no session, so
+    // they add the causes the thread last showed live; a failure that happened
+    // while offline is still new on reconnect and holds.
+    const state = useStore.getState();
     const view = readQueueThreadView(
-      useStore.getState(),
+      state,
       scopeThreadRef(message.environmentId, message.threadId),
     );
-    acknowledged[key] = appendAcknowledgedCauseKeys(
-      undefined,
-      view ? deriveQueueFailureCauses(view, dispatchedFor(key)).map((cause) => cause.causeKey) : [],
-    );
+    const seenBeforeOffline = selectEnvironmentShellLive(state, message.environmentId)
+      ? []
+      : (seenLive[key] ?? []);
+    acknowledged[key] = appendAcknowledgedCauseKeys(undefined, [
+      ...seenBeforeOffline,
+      ...currentCauseKeys(view, key),
+    ]);
     persistHolds();
   }
   commitMessages([...messages.filter((m) => m.messageId !== message.messageId), message]);
@@ -335,7 +459,9 @@ export function releaseThreadOutboxHold(threadKey: string): void {
     acknowledged[threadKey],
     releaseQueueHoldKeys(
       holds[threadKey] ?? null,
-      view ? deriveQueueFailureCauses(view, dispatchedFor(threadKey)) : [],
+      view
+        ? deriveQueueFailureCauses(view, dispatchedFor(threadKey), { includeUnsettled: true })
+        : [],
     ),
   );
   delete holds[threadKey];
@@ -349,6 +475,7 @@ export function resetThreadOutboxForTests(): void {
   messages = [];
   holds = {};
   acknowledged = {};
+  seenLive = {};
   hydrated = false;
   hydrationStarted = false;
   pendingDispatchByThreadKey.clear();

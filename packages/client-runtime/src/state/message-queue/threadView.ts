@@ -39,6 +39,13 @@ export interface QueueThreadView {
     readonly turnId: TurnId;
     readonly state: OrchestrationLatestTurnState;
   } | null;
+  /**
+   * The latest turn's checkpoint is the provider-diff placeholder recorded on
+   * its first diff update. Its `missing` status reads as an `interrupted`
+   * latest turn although nobody stopped it, until the real capture replaces it
+   * (which can fail). Only known once detail is loaded.
+   */
+  readonly latestTurnPlaceholderCheckpoint: boolean;
   readonly projectedMessageIds: ReadonlySet<string>;
   readonly turnStartFailures: ReadonlyArray<QueueTurnStartFailure>;
   readonly steerFailedMessageIds: ReadonlySet<string>;
@@ -56,6 +63,13 @@ interface ActivityDerivedView {
   readonly pendingApproval: boolean;
   readonly pendingUserInput: boolean;
 }
+
+/**
+ * `ProviderRuntimeIngestion` dispatches a `missing` checkpoint with this ref on a
+ * turn's first `turn.diff.updated`, before `CheckpointReactor` captures the
+ * real one.
+ */
+const PLACEHOLDER_CHECKPOINT_REF_PREFIX = "provider-diff:";
 
 const EMPTY_MESSAGE_ID_SET: ReadonlySet<string> = new Set();
 const EMPTY_ACTIVITY_VIEW: ActivityDerivedView = {
@@ -145,6 +159,17 @@ function sessionReleasedTurn(
   return Date.parse(session.updatedAt) > Date.parse(latestTurn.startedAt ?? latestTurn.requestedAt);
 }
 
+function isPlaceholderCheckpoint(
+  summary:
+    | { readonly status?: string | undefined; readonly checkpointRef?: string | undefined }
+    | undefined,
+): boolean {
+  return (
+    summary?.status === "missing" &&
+    (summary.checkpointRef?.startsWith(PLACEHOLDER_CHECKPOINT_REF_PREFIX) ?? false)
+  );
+}
+
 /** null when the environment has no shell for the thread. */
 export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): QueueThreadView | null {
   const environmentState = selectEnvironmentState(state, ref.environmentId);
@@ -194,6 +219,11 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
         }
       : null,
     latestTurn: latestTurn ? { turnId: latestTurn.turnId, state: latestTurn.state } : null,
+    latestTurnPlaceholderCheckpoint: isPlaceholderCheckpoint(
+      latestTurn
+        ? environmentState.turnDiffSummaryByThreadId[threadId]?.[latestTurn.turnId]
+        : undefined,
+    ),
     projectedMessageIds: readProjectedMessageIds(messageIds),
     turnStartFailures: activityView.turnStartFailures,
     steerFailedMessageIds: activityView.steerFailedMessageIds,
@@ -212,6 +242,7 @@ export function queueThreadViewInputs(state: AppState, ref: ScopedThreadRef): re
     shell,
     environmentState.threadSessionById[threadId],
     environmentState.threadTurnStateById[threadId],
+    environmentState.turnDiffSummaryByThreadId[threadId],
     environmentState.sidebarThreadSummaryById[threadId],
     environmentState.messageIdsByThreadId[threadId],
     environmentState.activityIdsByThreadId[threadId],

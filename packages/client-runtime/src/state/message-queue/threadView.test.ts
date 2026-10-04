@@ -1,4 +1,4 @@
-import { MessageId } from "@ryco/contracts";
+import { CheckpointRef, MessageId, TurnId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -102,6 +102,54 @@ describe("readQueueThreadView", () => {
       { activityId: "a-1", messageId: "m-1", detail: "Thread already has active turn" },
     ]);
     expect([...loaded.steerFailedMessageIds]).toEqual(["m-2"]);
+  });
+
+  it("flags a latest turn whose checkpoint is the provider-diff placeholder", () => {
+    const interrupted = { turnId: "turn-1", state: "interrupted" as const };
+    const placeholder = viewOf({
+      latestTurn: interrupted,
+      latestCheckpoint: { status: "missing", checkpointRef: "provider-diff:event-1" },
+      messageIds: [],
+    });
+    expect(placeholder.latestTurnPlaceholderCheckpoint).toBe(true);
+    for (const latestCheckpoint of [
+      { status: "missing" as const, checkpointRef: "refs/ryco/checkpoints/1" },
+      { status: "ready" as const, checkpointRef: "provider-diff:event-1" },
+      undefined,
+    ]) {
+      expect(
+        viewOf({ latestTurn: interrupted, latestCheckpoint, messageIds: [] })
+          .latestTurnPlaceholderCheckpoint,
+      ).toBe(false);
+    }
+    // A checkpoint landing is a view input even when nothing else changes.
+    const state = makeQueueAppState([{ id: "t", latestTurn: interrupted, messageIds: [] }]);
+    const environment = state.environmentStateById[QUEUE_ENV]!;
+    const captured: AppState = {
+      ...state,
+      environmentStateById: {
+        [QUEUE_ENV]: {
+          ...environment,
+          turnDiffSummaryByThreadId: {
+            [queueRef("t").threadId]: {
+              [TurnId.make("turn-1")]: {
+                turnId: TurnId.make("turn-1"),
+                completedAt: "2026-10-01T10:00:02.000Z",
+                status: "missing",
+                files: [],
+                checkpointRef: CheckpointRef.make("provider-diff:event-1"),
+              },
+            },
+          },
+        },
+      },
+    };
+    expect(
+      queueThreadViewInputsEqual(
+        queueThreadViewInputs(state, queueRef("t")),
+        queueThreadViewInputs(captured, queueRef("t")),
+      ),
+    ).toBe(false);
   });
 
   it("derives started from turns, projected messages, or the sidebar", () => {

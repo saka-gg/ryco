@@ -521,18 +521,19 @@ export function createMessageQueueDrainCoordinator<C, S>(
       const before = previous.queuesByThreadKey[key];
       if (queue.length > 0 && (before?.length ?? 0) === 0) {
         // The thread state at this instant is what the user saw while composing:
-        // record it as already acknowledged, synchronously.
+        // record it as already acknowledged, synchronously. That includes a Stop
+        // whose turn is still settling: the follow-up answers it.
         if (state.acknowledgedCauseKeysByThreadKey[key] === undefined) {
           const ref = parseScopedThreadKey(key);
           const view = ref ? readQueueThreadView(platform.threads.getState(), ref) : null;
-          queueStore
-            .getState()
-            .acknowledgeCauses(
-              key,
-              view
-                ? deriveQueueFailureCauses(view, dispatchedFor(key)).map((cause) => cause.causeKey)
-                : [],
-            );
+          queueStore.getState().acknowledgeCauses(
+            key,
+            view
+              ? deriveQueueFailureCauses(view, dispatchedFor(key), {
+                  includeUnsettled: true,
+                }).map((cause) => cause.causeKey)
+              : [],
+          );
         }
       }
     }
@@ -598,7 +599,9 @@ export function createMessageQueueDrainCoordinator<C, S>(
       threadKey,
       releaseQueueHoldKeys(
         state.holdsByThreadKey[threadKey] ?? null,
-        view ? deriveQueueFailureCauses(view, dispatchedFor(threadKey)) : [],
+        view
+          ? deriveQueueFailureCauses(view, dispatchedFor(threadKey), { includeUnsettled: true })
+          : [],
       ),
     );
     // The user chose to proceed: stop waiting on the previous send's ack.

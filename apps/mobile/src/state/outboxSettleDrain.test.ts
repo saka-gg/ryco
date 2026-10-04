@@ -64,6 +64,7 @@ describe("outbox settle-edge drain (MAJOR 4)", () => {
             hasPendingUserInput: false,
             session: null,
             latestTurn: null,
+            latestTurnPlaceholderCheckpoint: false,
             projectedMessageIds: new Set(),
             turnStartFailures: [],
             steerFailedMessageIds: new Set(),

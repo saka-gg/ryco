@@ -44,6 +44,38 @@ export interface QueueHoldInput {
   readonly detail: string | null;
 }
 
+export interface DeriveQueueFailureCausesOptions {
+  /**
+   * Also return interrupts that cannot hold the queue yet (see
+   * {@link isLatestTurnInterruptSettled}). Baselines and Resume acknowledge
+   * them, so a Stop the user saw before composing never holds the follow-up
+   * once its turn settles.
+   */
+  readonly includeUnsettled?: boolean;
+}
+
+/**
+ * Whether an `interrupted` latest turn is a real, settled interrupt.
+ * `latestTurn.state` alone is not a stable signal: a Codex turn in a git repo
+ * reads `interrupted` from its first diff update through a placeholder
+ * `missing` checkpoint, and keeps reading so after it settles until the real
+ * capture replaces it (or for good when that capture fails). An edge-triggered
+ * hold would outlive both. So the interrupt counts only once the turn is no
+ * longer live and detail shows its checkpoint is not that placeholder. A local
+ * Stop is recorded explicitly and does not depend on this.
+ */
+export function isLatestTurnInterruptSettled(view: QueueThreadView): boolean {
+  if (view.latestTurn?.state !== "interrupted") return false;
+  if (!view.detailLoaded || view.latestTurnPlaceholderCheckpoint) return false;
+  const session = view.session;
+  const turnLive =
+    session !== null &&
+    (session.status === "running" ||
+      session.status === "starting" ||
+      session.activeTurnId !== null);
+  return !turnLive;
+}
+
 /**
  * Derived, current failure causes for a thread.
  *
@@ -52,6 +84,7 @@ export interface QueueHoldInput {
 export function deriveQueueFailureCauses(
   view: QueueThreadView,
   dispatchedMessageIds: ReadonlySet<string>,
+  options: DeriveQueueFailureCausesOptions = {},
 ): QueueFailureCause[] {
   const causes: QueueFailureCause[] = [];
   for (const failure of view.turnStartFailures) {
@@ -76,20 +109,10 @@ export function deriveQueueFailureCauses(
       providerInstanceId: session.providerInstanceId,
     });
   }
-  // `latestTurn.state` is not a stable signal while its turn is live: a Codex
-  // turn in a git repo flips it to `interrupted` mid-turn through a placeholder
-  // `missing` checkpoint, and an edge-triggered hold would outlive the flip. A
-  // local Stop is recorded explicitly, so only a settled interrupted turn (for
-  // example a Stop from another client) is derived here.
-  const turnLive =
-    session !== null &&
-    (session.status === "running" ||
-      session.status === "starting" ||
-      session.activeTurnId !== null);
-  if (
-    (view.latestTurn?.state === "interrupted" && !turnLive) ||
-    session?.status === "interrupted"
-  ) {
+  const latestTurnInterrupted =
+    view.latestTurn?.state === "interrupted" &&
+    (options.includeUnsettled === true || isLatestTurnInterruptSettled(view));
+  if (latestTurnInterrupted || session?.status === "interrupted") {
     causes.push({
       reason: "interrupted",
       causeKey: `interrupt:${turnKey}`,

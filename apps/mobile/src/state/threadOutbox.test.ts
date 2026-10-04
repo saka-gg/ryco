@@ -27,6 +27,7 @@ import {
   releaseThreadOutboxHold,
   resetThreadOutboxForTests,
   retryThreadOutboxReview,
+  trackThreadOutboxLiveCauses,
   type ThreadOutboxDrainDeps,
 } from "./threadOutbox";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
@@ -59,6 +60,7 @@ function view(overrides: Partial<QueueThreadView> = {}): QueueThreadView {
     hasPendingUserInput: false,
     session: { status: "ready", lastError: null, providerInstanceId: "codex", activeTurnId: null },
     latestTurn: { turnId: "turn-1" as TurnId, state: "completed" },
+    latestTurnPlaceholderCheckpoint: false,
     projectedMessageIds: new Set(),
     turnStartFailures: [],
     steerFailedMessageIds: new Set(),
@@ -305,6 +307,95 @@ describe("threadOutbox holds", () => {
         reason: "error",
         detail: "Usage limit reached",
       });
+    } finally {
+      useStore.getState().removeEnvironmentState(ENV);
+    }
+  });
+
+  it("sends an offline reply to an error the user saw live, after a cold start from cache", async () => {
+    await hydrateThreadOutbox();
+    const stopTracking = trackThreadOutboxLiveCauses();
+    const orphaned =
+      "Provider session did not survive a server restart. Send a new message to continue.";
+    try {
+      syncShell({ status: "error", lastError: orphaned }, "completed");
+      await vi.waitFor(() => expect(kv.get("ryco.threadOutboxHolds.v1")).toContain(orphaned));
+      // The app is killed offline: a cold start replays the persisted outbox and
+      // the cached rows, which carry no session.
+      const live = useStore.getState().environmentStateById[ENV]!;
+      const cached = {
+        capturedAt: Date.now(),
+        projects: [],
+        worktrees: [],
+        threads: [
+          { shell: live.threadShellById[THREAD]!, summary: live.sidebarThreadSummaryById[THREAD]! },
+        ],
+      };
+      stopTracking();
+      const persisted = new Map(kv);
+      resetThreadOutboxForTests();
+      for (const [key, value] of persisted) kv.set(key, value);
+      useStore.getState().removeEnvironmentState(ENV);
+      useStore.getState().hydrateEnvironmentStateFromCache(cached, ENV);
+      expect(
+        useStore.getState().environmentStateById[ENV]?.threadSessionById[THREAD] ?? null,
+      ).toBeNull();
+      await hydrateThreadOutbox();
+
+      enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+      const sendQueuedMessage = accepting();
+      await drainThreadOutbox(
+        deps(
+          view({
+            session: {
+              status: "error",
+              lastError: orphaned,
+              providerInstanceId: "codex",
+              activeTurnId: null,
+            },
+          }),
+          sendQueuedMessage,
+        ),
+      );
+      expect(getThreadOutboxHold(KEY)).toBeNull();
+      expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      stopTracking();
+      useStore.getState().removeEnvironmentState(ENV);
+    }
+  });
+
+  it("does not record causes from cached rows", async () => {
+    await hydrateThreadOutbox();
+    syncShell({ status: "error", lastError: "Rate limited" }, "error");
+    useStore.getState().demoteEnvironmentStateToCachedSnapshot(ENV, Date.now());
+    const stopTracking = trackThreadOutboxLiveCauses();
+    try {
+      // Tracking started only after the demotion: nothing was seen live.
+      enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+      const sendQueuedMessage = accepting();
+      await drainThreadOutbox(deps(errored("Rate limited"), sendQueuedMessage));
+      expect(sendQueuedMessage).not.toHaveBeenCalled();
+      expect(getThreadOutboxHold(KEY)?.reason).toBe("error");
+    } finally {
+      stopTracking();
+      useStore.getState().removeEnvironmentState(ENV);
+    }
+  });
+
+  it("baselines a Stop the user saw while the aborted turn was still settling", async () => {
+    syncShell({ status: "running", lastError: null }, "interrupted");
+    try {
+      enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+      const sendQueuedMessage = accepting();
+      await drainThreadOutbox(
+        deps(
+          view({ latestTurn: { turnId: "turn-1" as TurnId, state: "interrupted" } }),
+          sendQueuedMessage,
+        ),
+      );
+      expect(getThreadOutboxHold(KEY)).toBeNull();
+      expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
     } finally {
       useStore.getState().removeEnvironmentState(ENV);
     }

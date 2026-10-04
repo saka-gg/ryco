@@ -50,34 +50,75 @@ function entry(id: string): Entry {
   return { id, composer: { text: id }, settings: {} };
 }
 
-function turnDiffCompleted(
+function threadEvent(
   sequence: number,
-  turnId: string,
-  status: "ready" | "missing",
+  type: OrchestrationEvent["type"],
+  payload: object,
 ): OrchestrationEvent {
   const threadId = ThreadId.make("t");
   return {
     sequence,
-    eventId: EventId.make(`event-diff-${sequence}`),
+    eventId: EventId.make(`event-${sequence}`),
     aggregateKind: "thread",
     aggregateId: threadId,
     occurredAt: "2026-10-01T10:00:02.000Z",
-    commandId: CommandId.make(`command-diff-${sequence}`),
+    commandId: CommandId.make(`command-${sequence}`),
     causationEventId: null,
     correlationId: null,
     metadata: {},
-    type: "thread.turn-diff-completed",
-    payload: {
-      threadId,
-      turnId: TurnId.make(turnId),
-      checkpointTurnCount: 1,
-      checkpointRef: CheckpointRef.make(`checkpoint-${sequence}`),
-      status,
-      files: [],
-      assistantMessageId: MessageId.make(`assistant:${turnId}`),
-      completedAt: "2026-10-01T10:00:02.000Z",
-    },
+    type,
+    payload: { threadId, ...payload },
   } as OrchestrationEvent;
+}
+
+/**
+ * `placeholder` is the `missing` checkpoint ProviderRuntimeIngestion records on
+ * a Codex turn's first diff update; `missing` alone is a real capture of an
+ * interrupted turn.
+ */
+function turnDiffCompleted(
+  sequence: number,
+  turnId: string,
+  status: "ready" | "missing" | "placeholder",
+): OrchestrationEvent {
+  return threadEvent(sequence, "thread.turn-diff-completed", {
+    turnId: TurnId.make(turnId),
+    checkpointTurnCount: 1,
+    checkpointRef: CheckpointRef.make(
+      status === "placeholder" ? `provider-diff:event-${sequence}` : `checkpoint-${sequence}`,
+    ),
+    status: status === "placeholder" ? "missing" : status,
+    files: [],
+    assistantMessageId: MessageId.make(`assistant:${turnId}`),
+    completedAt: "2026-10-01T10:00:02.000Z",
+  });
+}
+
+/** `session-set` leaves the latest turn alone unless it starts one. */
+function sessionSet(
+  sequence: number,
+  status: "running" | "ready",
+  activeTurnId: string | null,
+): OrchestrationEvent {
+  return threadEvent(sequence, "thread.session-set", {
+    session: {
+      threadId: ThreadId.make("t"),
+      status,
+      providerName: "codex",
+      providerInstanceId: "codex",
+      runtimeMode: "full-access",
+      activeTurnId: activeTurnId === null ? null : TurnId.make(activeTurnId),
+      lastError: null,
+      updatedAt: `2026-10-01T10:00:${String(10 + sequence).padStart(2, "0")}.000Z`,
+    },
+  });
+}
+
+function turnInterruptRequested(sequence: number, turnId: string): OrchestrationEvent {
+  return threadEvent(sequence, "thread.turn-interrupt-requested", {
+    turnId: TurnId.make(turnId),
+    createdAt: "2026-10-01T10:00:03.000Z",
+  });
 }
 
 async function flush(): Promise<void> {
@@ -134,6 +175,11 @@ function setup(options: { thread?: ThreadFixture; mutationReady?: boolean } = {}
     releaseDetail,
     setThread: (fixture: Omit<ThreadFixture, "id">) =>
       threads.setState((state) => withThread(state, { id: "t", ...fixture })),
+    apply: (event: OrchestrationEvent) =>
+      threads.setState((state) => applyOrchestrationEvent(state, event, QUEUE_ENV)),
+    latestTurnState: () =>
+      threads.getState().environmentStateById[QUEUE_ENV]?.threadTurnStateById[ThreadId.make("t")]
+        ?.latestTurn?.state,
     setMutationReady: (ready: boolean) => {
       mutationReady = ready;
       for (const listener of readinessListeners) listener();
@@ -230,21 +276,65 @@ describe("message queue drain coordinator", () => {
     expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "busy" });
     // A Codex turn in a git repo: the first turn.diff.updated dispatches a
     // placeholder `missing` checkpoint, which the client maps to `interrupted`.
-    f.threads.setState((state) =>
-      applyOrchestrationEvent(state, turnDiffCompleted(1, "turn-1", "missing"), QUEUE_ENV),
-    );
-    expect(
-      f.threads.getState().environmentStateById[QUEUE_ENV]?.threadTurnStateById[ThreadId.make("t")]
-        ?.latestTurn?.state,
-    ).toBe("interrupted");
+    f.apply(turnDiffCompleted(1, "turn-1", "placeholder"));
+    expect(f.latestTurnState()).toBe("interrupted");
     await flush();
     expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "busy" });
     expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
     // The real capture lands and the turn settles normally.
-    f.threads.setState((state) =>
-      applyOrchestrationEvent(state, turnDiffCompleted(2, "turn-1", "ready"), QUEUE_ENV),
-    );
+    f.apply(turnDiffCompleted(2, "turn-1", "ready"));
     f.setThread(IDLE);
+    await flush();
+    expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
+    expect(f.sent).toEqual(["q-1"]);
+  });
+
+  it("does not hold when a placeholder-checkpoint turn settles before its real capture", async () => {
+    const f = setup({ thread: RUNNING });
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    f.queue.getState().enqueue(KEY, entry("q-2"));
+    await flush();
+    f.apply(turnDiffCompleted(1, "turn-1", "placeholder"));
+    // turn.completed settles the session; the capture is still running (or failed).
+    f.apply(sessionSet(2, "ready", null));
+    expect(f.latestTurnState()).toBe("interrupted");
+    await flush();
+    expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
+    expect(f.sent).toEqual(["q-1"]);
+    // The real capture lands late; q-2 still waits for q-1's own turn.
+    f.apply(turnDiffCompleted(3, "turn-1", "ready"));
+    await flush();
+    expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
+    expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "awaiting-ack" });
+  });
+
+  it("holds when a settled turn's real capture shows it was interrupted", async () => {
+    const f = setup({ thread: RUNNING });
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    await flush();
+    f.apply(turnDiffCompleted(1, "turn-1", "placeholder"));
+    f.apply(sessionSet(2, "ready", null));
+    f.apply(turnDiffCompleted(3, "turn-1", "missing"));
+    await flush();
+    expect(f.sent).toEqual([]);
+    expect(f.queue.getState().holdsByThreadKey[KEY]).toMatchObject({
+      reason: "interrupted",
+      causeKeys: ["interrupt:turn-1"],
+    });
+  });
+
+  it("sends a follow-up composed after Stop while the aborted turn was still settling", async () => {
+    const f = setup({ thread: RUNNING });
+    // Stop with an empty queue: no explicit hold, the turn reads interrupted at once.
+    f.apply(turnInterruptRequested(1, "turn-1"));
+    expect(f.latestTurnState()).toBe("interrupted");
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    expect(f.queue.getState().acknowledgedCauseKeysByThreadKey[KEY]).toEqual(["interrupt:turn-1"]);
+    await flush();
+    expect(f.sent).toEqual([]);
+    // turn.aborted: the session settles, then the interrupt is re-requested.
+    f.apply(sessionSet(2, "ready", null));
+    f.apply(turnInterruptRequested(3, "turn-1"));
     await flush();
     expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
     expect(f.sent).toEqual(["q-1"]);

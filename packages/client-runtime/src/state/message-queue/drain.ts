@@ -101,13 +101,14 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
   // 4. Cached or demoted rows cannot be trusted for dedupe or running state.
   if (!environment.shellLive) return wait("environment");
 
-  // 5. The causes current when the queue became non-empty were already seen.
+  // 5. The causes current when the queue became non-empty were already seen,
+  // including an interrupt whose turn has not settled yet.
   if (input.acknowledgedCauseKeys === undefined) {
     return {
       kind: "baseline",
-      causeKeys: deriveQueueFailureCauses(view, input.dispatchedMessageIds).map(
-        (cause) => cause.causeKey,
-      ),
+      causeKeys: deriveQueueFailureCauses(view, input.dispatchedMessageIds, {
+        includeUnsettled: true,
+      }).map((cause) => cause.causeKey),
     };
   }
 

@@ -11,6 +11,7 @@ import {
   createInterruptQueueHold,
   deriveQueueFailureCauses,
   describeQueueHold,
+  isLatestTurnInterruptSettled,
   MAX_ACKNOWLEDGED_CAUSE_KEYS,
   mergeQueueHold,
   partitionNewQueueFailureCauses,
@@ -66,11 +67,21 @@ describe("deriveQueueFailureCauses", () => {
     },
   );
 
-  it("raises an interrupt cause from the latest turn or the session", () => {
+  it("raises an interrupt cause from a settled latest turn or the session", () => {
     expect(
       causesFor({
         session: { status: "ready" },
         latestTurn: { turnId: "turn-2", state: "interrupted" },
+        messageIds: [],
+      }).map((cause) => cause.causeKey),
+    ).toEqual(["interrupt:turn-2"]);
+    // A real capture of an interrupted turn is `missing` too, but not the placeholder.
+    expect(
+      causesFor({
+        session: { status: "ready" },
+        latestTurn: { turnId: "turn-2", state: "interrupted" },
+        latestCheckpoint: { status: "missing", checkpointRef: "refs/ryco/checkpoints/2" },
+        messageIds: [],
       }).map((cause) => cause.causeKey),
     ).toEqual(["interrupt:turn-2"]);
     expect(
@@ -78,16 +89,38 @@ describe("deriveQueueFailureCauses", () => {
     ).toEqual(["interrupt:session"]);
   });
 
+  const placeholder = { status: "missing" as const, checkpointRef: "provider-diff:event-1" };
   it.each([
-    ["running on that turn", { status: "running" as const, activeTurnId: "turn-1" }],
-    ["starting", { status: "starting" as const }],
-    ["ready with the turn still active", { status: "ready" as const, activeTurnId: "turn-1" }],
-  ])("derives no interrupt from a live turn's latest state while %s", (_label, session) => {
-    // A Codex turn in a git repo flips latestTurn to `interrupted` mid-turn
-    // through a placeholder `missing` checkpoint.
-    expect(causesFor({ session, latestTurn: { turnId: "turn-1", state: "interrupted" } })).toEqual(
-      [],
-    );
+    [
+      "running on that turn",
+      { session: { status: "running" as const, activeTurnId: "turn-1" }, messageIds: [] },
+    ],
+    ["starting", { session: { status: "starting" as const }, messageIds: [] }],
+    [
+      "ready with the turn still active",
+      { session: { status: "ready" as const, activeTurnId: "turn-1" }, messageIds: [] },
+    ],
+    [
+      "settled on a placeholder checkpoint",
+      { session: { status: "ready" as const }, latestCheckpoint: placeholder, messageIds: [] },
+    ],
+    ["settled before detail is loaded", { session: { status: "ready" as const } }],
+  ])("holds no interrupt for a latest turn %s, but a baseline includes it", (_label, fixture) => {
+    // A Codex turn in a git repo reads `interrupted` from its first diff update
+    // through a placeholder `missing` checkpoint, live or settled.
+    const view = readQueueThreadView(
+      makeQueueAppState([
+        { id: "t", ...fixture, latestTurn: { turnId: "turn-1", state: "interrupted" } },
+      ]),
+      queueRef("t"),
+    )!;
+    expect(isLatestTurnInterruptSettled(view)).toBe(false);
+    expect(deriveQueueFailureCauses(view, NONE)).toEqual([]);
+    expect(
+      deriveQueueFailureCauses(view, NONE, { includeUnsettled: true }).map(
+        (cause) => cause.causeKey,
+      ),
+    ).toEqual(["interrupt:turn-1"]);
   });
 
   it("raises a start failure only for a message this client dispatched", () => {

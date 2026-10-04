@@ -11,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   createEnvironmentFallbackThreadRefSelector,
+  selectEnvironmentShellLive,
   selectThreadDetailLoaded,
 } from "./storeSelectors.ts";
 import {
@@ -222,5 +223,26 @@ describe("selectThreadDetailLoaded", () => {
       environmentId,
     );
     expect(selectThreadDetailLoaded(state, ref)).toBe(true);
+  });
+});
+
+describe("selectEnvironmentShellLive", () => {
+  it("is true only for a bootstrapped environment that is not cache provenance", () => {
+    expect(selectEnvironmentShellLive(makeState(makeEnvironmentState()), environmentId)).toBe(true);
+    expect(
+      selectEnvironmentShellLive(
+        makeState(makeEnvironmentState({ bootstrapComplete: false })),
+        environmentId,
+      ),
+    ).toBe(false);
+    expect(
+      selectEnvironmentShellLive(
+        makeState(makeEnvironmentState({ hydratedFromCacheAt: 1 })),
+        environmentId,
+      ),
+    ).toBe(false);
+    expect(
+      selectEnvironmentShellLive(makeState(makeEnvironmentState()), EnvironmentId.make("other")),
+    ).toBe(false);
   });
 });

@@ -120,6 +120,29 @@ describe("resolveQueueDrainStep", () => {
     ]);
   });
 
+  it("baselines a Stop the user saw while its turn was still settling", () => {
+    const stopping = viewOf({
+      session: { status: "running", activeTurnId: "turn-1" },
+      latestTurn: { turnId: "turn-1", state: "interrupted" },
+      messageIds: ["m-0"],
+    });
+    expect(
+      resolveQueueDrainStep(input({ acknowledgedCauseKeys: undefined, view: stopping })),
+    ).toEqual({ kind: "baseline", causeKeys: ["interrupt:turn-1"] });
+    const settled = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-1", state: "interrupted" },
+      messageIds: ["m-0"],
+    });
+    expect(
+      kinds(drive(input({ acknowledgedCauseKeys: ["interrupt:turn-1"], view: settled }))),
+    ).toEqual(["send"]);
+    expect(kinds(drive(input({ acknowledgedCauseKeys: [], view: settled })))).toEqual([
+      "hold",
+      "wait:held",
+    ]);
+  });
+
   it("holds a restart-orphan error that arrives after enqueue", () => {
     const orphaned = viewOf({
       session: { status: "error", lastError: "Provider session did not survive a server restart." },

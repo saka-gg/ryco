@@ -156,3 +156,18 @@ export function selectThreadDetailLoaded(state: AppState, ref: ScopedThreadRef):
     environmentState.messageIdsByThreadId[ref.threadId] !== undefined
   );
 }
+
+/**
+ * True when the environment's rows come from a live shell snapshot: bootstrap
+ * completed and not cache provenance. Rows hydrated from the snapshot cache, or
+ * demoted after a disconnect, are last-known state with every session dropped.
+ */
+export function selectEnvironmentShellLive(
+  state: AppState,
+  environmentId: ScopedThreadRef["environmentId"] | null | undefined,
+): boolean {
+  const environmentState = selectEnvironmentState(state, environmentId);
+  return (
+    environmentState.bootstrapComplete && (environmentState.hydratedFromCacheAt ?? null) === null
+  );
+}
