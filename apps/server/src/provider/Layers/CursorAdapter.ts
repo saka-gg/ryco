@@ -1296,7 +1296,8 @@ export function makeCursorAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      // sendTurn awaits the whole prompt after emitting turn.started.
+      capabilities: { sessionModelSwitch: "in-session", turnSubmission: "completion" },
       startSession,
       sendTurn,
       interruptTurn,

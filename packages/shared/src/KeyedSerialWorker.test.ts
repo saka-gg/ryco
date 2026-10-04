@@ -166,7 +166,7 @@ describe("makeKeyedSerialWorker", () => {
         expect(yield* worker.isIdle("c")).toBe(true);
         yield* Deferred.succeed(release, undefined);
         yield* worker.drain;
-        expect(processed.sort()).toEqual([1, 2]);
+        expect(processed.toSorted()).toEqual([1, 2]);
         expect(yield* worker.isIdle("a")).toBe(true);
       }),
     ),

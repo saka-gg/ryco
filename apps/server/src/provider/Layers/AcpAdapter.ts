@@ -1096,6 +1096,8 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
           // override this only when the agent advertises no model API.
           return options.getSessionModelSwitch?.() ?? "in-session";
         },
+        // sendTurn awaits the whole ACP prompt after emitting turn.started.
+        turnSubmission: "completion",
       },
       startSession,
       sendTurn,
