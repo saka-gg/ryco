@@ -24,6 +24,8 @@ import {
   nodeEnrollmentFingerprintView,
   nodeFallbackReport,
   nodeNarrowOffered,
+  nodePendingInPartition,
+  nodePendingPartitionWarning,
   nodeOperatorDataAvailability,
   nodePairingWindowRows,
   nodePolicyChangeDestructive,
@@ -40,11 +42,13 @@ import {
   nodeSessionVerificationView,
   NODE_APPROVAL_ROLE_UNKNOWN_PENDING,
   NODE_APPROVAL_ROLE_UNKNOWN_REVOKED,
+  NODE_APPROVE_NUMBER_PROMPT,
   NODE_E2EE_ACTION_IDS,
   NODE_E2EE_APPROVABLE_ROLES,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
   NODE_E2EE_RECORD_ACTION_IDS,
   NODE_SAFETY_NUMBER_ADVISORY,
+  NODE_SAFETY_NUMBER_MATCH_HINT,
   NODE_SESSION_WEB_SAS_ADVISORY,
 } from "./NodeSecuritySettings.logic";
 
@@ -332,6 +336,9 @@ describe("prohibited claims", () => {
       "policyNoWithdrawal",
       "policyValueUnreadable",
       "approvalRoleUnknown",
+      "pendingPartitionWarning",
+      "safetyNumberMatchLabel",
+      "approveNumberPrompt",
       // The claim-bearing `.tsx` copy, moved here so a unit scan can see it. The
       // browser suite runs the same list over the rendered DOM for the rest.
       "requireE2eeDescription",
@@ -479,6 +486,86 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
     expect(nodeNarrowOffered({ ...approved("owner", "viewer"), status: "revoked" }, "viewer")).toBe(
       false,
     );
+  });
+
+  it("carries the whole number into the approval dialog, and never a tail", () => {
+    // The dialog's scrim hides the row the owner just compared, so the last look
+    // before approving has to be inside it. A tail is not a comparison: a Hub
+    // that holds the phone's enrolled key can grind a key to match one.
+    const subject = {
+      fingerprint: "SHA256:AAAAphoneAAAA",
+      accountId: "acct_reader",
+      hubOrigin: "https://hub.example.test",
+      safetyNumber: SAFETY_NUMBER,
+      pendingInPartition: 1,
+    };
+    const confirmation = nodeApproveConfirmation("owner", subject);
+    const number = confirmation.facts?.find((fact) => fact.value === SAFETY_NUMBER);
+    expect(number, "the approval dialog does not carry the whole number").toBeDefined();
+    expect(number!.mono).toBe(true);
+    expect(confirmation.body).toContain(NODE_APPROVE_NUMBER_PROMPT);
+    // One request under the account: nothing to warn about.
+    expect(confirmation.body).not.toContain("requests are waiting");
+    // An unreadable number is not drawn as one.
+    expect(
+      nodeApproveConfirmation("owner", { ...subject, safetyNumber: "12345" }).facts?.map(
+        (fact) => fact.label,
+      ),
+    ).not.toContain("Comparison number");
+    // The statement that gates the action is about all the digits.
+    expect(NODE_SAFETY_NUMBER_MATCH_HINT).toContain(String(E2EE_SAFETY_NUMBER_DIGITS.digits));
+  });
+
+  it("warns when an account has more than one request waiting, on the row and in the dialog", () => {
+    const pending = (fingerprint: string, accountId = "acct_reader"): NodeE2eeClientRecord => ({
+      status: "pending",
+      hubOrigin: "https://hub.example.test",
+      accountId,
+      fingerprint,
+      maxRole: "viewer",
+      capabilitySet: [],
+      createdAt: 0,
+      safetyNumber: SAFETY_NUMBER,
+      pairingReserved: false,
+      observedRole: "owner",
+    });
+    const phone = pending("SHA256:AAAAphone0");
+    const hubKey = pending("SHA256:BBBBunknown1");
+    const otherAccount = pending("SHA256:CCCCother2", "acct_other");
+    const approved: NodeE2eeClientRecord = {
+      ...pending("SHA256:DDDDlaptop3"),
+      status: "approved",
+      maxRole: "owner",
+      capabilitySet: ["ryco.rpc"],
+    };
+    const listing = {
+      records: [phone, hubKey, otherAccount, approved],
+      pendingGlobalSaturated: false,
+      saturatedAccounts: [],
+      refusedPairingAttempts: 0,
+    };
+
+    // The partition is (hubOrigin, accountId), and only pending records count.
+    expect(nodePendingInPartition(listing, phone)).toBe(2);
+    expect(nodePendingInPartition(listing, hubKey)).toBe(2);
+    expect(nodePendingInPartition(listing, otherAccount)).toBe(1);
+    expect(nodePendingInPartition(listing, approved)).toBe(0);
+    expect(nodePendingInPartition(null, phone)).toBe(0);
+
+    expect(nodePendingPartitionWarning(1)).toBeNull();
+    expect(nodePendingPartitionWarning(0)).toBeNull();
+    const warning = nodePendingPartitionWarning(2)!;
+    expect(warning).toContain("2 requests are waiting under this account");
+    expect(warning.toLowerCase()).toContain("matches the phone in your hand");
+
+    const dialog = nodeApproveConfirmation("owner", {
+      fingerprint: phone.fingerprint,
+      accountId: phone.accountId,
+      hubOrigin: phone.hubOrigin,
+      safetyNumber: phone.safetyNumber,
+      pendingInPartition: 2,
+    });
+    expect(dialog.body).toContain(warning);
   });
 
   it("does not promise a reconnect a narrowing cannot deliver", () => {

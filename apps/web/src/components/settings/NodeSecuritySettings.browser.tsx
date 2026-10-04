@@ -163,7 +163,9 @@ import {
   nodeE2eeActionConfirmation,
   nodeE2eeRecordConfirmation,
   nodePolicyPreviewWarnings,
+  NODE_APPROVE_NUMBER_PROMPT,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
+  NODE_SAFETY_NUMBER_MATCH_LABEL,
   NODE_SESSION_WEB_SAS_ADVISORY,
 } from "./NodeSecuritySettings.logic";
 
@@ -189,6 +191,14 @@ const SECOND_SAFETY_NUMBER = Array.from(
   { length: E2EE_SAFETY_NUMBER_DIGITS.groups },
   (_unused, index) =>
     String(13_570 + index).padStart(E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup, "0"),
+).join(E2EE_SAFETY_NUMBER_DIGITS.separator);
+
+/** A third key under the same account, for the partition with two requests waiting. */
+const THIRD_FINGERPRINT = "SHA256:CCCCtabletCCCCtabletCCCCtabletCCCCtabletC2";
+const THIRD_SAFETY_NUMBER = Array.from(
+  { length: E2EE_SAFETY_NUMBER_DIGITS.groups },
+  (_unused, index) =>
+    String(97_530 - index).padStart(E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup, "0"),
 ).join(E2EE_SAFETY_NUMBER_DIGITS.separator);
 
 const CLIENTS: NodeE2eeClientListing = {
@@ -331,6 +341,20 @@ async function mountLocalPanel() {
   mounted = await render(<NodeSecuritySettings />);
   await expect.element(page.getByText(SAFETY_NUMBER)).toBeVisible();
   return mounted;
+}
+
+/** Every "This number matches the phone" statement on the page, in row order. */
+const numberMatchStatements = () =>
+  [...document.querySelectorAll<HTMLElement>('[data-testid="node-safety-number-match"]')].map(
+    (statement) => statement.querySelector<HTMLElement>('[role="checkbox"]')!,
+  );
+
+/** The owner says the `index`th approvable row's number matches the phone. */
+async function confirmNumberMatches(index = 0) {
+  numberMatchStatements()[index]!.click();
+  await vi.waitFor(() => {
+    expect(numberMatchStatements()[index]!.getAttribute("aria-checked")).toBe("true");
+  });
 }
 
 describe("local mode: the node's operator state, and no alarm about a relay that is not there", () => {
@@ -619,6 +643,7 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
     // was EMPTY, which §8.6 step 6 refuses on every native handshake — an
     // `approved` record that cannot connect.
     await mountLocalPanel();
+    await confirmNumberMatches();
 
     buttonsLabelled("Approve as owner")[0]!.click();
     await vi.waitFor(() => {
@@ -655,6 +680,7 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
     // buttons this replaced led with "Approve as viewer" — a green row whose
     // every handshake was then refused.
     await mountLocalPanel();
+    await confirmNumberMatches();
     for (const role of ["viewer", "operator"]) {
       expect(buttonsLabelled(`Approve as ${role}`), role).toHaveLength(0);
     }
@@ -675,6 +701,8 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
     expect(
       document.querySelector('[data-testid="node-approval-role-unknown"]')?.textContent,
     ).toContain("Have the device try again");
+    // …and no comparison is asked for an approval that is not on offer.
+    expect(numberMatchStatements()).toHaveLength(0);
   });
 
   it("offers Reduce to viewer only where the device would still get in", async () => {
@@ -704,6 +732,116 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
         hubOrigin: "https://hub.example.test",
       }).body,
     );
+  });
+});
+
+describe("§13.2 step 5 an approval waits for the owner to match the number", () => {
+  // A Hub mints the tickets, so it can introduce a key of its own under the
+  // owner's account. That pending row reads exactly like the phone's except for
+  // the fingerprint and the §13.4 number — so the comparison is the one human
+  // check strict mode rests on, and an advisory beside an always-present button
+  // left it optional.
+  const approveButtons = () =>
+    [...document.querySelectorAll<HTMLElement>("button")].filter((element) =>
+      (element.textContent ?? "").trim().startsWith("Approve as"),
+    );
+
+  it("offers no approve action until the owner says the number matches the phone", async () => {
+    await mountLocalPanel();
+    expect(approveButtons()).toHaveLength(0);
+
+    // The statement sits with the number it is about, on the approvable row only.
+    expect(numberMatchStatements()).toHaveLength(1);
+    expect(
+      document.querySelector('[data-testid="node-safety-number-match"]')!.textContent,
+    ).toContain(NODE_SAFETY_NUMBER_MATCH_LABEL);
+
+    await confirmNumberMatches();
+    expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
+
+    // Taking it back takes the action away again.
+    numberMatchStatements()[0]!.click();
+    await vi.waitFor(() => {
+      expect(approveButtons()).toHaveLength(0);
+    });
+    expect(applyNodeE2eeAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("repeats the whole number in the approval dialog, never a tail of it", async () => {
+    await mountLocalPanel();
+    await confirmNumberMatches();
+    buttonsLabelled("Approve as owner")[0]!.click();
+    await vi.waitFor(() => {
+      expect(confirmDialog()).not.toBeNull();
+    });
+
+    // The dialog's scrim hides the row just compared, so the last look has to
+    // be inside it — all sixty digits, in the face a digit-by-digit read needs.
+    const facts = document.querySelector<HTMLElement>('[data-testid="node-confirmation-facts"]')!;
+    const value = [...facts.querySelectorAll<HTMLElement>("dd")].find(
+      (element) => (element.textContent ?? "").trim() === SAFETY_NUMBER,
+    );
+    expect(value, "the dialog does not carry the whole number").toBeDefined();
+    expect(getComputedStyle(value!).fontFamily.toLowerCase()).toMatch(/mono/u);
+    expect(confirmDialog()!.textContent).toContain(NODE_APPROVE_NUMBER_PROMPT);
+    expect(confirmDialog()!.textContent).toContain(FINGERPRINT);
+    expect(applyNodeE2eeAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("warns on each row, and in the dialog, when an account has two requests waiting", async () => {
+    const [phone, approved] = CLIENTS.records;
+    clients = {
+      ...CLIENTS,
+      records: [
+        phone!,
+        // A second pending key under the SAME account and origin — another
+        // device, or one the Hub introduced. Nothing but the fingerprint and
+        // the number tell it from the phone.
+        { ...phone!, fingerprint: THIRD_FINGERPRINT, safetyNumber: THIRD_SAFETY_NUMBER },
+        approved!,
+      ],
+    };
+    await mountLocalPanel();
+
+    const warnings = [
+      ...document.querySelectorAll<HTMLElement>('[data-testid="node-pending-partition-warning"]'),
+    ];
+    expect(warnings).toHaveLength(2);
+    for (const warning of warnings) {
+      expect(warning.textContent).toContain("2 requests are waiting under this account");
+    }
+
+    // Matching the SECOND row approves the second row, and its dialog repeats
+    // the warning along with that row's own number — not the first row's.
+    await confirmNumberMatches(1);
+    expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
+    buttonsLabelled("Approve as owner")[0]!.click();
+    const dialog = await vi.waitFor(() => {
+      const found = confirmDialog();
+      expect(found).not.toBeNull();
+      return found!.textContent ?? "";
+    });
+    expect(dialog).toContain("2 requests are waiting under this account");
+    expect(dialog).toContain(THIRD_SAFETY_NUMBER);
+    expect(dialog).toContain(THIRD_FINGERPRINT);
+    expect(dialog).not.toContain(SAFETY_NUMBER);
+  });
+
+  it("does not warn when the only other record under the account is approved", async () => {
+    await mountLocalPanel();
+    expect(document.querySelector('[data-testid="node-pending-partition-warning"]')).toBeNull();
+  });
+
+  it("offers no approval for a record whose number it cannot show", async () => {
+    // No readable number, nothing to compare — so nothing to approve from here.
+    clients = {
+      ...CLIENTS,
+      records: [{ ...CLIENTS.records[0]!, safetyNumber: "12345" }, CLIENTS.records[1]!],
+    };
+    mounted = await render(<NodeSecuritySettings />);
+    await expect.element(page.getByText(SECOND_SAFETY_NUMBER)).toBeVisible();
+    expect(numberMatchStatements()).toHaveLength(0);
+    expect(approveButtons()).toHaveLength(0);
   });
 });
 

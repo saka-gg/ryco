@@ -351,6 +351,25 @@ export const NODE_SAFETY_NUMBER_ADVISORY =
   "account reads differently. Approve nothing whose number you have not read off the other " +
   "screen yourself.";
 
+/**
+ * The owner's statement, per row, that gates every approval from this panel.
+ *
+ * §13.2 step 5 has the owner compare the number on both screens before
+ * approving, and strict mode's whole guarantee rests on that one human check: a
+ * Hub mints the tickets, so it can introduce a key of its own under the owner's
+ * account, and that pending row differs from the phone's only in its
+ * fingerprint and this number. An advisory sentence beside an Approve button
+ * leaves the comparison optional, so the button does not exist until the owner
+ * says the numbers match. It is a statement about the whole value — never about
+ * a tail of it, which a Hub that knows the phone's enrolled key can grind a key
+ * to match ahead of time.
+ */
+export const NODE_SAFETY_NUMBER_MATCH_LABEL = "This number matches the phone";
+
+export const NODE_SAFETY_NUMBER_MATCH_HINT =
+  `Read all ${E2EE_SAFETY_NUMBER_DIGITS.digits} digits off the phone's own screen and tick this ` +
+  "only if every group is the same. The approve action appears once you have.";
+
 export function nodeSafetyNumberView(value: string): NodeSafetyNumberView | null {
   const groups = nodeSafetyNumberGroups(value);
   if (groups.length === 0) return null;
@@ -1298,6 +1317,46 @@ export function nodeApprovalRoleUnknownNotice(record: NodeE2eeClientRecord): str
 }
 
 /**
+ * How many pending records share this record's §13.6 partition — the same
+ * `(hubOrigin, accountId)` — this one included, or 0 for a record that is not
+ * pending.
+ *
+ * Counted from the listing the panel actually holds, so the warning below and
+ * the rows it sits on describe the same read.
+ */
+export function nodePendingInPartition(
+  listing: NodeE2eeClientListing | null,
+  record: NodeE2eeClientRecord,
+): number {
+  if (listing === null || record.status !== "pending") return 0;
+  return listing.records.filter(
+    (entry) =>
+      entry.status === "pending" &&
+      entry.hubOrigin === record.hubOrigin &&
+      entry.accountId === record.accountId,
+  ).length;
+}
+
+/**
+ * The warning for a partition holding more than one pending request.
+ *
+ * One request under the owner's account is the ordinary case: the phone they
+ * are holding. A second is either another device of theirs or a key the Hub
+ * introduced under their account — and the two read identically here except
+ * for the fingerprint and the number. That is the moment an owner most needs to
+ * compare rather than pick, so it is said on the row and again in the dialog.
+ */
+export function nodePendingPartitionWarning(pendingInPartition: number): string | null {
+  if (pendingInPartition <= 1) return null;
+  return (
+    `${pendingInPartition} requests are waiting under this account at this Hub. A Hub can open ` +
+    "one under your account from a key of its own, and it reads exactly like your phone's except " +
+    "for the fingerprint and the number. Approve only the row whose number matches the phone in " +
+    "your hand, and delete any you cannot account for."
+  );
+}
+
+/**
  * Whether lowering an approved record's ceiling to `ceiling` still lets the
  * device in.
  *
@@ -1354,26 +1413,63 @@ export const NODE_E2EE_APPROVAL_CAPABILITY_SET: ReadonlyArray<RelayCapability> =
  * because there is exactly one capability a relay channel carries and any other
  * value approves a key that cannot connect; so the sentence states what is
  * granted rather than implying an empty grant is a smaller one.
+ *
+ * THE DIALOG CARRIES THE WHOLE NUMBER. Its scrim hides the row the owner just
+ * compared, so the last look before the key is approved has to be inside the
+ * dialog — all of it, never a tail — and, when the account has more than one
+ * request waiting, so does the reason to look twice.
  */
+export interface NodeE2eeApprovalSubject extends NodeE2eeRecordSubject {
+  /** §13.4's display string, as the record stores it. */
+  readonly safetyNumber: string;
+  /** `nodePendingInPartition` for the record being approved. */
+  readonly pendingInPartition: number;
+}
+
+export const NODE_APPROVE_NUMBER_PROMPT =
+  "The number below is the one you matched against the phone; read it once more before " +
+  "confirming.";
+
 export function nodeApproveConfirmation(
   role: NodeE2eeApprovableRole,
-  subject?: NodeE2eeRecordSubject,
+  subject?: NodeE2eeApprovalSubject,
 ): NodeE2eeActionConfirmation {
   const base = ACTION_CONFIRMATIONS.approve;
   const capabilities = NODE_E2EE_APPROVAL_CAPABILITY_SET.join(", ");
+  const number = subject === undefined ? null : nodeSafetyNumberView(subject.safetyNumber);
+  const partition =
+    subject === undefined ? null : nodePendingPartitionWarning(subject.pendingInPartition);
+  const subjectSentences =
+    subject === undefined
+      ? []
+      : [
+          ...(number === null ? [] : [NODE_APPROVE_NUMBER_PROMPT]),
+          ...(partition === null ? [] : [partition]),
+          NODE_E2EE_RECORD_SUBJECT_PROMPT,
+        ];
   return {
     title: `Approve this client key as ${role}?`,
-    body:
+    body: [
       `${base.body} ${role} is the role this device connects with, so it is the ceiling it is ` +
-      `approved at: at most it will be able to ${APPROVAL_ROLE_MEANINGS[role]}. A smaller ` +
-      `ceiling would refuse the device rather than limit it — if this account should not hold ` +
-      `that much on this node, revoke the key instead. ` +
+        `approved at: at most it will be able to ${APPROVAL_ROLE_MEANINGS[role]}. A smaller ` +
+        `ceiling would refuse the device rather than limit it — if this account should not hold ` +
+        `that much on this node, revoke the key instead.`,
       `It is granted the one capability a relay channel carries, ${capabilities} — a key ` +
-      `approved with none is admitted by nothing and could not connect at all. ` +
-      `${subject === undefined ? "" : NODE_E2EE_RECORD_SUBJECT_PROMPT}`.trimEnd(),
+        `approved with none is admitted by nothing and could not connect at all.`,
+      ...subjectSentences,
+    ].join(" "),
     confirmLabel: `Approve as ${role}`,
     destructive: false,
-    ...(subject === undefined ? {} : { facts: nodeE2eeRecordSubjectFacts(subject) }),
+    ...(subject === undefined
+      ? {}
+      : {
+          facts: [
+            ...nodeE2eeRecordSubjectFacts(subject),
+            ...(number === null
+              ? []
+              : [{ label: "Comparison number", value: number.display, mono: true }]),
+          ],
+        }),
   };
 }
 
@@ -1482,10 +1578,24 @@ export function everyNodeSecurityString(): ReadonlyArray<{
     pushConfirmation(`record(${action})`, nodeE2eeRecordConfirmation(action, subject));
   }
   pushConfirmation("pairingWindow", nodeE2eePairingWindowConfirmation("SHA256:example"));
+  const exampleSafetyNumber = Array.from({ length: E2EE_SAFETY_NUMBER_DIGITS.groups }, () =>
+    "1".repeat(E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup),
+  ).join(E2EE_SAFETY_NUMBER_DIGITS.separator);
   for (const role of NODE_E2EE_APPROVABLE_ROLES) {
     pushConfirmation(`approve(${role})`, nodeApproveConfirmation(role));
-    pushConfirmation(`approve(${role}, record)`, nodeApproveConfirmation(role, subject));
+    pushConfirmation(
+      `approve(${role}, record)`,
+      nodeApproveConfirmation(role, {
+        ...subject,
+        safetyNumber: exampleSafetyNumber,
+        pendingInPartition: 2,
+      }),
+    );
   }
+  push("approveNumberPrompt", NODE_APPROVE_NUMBER_PROMPT);
+  push("pendingPartitionWarning", nodePendingPartitionWarning(2) ?? "");
+  push("safetyNumberMatchLabel", NODE_SAFETY_NUMBER_MATCH_LABEL);
+  push("safetyNumberMatchHint", NODE_SAFETY_NUMBER_MATCH_HINT);
   push("recordSubjectPrompt", NODE_E2EE_RECORD_SUBJECT_PROMPT);
   for (const status of ["pending", "revoked"] as const) {
     push(

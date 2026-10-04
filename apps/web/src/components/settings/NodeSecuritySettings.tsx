@@ -66,6 +66,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
   DialogClose,
@@ -105,6 +106,8 @@ import {
   nodeEnrollmentFingerprintView,
   nodeFallbackReport,
   nodeNarrowOffered,
+  nodePendingInPartition,
+  nodePendingPartitionWarning,
   nodeOperatorDataAvailability,
   nodePairingWindowRows,
   nodePolicyChangeDestructive,
@@ -140,6 +143,8 @@ import {
   NODE_POLICY_STRICT_TITLE,
   NODE_POLICY_VALUE_UNREADABLE,
   NODE_PREKEY_DESCRIPTION,
+  NODE_SAFETY_NUMBER_MATCH_HINT,
+  NODE_SAFETY_NUMBER_MATCH_LABEL,
   NODE_SAFETY_NUMBER_UNAVAILABLE,
   NODE_SESSION_NATIVE_CODE_ABSENT,
   NODE_SESSION_WEB_ROW_DESCRIPTION,
@@ -685,14 +690,24 @@ function PrimaryNodeSecuritySettings() {
     [confirmCopyThen],
   );
 
-  /** An approval, whose confirmation names the role the owner picked (§13.6). */
+  /**
+   * An approval, whose confirmation names the role it grants (§13.6) and
+   * carries the whole number the owner just matched against the phone.
+   *
+   * The key in the dialog is derived from the request the network gets, as the
+   * withdrawals' is; the number and the partition count come from the row that
+   * gated the button.
+   */
   const approve = useCallback(
-    (request: NodeE2eeAuthorizationRequest, role: NodeE2eeApprovableRole) => {
+    (request: NodeE2eeAuthorizationRequest, approval: NodeE2eeRowApproval) => {
+      const { role } = approval;
       setConfirmation({
         copy: nodeApproveConfirmation(role, {
           fingerprint: request.fingerprint,
           accountId: request.accountId,
           hubOrigin: request.hubOrigin,
+          safetyNumber: approval.safetyNumber,
+          pendingInPartition: approval.pendingInPartition,
         }),
         run: () =>
           run(async () => {
@@ -984,6 +999,7 @@ function PrimaryNodeSecuritySettings() {
               <ClientRecordRow
                 key={`${record.hubOrigin}\u0000${record.accountId}\u0000${record.fingerprint}`}
                 record={record}
+                pendingInPartition={nodePendingInPartition(snapshot.clients, record)}
                 busy={busy}
                 onAuthorize={authorize}
                 onApprove={approve}
@@ -1390,21 +1406,33 @@ function ResetFallbackButton({
   );
 }
 
+/** What one row hands the panel's approval: the role, and what the dialog must repeat. */
+interface NodeE2eeRowApproval {
+  readonly role: NodeE2eeApprovableRole;
+  readonly safetyNumber: string;
+  readonly pendingInPartition: number;
+}
+
 function ClientRecordRow({
   record,
+  pendingInPartition,
   busy,
   onAuthorize,
   onApprove,
   onShowApprovalQr,
 }: {
   readonly record: NodeE2eeClientRecord;
+  readonly pendingInPartition: number;
   readonly busy: boolean;
   readonly onAuthorize: (
     request: NodeE2eeAuthorizationRequest,
     action: NodeE2eeRecordActionId,
     message: string,
   ) => void;
-  readonly onApprove: (request: NodeE2eeAuthorizationRequest, role: NodeE2eeApprovableRole) => void;
+  readonly onApprove: (
+    request: NodeE2eeAuthorizationRequest,
+    approval: NodeE2eeRowApproval,
+  ) => void;
   readonly onShowApprovalQr: (record: NodeE2eeClientRecord) => void;
 }) {
   const key = {
@@ -1415,6 +1443,22 @@ function ClientRecordRow({
   const tone = nodeClientStatusTone(record.status);
   const approvalRole = nodeApprovalRole(record);
   const approvalRoleUnknown = nodeApprovalRoleUnknownNotice(record);
+  const partitionWarning = nodePendingPartitionWarning(pendingInPartition);
+  // §13.2 step 5's comparison, as a per-row statement the owner makes. It is
+  // tied to the exact status and number it was made about, so a re-read that
+  // moves either one — a re-introduction, a revocation, a different number —
+  // takes the approve action away again rather than carrying a stale "yes"
+  // over to a value the owner never compared. In memory only, like the number.
+  const [matched, setMatched] = useState<{
+    readonly status: NodeE2eeClientRecord["status"];
+    readonly safetyNumber: string;
+  } | null>(null);
+  const numberMatches =
+    matched !== null &&
+    matched.status === record.status &&
+    matched.safetyNumber === record.safetyNumber;
+  // No readable number, nothing to compare — and so no approval from here.
+  const comparable = approvalRole !== null && nodeSafetyNumberView(record.safetyNumber) !== null;
 
   return (
     <SettingsRow
@@ -1440,8 +1484,13 @@ function ClientRecordRow({
               empty: §8.6 step 6 admits a native handshake only if the record's
               set contains the intended capability, and `RelayCapability` has one
               member — so an empty set approves a key that is refused by every
-              handshake it attempts. */}
-          {approvalRole === null ? null : (
+              handshake it attempts.
+
+              And it does not exist until the owner has said this row's number
+              matches the phone: a Hub can introduce a key of its own under the
+              owner's account, and the number is the only thing that tells that
+              row from the phone's. */}
+          {approvalRole === null || !comparable || !numberMatches ? null : (
             <Button
               size="xs"
               variant="outline"
@@ -1454,7 +1503,7 @@ function ClientRecordRow({
                     maxRole: approvalRole,
                     capabilitySet: NODE_E2EE_APPROVAL_CAPABILITY_SET,
                   },
-                  approvalRole,
+                  { role: approvalRole, safetyNumber: record.safetyNumber, pendingInPartition },
                 )
               }
             >
@@ -1523,7 +1572,39 @@ function ClientRecordRow({
             {approvalRoleUnknown}
           </p>
         )}
+        {partitionWarning === null ? null : (
+          <p
+            data-testid="node-pending-partition-warning"
+            className="text-[11px] leading-relaxed font-medium text-warning"
+          >
+            {partitionWarning}
+          </p>
+        )}
         <SafetyNumber value={record.safetyNumber} />
+        {comparable ? (
+          <label data-testid="node-safety-number-match" className="flex items-start gap-2">
+            <Checkbox
+              className="mt-0.5"
+              checked={numberMatches}
+              disabled={busy}
+              onCheckedChange={(checked) =>
+                setMatched(
+                  checked === true
+                    ? { status: record.status, safetyNumber: record.safetyNumber }
+                    : null,
+                )
+              }
+            />
+            <span className="space-y-0.5">
+              <span className="block text-[12px] font-medium">
+                {NODE_SAFETY_NUMBER_MATCH_LABEL}
+              </span>
+              <span className="block text-[11px] leading-relaxed text-muted-foreground">
+                {NODE_SAFETY_NUMBER_MATCH_HINT}
+              </span>
+            </span>
+          </label>
+        ) : null}
       </div>
     </SettingsRow>
   );
