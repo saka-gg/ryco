@@ -22,7 +22,10 @@ import {
   type HubIdentityRuntimeShape,
   makeHubIdentityRuntime,
 } from "./HubIdentityRuntime.ts";
-import { makeHubIdentityProcessLock } from "../hubIdentity/HubIdentityProcessLock.ts";
+import {
+  type HubIdentityProcessLock,
+  makeHubIdentityProcessLock,
+} from "../hubIdentity/HubIdentityProcessLock.ts";
 import { makeLocalHubIdentityStateStore } from "../hubIdentity/LocalHubIdentityState.ts";
 import type { NodeE2eeAdvertisementResult } from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
 import type { NodeE2eeFallbackState } from "../hubIdentity/NodeE2eeFallbackCounter.ts";
@@ -354,6 +357,7 @@ const readOnlyIdentity = (options: {
   readonly statePath: string;
   readonly fileSecretRoot: string;
   readonly allowFileFallback: boolean;
+  readonly makeIdentityRuntime: HubConnectorLiveDependencies["makeIdentityRuntime"];
 }): HubIdentityRuntimeShape => {
   const unavailable = async (): Promise<never> => {
     throw new HubIdentityRuntimeError("identity_unavailable");
@@ -375,7 +379,7 @@ const readOnlyIdentity = (options: {
      * full runtime is built on demand rather than on every launch.
      */
     leave: async () => {
-      const runtime = await makeHubIdentityRuntime({
+      const runtime = await options.makeIdentityRuntime({
         statePath: options.statePath,
         fileSecretRoot: options.fileSecretRoot,
         allowFileFallback: options.allowFileFallback,
@@ -401,8 +405,27 @@ const readOnlyIdentity = (options: {
   };
 };
 
-export const HubConnectorLive = Layer.effect(
-  HubConnectorService,
+/**
+ * The two things `HubConnectorLive` opens on this machine: the identity's
+ * process lock and its key custody.
+ *
+ * Injectable so the composition that decides who may use the identity — the
+ * lock taken before the runtime is built, startup deferred for a backend that
+ * lost it, and every surface that writes what the owner relies on gated behind
+ * it — can be tested as it is wired, without a second process or a credential
+ * store.
+ */
+export interface HubConnectorLiveDependencies {
+  readonly makeProcessLock: (path: string) => HubIdentityProcessLock;
+  readonly makeIdentityRuntime: typeof makeHubIdentityRuntime;
+}
+
+const machineDependencies: HubConnectorLiveDependencies = {
+  makeProcessLock: (path) => makeHubIdentityProcessLock({ path }),
+  makeIdentityRuntime: makeHubIdentityRuntime,
+};
+
+const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
   Effect.gen(function* () {
     const config = yield* ServerConfig;
     const environment = yield* ServerEnvironment;
@@ -414,9 +437,9 @@ export const HubConnectorLive = Layer.effect(
     // Beside the identity it guards, so every backend sharing that identity —
     // the desktop's child and a `ryco serve` on the same state directory —
     // contends for the same file.
-    const processLock = makeHubIdentityProcessLock({
-      path: join(dirname(config.hubIdentityStatePath), "hub-connector.lock"),
-    });
+    const processLock = dependencies.makeProcessLock(
+      join(dirname(config.hubIdentityStatePath), "hub-connector.lock"),
+    );
     // Taken before the full runtime is built, because building it runs startup
     // work that writes what the identity's owner relies on. A backend that finds
     // the lock held builds the runtime with that work deferred, and its
@@ -440,11 +463,12 @@ export const HubConnectorLive = Layer.effect(
         statePath: config.hubIdentityStatePath,
         fileSecretRoot: `${config.secretsDir}/hub-node`,
         allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
+        makeIdentityRuntime: dependencies.makeIdentityRuntime,
       });
     const custody = config.hubConnector?.enabled
       ? yield* Effect.tryPromise({
           try: () =>
-            makeHubIdentityRuntime({
+            dependencies.makeIdentityRuntime({
               statePath: config.hubIdentityStatePath,
               fileSecretRoot: `${config.secretsDir}/hub-node`,
               allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
@@ -763,5 +787,10 @@ export const HubConnectorLive = Layer.effect(
         onAdvertisementChanged: () => connector.refreshE2eeState(),
       }),
     } satisfies HubConnectorServiceShape;
-  }),
-);
+  });
+
+export const makeHubConnectorLive = (
+  dependencies: HubConnectorLiveDependencies = machineDependencies,
+) => Layer.effect(HubConnectorService, makeHubConnectorService(dependencies));
+
+export const HubConnectorLive = makeHubConnectorLive();
