@@ -20,7 +20,7 @@ import { hostedHubController, hostedHubStore } from "./state";
 const environment = (index: number) => EnvironmentId.make(`env_${String(index).padStart(22, "0")}`);
 const thread = (index: number) => ThreadId.make(`thread_${String(index)}`);
 
-function harness() {
+function harness(foregroundEnvironmentId?: () => EnvironmentId | null) {
   let now = 1;
   const connected = new Set<EnvironmentId>();
   const connects: Array<{ environmentId: EnvironmentId; delayMs: number }> = [];
@@ -28,6 +28,7 @@ function harness() {
   const scopes = createHostedWebScopeStore();
   const coordinator = createHostedConnectionCoordinator({
     scopes,
+    ...(foregroundEnvironmentId ? { foregroundEnvironmentId } : {}),
     now: () => now,
     connect: async (environmentId, delayMs) => {
       connects.push({ environmentId, delayMs });
@@ -131,6 +132,38 @@ describe("hosted Web connection coordinator", () => {
     expect(scopes.list()).toMatchObject([{ refCount: 1 }]);
     second();
     expect(scopes.list()).toEqual([]);
+  });
+
+  it("switches to the routed device while the outgoing shell still retains its scopes", async () => {
+    let foreground = environment(1);
+    const test = harness(() => foreground);
+    const releaseA = test.scopes.retain(environment(1), {
+      type: "thread-detail",
+      threadId: thread(1),
+    });
+    const releaseProvider = test.scopes.retain(environment(1), { type: "provider-status" });
+    await test.coordinator.reconcile();
+
+    foreground = environment(2);
+    const releaseB = test.scopes.retain(environment(2), {
+      type: "thread-detail",
+      threadId: thread(2),
+    });
+    await test.coordinator.reconcile();
+
+    expect(test.connected).toEqual(new Set([environment(2)]));
+    expect(test.releases).toEqual([environment(1)]);
+    expect(test.coordinator.snapshot().queuedEnvironmentIds).toEqual([]);
+    // Scope ownership is preserved for the mounted views. Switching Back can
+    // reactivate A without waiting for a React cleanup or the renewal timer.
+    expect(test.scopes.list()).toHaveLength(3);
+    foreground = environment(1);
+    await test.coordinator.reconcile();
+    expect(test.connected).toEqual(new Set([environment(1)]));
+    releaseA();
+    releaseProvider();
+    releaseB();
+    test.coordinator.dispose();
   });
 
   it("purges native-only cache entries and the exact account namespace on sign-out", async () => {

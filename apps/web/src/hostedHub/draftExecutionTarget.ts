@@ -27,6 +27,8 @@ export interface HostedDraftTargetPorts {
   readonly waitForLease: (environmentId: EnvironmentId) => Promise<NodeMutationLease | null>;
   readonly readLease: (environmentId: EnvironmentId) => NodeMutationLease | null;
   readonly readProjects: (environmentId: EnvironmentId) => ReadonlyArray<Project>;
+  readonly canPreviewProjects?: (environmentId: EnvironmentId) => boolean;
+  readonly subscribeProjects?: (listener: () => void) => () => void;
   readonly move: (draftId: DraftId, project: Project, logicalKey: string) => void;
   readonly retry: (environmentId: EnvironmentId) => void;
 }
@@ -42,6 +44,9 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
     readonly sourceLogicalKey: string;
     readonly release: () => void;
     unsubscribeRoute: () => void;
+    unsubscribeProjects: () => void;
+    previewing: boolean;
+    chosenProjectId: ProjectId | null;
   } | null = null;
   const listeners = new Set<() => void>();
   const publish = (next: HostedDraftTargetSelection | null) => {
@@ -56,6 +61,7 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
     const previous = selection;
     const restore = restoreSource && previous !== null && current(previous);
     operation?.unsubscribeRoute();
+    operation?.unsubscribeProjects();
     operation?.release();
     operation = null;
     loadSequence += 1;
@@ -67,6 +73,13 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
   };
   const chooseProject = (request: HostedDraftTargetSelection, projectId: ProjectId) => {
     if (!current(request) || !operation) return;
+    if (operation.previewing && !ports.readLease(request.environmentId)) {
+      // Choosing a cached row records local intent only. The fresh shell must
+      // still confirm this project and the mutation lease before moving it.
+      operation.chosenProjectId = projectId;
+      publish({ ...request, phase: "connecting" });
+      return;
+    }
     const before = ports.readLease(request.environmentId);
     const project = ports
       .readProjects(request.environmentId)
@@ -100,6 +113,11 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
         return;
       }
       const active = operation;
+      active.previewing = false;
+      if (active.chosenProjectId) {
+        chooseProject(request, active.chosenProjectId);
+        return;
+      }
       const matches = ports
         .readProjects(request.environmentId)
         .filter((project) => active.logicalKey(project) === active.sourceLogicalKey);
@@ -147,6 +165,9 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
         sourceLogicalKey: input.logicalKey(input.project),
         release: ports.retain(input.environmentId),
         unsubscribeRoute: () => undefined,
+        unsubscribeProjects: () => undefined,
+        previewing: false,
+        chosenProjectId: null,
       };
       publish(request);
       if (!ports.adopt(input.environmentId)) {
@@ -156,6 +177,21 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
       operation.unsubscribeRoute = ports.subscribeRoute(() => {
         if (!current(request)) cancel(false);
       });
+      const preview = () => {
+        if (
+          !current(request) ||
+          !operation ||
+          operation.chosenProjectId ||
+          selection?.phase !== "connecting" ||
+          !ports.canPreviewProjects?.(request.environmentId) ||
+          ports.readProjects(request.environmentId).length === 0
+        )
+          return;
+        operation.previewing = true;
+        publish({ ...request, phase: "project" });
+      };
+      operation.unsubscribeProjects = ports.subscribeProjects?.(preview) ?? (() => undefined);
+      preview();
       void load(request);
     },
     cancel,

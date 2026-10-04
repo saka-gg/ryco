@@ -107,6 +107,7 @@ class RpcTransport<Client> {
   private session: TransportSession<Client>;
   private lastHeartbeatPongAt = 0;
   private readonly makeClient: () => Effect.Effect<Client, never, RpcClient.Protocol | Scope.Scope>;
+  private readonly subscriptionRetryWakeups = new Set<() => void>();
   private readonly streamRequestStartListeners = new Set<(info: StreamRequestStartInfo) => void>();
 
   constructor(
@@ -175,6 +176,31 @@ class RpcTransport<Client> {
       Duration.fromInputUnsafe(options?.retryDelay ?? DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS),
     );
     let cancelCurrentStream: () => void = NOOP;
+    let admissionRevision = 0;
+    let wakeRetry: () => void = NOOP;
+    const admissionChanged = () => {
+      admissionRevision += 1;
+      wakeRetry();
+    };
+    const unsubscribeAdmission =
+      this.lifecycleHandlers?.subscribeAdmissionChanges?.(admissionChanged) ?? NOOP;
+    this.subscriptionRetryWakeups.add(admissionChanged);
+    const waitForRetry = (delayMs: number, observedRevision: number) => {
+      // Register before the stream starts and compare revisions afterwards:
+      // readiness can change between refusal and the rejection reaching us.
+      if (!active || this.disposed || admissionRevision !== observedRevision) {
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          wakeRetry = NOOP;
+          resolve();
+        };
+        const timer = setTimeout(finish, delayMs);
+        wakeRetry = finish;
+      });
+    };
 
     void (async () => {
       for (;;) {
@@ -183,6 +209,7 @@ class RpcTransport<Client> {
         }
 
         const session = this.session;
+        const observedAdmissionRevision = admissionRevision;
         try {
           const runningStream = this.runStreamOnSession(
             session,
@@ -226,11 +253,12 @@ class RpcTransport<Client> {
           if (isAwaitingAdmission(error)) {
             // Expected while a rebuilt hosted client's session synchronizes;
             // the stream starts once the connection admits it.
-            await sleep(
+            await waitForRetry(
               Math.min(
                 Math.max(retryDelayMs, 1) * 2 ** Math.min(awaitingSessionRetries, 16),
                 AWAITING_SESSION_SUBSCRIPTION_MAX_DELAY_MS,
               ),
+              observedAdmissionRevision,
             );
             awaitingSessionRetries += 1;
             continue;
@@ -262,13 +290,17 @@ class RpcTransport<Client> {
             });
           }
           this.hasReportedTransportDisconnect = true;
-          await sleep(retryDelayMs);
+          await waitForRetry(retryDelayMs, observedAdmissionRevision);
         }
       }
-    })();
+    })().finally(() => {
+      unsubscribeAdmission();
+      this.subscriptionRetryWakeups.delete(admissionChanged);
+    });
 
     return () => {
       active = false;
+      wakeRetry();
       cancelCurrentStream();
     };
   }
@@ -287,6 +319,7 @@ class RpcTransport<Client> {
       this.lastHeartbeatPongAt = 0;
       const previousSession = this.session;
       this.session = this.createSession();
+      for (const wake of this.subscriptionRetryWakeups) wake();
       await this.closeSession(previousSession);
     });
 
@@ -303,6 +336,7 @@ class RpcTransport<Client> {
       return;
     }
     this.disposed = true;
+    for (const wake of this.subscriptionRetryWakeups) wake();
     await this.closeSession(this.session);
   }
 
@@ -478,10 +512,4 @@ export class HostedWsTransport extends RpcTransport<HostedRpcProtocolClient> {
   ) {
     super(url, platform, () => makeHostedRpcProtocolClient, lifecycleHandlers);
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(() => resolve(), ms);
-  });
 }

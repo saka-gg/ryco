@@ -56,6 +56,9 @@ export const hostedDraftTargetController = createHostedDraftTargetController({
   waitForLease: waitForHostedNodeMutationLease,
   readLease: readHostedNodeMutationLease,
   readProjects: (environmentId) => selectProjectsForEnvironment(useStore.getState(), environmentId),
+  canPreviewProjects: (environmentId) =>
+    useStore.getState().environmentStateById[environmentId]?.hydratedFromCacheAt !== undefined,
+  subscribeProjects: useStore.subscribe,
   move: (draftId, project, logicalProjectKey) =>
     useComposerDraftStore.getState().moveDraftThreadToProject(draftId, {
       projectRef: scopeProjectRef(project.environmentId, project.id),

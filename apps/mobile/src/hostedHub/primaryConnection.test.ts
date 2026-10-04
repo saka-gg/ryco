@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const hostedLifecycle = vi.hoisted(() => ({
   generation: 7,
+  listeners: new Set<() => void>(),
   markReady: vi.fn(),
   markReplaying: vi.fn(),
   reportFailure: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock("@ryco/client-runtime/relay", async (importOriginal) => {
 
 const coordinator = vi.hoisted(() => ({
   current: true,
+  listeners: new Set<() => void>(),
   generation: 3,
   markReady: vi.fn(),
   markReplaying: vi.fn(),
@@ -47,6 +49,10 @@ const coordinator = vi.hoisted(() => ({
 vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   hostedHubStore: {
+    subscribe: (listener: () => void) => {
+      hostedLifecycle.listeners.add(listener);
+      return () => hostedLifecycle.listeners.delete(listener);
+    },
     getState: () => ({
       generation: hostedLifecycle.generation,
       accountStatus: "authenticated",
@@ -66,6 +72,12 @@ vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => ({
   reportHostedShellSnapshotFailure: hostedLifecycle.reportFailure,
 }));
 vi.mock("../connection/hostedConnectionCoordinator", () => ({
+  mobileHostedConnectionsStore: {
+    subscribe: (listener: () => void) => {
+      coordinator.listeners.add(listener);
+      return () => coordinator.listeners.delete(listener);
+    },
+  },
   getMobileHostedConnectionCoordinator: () => ({
     ensureRecord: () => ({
       generation: coordinator.generation,
@@ -165,6 +177,8 @@ const deps = () => ({
 
 beforeEach(() => {
   hostedLifecycle.generation = 7;
+  hostedLifecycle.listeners.clear();
+  coordinator.listeners.clear();
   hostedLifecycle.markReady.mockReset();
   hostedLifecycle.markReplaying.mockReset();
   hostedLifecycle.reportFailure.mockReset();
@@ -183,6 +197,19 @@ beforeEach(() => {
 });
 
 describe("hosted primary connection", () => {
+  it("wakes subscriptions for account and per-node admission changes and cleans both up", () => {
+    writePrimaryEnvironmentDescriptor(descriptor);
+    createHostedPrimaryConnection(deps());
+    const changed = vi.fn();
+    const unsubscribe = relay.binding!.subscribeAdmissionChanges!(changed);
+    for (const listener of hostedLifecycle.listeners) listener();
+    for (const listener of coordinator.listeners) listener();
+    expect(changed).toHaveBeenCalledTimes(2);
+    unsubscribe();
+    expect(hostedLifecycle.listeners.size).toBe(0);
+    expect(coordinator.listeners.size).toBe(0);
+  });
+
   it("returns recovered channels to the shared lifecycle only for the active record", () => {
     writePrimaryEnvironmentDescriptor(descriptor);
     createHostedPrimaryConnection(deps());

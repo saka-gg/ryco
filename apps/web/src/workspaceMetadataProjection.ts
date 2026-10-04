@@ -15,14 +15,15 @@ import {
   type CachedEnvironmentShellSnapshot,
 } from "@ryco/client-runtime/state/threads";
 
-import { useStore } from "./store";
+import { useStore, type AppState } from "./store";
 
 export function readWorkspaceMetadataSnapshot(
   environmentId: EnvironmentId,
   capturedAt = Date.now(),
   deliveryUnknown = false,
+  state: AppState = useStore.getState(),
 ): WorkspaceMetadataSnapshot | null {
-  const environment = useStore.getState().environmentStateById[environmentId];
+  const environment = state.environmentStateById[environmentId];
   if (!environment?.bootstrapComplete) return null;
   const snapshot: WorkspaceMetadataSnapshot = {
     schemaVersion: 1,

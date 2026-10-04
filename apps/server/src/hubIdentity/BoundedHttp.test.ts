@@ -29,6 +29,24 @@ async function capturedFailure(
 }
 
 describe("bounded HTTP", () => {
+  it("preserves caller cancellation while enforcing its own deadline", async () => {
+    const controller = new AbortController();
+    const pending = fetchBoundedJson(
+      async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("cancelled")), {
+            once: true,
+          });
+        }),
+      request,
+      { method: "GET", signal: controller.signal },
+      () => {
+        throw new Error("bounded transport failure");
+      },
+    );
+    controller.abort();
+    await expect(pending).rejects.toThrow("bounded transport failure");
+  });
   it("distinguishes transport interruption from an invalid completed response", async () => {
     expect(
       await capturedFailure(async () => {

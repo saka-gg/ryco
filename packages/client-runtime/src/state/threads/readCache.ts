@@ -1,8 +1,12 @@
 import { MessageId, TurnId } from "@ryco/contracts";
+import {
+  THREAD_READ_CACHE_MESSAGE_LIMIT,
+  THREAD_READ_CACHE_TEXT_LIMIT,
+} from "@ryco/contracts/thread-read-cache";
 import type { ChatMessage } from "./types.ts";
 
-export const CACHED_THREAD_MESSAGE_LIMIT = 150;
-export const CACHED_THREAD_TEXT_LIMIT = 1_000_000;
+export const CACHED_THREAD_MESSAGE_LIMIT = THREAD_READ_CACHE_MESSAGE_LIMIT;
+export const CACHED_THREAD_TEXT_LIMIT = THREAD_READ_CACHE_TEXT_LIMIT;
 
 /** Display data only. Never a replay baseline, session, or dispatch queue. */
 export interface CachedThreadContent {

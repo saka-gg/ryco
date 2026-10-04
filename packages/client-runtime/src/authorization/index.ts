@@ -14,3 +14,4 @@ export * from "./nodeMutationLease.ts";
 export * from "./runtime.ts";
 export * from "./state.ts";
 export * from "./types.ts";
+export * from "./threadReadCache.ts";

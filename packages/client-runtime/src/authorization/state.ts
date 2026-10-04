@@ -2040,7 +2040,12 @@ class HostedHubController {
 
   async selectNode(nodeId: string): Promise<void> {
     const state = hostedHubStore.getState();
-    if (state.directoryStatus !== "ready" || state.browserStatus !== "current") return;
+    if (
+      state.accountStatus !== "authenticated" ||
+      state.directoryStatus !== "ready" ||
+      (state.browserStatus !== "current" && state.browserStatus !== "synchronizing")
+    )
+      return;
     const node = state.nodes.find((candidate) => candidate.id === nodeId);
     if (!node || node.revokedAt) return;
     if (
@@ -2048,6 +2053,16 @@ class HostedHubController {
       state.selectedNode.environmentId === node.environmentId
     )
       return;
+    // Synchronizing means account and directory checks already succeeded; the
+    // old node's snapshot must not block navigation to another authorized node.
+    // Supersede its recovery operation before starting the new generation.
+    this.#browserLifecycleGeneration += 1;
+    this.#browserResumeOperation?.abort();
+    this.#browserResumeOperation = null;
+    this.#browserResumePromise = null;
+    this.#retrySelectedNodeOperation?.abort();
+    this.#retrySelectedNodeOperation = null;
+    this.#retrySelectedNodePromise = null;
     const generation = state.generation + 1;
     patchState({
       selectedNode: node,

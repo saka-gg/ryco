@@ -332,13 +332,10 @@ function reconcile(): void {
     return;
   }
   if (state.directoryStatus !== "ready") return;
-  // Known bounded transient: while the browser is suspended, a Back/Forward
-  // segment change waits here, so a resume may first reconnect the previously
-  // selected node before this reconcile switches to the routed one. The resume
-  // path always ends in a store update that re-runs reconcile, and generation
-  // guards serialize the switch, so the transient cannot publish stale
-  // readiness or strand the UI.
-  if (state.browserStatus !== "current") return;
+  // Access checks must finish before choosing a node. Once they have reached
+  // shell synchronization, navigation may replace that pending node through
+  // the same lifecycle owner without waiting for its snapshot or deadline.
+  if (state.browserStatus !== "current" && state.browserStatus !== "synchronizing") return;
 
   const node = state.nodes.find((candidate) => candidate.id === nodeId);
   if (!node) {

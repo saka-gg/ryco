@@ -25,7 +25,10 @@ import {
 import { createWsRpcClient } from "@ryco/client-runtime/rpc";
 
 import { WsTransport } from "../rpc/wsTransport";
-import { getMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
+import {
+  getMobileHostedConnectionCoordinator,
+  mobileHostedConnectionsStore,
+} from "../connection/hostedConnectionCoordinator";
 import {
   disposeMobileRelaySocketContext,
   issueMobileRelayAttempt,
@@ -113,6 +116,14 @@ export function createHostedPrimaryConnection(
         e2ee: providerForMobileRelaySocketContext(input.preparedSocketContext),
         disposePreparedContext: () => disposeMobileRelaySocketContext(input.preparedSocketContext),
       }),
+    subscribeAdmissionChanges: (listener) => {
+      const unsubscribeAccount = hostedHubStore.subscribe(listener);
+      const unsubscribeConnections = mobileHostedConnectionsStore.subscribe(listener);
+      return () => {
+        unsubscribeAccount();
+        unsubscribeConnections();
+      };
+    },
     authorizeRequest: (info) => {
       const shared = hostedHubStore.getState();
       const current = coordinator.read(descriptor.environmentId);

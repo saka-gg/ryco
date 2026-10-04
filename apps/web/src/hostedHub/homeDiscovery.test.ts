@@ -219,6 +219,38 @@ describe("hosted home discovery", () => {
     expect(readHostedWorkspaceState().homeDiscovery.environmentId).toBeNull();
   });
 
+  it("discovers the next device while the current device streams continuous updates", async () => {
+    start();
+    await settle();
+    const environmentId = nodes[0]!.environmentId;
+    useStore
+      .getState()
+      .hydrateEnvironmentStateFromCache(
+        workspaceMetadataToCachedShellSnapshot(metadata(environmentId)),
+        environmentId,
+      );
+    useStore.setState((state) => ({
+      environmentStateById: {
+        ...state.environmentStateById,
+        [environmentId]: {
+          ...state.environmentStateById[environmentId]!,
+          bootstrapComplete: true,
+          hydratedFromCacheAt: undefined,
+        },
+      },
+    }));
+    hostedHubStore.setState({ transportStatus: "online", sessionEstablished: true });
+
+    for (let index = 0; index < 10; index++) {
+      await vi.advanceTimersByTimeAsync(20);
+      useStore.setState((state) => ({ environmentStateById: { ...state.environmentStateById } }));
+    }
+    await settle();
+
+    expect(select.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
+    expect(readHostedWorkspaceState().workspace.threads).toHaveLength(1);
+  });
+
   it("moves past a failed device and supports an explicit retry", async () => {
     start();
     await settle();

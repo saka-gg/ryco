@@ -187,6 +187,7 @@ export interface HostedRelayAttemptBinding {
     readonly tag: string;
     readonly stream: boolean;
   }) => RpcRequestAdmission;
+  readonly subscribeAdmissionChanges?: (listener: () => void) => () => void;
   readonly shouldReconnect: (generation: number) => boolean;
   readonly transportStatus: (generation: number, status: HostedRelayTransportStatus) => void;
   readonly sessionStatus: (generation: number, status: HostedRycoSessionStatus) => void;
@@ -218,6 +219,7 @@ function defaultBinding(): HostedRelayAttemptBinding {
     disposeSocketContext: (context) =>
       getHostedRuntimeConfiguration().disposeRelaySocketContext?.(context),
     authorizeRequest: admitHostedRequest,
+    subscribeAdmissionChanges: hostedHubStore.subscribe,
     shouldReconnect: (generation) => {
       const state = hostedHubStore.getState();
       return (
@@ -435,6 +437,9 @@ export class HostedRelayAttemptFactory {
       shouldReconnect: () =>
         this.#activeGeneration !== null && this.#binding.shouldReconnect(this.#activeGeneration),
       authorizeRequest: (info) => this.#binding.authorizeRequest(info),
+      ...(this.#binding.subscribeAdmissionChanges
+        ? { subscribeAdmissionChanges: this.#binding.subscribeAdmissionChanges }
+        : {}),
       getReconnectDelayMs: () => {
         const delay = this.#reconnect.nextDelay(this.#lastRetryAfterMs);
         this.#lastRetryAfterMs = undefined;

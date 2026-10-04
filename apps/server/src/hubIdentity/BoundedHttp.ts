@@ -22,7 +22,10 @@ export async function fetchBoundedJson(
   const maximum = options.maxResponseBytes ?? 16 * 1024;
   let response: Response;
   try {
-    response = await fetchImplementation(input, { ...init, signal: controller.signal });
+    response = await fetchImplementation(input, {
+      ...init,
+      signal: init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal,
+    });
   } catch {
     clearTimeout(timeout);
     return fail({ kind: "transport" });
