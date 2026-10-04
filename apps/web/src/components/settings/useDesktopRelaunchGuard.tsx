@@ -46,6 +46,16 @@ function reportRelaunchFailure(error: unknown): void {
 
 let waitingToastId: ReturnType<typeof toastManager.add> | null = null;
 
+/**
+ * However the operator dismisses the waiting notice (its close button, a swipe,
+ * or Escape), the wait stops. Removing the notice itself is not a dismissal.
+ */
+function handleWaitingNoticeClosed(): void {
+  if (waitingToastId === null) return;
+  waitingToastId = null;
+  desktopRelaunchScheduler.cancel();
+}
+
 async function restartDesktop(): Promise<void> {
   const restartApp = window.desktopBridge?.restartApp;
   if (!restartApp) throw new Error("Desktop restart is unavailable.");
@@ -59,11 +69,12 @@ export const desktopRelaunchScheduler = createDesktopRelaunchScheduler({
   restart: restartDesktop,
   present: (waiting) => {
     if (waiting === null) {
-      if (waitingToastId !== null) toastManager.close(waitingToastId);
+      const toastId = waitingToastId;
       waitingToastId = null;
+      if (toastId !== null) toastManager.close(toastId);
       return;
     }
-    const options = stackedThreadToast({
+    const notice = stackedThreadToast({
       type: "info",
       title: "Ryco restarts when its agents finish",
       description: `${describeActiveDesktopTurns(waiting.activeTurns ?? 0)}. Your change is saved and applies when Ryco restarts; dismiss this to restart later yourself.`,
@@ -72,8 +83,10 @@ export const desktopRelaunchScheduler = createDesktopRelaunchScheduler({
         children: "Restart now",
         onClick: () => void desktopRelaunchScheduler.relaunchNow().catch(reportRelaunchFailure),
       },
-      data: { onClose: () => desktopRelaunchScheduler.cancel() },
     });
+    // The manager's own close callback, unlike the close button's, also runs
+    // for a swipe or Escape.
+    const options = { ...notice, onClose: handleWaitingNoticeClosed };
     if (waitingToastId === null) waitingToastId = toastManager.add(options);
     else toastManager.update(waitingToastId, options);
   },
