@@ -119,6 +119,14 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
  * as `identity_unavailable` would have the panel offer a Retry that does
  * nothing.
  */
+/** Another local Ryco process holds this node identity's process lock. */
+export class HubIdentityInUseError extends Error {
+  constructor() {
+    super("Hub identity is in use by another Ryco process.");
+    this.name = "HubIdentityInUseError";
+  }
+}
+
 const identityFailure = (error: unknown): "identity_unavailable" | "identity_store_unavailable" =>
   error instanceof HubIdentityRuntimeError && error.code === "identity_store_unavailable"
     ? "identity_store_unavailable"
@@ -220,6 +228,13 @@ export class HubConnector {
     readonly livenessWatch?: boolean;
     /** Keeps a second local process off this identity; see `HubIdentityProcessLock`. */
     readonly processLock?: HubIdentityProcessLock;
+    /**
+     * The caller already acquired `processLock` — or found it unusable — before
+     * it built the identity runtime, as `HubConnectorLive` does so that a
+     * backend that loses the lock defers its startup work. Otherwise the
+     * connector claims the lock itself, when it first needs the identity.
+     */
+    readonly ownsIdentity?: boolean;
   }) {
     this.#config = options.config;
     this.#identity = options.identity;
@@ -239,7 +254,7 @@ export class HubConnector {
     this.#networkFingerprint = options.networkFingerprint ?? defaultNetworkFingerprint;
     this.#livenessWatchEnabled = options.livenessWatch ?? true;
     this.#processLock = options.processLock;
-    this.#ownsIdentity = options.processLock === undefined;
+    this.#ownsIdentity = options.processLock === undefined || options.ownsIdentity === true;
   }
 
   /**
@@ -402,11 +417,14 @@ export class HubConnector {
     this.#started = true;
     const generation = this.#state.generation;
     if (!this.#config.enabled) return;
-    if (this.#config.configurationIssue !== undefined || this.#config.origin === undefined) {
+    if (!this.#runsConnector()) {
       this.#state.transition("degraded", {
         degradedMode: "operator_action_required",
         failure: "configuration_invalid",
       });
+      // A connector that cannot connect does not keep another copy that can
+      // off the identity; an operation that needs it claims it for its length.
+      await this.#handBackIdentity();
       return;
     }
     this.#startLivenessWatch();
@@ -428,7 +446,7 @@ export class HubConnector {
     this.#clearTimer("retry");
     this.#slowAttempts.clear();
     this.#slowRetryLog.clear();
-    if (this.#config.configurationIssue !== undefined || this.#config.origin === undefined) {
+    if (!this.#runsConnector()) {
       this.#state.transition("degraded", {
         degradedMode: "operator_action_required",
         failure: "configuration_invalid",
@@ -451,6 +469,7 @@ export class HubConnector {
     if (!(await this.#claimIdentity(generation))) return;
     let identity;
     try {
+      await this.#completeIdentityStartup();
       identity = await this.#identity.readState();
     } catch (error: unknown) {
       await this.#handleFailure(generation, identityFailure(error));
@@ -483,32 +502,98 @@ export class HubConnector {
    * over on its own once the first one exits. False means the caller must stop.
    */
   async #claimIdentity(generation: number): Promise<boolean> {
-    const lock = this.#processLock;
-    if (lock === undefined || this.#ownsIdentity) return true;
-    const result = await lock.acquire();
+    const claim = await this.#takeIdentity();
     if (this.#stopping) {
-      await lock.release();
+      // `stop()` handed the identity back while this claim was in flight.
+      await this.#handBackIdentity();
       return false;
     }
     if (!this.#state.isCurrent(generation)) return false;
-    if (result === "held") {
+    if (claim === "held") {
       await this.#handleFailure(generation, "identity_in_use");
       return false;
     }
-    this.#ownsIdentity = true;
     return true;
   }
 
+  /**
+   * Make this process the identity's owner, unless another live one is.
+   *
+   * `claimed` means ownership was taken just now, so a caller whose connector
+   * will not run can hand it back; ownership is recorded before any caller
+   * looks at its own generation, so a superseded caller cannot leave the lock
+   * file naming this process while the connector believes it does not.
+   */
+  async #takeIdentity(): Promise<"owned" | "claimed" | "held"> {
+    const lock = this.#processLock;
+    if (lock === undefined || this.#ownsIdentity) return "owned";
+    if ((await lock.acquire()) === "held") return "held";
+    this.#ownsIdentity = true;
+    return "claimed";
+  }
+
+  /** Let another local copy take the identity without waiting for this process to exit. */
+  async #handBackIdentity(): Promise<void> {
+    if (this.#processLock === undefined) return;
+    this.#ownsIdentity = false;
+    await this.#processLock.release();
+  }
+
+  /**
+   * Startup work the identity runtime deferred because another process owned
+   * the identity when it was built — finishing an interrupted leave, retired-key
+   * destruction, prekey and continuity repair, the launch policy commit. Run
+   * once this process owns the identity, before anything else uses it; a no-op
+   * once done, and for a runtime that never deferred.
+   */
+  async #completeIdentityStartup(): Promise<void> {
+    await this.#identity.completeStartup?.();
+  }
+
+  /** Whether this connector is configured to connect, and so keeps a claim it takes. */
+  #runsConnector(): boolean {
+    return (
+      this.#config.enabled &&
+      this.#config.configurationIssue === undefined &&
+      this.#config.origin !== undefined
+    );
+  }
+
   /** Mutating an identity another local process is connected with would pull it out from under it. */
-  #requireIdentityOwnership(): void {
-    if (!this.#ownsIdentity) {
-      throw new Error("Hub identity is in use by another Ryco process.");
+  async #requireIdentityOwnership(): Promise<void> {
+    if ((await this.#takeIdentity()) === "held") throw new HubIdentityInUseError();
+    await this.#completeIdentityStartup();
+  }
+
+  /**
+   * Run an operation that changes this identity's shared state, as its owner.
+   *
+   * For the surfaces outside the connector that write what the identity's
+   * owner relies on: the desktop's native claim, which commits an active node;
+   * the local trusted introduction, which approves a client; and the E2EE owner
+   * commands, whose commit-then-sweep could otherwise commit here and sweep
+   * nothing, leaving the owning process's live channels under authority that
+   * was just withdrawn. Refused while another local process owns the identity.
+   * A claim taken for an operation is kept when this connector runs — it will
+   * use the identity next — and handed back afterwards when it does not.
+   */
+  async asIdentityOwner<A>(operation: () => Promise<A>): Promise<A> {
+    if (this.#stopping) throw new Error("Hub identity is unavailable while stopping.");
+    const claim = await this.#takeIdentity();
+    if (claim === "held") throw new HubIdentityInUseError();
+    try {
+      await this.#completeIdentityStartup();
+      return await operation();
+    } finally {
+      if (claim === "claimed" && (!this.#runsConnector() || this.#stopping)) {
+        await this.#handBackIdentity();
+      }
     }
   }
 
   async enroll(): Promise<HubEnrollmentStartResult> {
     const origin = this.#enrollmentOrigin();
-    this.#requireIdentityOwnership();
+    await this.#requireIdentityOwnership();
     const initialGeneration = this.#state.generation;
     const state = await this.#identity.readState();
     if (!this.#state.isCurrent(initialGeneration) || this.#stopping) {
@@ -637,7 +722,7 @@ export class HubConnector {
 
   async cancelEnrollment(): Promise<HubConnectorStatus> {
     const origin = this.#enrollmentOrigin();
-    this.#requireIdentityOwnership();
+    await this.#requireIdentityOwnership();
     const initialGeneration = this.#state.generation;
     const identity = await this.#identity.readState();
     if (!this.#state.isCurrent(initialGeneration) || this.#stopping) {
@@ -695,10 +780,7 @@ export class HubConnector {
     this.#state.invalidateGeneration();
     if (this.#state.snapshot().state !== "disabled") this.#state.transition("stopping");
     await this.#teardownConnection();
-    if (this.#processLock !== undefined) {
-      this.#ownsIdentity = false;
-      await this.#processLock.release();
-    }
+    await this.#handBackIdentity();
     this.#state.transition("disabled");
     this.#started = false;
   }
@@ -723,25 +805,12 @@ export class HubConnector {
     // A connector that never started — switched off here, perhaps while another
     // copy runs with it on — has not claimed the identity yet. Claim it now, and
     // refuse rather than erase keys a running process is authenticating with.
-    const lock = this.#processLock;
-    const claimedForLeave = lock !== undefined && !this.#ownsIdentity;
-    if (claimedForLeave) {
-      if ((await lock.acquire()) === "held") {
-        throw new Error("Hub identity is in use by another Ryco process.");
-      }
-      this.#ownsIdentity = true;
-    }
+    const claim = await this.#takeIdentity();
+    if (claim === "held") throw new HubIdentityInUseError();
     // A connector that will not run afterwards hands the claim back, so a copy
     // that does run can take the identity — fresh or not — without waiting.
     const releaseLeaveClaim = async () => {
-      if (
-        !claimedForLeave ||
-        (this.#config.enabled && this.#config.configurationIssue === undefined)
-      ) {
-        return;
-      }
-      this.#ownsIdentity = false;
-      await lock.release();
+      if (claim === "claimed" && !this.#runsConnector()) await this.#handBackIdentity();
     };
     await this.#teardownConnection();
     this.#started = false;
@@ -765,7 +834,7 @@ export class HubConnector {
     // socket, timer, or channel survives the teardown above. `enrolling` is only
     // honest once the connector is actually configured to enroll.
     this.#state.transition("disabled");
-    if (this.#config.enabled && this.#config.configurationIssue === undefined) {
+    if (this.#runsConnector()) {
       this.#state.transition("enrolling");
       this.#started = true;
     }

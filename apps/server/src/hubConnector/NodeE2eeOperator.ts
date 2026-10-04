@@ -321,6 +321,17 @@ export function makeNodeE2eeOperator(options: {
     | undefined;
   /** Republish the signed statement after any mutation of advertised material. */
   readonly onAdvertisementChanged?: () => Promise<void>;
+  /**
+   * Run a command that changes durable E2EE state as the identity's owner, or
+   * refuse it (`HubConnector.asIdentityOwner`).
+   *
+   * Every mutation below is a commit another local backend sharing the state
+   * directory would read, and the authority reductions among them are §13.6's
+   * and §12.6's commit-then-sweep: committed by a backend that does not own the
+   * identity, they would sweep that backend's channels — none — and acknowledge
+   * while the owner's live channels kept the withdrawn authority.
+   */
+  readonly asIdentityOwner?: <A>(operation: () => Promise<A>) => Promise<A>;
   readonly now?: () => number;
 }): HubConnectorE2eeOperator {
   const now = options.now ?? Date.now;
@@ -328,6 +339,8 @@ export function makeNodeE2eeOperator(options: {
   const admin = () => identity.e2eeAuthorizationAdmin;
   const liveUndersizedConnection = options.undersizedConnection ?? (() => undefined);
   const advertisementChanged = options.onAdvertisementChanged ?? (() => Promise.resolve());
+  const owned: <A>(operation: () => Promise<A>) => Promise<A> =
+    options.asIdentityOwner ?? ((operation) => operation());
 
   /**
    * Read the listing AFTER the mutation that changed it.
@@ -339,7 +352,7 @@ export function makeNodeE2eeOperator(options: {
    */
   const listing = async (): Promise<E2eeClientListingView> => listingView(await admin().list());
 
-  return {
+  const operator: HubConnectorE2eeOperator = {
     listClients: listing,
     getClient: async (key) => {
       const record = await admin().get(authorizationKey(key));
@@ -469,5 +482,26 @@ export function makeNodeE2eeOperator(options: {
       // zeroes counters and the ring, and this pair is a property of the
       // connection the node is on, which the command does not touch.
       fallbackView(await identity.resetE2eeFallbackState(), liveUndersizedConnection()),
+  };
+
+  // Every command that changes durable state, or signs as the node, goes
+  // through the owner gate. The reads, and clearing this process's own
+  // in-memory refusal count, do not.
+  return {
+    ...operator,
+    approveClient: (input) => owned(() => operator.approveClient(input)),
+    narrowClient: (input) => owned(() => operator.narrowClient(input)),
+    revokeClient: (key) => owned(() => operator.revokeClient(key)),
+    purgeClient: (key) => owned(() => operator.purgeClient(key)),
+    createClientApprovalQr: (key) => owned(() => operator.createClientApprovalQr(key)),
+    openPairingWindow: (fingerprint) => owned(() => operator.openPairingWindow(fingerprint)),
+    closePairingWindow: () => owned(() => operator.closePairingWindow()),
+    applyPolicy: (proposal) => owned(() => operator.applyPolicy(proposal)),
+    recoverPolicyGeneration: () => owned(() => operator.recoverPolicyGeneration()),
+    rotatePrekey: () => owned(() => operator.rotatePrekey()),
+    adoptContinuityId: (continuityId) => owned(() => operator.adoptContinuityId(continuityId)),
+    remintContinuityId: () => owned(() => operator.remintContinuityId()),
+    breakContinuityChain: () => owned(() => operator.breakContinuityChain()),
+    resetFallback: () => owned(() => operator.resetFallback()),
   };
 }

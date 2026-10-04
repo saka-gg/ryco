@@ -408,6 +408,23 @@ export const HubConnectorLive = Layer.effect(
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromiseWith(runtimeContext as Context.Context<R>)(effect);
+    // Beside the identity it guards, so every backend sharing that identity —
+    // the desktop's child and a `ryco serve` on the same state directory —
+    // contends for the same file.
+    const processLock = makeHubIdentityProcessLock({
+      path: join(dirname(config.hubIdentityStatePath), "hub-connector.lock"),
+    });
+    // Taken before the full runtime is built, because building it runs startup
+    // work that writes what the identity's owner relies on. A backend that finds
+    // the lock held builds the runtime with that work deferred, and its
+    // connector runs it once it takes the lock over. Released last, after the
+    // connector has stopped.
+    const identityClaim = config.hubConnector?.enabled
+      ? yield* Effect.acquireRelease(
+          Effect.promise(() => processLock.acquire()),
+          () => Effect.promise(() => processLock.release()),
+        )
+      : undefined;
     const identity = config.hubConnector?.enabled
       ? yield* Effect.tryPromise({
           try: () =>
@@ -424,6 +441,7 @@ export const HubConnectorLive = Layer.effect(
                 requireE2EE: config.hubE2eePolicy?.requireE2EE,
                 requireApprovedClientE2EE: config.hubE2eePolicy?.requireApprovedClientE2EE,
               },
+              deferStartup: identityClaim === "held",
             }),
           catch: () => new HubIdentityRuntimeError("identity_unavailable"),
         }).pipe(Effect.orElseSucceed(unavailableIdentity))
@@ -672,13 +690,11 @@ export const HubConnectorLive = Layer.effect(
       onE2eeEnrollmentRevoked: async (frame) => {
         await sessionDirectory.revokeEnrollment(frame);
       },
-      // Beside the identity it guards, so every backend sharing that identity —
-      // the desktop's child and a `ryco serve` on the same state directory —
-      // contends for the same file.
-      processLock: makeHubIdentityProcessLock({
-        path: join(dirname(config.hubIdentityStatePath), "hub-connector.lock"),
-      }),
+      processLock,
+      ownsIdentity: identityClaim !== undefined && identityClaim !== "held",
     });
+    const asIdentityOwner = <A>(operation: () => Promise<A>) =>
+      connector.asIdentityOwner(operation);
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         void connector.start();
@@ -702,11 +718,21 @@ export const HubConnectorLive = Layer.effect(
       leave: () => connector.leave(),
       cancelEnrollment: () => connector.cancelEnrollment(),
       stop: () => connector.stop(),
-      localIntroduction: identity.localIntroduction,
-      nativeNodeClaim: identity.nativeNodeClaim,
+      // Both commit what the identity's owner relies on — an approved client,
+      // an active node — so neither runs while another local process owns it.
+      localIntroduction: {
+        descriptor: () => asIdentityOwner(() => identity.localIntroduction.descriptor()),
+        complete: (input) => asIdentityOwner(() => identity.localIntroduction.complete(input)),
+      },
+      nativeNodeClaim: {
+        prepare: (hubOrigin) => asIdentityOwner(() => identity.nativeNodeClaim.prepare(hubOrigin)),
+        sign: (input) => asIdentityOwner(() => identity.nativeNodeClaim.sign(input)),
+        commit: (input) => asIdentityOwner(() => identity.nativeNodeClaim.commit(input)),
+      },
       e2ee: makeNodeE2eeOperator({
         identity,
         sessions: sessionDirectory,
+        asIdentityOwner,
         // §12.5 Display: the live §5.5 U1 pair, read from the connection the
         // advertiser is on right now. It is not in the durable counter and must
         // not be — §12.5 says the pair is not retained in the ring.

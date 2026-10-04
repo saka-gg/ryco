@@ -7,6 +7,7 @@ import { deriveE2eeAgreementPublicKey } from "@ryco/shared/relayE2eeKeys";
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeNodeContinuityAnchor } from "../hubIdentity/NodeContinuityAnchor.ts";
+import { NODE_E2EE_FAIL_CLOSED_POLICY } from "../hubIdentity/NodeE2eePolicyStore.ts";
 import { makeNodeE2eePrekeyStore } from "../hubIdentity/NodeE2eePrekeyStore.ts";
 import { makeNodeIdentityContinuityStore } from "../hubIdentity/NodeIdentityContinuityStore.ts";
 import { makeNodeIdentityKeyRetirementStore } from "../hubIdentity/NodeIdentityKeyRetirementStore.ts";
@@ -394,6 +395,43 @@ describe("HubIdentityRuntime", () => {
     expect(state.activeNode).toBeNull();
     expect(state.pendingTeardown).toBeNull();
     expect(state.environmentId).not.toBe(`env_${"E".repeat(22)}`);
+  });
+
+  it("leaves startup's writes to a process that owns the identity when asked to defer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-deferred-start-"));
+    const statePath = join(root, "hub-identity.json");
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        revision: 4,
+        environmentId: `env_${"E".repeat(22)}`,
+        pendingEnrollment: null,
+        activeNode: null,
+        stagedRotation: null,
+        pendingTeardown: { secretNames: ["node-key.gone"], requestedAt: 99_000 },
+      }),
+      { mode: 0o600 },
+    );
+    const options = {
+      statePath,
+      fileSecretRoot: join(root, "secrets"),
+      allowFileFallback: false,
+      secretStore: makeMemoryStore(),
+      now: () => 100_000,
+    } as const;
+
+    // Another backend owns this identity: it may be the one finishing that
+    // leave, and a policy committed here could not close its channels.
+    const waiting = await makeHubIdentityRuntime({ ...options, deferStartup: true });
+    expect((await waiting.readState()).pendingTeardown).not.toBeNull();
+    expect(waiting.e2eeGeneration()).toBe(0);
+    expect(waiting.e2eePolicy()).toEqual(NODE_E2EE_FAIL_CLOSED_POLICY);
+
+    // It exited; this one owns the identity now.
+    await Promise.all([waiting.completeStartup!(), waiting.completeStartup!()]);
+    expect((await waiting.readState()).pendingTeardown).toBeNull();
+    expect(waiting.e2eeGeneration()).toBeGreaterThan(0);
   });
 
   it("keeps a file-backed identity on files when the OS store later becomes available", async () => {

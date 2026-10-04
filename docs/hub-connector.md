@@ -366,18 +366,30 @@ without the marker is migrated only when all required material is found in exact
 store. Missing, split, or ambiguous custody fails closed as `identity_store_unavailable`.
 
 One node identity belongs to one running backend. The desktop app's backend and a default
-`ryco serve` both keep their state in `~/.ryco`, so when its connector starts each backend takes a
-process lock, `hub-connector.lock`, beside the identity state. A second backend whose connector finds
-the lock held by a live process does not read, sign with, or connect as the identity: it reports
-`connection_replaced`, checks again every 30 seconds to two minutes, and takes over by itself once
-the first one exits. It also refuses to start or cancel an enrollment, or to leave, while the other
-process holds the identity. A lock left by a process that died — or by one from before a reboot,
-whose pid may since have been reused — is reclaimed automatically. The lock records the kernel's
-boot id where there is one (Linux and macOS), so a wall-clock correction cannot make a live holder
-look like one from an earlier boot, and on Linux the holder's start time, so a pid that a container
-restart handed to another process is not mistaken for the holder. If the lock file cannot be
-written at all the connector proceeds without it; the Hub still allows only one connection per
-identity.
+`ryco serve` both keep their state in `~/.ryco`, so a backend whose connector is switched on takes a
+process lock, `hub-connector.lock`, beside the identity state before it builds its identity runtime.
+A second backend that finds the lock held by a live process still opens the credential store, but
+defers the rest of its startup work until it holds the lock: it does not finish an interrupted
+leave, destroy retired keys, repair the prekey or continuity chain, or commit its launch E2EE
+policy, so a narrower policy given to it cannot be committed where the first backend's live
+channels would never be swept. Until then its policy reads as the fail-closed default, which is
+also what it enforces, since it serves no channel. It does not sign with or connect as the identity:
+it reports `connection_replaced`, checks again every 30 seconds to two minutes, and takes over by
+itself once the first one exits, running the deferred work first. Until it holds the lock it also
+refuses everything that writes what the owning backend relies on — starting or cancelling an
+enrollment, leaving, the desktop's native node claim and local trusted introduction, and every E2EE
+owner command that changes state (client approval, narrowing, revocation and purge, approval QR
+codes, the pairing window, policy changes and generation recovery, prekey rotation, continuity
+commands, and the fallback reset). Reads are still answered. A backend whose connector is switched
+off or misconfigured does not hold the lock; it claims it for the length of a leave or one of those
+operations, and refuses while another backend holds it.
+
+A lock left by a process that died — or by one from before a reboot, whose pid may since have been
+reused — is reclaimed automatically. The lock records the kernel's boot id where there is one (Linux
+and macOS), so a wall-clock correction cannot make a live holder look like one from an earlier boot,
+and on Linux the holder's start time, so a pid that a container restart handed to another process is
+not mistaken for the holder. If the lock file cannot be written at all the connector proceeds without
+it; the Hub still allows only one connection per identity.
 
 The standalone [relay architecture atlas](./relay-architecture.html) shows enrollment, client relay
 connection, hosted reconnect, actor capabilities, role intersection, and which data each component

@@ -1507,6 +1507,78 @@ describe("HubConnector", () => {
     expect(lockCalls.at(-1)).toBe("release");
   });
 
+  it("keeps owner operations and deferred startup off an identity another process holds", async () => {
+    const clock = scheduler();
+    let otherCopyRunning = true;
+    const calls: string[] = [];
+    const lock = {
+      acquire: async () => {
+        calls.push("acquire");
+        return otherCopyRunning ? ("held" as const) : ("acquired" as const);
+      },
+      release: async () => {
+        calls.push("release");
+      },
+    };
+    const activeIdentity = identity();
+    const makeConnector = (config: HubConnectorConfig) =>
+      new HubConnector({
+        config,
+        identity: {
+          ...activeIdentity,
+          completeStartup: async () => {
+            calls.push("startup");
+          },
+          readState: async () => {
+            calls.push("read");
+            return activeIdentity.readState();
+          },
+        },
+        transport: { open: () => new FakeSocket() },
+        channels: { open: async () => Promise.reject(new Error("unused")) },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+        processLock: lock,
+      });
+    // The native claim, a local introduction, an E2EE owner command.
+    const ownerOperation = async () => {
+      calls.push("operation");
+      return "done";
+    };
+
+    const connector = makeConnector(enabledConfig);
+    await connector.start();
+    expect(connector.status()).toMatchObject({ failure: "connection_replaced" });
+    await expect(connector.asIdentityOwner(ownerOperation)).rejects.toThrow(
+      "in use by another Ryco process",
+    );
+    await expect(connector.enroll()).rejects.toThrow("in use by another Ryco process");
+    expect(calls).not.toContain("startup");
+    expect(calls).not.toContain("operation");
+    expect(calls).not.toContain("read");
+
+    // The other copy exited. The operation takes the identity over, and the
+    // startup work deferred for it runs before anything uses it.
+    otherCopyRunning = false;
+    calls.length = 0;
+    await expect(connector.asIdentityOwner(ownerOperation)).resolves.toBe("done");
+    expect(calls).toEqual(["acquire", "startup", "operation"]);
+    // A running connector keeps the claim: its next retry connects with it.
+    await clock.advance(33_000);
+    await settle();
+    expect(calls).toEqual(["acquire", "startup", "operation", "startup", "read"]);
+    await connector.stop();
+
+    // A connector that is switched off hands an operation's claim straight back.
+    calls.length = 0;
+    const disabled = makeConnector(DEFAULT_HUB_CONNECTOR_CONFIG);
+    await disabled.start();
+    await expect(disabled.asIdentityOwner(ownerOperation)).resolves.toBe("done");
+    expect(calls).toEqual(["acquire", "startup", "operation", "release"]);
+    await disabled.stop();
+  });
+
   it("spaces out a connection the Hub displaced with a bare close", async () => {
     const clock = scheduler();
     const sockets: FakeSocket[] = [];
