@@ -1,6 +1,11 @@
 import type { OrchestrationEvent } from "@ryco/contracts";
 import { Context, Effect } from "effect";
 
+import type {
+  ContextHandoffRepositoryError,
+  ProjectionRepositoryError,
+} from "../../persistence/Errors.ts";
+import type { OrchestrationDispatchError } from "../Errors.ts";
 import type { ProviderSessionStartCancelledError } from "../threadLaneControl.ts";
 
 export type ContextHandoffTurnStartEvent = Extract<
@@ -47,7 +52,27 @@ export interface ContextHandoffCoordinatorShape {
 
   /** Reconcile durable operations left in preparing/dispatching at startup. */
   readonly recover: () => Effect.Effect<void>;
+
+  /**
+   * Resolve a handoff turn start whose process died before the coordinator
+   * took it past `requested`. Never touches source/target runtimes: nothing was
+   * swapped yet. `owned`: in flight here, or `recover()` owns or finished the
+   * record. `abandoned`: the terminal `failed` activity was appended (it settles
+   * the start). `unrecognized`: the request cannot be validated; nothing changed.
+   * A failed terminal append propagates and leaves the record `requested`.
+   */
+  readonly abandonUnstartedTurnStart: (
+    event: ContextHandoffTurnStartEvent,
+    detail: string,
+  ) => Effect.Effect<AbandonUnstartedTurnStartResult, ContextHandoffAbandonError>;
 }
+
+export type AbandonUnstartedTurnStartResult = "owned" | "abandoned" | "unrecognized";
+
+export type ContextHandoffAbandonError =
+  | ContextHandoffRepositoryError
+  | ProjectionRepositoryError
+  | OrchestrationDispatchError;
 
 export class ContextHandoffCoordinator extends Context.Service<
   ContextHandoffCoordinator,

@@ -574,6 +574,7 @@ function makeHarness(input?: {
   return {
     repository,
     commands,
+    dispatch,
     deliveryOrder,
     preparedBudgets,
     startFreshSession,
@@ -582,6 +583,7 @@ function makeHarness(input?: {
     retireSessionBinding,
     restoreSessionBinding,
     stopSession,
+    layer,
     run: (effect: Effect.Effect<void, never, ContextHandoffCoordinator>) =>
       Effect.runPromise(effect.pipe(Effect.provide(layer))),
   };
@@ -1197,5 +1199,106 @@ it("delivers with the default budget when manifest resolution defects", async ()
     maxInputChars: 120_000,
     budgetSource: "default",
     contextWindowTokens: null,
+  });
+});
+
+describe("ContextHandoffCoordinator.abandonUnstartedTurnStart", () => {
+  const abandonDetail =
+    "Ryco restarted before this message reached the provider. Nothing was sent. Send it again to continue.";
+  const abandon = (harness: ReturnType<typeof makeHarness>) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        return yield* coordinator.abandonUnstartedTurnStart(turnStartEvent(), abandonDetail);
+      }).pipe(Effect.provide(harness.layer)),
+    );
+  const expectNoRuntimeWork = (harness: ReturnType<typeof makeHarness>) => {
+    expect(harness.commands.some((command) => command.type === "thread.session.set")).toBe(false);
+    expect(harness.restoreSessionBinding).not.toHaveBeenCalled();
+    expect(harness.stopSessionBinding).not.toHaveBeenCalled();
+    expect(harness.retireSessionBinding).not.toHaveBeenCalled();
+    expect(harness.stopSession).not.toHaveBeenCalled();
+    expect(harness.startFreshSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  };
+  const terminalActivities = (harness: ReturnType<typeof makeHarness>) =>
+    harness.commands.flatMap((command) =>
+      command.type === "thread.activity.append" && command.activity.kind === "context-handoff"
+        ? [command.activity]
+        : [],
+    );
+
+  for (const initial of ["no record", "a requested record"] as const) {
+    it(`fails ${initial} with a terminal activity and touches no runtime`, async () => {
+      const harness = makeHarness(
+        initial === "a requested record" ? { initialRecord: requestedRecord() } : {},
+      );
+      expect(await abandon(harness)).toBe("abandoned");
+      expect(harness.repository.get()).toMatchObject({ status: "failed", error: abandonDetail });
+      const [terminal, ...rest] = terminalActivities(harness);
+      expect(rest).toEqual([]);
+      expect(terminal).toMatchObject({
+        id: activityId,
+        tone: "error",
+        payload: {
+          handoffId,
+          status: "failed",
+          error: abandonDetail,
+          targetMessageId,
+          sources: [{ providerInstanceId: sourceSelection.instanceId }],
+          target: { providerInstanceId: targetSelection.instanceId },
+        },
+      });
+      // The idle source session is never error-marked or replaced.
+      expectNoRuntimeWork(harness);
+    });
+  }
+
+  it("leaves a record that recover() owns alone", async () => {
+    for (const status of ["preparing", "dispatching", "failed", "consumed"] as const) {
+      const harness = makeHarness({ initialRecord: { ...requestedRecord(), status } });
+      expect(await abandon(harness)).toBe("owned");
+      expect(harness.repository.get().status).toBe(status);
+      expect(harness.commands).toEqual([]);
+      expectNoRuntimeWork(harness);
+    }
+  });
+
+  it("changes nothing when the requested activity cannot be validated", async () => {
+    const unrelated = makeThread({
+      activities: [
+        {
+          id: activityId,
+          tone: "info",
+          kind: "context-handoff",
+          summary: "Context handoff requested",
+          payload: { status: "requested", handoffId: "other-handoff" },
+          turnId: null,
+          createdAt,
+        },
+      ],
+    });
+    const withoutRecord = makeHarness({ thread: unrelated });
+    expect(await abandon(withoutRecord)).toBe("unrecognized");
+    expect(withoutRecord.repository.get()).toBeUndefined();
+    expect(withoutRecord.commands).toEqual([]);
+
+    const withRecord = makeHarness({ thread: unrelated, initialRecord: requestedRecord() });
+    expect(await abandon(withRecord)).toBe("unrecognized");
+    expect(withRecord.repository.get().status).toBe("requested");
+    expect(withRecord.commands).toEqual([]);
+    expectNoRuntimeWork(withRecord);
+  });
+
+  it("propagates a failed terminal append and keeps the record requested", async () => {
+    const harness = makeHarness({ initialRecord: requestedRecord() });
+    harness.dispatch.mockImplementation((command: OrchestrationCommand) =>
+      command.type === "thread.activity.append"
+        ? Effect.die(new Error("append failed"))
+        : Effect.succeed({ sequence: 1 }),
+    );
+    await expect(abandon(harness)).rejects.toThrow("append failed");
+    expect(harness.repository.get().status).toBe("requested");
+    expectNoRuntimeWork(harness);
   });
 });

@@ -388,6 +388,9 @@ describe("ProviderCommandReactor", () => {
     const processContextHandoff = vi.fn<ContextHandoffCoordinatorShape["processTurnStart"]>(
       (_event) => Effect.void,
     );
+    const abandonUnstartedTurnStart = vi.fn<
+      ContextHandoffCoordinatorShape["abandonUnstartedTurnStart"]
+    >(() => Effect.succeed("unrecognized" as const));
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
@@ -483,6 +486,7 @@ describe("ProviderCommandReactor", () => {
         Layer.succeed(ContextHandoffCoordinator, {
           processTurnStart: processContextHandoff,
           recover: () => Effect.void,
+          abandonUnstartedTurnStart,
         }),
       ),
       Layer.provideMerge(
@@ -627,6 +631,7 @@ describe("ProviderCommandReactor", () => {
       generateBranchName,
       generateThreadTitle,
       processContextHandoff,
+      abandonUnstartedTurnStart,
       runtimeSessions,
       stateDir,
       drain,

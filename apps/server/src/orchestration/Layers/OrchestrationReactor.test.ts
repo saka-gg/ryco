@@ -27,6 +27,7 @@ describe("OrchestrationReactor", () => {
         Layer.provideMerge(
           Layer.succeed(ContextHandoffCoordinator, {
             processTurnStart: () => Effect.void,
+            abandonUnstartedTurnStart: () => Effect.succeed("unrecognized" as const),
             recover: () => {
               started.push("context-handoff-recovery");
               return Effect.void;

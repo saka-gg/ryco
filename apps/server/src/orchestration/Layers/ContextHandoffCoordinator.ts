@@ -127,6 +127,11 @@ type ContextHandoffReference = NonNullable<
   ContextHandoffTurnStartEvent["payload"]["contextHandoff"]
 >;
 
+const truncateHandoffError = (detail: string): string =>
+  detail.length <= CONTEXT_HANDOFF_ERROR_MAX_CHARS
+    ? detail
+    : detail.slice(0, CONTEXT_HANDOFF_ERROR_MAX_CHARS);
+
 function boundedFailureDetail(cause: Cause.Cause<unknown>): string {
   return userFacingFailureDetail(cause, {
     fallback: "The target provider did not accept the context handoff.",
@@ -1206,6 +1211,43 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
     },
   );
 
+  /** The validated requested activity of a turn start, or undefined. */
+  const requestedActivityFor = (
+    thread: OrchestrationThread,
+    reference: ContextHandoffReference,
+  ) => {
+    const requested = decodeRequestedActivity(thread, reference.activityId);
+    return requested &&
+      requested.handoffId === reference.handoffId &&
+      requested.targetMessageId === reference.targetMessageId
+      ? requested
+      : undefined;
+  };
+
+  /** Shared by processTurnStart and abandonUnstartedTurnStart, so the record cannot drift. */
+  const createRequestedRecord = Effect.fnUntraced(function* (input: {
+    readonly thread: OrchestrationThread;
+    readonly reference: ContextHandoffReference;
+    readonly requested: typeof ContextHandoffActivityPayload.Type;
+    readonly createdAt: string;
+  }) {
+    const created = yield* repository.create(
+      makeRequestedContextHandoffRecord({
+        handoffId: input.reference.handoffId,
+        threadId: input.thread.id,
+        sourceSelection: input.requested.sourceSelection,
+        targetSelection: input.requested.targetSelection,
+        sourceRuntimeSessionId: input.requested.sourceRuntimeSessionId ?? null,
+        firstMessageId: input.reference.targetMessageId,
+        createdAt: input.createdAt,
+        updatedAt: input.createdAt,
+      }),
+    );
+    if (created) {
+      yield* increment(contextHandoffsTotal, { status: "requested" });
+    }
+  });
+
   const processTurnStart: ContextHandoffCoordinatorShape["processTurnStart"] = (
     event,
     control = NO_LANE_CONTROL,
@@ -1217,29 +1259,14 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       yield* Effect.gen(function* () {
         const thread = yield* resolveThread(event.payload.threadId);
         if (!thread) return;
-        const requested = decodeRequestedActivity(thread, reference.activityId);
-        if (
-          !requested ||
-          requested.handoffId !== reference.handoffId ||
-          requested.targetMessageId !== reference.targetMessageId
-        ) {
-          return;
-        }
-        const created = yield* repository.create(
-          makeRequestedContextHandoffRecord({
-            handoffId: reference.handoffId,
-            threadId: thread.id,
-            sourceSelection: requested.sourceSelection,
-            targetSelection: requested.targetSelection,
-            sourceRuntimeSessionId: requested.sourceRuntimeSessionId ?? null,
-            firstMessageId: reference.targetMessageId,
-            createdAt: event.payload.createdAt,
-            updatedAt: event.payload.createdAt,
-          }),
-        );
-        if (created) {
-          yield* increment(contextHandoffsTotal, { status: "requested" });
-        }
+        const requested = requestedActivityFor(thread, reference);
+        if (!requested) return;
+        yield* createRequestedRecord({
+          thread,
+          reference,
+          requested,
+          createdAt: event.payload.createdAt,
+        });
         const record = Option.getOrUndefined(
           yield* repository.getById({ handoffId: reference.handoffId }),
         );
@@ -1293,7 +1320,77 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       ),
     );
 
-  return { processTurnStart, recover } satisfies ContextHandoffCoordinatorShape;
+  const abandonUnstartedTurnStart: ContextHandoffCoordinatorShape["abandonUnstartedTurnStart"] = (
+    event,
+    detail,
+  ) => {
+    const reference = event.payload.contextHandoff;
+    if (!reference) return Effect.succeed("unrecognized" as const);
+    const error = truncateHandoffError(detail);
+    return Effect.gen(function* () {
+      // In flight in this process: whoever runs it owns the outcome.
+      if (!(yield* acquire(reference.handoffId))) return "owned" as const;
+      return yield* Effect.gen(function* () {
+        const existing = Option.getOrUndefined(
+          yield* repository.getById({ handoffId: reference.handoffId }),
+        );
+        // recover() owns preparing/dispatching records; terminal ones have their activity.
+        if (existing && existing.status !== "requested") return "owned" as const;
+        const thread = yield* resolveThread(event.payload.threadId);
+        if (!thread) return "unrecognized" as const;
+        const requested = requestedActivityFor(thread, reference);
+        if (!requested) return "unrecognized" as const;
+        if (!existing) {
+          yield* createRequestedRecord({
+            thread,
+            reference,
+            requested,
+            createdAt: event.payload.createdAt,
+          });
+        }
+        const record = Option.getOrUndefined(
+          yield* repository.getById({ handoffId: reference.handoffId }),
+        );
+        if (!record) return "unrecognized" as const;
+        if (record.status !== "requested") return "owned" as const;
+        const presentation = Option.getOrUndefined(
+          yield* resolvePresentation(thread, record).pipe(Effect.option),
+        );
+        if (!presentation) return "unrecognized" as const;
+        // Nothing was swapped before `preparing`: no source restore, no binding
+        // stop or retire. The activity goes first (as in finalizeFailure), so a
+        // failed append leaves the record `requested` for the next boot.
+        yield* appendTerminalActivity({
+          record,
+          activityId: reference.activityId,
+          source: presentation.source,
+          target: presentation.target,
+          sources: [presentation.source],
+          error,
+          status: "failed",
+        });
+        const transitioned = yield* repository.compareAndSetStatus({
+          handoffId: record.handoffId,
+          expectedStatus: "requested",
+          nextStatus: "failed",
+          targetRuntimeSessionId: record.targetRuntimeSessionId,
+          acceptedProviderTurnId: record.acceptedProviderTurnId,
+          error,
+          updatedAt: nowIso(),
+        });
+        if (transitioned) {
+          yield* increment(contextHandoffsTotal, { status: "failed" });
+        }
+        return "abandoned" as const;
+      }).pipe(Effect.ensuring(release(reference.handoffId)));
+    });
+  };
+
+  return {
+    processTurnStart,
+    recover,
+    abandonUnstartedTurnStart,
+  } satisfies ContextHandoffCoordinatorShape;
 });
 
 export const ContextHandoffCoordinatorLive = Layer.effect(
