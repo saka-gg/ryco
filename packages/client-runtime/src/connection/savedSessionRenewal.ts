@@ -144,6 +144,11 @@ export function createSavedSessionRenewal(input: {
       }
       return request.bearerToken;
     }
+    // The successor replaces only the bearer it renews. Pairing again or
+    // removing the environment while the rotation was in flight replaced or
+    // dropped that one, and the old pairing's successor must not come back.
+    const holding = await input.readBearerToken(request.environmentId).catch(() => null);
+    if (holding !== request.bearerToken) return holding ?? request.bearerToken;
     // The successor is used only once it is durably stored: written and read
     // back. Until it is used, the node keeps the presented bearer valid.
     const written = await input

@@ -111,6 +111,50 @@ describe("createSavedSessionRenewal", () => {
     expect(fetchSessionState).not.toHaveBeenCalled();
   });
 
+  it("leaves a credential paired again or removed during the rotation alone", async () => {
+    const store = createStore("bearer-1");
+    const renewal = createSavedSessionRenewal({
+      readBearerToken: store.read,
+      writeBearerToken: store.write,
+      now: () => NOW,
+    });
+    const fetchSessionState = vi.fn(async () => bearerSession(30 * DAY_MS));
+    const request = {
+      environmentId,
+      session: bearerSession(20 * DAY_MS),
+      bearerToken: "bearer-1",
+      fetchSessionState,
+    };
+
+    // Paired again with an owner code while the rotation was in flight.
+    await expect(
+      renewal.renew({
+        ...request,
+        rotate: async () => {
+          await store.write(environmentId, "owner-bearer");
+          return rotation("bearer-2");
+        },
+      }),
+    ).resolves.toBe("owner-bearer");
+    expect(store.current()).toBe("owner-bearer");
+
+    // Removed while the rotation was in flight.
+    await store.write(environmentId, "bearer-1");
+    store.write.mockClear();
+    await expect(
+      renewal.renew({
+        ...request,
+        rotate: async () => {
+          store.read.mockResolvedValue(null);
+          return rotation("bearer-2");
+        },
+      }),
+    ).resolves.toBe("bearer-1");
+    expect(store.write).not.toHaveBeenCalled();
+    // Neither successor was ever used.
+    expect(fetchSessionState).not.toHaveBeenCalled();
+  });
+
   it("asks again after an outage, but not after the node declined", async () => {
     const store = createStore("bearer-1");
     const renewal = createSavedSessionRenewal({
