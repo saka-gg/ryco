@@ -73,7 +73,11 @@ import {
   setDesktopKeepAwakePreference,
   writeDesktopSettings,
 } from "./desktopSettings.ts";
-import { DesktopKeepAwakeController, isDesktopNodeReachable } from "./desktopKeepAwake.ts";
+import {
+  DESKTOP_KEEP_AWAKE_RECHECK_MS,
+  DesktopKeepAwakeController,
+  isDesktopNodeReachable,
+} from "./desktopKeepAwake.ts";
 import {
   readClientSettings,
   readAppKeybindings,
@@ -411,6 +415,15 @@ let backendBootstrapToken = "";
 // exact backend child and authenticates Desktop-main-only local control calls.
 let backendControlToken = "";
 let backendHttpUrl = "";
+// Main-only local control over the running backend child (per-child secret).
+const desktopHubControl = createDesktopHubControlClient({
+  baseUrl: () => backendHttpUrl,
+  controlToken: () => backendControlToken,
+});
+// Whether the running backend reports other devices can reach it through the
+// Hub. Main has no push channel from the child, so it asks; false until known.
+let backendHubReachable = false;
+let desktopHubReachabilityProbe: Promise<void> | null = null;
 let backendWsUrl = "";
 let backendEndpointUrl: string | null = null;
 let backendAdvertisedHost: string | null = null;
@@ -815,10 +828,7 @@ const ensureDesktopHostedIdentityCoordinator = lazyAsyncResource(
       relayDpopSigner: await createDesktopDpopSigner(context.security),
       allowsBackgroundNodeClaim: () => desktopHubAllowsBackgroundNodeClaim(desktopSettings),
       beforeInteractiveNodeClaim: enableDesktopHubConnectorForAccountSetup,
-      control: createDesktopHubControlClient({
-        baseUrl: () => backendHttpUrl,
-        controlToken: () => backendControlToken,
-      }),
+      control: desktopHubControl,
     });
     desktopHostedIdentityCoordinator = coordinator;
     return coordinator;
@@ -1167,20 +1177,47 @@ function desktopHubRestartRequired(settings: DesktopSettings = desktopSettings):
   );
 }
 
+/**
+ * Ask the running backend whether the Hub can reach it: enrolled, and
+ * connected or reconnecting. A saved enable, an enrollment nobody approved, or
+ * a connector waiting on a restart is not reachable.
+ */
+function refreshDesktopHubReachability(): Promise<void> {
+  if (desktopHubReachabilityProbe !== null) return desktopHubReachabilityProbe;
+  const probe = (async () => {
+    let reachable = false;
+    if (backendHubLaunch?.enabled === true) {
+      reachable = await desktopHubControl
+        .hubReachability()
+        .then((response) => response.reachable)
+        .catch(() => false);
+    }
+    if (reachable === backendHubReachable) return;
+    backendHubReachable = reachable;
+    desktopKeepAwake?.sync();
+  })().finally(() => {
+    desktopHubReachabilityProbe = null;
+  });
+  desktopHubReachabilityProbe = probe;
+  return probe;
+}
+
 function readDesktopKeepAwakeInputs() {
   return {
     enabled: desktopSettings.keepAwakeWhileReachable,
+    // What the running backend serves, never a change saved for a relaunch.
     reachable: isDesktopNodeReachable({
-      hubConnectorEnabled:
-        desktopSettings.hubOrigin !== null && desktopSettings.hubConnectorEnabled,
+      hubReachable: backendHubReachable,
       effectiveServerExposureMode: desktopServerExposureMode,
-      tailscaleServeEnabled: desktopSettings.tailscaleServeEnabled,
+      tailscaleServeEnabled: runningTailscaleServe().enabled,
     }),
   };
 }
 
 function startDesktopKeepAwake(): void {
   if (desktopKeepAwake !== null) return;
+  // The connector's reachability changes with enrollment and the network.
+  setInterval(() => void refreshDesktopHubReachability(), DESKTOP_KEEP_AWAKE_RECHECK_MS).unref();
   desktopKeepAwake = new DesktopKeepAwakeController({
     blocker: powerSaveBlocker,
     power: powerMonitor,
@@ -1363,6 +1400,7 @@ function ensureDevelopmentInitialWindowOpen(): void {
       markDesktopStartupPhase("desktop.backend.listening", `source=${source}`);
       writeDesktopLogHeader(`bootstrap development resources ready backendSource=${source}`);
       resumeDesktopHostedIdentityForBackend();
+      void refreshDesktopHubReachability();
     })
     .catch((error) => {
       if (isBackendReadinessAborted(error)) {
@@ -1433,6 +1471,7 @@ function ensureInitialBackendWindowOpen(): void {
       markDesktopStartupPhase("desktop.backend.listening", `source=${source}`);
       writeDesktopLogHeader(`bootstrap backend ready source=${source}`);
       resumeDesktopHostedIdentityForBackend();
+      void refreshDesktopHubReachability();
       const window = ensurePackagedBootstrapWindowOpen("backend-ready");
       if (window) {
         loadPackagedBackendAppWindow(window, "backend-ready");
@@ -3081,6 +3120,8 @@ function registerIpcHandlers(): void {
     ) {
       enableDesktopHubConnectorForAccountSetup();
     }
+    // A claim committed in place wakes the connector; keep-awake follows it.
+    void refreshDesktopHubReachability();
     return hostedIdentityView();
   });
   ipcMain.removeHandler(DISCONNECT_HOSTED_IDENTITY_CHANNEL);

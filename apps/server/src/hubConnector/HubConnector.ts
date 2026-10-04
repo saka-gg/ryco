@@ -682,7 +682,12 @@ export class HubConnector {
    * enrolled" because the keychain is locked would invite overwriting a real
    * identity.
    */
-  async identitySummary(): Promise<HubIdentitySummary> {
+  /**
+   * `fingerprint: false` answers from the state files alone. The fingerprint
+   * is derived from the private key in key custody, which a caller that only
+   * needs the enrollment state (such as a periodic probe) must not open.
+   */
+  async identitySummary(options?: { readonly fingerprint?: boolean }): Promise<HubIdentitySummary> {
     try {
       const state = await this.#identity.readState();
       // A committed teardown means the erase is under way: the keys it names may
@@ -691,6 +696,7 @@ export class HubConnector {
       // leave no in-panel way to correct it.
       if (state.pendingTeardown !== null) return { enrolled: "none" };
       if (state.activeNode !== null) {
+        if (options?.fingerprint === false) return { enrolled: "active" };
         const fingerprint = await this.#identity.readActiveFingerprint?.();
         return {
           enrolled: "active",

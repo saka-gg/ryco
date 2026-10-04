@@ -76,12 +76,12 @@ describe("shouldKeepDesktopAwake", () => {
 describe("isDesktopNodeReachable", () => {
   it("counts the Hub connector, effective network exposure, and Tailscale Serve", () => {
     const base = {
-      hubConnectorEnabled: false,
+      hubReachable: false,
       effectiveServerExposureMode: "local-only" as const,
       tailscaleServeEnabled: false,
     };
     expect(isDesktopNodeReachable(base)).toBe(false);
-    expect(isDesktopNodeReachable({ ...base, hubConnectorEnabled: true })).toBe(true);
+    expect(isDesktopNodeReachable({ ...base, hubReachable: true })).toBe(true);
     expect(
       isDesktopNodeReachable({ ...base, effectiveServerExposureMode: "network-accessible" }),
     ).toBe(true);

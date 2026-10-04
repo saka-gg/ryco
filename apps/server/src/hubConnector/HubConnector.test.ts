@@ -2590,4 +2590,21 @@ describe("HubConnector", () => {
     expect(JSON.stringify(await connector.identitySummary())).not.toContain("publicKey");
     expect(JSON.stringify(await connector.identitySummary())).not.toContain("secretName");
   });
+
+  it("reports enrollment without opening key custody when the fingerprint is not wanted", async () => {
+    // Desktop probes reachability every minute; the fingerprint is derived from
+    // the private key, which that probe must not load.
+    const readActiveFingerprint = vi.fn(async () => `SHA256:${"A".repeat(43)}`);
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity({ readActiveFingerprint }),
+      transport: { open: () => new FakeSocket() },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+    });
+
+    expect(await connector.identitySummary({ fingerprint: false })).toEqual({ enrolled: "active" });
+    expect(readActiveFingerprint).not.toHaveBeenCalled();
+  });
 });

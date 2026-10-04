@@ -2,9 +2,11 @@ import { describe, expect, it } from "@effect/vitest";
 import { Schema } from "effect";
 
 import {
+  DESKTOP_HUB_REACHABILITY_PATH,
   DESKTOP_NATIVE_NODE_CLAIM_COMMIT_PATH,
   DESKTOP_NATIVE_NODE_CLAIM_DESCRIPTOR_PATH,
   DESKTOP_NATIVE_NODE_CLAIM_SIGN_PATH,
+  DesktopHubReachabilityResponse,
   DesktopNativeNodeClaimCommitRequest,
   DesktopNativeNodeClaimDescriptorResponse,
   DesktopNativeNodeClaimSignRequest,
@@ -55,6 +57,20 @@ describe("Desktop automatic node-claim local-control contracts", () => {
       "/api/desktop/hub/native-node-claim/sign",
       "/api/desktop/hub/native-node-claim/commit",
     ]);
+  });
+
+  it("pins the reachability probe to the same local-control prefix with a bare answer", () => {
+    expect(DESKTOP_HUB_REACHABILITY_PATH).toBe("/api/desktop/hub/reachability");
+    expect(
+      strictDecode(DesktopHubReachabilityResponse, { protocolVersion: 1, reachable: true }),
+    ).toEqual({ protocolVersion: 1, reachable: true });
+    expect(() =>
+      strictDecode(DesktopHubReachabilityResponse, {
+        protocolVersion: 1,
+        reachable: true,
+        hubOrigin: "https://hub.example.test",
+      }),
+    ).toThrow();
   });
 
   it("accepts the exact prepared descriptor and claim envelopes", () => {

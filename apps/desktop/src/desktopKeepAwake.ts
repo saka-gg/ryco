@@ -29,17 +29,20 @@ export function shouldKeepDesktopAwake(input: DesktopKeepAwakeInputs): boolean {
 /**
  * Whether this desktop serves other devices.
  *
- * A Hub connector counts only when it is actually configured to run; the
- * network mode is the effective one, so a requested LAN exposure that fell back
- * to loopback does not keep a machine awake for nobody.
+ * Every input describes what the running backend serves, never a saved
+ * preference: the Hub counts only while the backend reports an enrolled
+ * connector that is connected or reconnecting, so an enrollment nobody approves
+ * or a connector waiting on a restart does not keep a machine awake for nobody.
+ * The network mode is the effective one, so a requested LAN exposure that fell
+ * back to loopback does not either.
  */
 export function isDesktopNodeReachable(input: {
-  readonly hubConnectorEnabled: boolean;
+  readonly hubReachable: boolean;
   readonly effectiveServerExposureMode: "local-only" | "network-accessible";
   readonly tailscaleServeEnabled: boolean;
 }): boolean {
   return (
-    input.hubConnectorEnabled ||
+    input.hubReachable ||
     input.effectiveServerExposureMode === "network-accessible" ||
     input.tailscaleServeEnabled
   );
