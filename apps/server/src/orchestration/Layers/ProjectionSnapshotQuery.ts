@@ -7,6 +7,10 @@ import {
   decodeMessageText,
 } from "../../persistence/messageText.ts";
 import {
+  firstUserMessageIdQuery,
+  latestUserMessageIdQuery,
+} from "../../persistence/userMessageAnchors.ts";
+import {
   ChatAttachment,
   DEFAULT_AGENT_TOKEN_MODE,
   IsoDateTime,
@@ -723,11 +727,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  // The command read model does not need full message history, but it must
-  // retain whether a thread has already accepted a user turn. Otherwise a
-  // process restart makes an established thread look new and a provider/model
-  // change bypasses the atomic context-handoff path.
-  const listFirstUserMessageRows = SqlSchema.findAll({
+  // The command read model does not load full message history. It keeps two
+  // user-message anchors per thread:
+  // - first: the thread has accepted a user turn, so a provider/model change after
+  //   a restart still takes the atomic context-handoff path;
+  // - latest: the delegated-return fence (decider thread.turn.start) and settlement
+  //   read messages.findLast(user). It MUST be the row CompletionReturnDelivery
+  //   reads, hence the shared latestUserMessageIdQuery.
+  // Rows are ordered so a thread's latest anchor is always its last row.
+  // Do NOT add `messages.thread_id = threads.thread_id`: it flips the plan to a
+  // full SCAN of projection_thread_messages (guarded by a test).
+  const listUserMessageAnchorRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadMessageDbRowSchema,
     execute: () =>
@@ -743,22 +753,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           messages.is_streaming AS "isStreaming",
           messages.created_at AS "createdAt",
           messages.updated_at AS "updatedAt"
-        FROM projection_thread_messages messages
-        WHERE messages.role = 'user'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM projection_thread_messages earlier
-            WHERE earlier.thread_id = messages.thread_id
-              AND earlier.role = 'user'
-              AND (
-                earlier.created_at < messages.created_at
-                OR (
-                  earlier.created_at = messages.created_at
-                  AND earlier.message_id < messages.message_id
-                )
-              )
+        FROM projection_threads threads
+        JOIN projection_thread_messages messages
+          ON messages.message_id IN (
+            (${firstUserMessageIdQuery(sql, sql.literal("threads.thread_id"))}),
+            (${latestUserMessageIdQuery(sql, sql.literal("threads.thread_id"))})
           )
-        ORDER BY messages.thread_id ASC
+        ORDER BY messages.thread_id ASC, messages.created_at ASC, messages.rowid ASC
       `,
   });
 
@@ -2173,11 +2174,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
-          listFirstUserMessageRows(undefined).pipe(
+          listUserMessageAnchorRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
-                "ProjectionSnapshotQuery.getCommandReadModel:listFirstUserMessages:query",
-                "ProjectionSnapshotQuery.getCommandReadModel:listFirstUserMessages:decodeRows",
+                "ProjectionSnapshotQuery.getCommandReadModel:listUserMessageAnchors:query",
+                "ProjectionSnapshotQuery.getCommandReadModel:listUserMessageAnchors:decodeRows",
               ),
             ),
           ),
@@ -2229,7 +2230,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             projectRows,
             worktreeRows,
             threadRows,
-            firstUserMessageRows,
+            userMessageAnchorRows,
             actionableActivityRows,
             proposedPlanRows,
             sessionRows,
@@ -2241,7 +2242,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               const projects: OrchestrationProject[] = [];
               const worktrees: OrchestrationWorktreeShell[] = [];
               const threads: OrchestrationThread[] = [];
-              const firstUserMessageByThread = new Map<string, OrchestrationMessage>();
+              const userMessageAnchorsByThread = new Map<string, OrchestrationMessage[]>();
               const actionableActivitiesByThread = new Map<
                 string,
                 Array<OrchestrationThreadActivity>
@@ -2280,22 +2281,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
                 worktrees.push(toWorktreeShell(row));
               }
-              for (let index = 0; index < firstUserMessageRows.length; index += 1) {
-                const row = firstUserMessageRows[index];
+              for (let index = 0; index < userMessageAnchorRows.length; index += 1) {
+                const row = userMessageAnchorRows[index];
                 if (!row) {
                   continue;
                 }
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                firstUserMessageByThread.set(row.threadId, {
-                  id: row.messageId,
-                  role: row.role,
-                  text: resolveMessageText(row),
-                  ...(row.attachments !== null ? { attachments: row.attachments } : {}),
-                  turnId: row.turnId,
-                  streaming: row.isStreaming === 1,
-                  createdAt: row.createdAt,
-                  updatedAt: row.updatedAt,
-                });
+                // SQL order keeps each thread's latest anchor last (findLast(user)).
+                const anchors = userMessageAnchorsByThread.get(row.threadId) ?? [];
+                anchors.push(mapMessageRow(row));
+                userMessageAnchorsByThread.set(row.threadId, anchors);
               }
               for (let index = 0; index < actionableActivityRows.length; index += 1) {
                 const row = actionableActivityRows[index];
@@ -2408,9 +2403,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   snoozedUntil: row.snoozedUntil ?? null,
                   snoozedAt: row.snoozedAt ?? null,
                   deletedAt: row.deletedAt,
-                  messages: firstUserMessageByThread.has(row.threadId)
-                    ? [firstUserMessageByThread.get(row.threadId)!]
-                    : [],
+                  messages: userMessageAnchorsByThread.get(row.threadId) ?? [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                   activities: actionableActivitiesByThread.get(row.threadId) ?? [],
                   checkpoints: [],
