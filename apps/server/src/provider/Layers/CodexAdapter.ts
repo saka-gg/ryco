@@ -2534,7 +2534,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
 
     return requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.rollbackThread(numTurns)),
+      Effect.flatMap((session) =>
+        session.runtime.rollbackThread({
+          numTurns,
+          beforeTurnId: input.droppedTurnIds[0],
+        }),
+      ),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause

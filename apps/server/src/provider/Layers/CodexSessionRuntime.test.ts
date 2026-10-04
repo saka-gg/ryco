@@ -18,6 +18,7 @@ import {
   buildTurnSteerParams,
   isRecoverableThreadResumeError,
   openCodexThread,
+  revertCodexThread,
 } from "./CodexSessionRuntime.ts";
 
 function makeThreadOpenResponse(
@@ -576,5 +577,126 @@ describe("openCodexThread", () => {
         Schema.is(CodexErrors.CodexAppServerRequestError)(error) &&
         error.errorMessage === "timed out waiting for server",
     );
+  });
+});
+
+describe("revertCodexThread", () => {
+  function makeRevertClient(input: {
+    readonly revert?: (payload: unknown) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+    readonly rollback?: (
+      payload: CodexRpc.ClientRequestParamsByMethod["thread/rollback"],
+    ) => Effect.Effect<
+      CodexRpc.ClientRequestResponsesByMethod["thread/rollback"],
+      CodexErrors.CodexAppServerError
+    >;
+  }) {
+    const calls: Array<{ readonly method: string; readonly payload: unknown }> = [];
+    const client = {
+      raw: {
+        request: (method: string, payload?: unknown) => {
+          calls.push({ method, payload });
+          return input.revert?.(payload) ?? Effect.succeed({ thread: { id: "provider-thread" } });
+        },
+      },
+      request: (
+        method: "thread/rollback",
+        payload: CodexRpc.ClientRequestParamsByMethod["thread/rollback"],
+      ) => {
+        calls.push({ method, payload });
+        return (
+          input.rollback?.(payload) ??
+          Effect.succeed({
+            thread: { id: "provider-thread", turns: [] },
+          } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/rollback"])
+        );
+      },
+    };
+    return { client, calls };
+  }
+
+  const unknownVariant = (method: string) =>
+    new CodexErrors.CodexAppServerRequestError({
+      code: -32600,
+      errorMessage: `Invalid request: unknown variant \`${method}\``,
+    });
+
+  it("reverts before the first dropped turn with thread/revert", async () => {
+    const { client, calls } = makeRevertClient({});
+    const snapshot = await Effect.runPromise(
+      revertCodexThread(client, {
+        threadId: "provider-thread",
+        beforeTurnId: "turn-2",
+        numTurns: 1,
+      }),
+    );
+    assert.deepStrictEqual(calls, [
+      { method: "thread/revert", payload: { threadId: "provider-thread", beforeTurnId: "turn-2" } },
+    ]);
+    assert.deepStrictEqual(snapshot, { threadId: "provider-thread", turns: [] });
+  });
+
+  it("falls back to thread/rollback when thread/revert is unknown", async () => {
+    const { client, calls } = makeRevertClient({
+      revert: () => Effect.fail(unknownVariant("thread/revert")),
+    });
+    await Effect.runPromise(
+      revertCodexThread(client, {
+        threadId: "provider-thread",
+        beforeTurnId: "turn-2",
+        numTurns: 1,
+      }),
+    );
+    assert.deepStrictEqual(
+      calls.map((call) => call.method),
+      ["thread/revert", "thread/rollback"],
+    );
+    assert.deepStrictEqual(calls[1]?.payload, { threadId: "provider-thread", numTurns: 1 });
+  });
+
+  it("reports the thread/revert error when thread/rollback is unknown too", async () => {
+    const { client } = makeRevertClient({
+      revert: () =>
+        Effect.fail(
+          new CodexErrors.CodexAppServerRequestError({
+            code: -32602,
+            errorMessage: "turn turn-2 is not in this thread's history",
+          }),
+        ),
+      rollback: () => Effect.fail(unknownVariant("thread/rollback")),
+    });
+    const error = await Effect.runPromise(
+      revertCodexThread(client, {
+        threadId: "provider-thread",
+        beforeTurnId: "turn-2",
+        numTurns: 1,
+      }).pipe(Effect.flip),
+    );
+    assert.equal(error.message, "turn turn-2 is not in this thread's history");
+  });
+
+  it("uses thread/rollback without a dropped turn id", async () => {
+    const { client, calls } = makeRevertClient({});
+    await Effect.runPromise(
+      revertCodexThread(client, { threadId: "provider-thread", numTurns: 2 }),
+    );
+    assert.deepStrictEqual(calls, [
+      { method: "thread/rollback", payload: { threadId: "provider-thread", numTurns: 2 } },
+    ]);
+  });
+
+  it("explains a binary that can neither revert nor roll back", async () => {
+    const { client } = makeRevertClient({
+      rollback: () =>
+        Effect.fail(
+          new CodexErrors.CodexAppServerRequestError({
+            code: -32601,
+            errorMessage: "Method not found",
+          }),
+        ),
+    });
+    const error = await Effect.runPromise(
+      revertCodexThread(client, { threadId: "provider-thread", numTurns: 1 }).pipe(Effect.flip),
+    );
+    assert.equal(error.message, "This Codex version can't rewind threads.");
   });
 });

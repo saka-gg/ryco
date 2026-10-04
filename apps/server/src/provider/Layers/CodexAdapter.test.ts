@@ -102,11 +102,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     }),
   );
 
-  public readonly rollbackThreadImpl = vi.fn((_numTurns: number): Promise<CodexThreadSnapshot> =>
-    Promise.resolve({
-      threadId: "provider-thread-1",
-      turns: [],
-    }),
+  public readonly rollbackThreadImpl = vi.fn(
+    (
+      _input: Parameters<CodexSessionRuntimeShape["rollbackThread"]>[0],
+    ): Promise<CodexThreadSnapshot> =>
+      Promise.resolve({
+        threadId: "provider-thread-1",
+        turns: [],
+      }),
   );
 
   public readonly respondToRequestImpl = vi.fn(
@@ -147,8 +150,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   readThread = Effect.promise(() => this.readThreadImpl());
 
-  rollbackThread(numTurns: number) {
-    return Effect.promise(() => this.rollbackThreadImpl(numTurns));
+  rollbackThread(input: Parameters<CodexSessionRuntimeShape["rollbackThread"]>[0]) {
+    return Effect.promise(() => this.rollbackThreadImpl(input));
   }
 
   setGoal(input: Omit<EffectCodexSchema.V2ThreadGoalSetParams, "threadId">) {
@@ -922,6 +925,20 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(firstEvent.value.type, "item.completed");
       }
     }).pipe(TestClock.withLive),
+  );
+
+  it.effect("reverts before the first dropped turn", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime, session } = yield* startLifecycleRuntime();
+      yield* adapter.rollbackThread(session.threadId, {
+        numTurns: 2,
+        targetTurnId: asTurnId("turn-1"),
+        droppedTurnIds: [asTurnId("turn-2"), asTurnId("turn-3")],
+      });
+      assert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [
+        [{ numTurns: 2, beforeTurnId: "turn-2" }],
+      ]);
+    }),
   );
 
   it.effect("recycles a provider session when its interrupt RPC never settles", () =>
