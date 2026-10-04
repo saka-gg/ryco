@@ -256,8 +256,10 @@ class ProbedFakeClaudeQuery extends FakeClaudeQuery {
   public failInit = false;
   /** While set, initializationResult waits on it. */
   public initGate: Promise<void> | undefined;
+  public initCalls = 0;
 
   readonly initializationResult = async (): Promise<unknown> => {
+    this.initCalls += 1;
     if (this.initGate) await this.initGate;
     if (this.failInit) throw new Error("Resume rejected by the test CLI.");
     return {};
@@ -4306,6 +4308,112 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(events.filter((event) => event.type === "session.exited").length, 1);
         assert.equal(events.filter((event) => event.type === "runtime.error").length, 0);
         assert.deepEqual(yield* adapter.listSessions(), []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    const runTwoTurnsForRewind = (
+      adapter: ClaudeAdapterShape,
+      harness: ReturnType<typeof makeSequencedHarness>,
+      events: ReadonlyArray<ProviderRuntimeEvent>,
+    ) =>
+      Effect.gen(function* () {
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
+        });
+        const turn2 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "two",
+          assistantUuid: "a2",
+        });
+        harness.setTranscript([
+          transcriptEntry(turn1, "user"),
+          transcriptEntry("a1"),
+          transcriptEntry(turn2, "user"),
+        ]);
+        return { turn1, turn2 };
+      });
+
+    for (const ending of ["fails", "ends"] as const) {
+      it.effect(
+        `restores silently when the reopened CLI's stream ${ending} during the probe`,
+        () => {
+          const harness = makeSequencedHarness();
+          return Effect.gen(function* () {
+            const adapter = yield* ClaudeAdapter;
+            const events = yield* collectEvents(adapter);
+            yield* startRewindSession(adapter);
+            const { turn1, turn2 } = yield* runTwoTurnsForRewind(adapter, harness, events);
+            harness.setOnCreate((query, index) => {
+              if (index !== 1) return;
+              // The CLI never answers the probe; only its stream exit can end it.
+              query.initGate = new Promise<void>(() => undefined);
+              if (ending === "fails") query.fail(new Error("Claude exited with code 1"));
+              else query.finish();
+            });
+
+            const error = yield* Effect.flip(
+              adapter.rollbackThread(THREAD_ID, {
+                numTurns: 1,
+                targetTurnId: turn1,
+                droppedTurnIds: [turn2],
+              }),
+            );
+
+            assert.include(
+              error.message,
+              "Claude refused to rewind this conversation, so nothing was changed.",
+            );
+            assert.equal(harness.inputs.length, 3);
+            assert.equal(harness.inputs[2]?.options.resume, REWIND_SESSION_ID);
+            assert.equal(harness.inputs[2]?.options.resumeSessionAt, undefined);
+            assert.deepEqual(exitOrErrorEvents(events), []);
+            assert.equal((yield* currentCursor(adapter))?.rewind, undefined);
+          }).pipe(
+            Effect.provideService(Random.Random, makeDeterministicRandomService()),
+            Effect.provide(harness.layer),
+          );
+        },
+      );
+    }
+
+    it.effect("gives up on a reopened CLI that never answers the probe", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter);
+        const { turn1, turn2 } = yield* runTwoTurnsForRewind(adapter, harness, events);
+        harness.setOnCreate((query, index) => {
+          if (index === 1) query.initGate = new Promise<void>(() => undefined);
+        });
+
+        const rewinding = yield* adapter
+          .rollbackThread(THREAD_ID, {
+            numTurns: 1,
+            targetTurnId: turn1,
+            droppedTurnIds: [turn2],
+          })
+          .pipe(Effect.flip, Effect.forkChild);
+        // The probe timer is armed by the time the reopened CLI is asked to initialize.
+        yield* waitUntil(() => (harness.queries[1]?.initCalls ?? 0) > 0);
+        yield* TestClock.adjust("29 seconds");
+        assert.equal(harness.inputs.length, 2);
+        yield* TestClock.adjust("1 second");
+        const error = yield* Fiber.join(rewinding);
+
+        assert.include(error.message, "Claude did not respond while reopening the conversation.");
+        assert.equal(harness.inputs.length, 3);
+        assert.equal(harness.inputs[2]?.options.resumeSessionAt, undefined);
+        assert.deepEqual(exitOrErrorEvents(events), []);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
