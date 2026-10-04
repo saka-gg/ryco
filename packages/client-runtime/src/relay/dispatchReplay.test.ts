@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import type { HostedRuntimeTimers } from "../authorization/runtime";
 import { RpcRequestRefusedError } from "../rpc/protocol";
 import type { WsRpcClient } from "../rpc/wsRpcClient";
+import { RpcTransportDisposedError } from "../rpc/wsTransport";
 import {
   bindHostedDispatchReplay,
   HOSTED_DISPATCH_REPLAY_HORIZON_MS,
@@ -105,7 +106,7 @@ describe("HostedDispatchReplay", () => {
       () => new RpcClientError({ reason: new Socket.SocketCloseError({ code: 1006 }) }),
     ],
     ["a disposed client", disposed],
-    ["a disposed transport", () => new Error("Transport disposed")],
+    ["a disposed transport", () => new RpcTransportDisposedError()],
   ])(
     "holds the caller through %s and replays the identical envelope once ready",
     async (_, fail) => {
@@ -162,6 +163,40 @@ describe("HostedDispatchReplay", () => {
     replay.markReady(environmentId);
     expect(raw).toHaveBeenCalledOnce();
     expect(markUncertain).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a defect for a payload it cannot decode", () => "Expected a known command type"],
+    ["a protocol defect", () => new Error("Unknown request tag: orchestration.next")],
+  ])(
+    "reports what the node answered on a live connection at once: %s",
+    async (_, fail) => {
+      const error = fail();
+      const raw = vi.fn<Dispatch>(() => Promise.reject(error));
+      const { dispatch } = attach(raw);
+
+      await expect(dispatch(command)).rejects.toBe(error);
+      replay.markReady(environmentId);
+      expect(raw).toHaveBeenCalledOnce();
+      expect(markUncertain).not.toHaveBeenCalled();
+    },
+  );
+
+  it("holds any failure once the attempt's connection was lost after the send", async () => {
+    const pending = deferred<{ readonly sequence: number }>();
+    const { dispatch, lost } = attach(() => pending.promise);
+    const result = dispatch(command);
+
+    lost();
+    // A drop surfacing in a shape the classification does not know.
+    pending.reject(new Error("socket went away"));
+    expect(await settled(result)).toBe("pending");
+
+    const second = vi.fn<Dispatch>(async () => ({ sequence: 6 }));
+    attach(second);
+    replay.markReady(environmentId);
+    await expect(result).resolves.toEqual({ sequence: 6 });
+    expect(second).toHaveBeenCalledExactlyOnceWith(command);
   });
 
   it("does not count a readiness published between sending and the drop", async () => {
@@ -381,6 +416,44 @@ describe("bindHostedDispatchReplay", () => {
     replay.markReady(environmentId);
     expect(await settled(result)).toBe("pending");
     expect(raw).toHaveBeenCalledOnce();
+  });
+
+  it("counts its connection's unexpected close, its disposal, and a reconnect as losses", async () => {
+    const odd = () => new Error("socket went away");
+    const pending = [
+      deferred<{ readonly sequence: number }>(),
+      deferred<{ readonly sequence: number }>(),
+    ];
+    const raw = vi
+      .fn<Dispatch>()
+      .mockImplementationOnce(() => pending[0]!.promise)
+      .mockImplementationOnce(() => pending[1]!.promise);
+    const reconnect = vi.fn(async () => undefined);
+    const client = {
+      dispose: async () => undefined,
+      reconnect,
+      orchestration: { dispatchCommand: raw },
+    } as unknown as WsRpcClient;
+    const binding = bindHostedDispatchReplay({ environmentId, lineage, markUncertain, replay });
+    const wrapped = binding.wrap(client);
+
+    // Reported by the relay attempt factory when the socket closes unexpectedly.
+    const closed = wrapped.orchestration.dispatchCommand(command);
+    binding.connectionLost();
+    pending[0]!.reject(odd());
+    expect(await settled(closed)).toBe("pending");
+
+    const reconnected = wrapped.orchestration.dispatchCommand(command);
+    await wrapped.reconnect();
+    expect(reconnect).toHaveBeenCalledOnce();
+    pending[1]!.reject(odd());
+    expect(await settled(reconnected)).toBe("pending");
+
+    // Without a loss the same failure is the node's answer.
+    raw.mockRejectedValueOnce(odd());
+    await expect(wrapped.orchestration.dispatchCommand(command)).rejects.toThrow(
+      "socket went away",
+    );
   });
 
   it.each([

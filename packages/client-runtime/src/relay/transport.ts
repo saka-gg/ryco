@@ -272,6 +272,8 @@ export function recoverHostedRelayConnection(generation: number): void {
  */
 export interface HostedReceiptedRequestOwner {
   readonly ownsReceiptedRequests: () => boolean;
+  /** The connection closed unexpectedly: what it had in flight may not have arrived. */
+  readonly connectionLost: () => void;
 }
 
 export class HostedRelayAttemptFactory {
@@ -439,6 +441,7 @@ export class HostedRelayAttemptFactory {
       onOpen: () => this.#reconnect.opened(),
       onClose: (_details, context) => {
         if (context.intentional) return;
+        receiptedRequestOwner?.connectionLost();
         const generation = this.#activeGeneration;
         if (generation === null) return;
         this.#reconnect.closed();

@@ -40,6 +40,7 @@ const command: ClientOrchestrationCommand = {
 };
 
 let replay: HostedDispatchReplay;
+let markUncertain: ReturnType<typeof vi.fn<() => void>>;
 const clients: WsRpcClient[] = [];
 
 /** One hosted connection attempt: its own transport and socket, like a client rebuild. */
@@ -60,7 +61,7 @@ async function connect(
       : bindHostedDispatchReplay({
           environmentId,
           lineage: "account-1",
-          markUncertain: () => undefined,
+          markUncertain,
           replay,
         }).wrap(raw);
   clients.push(client);
@@ -96,6 +97,7 @@ async function settled(promise: Promise<unknown>) {
 beforeEach(() => {
   sockets.length = 0;
   replay = new HostedDispatchReplay(() => timers);
+  markUncertain = vi.fn<() => void>();
   resetRequestLatencyStateForTests();
   resetWsConnectionStateForTests();
 });
@@ -170,5 +172,57 @@ describe("hosted dispatch replay over the real RPC protocol", () => {
       exit: { _tag: "Success", value: { sequence: 10 } },
     });
     await expect(result).resolves.toEqual({ sequence: 10 });
+  });
+
+  it("reports the node's own defect at once, without holding or marking anything", async () => {
+    const { client, socket } = await connect();
+    const result = client.orchestration.dispatchCommand(command);
+    socket.open();
+    const sent = await sentDispatch(socket);
+
+    // What the node answers for a payload it cannot decode, such as a command
+    // type from a newer hosted bundle. The connection stays up.
+    socket.reply({
+      _tag: "Exit",
+      requestId: sent.id,
+      exit: {
+        _tag: "Failure",
+        cause: [{ _tag: "Die", defect: "Expected a known command type" }],
+      },
+    });
+    expect(await settled(result)).toBe("rejected");
+    await expect(result).rejects.toBe("Expected a known command type");
+    expect(markUncertain).not.toHaveBeenCalled();
+
+    // No later readiness replays it either.
+    replay.markReady(environmentId);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(socket.requests()).toHaveLength(1);
+  });
+
+  it("holds a command the node interrupted and replays it once the session is ready", async () => {
+    const { client, socket } = await connect();
+    const result = client.orchestration.dispatchCommand(command);
+    socket.open();
+    const sent = await sentDispatch(socket);
+
+    // A node on its way down interrupts what it was handling.
+    socket.reply({
+      _tag: "Exit",
+      requestId: sent.id,
+      exit: { _tag: "Failure", cause: [{ _tag: "Interrupt", fiberId: 1 }] },
+    });
+    expect(await settled(result)).toBe("pending");
+
+    replay.markReady(environmentId);
+    await vi.waitFor(() => expect(socket.requests()).toHaveLength(2));
+    const replayed = socket.requests()[1]!;
+    expect(replayed.payload).toEqual(sent.payload);
+    socket.reply({
+      _tag: "Exit",
+      requestId: replayed.id,
+      exit: { _tag: "Success", value: { sequence: 11 } },
+    });
+    await expect(result).resolves.toEqual({ sequence: 11 });
   });
 });

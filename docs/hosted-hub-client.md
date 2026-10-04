@@ -526,9 +526,12 @@ classified counts as a mutation.
 - The hosted client holds the caller's promise through a reconnect and sends the identical envelope
   once more, at most once, after the environment's session has a fresh ticket, a completed
   handshake, and an accepted snapshot again. Which failures leave a command's delivery unknown is
-  decided by what they are, not by their message: only the node's typed answer and a refusal by the
-  client before sending are definite; any socket or protocol error, interruption, or disposal of
-  the client is replayed. The replay stays inside the same environment and the same account
+  decided by what they are: a failure of the transport itself — a socket error, an interruption, a
+  disposed or reconnecting client — or any failure at all once the connection was lost after the
+  send. Whatever the node answered on a live connection is the command's outcome and reaches the
+  caller at once: its typed rejection, its role check, or the defect it returns for a payload it
+  cannot decode (a hosted bundle newer than the node). So does a refusal by the client before
+  sending. The replay stays inside the same environment and the same account
   session — readiness is bound to those, not to a hosted generation, because every recovery
   publishes a new generation and readiness is only published from the current one. Hub session-id
   rotation on resume is the same account session; leaving the node, signing out, or session expiry

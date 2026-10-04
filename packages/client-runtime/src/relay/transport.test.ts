@@ -691,6 +691,17 @@ describe("HostedRelayAttemptFactory", () => {
     expect(claimed.hasPendingRequests()).toBe(true);
   });
 
+  it("tells the owner of a connection's commands when that connection closes unexpectedly", () => {
+    const owner = { ownsReceiptedRequests: () => true, connectionLost: vi.fn() };
+    const lifecycle = new HostedRelayAttemptFactory().lifecycleHandlers(owner);
+
+    // Its own disposal is reported by the client it wraps instead.
+    lifecycle.onClose?.({ code: 1000, reason: "" }, { intentional: true });
+    expect(owner.connectionLost).not.toHaveBeenCalled();
+    lifecycle.onClose?.({ code: 1006, reason: "network" }, { intentional: false });
+    expect(owner.connectionLost).toHaveBeenCalledOnce();
+  });
+
   it("replays a held orchestration command only once the hosted session can accept it", async () => {
     hostedHubStore.setState({
       account: { id: "account-1", displayName: "A", role: "owner", createdAt: 1, disabledAt: null },

@@ -62,6 +62,14 @@ interface StreamRequestStartInfo {
   readonly stream: boolean;
 }
 
+/** A request made on a transport that was already disposed: it was never sent. */
+export class RpcTransportDisposedError extends Error {
+  constructor() {
+    super("Transport disposed");
+    this.name = "RpcTransportDisposedError";
+  }
+}
+
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -125,7 +133,7 @@ class RpcTransport<Client> {
     _options?: RequestOptions,
   ): Promise<TSuccess> {
     if (this.disposed) {
-      throw new Error("Transport disposed");
+      throw new RpcTransportDisposedError();
     }
 
     const session = this.session;
@@ -138,7 +146,7 @@ class RpcTransport<Client> {
     listener: (value: TValue) => void,
   ): Promise<void> {
     if (this.disposed) {
-      throw new Error("Transport disposed");
+      throw new RpcTransportDisposedError();
     }
 
     const session = this.session;
@@ -272,12 +280,12 @@ class RpcTransport<Client> {
 
   async reconnect() {
     if (this.disposed) {
-      throw new Error("Transport disposed");
+      throw new RpcTransportDisposedError();
     }
 
     const reconnectOperation = this.reconnectChain.then(async () => {
       if (this.disposed) {
-        throw new Error("Transport disposed");
+        throw new RpcTransportDisposedError();
       }
 
       clearAllTrackedRpcRequests();

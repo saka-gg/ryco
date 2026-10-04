@@ -7,6 +7,7 @@ import {
 import type { HostedHubState } from "../authorization/state.ts";
 import { RpcRequestRefusedError } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
+import { RpcTransportDisposedError } from "../rpc/wsTransport.ts";
 import type { HostedReceiptedRequestOwner } from "./transport.ts";
 
 type DispatchCommand = WsRpcClient["orchestration"]["dispatchCommand"];
@@ -46,17 +47,41 @@ function hasTag(error: unknown, tag: string): boolean {
 }
 
 /**
- * Whether a first attempt's failure leaves its outcome unknown. Only two
- * failures are definite: the node's own answer (a typed error of the RPC), and
- * a refusal by this client before anything was sent. Everything else — a relay
- * drop surfacing as any socket or protocol error, the client being disposed or
- * interrupted mid-request — may or may not have reached the node, so it is
- * replayed. Classifying by what the failure is, never by its message, keeps an
- * unrecognised failure on the safe side.
+ * Effect's `Cause.squash` of a cause made only of interruptions: what a request
+ * rejects with when its client is disposed or reconnected mid-request, or when
+ * the node interrupts it on its way down. The wire test pins it.
  */
-function isDeliveryUnknown(error: unknown): boolean {
+const INTERRUPTED_WITHOUT_ERROR = "All fibers interrupted without error";
+
+/**
+ * Whether the transport gave up on the request rather than the node answering
+ * it: every socket failure reaches a pending request as an `RpcClientError`, a
+ * disposal or reconnect interrupts it, and a disposed transport sends nothing.
+ */
+function isTransportFailure(error: unknown): boolean {
+  return (
+    hasTag(error, "RpcClientError") ||
+    error instanceof RpcTransportDisposedError ||
+    (error instanceof Error && error.message === INTERRUPTED_WITHOUT_ERROR)
+  );
+}
+
+/**
+ * Whether a first attempt's failure leaves its outcome unknown. A refusal by
+ * this client before sending and the node's typed answer are always definite.
+ * Otherwise only a failure of the transport itself is unknown — or any failure
+ * at all once the attempt's connection was lost after the send, so a drop that
+ * surfaces in a shape not recognised here still stays on the safe side.
+ * Anything else the node answered on a live connection, such as the defect it
+ * returns for a payload it cannot decode, is that request's outcome: holding it
+ * would wait for a readiness that never comes, then misreport it as a drop.
+ */
+function isDeliveryUnknown(error: unknown, lostSinceSend: boolean): boolean {
   if (error instanceof RpcRequestRefusedError) return false;
-  return !hasTag(error, "OrchestrationDispatchCommandError") && !hasTag(error, "AuthRpcError");
+  if (hasTag(error, "OrchestrationDispatchCommandError") || hasTag(error, "AuthRpcError")) {
+    return false;
+  }
+  return lostSinceSend || isTransportFailure(error);
 }
 
 /**
@@ -81,6 +106,8 @@ interface Attempt {
   readonly accountSession: number;
   readonly dispatch: DispatchCommand;
   readonly markUncertain: () => void;
+  /** How often its connection was lost, dropped or replaced; see `isDeliveryUnknown`. */
+  losses: number;
 }
 
 type Replacement =
@@ -149,22 +176,34 @@ export class HostedDispatchReplay {
     readonly dispatch: DispatchCommand;
     /** Mark the environment delivery unknown; called when a replay gives up. */
     readonly markUncertain: () => void;
-  }): { readonly dispatch: DispatchCommand; readonly detach: () => void } {
+  }): {
+    readonly dispatch: DispatchCommand;
+    /** The connection dropped or is being replaced: what it has in flight may not have arrived. */
+    readonly lost: () => void;
+    /** The attempt's client is being disposed; it is no longer a replay target. */
+    readonly detach: () => void;
+  } {
     const { environmentId } = input;
     const attempt: Attempt = {
       lineage: input.lineage,
       accountSession: this.#accountSession,
       dispatch: input.dispatch,
       markUncertain: input.markUncertain,
+      losses: 0,
     };
     this.#latest.set(environmentId, attempt);
     // A different account took the environment over.
     this.#settleWaiters(environmentId, (waiter) =>
       sameAccountSession(waiter.origin, attempt) ? undefined : ENDED,
     );
+    const lost = () => {
+      attempt.losses += 1;
+    };
     return {
       dispatch: (command) => this.#dispatch(environmentId, attempt, command),
+      lost,
       detach: () => {
+        lost();
         if (this.#latest.get(environmentId) === attempt) this.#latest.delete(environmentId);
       },
     };
@@ -209,10 +248,11 @@ export class HostedDispatchReplay {
     command: ClientOrchestrationCommand,
   ): ReturnType<DispatchCommand> {
     const deadline = this.#timers().now() + HOSTED_DISPATCH_REPLAY_HORIZON_MS;
+    const lossesAtSend = attempt.losses;
     try {
       return await attempt.dispatch(command);
     } catch (error) {
-      if (!isDeliveryUnknown(error)) throw error;
+      if (!isDeliveryUnknown(error, attempt.losses !== lossesAtSend)) throw error;
     }
     // Only a readiness published after the failure belongs to a session that
     // replaced the one that lost the command.
@@ -311,7 +351,10 @@ export function getHostedDispatchReplay(): HostedDispatchReplay {
  * with it: from then on the client replays its commands itself, so the factory
  * stops counting them as uncertain. If it cannot attach — no environment or no
  * authenticated account — it claims nothing and the factory keeps tracking
- * them, so a dropped command still leaves the session delivery unknown.
+ * them, so a dropped command still leaves the session delivery unknown. The
+ * factory reports the connection's unexpected closes to it, and the wrapped
+ * client its own disposal and reconnects, so that no failure after one of those
+ * is taken for the node's answer.
  */
 export interface HostedDispatchReplayBinding extends HostedReceiptedRequestOwner {
   readonly wrap: (client: WsRpcClient) => WsRpcClient;
@@ -324,26 +367,31 @@ export function bindHostedDispatchReplay(input: {
   readonly markUncertain: () => void;
   readonly replay?: HostedDispatchReplay;
 }): HostedDispatchReplayBinding {
-  let attached = false;
+  let attachment: ReturnType<HostedDispatchReplay["attach"]> | null = null;
   return {
-    ownsReceiptedRequests: () => attached,
+    ownsReceiptedRequests: () => attachment !== null,
+    connectionLost: () => attachment?.lost(),
     wrap: (client) => {
       const { environmentId, lineage } = input;
-      if (attached || environmentId === null || lineage === null) return client;
-      const attachment = (input.replay ?? getHostedDispatchReplay()).attach({
+      if (attachment !== null || environmentId === null || lineage === null) return client;
+      const attached = (input.replay ?? getHostedDispatchReplay()).attach({
         environmentId,
         lineage,
         dispatch: client.orchestration.dispatchCommand,
         markUncertain: input.markUncertain,
       });
-      attached = true;
+      attachment = attached;
       return {
         ...client,
         dispose: async () => {
-          attachment.detach();
+          attached.detach();
           await client.dispose();
         },
-        orchestration: { ...client.orchestration, dispatchCommand: attachment.dispatch },
+        reconnect: async () => {
+          attached.lost();
+          await client.reconnect();
+        },
+        orchestration: { ...client.orchestration, dispatchCommand: attached.dispatch },
       };
     },
   };
