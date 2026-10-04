@@ -50,6 +50,7 @@ describe("countActiveDesktopTurns", () => {
           thread(),
         ],
         LOCAL,
+        true,
       ),
     ).toBe(4);
   });
@@ -63,14 +64,23 @@ describe("countActiveDesktopTurns", () => {
           thread({ backgroundLiveness: "monitoring" }),
         ],
         LOCAL,
+        true,
       ),
     ).toBe(0);
   });
 
   it("cannot count before the local environment is known", () => {
     // Reading that as zero relaunched without asking while turns ran.
-    expect(countActiveDesktopTurns([thread({ session: runningSession })], null)).toBeNull();
-    expect(countActiveDesktopTurns([], null)).toBeNull();
+    expect(countActiveDesktopTurns([thread({ session: runningSession })], null, false)).toBeNull();
+    expect(countActiveDesktopTurns([], null, false)).toBeNull();
+  });
+
+  it("cannot count before the local environment has a live snapshot", () => {
+    // Rows hydrated from the cache, or held over a reconnect, carry no
+    // session, so a renderer reload while the backend ran a turn read zero
+    // and relaunched without asking.
+    expect(countActiveDesktopTurns([thread()], LOCAL, false)).toBeNull();
+    expect(countActiveDesktopTurns([], LOCAL, false)).toBeNull();
   });
 });
 

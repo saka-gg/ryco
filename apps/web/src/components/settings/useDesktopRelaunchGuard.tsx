@@ -10,7 +10,11 @@ import {
   type DesktopRelaunchChange,
 } from "../../desktopRelaunchScheduler";
 import { readPrimaryEnvironmentDescriptor } from "../../environments/primary";
-import { selectSidebarThreadsAcrossEnvironments, useStore } from "../../store";
+import {
+  selectBootstrapCompleteForEnvironment,
+  selectSidebarThreadsAcrossEnvironments,
+  useStore,
+} from "../../store";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -25,12 +29,16 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 
 /**
  * Agent turns on this desktop's own backend; remote environments keep running.
- * `null` until the local environment is known: ask rather than assume none.
+ * `null` until the local environment is known and live: ask rather than
+ * assume none.
  */
 function readActiveDesktopTurnCount(): number | null {
+  const state = useStore.getState();
+  const localEnvironmentId = readPrimaryEnvironmentDescriptor()?.environmentId ?? null;
   return countActiveDesktopTurns(
-    selectSidebarThreadsAcrossEnvironments(useStore.getState()),
-    readPrimaryEnvironmentDescriptor()?.environmentId ?? null,
+    selectSidebarThreadsAcrossEnvironments(state),
+    localEnvironmentId,
+    selectBootstrapCompleteForEnvironment(state, localEnvironmentId),
   );
 }
 
