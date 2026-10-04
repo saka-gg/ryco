@@ -1616,7 +1616,7 @@ describe("OrchestrationEngine", () => {
         Layer.provide(OrchestrationEventStoreLive),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolverLive),
-        Layer.provide(SqlitePersistenceMemory),
+        Layer.provideMerge(SqlitePersistenceMemory),
       ),
     );
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
@@ -1683,9 +1683,23 @@ describe("OrchestrationEngine", () => {
       "project.created",
       "thread.created",
     ]);
+    // The intent row was written after the request event's append, inside the
+    // same transaction: the rollback removes it too.
+    const openIntentSequences = () =>
+      runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{
+            readonly sequence: number;
+          }>`SELECT sequence FROM provider_effect_intents ORDER BY sequence`;
+          return rows.map((row) => row.sequence);
+        }),
+      );
+    expect(await openIntentSequences()).toEqual([]);
 
     const retryResult = await runtime.runPromise(engine.dispatch(turnStartCommand));
     expect(retryResult.sequence).toBe(4);
+    expect(await openIntentSequences()).toEqual([4]);
 
     const eventsAfterRetry = await runtime.runPromise(
       Stream.runCollect(engine.readEvents(0)).pipe(
@@ -3047,6 +3061,137 @@ describe("usage limits across projections and restarts", () => {
       ).rejects.toThrow("usage-limit resume is stale");
       const cleared = (await system.readShell()).threads.find((t) => t.id === limitThreadId);
       expect(cleared?.usageLimit ?? null).toBeNull();
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("OrchestrationEngine provider effect intents", () => {
+  const intentThreadId = ThreadId.make("thread-intents");
+  const intentMessageId = asMessageId("message-intents");
+
+  const seedIntentThread = async (
+    system: Awaited<ReturnType<typeof createOrchestrationSystem>>,
+  ) => {
+    const createdAt = now();
+    await system.run(
+      system.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-intents-project"),
+        projectId: asProjectId("project-intents"),
+        title: "Intents",
+        workspaceRoot: "/tmp/project-intents",
+        defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt" },
+        createdAt,
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-intents-thread"),
+        threadId: intentThreadId,
+        projectId: asProjectId("project-intents"),
+        title: "intents",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+  };
+
+  const openIntents = (system: Awaited<ReturnType<typeof createOrchestrationSystem>>) =>
+    system.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql<{ readonly sequence: number; readonly kind: string; messageId: string }>`
+          SELECT sequence, kind, message_id AS "messageId" FROM provider_effect_intents
+          ORDER BY sequence ASC
+        `;
+      }).pipe(Effect.provideService(SqlClient.SqlClient, system.sql)),
+    );
+
+  it("records a turn start intent with its request and settles it with the visible failure", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      await seedIntentThread(system);
+      const createdAt = now();
+      const { sequence } = await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-intents-start"),
+          threadId: intentThreadId,
+          message: { messageId: intentMessageId, role: "user", text: "hi", attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        }),
+      );
+      const events = await system.run(
+        Stream.runCollect(system.engine.readEvents(0)).pipe(
+          Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+        ),
+      );
+      expect(events.at(-1)).toMatchObject({ sequence, type: "thread.turn-start-requested" });
+      expect(await openIntents(system)).toEqual([
+        { sequence, kind: "turn-start", messageId: intentMessageId },
+      ]);
+
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("cmd-intents-failure"),
+          threadId: intentThreadId,
+          activity: {
+            id: EventId.make("activity-intents-failure"),
+            tone: "error",
+            kind: "provider.turn.start.failed",
+            summary: "Provider turn start failed",
+            payload: { messageId: intentMessageId, detail: "boom" },
+            turnId: null,
+            createdAt,
+          },
+          createdAt,
+        }),
+      );
+      expect(await openIntents(system)).toEqual([]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("captures the boot sequence before any dispatch of this engine", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-intents-boot-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await createOrchestrationSystem(database);
+    try {
+      expect(system.engine.bootSequence).toBe(0);
+      await seedIntentThread(system);
+      expect(system.engine.bootSequence).toBe(0);
+      await system.dispose();
+
+      system = await createOrchestrationSystem(database);
+      const head = await system.run(
+        system.engine.readEventsPage(0, 100).pipe(Effect.map((page) => page.events.length)),
+      );
+      expect(head).toBe(2);
+      expect(system.engine.bootSequence).toBe(2);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-intents-stop"),
+          threadId: intentThreadId,
+          createdAt: now(),
+        }),
+      );
+      expect(system.engine.bootSequence).toBe(2);
+      expect(await openIntents(system)).toEqual([
+        { sequence: 3, kind: "session-stop", messageId: null },
+      ]);
     } finally {
       await system.dispose();
       await fs.rm(directory, { recursive: true, force: true });

@@ -838,6 +838,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         searchThreadMessages: () => Effect.die("unused"),
       }),
       Effect.provideService(OrchestrationEngineService, {
+        bootSequence: 0,
         readEvents: () => Stream.empty,
         readEventsPage: (fromSequenceExclusive) =>
           Effect.succeed({
@@ -891,6 +892,7 @@ it.effect(
           searchThreadMessages: () => Effect.die("unused"),
         }),
         Effect.provideService(OrchestrationEngineService, {
+          bootSequence: 0,
           readEvents: () => Stream.empty,
           readEventsPage: (fromSequenceExclusive) =>
             Effect.succeed({

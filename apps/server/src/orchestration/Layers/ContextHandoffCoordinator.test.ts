@@ -508,6 +508,7 @@ function makeHarness(input?: {
     Layer.succeed(ContextHandoffRepository, repository.service),
     Layer.succeed(ContextHandoffService, contextService),
     Layer.mock(OrchestrationEngineService)({
+      bootSequence: 0,
       dispatch,
       streamDomainEvents: Stream.empty,
     }),

@@ -14,6 +14,8 @@ import {
 } from "../approvalResponses.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
+import { ProviderEffectIntentRepository } from "../../persistence/Services/ProviderEffectIntents.ts";
+import { ProviderEffectIntentRepositoryLive } from "../../persistence/Layers/ProviderEffectIntents.ts";
 import type {
   OrchestrationEvent,
   OrchestrationReadModel,
@@ -153,6 +155,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const providerEffectIntents = yield* ProviderEffectIntentRepository;
 
   const sidebarUndo = createSidebarUndoReceipts();
   let commandReadModel = createEmptyReadModel(new Date().toISOString());
@@ -398,6 +401,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
                 for (const nextEvent of eventBases) {
                   const savedEvent = yield* eventStore.append(nextEvent);
+                  // Same transaction: a provider-bound request and its intent row
+                  // commit (or roll back) together, and an outcome settles its row
+                  // atomically with becoming visible.
+                  yield* providerEffectIntents.applyEvent(savedEvent);
                   nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
                   postCommitEffects.push(
                     yield* projectionPipeline.projectEventInTransaction(savedEvent),
@@ -541,6 +548,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   yield* projectionPipeline.bootstrap;
   commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
+  // Before the worker forks: everything at or below this was committed by an
+  // earlier process, everything above by this one.
+  const bootSequence = yield* eventStore.latestSequence;
 
   const worker = Effect.forever(
     Queue.take(commandQueue).pipe(
@@ -558,7 +568,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   yield* Effect.forkScoped(worker);
   yield* Effect.addFinalizer(() => commandQueueMetrics.reset);
   yield* Effect.logDebug("orchestration engine started").pipe(
-    Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
+    Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence, bootSequence }),
   );
 
   const readEvents: OrchestrationEngineShape["readEvents"] = (fromSequenceExclusive, limit) =>
@@ -588,6 +598,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     });
 
   return {
+    bootSequence,
     captureThreadWorkspace: (input) => {
       if (!workspaceAuthorityHealthy) return undefined;
       const captured = workspaceCommitFence.capture(input);
@@ -615,4 +626,5 @@ export const OrchestrationEngineLive = Layer.effect(
 ).pipe(
   Layer.provide(ProjectionPendingApprovalRepositoryLive),
   Layer.provide(ProjectionThreadUserInputRequestRepositoryLive),
+  Layer.provide(ProviderEffectIntentRepositoryLive),
 );

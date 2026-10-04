@@ -21,6 +21,13 @@ import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
  * OrchestrationEngineShape - Service API for orchestration command and event flow.
  */
 export interface OrchestrationEngineShape {
+  /**
+   * Highest event sequence committed before this engine instance started (by
+   * prior processes). Captured after projection bootstrap and before the
+   * command worker forks, so every later event belongs to this process.
+   */
+  readonly bootSequence: number;
+
   /** Fail closed without synchronous authority; the returned fence must be checked in the PTY commit. */
   readonly captureThreadWorkspace?: (input: {
     readonly threadId: string;
